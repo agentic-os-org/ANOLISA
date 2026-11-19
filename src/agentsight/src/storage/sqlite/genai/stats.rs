@@ -350,6 +350,187 @@ fn latency_percentiles(latencies: &[CallLatency]) -> LatencyPercentiles {
     }
 }
 
+/// Label for a group whose calls carry no agent name, process name, PID or
+/// session ID — reachable only for hand-written rows, but the table must not
+/// render a blank name.
+const UNKNOWN_LABEL: &str = "(unknown)";
+
+/// Which column [`GenAISqliteStore::get_top_rows`] groups recorded calls by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopGrouping {
+    /// One row per agent process (PID).
+    Process,
+    /// One row per session ID.
+    Session,
+}
+
+/// One aggregated row of the live `top` view.
+#[derive(Debug, serde::Serialize)]
+pub struct TopRow {
+    /// Agent process ID of the row's most recent call, or `None` when that call
+    /// carried none. Populated under both groupings.
+    pub pid: Option<i64>,
+    /// Session ID of the row's most recent call, or `None` when that call
+    /// carried none. Populated under both groupings: a process row still
+    /// reports the session its latest call belongs to.
+    pub session_id: Option<String>,
+    /// Display name: stored agent name, else process name, else the grouping key.
+    pub label: String,
+    /// Process name of the row's most recent call.
+    pub process_name: Option<String>,
+    /// Model of the row's most recent call.
+    pub model: Option<String>,
+    /// Completed LLM calls inside the window.
+    pub call_count: usize,
+    /// Subset of those calls that streamed over SSE.
+    pub streaming_call_count: usize,
+    /// Billed input tokens, following the same cache-aware rule as token views.
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    /// Start of the row's earliest call, in nanoseconds since the Unix epoch.
+    pub first_seen_ns: i64,
+    /// Completion (or start, when unfinished) of the row's latest call, in nanoseconds.
+    pub last_seen_ns: i64,
+    pub ttft_ms: Option<MetricPercentiles>,
+    pub tps_tokens_per_second: Option<MetricPercentiles>,
+    pub tpot_ms_per_token: Option<MetricPercentiles>,
+    pub e2e_latency_ms: Option<MetricPercentiles>,
+}
+
+/// Window totals for the `top` header, independent of how rows are grouped.
+#[derive(Debug, serde::Serialize)]
+pub struct TopWindowSummary {
+    /// Distinct agent processes that recorded a call in the window.
+    pub process_count: i64,
+    /// Distinct sessions that recorded a call in the window.
+    pub session_count: i64,
+    /// Completed LLM calls in the window.
+    pub call_count: i64,
+    /// Billed input tokens, following the same cache-aware rule as [`TopRow::input_tokens`].
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    /// Start of the earliest call in the window, in nanoseconds since the Unix
+    /// epoch; `0` when the window holds no call.
+    pub first_seen_ns: i64,
+    /// Completion (or start, when unfinished) of the latest call in the window,
+    /// in nanoseconds since the Unix epoch; `0` when the window holds no call.
+    pub last_seen_ns: i64,
+}
+
+/// Grouping key of one `top` row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum TopKey {
+    /// Fallback for calls whose grouping column is NULL or blank; the agent
+    /// label as folded by [`fallback_agent_key`].
+    Agent(String),
+    Pid(i64),
+    Session(String),
+}
+
+/// Builds the [`TopKey::Agent`] fallback key: the agent label, case-folded so
+/// "Qoder" and "qoder" stay one group exactly as they do in
+/// [`GenAISqliteStore::get_latency_metrics`]. Only the key is folded — the row
+/// label still comes from the most recent call, so the table keeps the spelling
+/// the agent reported.
+fn fallback_agent_key(agent_label: Option<&str>) -> String {
+    agent_label.unwrap_or_default().to_lowercase()
+}
+
+/// One recorded call attributed to a `top` group.
+struct TopCall {
+    key: TopKey,
+    pid: Option<i64>,
+    session_id: Option<String>,
+    agent_label: Option<String>,
+    process_name: Option<String>,
+    model: Option<String>,
+    start: i64,
+    seen: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    is_sse: bool,
+    latency: CallLatency,
+}
+
+/// Accumulator over the calls of one `top` group.
+#[derive(Default)]
+struct TopGroup {
+    call_count: usize,
+    streaming_call_count: usize,
+    input_tokens: i64,
+    output_tokens: i64,
+    first_seen_ns: Option<i64>,
+    last_seen_ns: Option<i64>,
+    pid: Option<i64>,
+    session_id: Option<String>,
+    label: String,
+    process_name: Option<String>,
+    model: Option<String>,
+    latencies: Vec<CallLatency>,
+}
+
+impl TopGroup {
+    fn add(&mut self, call: TopCall) {
+        self.call_count += 1;
+        self.streaming_call_count += usize::from(call.is_sse);
+        self.input_tokens += call.input_tokens;
+        self.output_tokens += call.output_tokens;
+        let first_seen = self
+            .first_seen_ns
+            .map_or(call.start, |seen| seen.min(call.start));
+        self.first_seen_ns = Some(first_seen);
+        // Identity follows the most recent call, so a process that changed its
+        // reported name shows the current one rather than the first one seen.
+        if call.seen >= self.last_seen_ns.unwrap_or(i64::MIN) {
+            self.last_seen_ns = Some(call.seen);
+            self.pid = call.pid;
+            self.session_id = call.session_id.clone();
+            self.process_name = call.process_name.clone();
+            self.model = call.model.clone();
+            if let Some(label) = call.agent_label {
+                self.label = label;
+            }
+        }
+        self.latencies.push(call.latency);
+    }
+
+    fn into_row(self, key: TopKey) -> TopRow {
+        // A group keyed by the agent fallback may have no name at all; fall back
+        // to the key so the row is never blank in the table.
+        let fallback = match key {
+            TopKey::Agent(name) if !name.is_empty() => name,
+            TopKey::Pid(pid) => pid.to_string(),
+            TopKey::Session(session) => session,
+            TopKey::Agent(_) => UNKNOWN_LABEL.to_string(),
+        };
+        let label = if self.label.is_empty() {
+            fallback
+        } else {
+            self.label
+        };
+        let percentiles = latency_percentiles(&self.latencies);
+        TopRow {
+            pid: self.pid,
+            session_id: self.session_id,
+            label,
+            process_name: self.process_name,
+            model: self.model,
+            call_count: self.call_count,
+            streaming_call_count: self.streaming_call_count,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.input_tokens + self.output_tokens,
+            first_seen_ns: self.first_seen_ns.unwrap_or_default(),
+            last_seen_ns: self.last_seen_ns.unwrap_or_default(),
+            ttft_ms: percentiles.ttft_ms,
+            tps_tokens_per_second: percentiles.tps_tokens_per_second,
+            tpot_ms_per_token: percentiles.tpot_ms_per_token,
+            e2e_latency_ms: percentiles.e2e_latency_ms,
+        }
+    }
+}
+
 fn percentile(sorted: &[f64], pct: f64) -> Option<f64> {
     if sorted.is_empty() {
         return None;
@@ -446,6 +627,158 @@ impl GenAISqliteStore {
                 }
             })
             .collect())
+    }
+
+    /// Returns one row per agent process or per session for a live `top` view.
+    ///
+    /// Metrics use the same per-call derivation as [`Self::get_latency_metrics`]
+    /// and are reported as p50/p95/p99 over the window. Calls whose grouping
+    /// column is NULL or blank are bucketed by agent label, case-folded exactly
+    /// as [`Self::get_latency_metrics`] groups agents, so unattributed traffic
+    /// stays visible instead of merging into one anonymous row; `pid` and
+    /// `session_id` on each row come from its most recent call.
+    ///
+    /// Rows come back in grouping-key order; callers sort them for display.
+    ///
+    /// # Errors
+    ///
+    /// Propagates SQLite errors. `agent_name` matches case-insensitively, like
+    /// every other agent-attributed view.
+    pub fn get_top_rows(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        grouping: TopGrouping,
+        agent_name: Option<&str>,
+        pid: Option<i64>,
+    ) -> Result<Vec<TopRow>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // One statement serves both groupings: the key is chosen in Rust, and
+        // the optional filters stay parameterized (`? IS NULL OR …`) instead of
+        // being concatenated into the SQL.
+        let mut stmt = conn.prepare(concat!(
+            "SELECT pid, session_id,
+                    COALESCE(NULLIF(TRIM(agent_name), ''),
+                             NULLIF(TRIM(process_name), '')) AS agent_label,
+                    process_name, model,
+                    start_timestamp_ns, end_timestamp_ns, first_output_timestamp_ns,
+                    output_tokens, is_sse,
+                    COALESCE(",
+            billed_input_col!(),
+            ", 0) AS billed_input_tokens
+             FROM genai_events
+             WHERE event_type = 'llm_call' AND status = 'complete'
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND (?3 IS NULL
+                    OR COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE)
+               AND (?4 IS NULL OR pid = ?4)"
+        ))?;
+
+        let mut groups: std::collections::BTreeMap<TopKey, TopGroup> =
+            std::collections::BTreeMap::new();
+        let calls = stmt.query_map(params![start_ns, end_ns, agent_name, pid], |row| {
+            let pid: Option<i64> = row.get(0)?;
+            // Normalized the same way the window summary counts sessions
+            // (`NULLIF(TRIM(session_id), '')`), so a blank session groups under
+            // the agent label instead of becoming its own unnamed row.
+            let session_id: Option<String> = row
+                .get::<_, Option<String>>(1)?
+                .map(|session| session.trim().to_string())
+                .filter(|session| !session.is_empty());
+            let agent_label: Option<String> = row.get(2)?;
+            let process_name: Option<String> = row.get(3)?;
+            let model: Option<String> = row.get(4)?;
+            let start: i64 = row.get(5)?;
+            let end: Option<i64> = row.get(6)?;
+            let first: Option<i64> = row.get(7)?;
+            let output_tokens: Option<i64> = row.get(8)?;
+            let is_sse: Option<i64> = row.get(9)?;
+            let input_tokens: i64 = row.get(10)?;
+            Ok(TopCall {
+                key: match grouping {
+                    TopGrouping::Process => match pid {
+                        Some(pid) => TopKey::Pid(pid),
+                        None => TopKey::Agent(fallback_agent_key(agent_label.as_deref())),
+                    },
+                    TopGrouping::Session => match &session_id {
+                        Some(session) => TopKey::Session(session.clone()),
+                        None => TopKey::Agent(fallback_agent_key(agent_label.as_deref())),
+                    },
+                },
+                pid,
+                session_id,
+                agent_label,
+                process_name,
+                model,
+                start,
+                seen: end.filter(|end| *end > start).unwrap_or(start),
+                input_tokens,
+                // Summed as stored, like [`Self::get_top_window_summary`] and
+                // every other token view: clamping here would let a bad negative
+                // sample make the rows disagree with the header total.
+                output_tokens: output_tokens.unwrap_or_default(),
+                is_sse: is_sse == Some(1),
+                latency: call_latency(start, end, first, output_tokens),
+            })
+        })?;
+        for call in calls {
+            let call = call?;
+            groups.entry(call.key.clone()).or_default().add(call);
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(key, group)| group.into_row(key))
+            .collect())
+    }
+
+    /// Returns the window totals shown in the `top` header.
+    ///
+    /// Counted independently of [`Self::get_top_rows`] so the header stays
+    /// correct whichever grouping the rows use: process and session counts are
+    /// both distinct counts over the same filtered window.
+    ///
+    /// # Errors
+    ///
+    /// Propagates SQLite errors.
+    pub fn get_top_window_summary(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        agent_name: Option<&str>,
+        pid: Option<i64>,
+    ) -> Result<TopWindowSummary, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(concat!(
+            "SELECT COUNT(DISTINCT pid),
+                    COUNT(DISTINCT NULLIF(TRIM(session_id), '')),
+                    COUNT(*),
+                    COALESCE(SUM(",
+            billed_input_col!(),
+            "), 0),
+                    COALESCE(SUM(COALESCE(output_tokens, 0)), 0),
+                    COALESCE(MAX(CASE WHEN end_timestamp_ns > start_timestamp_ns
+                                      THEN end_timestamp_ns
+                                      ELSE start_timestamp_ns END), 0),
+                    COALESCE(MIN(start_timestamp_ns), 0)
+             FROM genai_events
+             WHERE event_type = 'llm_call' AND status = 'complete'
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND (?3 IS NULL
+                    OR COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE)
+               AND (?4 IS NULL OR pid = ?4)"
+        ))?;
+        stmt.query_row(params![start_ns, end_ns, agent_name, pid], |row| {
+            Ok(TopWindowSummary {
+                process_count: row.get(0)?,
+                session_count: row.get(1)?,
+                call_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                last_seen_ns: row.get(5)?,
+                first_seen_ns: row.get(6)?,
+            })
+        })
+        .map_err(Into::into)
     }
 
     /// One bucket in a token time-series query.
@@ -721,5 +1054,502 @@ impl GenAISqliteStore {
             result.push(row?);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod top_tests {
+    use super::{GenAISqliteStore, TopGrouping};
+    use rusqlite::params;
+
+    /// One stored `llm_call`; every field maps to a `genai_events` column.
+    #[derive(Default)]
+    struct Call {
+        pid: Option<i64>,
+        session_id: Option<&'static str>,
+        agent_name: Option<&'static str>,
+        process_name: Option<&'static str>,
+        model: Option<&'static str>,
+        provider: Option<&'static str>,
+        start_ns: i64,
+        end_ns: Option<i64>,
+        first_output_ns: Option<i64>,
+        input_tokens: i64,
+        cache_creation_tokens: i64,
+        cache_read_tokens: i64,
+        includes_cache: bool,
+        output_tokens: i64,
+        is_sse: bool,
+        /// `None` means `'complete'`, the default every view counts.
+        status: Option<&'static str>,
+    }
+
+    impl Call {
+        fn insert(&self, conn: &rusqlite::Connection, call_id: &str) {
+            conn.execute(
+                "INSERT INTO genai_events
+                 (event_type, status, call_id, pid, session_id, agent_name, process_name,
+                  model, provider, start_timestamp_ns, end_timestamp_ns,
+                  first_output_timestamp_ns, input_tokens, cache_creation_tokens,
+                  cache_read_tokens, input_tokens_includes_cache, output_tokens, is_sse,
+                  event_json)
+                 VALUES ('llm_call', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, ?14, ?15, ?16, ?17, '{}')",
+                params![
+                    self.status.unwrap_or("complete"),
+                    call_id,
+                    self.pid,
+                    self.session_id,
+                    self.agent_name,
+                    self.process_name,
+                    self.model,
+                    self.provider,
+                    self.start_ns,
+                    self.end_ns,
+                    self.first_output_ns,
+                    self.input_tokens,
+                    self.cache_creation_tokens,
+                    self.cache_read_tokens,
+                    self.includes_cache as i64,
+                    self.output_tokens,
+                    self.is_sse as i64,
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    fn store_with(name: &str, calls: &[Call]) -> (GenAISqliteStore, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("agentsight_top_{name}_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store =
+            GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+                .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            for (index, call) in calls.iter().enumerate() {
+                call.insert(&conn, &format!("call-{index}"));
+            }
+        }
+        (store, path)
+    }
+
+    fn finish(store: GenAISqliteStore, path: std::path::PathBuf) {
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Two streamed calls of one process, one call of a second process, and an
+    /// interrupted call that no view may count.
+    fn two_process_fixture() -> Vec<Call> {
+        vec![
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                process_name: Some("claude"),
+                model: Some("claude-4"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_500_000_000),
+                first_output_ns: Some(1_100_000_000),
+                input_tokens: 100,
+                output_tokens: 20,
+                is_sse: true,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                process_name: Some("claude"),
+                model: Some("claude-4"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_300_000_000),
+                first_output_ns: Some(2_050_000_000),
+                input_tokens: 50,
+                output_tokens: 10,
+                is_sse: true,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(222),
+                session_id: Some("s-2"),
+                agent_name: Some("qoder"),
+                process_name: Some("qoder-cli"),
+                model: Some("gpt-x"),
+                start_ns: 3_000_000_000,
+                // end == start: no end-to-end or streaming sample may be derived
+                end_ns: Some(3_000_000_000),
+                input_tokens: 10,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                start_ns: 4_000_000_000,
+                end_ns: Some(4_500_000_000),
+                output_tokens: 99,
+                status: Some("interrupted"),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn groups_rows_by_process_and_derives_metrics_per_call() {
+        let (store, path) = store_with("process", &two_process_fixture());
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 2, "the interrupted call must not add a row");
+
+        let claude = &rows[0];
+        assert_eq!(claude.pid, Some(111));
+        assert_eq!(claude.label, "claude-code");
+        assert_eq!(claude.process_name.as_deref(), Some("claude"));
+        assert_eq!(claude.model.as_deref(), Some("claude-4"));
+        assert_eq!(claude.session_id.as_deref(), Some("s-1"));
+        assert_eq!(claude.call_count, 2);
+        assert_eq!(claude.streaming_call_count, 2);
+        assert_eq!(claude.input_tokens, 150);
+        assert_eq!(claude.output_tokens, 30);
+        assert_eq!(claude.total_tokens, 180);
+        assert_eq!(claude.first_seen_ns, 1_000_000_000);
+        assert_eq!(claude.last_seen_ns, 2_300_000_000);
+        assert_eq!(claude.ttft_ms.as_ref().map(|p| p.p50), Some(75.0));
+        assert_eq!(
+            claude.tps_tokens_per_second.as_ref().map(|p| p.p50),
+            Some(45.0)
+        );
+        assert_eq!(claude.tpot_ms_per_token.as_ref().map(|p| p.p50), Some(22.5));
+        assert_eq!(claude.e2e_latency_ms.as_ref().map(|p| p.p50), Some(400.0));
+
+        let qoder = &rows[1];
+        assert_eq!(qoder.pid, Some(222));
+        assert_eq!(qoder.label, "qoder");
+        assert_eq!(qoder.call_count, 1);
+        assert_eq!(qoder.streaming_call_count, 0);
+        assert_eq!(qoder.first_seen_ns, 3_000_000_000);
+        assert_eq!(qoder.last_seen_ns, 3_000_000_000);
+        assert!(qoder.ttft_ms.is_none());
+        assert!(qoder.tps_tokens_per_second.is_none());
+        assert!(qoder.tpot_ms_per_token.is_none());
+        assert!(qoder.e2e_latency_ms.is_none());
+        finish(store, path);
+    }
+
+    #[test]
+    fn groups_rows_by_session_and_falls_back_to_the_agent_label() {
+        let calls = vec![
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_500_000_000),
+                output_tokens: 20,
+                ..Default::default()
+            },
+            // Whitespace around the ID is the same session, not a second one.
+            Call {
+                pid: Some(111),
+                session_id: Some(" s-1 "),
+                agent_name: Some("claude-code"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_200_000_000),
+                output_tokens: 10,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(222),
+                session_id: Some("   "),
+                agent_name: Some("blank-session"),
+                start_ns: 3_000_000_000,
+                end_ns: Some(3_100_000_000),
+                output_tokens: 5,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(333),
+                process_name: Some("mystery"),
+                start_ns: 4_000_000_000,
+                end_ns: Some(4_400_000_000),
+                output_tokens: 5,
+                ..Default::default()
+            },
+            Call {
+                start_ns: 5_000_000_000,
+                end_ns: Some(5_500_000_000),
+                output_tokens: 5,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("session", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Session, None, None)
+            .unwrap();
+        // Agent-fallback groups sort before session groups; the unnamed one first.
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].label, "(unknown)");
+        assert!(rows[0].pid.is_none() && rows[0].session_id.is_none());
+        assert_eq!(rows[1].label, "blank-session");
+        assert_eq!(rows[1].pid, Some(222));
+        assert!(
+            rows[1].session_id.is_none(),
+            "a blank session is no session"
+        );
+        assert_eq!(rows[2].label, "mystery");
+
+        let session = &rows[3];
+        assert_eq!(session.label, "claude-code");
+        assert_eq!(session.session_id.as_deref(), Some("s-1"));
+        assert_eq!(session.pid, Some(111));
+        assert_eq!(session.call_count, 2);
+
+        let summary = store
+            .get_top_window_summary(0, 10_000_000_000, None, None)
+            .unwrap();
+        assert_eq!(
+            summary.process_count, 3,
+            "the PID-less call counts no process"
+        );
+        assert_eq!(
+            summary.session_count, 1,
+            "only the trimmed s-1 is a session"
+        );
+        assert_eq!(summary.call_count, 5);
+        finish(store, path);
+    }
+
+    /// Two spellings of one unattributed agent are one row, and the row keeps
+    /// the spelling its most recent call reported.
+    #[test]
+    fn folds_agent_fallback_rows_case_insensitively() {
+        let calls = vec![
+            Call {
+                agent_name: Some("Qoder"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_200_000_000),
+                output_tokens: 5,
+                ..Default::default()
+            },
+            Call {
+                agent_name: Some("qoder"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_400_000_000),
+                output_tokens: 7,
+                ..Default::default()
+            },
+            Call {
+                process_name: Some("Mystery"),
+                start_ns: 3_000_000_000,
+                end_ns: Some(3_100_000_000),
+                output_tokens: 3,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("fold", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 2, "one agent per label, not per spelling");
+        assert_eq!(rows[0].label, "Mystery");
+        assert_eq!(rows[1].label, "qoder");
+        assert_eq!(rows[1].call_count, 2);
+        assert_eq!(rows[1].output_tokens, 12);
+        assert_eq!(rows[1].total_tokens, 12);
+        finish(store, path);
+    }
+
+    /// Row token sums and the window header must agree even on a sample the
+    /// collector should never have written.
+    #[test]
+    fn keeps_row_and_window_token_totals_symmetric() {
+        let calls = vec![
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_500_000_000),
+                input_tokens: 100,
+                output_tokens: 20,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(222),
+                session_id: Some("s-2"),
+                agent_name: Some("qoder"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_200_000_000),
+                output_tokens: -5,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("symmetry", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        let summary = store
+            .get_top_window_summary(0, 10_000_000_000, None, None)
+            .unwrap();
+        let row_sum: i64 = rows.iter().map(|row| row.output_tokens).sum();
+        assert_eq!(row_sum, 15, "the negative sample is summed as stored");
+        assert_eq!(row_sum, summary.output_tokens);
+        finish(store, path);
+    }
+
+    #[test]
+    fn filters_rows_by_pid_and_matches_agent_names_case_insensitively() {
+        let (store, path) = store_with("filters", &two_process_fixture());
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, Some(222))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, Some(222));
+
+        let rows = store
+            .get_top_rows(
+                0,
+                10_000_000_000,
+                TopGrouping::Process,
+                Some("CLAUDE-CODE"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].call_count, 2);
+
+        let summary = store
+            .get_top_window_summary(0, 10_000_000_000, Some("claude-code"), None)
+            .unwrap();
+        assert_eq!(summary.call_count, 2);
+        assert_eq!(summary.process_count, 1);
+        assert_eq!(summary.session_count, 1);
+        finish(store, path);
+    }
+
+    #[test]
+    fn process_rows_agree_with_the_agent_latency_view() {
+        let (store, path) = store_with("agreement", &two_process_fixture());
+        let rows = store
+            .get_top_rows(
+                0,
+                10_000_000_000,
+                TopGrouping::Process,
+                Some("claude-code"),
+                None,
+            )
+            .unwrap();
+        let agents = store
+            .get_latency_metrics(0, 10_000_000_000, Some("claude-code"))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(agents.len(), 1);
+        let (row, agent) = (&rows[0], &agents[0]);
+        assert_eq!(row.call_count, agent.call_count);
+        assert_eq!(row.streaming_call_count, agent.streaming_call_count);
+        for (top, latency) in [
+            (row.ttft_ms.as_ref(), agent.ttft_ms.as_ref()),
+            (
+                row.tps_tokens_per_second.as_ref(),
+                agent.tps_tokens_per_second.as_ref(),
+            ),
+            (
+                row.tpot_ms_per_token.as_ref(),
+                agent.tpot_ms_per_token.as_ref(),
+            ),
+            (row.e2e_latency_ms.as_ref(), agent.e2e_latency_ms.as_ref()),
+        ] {
+            assert_eq!(
+                top.map(|p| (p.p50, p.p95, p.p99)),
+                latency.map(|p| (p.p50, p.p95, p.p99))
+            );
+        }
+        finish(store, path);
+    }
+
+    #[test]
+    fn bills_input_tokens_with_the_cache_aware_rule() {
+        let calls = vec![
+            Call {
+                pid: Some(1),
+                agent_name: Some("a"),
+                provider: Some("anthropic"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(2_000_000_000),
+                input_tokens: 100,
+                cache_creation_tokens: 5,
+                cache_read_tokens: 7,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(1),
+                agent_name: Some("a"),
+                provider: Some("openai"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(3_000_000_000),
+                input_tokens: 100,
+                cache_read_tokens: 50,
+                includes_cache: true,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(1),
+                agent_name: Some("a"),
+                start_ns: 3_000_000_000,
+                end_ns: Some(4_000_000_000),
+                input_tokens: 10,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("billed", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 222, "100+5+7, 100 already cached, 10");
+        assert_eq!(rows[0].output_tokens, 3);
+        assert_eq!(rows[0].total_tokens, 225);
+
+        let summary = store
+            .get_top_window_summary(0, 10_000_000_000, None, None)
+            .unwrap();
+        assert_eq!(summary.input_tokens, 222);
+        assert_eq!(summary.output_tokens, 3);
+        assert_eq!(summary.first_seen_ns, 1_000_000_000);
+        assert_eq!(summary.last_seen_ns, 4_000_000_000);
+        finish(store, path);
+    }
+
+    #[test]
+    fn empty_window_reports_zero_summary_and_no_rows() {
+        let (store, path) = store_with("empty", &two_process_fixture());
+        let rows = store
+            .get_top_rows(
+                20_000_000_000,
+                30_000_000_000,
+                TopGrouping::Process,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(rows.is_empty());
+        let summary = store
+            .get_top_window_summary(20_000_000_000, 30_000_000_000, None, None)
+            .unwrap();
+        assert_eq!(summary.call_count, 0);
+        assert_eq!(summary.process_count, 0);
+        assert_eq!(summary.session_count, 0);
+        assert_eq!(summary.input_tokens, 0);
+        assert_eq!(summary.output_tokens, 0);
+        assert_eq!(summary.first_seen_ns, 0);
+        assert_eq!(summary.last_seen_ns, 0);
+        finish(store, path);
     }
 }

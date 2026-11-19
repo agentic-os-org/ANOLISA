@@ -69,7 +69,7 @@ pub use resource_timeline::{SessionPhase, SessionResourceTimeline};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
 pub use stats::{
     AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
-    ModelTimeseriesBucket, TimeseriesBucket,
+    ModelTimeseriesBucket, TimeseriesBucket, TopGrouping, TopRow, TopWindowSummary,
 };
 pub use tokenless::{SavedTokenlessRecord, TokenlessRecordError};
 
