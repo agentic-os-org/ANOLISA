@@ -3,18 +3,18 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Instance } from "../src/client.mjs";
-import { runPiWorker } from "../src/pi.mjs";
+import { Instance } from "../../../typescript/src/client.mjs";
+import { runPiWorker } from "../src/index.mjs";
 import {
   piProfile,
   strictOutputRelease,
   workerBinding,
-} from "../../../crates/aw-adapter/native/pi/sdk.mjs";
+} from "../../../../crates/aw-adapter/native/pi/sdk.mjs";
 
 const execute = promisify(execFile);
 const binary = process.env.AW_TEST_BINARY;
 const fixture = JSON.parse(
-  await readFile(new URL("../../tests/fixtures/deployment.json", import.meta.url)),
+  await readFile(new URL("../../../tests/fixtures/deployment.json", import.meta.url)),
 );
 
 test("strict output follows the release range shared with managed launch", () => {
@@ -65,6 +65,16 @@ test("worker capabilities follow the seams the loaded worker provides", () => {
     () => workerBinding({ worker: { run() {}, runWorker() {} }, inputEnabled: true, strictOutput: true }),
     /runWorker factory/,
   );
+});
+
+test("package engines.node matches canonical Pi runtime Node requirement", async () => {
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const entrypoint = await readFile(
+    new URL("../../../../crates/aw-adapter/native/pi/entrypoint.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.equal(pkg.engines?.node, ">=22.19.0");
+  assert.match(entrypoint, /AW Pi requires Node\.js >=22\.19\.0/);
 });
 
 test(
@@ -129,11 +139,36 @@ test(
       );
       await writeFile(`${dir}/dist/index.js`, body);
     }
+    await compile("pi-worker-hooks");
+    // Verify automatic defaults to false, forwards true to instance.listen, and rejects non-booleans.
+    await assert.rejects(
+      runPiWorker({ ...options, automatic: "yes" }),
+      (error) => error.code === "invalid_automatic_option",
+    );
+    const okApplication = `${root}/worker-ok.mjs`;
+    await writeFile(
+      okApplication,
+      "export function createSession() {}\nexport async function runWorker() {}\n",
+    );
+    const listened = [];
+    const originalListen = Instance.prototype.listen;
+    Instance.prototype.listen = function (opts) {
+      listened.push(opts);
+      return originalListen.call(this, opts);
+    };
+    try {
+      await runPiWorker({ ...options, application: okApplication });
+      await runPiWorker({ ...options, application: okApplication, automatic: true });
+    } finally {
+      Instance.prototype.listen = originalListen;
+    }
+    assert.deepEqual(listened, [{ automatic: false }, { automatic: true }]);
+
+    // Stub crash preservation on close failure.
     await writeFile(
       application,
       'export function createSession() {}\nexport async function runWorker() { throw new Error("primary_worker_crash"); }\n',
     );
-    await compile("pi-worker-hooks");
     await assert.rejects(runPiWorker(options), /^Error: primary_worker_crash$/);
 
     const originalClose = Instance.prototype.close;

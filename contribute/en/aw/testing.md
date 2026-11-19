@@ -137,14 +137,15 @@ scanner exit and zero model requests. The nightly matrix requires both reports.
 ## Application-owned SDK package
 
 The default gate runs the shared protocol consumer, Node lifecycle/transport tests,
-and an offline out-of-tree npm install. Build the tarball from the repository root:
+and an offline out-of-tree npm install. Build the core and Qoder tarballs from the repository root:
 
 ```bash
 mkdir -p src/aw/target/sdk-package
 npm pack ./src/aw/sdk/typescript --pack-destination src/aw/target/sdk-package
+npm pack ./src/aw/sdk/typescript-adapters/qoder --pack-destination src/aw/target/sdk-package
 ```
 
-For real Qoder acceptance, install that tarball and the selected native Qoder SDK
+For real Qoder acceptance, install both tarballs and the selected native Qoder SDK
 in a separate application directory. Copy `src/aw/sdk/tests/native-qoder.mjs` and
 `src/aw/sdk/tests/fixtures/sdk-deny.py` there. Set `AW_TEST_BINARY` to the absolute
 candidate executable and provide native `QODER_PERSONAL_ACCESS_TOKEN` through the
@@ -154,10 +155,11 @@ service loss, recovery, AW denial and native denial with actual Bash side effect
 The application retains daemon/Query cleanup. Credentialed acceptance is separate
 from the required offline package gate.
 
-The default gate also builds and installs the Python wheel offline and runs its six
-contract tests. For a real QwenPaw App, install the wheel outside the checkout and
-set `AW_TEST_BINARY`, `AW_QWENPAW_BINARY`, `AW_SDK_PYTHONPATH` (the installed package
-directory) and `AW_TEST_OUTPUT` (an existing private evidence directory). Run
+The default gate also builds the Python wheels offline and tests installed consumers.
+For a real QwenPaw App, install the matching `anolisa-aw-sdk` and
+`anolisa-aw-sdk-qwenpaw` wheels into the same directory outside the checkout.
+Set `AW_SDK_PYTHONPATH` to that directory, `AW_TEST_BINARY` and `AW_QWENPAW_BINARY`
+to the candidate executables, and `AW_TEST_OUTPUT` to a private evidence directory. Run
 `timeout --kill-after=10s 180s python3 src/aw/sdk/tests/native_qwenpaw.py` from the
 repository root. It uses the stock App, a controlled model and native observer
 plugin, and verifies AW loss while a tool is entering, recovery and denial.

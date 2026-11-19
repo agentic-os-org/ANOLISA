@@ -9,6 +9,8 @@ export interface PiWorkerOptions {
   target?: string;
   executable?: string;
   attachTimeoutMs?: number;
+  /** Attach automatically when the configured Service is available (defaults to false). */
+  automatic?: boolean;
 }
 
 /**

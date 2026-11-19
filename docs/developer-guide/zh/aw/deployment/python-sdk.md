@@ -2,7 +2,10 @@
 
 [English](../../../en/aw/deployment/python-sdk.md)
 
-`anolisa-aw-sdk` 提供 Python 3.11+ 的 Linux 异步客户端与可选 QwenPaw 插件。
+`anolisa-aw-sdk` 提供无框架耦合的 Python 3.11+ Linux 异步核心客户端，包含
+`Instance`、`Task`、`Admission`、`TaskScope`、部署 Descriptor 加载、协作式控制与
+语言级 Source Runtime（`aw_sdk.sources`）。框架专属集成作为独立可选 wheel 分发
+（`anolisa-aw-sdk-qwenpaw`、`anolisa-aw-sdk-claude`），不再物理捆绑在核心 wheel 中。
 应用保留原生启动、配置、权限和调度。AW／Provider 分别安装，Service 使用应用用户
 运行。当前 wheel 为源码构建候选，registry 发布沿 AW 发行流程。
 
@@ -15,24 +18,29 @@ AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` �
 
 ## 安装与接入
 
-在应用环境安装 wheel：
+在应用环境安装核心 wheel，并按需仅安装实际使用的可选框架适配 wheel：
 
 ```bash
 python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.1.1-py3-none-any.whl
+# 可选框架适配包（按需安装）：
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.1.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.1.1-py3-none-any.whl
 ```
 
-顶层 `aw_sdk` 导入不加载 Agent 框架。`Instance` 接受绝对 `endpoint`、配置中的
+顶层 `aw_sdk` 导入不加载任何 Agent 框架，核心 wheel 也不包含框架私有适配源码。`Instance` 接受绝对 `endpoint`、配置中的
 `target`、原生 `capabilities`、显式 `availability` 和 `install(routes)` 回调；
 还可传入 `cwd`、`environment`、`config`、`timeout_ms`、`reconnect_ms`。
 上下文默认采用应用目录和环境，目录应与原生 Agent 一致。wheel 不包含二进制或策略引擎。
 
-QwenPaw 接入时，将安装后的 `share/anolisa-aw-sdk/examples/qwenpaw/` 示例复制到
+QwenPaw 接入时，在安装 `anolisa-aw-sdk` 的同时安装 `anolisa-aw-sdk-qwenpaw`，将安装后的
+`share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw/` 示例复制到
 新的原生插件目录，启用 `plugins.aw-sdk`，并将 `AW_CONFIG` 设置为部署配置的绝对路径。
+兼容子路径 `aw_sdk.qwenpaw` 会在已安装该可选包时转发至 `aw_sdk_qwenpaw`，未安装时提示安装指引。
 沿用 `qwenpaw app`、原模型、权限和其他插件。初始化复用 AW 权威离线解析器，
 不启动 AW 或 sec-core。
 
 ```python
-from aw_sdk.qwenpaw import QwenPawPlugin
+from aw_sdk_qwenpaw import QwenPawPlugin
 
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
@@ -55,7 +63,7 @@ QwenPaw `2.1.1b3`。安装不启动服务，保留原生隔离与清理；其他
 业务有早期 Python 启动入口时，可在 QwenPaw 加载插件前调用，让后续全部插件受益：
 
 ```python
-from aw_sdk.qwenpaw import prepare_runtime
+from aw_sdk_qwenpaw import prepare_runtime
 
 accelerated = prepare_runtime()  # Before QwenPaw starts loading plugins.
 ```
@@ -126,7 +134,7 @@ Service 仍可达时，回调取消或失败先等待事件清理，再传播原
 ## 工具后的延迟接入
 
 实验性 `AfterOnlyPlugin` 保留原生 `qwenpaw app` 启动，启动阶段不等待 AW 或 sec-core。
-从已安装 wheel 的 `share/anolisa-aw-sdk/examples/qwenpaw-after/` 复制到新的原生插件目录，
+从已安装 `anolisa-aw-sdk-qwenpaw` wheel 的 `share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw-after/` 复制到新的原生插件目录，
 启用 `plugins.aw-after`，将 `AW_SOCKET` 设置为 AW 配置选择的私有 socket。
 该应用使用这一种 AW 接线，替代可选的 `aw-sdk` 插件；原模型、权限和其他 Hook 沿用业务配置。
 

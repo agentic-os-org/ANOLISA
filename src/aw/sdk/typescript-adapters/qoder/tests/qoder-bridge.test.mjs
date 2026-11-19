@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 
 import { fixture, before, delay } from "./qoder-bridge-fixture.mjs";
-import { Task } from "../src/client.mjs";
+import { Task } from "../../../typescript/src/client.mjs";
 
 test(
   "text replies and native initialization finish without AW or input Hooks",

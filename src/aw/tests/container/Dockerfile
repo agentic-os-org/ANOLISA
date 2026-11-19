@@ -20,7 +20,9 @@ RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
     && uv pip install --python /opt/venv/bin/python -r /opt/requirements.txt \
     && uv build --wheel --python /opt/venv/bin/python \
        --out-dir /tmp/aw-wheel /opt/wheel-source/src/aw/sdk/python \
-    && (cd /tmp/aw-wheel && sha256sum *.whl) > /opt/aw-sdk-wheel.sha256 \
+    && uv build --wheel --python /opt/venv/bin/python \
+       --out-dir /tmp/aw-wheel /opt/wheel-source/src/aw/sdk/python-adapters/claude \
+    && (cd /tmp/aw-wheel && LC_ALL=C ls -1 *.whl | xargs sha256sum) > /opt/aw-sdk-wheel.sha256 \
     && uv pip install --offline --no-deps --python /opt/venv/bin/python /tmp/aw-wheel/*.whl \
     && rm -rf /root/.cache/uv /tmp/aw-wheel
 COPY payload/ /opt/aw/bin/

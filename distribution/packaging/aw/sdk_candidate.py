@@ -1,4 +1,4 @@
-"""Build SDKs from a fixed Git commit and inspect matching RPM declarations."""
+"""Build core and optional SDKs from a fixed Git commit and inspect matching RPMs."""
 
 from __future__ import annotations
 
@@ -15,6 +15,15 @@ from common import Cancellation, digest, run
 from package import publish
 
 PACKAGES = {"aw", "aw-provider-sec-core", "aw-provider-tokenless"}
+SDK_PACKAGES = (
+    ("npm", "core", "src/aw/sdk/typescript"),
+    ("npm", "qoder", "src/aw/sdk/typescript-adapters/qoder"),
+    ("npm", "pi", "src/aw/sdk/typescript-adapters/pi"),
+    ("wheel", "core", "src/aw/sdk/python"),
+    ("wheel", "claude", "src/aw/sdk/python-adapters/claude"),
+    ("wheel", "qwenpaw", "src/aw/sdk/python-adapters/qwenpaw"),
+)
+EXPECTED_SDK_KEYS = {(kind, component) for kind, component, _ in SDK_PACKAGES}
 
 
 def commit_id(repo: Path, requested: str, cancel: Cancellation) -> str:
@@ -55,10 +64,40 @@ def sdk_payload(path: Path) -> dict[str, bytes]:
     return result
 
 
+def check_core_boundary(
+    kind: str, component: str, payload: dict[str, bytes]
+) -> None:
+    """Reject framework-private adapter bridges bundled inside core SDK artifacts."""
+    if component != "core":
+        return
+    if kind == "wheel":
+        forbidden = sorted(
+            name for name in payload if name.startswith(("aw_sdk/_native/", "aw_sdk/_native\\"))
+        )
+        if forbidden:
+            raise ValueError(
+                "core Python wheel must not bundle framework adapters: "
+                + ", ".join(forbidden[:3])
+            )
+    elif kind == "npm":
+        forbidden = sorted(
+            name
+            for name in payload
+            if name.startswith(
+                ("package/dist/native/qoder-sdk/", "package/dist/native/pi/")
+            )
+        )
+        if forbidden:
+            raise ValueError(
+                "core npm package must not bundle framework adapters: "
+                + ", ".join(forbidden[:3])
+            )
+
+
 def build(
     repo: Path, candidate: str, output: Path, python: str, cancel: Cancellation
 ) -> dict:
-    """Build only archived candidate sources; publish a receipt after both succeed."""
+    """Build only archived candidate sources; publish a receipt after all succeed."""
     commit_id(repo, candidate, cancel)
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -87,39 +126,53 @@ def build(
         run(["tar", "-xf", str(archive), "-C", str(source)], root, cancel, 60)
         packages = root / "packages"
         packages.mkdir()
-        run(
-            ["npm", "pack", "--offline", "--pack-destination", str(packages)],
-            source / "src/aw/sdk/typescript",
-            cancel,
-            120,
-        )
-        run(
-            [
-                python,
-                "-m",
-                "pip",
-                "wheel",
-                "--no-build-isolation",
-                "--no-deps",
-                "--no-index",
-                str(source / "src/aw/sdk/python"),
-                "--wheel-dir",
-                str(packages),
-            ],
-            source,
-            cancel,
-            120,
-        )
-        (npm,) = packages.glob("*.tgz")
-        (wheel,) = packages.glob("*.whl")
-        records = []
-        for kind, path in (("npm", npm), ("wheel", wheel)):
-            payload = sdk_payload(path)
+        staged_paths: list[Path] = []
+        records: list[dict] = []
+        seen_names: set[str] = set()
+        for kind, component, rel_dir in SDK_PACKAGES:
+            stage = root / f"stage-{kind}-{component}"
+            stage.mkdir()
+            if kind == "npm":
+                run(
+                    ["npm", "pack", "--offline", "--pack-destination", str(stage)],
+                    source / rel_dir,
+                    cancel,
+                    120,
+                )
+                (built,) = stage.glob("*.tgz")
+            else:
+                run(
+                    [
+                        python,
+                        "-m",
+                        "pip",
+                        "wheel",
+                        "--no-build-isolation",
+                        "--no-deps",
+                        "--no-index",
+                        str(source / rel_dir),
+                        "--wheel-dir",
+                        str(stage),
+                    ],
+                    source,
+                    cancel,
+                    120,
+                )
+                (built,) = stage.glob("*.whl")
+            if built.name in seen_names:
+                raise ValueError("duplicate SDK artifact filename: " + built.name)
+            seen_names.add(built.name)
+            target = packages / built.name
+            built.rename(target)
+            payload = sdk_payload(target)
+            check_core_boundary(kind, component, payload)
+            staged_paths.append(target)
             records.append(
                 {
                     "kind": kind,
-                    "file": path.name,
-                    "sha256": digest(path, cancel),
+                    "component": component,
+                    "file": target.name,
+                    "sha256": digest(target, cancel),
                     "files": len(payload),
                 }
             )
@@ -138,7 +191,7 @@ def build(
             )
         )
         receipt = {
-            "schema": "aw-sdk-candidate/v1",
+            "schema": "aw-sdk-candidate/v2",
             "commit": candidate,
             "artifacts": records,
             "tools": {
@@ -151,7 +204,7 @@ def build(
         }
         receipt_path = packages / "sdk-candidate.json"
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
-        publish([npm, wheel, receipt_path], output, cancel)
+        publish([*staged_paths, receipt_path], output, cancel)
         return receipt
 
 
@@ -162,42 +215,54 @@ def verify_sdk(
     receipt = json.loads(receipt_path.read_text())
     if not isinstance(receipt, dict):
         raise ValueError("SDK receipt must be an object")
+    if receipt.get("schema") == "aw-sdk-candidate/v1":
+        raise ValueError(
+            "legacy aw-sdk-candidate/v1 receipts (2-artifact layout) must be "
+            "verified with the matching pre-split candidate revision"
+        )
     if (
-        receipt.get("schema") != "aw-sdk-candidate/v1"
+        receipt.get("schema") != "aw-sdk-candidate/v2"
         or receipt.get("commit") != candidate
     ):
         raise ValueError("SDK receipt candidate mismatch")
     records = receipt.get("artifacts", [])
     if (
         not isinstance(records, list)
-        or len(records) != 2
+        or len(records) != len(SDK_PACKAGES)
         or any(
             not isinstance(row, dict)
             or any(
-                not isinstance(row.get(key), str) for key in ("kind", "file", "sha256")
+                not isinstance(row.get(key), str)
+                for key in ("kind", "component", "file", "sha256")
             )
             for row in records
         )
-        or {row["kind"] for row in records} != {"npm", "wheel"}
+        or {(row["kind"], row["component"]) for row in records} != EXPECTED_SDK_KEYS
     ):
         raise ValueError(
-            "receipt must contain exactly one npm and one wheel with file and sha256"
+            "receipt must contain the complete core and optional SDK artifact set"
         )
     with tempfile.TemporaryDirectory(prefix="aw-sdk-rebuild-") as directory:
         fresh = Path(directory)
         rebuilt = build(repo, candidate, fresh, python, cancel)
-        expected = {row["kind"]: fresh / row["file"] for row in rebuilt["artifacts"]}
+        expected = {
+            (row["kind"], row["component"]): fresh / row["file"]
+            for row in rebuilt["artifacts"]
+        }
         for row in records:
+            key = (row["kind"], row["component"])
             if Path(row["file"]).name != row["file"]:
                 raise ValueError("SDK artifact must be next to its receipt")
-            if row["file"] != expected[row["kind"]].name:
+            if row["file"] != expected[key].name:
                 raise ValueError(
                     "SDK artifact filename differs from candidate build: " + row["file"]
                 )
             path = receipt_path.parent / row["file"]
             if digest(path, cancel) != row["sha256"]:
                 raise ValueError("SDK artifact checksum mismatch: " + row["file"])
-            if sdk_payload(path) != sdk_payload(expected[row["kind"]]):
+            actual_payload = sdk_payload(path)
+            check_core_boundary(row["kind"], row["component"], actual_payload)
+            if actual_payload != sdk_payload(expected[key]):
                 raise ValueError(
                     "SDK payload differs from candidate build: " + row["file"]
                 )

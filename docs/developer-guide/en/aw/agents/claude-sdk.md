@@ -247,8 +247,10 @@ A host without its own process group is rejected before readiness.
 
 ## Cooperative attach for a native Python worker
 
-Install the AW Python SDK wheel containing `aw_sdk.claude` and Claude Agent SDK
-0.2.88 in the application's Python environment; the worker and Service run as
+Install the core AW Python SDK wheel (`anolisa-aw-sdk`), the optional Claude
+adapter wheel (`anolisa-aw-sdk-claude`), and Claude Agent SDK
+0.2.88 in the application's Python environment (legacy `aw_sdk.claude` imports
+forward to `aw_sdk_claude` when the optional adapter wheel is installed); the worker and Service run as
 the same user. Compile a descriptor with the `claude-resident-hooks` profile at
 deployment so the worker starts without the configuration parser:
 
@@ -279,7 +281,7 @@ The default wait is 5 seconds and `attach_timeout_ms` can change it. The optiona
 `listen(automatic=True)` attaches when the configured Service is available.
 
 ```python
-from aw_sdk.claude import ResidentClaude
+from aw_sdk_claude import ResidentClaude
 from claude_agent_sdk import ClaudeAgentOptions
 
 async def startup():
@@ -314,8 +316,8 @@ aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
 ```
 
 For managed in-process MCP handlers, use
-`aw_sdk.claude.create_sdk_mcp_server` in the client's options. Catch
-`aw_sdk.claude.SubmissionDenied` around a guarded query. The cooperative
+`aw_sdk_claude.create_sdk_mcp_server` in the client's options. Catch
+`aw_sdk_claude.SubmissionDenied` around a guarded query. The cooperative
 factory admits `input.submit` (when configured), `tool.before` with
 `replace_input` and `tool.after` with `replace_result`. The final tool-result
 security boundary uses the separate foreground entrypoint.

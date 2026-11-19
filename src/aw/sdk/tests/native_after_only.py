@@ -36,27 +36,30 @@ if a.sdk is None:
     )
     import subprocess
 
-    subprocess.run(
-        [
-            build_python,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-build-isolation",
-            "--no-deps",
-            "--no-index",
-            str(a.repo / "src/aw/sdk/python"),
-            "--wheel-dir",
-            package_root.name,
-        ],
-        check=True,
-        capture_output=True,
-        timeout=90,
-    )
-    (wheel,) = Path(package_root.name).glob("*.whl")
     a.sdk = Path(package_root.name) / "installed"
-    with zipfile.ZipFile(wheel) as z:
-        z.extractall(a.sdk)
+    for rel in ("src/aw/sdk/python", "src/aw/sdk/python-adapters/qwenpaw"):
+        wheel_dir = Path(package_root.name) / Path(rel).name
+        wheel_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                build_python,
+                "-m",
+                "pip",
+                "wheel",
+                "--no-build-isolation",
+                "--no-deps",
+                "--no-index",
+                str(a.repo / rel),
+                "--wheel-dir",
+                str(wheel_dir),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=90,
+        )
+        (wheel,) = wheel_dir.glob("*.whl")
+        with zipfile.ZipFile(wheel) as z:
+            z.extractall(a.sdk)
 a.output.mkdir(parents=True, exist_ok=True)
 sys.path[:0] = [
     str(a.repo / "src/aw/crates/aw-cli/tests/fixtures/sec_core"),

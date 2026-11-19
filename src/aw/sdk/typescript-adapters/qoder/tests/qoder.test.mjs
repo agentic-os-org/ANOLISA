@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { qoderOptions } from "../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
+import { qoderOptions } from "../../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
 
 const hook = {
   event: "tool.before",

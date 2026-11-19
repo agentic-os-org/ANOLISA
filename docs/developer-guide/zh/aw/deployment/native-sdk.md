@@ -3,8 +3,11 @@
 [English](../../../en/aw/deployment/native-sdk.md)
 
 应用自主管理启动并需要 AW 策略与生命周期管理时，可使用 `@anolisa/aw-sdk` 或异步
-`anolisa-aw-sdk` Python 包。两种客户端均支持无框架依赖的语义回调；Qoder Hook 与
-QwenPaw Middleware 保留为可选原生集成。要求 Linux，Node 包要求 Node.js 22+。
+`anolisa-aw-sdk` Python 核心包。两个核心包提供连接传输、`Instance`、`Task`、`Admission`、
+`TaskScope`、部署 Descriptor 加载、协作式控制与通用语言级 Source Runtime
+（`@anolisa/aw-sdk/sources` 与 `aw_sdk.sources`）。各框架专属集成作为独立可选适配包分发
+（`@anolisa/aw-sdk-qoder`、`@anolisa/aw-sdk-pi`、`anolisa-aw-sdk-qwenpaw`、
+`anolisa-aw-sdk-claude`），不再物理捆绑在核心包内。要求 Linux，Node 包要求 Node.js 22+。
 AW 与 Provider 分别安装。当前交付源码构建候选，registry 发布沿 AW 发行流程。
 
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
@@ -12,14 +15,16 @@ AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` �
 
 ## 按配置接入 Qoder
 
-使用 `createQoderBridge` 保留业务原生 Node 入口、daemon、认证、模型、权限和 Hook。
+在应用中同时安装核心包 `@anolisa/aw-sdk` 与可选适配包 `@anolisa/aw-sdk-qoder`。
+使用 `createQoderBridge`（从 `@anolisa/aw-sdk-qoder` 直接导入，或经由兼容子路径
+`@anolisa/aw-sdk/qoder` 按需转发）保留业务原生 Node 入口、daemon、认证、模型、权限和 Hook。
 接入模块读取部署所用的同一份自有 `aw.yaml`，安装 Qoder 公开 Hook 并发布协作监听。
 部署生成的 Descriptor 可让初始化直接读取已验证的接线，无需启动配置解析子进程。
 未传入 `descriptorFile` 时，继续通过一次有界 CLI 调用复用 AW 离线 `config show`
 解析 YAML／JSON。两条路径均不启动 AW 或 sec-core。
 
 ```javascript
-import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
+import { createQoderBridge } from "@anolisa/aw-sdk-qoder";
 import { query } from "@qoder-ai/qoder-agent-sdk";
 
 const aw = await createQoderBridge({
@@ -63,27 +68,30 @@ Node 应用。服务准备可与模型推理重叠；未配置 `input.submit` �
 
 ## Pi Worker 接入
 
-在 Node.js 22.19 及以上使用可选入口 `@anolisa/aw-sdk/pi`。业务模块导出
+在 Node.js 22.19 及以上同时安装核心包 `@anolisa/aw-sdk` 与可选适配包 `@anolisa/aw-sdk-pi`
+（兼容子路径 `@anolisa/aw-sdk/pi` 会在已安装该可选包时转发调用）。业务模块导出
 `createSession({ sdk, cwd, args, ...options })` 和
 `runWorker({ args, createSession, closeSession, withSession })`。模型、设置、工具和
 原生回调仍在业务工厂配置。受保护操作通过传入的 `createSession` 和
 `session.prompt()` 执行。
 
 ```javascript
-import { runPiWorker } from "@anolisa/aw-sdk/pi";
+import { runPiWorker } from "@anolisa/aw-sdk-pi";
 
 await runPiWorker({
   application: "/absolute/pi-worker.mjs",
   configFile: "/absolute/aw.yaml",
   descriptorFile: "/absolute/aw-pi.descriptor.json",
   args: process.argv.slice(2),
+  automatic: false, // 设为 true 时常驻 worker 重建后自动向 Service 重连
 });
 ```
 
 部署阶段用 `pi-worker-hooks` Profile 编译 Descriptor，Worker 启动时不再调用
 `aw config show`；省略 `descriptorFile` 时使用离线解析。在配置中选择 Pi 目标，
-显式指定 daemon endpoint 或状态目录。进程进入 Worker 前启动 SDK 监听，部署侧以应用所属
-Linux 用户接入。该入口始终要求 AW 可用。
+显式指定 daemon endpoint 或状态目录。进程进入 Worker 前启动 SDK 监听；可选布尔参数
+`automatic`（默认 `false`）透传给 `instance.listen({ automatic })`，设为 `true` 时支持
+常驻 worker 重建后免外部追 PID 自动重连。部署侧以应用所属 Linux 用户接入。该入口始终要求 AW 可用。
 
 ```bash
 aw config descriptor --config /absolute/aw.yaml --agent pi \
@@ -225,7 +233,7 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
 
-如需直接调用底层语义回调，可配置名为 `app` 的目标并保留应用普通 `argv`，安装候选包后设置
+如需直接调用底层语义回调，可配置名为 `app` 的目标并保留应用普通 `argv`，安装核心候选包后设置
 `AW_SOCKET`，运行
 [TypeScript 示例](../../../../../src/aw/sdk/typescript/examples/application.mjs)或
 [Python 示例](../../../../../src/aw/sdk/python/examples/application.py)。示例在工具执行前
@@ -235,19 +243,22 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 
 通用入口支持输入提交、工具调用前和工具调用后，字段与效果见
 [通用语义入口](../../../../../src/aw/docs/design/zh/runtime/native-sdk.md#通用语义入口)。
-具有这些语义的应用可通过 SDK 即可复用，无需新增框架专属 Rust Adapter。原生 Hook 或语言级
+具有这些语义的应用只需核心 SDK 即可复用，无需新增框架专属 Rust Adapter。原生 Hook 或语言级
 插桩来源可向同一入口供给事件；自动发现与覆盖选择属于后续交付。
-Qoder 的丰富原生效果沿用下述框架集成，Python/QwenPaw 见 [Python SDK](python-sdk.md)。
+Qoder 的丰富原生效果继续安装下述可选适配包，Python/QwenPaw 见 [Python SDK](python-sdk.md)。
 
 生命周期 RPC 默认超时 1000 ms；回调 RPC 至少容纳准入事件预算加 1000 ms 传输余量。
 Service 在有序步骤间持续使用同一事件截止时间。
 
 ## 安装与连接
 
-在应用目录安装候选 tarball：
+在应用目录安装核心候选 tarball，并按需仅安装实际使用的可选框架适配包：
 
 ```bash
 npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
+# 可选框架适配包（按需安装）：
+npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.1.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.1.1.tgz
 ```
 
 使用应用用户持有的私有目录中的绝对 socket 路径。同用户运行 AW，完整配置中设置
@@ -256,7 +267,7 @@ npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
 `aw service serve --config /absolute/aw.yaml`，使用该服务报告的 socket。
 SDK 不启动服务或 Agent。
 
-安装包中的 `examples/qoder.mjs` 使用配置式接入。显式管理生命周期时，沿用业务原有的
+已安装的 `@anolisa/aw-sdk-qoder` 包内包含 `examples/qoder.mjs` 配置式接入示例。显式管理生命周期时，沿用业务原有的
 认证、daemon、模型、权限、配置来源和 Hook。将现有选项传给
 `qoderOptions(task, options)`，创建原生 Query 后立即通过返回对象执行
 `bind(query)`。每个 Query 使用独立 task，先关闭 Query，再关闭 task；应用退出时

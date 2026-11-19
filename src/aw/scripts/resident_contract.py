@@ -79,10 +79,18 @@ def verify_shard(directory: Path, manifest: dict, expected: str, shard: str) -> 
                     (directory / agent / case["results"][0]["file"]).read_text()
                 )["wheel"]
                 if (
-                    evidence["installation"] != "image"
+                    evidence.get("installation") != "image"
+                    or not isinstance(evidence.get("sha256"), str)
                     or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])
+                    or not isinstance(evidence.get("adapter_name"), str)
+                    or not re.fullmatch(
+                        r"anolisa_aw_sdk_claude-[0-9A-Za-z._+-]+-py3-none-any\.whl",
+                        evidence["adapter_name"],
+                    )
+                    or not isinstance(evidence.get("adapter_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", evidence["adapter_sha256"])
                 ):
-                    raise ValueError("resident Claude requires the image-installed SDK wheel")
+                    raise ValueError("resident Claude requires the image-installed SDK wheels")
     runtime = report["runtime"]
     if runtime["python"] != next(iter(selected.values()))["python"]:
         raise ValueError("resident Python version differs from the native inventory")

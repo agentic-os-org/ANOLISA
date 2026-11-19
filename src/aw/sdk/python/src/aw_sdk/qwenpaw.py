@@ -1,29 +1,32 @@
-"""Optional native App integration; import only in applications using QwenPaw."""
+"""Optional compatibility shim delegating to the anolisa-aw-sdk-qwenpaw package."""
+
+from importlib import import_module
+from types import ModuleType
+from typing import Any
 
 __all__ = ["AfterOnlyPlugin", "QwenPawPlugin", "prepare_runtime"]
 
 
+def _load_optional() -> ModuleType:
+    try:
+        return import_module("aw_sdk_qwenpaw")
+    except ModuleNotFoundError as error:
+        if error.name in {"aw_sdk_qwenpaw", "aw_sdk_qwenpaw._native"}:
+            raise ModuleNotFoundError(
+                "Optional QwenPaw adapter package 'anolisa-aw-sdk-qwenpaw' is not installed. "
+                "Install 'anolisa-aw-sdk-qwenpaw' alongside 'anolisa-aw-sdk' "
+                "or import directly from 'aw_sdk_qwenpaw'.",
+                name="aw_sdk_qwenpaw",
+            ) from error
+        raise
+
+
 def prepare_runtime() -> bool:
-    """Install optional native acceleration before plugin loading; start no services.
-
-    Returns whether the verified QwenPaw 2.1.1b3 path optimization is installed.
-    Repeated calls are safe. Unsupported or absent runtimes keep native behavior.
-    The patch lasts until process exit; changing it requires an App restart.
-    """
-    from aw_sdk._native.qwenpaw.aw_paths import prepare_runtime as prepare
-
-    return prepare()
+    """Delegate optional native path acceleration to anolisa-aw-sdk-qwenpaw."""
+    return _load_optional().prepare_runtime()
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name in ("AfterOnlyPlugin", "QwenPawPlugin"):
-        prepare_runtime()
-    if name == "AfterOnlyPlugin":
-        from aw_sdk._native.qwenpaw.after_only import AfterOnlyPlugin
-
-        return AfterOnlyPlugin
-    if name == "QwenPawPlugin":
-        from aw_sdk._native.qwenpaw.sdk import QwenPawPlugin
-
-        return QwenPawPlugin
+        return getattr(_load_optional(), name)
     raise AttributeError(name)

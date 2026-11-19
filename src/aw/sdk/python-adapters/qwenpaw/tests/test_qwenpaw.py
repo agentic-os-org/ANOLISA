@@ -36,7 +36,7 @@ class Middleware(unittest.IsolatedAsyncioTestCase):
             modules[name] = ModuleType(name)
             modules[name].__dict__.update(values)
         with patch.dict(sys.modules, modules):
-            native = importlib.import_module("aw_sdk._native.qwenpaw.sdk")
+            native = importlib.import_module("aw_sdk_qwenpaw._native.sdk")
             calls = []
             hooks = [
                 {"event": event, "step": step, "on_error": "report"}

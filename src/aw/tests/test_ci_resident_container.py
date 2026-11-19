@@ -51,7 +51,12 @@ class ResidentContainerTests(GateFixture):
                     wheel_result = directory / plan["agent"] / case["results"][0]["file"]
                     wheel_result.parent.mkdir(parents=True)
                     wheel_result.write_text(json.dumps({
-                        "wheel": {"installation": "image", "sha256": "c" * 64},
+                        "wheel": {
+                            "installation": "image",
+                            "sha256": "c" * 64,
+                            "adapter_name": "anolisa_aw_sdk_claude-0.1.1-py3-none-any.whl",
+                            "adapter_sha256": "d" * 64,
+                        },
                     }))
             (directory / "result.json").write_text(json.dumps(report))
             (directory / "container.json").write_text(json.dumps(cleanup))
@@ -120,6 +125,9 @@ class ResidentContainerTests(GateFixture):
             "src/aw/sdk/python/pyproject.toml",
             "src/aw/sdk/python/setup.py",
             "src/aw/sdk/python/src/aw_sdk/claude.py",
+            "src/aw/sdk/python-adapters/claude/pyproject.toml",
+            "src/aw/sdk/python-adapters/claude/setup.py",
+            "src/aw/sdk/python-adapters/claude/src/aw_sdk_claude/__init__.py",
             "src/aw/crates/aw-adapter/native/claude-sdk/aw_sdk_scope.py",
             "src/aw/crates/aw-adapter/native/qwenpaw/sdk.py",
         ):
@@ -192,10 +200,23 @@ class ResidentContainerTests(GateFixture):
         result = directory / "claude-sdk" / case["results"][0]["file"]
         with patch("resident_contract.verify_case"):
             verify_shard(directory, self.manifest, "a" * 40, "claude-sdk-regular")
-            for installation, digest in (("private", "c" * 64), ("image", "missing")):
-                result.write_text(json.dumps({
-                    "wheel": {"installation": installation, "sha256": digest},
-                }))
+            valid = {
+                "installation": "image",
+                "sha256": "c" * 64,
+                "adapter_name": "anolisa_aw_sdk_claude-0.1.1-py3-none-any.whl",
+                "adapter_sha256": "d" * 64,
+            }
+            for overrides in (
+                {"installation": "private"},
+                {"sha256": "missing"},
+                {"adapter_name": None},
+                {"adapter_name": "anolisa_aw_sdk-0.1.1-py3-none-any.whl"},
+                {"adapter_sha256": None},
+                {"adapter_sha256": "short"},
+            ):
+                wheel = {**valid, **overrides}
+                wheel = {k: v for k, v in wheel.items() if v is not None}
+                result.write_text(json.dumps({"wheel": wheel}))
                 with self.assertRaisesRegex(ValueError, "image-installed"):
                     verify_shard(directory, self.manifest, "a" * 40, "claude-sdk-regular")
 

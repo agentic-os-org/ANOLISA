@@ -13,7 +13,11 @@ import unittest
 from unittest.mock import patch
 
 from aw_sdk import AwError
-from test_deployment import BINARY, FIXTURE
+
+FIXTURE = json.loads(
+    (Path(__file__).resolve().parents[3] / "tests/fixtures/deployment.json").read_text()
+)
+BINARY = os.environ["AW_TEST_BINARY"]
 
 
 class ClaudeDeployment(unittest.TestCase):
@@ -25,7 +29,7 @@ class ClaudeDeployment(unittest.TestCase):
         self.descriptor = self.root / "descriptor.json"
         # Cooperative workers must lead their own session; emulate setsid here.
         for name in ("getpgrp", "getsid"):
-            patcher = patch(f"aw_sdk.claude.os.{name}", return_value=os.getpid())
+            patcher = patch(f"aw_sdk_claude.os.{name}", return_value=os.getpid())
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -50,8 +54,11 @@ class ClaudeDeployment(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_descriptor_and_parser_select_the_same_required_worker(self) -> None:
-        from aw_sdk.claude import ResidentClaude
-        from aw_sdk._native.claude.aw_sdk_scope import PROFILE
+        from aw_sdk.claude import ResidentClaude as CompatResidentClaude
+        from aw_sdk_claude import ResidentClaude
+        from aw_sdk_claude._native.aw_sdk_scope import PROFILE
+
+        self.assertIs(CompatResidentClaude, ResidentClaude)
 
         for enabled in (False, True):
             self.write(enabled)
@@ -95,10 +102,10 @@ class ClaudeDeployment(unittest.TestCase):
             ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
 
     def test_worker_rejects_shared_process_group_without_setsid(self) -> None:
-        from aw_sdk.claude import ResidentClaude
+        from aw_sdk_claude import ResidentClaude
 
         for name in ("getpgrp", "getsid"):
-            with patch(f"aw_sdk.claude.os.{name}", return_value=os.getpid() + 1):
+            with patch(f"aw_sdk_claude.os.{name}", return_value=os.getpid() + 1):
                 with self.assertRaisesRegex(
                     RuntimeError, "Cooperative Claude requires an isolated process started with setsid"
                 ):
@@ -154,13 +161,13 @@ class ClaudeWorkerLifecycleGuards(unittest.IsolatedAsyncioTestCase):
                     "claude_agent_sdk._internal.transport.subprocess_cli": subprocess_stub,
                 },
             ),
-            patch("aw_sdk.claude.os.getpgrp", return_value=pid),
-            patch("aw_sdk.claude.os.getsid", return_value=pid),
+            patch("aw_sdk_claude.os.getpgrp", return_value=pid),
+            patch("aw_sdk_claude.os.getsid", return_value=pid),
             patch("os.getpgrp", return_value=pid),
             patch("os.getsid", return_value=pid),
         ):
-            from aw_sdk.claude import ResidentClaude
-            import aw_sdk._native.claude.aw_resident as resident
+            from aw_sdk_claude import ResidentClaude
+            import aw_sdk_claude._native.aw_resident as resident
 
             with tempfile.TemporaryDirectory(prefix="aw-claude-guard-") as temporary:
                 worker = ResidentClaude(endpoint=f"{temporary}/aw.sock", target="app")

@@ -1,4 +1,4 @@
-"""Compile public bridge consumers against the pinned Qoder SDK's actual Query."""
+"""Compile public core, source and adapter consumers against pinned Qoder SDK Query."""
 
 import argparse
 import json
@@ -8,12 +8,26 @@ import subprocess
 import tempfile
 
 
+def pack(package: Path, out: Path) -> Path:
+    out.mkdir(parents=True, exist_ok=True)
+    packed = subprocess.run(
+        ["npm", "pack", "--pack-destination", str(out)],
+        cwd=package,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert packed.returncode == 0, packed.stderr
+    (tarball,) = out.glob("*.tgz")
+    return tarball
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--npm", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    package = Path(__file__).resolve().parents[1] / "typescript"
+    sdk_root = Path(__file__).resolve().parents[1]
     args.output.mkdir(parents=True, exist_ok=True)
     sdk = args.npm / "node_modules/@qoder-ai/qoder-agent-sdk"
     compiler = args.npm / "node_modules/typescript"
@@ -22,15 +36,9 @@ def main() -> None:
     assert sdk_version == "1.0.56" and compiler_version == "5.9.3"
     with tempfile.TemporaryDirectory(prefix="aw-sdk-types-", dir="/tmp") as temporary:
         root = Path(temporary)
-        packed = subprocess.run(
-            ["npm", "pack", "--pack-destination", str(root)],
-            cwd=package,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert packed.returncode == 0, packed.stderr
-        (tarball,) = root.glob("*.tgz")
+        core_tgz = pack(sdk_root / "typescript", root / "pack-core")
+        qoder_tgz = pack(sdk_root / "typescript-adapters/qoder", root / "pack-qoder")
+        pi_tgz = pack(sdk_root / "typescript-adapters/pi", root / "pack-pi")
         subprocess.run(
             [
                 "npm",
@@ -41,7 +49,9 @@ def main() -> None:
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
-                str(tarball),
+                str(core_tgz),
+                str(qoder_tgz),
+                str(pi_tgz),
             ],
             check=True,
             capture_output=True,
@@ -51,19 +61,69 @@ def main() -> None:
         consumer.write_text(
             "import { query } from " + json.dumps(str(sdk / "dist/index.js")) + ";\n"
             'import { Admission, Instance } from "@anolisa/aw-sdk";\n'
+            'import { LanguageSource, SourceDenied, sourceCapabilities } from "@anolisa/aw-sdk/sources";\n'
+            'import type { WrapToolOptions } from "@anolisa/aw-sdk/sources";\n'
             'import { runPiWorker } from "@anolisa/aw-sdk/pi";\n'
+            'import { runPiWorker as directPiWorker } from "@anolisa/aw-sdk-pi";\n'
             'import { createQoderBridge, qoderOptions } from "@anolisa/aw-sdk/qoder";\n'
+            'import { createQoderBridge as directQoderBridge, qoderOptions as directQoderOptions } from "@anolisa/aw-sdk-qoder";\n'
             "export async function consumer(instance: Instance) {\n"
             ' const bridge = await createQoderBridge({configFile:"/tmp/aw.yaml", query, availability:"native_fallback"});\n'
+            ' const direct = await directQoderBridge({configFile:"/tmp/aw.yaml", query, availability:"native_fallback"});\n'
             ' const session = bridge.query({prompt:"text"});\n'
             " await session.initializationResult();\n"
+            " await direct.close();\n"
             " const gate = new Admission(instance, {events:[\"tool.before\"], deferAcknowledgement:true});\n"
             " await gate.prepare();\n"
             " const task = await instance.task({deferAcknowledgement:true});\n"
             " await task.acknowledge();\n"
             ' const native = qoderOptions(task).bind(query({prompt:"text"}));\n'
+            ' const directNative = directQoderOptions(task).bind(query({prompt:"text"}));\n'
             " await native.initializationResult();\n"
-            ' void runPiWorker({application:"/app/worker.mjs", configFile:"/tmp/aw.yaml", descriptorFile:"/tmp/d.json"});\n'
+            " await directNative.initializationResult();\n"
+            ' void runPiWorker({application:"/app/worker.mjs", configFile:"/tmp/aw.yaml", descriptorFile:"/tmp/d.json", automatic:true});\n'
+            ' void directPiWorker({application:"/app/worker.mjs", configFile:"/tmp/aw.yaml", descriptorFile:"/tmp/d.json", automatic:false});\n'
+            ' const source = LanguageSource.create({endpoint:"/tmp/aw.sock", target:"app", events:["input.submit","tool.before","tool.after"]});\n'
+            " void sourceCapabilities();\n"
+            " void SourceDenied;\n"
+            ' const langSession = source.session({sessionId:"s1"});\n'
+            ' const wrapped = langSession.wrapTool(async (x: { cmd: string }) => x.cmd, {name:"sh"});\n'
+            ' void wrapped({cmd:"ok"});\n'
+            ' class ToolInput { constructor(public command: string) {} }\n'
+            ' const snapshotArg: WrapToolOptions<[ToolInput], string>["snapshotArg"] = (input) => new ToolInput(input.command);\n'
+            ' function run(input: ToolInput) { return input.command; }\n'
+            ' async function* runStream(input: ToolInput) { yield input.command; }\n'
+            ' await langSession.wrapTool(run, {snapshotArg})(new ToolInput("go"));\n'
+            ' for await (const chunk of langSession.wrapToolStream(runStream, {snapshotArg})(new ToolInput("go"))) chunk.toUpperCase();\n'
+            ' langSession.instrument({run, runStream}, {toolMethods: {run: {snapshotArg}, runStream: {stream: true, snapshotArg}}}).restore();\n'
+            ' // @ts-expect-error The callback must return a supported argument type.\n'
+            ' langSession.wrapTool(run, {snapshotArg: (input) => input.command});\n'
+            ' const agent = { async ask(prompt: string) { return prompt; }, async run(cmd: string) { return { ok: Boolean(cmd) }; } };\n'
+            ' const inst = langSession.instrument(agent, { inputMethods: { ask: { extractText: (p: string) => p } }, toolMethods: { run: { name: "sh", extractInput: (c: string) => ({ cmd: c }), extractResult: (r: { ok: boolean }) => r.ok } } });\n'
+            " inst.restore();\n"
+            ' const streamTool = langSession.wrapToolStream(async function* (cmd: string) { yield cmd; }, { name: "st", extractInput: (c: string) => ({ cmd: c }), extractResult: (items: string[]) => items.join(",") });\n'
+            ' for await (const chunk of streamTool("go")) { void chunk; }\n'
+            ' async function* chunks(text: string) { yield text; }\n'
+            ' const factory = (text: string) => chunks(text);\n'
+            ' const inputs = langSession.wrapInput(chunks)("go");\n'
+            ' const tools = langSession.wrapTool(chunks)("go");\n'
+            ' const factoryInput = langSession.wrapInput(factory)("go");\n'
+            ' const factoryTool = langSession.wrapTool(factory)("go");\n'
+            ' for (const result of [inputs, tools, factoryInput, factoryTool]) {\n'
+            '   for await (const chunk of await result) chunk.toUpperCase();\n'
+            ' }\n'
+            ' // @ts-expect-error An input factory can take the Promise path.\n'
+            ' for await (const chunk of factoryInput) void chunk;\n'
+            ' // @ts-expect-error A tool factory can take the Promise path.\n'
+            ' factoryTool.next();\n'
+            ' // @ts-expect-error Native input generator wrappers have no Promise methods.\n'
+            ' inputs.then();\n'
+            ' // @ts-expect-error Native tool generator wrappers have no Promise methods.\n'
+            ' tools.then();\n'
+            ' for await (const chunk of langSession.wrapInputStream(factory)("go")) chunk.toUpperCase();\n'
+            ' for await (const chunk of langSession.wrapTool(factory, {stream:true})("go")) chunk.toUpperCase();\n'
+            " await langSession.close({timeoutMs: 5000});\n"
+            " await source.close({closeInstance: true, timeoutMs: 5000});\n"
             " return session;\n}\n"
         )
         result = subprocess.run(
