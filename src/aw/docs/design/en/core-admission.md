@@ -106,8 +106,69 @@ production of trusted deployment artifacts. At startup, SDK consumers must
 check the stored configuration digest and expected target/profile identity
 before using hints; a digest identifies configuration bytes and does not
 authenticate a modified descriptor. Runtime Service admission, Provider checks,
-Ready and native adoption remain required. Source selection and task Overlay
-revisions are separate future consumers of requirement projection.
+Ready and native adoption remain required.
+
+## Pure Source resolution and Shadow Plan equivalence
+
+`aw_core::resolver` consumes projected `HookRequirement` slices (`spec.events`
+remains the single source of truth for desired events, effects, failure actions
+and `required` flags) and candidate `aw_contracts::source::SourceCapability`
+declarations (`source-capability-v1alpha1`, version
+`aw-source-capability/v1alpha1`) to produce a validated
+`aw_contracts::hook_plan::ResolvedHookPlan` (`resolved-hook-plan-v1alpha1`,
+version `aw-resolved-hook-plan/v1alpha1`) without probing processes, opening
+sockets, reading files or invoking `Core::prepare/execute`:
+
+- Candidate Sources that satisfy all requested effects and failure actions for a
+  Hook point prefer `SourceKind::Native` first (`Native > Python > Js > Sight`).
+- Each controlled Hook point selects at most one `HookAuthority::Control` owner
+  (`control_owner`).
+- Additional candidate Sources that support `observe` at the Hook point are
+  attached as auxiliary `SelectedSource` entries with `dispatches_steps: false`,
+  so a policy step is never dispatched more than once.
+- Unsatisfied `required: true` requirements fail with
+  `ResolveError::UnsatisfiedRequired`; unsatisfied optional requirements are
+  recorded as structured `CoverageGap` entries (`Uncovered` or `Degraded`) in
+  `ResolvedHookPlan::coverage`.
+- `aw_contracts::source::project_capability_cells` (and
+  `python3 src/aw/scripts/check_matrix.py --cells-json`) projects the structured
+  `16 × framework` `CapabilityCell` grid across all 16 canonical semantic Hook
+  events.
+- `resolve_configuration` checks each applicable step against its configured
+  Provider protocol before selecting Sources. A boolean Hook (`aw-hook/v1alpha1`,
+  including the default) cannot request `replace_input` or `replace_result`.
+  Resolved plans allow native command steps on `tool.before` and `tool.after`.
+  These steps support `on_error: report` on both events and `on_error: block` on
+  `tool.before` when the dispatch owner can block.
+- `resolve_shadow_preflight` evaluates `resolve` offline against
+  `AdapterCapabilities` and compiles `AdmittedStep` candidates to verify Shadow
+  Plan equivalence with `admission::preflight` across all registered framework
+  and SDK deployment profiles while leaving the active runtime admission path
+  unchanged.
+
+## Immutable Scope route compilation
+
+`aw_core::routes` compiles `AdmittedStep` slices and exact `u64` millisecond
+event budgets into immutable `PreparedRoutes` snapshots (`compile`) and native
+group schedules (`schedule_event`) independently of `Core::prepare/execute`.
+Each compiled `EventRoute` retains the whole-event budget, optional final result
+replacement step ID, and step failure actions (`on_error`), while `HookRoute`
+entries preserve per-step registration order, synthetic `$aw.observe`
+observation routes and `SkillCheck` annotations.
+
+Framework dialects in `aw-adapter` supply declarative `RouteOptions` and map
+`RouteError` variants into their dialect-specific diagnostics. Standard resident
+Source profiles compile through `RouteOptions::standard(capabilities)`; until
+the Source SPI takes over callback normalization, `reload::resident_supported`
+requires a catalog-registered adapter (`aw_adapter::select`) so unknown
+adapters fail early at registration (`registration_adapter_unsupported`) rather
+than at callback time (`sdk_adapter`).
+
+`aw-service` caches `Option<Arc<PreparedRoutes>>` on each `Instance` (populated
+during `Instance::prepared`, cloned into child task `Scope` instances, and
+atomically refreshed by `activate_policy`), so `ScopePolicy` and `sdk_callback`
+share one precomputed route snapshot and resolve event and step routes in O(1)
+time.
 
 ## Invariants and runtime boundaries
 

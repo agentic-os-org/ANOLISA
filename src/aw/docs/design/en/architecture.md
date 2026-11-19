@@ -42,14 +42,14 @@ maintained separately under `providers/`.
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
 | `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, core, exec, host, package, provider, service |
-| `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
+| `aw-service` | Local service, client, runtime state and cached Instance/Scope route snapshots | adapter, config, contracts, core, exec, host, provider |
 | `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, core, exec, provider |
 | `aw-host` | Prepare Providers and execute admitted Hook steps | config, core, exec, provider |
 | `aw-provider` | Validate Provider messages and view contracts | None |
 | `aw-exec` | Bound process lifetimes and output; hold managed package files; clean up owned processes | None |
 | `aw-config` | Parse configuration and validate fields and static references | None |
-| `aw-core` | Hook policy admission, capability plan executor, Host/Journal ports, and FileJournal | config, contracts, provider |
-| `aw-contracts` | Schemas, canonical encoding, and cross-record validation | None |
+| `aw-core` | Hook policy admission, Source resolver, pure route compilation, capability plan executor, Host/Journal ports, and FileJournal | config, contracts, provider |
+| `aw-contracts` | Schemas, canonical encoding, Source/plan contracts, and cross-record validation | None |
 | `aw-package` | Provider admission, private extension transactions and AW configuration | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
@@ -208,9 +208,16 @@ for framework-specific cleanup boundaries.
 Hook preparation routes through `aw_core::admission` via
 `Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`,
 and Hook event execution runs along `aw-service → aw-host → aw-exec` (see
-[Core admission](core-admission.md)). The service also reuses
-`aw-core::journal::FileJournal` for audit storage, without calling
-`Core::prepare/execute`.
+[Core admission](core-admission.md)). `aw_core::routes` compiles admitted steps
+and event budgets into immutable `PreparedRoutes` snapshots cached on each
+`aw-service` `Instance` and child task `Scope` so `ScopePolicy` and
+`sdk_callback` share one precomputed route table with O(1) lookup.
+`aw_core::resolver` provides side-effect-free multi-source Hook resolution over
+projected `HookRequirement` slices and `aw_contracts::source::SourceCapability`
+candidates into a single-control-owner `aw_contracts::hook_plan::ResolvedHookPlan`
+(verified offline via Shadow Plan equivalence against `admission::preflight`).
+The service also reuses `aw-core::journal::FileJournal` for audit storage,
+without calling `Core::prepare/execute`.
 
 `aw-core::Core` is a separate capability-plan API. Its embedding caller supplies
 `ProviderHost`, `Clock`, and `Journal`; it uses `aw-contracts` to validate plans
@@ -232,14 +239,14 @@ and packaging scope.
 | --- | --- |
 | `crates/aw-cli/src/bin/`, `crates/aw-cli/src/lib.rs`, `crates/aw-cli/src/cli/` | CLI entrypoints, launcher and RPC coordination |
 | `crates/aw-cli/src/command.rs`, `crates/aw-cli/src/command/` | Typed public command declaration, generated help and handler dispatch |
-| `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
+| `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service, cached Instance/Scope route snapshots, and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
-| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/admission/`, `crates/aw-core/src/journal.rs` | Hook policy admission rules/types and durable audit storage |
+| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/admission/`, `crates/aw-core/src/resolver.rs`, `crates/aw-core/src/routes.rs`, `crates/aw-core/src/journal.rs` | Hook policy admission rules/types, pure multi-source Hook resolver, immutable `PreparedRoutes` compilation, and durable audit storage |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | Private records, local verification, planning and durable extension file changes |
 | `crates/aw-package/src/configuration/`, `crates/aw-package/src/config_edit.rs` | AW configuration rendering and safe offline editing |
 | `../../distribution/packaging/aw/` | Independent AW archives, integration backend builds and concrete configuration templates |
 | `crates/aw-exec/src/packages.rs` | Shared runtime ownership of known installed files |
-| `crates/aw-contracts/src/registry.rs` | Contract schemas embedded in the program |
+| `crates/aw-contracts/src/registry.rs`, `crates/aw-contracts/src/source.rs`, `crates/aw-contracts/src/hook_plan.rs` | Contract schemas embedded in the program, plus versioned `SourceCapability`, `ResolvedHookPlan`, `Coverage`, and 16-Hook `CapabilityCell` contracts |
 | `../../providers/agent-sec-core/`, `../../providers/tokenless/` | Concrete Providers, configuration examples, and tests |
 | `crates/aw-adapter/src/` | Shared native dialects and catalog for launcher and service |
 | `crates/aw-adapter/native/` | Packaged Python/JavaScript native bridge assets |
@@ -266,8 +273,13 @@ development environment and checks.
 the [inventory test](../../../crates/aw-contracts/tests/schemas.rs) requires every
 schema file to be registered.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
-use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
-in this repository and were removed. Their contents remain in Git history.
+use v2 inputs and outputs; offline deployment descriptors use
+`deployment-descriptor-v1alpha1` (`aw-deployment/v1alpha1`); and Hook Source
+declarations and resolved single-control-owner plans use
+`source-capability-v1alpha1` (`aw-source-capability/v1alpha1`) and
+`resolved-hook-plan-v1alpha1` (`aw-resolved-hook-plan/v1alpha1`). Eight
+unregistered capability v1 drafts had no consumers in this repository and were
+removed. Their contents remain in Git history.
 
 New Providers can declare operations within the existing events and effects,
 owning their private configuration and backend data. Adding a Core capability or

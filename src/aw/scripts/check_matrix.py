@@ -24,6 +24,103 @@ SHARED_CASES = {
         "adapters_keep_observers_and_user_hooks_before_one_final_replacement",
     ),
 }
+HOOK_EVENTS = (
+    "session.start",
+    "input.submit",
+    "tool.before",
+    "tool.after",
+    "permission.request",
+    "compact.before",
+    "compact.after",
+    "subagent.start",
+    "subagent.stop",
+    "turn.stop",
+    "session.end",
+    "model.before_request",
+    "runtime.observed",
+    "runtime.exited",
+    "security.violation",
+    "coverage.changed",
+)
+EFFECT_ORDER = ("observe", "block", "replace_input", "replace_result", "ask")
+BLOCKING_EVENTS = frozenset(
+    {
+        "input.submit",
+        "tool.before",
+        "permission.request",
+        "compact.before",
+        "subagent.start",
+        "turn.stop",
+        "model.before_request",
+        "security.violation",
+    }
+)
+
+
+def event_allowed_effects(event: str) -> tuple[str, ...]:
+    """Return the semantic effects permitted on one canonical Hook event."""
+    allowed = ["observe"]
+    if event in BLOCKING_EVENTS:
+        allowed.append("block")
+    if event == "tool.before":
+        allowed.append("replace_input")
+    if event == "tool.after":
+        allowed.append("replace_result")
+    if event in {"tool.before", "permission.request"}:
+        allowed.append("ask")
+    return tuple(allowed)
+
+
+def capability_cells(matrix: dict) -> dict[str, dict[str, dict]]:
+    """Project the matrix-declared default native 16 x framework event/effect grid.
+
+    Note: regression-matrix.json only tracks default native event/effect regression
+    obligations. Supported entries therefore emit static placeholders (`sources: ["native"]`,
+    `mode: "control"`, `failure_actions: []`) and do not reflect runtime deployment profile
+    differences (such as `withhold_result` or auxiliary observation sources); callers must
+    use `aw_contracts::source::project_capability_cells` for authoritative runtime
+    `CapabilityCell` contracts.
+    """
+    if not isinstance(matrix.get("agents"), dict) or not matrix["agents"]:
+        raise ValueError("missing or unsupported regression matrix")
+    cells: dict[str, dict[str, dict]] = {}
+    for agent, row in sorted(matrix["agents"].items()):
+        events = row.get("events")
+        if not isinstance(events, dict) or not events:
+            raise ValueError(f"{agent}: missing hook coverage")
+        for event, declared in events.items():
+            if event not in HOOK_EVENTS:
+                raise ValueError(f"{agent}/{event}: unknown semantic hook")
+            if not isinstance(declared, dict) or not declared:
+                raise ValueError(f"{agent}/{event}: missing effect coverage")
+            allowed = event_allowed_effects(event)
+            if "observe" not in declared or any(effect not in allowed for effect in declared):
+                raise ValueError(f"{agent}/{event}: unsupported or incomplete effect set")
+        agent_cells: dict[str, dict] = {}
+        for event in HOOK_EVENTS:
+            declared = events.get(event)
+            if declared:
+                agent_cells[event] = {
+                    "adapter": agent,
+                    "event": event,
+                    "status": "supported",
+                    "sources": ["native"],
+                    "mode": "control",
+                    "effects": [effect for effect in EFFECT_ORDER if effect in declared],
+                    "failure_actions": [],
+                }
+            else:
+                agent_cells[event] = {
+                    "adapter": agent,
+                    "event": event,
+                    "status": "unsupported",
+                    "sources": [],
+                    "mode": None,
+                    "effects": [],
+                    "failure_actions": [],
+                }
+        cells[agent] = agent_cells
+    return cells
 
 
 def table(matrix: dict) -> str:
@@ -91,6 +188,9 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
                 raise ValueError(f"{agent}/{event}: missing effect coverage")
             for effect, cases in effects.items():
                 covered(cases, f"{agent}/{event}/{effect}")
+    cells = capability_cells(matrix)
+    if any(len(row) != len(HOOK_EVENTS) for row in cells.values()):
+        raise ValueError("incomplete 16 x framework capability cell grid")
     if set(matrix["providers"]) != {"sec-core", "tokenless"}:
         raise ValueError("sec-core and Tokenless provider contracts are required")
     for provider, cases in matrix["providers"].items():
@@ -112,10 +212,22 @@ def main() -> None:
     import json
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--write-docs", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--write-docs", action="store_true")
+    mode.add_argument(
+        "--cells-json",
+        action="store_true",
+        help=(
+            "print static matrix-declared native 16 x framework event/effect cells as JSON "
+            "(developer projection with placeholder mode/failure_actions, not runtime CapabilityCell)"
+        ),
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     matrix = json.loads((root / "tests/regression-matrix.json").read_text(encoding="utf-8"))
+    if args.cells_json:
+        print(json.dumps(capability_cells(matrix), indent=2, sort_keys=True))
+        return
     grid = table(matrix)
     if not args.write_docs:
         print(grid)

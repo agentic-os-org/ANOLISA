@@ -885,5 +885,135 @@
     "endpoint": "/run/aw/aw.sock",
     "wait_for_input_submit": false,
     "availability": "native_fallback"
+  },
+  "source-capability-v1alpha1": {
+    "version": "aw-source-capability/v1alpha1",
+    "source_id": "qwenpaw-native",
+    "kind": "native",
+    "adapter": "qwenpaw",
+    "contract": "installed-native-hooks/v1",
+    "entrypoint": "app",
+    "hooks": {
+      "input.submit": {
+        "mode": "control",
+        "effects": [
+          "observe",
+          "block"
+        ],
+        "failure_actions": []
+      },
+      "tool.before": {
+        "mode": "control",
+        "effects": [
+          "observe",
+          "block",
+          "replace_input"
+        ],
+        "failure_actions": []
+      },
+      "tool.after": {
+        "mode": "control",
+        "effects": [
+          "observe",
+          "replace_result"
+        ],
+        "failure_actions": [
+          "withhold_result"
+        ]
+      }
+    }
+  },
+  "resolved-hook-plan-v1alpha1": {
+    "version": "aw-resolved-hook-plan/v1alpha1",
+    "target": "qwenpaw",
+    "adapter": "qwenpaw",
+    "hooks": {
+      "tool.before": {
+        "event": "tool.before",
+        "required": true,
+        "budget_ms": 250,
+        "event_tools": [
+          "*"
+        ],
+        "control_owner": {
+          "source_id": "qwenpaw-native",
+          "kind": "native",
+          "contract": "installed-native-hooks/v1",
+          "entrypoint": "app",
+          "mode": "control",
+          "effects": [
+            "observe",
+            "block",
+            "replace_input"
+          ],
+          "failure_actions": [],
+          "dispatches_steps": true
+        },
+        "observation_sources": [
+          {
+            "source_id": "sight-observer",
+            "kind": "sight",
+            "contract": "agentsight/v1",
+            "entrypoint": "ebpf",
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": [],
+            "dispatches_steps": false
+          }
+        ],
+        "steps": [
+          {
+            "step_id": "check",
+            "provider": "policy",
+            "effects": [
+              "observe",
+              "block"
+            ],
+            "on_error": "block",
+            "step_tools": [
+              "*"
+            ],
+            "native": false,
+            "dispatch_owner": "qwenpaw-native"
+          }
+        ]
+      }
+    },
+    "coverage": {
+      "satisfied": [
+        {
+          "event": "tool.before",
+          "required": true,
+          "control_owner": "qwenpaw-native",
+          "observation_sources": [
+            "sight-observer"
+          ],
+          "effects": [
+            "observe",
+            "block"
+          ],
+          "failure_actions": [
+            "block"
+          ]
+        }
+      ],
+      "gaps": [
+        {
+          "event": "tool.after",
+          "required": false,
+          "status": "degraded",
+          "reason": "unsupported_effect",
+          "missing_effects": [
+            "replace_result"
+          ],
+          "missing_failure_actions": [],
+          "fallback_sources": [
+            "sight-observer"
+          ]
+        }
+      ]
+    }
   }
 }

@@ -15,12 +15,12 @@ ANOLISA/
 │   │   ├── aw-adapter/
 │   │   │   ├── src/                # 方言、能力目录、原生校验与回复转换
 │   │   │   └── native/             # Python / JavaScript 桥接资产
-│   │   ├── aw-contracts/           # src/、schemas/、tests/
+│   │   ├── aw-contracts/           # src/（含 source.rs、hook_plan.rs）、schemas/、tests/
 │   │   ├── aw-config/              # 配置解析与静态校验
 │   │   ├── aw-provider/            # 通用 Provider 协议与视图契约
 │   │   ├── aw-exec/                # 有界进程执行
 │   │   ├── aw-host/                # Provider 准备与调用
-│   │   ├── aw-core/                # Hook 策略准入、计划执行 API 与 Journal
+│   │   ├── aw-core/                # Hook 策略准入、Source 求解器、PreparedRoutes 路由编译、计划执行 API 与 Journal
 │   │   ├── aw-cli/                 # 统一 aw 命令入口
 │   │   ├── aw-service/             # 客户端、服务与运行状态
 │   │   └── aw-package/             # AW 扩展管理与配置编辑
@@ -63,10 +63,14 @@ CLI 通过 `aw-package` 完成本地 Provider 管理与离线编辑；文件校�
 | `LaunchFiles`、取消标志 | 启动器提供文件访问与取消信号，保留目录和进程所有权 |
 | `Client`、完整 `Binding`、wire 类型、`HookBinding` | 保留在服务与 CLI；Adapter 不持有连接或 RPC 状态 |
 | 原生关联、完成阶段与回复 | Adapter 解释原生字段，返回比较数据或回复；CLI 输出并处理退出 |
+| `RouteOptions`、`PreparedRoutes` | Adapter 方言向 `aw-core::routes::compile` 提供声明式 `RouteOptions`；服务在每个 `Instance` 与任务 `Scope` 上缓存不可变 `PreparedRoutes` 快照 |
 | 实例、事件、claim、预算、取消、审计 | 服务持有并执行约束 |
 
 Qoder 的步骤排序要求、Hermes 的观察/转换阶段、OpenClaw 的替换后观察，以及
-观测来源的 framework 别名归 Adapter。服务继续固定初始快照、检查关联摘要和
+观测来源的 framework 别名归 Adapter。`reload::resident_supported` 的标准常驻 Source
+Profile 兜底校验要求 `aw_adapter::select` 已注册对应 Adapter，使未知 Adapter 在注册期即早失败
+（`registration_adapter_unsupported`），待后续 Source SPI 接管回调归一化后再开放非 catalog 来源。
+服务继续固定初始快照、检查关联摘要和
 单次调用。原始 native bytes 使用服务传入的严格 JSON 解码器核对，不接受回调
 自报的 `verified: true`。
 

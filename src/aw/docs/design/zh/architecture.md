@@ -34,14 +34,14 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
 | `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、core、exec、host、package、provider、service |
-| `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
+| `aw-service` | 本地服务、客户端、运行状态及 Instance/Scope 路由快照缓存 | adapter、config、contracts、core、exec、host、provider |
 | `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、core、exec、provider |
 | `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、core、exec、provider |
 | `aw-provider` | 校验 Provider 消息与视图契约 | 无 |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
-| `aw-core` | Hook 策略准入、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
-| `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
+| `aw-core` | Hook 策略准入、Source 求解器、纯路由编译、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
+| `aw-contracts` | Schema、规范编码、Source/计划合同和记录间一致性校验 | 无 |
 | `aw-package` | Provider 准入、私有扩展事务与 AW 配置 | config、exec |
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，`aw-provider` 的测试还依赖 `aw-config`，CLI 集成测试还使用
@@ -162,7 +162,13 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 Hook 策略准备经由 `aw_core::admission` 执行，路径为
 `Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`；
 Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
-[Core 准入](core-admission.md)。服务同时复用 `aw-core::journal::FileJournal`
+[Core 准入](core-admission.md)。`aw_core::routes` 将已准入步骤与事件预算纯函数编译为
+不可变 `PreparedRoutes` 快照，由 `aw-service` 在每个 `Instance` 与子任务 `Scope`
+上缓存并随策略热更新原子刷新，使 `ScopePolicy` 与 `sdk_callback` 共享同一份预计算路由并按
+O(1) 定位事件与步骤。`aw_core::resolver` 基于配置需求投影 `HookRequirement` 与候选
+`aw_contracts::source::SourceCapability` 执行无副作用多源求解，产出单控制 Owner 的
+`aw_contracts::hook_plan::ResolvedHookPlan`（并通过离线 Shadow Plan 与
+`admission::preflight` 核对等价性）。服务同时复用 `aw-core::journal::FileJournal`
 保存审计，不调用 `Core::prepare/execute`。
 
 `aw-core::Core` 是单独的能力计划执行接口。使用它的嵌入方要提供
@@ -182,14 +188,14 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | --- | --- |
 | `crates/aw-cli/src/bin/`、`crates/aw-cli/src/lib.rs`、`crates/aw-cli/src/cli/` | CLI 入口、通用启动与 RPC 协调 |
 | `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
-| `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
+| `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务、Instance/Scope 路由快照缓存与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
-| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/admission/`、`crates/aw-core/src/journal.rs` | Hook 策略准入规则/类型与持久审计实现 |
+| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/admission/`、`crates/aw-core/src/resolver.rs`、`crates/aw-core/src/routes.rs`、`crates/aw-core/src/journal.rs` | Hook 策略准入规则/类型、无副作用多源 Hook 求解器、不可变 `PreparedRoutes` 纯路由编译与持久审计实现 |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | 私有扩展记录、本地校验、计划与持久文件变更 |
 | `crates/aw-package/src/configuration/`、`crates/aw-package/src/config_edit.rs` | AW 配置渲染与安全离线编辑 |
 | `../../distribution/packaging/aw/` | AW 独立归档、集成后端构建与具体配置模板 |
 | `crates/aw-exec/src/packages.rs` | 运行时对已知安装文件持有读锁 |
-| `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
+| `crates/aw-contracts/src/registry.rs`、`crates/aw-contracts/src/source.rs`、`crates/aw-contracts/src/hook_plan.rs` | 编译进程序的契约 Schema 清单，以及版本化 `SourceCapability`、`ResolvedHookPlan`、`Coverage` 与 16-Hook `CapabilityCell` 合同 |
 | `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
 | `crates/aw-adapter/src/` | 启动器与服务共用的原生方言、能力目录 |
 | `crates/aw-adapter/native/` | 随包分发的 Python/JavaScript 原生桥接资源 |
@@ -213,7 +219,10 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 `aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同。
 [Registry](../../../crates/aw-contracts/src/registry.rs) 列出活跃 Schema；
 [目录清单测试](../../../crates/aw-contracts/tests/schemas.rs) 要求每份 Schema 文件均已注册。
-计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
+计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2；离线部署 Descriptor 使用
+`deployment-descriptor-v1alpha1`（`aw-deployment/v1alpha1`）；Hook Source 能力声明
+与单控制 Owner 求解计划使用 `source-capability-v1alpha1`（`aw-source-capability/v1alpha1`）
+和 `resolved-hook-plan-v1alpha1`（`aw-resolved-hook-plan/v1alpha1`）。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 
 新增 Provider 可在现有事件和效果范围内声明操作，私有配置和后端数据由自身管理。

@@ -54,10 +54,15 @@ with migration and regression coverage before changing either binding.
 
 ## Source selection and lifecycle
 
-The common Source interface and per-task Resolved Hook Plan are development
-targets. Current Adapters expose prepared capabilities and native wiring;
-preserve those executable contracts while introducing the shared abstraction.
-Do not describe a planned SPI, resolver, wire field or CLI as available.
+The runtime Source SPI cutover and per-task runtime adoption of a Resolved Hook
+Plan remain development targets, while the versioned wire contracts
+`aw_contracts::source::SourceCapability` (`source-capability-v1alpha1`) and
+`aw_contracts::hook_plan::ResolvedHookPlan` (`resolved-hook-plan-v1alpha1`) and
+the side-effect-free solver `aw_core::resolver` are defined and contract-tested
+(see [Core admission](../core-admission.md#pure-source-resolution-and-shadow-plan-equivalence)).
+Current Adapters expose prepared capabilities and native wiring; preserve those
+executable contracts while introducing the shared abstraction. Do not describe
+an unwired runtime SPI, wire field or CLI as active in runtime dispatch.
 
 For new Source resolution, derive requirements per semantic Hook, effect and
 guarantee. Prefer native Hooks when they meet those requirements; fill gaps
@@ -89,12 +94,17 @@ model, freeze Source assignments and policy revision for each task. Source
 reconfiguration requires re-probe, installation and verification at a safe
 boundary; ordinary policy updates do not authorize live patching. Distinguish
 App Ready, installed wiring, verified capability, AW Ready and actual adoption.
-An attach must not mark earlier in-flight work as protected. Reject unsupported
-applicable enabled events and unsupported effects or failure actions of
-applicable enabled steps, regardless of `required`; an enabled event with no
-steps still requires support.
-Only additional auxiliary observation Sources carrying no configured requirement
-may degrade with an explicit report. Explicit native fallback governs Service
+An attach must not mark earlier in-flight work as protected. At runtime
+capability admission (`admission::preflight` and `resolve_shadow_preflight`),
+reject unsupported applicable enabled events and unsupported effects or failure
+actions of applicable enabled steps, regardless of `required`; an enabled event
+with no steps still requires support, and only additional auxiliary observation
+Sources carrying no configured requirement may degrade with an explicit report.
+In offline multi-source planning (`aw_core::resolver::resolve`), unsatisfied
+`required: true` hooks fail with `ResolveError::UnsatisfiedRequired` while
+unsatisfied `required: false` hooks are recorded as explicit `CoverageGap`
+entries (`Coverage::is_complete() == false`) so runtime admission can reject
+any incomplete plan before activation. Explicit native fallback governs Service
 availability and cannot relax static capability admission; it must remain
 policy-compatible and preserve denial, Provider errors and cancellation.
 Source loss follows the admitted failure contract without changing owners
