@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "scenarios": ["task_scope"],
+  "task": {
+    "allowed_resource_ids": [],
+    "preserve_resource_ids": []
+  },
+  "adapter": "qoder",
+  "workspace_path": "/absolute/synthetic-workspace",
+  "workspace_id": "synthetic-workspace",
+  "tools": {
+    "Bash": {"command_pointer": "/command"},
+    "Edit": {"operation": "replace", "path_pointer": "/file_path"},
+    "Write": {"operation": "replace", "path_pointer": "/file_path"}
+  },
+  "resources": {},
+  "model": {
+    "config_revision": "aw_request",
+    "backend": {
+      "kind": "bailian",
+      "endpoint_url": "http://127.0.0.1:18080/synthetic",
+      "model": "synthetic-model",
+      "key_env": "SEMANTIC_PROVIDER_SYNTHETIC_TEST_KEY"
+    },
+    "timeout_ms": 1500,
+    "max_response_bytes": 4096,
+    "thresholds": {"preservation_ppm": 900000, "task_scope_ppm": 900000},
+    "transport": "loopback_test"
+  },
+  "record_dir": "/absolute/private-shadow-records",
+  "max_sessions": 100,
+  "max_session_bytes": 67108864,
+  "max_storage_bytes": 432537600
+}

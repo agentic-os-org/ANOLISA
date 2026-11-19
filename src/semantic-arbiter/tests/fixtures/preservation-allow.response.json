@@ -1,0 +1,31 @@
+{
+  "api_version": "semantic-arbiter/v1alpha1",
+  "request_id": "preservation-allow",
+  "mode": "deterministic_check",
+  "binding": {
+    "session_id": "synthetic-session",
+    "instance_id": "synthetic-instance",
+    "workspace_id": "synthetic-workspace",
+    "task_version": "task-v1",
+    "config_revision": "policy-v1",
+    "candidate_id": "candidate-1",
+    "candidate_revision": "candidate-v1"
+  },
+  "input_digest": "sha256:52e6e552817f0ad58580c4b20e3e84d5569c01dabb343b81bf2a183e6719d0d2",
+  "answers": [
+    {
+      "unit": "preservation",
+      "value": "allow",
+      "confidence_ppm": 1000000,
+      "reason": "allowed",
+      "evidence_refs": ["rebuild-1"]
+    }
+  ],
+  "outcome": {
+    "control": {"candidate": "allow", "subject": []},
+    "obligations": [
+      {"id": "audit", "critical": true, "action": {"kind": "audit", "parameters": {}}}
+    ],
+    "evidence_refs": ["rebuild-1"]
+  }
+}

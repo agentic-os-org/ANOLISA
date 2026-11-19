@@ -195,6 +195,8 @@ ANOLISA 的组件分为用户入口层、统一接入层与 Agent 语义层。�
 | [Agent Security Core](https://agentic-os.sh/zh/docs/user-guide/agent-sec-core/) | 面向 AI Agent 的 OS 级安全内核。 |
 | [AgentSight](https://agentic-os.sh/zh/docs/user-guide/agentsight/) | Agent 可观测性工具，用于查看运行轨迹、LLM 调用和 Token 消耗。 |
 
+[semantic-arbiter](src/semantic-arbiter/) 是孵化中的独立语义判断组件，支持确定性检查与可配置百炼/TypeSafe 模型。无安装器、不执行真实动作、未接入生产 AW。
+
 [ANOLISA CLI](distribution/anolisa/README_zh.md) 负责组件安装与生命周期管理。
 [ktuner](https://agentic-os.sh/zh/docs/user-guide/ktuner/) 检查 Linux 内核参数，
 给出调优建议，并支持应用或回滚内核参数变更。各组件支持的平台见
