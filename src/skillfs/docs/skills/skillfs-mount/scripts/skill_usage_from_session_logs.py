@@ -19,7 +19,7 @@ import argparse
 import json
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -217,7 +217,7 @@ def parse_timestamp(ts) -> str:
             dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
             return dt.strftime('%Y-%m-%d')
         elif isinstance(ts, (int, float)):
-            dt = datetime.fromtimestamp(ts / 1000)
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
             return dt.strftime('%Y-%m-%d')
     except Exception:
         pass
@@ -258,7 +258,8 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
                     continue
 
                 ts = data.get("timestamp", "")
-                if ts:
+                # Unix timestamp zero is a date, even though it is falsy.
+                if ts or (ts == 0 and ts is not False):
                     session_date = parse_timestamp(ts)
 
                 message = data.get("message", {})
