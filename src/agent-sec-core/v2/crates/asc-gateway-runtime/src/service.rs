@@ -622,25 +622,9 @@ impl GatewayService {
     /// Rejects disabled, unloaded or otherwise unready data planes.
     pub fn ca(&self) -> Result<CaBundle, GatewayError> {
         let inner = self.lock();
-        if !self.status_of(&inner.state).ready {
-            return Err(GatewayError::unavailable(
-                "gateway generation or CA is not ready",
-            ));
-        }
-        let runtime = self.runtime(self.account()?);
-        let pid = self
-            .host
-            .unit_pid(&self.config.unit)
-            .ok_or_else(|| GatewayError::unavailable("gateway main process is unavailable"))?;
-        let ca_bundle_paths = runtime.published_ca_bundle(inner.state.generation, pid)?;
-        if !self.host.unit_active(&self.config.unit)
-            || self.host.unit_pid(&self.config.unit) != Some(pid)
-        {
-            return Err(GatewayError::unavailable(
-                "gateway restarted during CA query",
-            ));
-        }
-        Ok(CaBundle { ca_bundle_paths })
+        self.ready_ca_bundle(&inner.state)
+            .map(|ca_bundle_paths| CaBundle { ca_bundle_paths })
+            .ok_or_else(|| GatewayError::unavailable("gateway generation or CA is not ready"))
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner
@@ -927,20 +911,27 @@ impl GatewayService {
     pub(crate) fn fail_closed(&self, error: GatewayError) -> GatewayError {
         withdraw_on_failure(&self.config, self.host.as_ref(), error)
     }
+    fn ready_ca_bundle(&self, state: &State) -> Option<CaBundlePaths> {
+        if !state.enabled
+            || self.host.check_cgroup_v2().is_err()
+            || !self.host.unit_active(&self.config.unit)
+        {
+            return None;
+        }
+        let account = self.account().ok().flatten()?;
+        let pid = self.host.unit_pid(&self.config.unit)?;
+        let paths = self
+            .runtime(Some(account))
+            .published_ca_bundle(state.generation, pid)
+            .ok()?;
+        (self.host.unit_active(&self.config.unit)
+            && self.host.unit_pid(&self.config.unit) == Some(pid))
+        .then_some(paths)
+    }
     fn status_of(&self, state: &State) -> GatewayStatus {
-        let ready = state.enabled
-            && self.host.check_cgroup_v2().is_ok()
-            && self.host.unit_active(&self.config.unit)
-            && self.account().ok().flatten().is_some_and(|account| {
-                let runtime = self.runtime(Some(account));
-                self.host.unit_pid(&self.config.unit).is_some_and(|pid| {
-                    runtime.published_ca_bundle(state.generation, pid).is_ok()
-                        && self.host.unit_pid(&self.config.unit) == Some(pid)
-                })
-            });
         GatewayStatus {
             enabled: state.enabled,
-            ready,
+            ready: self.ready_ca_bundle(state).is_some(),
             scopes: Self::scopes_of(state),
         }
     }

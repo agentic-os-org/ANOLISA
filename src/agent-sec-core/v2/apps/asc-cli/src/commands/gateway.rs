@@ -10,7 +10,7 @@ use asc_daemon_protocol::method::{
 };
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse, GatewayKeyRemoveParams};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::common::encode;
@@ -51,16 +51,16 @@ struct CaResult {
     ca_bundle_paths: CaPaths,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CaPaths {
+pub(super) struct CaPaths {
     pem: String,
     pkcs12: String,
 }
 
 /// Validates the complete daemon response before any consumer selects one format.
-pub(super) fn ca_bundle_paths(result: &Value) -> io::Result<Value> {
-    let decoded: CaResult = serde_json::from_value(result.clone())
+pub(super) fn ca_bundle_paths(result: &Value) -> io::Result<CaPaths> {
+    let decoded = CaResult::deserialize(result)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid gateway CA result"))?;
     for path in [
         &decoded.ca_bundle_paths.pem,
@@ -73,7 +73,7 @@ pub(super) fn ca_bundle_paths(result: &Value) -> io::Result<Value> {
             ));
         }
     }
-    Ok(result["caBundlePaths"].clone())
+    Ok(decoded.ca_bundle_paths)
 }
 
 #[derive(Debug, Subcommand)]
@@ -113,17 +113,12 @@ impl GatewayCommand {
         if let Self::Ca(args) = self
             && let DaemonResponse::Success(success) = &mut response
         {
-            let mut paths = ca_bundle_paths(&success.result)?;
-            if let Some(format) = args.format {
-                let omitted = match format {
-                    CaFormat::Pem => "pkcs12",
-                    CaFormat::Pkcs12 => "pem",
-                };
-                paths
-                    .as_object_mut()
-                    .ok_or_else(|| io::Error::other("invalid gateway CA paths"))?
-                    .remove(omitted);
-            }
+            let paths = ca_bundle_paths(&success.result)?;
+            let paths = match args.format {
+                None => serde_json::json!(paths),
+                Some(CaFormat::Pem) => serde_json::json!({"pem": paths.pem}),
+                Some(CaFormat::Pkcs12) => serde_json::json!({"pkcs12": paths.pkcs12}),
+            };
             success.result = serde_json::json!({"caBundlePaths": paths});
         }
         render_policy(&response, stdout, stderr)
