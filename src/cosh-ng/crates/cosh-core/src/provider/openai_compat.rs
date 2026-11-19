@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -17,12 +18,34 @@ pub struct OpenAICompatProvider {
     cancelled: Arc<AtomicBool>,
     profile: Box<dyn ProviderProfile>,
     explicit_cache: bool,
+    #[cfg(test)]
+    test_timeouts: Option<(Duration, Duration)>,
 }
 
 /// Request fields `build_request_body` constructs below. `extra_params` may
 /// extend a request but must not replace these. Module scope so the drift test
 /// can name the list instead of restating it.
 const OWNED_REQUEST_FIELDS: [&str; 5] = ["model", "messages", "stream", "stream_options", "tools"];
+
+/// Bounds declared in docs/user-guide/*/cosh-ng/core/providers.md. The read
+/// bound is per read and resets on success, so a healthy stream has no
+/// total-duration deadline; a silent peer must be bounded here rather than
+/// by TCP keepalive coincidence.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Both bounds are parameters so a test can assert the stalled-stream
+/// behaviour without waiting the production read timeout.
+fn build_streaming_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))
+}
 
 impl OpenAICompatProvider {
     pub fn new(
@@ -37,7 +60,30 @@ impl OpenAICompatProvider {
             cancelled: Arc::new(AtomicBool::new(false)),
             profile,
             explicit_cache,
+            #[cfg(test)]
+            test_timeouts: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_timeouts(
+        base_url: &str,
+        api_key: &str,
+        profile: Box<dyn ProviderProfile>,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Self {
+        let mut provider = Self::new(base_url, api_key, profile, false);
+        provider.test_timeouts = Some((connect_timeout, read_timeout));
+        provider
+    }
+
+    fn timeout_bounds(&self) -> (Duration, Duration) {
+        #[cfg(test)]
+        if let Some(bounds) = self.test_timeouts {
+            return bounds;
+        }
+        (CONNECT_TIMEOUT, READ_TIMEOUT)
     }
 
     pub fn new_generic(base_url: &str, api_key: &str) -> Self {
@@ -187,7 +233,8 @@ impl ContentGenerator for OpenAICompatProvider {
         let body = self.build_request_body(messages, tools, config)?;
         let url = format!("{}/chat/completions", self.base_url);
 
-        let client = reqwest::Client::new();
+        let (connect_timeout, read_timeout) = self.timeout_bounds();
+        let client = build_streaming_client(connect_timeout, read_timeout)?;
         let auth_value = self.profile.auth_header_value(&self.api_key);
         let mut request = client
             .post(&url)
@@ -207,11 +254,13 @@ impl ContentGenerator for OpenAICompatProvider {
             super::observe::tap_request("POST", &url, &serialised);
         }
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        let response = request.json(&body).send().await.map_err(|e| {
+            if e.is_timeout() {
+                format!("HTTP request timed out: {e}")
+            } else {
+                format!("HTTP request failed: {e}")
+            }
+        })?;
 
         // Announce the response before the status check: an error response
         // (401/429/5xx) must still be reported, otherwise the observer is left
@@ -462,8 +511,21 @@ impl ContentGenerator for OpenAICompatProvider {
                             }
                         }
                         Some(Err(e)) => {
+                            let message = if e.is_timeout() {
+                                let budget = if read_timeout.as_secs() > 0 {
+                                    format!("{} seconds", read_timeout.as_secs())
+                                } else {
+                                    format!("{} milliseconds", read_timeout.as_millis())
+                                };
+                                format!(
+                                    "provider stream stalled: no data received for {budget} \
+                                     (read inactivity timeout)"
+                                )
+                            } else {
+                                format!("stream error: {e}")
+                            };
                             return Some((
-                                GenerateEvent::Error(format!("stream error: {e}")),
+                                GenerateEvent::Error(message),
                                 (
                                     stream,
                                     buf,
@@ -2583,6 +2645,215 @@ mod tests {
         })
         .await;
         server.await.unwrap();
+    }
+
+    // ─── Read-inactivity contract (providers.md) ───
+    //
+    // The declared contract allows 120s of read inactivity, reset by every
+    // successful read, with no total-duration deadline. These tests drive the
+    // real generate path against a local SSE fixture with a short injected
+    // read bound, mirroring the sysom streaming scenario tests.
+
+    const TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+    const TEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
+    const TEST_WATCHDOG: Duration = Duration::from_secs(10);
+
+    /// Serve `segments` (payload, pause after write) over one local TCP
+    /// connection and collect provider events through the first terminal one.
+    async fn events_from_timed_sse(
+        segments: Vec<(String, Duration)>,
+    ) -> (Vec<GenerateEvent>, Duration) {
+        let total: usize = segments.iter().map(|(payload, _)| payload.len()).sum();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n",
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            for (payload, pause) in segments {
+                socket.write_all(payload.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(pause).await;
+            }
+        });
+
+        let provider = OpenAICompatProvider::with_timeouts(
+            &format!("http://{address}/v1"),
+            "test",
+            Box::new(profile::GenericProfile),
+            TEST_CONNECT_TIMEOUT,
+            TEST_READ_TIMEOUT,
+        );
+        let started = std::time::Instant::now();
+        let mut stream = provider
+            .generate(&[], &[], &GenerateConfig::default())
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        let collect = async {
+            while let Some(event) = stream.next().await {
+                let terminal = matches!(
+                    event,
+                    GenerateEvent::MessageEnd | GenerateEvent::Error(_) | GenerateEvent::Cancelled
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(TEST_WATCHDOG, collect)
+            .await
+            .expect("timed SSE fixture must reach a terminal event");
+        let elapsed = started.elapsed();
+        server.abort();
+        let _ = server.await;
+        (events, elapsed)
+    }
+
+    fn sse_segment(content: &str, finish: Option<&str>, pause: Duration) -> (String, Duration) {
+        (format!("data: {}\n\n", text_chunk(content, finish)), pause)
+    }
+
+    #[tokio::test]
+    async fn silence_over_read_budget_surfaces_timeout() {
+        let (events, elapsed) = events_from_timed_sse(vec![
+            sse_segment("pre0", None, Duration::ZERO),
+            sse_segment("pre1", None, TEST_READ_TIMEOUT * 2),
+            sse_segment("post", None, Duration::ZERO),
+            sse_segment("done", Some("stop"), Duration::ZERO),
+            ("data: [DONE]\n\n".to_string(), Duration::ZERO),
+        ])
+        .await;
+
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::Error(message)) if message.contains("inactivity")),
+            "over-budget silence must surface a read-inactivity timeout: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::MessageEnd)),
+            "the timeout must seal the stream before the silent server resumes: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(event, GenerateEvent::TextDelta(text) if text == "post" || text == "done")),
+            "bytes sent after the timeout must not be consumed: {events:?}"
+        );
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "pre0")
+                && matches!(&events[1], GenerateEvent::TextDelta(text) if text == "pre1"),
+            "deltas received before the silence must be preserved: {events:?}"
+        );
+        assert!(
+            elapsed >= TEST_READ_TIMEOUT,
+            "the timeout must not fire before the read budget expires: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_within_read_budget_is_tolerated() {
+        let (events, elapsed) = events_from_timed_sse(vec![
+            sse_segment("pre0", None, Duration::ZERO),
+            sse_segment("pre1", None, Duration::from_millis(250)),
+            sse_segment("post", None, Duration::ZERO),
+            sse_segment("done", Some("stop"), Duration::ZERO),
+            ("data: [DONE]\n\n".to_string(), Duration::ZERO),
+        ])
+        .await;
+
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "within-budget silence must be tolerated to completion: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::Error(_))),
+            "within-budget silence must not surface an error: {events:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "the fixture must actually pause for the silent window: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_long_stream_has_no_total_deadline() {
+        let mut segments = Vec::new();
+        for index in 0..12 {
+            segments.push(sse_segment(
+                &format!("part{index}"),
+                None,
+                Duration::from_millis(250),
+            ));
+        }
+        segments.push(sse_segment("done", Some("stop"), Duration::ZERO));
+        segments.push(("data: [DONE]\n\n".to_string(), Duration::ZERO));
+
+        let (events, elapsed) = events_from_timed_sse(segments).await;
+
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "a steadily streaming response must complete: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::Error(_))),
+            "healthy gaps below the read budget must not surface an error: {events:?}"
+        );
+        assert!(
+            elapsed > TEST_READ_TIMEOUT,
+            "the stream must outlive the read budget: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_response_headers_surface_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        let provider = OpenAICompatProvider::with_timeouts(
+            &format!("http://{address}/v1"),
+            "test",
+            Box::new(profile::GenericProfile),
+            TEST_CONNECT_TIMEOUT,
+            TEST_READ_TIMEOUT,
+        );
+        let started = std::time::Instant::now();
+        let error = match tokio::time::timeout(
+            TEST_WATCHDOG,
+            provider.generate(&[], &[], &GenerateConfig::default()),
+        )
+        .await
+        {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("silent response headers must time out"),
+            Err(_) => panic!("silent headers must fail within the watchdog"),
+        };
+        assert!(
+            error.contains("timed out"),
+            "the send-stage timeout must be readable as a timeout: {error}"
+        );
+        assert!(
+            started.elapsed() >= TEST_READ_TIMEOUT,
+            "the timeout must not fire before the read budget expires: {:?}",
+            started.elapsed()
+        );
+        server.abort();
+        let _ = server.await;
     }
 
     // WHATWG line endings include a bare CR; a valid CR-only stream must
