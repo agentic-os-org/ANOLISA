@@ -13,6 +13,8 @@ pub(crate) struct MemoryFacts {
     pub(crate) swap_total_mib: u64,
     pub(crate) swap_used_mib: u64,
     pub(crate) swap_used_ratio: f64,
+    pub(crate) total_kib: u64,
+    pub(crate) available_kib: u64,
 }
 
 impl MemoryFacts {
@@ -27,6 +29,22 @@ impl MemoryFacts {
                     "memory.total_mib",
                     HealthFactValue::Unsigned(self.total_mib),
                     Some("MiB".to_string()),
+                    HealthFactSource::ProcMeminfo,
+                    elapsed_ms,
+                )
+                .add_fact(
+                    HealthFactCategory::Memory,
+                    "memory.total_kib",
+                    HealthFactValue::Unsigned(self.total_kib),
+                    Some("KiB".to_string()),
+                    HealthFactSource::ProcMeminfo,
+                    elapsed_ms,
+                )
+                .add_fact(
+                    HealthFactCategory::Memory,
+                    "memory.available_kib",
+                    HealthFactValue::Unsigned(self.available_kib),
+                    Some("KiB".to_string()),
                     HealthFactSource::ProcMeminfo,
                     elapsed_ms,
                 )
@@ -124,6 +142,8 @@ pub(crate) fn parse_proc_meminfo(content: &str) -> Option<MemoryFacts> {
         swap_total_mib: swap_total_kib / 1024,
         swap_used_mib: swap_used_kib / 1024,
         swap_used_ratio,
+        total_kib,
+        available_kib,
     })
 }
 

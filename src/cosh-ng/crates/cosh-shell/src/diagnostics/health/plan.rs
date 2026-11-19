@@ -111,6 +111,8 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
             "memory.available_mib",
             "memory.available_ratio",
             "memory.used_ratio",
+            "memory.total_kib",
+            "memory.available_kib",
         ],
         true,
     ),
@@ -330,6 +332,7 @@ pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
     ("J09", &[AdviceKind::DiskUsage]),
     ("J10", &[AdviceKind::DiskUsage]),
     ("J17", &[AdviceKind::DiskUsage]),
+    ("J18", &[AdviceKind::DiskUsage]),
     ("J11", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
     ("J12", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
     ("J13", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
@@ -370,6 +373,8 @@ const ROOT_FILESYSTEM_KEYS: &[&str] = &[
     "filesystem.mount./.volume_files",
     "filesystem.mount./.volume_favail",
     "filesystem.mount./.volume_inode_applicable",
+    "filesystem.mount./.volume_readonly",
+    "filesystem.mount./.volume_expected_writable",
     "filesystem.volume_*",
 ];
 
@@ -512,7 +517,7 @@ mod tests {
     fn rule_advice_declares_every_rule_exactly_once() {
         let mut declared: Vec<&str> = RULE_ADVICE.iter().map(|(rule, _)| *rule).collect();
         declared.sort_unstable();
-        let expected: Vec<String> = (1..=17).map(|index| format!("J{index:02}")).collect();
+        let expected: Vec<String> = (1..=18).map(|index| format!("J{index:02}")).collect();
         assert_eq!(declared, expected);
         assert!(advice_for_rule("J01").is_empty());
         assert!(advice_for_rule("J14").is_empty());
@@ -612,6 +617,8 @@ mod tests {
         ));
         assert!(!owns_fact("resource.swap", "memory.available_mib"));
         assert!(!owns_fact("resource.memory", "memory.swap_used_mib"));
+        assert!(owns_fact("resource.memory", "memory.total_kib"));
+        assert!(owns_fact("resource.memory", "memory.available_kib"));
     }
 }
 }

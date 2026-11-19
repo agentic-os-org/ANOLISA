@@ -64,6 +64,8 @@ pub(crate) struct VolumeFacts {
     pub bytes: Option<ByteStats>,
     pub inodes: Option<InodeStats>,
     pub inode_applicable: bool,
+    pub readonly: Option<bool>,
+    pub expected_writable: bool,
     pub unknown: Option<VolumeUnknown>,
 }
 
@@ -81,6 +83,8 @@ impl VolumeFacts {
             bytes: None,
             inodes: None,
             inode_applicable: false,
+            readonly: None,
+            expected_writable: false,
             unknown: Some(reason),
         }
     }
@@ -285,6 +289,13 @@ pub(crate) fn record_volumes(
             "volume_inode_applicable",
             HealthFactValue::Bool(volume.inode_applicable),
         );
+        if let Some(readonly) = volume.readonly {
+            add("volume_readonly", HealthFactValue::Bool(readonly));
+        }
+        add(
+            "volume_expected_writable",
+            HealthFactValue::Bool(volume.expected_writable),
+        );
     }
     let summary_check = match check_id {
         Some("filesystem.mounts") => true,
@@ -383,7 +394,7 @@ mod linux {
         parse_fdinfo_mnt_id(&content)
     }
 
-    fn statfs_raw(fd: &OwnedFd) -> Option<(RawStatfs, u64, String)> {
+    fn statfs_raw(fd: &OwnedFd) -> Option<(RawStatfs, u64, String, u64)> {
         let mut stat: nix::libc::statfs64 = unsafe { std::mem::zeroed() };
         if unsafe { nix::libc::fstatfs64(fd.0, &mut stat) } != 0 {
             return None;
@@ -404,7 +415,7 @@ mod linux {
         let identity = nix::sys::stat::fstat(fd.0)
             .ok()
             .map(|st| format!("{}:{}", st.st_dev, st.st_ino))?;
-        Some((raw, stat.f_type as u64, identity))
+        Some((raw, stat.f_type as u64, identity, stat.f_flags as u64))
     }
 
     fn expected_magic(fs_type: &str) -> Option<u64> {
@@ -427,7 +438,7 @@ mod linux {
         Some(parse_mountinfo(&content))
     }
 
-    fn bind_volume(root: &OwnedFd, entry: &MountEntry) -> VolumeFacts {
+    fn bind_volume(root: &OwnedFd, entry: &MountEntry, expected_writable: bool) -> VolumeFacts {
         let mount = entry.mount_point.as_str();
         if entry.fs_type == "autofs" {
             return VolumeFacts::unknown(mount, VolumeUnknown::Autofs);
@@ -447,12 +458,13 @@ mod linux {
         if fd_mount_id(&fd) != Some(entry.mnt_id) {
             return VolumeFacts::unknown(mount, VolumeUnknown::MountChanged);
         }
-        let Some((raw, f_type, fsid)) = statfs_raw(&fd) else {
+        let Some((raw, f_type, fsid, f_flags)) = statfs_raw(&fd) else {
             return VolumeFacts::unknown(mount, VolumeUnknown::InvalidStats);
         };
         if expected_magic(&entry.fs_type) != Some(f_type) {
             return VolumeFacts::unknown(mount, VolumeUnknown::FsMismatch);
         }
+        let readonly = Some(f_flags & nix::libc::ST_RDONLY != 0);
         let bytes = validate_bytes(&raw);
         let inode_applicable = inode_volume_fs(&entry.fs_type);
         let inodes = if inode_applicable {
@@ -469,6 +481,8 @@ mod linux {
                 bytes: None,
                 inodes: None,
                 inode_applicable: false,
+                readonly,
+                expected_writable,
                 unknown: Some(VolumeUnknown::InvalidStats),
             };
         }
@@ -481,6 +495,8 @@ mod linux {
             bytes,
             inodes,
             inode_applicable: inode_ok,
+            readonly,
+            expected_writable,
             unknown: None,
         }
     }
@@ -515,7 +531,11 @@ mod linux {
                 let Some(entry) = entries.iter().find(|entry| &entry.mount_point == target) else {
                     return VolumeFacts::unknown(target, VolumeUnknown::NotMountPoint);
                 };
-                bind_volume(&root, entry)
+                let expected_writable = config
+                    .expected_writable_mounts
+                    .iter()
+                    .any(|mount| mount == target);
+                bind_volume(&root, entry, expected_writable)
             })
             .collect();
         let mnt_ns = fs::read_link("/proc/self/ns/mnt")

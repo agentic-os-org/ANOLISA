@@ -101,6 +101,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "可用内存偏低"
         }
         MessageId::HealthInsightDiskHigh => "挂载点磁盘使用率偏高",
+        MessageId::HealthInsightMountReadonly => "挂载点只读，与期望可写不符",
         MessageId::HealthInsightRecentOom => {
             "近期 OOM 事件"
         }
@@ -123,6 +124,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingMemoryAvailableLow => "可用内存偏低",
         MessageId::HealthFindingSwapPressure => "换页压力有上下文",
         MessageId::HealthFindingDiskHigh => "磁盘水位偏高",
+        MessageId::HealthFindingMountReadonly => "挂载点只读偏离",
+        MessageId::HealthEvidenceMountReadonly => "挂载点 {mount} 当前只读，配置期望可写",
         MessageId::HealthFindingRecentOom => "近期 OOM 信号",
         MessageId::HealthFindingKernelPanic => "近期内核 panic",
         MessageId::HealthFindingServiceFailed => "服务失败",

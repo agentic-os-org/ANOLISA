@@ -75,6 +75,7 @@ pub struct HealthConfig {
     pub memory_sensitive: bool,
     pub critical_mounts: Vec<String>,
     pub scan_mounts: Option<Vec<String>>,
+    pub expected_writable_mounts: Vec<String>,
     pub checks: std::collections::BTreeMap<String, bool>,
     pub policies: std::collections::BTreeMap<String, Vec<String>>,
     pub verbose: bool,
@@ -89,6 +90,7 @@ impl Default for HealthConfig {
             memory_sensitive: false,
             critical_mounts: vec!["/".to_string()],
             scan_mounts: None,
+            expected_writable_mounts: Vec::new(),
             checks: Default::default(),
             policies: Default::default(),
             verbose: false,
@@ -101,6 +103,7 @@ impl Default for HealthConfig {
 pub struct HealthServiceConfig {
     pub name: String,
     pub expected: HealthServiceExpectedState,
+    pub activation: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

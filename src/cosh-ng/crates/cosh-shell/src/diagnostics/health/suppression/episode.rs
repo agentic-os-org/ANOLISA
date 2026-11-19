@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::private_state;
 
-use super::super::model::{HealthFactValue, HealthScanReport};
+use super::super::model::{HealthCheckStatus, HealthCollector, HealthFactValue, HealthScanReport};
+use super::super::rules::memory::{memory_active, memory_judgement};
 use super::super::rules::volume::{evaluate_volumes, MemberLevel};
 
 const FILE: &str = "health-episodes-v1.json";
@@ -193,8 +194,51 @@ pub(crate) fn signals_from_report(report: &HealthScanReport) -> EpisodeSignal {
                 valid: signal.valid,
             });
         }
+        let ro = super::super::rules::ro::ro_judgement(&report.facts, &judgement.mount);
+        if ro.valid {
+            volume.push(VolumeMemberSignal {
+                key: volume_member_key(&judgement.mount, "ro", &device, &fsid),
+                entered: ro.entry == Some(MemberLevel::Warning),
+                exit: ro.exit,
+                valid: ro.valid,
+            });
+        }
     }
     let counter = counter_sample(report);
+    let host_qualified = report.check_results.iter().any(|check| {
+        check.collector == Some(HealthCollector::Host) && check.status == HealthCheckStatus::Ok
+    });
+    let memory = memory_judgement(&report.facts, host_qualified);
+    if memory.valid {
+        volume.push(VolumeMemberSignal {
+            key: "host|memory".to_string(),
+            entered: memory.entry == Some(MemberLevel::Critical),
+            exit: memory.exit,
+            valid: memory.valid,
+        });
+    }
+    for fact in &report.facts {
+        let Some(name) = fact
+            .key
+            .strip_prefix("service.")
+            .and_then(|suffix| suffix.strip_suffix(".persistent_qualified"))
+        else {
+            continue;
+        };
+        let expected = match string_fact(report, &format!("service.{name}.expected")).as_deref() {
+            Some("inactive") => crate::config::HealthServiceExpectedState::Inactive,
+            _ => crate::config::HealthServiceExpectedState::Active,
+        };
+        let signal = super::super::rules::service::service_judgement(&report.facts, name, expected);
+        if signal.valid {
+            volume.push(VolumeMemberSignal {
+                key: format!("service|{name}"),
+                entered: signal.entry == Some(MemberLevel::Warning),
+                exit: signal.exit,
+                valid: signal.valid,
+            });
+        }
+    }
     EpisodeSignal {
         volume,
         counter,
@@ -282,6 +326,47 @@ pub(crate) fn candidate_for_finding(
             epoch: None,
             counter_window: None,
         });
+    }
+    if matches!(base, "J05") && memory_active(&report.facts) {
+        return Some(CandidateEpisode {
+            event: false,
+            key: "host|memory".to_string(),
+            problem: problem.to_string(),
+            severity,
+            epoch: None,
+            counter_window: None,
+        });
+    }
+    if matches!(base, "J18") && volume_active {
+        let mount = finding_id
+            .split_once(':')
+            .map(|(_, mount)| mount.to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let prefix = format!("filesystem.mount.{mount}.");
+        let device = string_fact(report, &format!("{prefix}volume_device")).unwrap_or_default();
+        let fsid = string_fact(report, &format!("{prefix}volume_fsid")).unwrap_or_default();
+        return Some(CandidateEpisode {
+            event: false,
+            key: volume_member_key(&mount, "ro", &device, &fsid),
+            problem: problem.to_string(),
+            severity,
+            epoch: None,
+            counter_window: None,
+        });
+    }
+    if matches!(base, "J15" | "J16") {
+        if let Some((_, name)) = finding_id.split_once(':') {
+            if string_fact(report, &format!("service.{name}.persistent_qualified")).is_some() {
+                return Some(CandidateEpisode {
+                    event: false,
+                    key: format!("service|{name}"),
+                    problem: problem.to_string(),
+                    severity,
+                    epoch: None,
+                    counter_window: None,
+                });
+            }
+        }
     }
     if matches!(base, "J11" | "J12")
         && unsigned_fact(report, "kernel.current_cgroup_version").is_some()

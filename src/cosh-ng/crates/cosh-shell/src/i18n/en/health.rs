@@ -119,6 +119,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthInsightDiskHigh => {
             "disk usage is high on this mount"
         }
+        MessageId::HealthInsightMountReadonly => {
+            "mount is read-only, expected writable"
+        }
         MessageId::HealthInsightRecentOom => {
             "Recent OOM event"
         }
@@ -143,6 +146,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingMemoryAvailableLow => "available memory low",
         MessageId::HealthFindingSwapPressure => "swap pressure with context",
         MessageId::HealthFindingDiskHigh => "disk usage high",
+        MessageId::HealthFindingMountReadonly => "mount read-only deviation",
+        MessageId::HealthEvidenceMountReadonly => {
+            "mount {mount} is read-only, configured expected writable"
+        }
         MessageId::HealthFindingRecentOom => "recent OOM signal",
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",
