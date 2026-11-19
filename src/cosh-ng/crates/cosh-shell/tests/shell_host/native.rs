@@ -909,17 +909,18 @@ fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
         let output = run_raw_relay_bash_with_actions(
             &config,
             vec![
-                RawRelayAction::wait(Duration::from_millis(100)),
+                // A toggle is accepted only at a painted, routable prompt.
+                // Waiting for those boundaries instead of fixed sleeps keeps
+                // a loaded runner's slower precmd from refusing the shortcut
+                // or from claiming the command line before bash reads it.
+                RawRelayAction::wait_for_assistance_toggle(),
                 RawRelayAction::write(b"\x1b[Z".to_vec()),
                 RawRelayAction::line("hello there"),
-                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::wait_for_assistance_toggle(),
                 RawRelayAction::line("/help"),
-                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::wait_for_assistance_toggle(),
                 RawRelayAction::line("printf '__KEEP__=%s\\n' \"$KEEP_ME\""),
-                // The toggle is valid only after the command boundary has
-                // repainted an empty prompt. Leave enough time for a loaded
-                // CI runner to observe and render that boundary.
-                RawRelayAction::wait(Duration::from_secs(1)),
+                RawRelayAction::wait_for_assistance_toggle(),
                 RawRelayAction::write(b"\x1b[Z".to_vec()),
                 RawRelayAction::line("hello there"),
                 RawRelayAction::wait(Duration::from_millis(100)),

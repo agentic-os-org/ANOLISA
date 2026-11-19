@@ -86,6 +86,60 @@ fn assistance_toggle_available(
         && !state.line_buffer.is_active()
 }
 
+/// How long a scripted toggle may wait for the shell to repaint its prompt.
+/// Long enough for a loaded runner's precmd, short enough that a shell which
+/// never reaches the boundary fails the calling test instead of wedging it.
+const ASSISTANCE_TOGGLE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Blocks until [`assistance_toggle_available`] holds.
+///
+/// Scripted input cannot know when the shell finished repainting after a
+/// command: the prompt-ready marker is written by the shell's own precmd, so
+/// a fixed sleep either wastes time or races it and gets the toggle refused.
+pub(super) fn wait_for_assistance_toggle(
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &RawInputRelayState,
+) -> io::Result<()> {
+    wait_for_assistance_toggle_within(
+        input_classifier,
+        input_mode,
+        state,
+        ASSISTANCE_TOGGLE_WAIT_TIMEOUT,
+    )
+}
+
+fn wait_for_assistance_toggle_within(
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &RawInputRelayState,
+    timeout: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mode = current_raw_input_mode(input_mode);
+        if assistance_toggle_available(&mode, input_classifier, state) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "assistance toggle boundary not reached within {timeout:?}: \
+                     at_prompt={:?} passthrough={} native_empty={} line_active={}",
+                    input_classifier
+                        .assistance_control()
+                        .map(|control| control.is_at_prompt()),
+                    matches!(mode, RawInputMode::Passthrough),
+                    state.native_line_state.is_empty(),
+                    state.line_buffer.is_active(),
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 pub(super) fn flush_pending_assistance_escape(
     force: bool,
     now: Instant,
@@ -115,4 +169,55 @@ pub(super) fn flush_pending_assistance_escape(
         state,
         RelayReadContext::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use crate::input::AssistanceControl;
+
+    use super::*;
+
+    #[test]
+    fn assistance_toggle_wait_times_out_with_the_boundary_state() {
+        let state_file = std::env::temp_dir().join(format!(
+            "cosh-shell-assistance-wait-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let control = AssistanceControl::enabled(state_file);
+        control.set_at_prompt(false);
+        let input_classifier = InputClassifier::default().with_assistance_control(control);
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let state = RawInputRelayState::default();
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ = result_tx.send(wait_for_assistance_toggle_within(
+                &input_classifier,
+                &input_mode,
+                &state,
+                Duration::ZERO,
+            ));
+        });
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait must return once its deadline has passed")
+            .expect_err("an unreached boundary must not succeed");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let message = error.to_string();
+        for expected in [
+            "at_prompt=Some(false)",
+            "passthrough=true",
+            "native_empty=true",
+            "line_active=false",
+        ] {
+            assert!(
+                message.contains(expected),
+                "timeout error must report {expected}: {message}"
+            );
+        }
+        waiter.join().expect("waiter thread");
+    }
 }
