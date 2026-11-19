@@ -135,18 +135,24 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 `hookSpecificOutput.permissionDecision: deny` 与 exit 2 使用同一 veto 路径，
 包括可选原因和提前事件关闭。这不开放原生批准或输入改写。
 
-当前运行时准入提交前观察/阻断、工具前 `observe`/`block`/`replace_input`、工具后 `observe` 或唯一且最后的结构化
-`replace_result`，以及这些点位的原生步骤。Adapter 提供经检查的交付边界时，
-`security.violation` 支持最终 `observe` 或 `block` 步骤。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
+静态校验与库级 `aw-provider`、`aw-core`、`aw-host` 准入 `session.start`、`session.end`
+（`observe`）、`input.submit` 与 `turn.stop`（`observe`/`block`）、`tool.before`
+（`observe`/`block`/`replace_input`）、`tool.after`（`observe` 或唯一且最后的结构化
+`replace_result`），以及 Adapter 提供经检查交付边界时的 `security.violation`
+（`observe`/`block`）；`tool.before` 和 `tool.after` 同时支持原生步骤。内置 Agent
+能力 profile 与 `aw run` 派发当前覆盖 `input.submit`、`tool.before`、`tool.after`
+和 `security.violation`，`session.start`、`session.end`、`turn.stop` 待后续原生 Source
+接入。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 将工具 Hook 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
 Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK、Codex CLI 与显式 AgentScope 工厂均有启动 Adapter；
 已验证基线、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
 
-配置识别以下 16 个名称。所选 Adapter 支持时，当前公共 Provider 派发
-`input.submit`、`tool.before`、`tool.after` 和 `security.violation`；其余 12 个名称
-为预留词汇。实现状态见[16 Hook 概览](../../../user-guide/zh/aw/capabilities.md#16-个通用-hook)。
+配置识别以下 16 个名称。内置 Agent profile 在所选 Adapter 支持时派发
+`input.submit`、`tool.before`、`tool.after` 和 `security.violation`；静态校验与库级
+`aw-host` 同时准入 `session.start`、`session.end` 和 `turn.stop`（待原生 Source
+接入），其余 9 个名称仍为预留词汇。实现状态见[16 Hook 概览](../../../user-guide/zh/aw/capabilities.md#16-个通用-hook)。
 各 Adapter 的效果支持见
 [能力矩阵](../../../user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
 
@@ -174,23 +180,26 @@ Session 提交前的 Agent loop 结果，支持 `observe`/`block`；结果替换
 `tool.after` 执行。运行时仍拒绝 `events.tool.before.guard` 引用。其他 Adapter
 需要验证自己的结果边界后才能启用该事件。
 
-运行时准入支持 `input.submit` 的观察/阻断、`tool.before` 的观察/阻断/输入替换，
-`tool.after` 的观察/结果替换，以及 DeepSeek Harness `security.violation` 的观察/阻断。
+运行时准入支持 `session.start` 与 `session.end` 的观察、`input.submit` 与 `turn.stop`
+的观察/阻断、`tool.before` 的观察/阻断/输入替换、`tool.after` 的观察/结果替换，
+以及 DeepSeek Harness `security.violation` 的观察/阻断。
 `replace_input` 步骤必须排在首个适用的 before 位置，
 只声明该效果，且整个 before 链使用 `on_error: block`。后续检查接收候选输入，
 最后一个成功回调交付改写，原生授权继续生效。`ask` 保留在 before 步骤中，
 启用步骤请求它时拒绝配置。显式关闭的 before 步骤可以保留 `ask` 供后续编辑，
 不因此获得审批能力。宿主原生审批不受影响。
 
-`on_error: block` 可用于 `input.submit`、`tool.before` 及经验证的 DeepSeek Harness
-`security.violation` 结果边界；`withhold_result`
-仅用于工具后；`report` 记录失败后继续。禁止原结果交付需要已验证的模型消费
+`on_error: block` 在 `input.submit`、`tool.before`、`turn.stop` 及经验证的
+DeepSeek Harness `security.violation` 结果边界上可通过静态校验，运行期准入要求所选
+Adapter 支持对应事件的阻断能力（`session.start` 与 `session.end` 仅接受 `report`）；
+`withhold_result` 仅用于工具后；`report` 记录失败后继续。禁止原结果交付需要已验证的模型消费
 边界，只修改历史记录不足以满足要求。必需的安全隐藏不能使用 `report`。
 服务在准入时拒绝尚不能落实的效果与失败动作。普通 Qoder SDK 与 QwenPaw resident 启动
 为结构化 Provider 和布尔 Hook 的 After 步骤声明 `withhold_result`；reloadable
 启动和原生命令步骤拒绝该动作。
 
-工具事件及其步骤均可配置 `match.tools`。工具必须同时匹配事件和步骤的列表，
+工具事件及其步骤均可配置 `match.tools`；启用的 `input.submit`、`session.start`、
+`session.end` 和 `turn.stop` 事件及步骤拒绝该选择器。工具必须同时匹配事件和步骤的列表，
 才会执行该步骤；单个列表内任一条目匹配即可。任一层省略选择器或使用 `["*"]`
 时，该层选择全部工具。列表须非空且无重复，`*` 必须单独使用。
 结构化 Provider、布尔 Hook 和原生命令均遵循这一规则。

@@ -48,10 +48,12 @@ JSON 文档。公共信封拒绝未知字段；Provider 私有配置和原生
 ```
 
 描述最多声明 64 个操作及其支持的事件和效果，操作名不得为空或重复。声明来自 Provider，不能
-扩大 Adapter 的可信能力或证明运行时身份。词表识别配置中的全部 16 个事件。当前
-Provider 执行链在所选 Adapter 支持相应事件与效果时，准入 `input.submit`、
-`tool.before`、`tool.after` 和 `security.violation`。提交检查需要受支持的 resident 入口，
-例如 Qoder SDK、QwenPaw 或 Pi。
+扩大 Adapter 的可信能力或证明运行时身份。词表识别配置中的全部 16 个事件。Provider 执行链按三类门禁在所选 Adapter 支持相应
+事件与效果时准入运行时 Hook：生命周期事件（`session.start`、`session.end`）、
+决策门禁（`input.submit`、`turn.stop`、`security.violation`）以及按槽位约束的
+改写门禁（`tool.before`、`tool.after`）。提交检查需要受支持的 resident 入口，
+例如 Qoder SDK、QwenPaw 或 Pi；内置框架能力集仅在对应原生 Source 接通并验收后
+声明 `session.start`、`session.end` 和 `turn.stop`。
 
 操作可以通过可选 `event_adapters` 限制某个事件支持的 Adapter，例如
 `"event_adapters":{"input.submit":["pi"]}`。键必须出现在该操作的 `events` 中；
@@ -79,10 +81,12 @@ Host 一起部署；旧 Host 在发现阶段会拒绝未知字段。
 ### `invoke`
 
 调用包含配置的操作、私有配置、配置版本、剩余预算、允许的效果、统一事件和不透明
-输入摘要。通过检查的成功响应返回相同摘要及候选效果列表。空列表不增加约束；
-`observe` 请求观测；`block` 可拒绝待提交输入或尚未执行的工具调用，也可在支持
-`security.violation` 的 Adapter 边界暂扣最终工具结果。两者都是候选效果，
-库本身不写入审计记录。这些响应均不授予原生权限。
+输入摘要。随附 JSON Schema 校验消息信封与各事件字段形状，`Protocol` 进一步校验
+各事件门禁允许的效果集合及请求-响应绑定。通过检查的成功响应返回相同摘要及候选
+效果列表。空列表不增加约束；`observe` 请求观测；`block` 可拒绝待提交输入、过早
+轮次停止或尚未执行的工具调用，也可在支持 `security.violation` 的 Adapter 边界
+暂扣最终工具结果；生命周期事件（`session.start`、`session.end`）仅允许
+`observe`。候选效果在本库中不写入审计记录，也不授予原生权限。
 `Outcome::requests_block()` 只报告候选效果中是否包含阻断请求。
 
 | 调用字段 | 含义 |
@@ -92,9 +96,10 @@ Host 一起部署；旧 Host 在发现阶段会拒绝未知字段。
 | `budget_ms` | Host 提供并执行的正数剩余预算 |
 | `allowed_effects` | 为本次操作和事件准入的效果 |
 | `event.agent` | Adapter、配置的 `binding_id` 和可空的运行时 `instance_id` |
-| `event.session_id`、`event.tool.call_id` | 原生标识，缺失时为 null |
-| `event.tool` | `name`、`native_name`、`call_id`、`input`、`result`；工具执行前的 `result` 必须为 null |
-| `event.turn_id`、`event.input.text` | 提交事件的轮次身份与完整用户文本；`session_id` 非空，事件不带 `tool` |
+| `event.session_id`、`event.tool.call_id` | 原生标识；`session.start`、`session.end`、`input.submit` 与 `turn.stop` 上 `session_id` 非空，工具事件缺失时为 null |
+| `event.tool` | 工具事件（`tool.before`、`tool.after`、`security.violation`）上的 `name`、`native_name`、`call_id`、`input`、`result`；工具执行前的 `result` 必须为 null |
+| `event.turn_id` | `input.submit` 与 `turn.stop` 必填的非空轮次标识；工具事件与会话生命周期事件不含该字段 |
+| `event.input.text` | 提交事件专用的完整用户文本；事件不带 `tool` |
 | `event.native` | Adapter 回调快照；提交快照带 Adapter 生成的 `aw_turn_id` |
 | `input_digest` | 为完整调用生成的不透明绑定 |
 
@@ -139,19 +144,21 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 
 | 请求 | 准入结果 |
 | --- | --- |
+| `session.start`、`session.end`：`observe` | Provider 与 Adapter 均支持时通过；拒绝阻断、改写、启用态工具选择器和原始 native-hook 步骤 |
 | `input.submit`：`observe`、`block` | Provider 与 Adapter 均支持时通过；拒绝工具选择器和原始 native-hook 步骤 |
+| `turn.stop`：`observe`、`block` | Provider 与 Adapter 均支持时通过；拒绝改写、启用态工具选择器和原始 native-hook 步骤 |
 | `tool.before`：`observe`、`block`、`replace_input` | 所选操作和 Adapter 均支持全部请求效果时通过 |
 | `tool.after`：`observe` | 双方均支持时通过 |
 | `tool.after`：`replace_result` | 单个结构化步骤与可信文本替换能力 |
 | `security.violation`：`observe`、`block` | Provider 与 Adapter 均支持时用于 DeepSeek Harness 最终结果边界 |
-| `ask`、`tool.after` 阻断 | 拒绝 |
+| `ask`、生命周期阻断、`tool.after` 阻断 | 拒绝 |
 | 启用 Adapter 不支持的事件 | 拒绝，`required: false` 也不例外 |
 | `events.tool.before.guard` 配置字段 | 运行时准入拒绝；工具执行前的检查配置在 `tool.before` 步骤中 |
-| 事件与步骤的 `match.tools` | 接受；Host 仅调用同时匹配两层选择器的工具 |
+| 事件与步骤的 `match.tools` | 工具事件（`tool.before`、`tool.after`、`security.violation`）接受；Host 仅调用同时匹配两层选择器的工具 |
 | 高于 `native_hook` 的保证 | 拒绝 |
 | 缺少 Provider、操作、能力或匹配的配置校验证据 | 拒绝，并给出明确原因 |
 
-提交及工具执行前的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
+生命周期事件（`session.start`、`session.end`）仅支持 `on_error: report`。决策与工具执行前门禁（`input.submit`、`turn.stop`、`tool.before`、`security.violation`）的 `on_error` 支持 `report`；Adapter 支持阻断时，也可以使用 `block`。
 工具执行后的失败支持 `report`；已准备的 Adapter 显式声明该事件失败动作时，
 还支持 `withhold_result`。目前普通 Qoder SDK 和 QwenPaw resident 入口声明该能力。其他动作拒绝。
 

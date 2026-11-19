@@ -60,9 +60,12 @@ The description declares up to 64 operations and their supported events and
 effects. Operation names must be nonempty and unique. A declaration is supplied by the Provider; it
 cannot expand the Adapter's trusted capabilities or establish runtime identity.
 The vocabulary recognizes all 16 configuration events. Provider execution
-currently admits `input.submit`, `tool.before`, `tool.after` and
-`security.violation` when the selected Adapter supports the event and effect.
-Submission support requires a supported resident entrypoint such as Qoder SDK, QwenPaw or Pi.
+classifies runtime Hooks into three gate classes when the selected Adapter
+supports the event and effect: lifecycle events (`session.start`,
+`session.end`), decision gates (`input.submit`, `turn.stop`,
+`security.violation`) and slot-constrained mutation gates (`tool.before`,
+`tool.after`).
+Submission support requires a supported resident entrypoint such as Qoder SDK, QwenPaw or Pi; built-in Agent profiles declare `session.start`, `session.end` and `turn.stop` only after their native Sources are connected and verified.
 
 An operation may restrict an event to specific Adapter IDs with optional
 `event_adapters`, for example `"event_adapters":{"input.submit":["pi"]}`.
@@ -94,12 +97,15 @@ prove that rules were installed or authenticate the Provider executable.
 
 An invocation supplies the configured operation, private configuration,
 configuration revision, remaining budget, admitted effects, normalized event and
-an opaque input digest. A checked successful response returns that same digest
-and a list of candidate effects. An empty list imposes no additional restriction;
-`observe` requests observation. `block` rejects a pending submission or tool
-call, or withholds a final tool result at an Adapter boundary that supports
-`security.violation`. Both are candidate effects; the library itself writes no audit record.
-None of these responses grants native permission.
+an opaque input digest. The bundled JSON Schema checks envelope and per-event
+field shapes, while `Protocol` additionally enforces per-event gate effect
+boundaries and request-response correlation. A checked successful response
+returns that same digest and a list of candidate effects. An empty list imposes
+no additional restriction; `observe` requests observation. `block` rejects a
+pending submission, premature turn stop or tool call, or withholds a final tool
+result at an Adapter boundary that supports `security.violation`; lifecycle
+events (`session.start`, `session.end`) accept `observe` only. Candidate effects
+write no audit record in this library and grant no native permission.
 `Outcome::requests_block()` reports only whether that candidate effect is present.
 
 | Invocation field | Meaning |
@@ -109,9 +115,10 @@ None of these responses grants native permission.
 | `budget_ms` | Positive remaining execution budget supplied and enforced by the Host |
 | `allowed_effects` | Effects admitted for this operation and event |
 | `event.agent` | Adapter, configured `binding_id` and nullable runtime `instance_id` |
-| `event.session_id`, `event.tool.call_id` | Native identifiers, or null when unavailable |
-| `event.tool` | `name`, `native_name`, `call_id`, `input` and `result`; before-tool `result` must be null |
-| `event.turn_id`, `event.input.text` | Submission-only turn identity and complete user text; `session_id` is nonempty and `tool` is absent |
+| `event.session_id`, `event.tool.call_id` | Native identifiers; non-empty string on `session.start`, `session.end`, `input.submit` and `turn.stop`, or null when unavailable on tool events |
+| `event.tool` | `name`, `native_name`, `call_id`, `input` and `result` on tool events (`tool.before`, `tool.after`, `security.violation`); before-tool `result` must be null |
+| `event.turn_id` | Non-empty turn identity required on `input.submit` and `turn.stop`; absent on tool and session lifecycle events |
+| `event.input.text` | Submission-only complete user text; `tool` is absent |
 | `event.native` | Adapter callback snapshot; submission snapshots include an Adapter-issued `aw_turn_id` |
 | `input_digest` | Opaque binding generated for the complete invocation |
 
@@ -170,19 +177,21 @@ preserved; admission does not schedule distinct events or choose parallelism.
 
 | Request | Admission result |
 | --- | --- |
+| `session.start`, `session.end`: `observe` | Accepted with Provider and Adapter support; blocking, mutations, active tool selectors and raw native-hook steps are rejected |
 | `input.submit`: `observe`, `block` | Accepted with Provider and Adapter support; tool selectors and raw native-hook steps are rejected |
+| `turn.stop`: `observe`, `block` | Accepted with Provider and Adapter support; mutations, active tool selectors and raw native-hook steps are rejected |
 | `tool.before`: `observe`, `block`, `replace_input` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
 | `tool.after`: `replace_result` | One structured step with trusted text-replacement capability |
 | `security.violation`: `observe`, `block` | Accepted for the DeepSeek Harness final-result boundary when both sides support it |
-| `ask` or `tool.after` block | Rejected |
+| `ask`, lifecycle blocking or `tool.after` block | Rejected |
 | An enabled event without Adapter support | Rejected, including when `required: false` |
 | `events.tool.before.guard` configuration field | Rejected by runtime admission; configure pre-execution checks as `tool.before` steps |
-| Event and step `match.tools` | Accepted; the Host invokes only tools matching both selectors |
+| Event and step `match.tools` | Accepted on tool events (`tool.before`, `tool.after`, `security.violation`); the Host invokes only tools matching both selectors |
 | A guarantee beyond `native_hook` | Rejected |
 | A missing Provider, operation, capability or matching configuration validation | Rejected with an explicit reason |
 
-Submission and before-tool `on_error` may be `report`, or `block` when the Adapter supports
+Lifecycle events (`session.start`, `session.end`) require `on_error: report`. Decision and pre-tool gates (`input.submit`, `turn.stop`, `tool.before`, `security.violation`) allow `report`, or `block` when the Adapter supports
 blocking. After-tool failures support `report`, or `withhold_result` when the
 prepared Adapter explicitly declares that event-scoped failure action. Currently
 ordinary Qoder SDK and QwenPaw resident entrypoints declare it. Other actions are rejected.

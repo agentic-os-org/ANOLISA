@@ -146,9 +146,12 @@
           "properties": {
             "name": {
               "enum": [
+                "session.start",
                 "input.submit",
                 "tool.before",
                 "tool.after",
+                "turn.stop",
+                "session.end",
                 "security.violation"
               ]
             },
@@ -307,12 +310,55 @@
                 }
               },
               "else": {
-                "required": [
-                  "tool"
-                ],
-                "properties": {
-                  "turn_id": false,
-                  "input": false
+                "if": {
+                  "properties": {
+                    "name": {
+                      "const": "turn.stop"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "turn_id"
+                  ],
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "tool": false,
+                    "input": false
+                  }
+                },
+                "else": {
+                  "if": {
+                    "properties": {
+                      "name": {
+                        "enum": [
+                          "session.start",
+                          "session.end"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "session_id": {
+                        "type": "string"
+                      },
+                      "tool": false,
+                      "turn_id": false,
+                      "input": false
+                    }
+                  },
+                  "else": {
+                    "required": [
+                      "tool"
+                    ],
+                    "properties": {
+                      "turn_id": false,
+                      "input": false
+                    }
+                  }
                 }
               }
             }

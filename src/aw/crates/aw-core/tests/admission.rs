@@ -473,6 +473,9 @@ fn disabled_events_and_steps_need_no_provider_evidence_and_preserve_order() {
 #[path = "admission/engine.rs"]
 mod engine;
 
+#[path = "admission/gates.rs"]
+mod gates;
+
 #[test]
 fn input_replacement_requires_one_initial_fail_closed_provider_step() {
     let mut doc = document();

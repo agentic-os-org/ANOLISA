@@ -13,6 +13,9 @@ mod package_leases;
 #[path = "host/submission.rs"]
 mod submission;
 
+#[path = "host/gates.rs"]
+mod gates;
+
 use aw_host::{Error, Failure, FailureAction, Host, Method};
 use fixture::{
     add_second_step, capabilities, event, Fixture, CLEANUP_ALLOWANCE, LITERAL_ARGUMENT, TIMEOUT,

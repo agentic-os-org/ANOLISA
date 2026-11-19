@@ -87,14 +87,15 @@ Successful preparation establishes local protocol agreement. It does not verify
 native Hook installation, produce a `Ready` binding or prove that an Agent
 adopted a policy. The admitted surface remains:
 
-| Event | Candidate effects | Failure action |
-| --- | --- | --- |
-| `input.submit` | `observe`, `block` | `report`, or `block` with Adapter support |
-| `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
-| `tool.after` | `observe`, `replace_result` | `report`, or `withhold_result` with explicit Adapter failure-action evidence |
+| Event | Gate class | Candidate effects | Failure action |
+| --- | --- | --- | --- |
+| `session.start`, `session.end` | Lifecycle | `observe` | `report` |
+| `input.submit`, `turn.stop`, `security.violation` | Decision | `observe`, `block` | `report`, or `block` with Adapter support |
+| `tool.before` | Mutation (`replace_input`) | `observe`, `block`, `replace_input` | `report`, or `block` with Adapter support |
+| `tool.after` | Mutation (`replace_result`) | `observe`, `replace_result` | `report`, or `withhold_result` with explicit Adapter failure-action evidence |
 
-Enabled unsupported events, guards, `ask`, input-replacement
-effects and guarantees beyond `native_hook` are rejected. The
+Enabled unsupported events, guards, `ask`
+and guarantees beyond `native_hook` are rejected. The
 [protocol design](../../../../../../docs/developer-guide/en/aw/providers/protocol.md) defines the complete admission contract.
 
 ## Adapter execution semantics
