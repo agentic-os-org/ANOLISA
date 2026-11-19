@@ -4718,3 +4718,6 @@ fn native_hint_prefix_slash_keeps_rust_intercept_when_routed() {
 
 #[path = "relay_tests/routing_recovery.rs"]
 mod routing_recovery;
+
+#[path = "relay_tests/paste_echo_budget.rs"]
+mod paste_echo_budget;
