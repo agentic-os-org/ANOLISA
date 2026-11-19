@@ -129,6 +129,21 @@ external shell changes, untrusted records, and unavailable authorization do not
 trigger a forced overwrite. Restoring an unmanaged account does not invent an
 original Shell.
 
+Recovery records are keyed by UID. Renaming a managed account with `usermod -l`,
+reusing its UID for a new account, or deleting it with `userdel` leaves a record
+that no longer describes its account, and login management then refuses that
+record until an administrator reviews it. The error names the record path, the
+recorded and current identities, and the next command. As root,
+`/usr/libexec/cosh/login-preflight reconcile` lists the pending actions, and
+`/usr/libexec/cosh/login-preflight reconcile --yes` applies them. It re-binds a
+record to the account that now owns its UID, or removes a record whose UID has no
+account. Reconcile changes records only and never changes a login shell. A rename
+and a reused UID look identical from the record, so nothing is applied without
+`--yes`. After a re-bind, `cosh login restore --user CURRENT_NAME` restores the
+recorded Bash, where `CURRENT_NAME` is the account that now owns the UID rather
+than the name the record used to carry. Package upgrade and uninstall stay
+blocked until the affected records are reviewed and restored.
+
 Run `cosh guide` for the quick start guide, default login shell and AI service
 settings. Its quick guide explains asking from Bash; the wizard does not start
 a question session. Guidance on/off/status remain separate CLI controls.

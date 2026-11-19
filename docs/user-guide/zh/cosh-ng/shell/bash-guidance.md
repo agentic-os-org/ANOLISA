@@ -105,6 +105,17 @@ cosh --ask '分析这次失败' --context <事件ID>
 `--without login_lifecycle` 时拒绝 `set`，不修改账户。外部 Shell 变更冲突、不可信记录或授权不可用时不会强行覆盖；
 恢复未受管账户时也不会猜测原 Shell。
 
+恢复记录按 UID 键控。用 `usermod -l` 给受管账户改名、把该 UID 复用给新账户，
+或用 `userdel` 删除账户，都会留下不再描述当前账户的记录，登录管理随后拒绝该记录，
+直到管理员审查。错误会指明记录路径、记录内与当前的身份，以及下一条命令。
+以 root 执行 `/usr/libexec/cosh/login-preflight reconcile` 列出待处理动作，
+执行 `/usr/libexec/cosh/login-preflight reconcile --yes` 应用这些动作：
+把记录重绑到当前持有该 UID 的账户，或删除该 UID 已无账户的记录。
+reconcile 只改记录，不改任何登录 Shell。仅凭记录无法区分改名与 UID 复用，
+因此不带 `--yes` 不会应用任何变更。重绑后用 `cosh login restore --user CURRENT_NAME`
+恢复已记录的 Bash，其中 `CURRENT_NAME` 是当前持有该 UID 的账户名，
+而非记录原先携带的名字。受影响记录完成审查并恢复前，包升级与卸载保持阻断。
+
 ## 展示语言
 
 默认 `auto`，不按地域切换：有效 `COSH_SHELL_LANG` 优先于 Cosh 的 `[ui].language`；

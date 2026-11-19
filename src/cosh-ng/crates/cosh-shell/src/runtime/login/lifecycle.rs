@@ -21,6 +21,7 @@ enum Action {
     CheckTarget(PathBuf),
     Replace(PathBuf),
     Downgrade(PathBuf),
+    Reconcile { apply: bool },
 }
 
 pub(crate) fn run_cli(args: &[OsString]) -> i32 {
@@ -38,7 +39,7 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
 }
 
 fn usage() -> Error {
-    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | erase".into(), usage: true, unconfirmed: false }
+    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | erase | reconcile [--yes]".into(), usage: true, unconfirmed: false }
 }
 
 fn parse(args: &[OsString]) -> Result<Action> {
@@ -55,6 +56,8 @@ fn parse(args: &[OsString]) -> Result<Action> {
         }
         ["check-erase"] => Ok(Action::CheckErase),
         ["erase"] => Ok(Action::Erase),
+        ["reconcile"] => Ok(Action::Reconcile { apply: false }),
+        ["reconcile", "--yes"] => Ok(Action::Reconcile { apply: true }),
         ["check-protocol", "1", "--record-version", "1", "--entry", COSH_PATH] => {
             Ok(Action::CheckProtocol)
         }
@@ -172,10 +175,62 @@ fn check_state(records: &[Record], accounts: &[Account], compatible: bool) -> Re
     Ok(())
 }
 
-fn audit(store: &Store, compatible: bool) -> Result<Vec<Record>> {
+/// Reports why a UID-keyed record no longer describes its account. `usermod -l`
+/// retires the recorded name while keeping the UID, so resolving by the recorded
+/// name alone cannot tell a rename apart from a deleted account.
+fn drift_error(store: &Store, record: &Record, owner: Option<&str>) -> Error {
+    let action = match owner {
+        Some(name) => format!(
+            "UID {} is now account {name}; run login-preflight reconcile to review, \
+             then reconcile --yes to re-bind the record and restore that account",
+            record.uid
+        ),
+        None => format!(
+            "UID {} has no account; run login-preflight reconcile to review, \
+             then reconcile --yes to remove the record",
+            record.uid
+        ),
+    };
+    Error::new(format!(
+        "login record {} names account {} (UID {}): {action}",
+        store.record_path(record.uid).display(),
+        record.username,
+        record.uid
+    ))
+}
+
+fn record_owner<'a>(
+    store: &Store,
+    record: &Record,
+    accounts: &'a [Account],
+) -> Result<Option<&'a str>> {
+    let mut owners = accounts.iter().filter(|account| account.uid == record.uid);
+    let Some(first) = owners.next() else {
+        return Ok(None);
+    };
+    if owners.next().is_some() {
+        return Err(Error::new(format!(
+            "login record {} names account {} (UID {}): several accounts share that UID; administrator review is required",
+            store.record_path(record.uid).display(),
+            record.username,
+            record.uid
+        )));
+    }
+    Ok(Some(first.name.as_str()))
+}
+
+fn audit(
+    store: &Store,
+    compatible: bool,
+    accounts: impl FnOnce() -> Result<Vec<Account>>,
+) -> Result<Vec<Record>> {
     let records = store.records()?;
-    let mut accounts = account::nss_accounts()?;
+    let mut accounts = accounts()?;
     for record in &records {
+        let owner = record_owner(store, record, &accounts)?;
+        if owner != Some(record.username.as_str()) {
+            return Err(drift_error(store, record, owner));
+        }
         let current = account::lookup(Some(&record.username), record.uid)?;
         record.validate(&current)?;
         if !accounts.contains(&current) {
@@ -219,6 +274,73 @@ fn require_erase_cleanup(records: &[Record]) -> Result<()> {
     Ok(())
 }
 
+/// Reviews records whose UID no longer belongs to the recorded name and, with
+/// `apply`, re-binds them to the current name or removes records of absent
+/// accounts. A rename and a reused UID look identical here, so nothing happens
+/// without the administrator's explicit `--yes`.
+fn reconcile(
+    store: &Store,
+    apply: bool,
+    accounts: impl FnOnce() -> Result<Vec<Account>>,
+) -> Result<()> {
+    let lock = if apply { Some(store.lock()?) } else { None };
+    let accounts = accounts()?;
+    let mut pending = Vec::new();
+    for record in store.records()? {
+        let owner = record_owner(store, &record, &accounts)?;
+        if owner == Some(record.username.as_str()) {
+            continue;
+        }
+        if let Some(name) = owner {
+            if !account::valid_name(name) {
+                return Err(Error::new(format!(
+                    "login record {} cannot be re-bound: account {name} (UID {}) is not a supported login management name",
+                    store.record_path(record.uid).display(),
+                    record.uid
+                )));
+            }
+        }
+        pending.push((record, owner.map(str::to_owned)));
+    }
+    for (record, owner) in &pending {
+        let path = store.record_path(record.uid);
+        match owner {
+            Some(name) => println!(
+                "{}: re-bind account {} to {name} (UID {})",
+                path.display(),
+                record.username,
+                record.uid
+            ),
+            None => println!(
+                "{}: remove record of absent account {} (UID {})",
+                path.display(),
+                record.username,
+                record.uid
+            ),
+        }
+    }
+    if !apply {
+        return if pending.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "login records need administrator review; run login-preflight reconcile --yes to apply the actions above",
+            ))
+        };
+    }
+    for (record, owner) in pending {
+        match owner {
+            Some(name) => store.write(&Record {
+                username: name,
+                ..record
+            })?,
+            None => store.remove_orphan(&record)?,
+        }
+    }
+    drop(lock);
+    Ok(())
+}
+
 fn inspect_target(path: &Path) -> Result<(PathBuf, bool)> {
     let path = account::trusted_path(path, false)?;
     let mut child = account::command("/usr/bin/rpm")?
@@ -259,16 +381,21 @@ fn run(action: Action, euid: u32) -> Result<()> {
     let downgrade = matches!(action, Action::Downgrade(_));
     let store = Store::system();
     match action {
-        Action::VerifyInstalled | Action::CheckProtocol => audit(&store, true).map(|_| ()),
-        Action::CheckErase => require_erase_cleanup(&audit(&store, false)?),
+        Action::VerifyInstalled | Action::CheckProtocol => {
+            audit(&store, true, account::nss_accounts).map(|_| ())
+        }
+        Action::CheckErase => require_erase_cleanup(&audit(&store, false, account::nss_accounts)?),
+        Action::Reconcile { apply } => reconcile(&store, apply, account::nss_accounts),
         Action::CheckTarget(path) => {
             let (_, compatible) = inspect_target(&path)?;
-            audit(&store, compatible).map(|_| ())
+            audit(&store, compatible, account::nss_accounts).map(|_| ())
         }
         Action::Replace(path) | Action::Downgrade(path) => {
             let (path, compatible) = inspect_target(&path)?;
             let lock = store.lock()?;
-            prepare_transaction(&store, compatible, audit)?;
+            prepare_transaction(&store, compatible, |store, compatible| {
+                audit(store, compatible, account::nss_accounts)
+            })?;
             let mut command = account::command("/usr/bin/dnf")?;
             command
                 .arg(if downgrade { "downgrade" } else { "install" })
@@ -280,7 +407,9 @@ fn run(action: Action, euid: u32) -> Result<()> {
         }
         Action::Erase => {
             let lock = store.lock()?;
-            prepare_transaction(&store, false, audit)?;
+            prepare_transaction(&store, false, |store, compatible| {
+                audit(store, compatible, account::nss_accounts)
+            })?;
             let mut command = account::command("/usr/bin/dnf")?;
             command.args(["remove", "cosh-ng"]);
             inherit_lock(&lock)?;
