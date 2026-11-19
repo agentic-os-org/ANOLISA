@@ -44,6 +44,7 @@ use auth::request_auth;
 const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
 const EXIT_PROTOCOL_MISMATCH: i32 = 65;
 const EXIT_TURN_FAILURE: i32 = 1;
+const EXIT_PARENT_LOST: i32 = 75;
 
 pub async fn run(
     args: &CliArgs,
@@ -52,6 +53,7 @@ pub async fn run(
     workspace: SessionWorkspace,
 ) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
+    let parent_watch = crate::parent_watch::ParentWatch::spawn();
 
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
@@ -269,7 +271,8 @@ pub async fn run(
         } else {
             0
         };
-        let transport_failed = engine.control_transport_failure().is_some();
+        let transport_failed = engine.control_transport_failure().is_some()
+            || engine.emit_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
         // Await the standalone upload handle with a 1-second grace period
         // reserved for the POST itself. The region probe (also bounded, see
@@ -304,6 +307,7 @@ pub async fn run(
             &mut session,
             &mut extensions,
             &mut protocol,
+            &parent_watch,
         )
         .await
         {
@@ -320,8 +324,20 @@ pub async fn run(
                 engine.shutdown_extension_runtime().await;
                 return Ok(EXIT_PROTOCOL_MISMATCH);
             }
+            InputLineResult::ParentLost => {
+                // The aborted turn is deliberately not persisted: the shell is
+                // gone and the dropped future can leave unpaired tool calls,
+                // which would corrupt transcript replay on the next session.
+                crate::core::emit_fatal_diagnostic(
+                    &mut std::io::stderr().lock(),
+                    "parent process lost; agent turn cancelled",
+                );
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PARENT_LOST);
+            }
         }
-        if engine.control_transport_failure().is_some() {
+        if engine.control_transport_failure().is_some() || engine.emit_transport_failure().is_some()
+        {
             engine.shutdown_extension_runtime().await;
             return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
         }
@@ -350,6 +366,7 @@ pub async fn run(
             &mut session,
             &mut extensions,
             &mut protocol,
+            &parent_watch,
         )
         .await
         {
@@ -366,10 +383,22 @@ pub async fn run(
                 engine.shutdown_extension_runtime().await;
                 return Ok(EXIT_PROTOCOL_MISMATCH);
             }
+            InputLineResult::ParentLost => {
+                // The aborted turn is deliberately not persisted: the shell is
+                // gone and the dropped future can leave unpaired tool calls,
+                // which would corrupt transcript replay on the next session.
+                crate::core::emit_fatal_diagnostic(
+                    &mut std::io::stderr().lock(),
+                    "parent process lost; agent turn cancelled",
+                );
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PARENT_LOST);
+            }
         }
         // Checked after every line, not only after a turn: once the transport
         // is gone the process can neither answer nor be answered.
-        if engine.control_transport_failure().is_some() {
+        if engine.control_transport_failure().is_some() || engine.emit_transport_failure().is_some()
+        {
             engine.shutdown_extension_runtime().await;
             return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
         }
@@ -383,6 +412,7 @@ enum InputLineResult {
     Shutdown,
     InvalidJson,
     ProtocolMismatch,
+    ParentLost,
 }
 
 struct ProtocolState {
@@ -500,6 +530,9 @@ fn brokered_capability_profile(
 }
 
 /// Processes a single JSONL input line.
+// The line dispatcher threads every session subsystem; the parent watch joins
+// the existing parameter set rather than reshaping the call sites.
+#[allow(clippy::too_many_arguments)]
 async fn process_input_line<W, R>(
     line: &str,
     engine: &mut CoshCore,
@@ -509,11 +542,15 @@ async fn process_input_line<W, R>(
     session: &mut SessionRuntime,
     extensions: &mut HeadlessExtensionRuntime<'_>,
     protocol: &mut ProtocolState,
+    parent_watch: &crate::parent_watch::ParentWatch,
 ) -> InputLineResult
 where
     W: io::Write,
     R: AsyncBufReadExt + Unpin,
 {
+    if parent_watch.is_dead() {
+        return InputLineResult::ParentLost;
+    }
     let msg: InputMessage = match serde_json::from_str(line) {
         Ok(m) => m,
         Err(e) => {
@@ -875,9 +912,16 @@ where
                 .cosh_shell_transport
                 .then_some(message.raw_user_input.as_deref())
                 .flatten();
-            let turn_result = engine
-                .handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer)
-                .await;
+            // Dropping the turn future cancels the in-flight provider request:
+            // an orphaned core must not keep streaming (and billing) after the
+            // shell is gone (issue #10315).
+            let turn_result = tokio::select! {
+                result = engine.handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer) => result,
+                _ = parent_watch.notified() => {
+                    engine.audit.finalize_parent_lost();
+                    return InputLineResult::ParentLost;
+                }
+            };
             if let Some(access) = engine.trial_access.as_ref() {
                 protocol.pending_input.extend(access.drain_input());
             }

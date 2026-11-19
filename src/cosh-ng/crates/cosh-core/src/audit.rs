@@ -1,6 +1,7 @@
 //! Core-owned unified audit recorder and governed durability barriers.
 
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::Utc;
 use cosh_platform::audit::config::{load_audit_settings, resolve_audit_root};
@@ -9,7 +10,8 @@ use cosh_platform::audit::store::{AuditDurability, AuditSegmentWriter};
 use cosh_types::audit::{
     AuditActor, AuditActorKind, AuditComponent, AuditComponentName, AuditControlData,
     AuditEventOutcome, AuditEventType, AuditEventV1, AuditIdentity, AuditMode, AuditOutcomeStatus,
-    AuditRedaction, AuditRedactionStatus, AuditSettings, AuditSubject, KnownAuditEventType,
+    AuditProviderData, AuditRedaction, AuditRedactionStatus, AuditSettings, AuditSubject,
+    KnownAuditEventType,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -40,6 +42,19 @@ enum CoreAuditSink {
     },
 }
 
+struct OpenProviderAudit {
+    request_id: String,
+    provider_type: String,
+    data: AuditProviderData,
+    started: Instant,
+}
+
+struct OpenTurnAudit {
+    run_id: String,
+    turn_id: String,
+    provider: Option<OpenProviderAudit>,
+}
+
 /// Independent audit side path for Core semantic lifecycle boundaries.
 pub(crate) struct CoreAuditRecorder {
     sink: CoreAuditSink,
@@ -50,6 +65,7 @@ pub(crate) struct CoreAuditRecorder {
     degraded: bool,
     warned: bool,
     pending_terminal_gap: bool,
+    open_turn: Option<OpenTurnAudit>,
 }
 
 impl CoreAuditRecorder {
@@ -110,6 +126,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         };
         #[cfg(not(test))]
         if let Some(root) = recorder.root.clone() {
@@ -522,6 +539,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -539,6 +557,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -554,6 +573,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -596,6 +616,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 

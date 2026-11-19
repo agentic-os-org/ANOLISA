@@ -1,15 +1,20 @@
 //! Process-boundary regressions for issue #10315: a headless cosh-core whose
 //! shell parent dies mid-turn, or whose stdout pipe breaks, must cancel the
 //! provider request and exit instead of orphaning until the turn completes.
+//! Parent death is triggered only after an observable proves the turn is in
+//! flight, so loaded hosts cannot move the death outside the watched window.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
 use wait_timeout::ChildExt;
 
 mod common;
@@ -17,6 +22,10 @@ mod common;
 const INIT: &str =
     r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#;
 const USER: &str = r#"{"type":"user","message":{"role":"user","content":"write a long essay about mountains"},"parent_tool_use_id":null}"#;
+// The wrapper backgrounds core keeping the test's stdin pipe on fd 3 (sh
+// would otherwise redirect background stdin to /dev/null) and exits only
+// once the test drops the trigger file, i.e. after a witnessed in-flight turn.
+const WRAPPER: &str = "exec 3<&0; core=\"$1\"; pidfile=\"$2\"; trigger=\"$3\"; shift 3; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; while [ ! -f \"$trigger\" ]; do sleep 0.1; done; sleep 0.5; exit 0";
 
 fn configure(home: &Path, address: SocketAddr) {
     let directory = home.join(".copilot-shell");
@@ -36,6 +45,7 @@ model = "slow-model"
         ),
     )
     .unwrap();
+    fs::write(directory.join("telemetry_disabled"), b"").unwrap();
 }
 
 fn slow_model_server(
@@ -83,78 +93,131 @@ fn core_command(home: &Path, workspace: &Path) -> Command {
     command
 }
 
-fn kill_pid(pid: u32) {
-    if pid == 0 {
-        return;
+fn read_jsonl(dir: &Path, out: &mut String) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            read_jsonl(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl")
+            || path.to_string_lossy().ends_with(".jsonl.active")
+        {
+            out.push_str(&fs::read_to_string(&path).unwrap());
+        }
     }
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        nix::sys::signal::Signal::SIGKILL,
-    );
+}
+
+fn wait_for(deadline: Instant, mut predicate: impl FnMut() -> bool) -> bool {
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    predicate()
+}
+
+fn reap_exit(pid: i32, deadline: Instant) -> i32 {
+    loop {
+        match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)).unwrap() {
+            WaitStatus::Exited(_, code) => return code,
+            WaitStatus::StillAlive => {
+                assert!(
+                    Instant::now() < deadline,
+                    "core did not exit after parent death"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            other => panic!("unexpected wait status: {other:?}"),
+        }
+    }
+}
+
+fn spawn_wrapper(
+    home: &Path,
+    workspace: &Path,
+    audit_dir: Option<&Path>,
+    stdout_log: Option<&Path>,
+    stderr_log: Option<&Path>,
+) -> (std::process::Child, PathBuf, PathBuf) {
+    let pidfile = home.join("core.pid");
+    let trigger = home.join("kill-now");
+    let mut wrapper = Command::new("sh");
+    wrapper
+        .arg("-c")
+        .arg(WRAPPER)
+        .arg("sh")
+        .arg(common::binary_path())
+        .arg(&pidfile)
+        .arg(&trigger)
+        .arg("--headless")
+        .arg("--workspace")
+        .arg(workspace)
+        .stdin(Stdio::piped())
+        .stdout(match stdout_log {
+            Some(path) => Stdio::from(fs::File::create(path).unwrap()),
+            None => Stdio::piped(),
+        });
+    match stderr_log {
+        Some(path) => wrapper.stderr(Stdio::from(fs::File::create(path).unwrap())),
+        None => wrapper.stderr(Stdio::piped()),
+    };
+    common::opt_out_telemetry(&mut wrapper, home);
+    wrapper.env("HOME", home);
+    if let Some(dir) = audit_dir {
+        wrapper.env("COSH_AUDIT_DIR", dir);
+    }
+    wrapper
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("DASHSCOPE_API_KEY")
+        .env_remove("OPENAI_BASE_URL");
+    let child = wrapper.spawn().unwrap();
+    (child, pidfile, trigger)
+}
+
+fn send_lines(child: &mut std::process::Child, lines: &[&str]) {
+    let stdin = child.stdin.as_mut().unwrap();
+    for line in lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    stdin.flush().unwrap();
+}
+
+fn core_pid(pidfile: &Path) -> i32 {
+    fs::read_to_string(pidfile).unwrap().trim().parse().unwrap()
+}
+
+fn release_fifo(path: &Path) {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    use std::os::unix::io::FromRawFd;
+    if let Ok(fd) = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
+        let mut file = unsafe { fs::File::from_raw_fd(fd) };
+        let _ = file.write_all(b"release\n");
+    }
 }
 
 #[test]
 fn parent_death_midturn_cancels_turn() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let stderr_log = home.path().join("core.stderr.log");
     let (address, started_rx, server) = slow_model_server(60, Duration::from_millis(200));
     configure(home.path(), address);
-    let pidfile = home.path().join("core.pid");
-    let stderr_log = home.path().join("core.stderr.log");
-    // The wrapper backgrounds cosh-core and exits after one second, so the
-    // kernel reparents core while the provider stream is still running.
-    // fd 3 keeps the test's stdin pipe: sh otherwise redirects background
-    // commands' stdin to /dev/null and core would see EOF immediately.
-    let mut wrapper = Command::new("sh");
-    wrapper
-        .arg("-c")
-        .arg("exec 3<&0; core=\"$1\"; pidfile=\"$2\"; shift 2; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; sleep 1; exit 0")
-        .arg("sh")
-        .arg(common::binary_path())
-        .arg(&pidfile)
-        .arg("--headless")
-        .arg("--workspace")
-        .arg(workspace.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()));
-    common::opt_out_telemetry(&mut wrapper, home.path());
-    wrapper
-        .env("HOME", home.path())
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("DASHSCOPE_API_KEY")
-        .env_remove("OPENAI_BASE_URL");
-    let mut wrapper = wrapper.spawn().unwrap();
-    {
-        let stdin = wrapper.stdin.as_mut().unwrap();
-        writeln!(stdin, "{INIT}").unwrap();
-        writeln!(stdin, "{USER}").unwrap();
-        stdin.flush().unwrap();
-    }
-    if started_rx.recv_timeout(Duration::from_secs(10)).is_err() {
-        let log = fs::read_to_string(&stderr_log).unwrap_or_default();
-        let pid = fs::read_to_string(&pidfile).unwrap_or_default();
-        let pid_num: u32 = pid.trim().parse().unwrap_or(0);
-        kill_pid(pid_num);
-        let mut out = String::new();
-        if let Some(mut stdout) = wrapper.stdout.take() {
-            let _ = stdout.read_to_string(&mut out);
-        }
-        panic!("provider request never started; core pid={pid}\nstdout:\n{out}\nstderr:\n{log}");
-    }
+    let (mut wrapper, _pidfile, trigger) =
+        spawn_wrapper(home.path(), workspace.path(), None, None, Some(&stderr_log));
+    send_lines(&mut wrapper, &[INIT, USER]);
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("provider request started");
+    fs::write(&trigger, b"1").unwrap();
     assert!(
-        wrapper.wait_timeout(Duration::from_secs(5)).unwrap().is_some(),
+        wrapper
+            .wait_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_some(),
         "wrapper parent did not exit"
     );
     let orphaned_at = Instant::now();
-    let core_pid: u32 = fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    // Stdout EOF is the exit proof: the wrapper is dead, so core holds the
-    // last write end, and a zombie still reaped slowly would keep kill(pid,0)
-    // alive past the actual exit.
     let stdout = wrapper.stdout.take().unwrap();
     let (eof_tx, eof_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -164,7 +227,6 @@ fn parent_death_midturn_cancels_turn() {
         let _ = eof_tx.send(());
     });
     let exited = eof_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-    kill_pid(core_pid);
     assert!(
         exited,
         "cosh-core orphan kept stdout open >5s after parent death (elapsed {:?})",
@@ -183,6 +245,7 @@ fn parent_death_midturn_cancels_turn() {
 fn stdout_epipe_exits_transport_failure() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let stderr_log = home.path().join("core.stderr.log");
     // No live server: the bound address is dropped so any provider dial is
     // refused; the assertion is about the broken stdout, not the provider.
     let address = TcpListener::bind("127.0.0.1:0")
@@ -190,7 +253,6 @@ fn stdout_epipe_exits_transport_failure() {
         .local_addr()
         .unwrap();
     configure(home.path(), address);
-    let stderr_log = home.path().join("core.stderr.log");
     let mut child = core_command(home.path(), workspace.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -198,24 +260,20 @@ fn stdout_epipe_exits_transport_failure() {
         .spawn()
         .unwrap();
     drop(child.stdout.take().unwrap());
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{INIT}").unwrap();
-        writeln!(stdin, "{USER}").unwrap();
-        stdin.flush().unwrap();
-    }
+    send_lines(&mut child, &[INIT, USER]);
     let status = child
         .wait_timeout(Duration::from_secs(10))
         .unwrap()
-        .unwrap_or_else(|| {
-            let log = fs::read_to_string(&stderr_log).unwrap_or_default();
-            panic!("cosh-core still alive after stdout EPIPE; stderr:\n{log}");
-        });
-    let log = fs::read_to_string(&stderr_log).unwrap_or_default();
+        .expect("cosh-core did not exit after stdout EPIPE");
     assert_eq!(
         status.code(),
         Some(74),
-        "expected EXIT_CONTROL_TRANSPORT_FAILURE; stderr:\n{log}"
+        "expected EXIT_CONTROL_TRANSPORT_FAILURE"
+    );
+    let stderr = fs::read_to_string(&stderr_log).unwrap_or_default();
+    assert!(
+        stderr.contains("control transport emit failed"),
+        "missing emit-failure diagnostic: {stderr}"
     );
     let _ = child.kill();
     let _ = child.wait();
@@ -233,12 +291,7 @@ fn normal_turn_completes_with_parent_alive() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{INIT}").unwrap();
-        writeln!(stdin, "{USER}").unwrap();
-        stdin.flush().unwrap();
-    }
+    send_lines(&mut child, &[INIT, USER]);
     drop(child.stdin.take().unwrap());
     let output = child
         .wait_timeout(Duration::from_secs(15))
@@ -253,4 +306,328 @@ fn normal_turn_completes_with_parent_alive() {
         "result missing: {stdout}"
     );
     server.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parent_death_closed_pipes_exit_75_and_audit_cancel() {
+    nix::sys::prctl::set_child_subreaper(true).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    // The audit root safety check requires a private (0700) directory.
+    fs::set_permissions(audit_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let (address, started_rx, server) = slow_model_server(60, Duration::from_millis(200));
+    configure(home.path(), address);
+    let (mut wrapper, pidfile, trigger) = spawn_wrapper(
+        home.path(),
+        workspace.path(),
+        Some(audit_dir.path()),
+        None,
+        None,
+    );
+    send_lines(&mut wrapper, &[INIT, USER]);
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("provider request started");
+    // The dying shell closes both output pipes; the cancel path must not
+    // panic on stderr EPIPE and must still finalize the audit lifecycle.
+    drop(wrapper.stdout.take().unwrap());
+    drop(wrapper.stderr.take().unwrap());
+    fs::write(&trigger, b"1").unwrap();
+    assert!(
+        wrapper
+            .wait_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_some(),
+        "wrapper parent did not exit"
+    );
+    let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
+    assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST, not a panic exit");
+    assert!(
+        !home
+            .path()
+            .join(".copilot-shell/cosh-core/sessions")
+            .exists(),
+        "aborted turn must not be persisted"
+    );
+    let mut events = String::new();
+    read_jsonl(audit_dir.path(), &mut events);
+    assert!(
+        events.contains("session.ended"),
+        "session.ended missing: {events}"
+    );
+    let mut turn_failed = 0;
+    let mut provider_cancelled = 0;
+    for line in events.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match value["event_type"].as_str() {
+            Some("turn.failed") => {
+                turn_failed += 1;
+                assert_eq!(value["outcome"]["status"], "cancelled", "{line}");
+                assert_eq!(value["data"]["reason_code"], "parent_lost", "{line}");
+            }
+            Some("provider.request.cancelled") => {
+                provider_cancelled += 1;
+                assert_eq!(value["outcome"]["status"], "cancelled", "{line}");
+                assert_eq!(value["data"]["finish_category"], "parent_lost", "{line}");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        turn_failed, 1,
+        "turn.failed must be recorded once: {events}"
+    );
+    assert_eq!(
+        provider_cancelled, 1,
+        "provider.request.cancelled must be recorded once: {events}"
+    );
+    server.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parent_death_between_turns_no_double_terminal() {
+    nix::sys::prctl::set_child_subreaper(true).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(audit_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let (address, started_rx, server) = slow_model_server(3, Duration::from_millis(50));
+    let directory = home.path().join(".copilot-shell");
+    fs::create_dir_all(&directory).unwrap();
+    let hook_marker = home.path().join("hook-started");
+    let hook_fifo = home.path().join("hook-fifo");
+    let hook_marker2 = home.path().join("hook2-started");
+    assert!(Command::new("mkfifo")
+        .arg(&hook_fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(
+        directory.join("config.toml"),
+        format!(
+            r#"
+[ai]
+active_provider = "test"
+[ai.providers.test]
+type = "openai"
+api_key = "local-test"
+base_url = "http://{address}/v1"
+model = "slow-model"
+[hooks]
+enabled = true
+[[hooks.UserPromptSubmit]]
+command = "if [ -f '{0}' ]; then touch '{2}'; read line < '{1}'; else touch '{0}'; fi"
+name = "slow-hook"
+"#,
+            hook_marker.display(),
+            hook_fifo.display(),
+            hook_marker2.display()
+        ),
+    )
+    .unwrap();
+    fs::write(directory.join("telemetry_disabled"), b"").unwrap();
+    let stdout_log = home.path().join("core.stdout.log");
+    let stderr_log = home.path().join("core.stderr.log");
+    let (mut wrapper, pidfile, trigger) = spawn_wrapper(
+        home.path(),
+        workspace.path(),
+        Some(audit_dir.path()),
+        Some(&stdout_log),
+        Some(&stderr_log),
+    );
+    send_lines(&mut wrapper, &[INIT, USER]);
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first provider request started");
+    assert!(
+        wait_for(Instant::now() + Duration::from_secs(10), || {
+            fs::read_to_string(&stdout_log)
+                .map(|s| s.contains("\"type\":\"result\""))
+                .unwrap_or(false)
+        }),
+        "first turn did not complete; stdout: {}",
+        fs::read_to_string(&stdout_log).unwrap_or_default()
+    );
+    send_lines(&mut wrapper, &[USER]);
+    assert!(
+        wait_for(Instant::now() + Duration::from_secs(10), || hook_marker2
+            .exists()),
+        "second turn hook did not start"
+    );
+    fs::write(&trigger, b"1").unwrap();
+    assert!(
+        wrapper
+            .wait_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_some(),
+        "wrapper parent did not exit"
+    );
+    let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
+    assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST");
+    let mut events = String::new();
+    read_jsonl(audit_dir.path(), &mut events);
+    assert!(
+        events.contains("session.ended"),
+        "session.ended missing: {events}"
+    );
+    let mut completed_turns: Vec<String> = Vec::new();
+    let mut failed_turns: Vec<String> = Vec::new();
+    for line in events.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let turn = value["identity"]["turn_id"].as_str().unwrap_or_default();
+        match value["event_type"].as_str() {
+            Some("turn.completed") => completed_turns.push(turn.to_string()),
+            Some("turn.failed") => failed_turns.push(turn.to_string()),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        completed_turns.len(),
+        1,
+        "first turn must complete once: {events}"
+    );
+    assert!(
+        failed_turns.is_empty(),
+        "no turn may receive a terminal after completion: {events}"
+    );
+    release_fifo(&hook_fifo);
+    server.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parent_death_audit_rejected_provider_not_cancelled() {
+    nix::sys::prctl::set_child_subreaper(true).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(audit_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let (address, started_rx, server) = slow_model_server(60, Duration::from_millis(200));
+    let directory = home.path().join(".copilot-shell");
+    fs::create_dir_all(&directory).unwrap();
+    let hook_marker = home.path().join("hook-started");
+    let hook_fifo = home.path().join("hook-fifo");
+    let hook_marker2 = home.path().join("hook2-started");
+    assert!(Command::new("mkfifo")
+        .arg(&hook_fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(
+        directory.join("config.toml"),
+        format!(
+            r#"
+[ai]
+active_provider = "test"
+[ai.providers.test]
+type = "openai"
+api_key = "local-test"
+base_url = "http://{address}/v1"
+model = "slow-model"
+[audit]
+mode = "required"
+[hooks]
+enabled = true
+[[hooks.UserPromptSubmit]]
+command = "if [ -f '{0}' ]; then touch '{2}'; read line < '{1}'; else touch '{0}'; fi"
+name = "slow-hook"
+"#,
+            hook_marker.display(),
+            hook_fifo.display(),
+            hook_marker2.display()
+        ),
+    )
+    .unwrap();
+    fs::write(directory.join("telemetry_disabled"), b"").unwrap();
+    let stdout_log = home.path().join("core.stdout.log");
+    let stderr_log = home.path().join("core.stderr.log");
+    let (mut wrapper, pidfile, trigger) = spawn_wrapper(
+        home.path(),
+        workspace.path(),
+        Some(audit_dir.path()),
+        Some(&stdout_log),
+        Some(&stderr_log),
+    );
+    send_lines(&mut wrapper, &[INIT]);
+    let mut segments = Vec::new();
+    fn find_active(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                find_active(&path, out);
+            } else if path.to_string_lossy().ends_with(".jsonl.active") {
+                out.push(path);
+            }
+        }
+    }
+    assert!(
+        wait_for(Instant::now() + Duration::from_secs(10), || {
+            segments.clear();
+            find_active(audit_dir.path(), &mut segments);
+            segments.len() == 1
+        }),
+        "active audit segment did not appear"
+    );
+    fs::set_permissions(&segments[0], fs::Permissions::from_mode(0o644)).unwrap();
+    send_lines(&mut wrapper, &[USER]);
+    assert!(
+        wait_for(Instant::now() + Duration::from_secs(10), || {
+            fs::read_to_string(&stdout_log)
+                .map(|s| s.contains("\"is_error\":true"))
+                .unwrap_or(false)
+        }),
+        "audit barrier rejection did not surface as an error result"
+    );
+    fs::set_permissions(&segments[0], fs::Permissions::from_mode(0o600)).unwrap();
+    // A subsequent turn keeps the core in flight (slow UserPromptSubmit hook)
+    // so parent loss runs finalize_parent_lost with whatever tracking the
+    // rejected turn left behind.
+    send_lines(&mut wrapper, &[USER]);
+    assert!(
+        wait_for(Instant::now() + Duration::from_secs(10), || hook_marker2
+            .exists()),
+        "second turn hook did not start"
+    );
+    fs::write(&trigger, b"1").unwrap();
+    assert!(
+        wrapper
+            .wait_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_some(),
+        "wrapper parent did not exit"
+    );
+    let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
+    assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST");
+    let stderr = fs::read_to_string(&stderr_log).unwrap_or_default();
+    assert!(
+        stderr.contains("parent process lost"),
+        "missing parent-lost diagnostic: {stderr}"
+    );
+    assert!(
+        started_rx.recv_timeout(Duration::from_secs(1)).is_err(),
+        "provider must receive zero connections when the audit barrier rejects"
+    );
+    let mut events = String::new();
+    read_jsonl(audit_dir.path(), &mut events);
+    assert!(
+        !events.contains("provider.request.cancelled"),
+        "rejected provider request must not gain a cancelled terminal: {events}"
+    );
+    assert!(
+        !events.contains("parent_lost"),
+        "parent loss must not append terminals for the rejected turn: {events}"
+    );
+    assert!(
+        events.contains("session.ended"),
+        "session.ended missing: {events}"
+    );
+    release_fifo(&hook_fifo);
+    std::mem::forget(server);
 }
