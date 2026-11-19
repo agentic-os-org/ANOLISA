@@ -272,6 +272,10 @@ _cosh_bounded_preexec_marker() {
     printf '\r\033[K' > /dev/tty
     return 0
   fi
+  if _cosh_memory_overage; then
+    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+    return 0
+  fi
   history_entry="$(_cosh_history_entry)"
   history_no="$(_cosh_history_no "$history_entry")"
   command="$(_cosh_history_command_from_entry "$history_entry")"
@@ -357,6 +361,12 @@ _cosh_bounded_prompt_marker() {
 }
 _cosh_precmd_marker() {
   local status="${1:-$?}"
+  if _cosh_memory_overage; then
+    _cosh_scrub_sensitive_native_history
+    _cosh_emit_throttled_precmd "$status"
+    _COSH_AT_PROMPT=1
+    return 0
+  fi
   _cosh_apply_internal_recovery
   _cosh_commit_pending_recovery_history
   _cosh_commit_pending_slash

@@ -91,46 +91,12 @@ _cosh_apply_internal_recovery() {
   rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
   stty echo icanon isig iexten opost 2>/dev/null || true
 }
-# Shell variables cannot represent NUL; escape every representable C0 byte and DEL.
-_cosh_json_escape() {
-  local value="$1"
-  value=${value//\\/\\\\}
-  value=${value//\"/\\\"}
-  value=${value//$'\001'/\\u0001}; value=${value//$'\002'/\\u0002}
-  value=${value//$'\003'/\\u0003}
-  value=${value//$'\004'/\\u0004}
-  value=${value//$'\005'/\\u0005}
-  value=${value//$'\006'/\\u0006}
-  value=${value//$'\a'/\\u0007}
-  value=${value//$'\b'/\\b}
-  value=${value//$'\n'/\\n}
-  value=${value//$'\v'/\\u000b}
-  value=${value//$'\f'/\\f}
-  value=${value//$'\r'/\\r}
-  value=${value//$'\016'/\\u000e}
-  value=${value//$'\017'/\\u000f}
-  value=${value//$'\020'/\\u0010}
-  value=${value//$'\021'/\\u0011}
-  value=${value//$'\022'/\\u0012}
-  value=${value//$'\023'/\\u0013}
-  value=${value//$'\024'/\\u0014}
-  value=${value//$'\025'/\\u0015}
-  value=${value//$'\026'/\\u0016}
-  value=${value//$'\027'/\\u0017}
-  value=${value//$'\030'/\\u0018}
-  value=${value//$'\031'/\\u0019}
-  value=${value//$'\032'/\\u001a}
-  value=${value//$'\e'/\\u001b}
-  value=${value//$'\034'/\\u001c}
-  value=${value//$'\035'/\\u001d}
-  value=${value//$'\036'/\\u001e}
-  value=${value//$'\037'/\\u001f}
-  value=${value//$'\t'/\\t}
-  value=${value//$'\177'/\\u007f}
-  printf '%s' "$value"
-}
 _cosh_now_ms() {
-  date +%s000
+  if zmodload zsh/datetime 2>/dev/null && (( $+EPOCHREALTIME )); then
+    printf '%.0f' $(( EPOCHREALTIME * 1000 ))
+  else
+    date +%s000
+  fi
 }
 _cosh_shell_path_names_fragment() { # Line-init can mutate the namespace after this snapshot.
   local -a names suffixes quoted_names quoted_suffixes; local name total=0
@@ -281,7 +247,9 @@ _cosh_is_pending_handoff_command() {
   if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 1
   fi
-  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+  local handoff_request
+  handoff_request="$(<"$COSH_HANDOFF_REQUEST_FILE")"
+  [[ "$handoff_request" == "$command" ]]
 }
 _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
@@ -305,7 +273,7 @@ _cosh_load_handoff_token() {
   _COSH_HANDOFF_TOKEN=""
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
      && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
-    _COSH_HANDOFF_TOKEN="$(cat -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null)" || _COSH_HANDOFF_TOKEN=""
+    _COSH_HANDOFF_TOKEN="$(<"${COSH_HANDOFF_REQUEST_FILE}.token")" || _COSH_HANDOFF_TOKEN=""
   fi
 }
 # Implicit-pager policy for one approved handoff. The sidecar file is written by
@@ -583,6 +551,7 @@ command_not_found_handler() {
 _cosh_preexec_marker() {
   setopt localoptions noxtrace
   local command="$1"
+  if _cosh_memory_overage; then _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1)); return 0; fi
   # zsh passes the abbreviated, size-limited form in $2 and the full text of
   # the command being executed in $3. Long inputs truncate $2, so comparing
   # against it produces a false expansion-drift signal that misroutes long
@@ -664,6 +633,7 @@ _cosh_precmd_marker() {
   setopt localoptions noxtrace
   setopt NO_PROMPT_CR 2>/dev/null || true
   setopt NO_PROMPT_SP 2>/dev/null || true
+  if _cosh_memory_overage; then _cosh_emit_throttled_precmd "$exit_status"; return 0; fi
   _cosh_apply_internal_recovery
   _cosh_add_handoff_history
   # Only the handoff's own prompt boundary may clear the staged files: an
@@ -695,5 +665,6 @@ add-zsh-hook zshaddhistory _cosh_zshaddhistory_marker
 add-zsh-hook preexec _cosh_preexec_marker
 add-zsh-hook precmd _cosh_precmd_marker
 "#,
+        include_str!("zsh_throttle.zsh"),
     )
 }

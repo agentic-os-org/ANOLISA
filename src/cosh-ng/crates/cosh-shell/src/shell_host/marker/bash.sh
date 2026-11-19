@@ -109,7 +109,7 @@ _cosh_apply_internal_recovery() {
   stty echo icanon isig iexten opost 2>/dev/null || true
 }
 # Shell variables cannot represent NUL; escape every representable C0 byte and DEL.
-_cosh_json_escape() {
+_cosh_json_escape_var() {
   local value="$1"
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
@@ -144,7 +144,40 @@ _cosh_json_escape() {
   value=${value//$'\037'/\\u001f}
   value=${value//$'\t'/\\t}
   value=${value//$'\177'/\\u007f}
-  printf '%s' "$value"
+  _COSH_JSON_ESCAPE_RESULT="$value"
+}
+_cosh_json_escape() {
+  _cosh_json_escape_var "$1"
+  printf '%s' "$_COSH_JSON_ESCAPE_RESULT"
+}
+_cosh_memory_overage() {
+  local dir="${_COSH_CGROUP_DIR-}"
+  if [[ -z "$dir" ]]; then
+    local line=""
+    IFS= read -r line < /proc/self/cgroup 2>/dev/null || true
+    local rel="${line#0::}"
+    if [[ "$rel" == /* && "$rel" != "/" && -r "/sys/fs/cgroup${rel}/memory.high" ]]; then
+      dir="/sys/fs/cgroup${rel}"
+    else
+      dir="none"
+    fi
+    _COSH_CGROUP_DIR="$dir"
+  fi
+  [[ "$dir" != none ]] || return 1
+  local current="" high=""
+  IFS= read -r current < "$dir/memory.current" 2>/dev/null || return 1
+  IFS= read -r high < "$dir/memory.high" 2>/dev/null || return 1
+  [[ "$high" != max ]] || return 1
+  (( current > high ))
+}
+_cosh_emit_throttled_precmd() {
+  local exit_status="${1:-0}"
+  _cosh_json_escape_var "${_COSH_MARKER_TOKEN}"
+  local token="$_COSH_JSON_ESCAPE_RESULT"
+  _cosh_json_escape_var "$PWD"
+  local cwd="$_COSH_JSON_ESCAPE_RESULT"
+  printf '\033]1337;COSH;{"e":"p","t":"%s","c":"%s","pc":"%s","s":%s}\a' \
+    "$token" "$cwd" "$cwd" "$exit_status"
 }
 _cosh_native_history_file_path() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" || -z "${HISTFILE:-}" ]]; then
@@ -160,7 +193,8 @@ _cosh_native_history_file_path() {
   if [[ "$history_file" != /* ]]; then
     return 1
   fi
-  if printf '%s' "$history_file" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+  local LC_ALL=C
+  if [[ "$history_file" =~ [[:cntrl:]] ]]; then
     return 1
   fi
   printf '%s' "$history_file"
@@ -205,26 +239,54 @@ _cosh_native_history_file_fragment() {
   printf ',\"h\":\"%s\"' "$(_cosh_json_escape "$history_file")"
 }
 _cosh_now_ms() {
-  date +%s000
+  if [[ -n "${EPOCHREALTIME-}" ]]; then
+    local digits=${EPOCHREALTIME/./}
+    printf '%s' "${digits:0:13}"
+  else
+    date +%s000
+  fi
 }
 _cosh_history_entry() {
+  _cosh_capture_history_entry
+  printf '%s' "$_COSH_HISTORY_ENTRY_RESULT"
+}
+_cosh_capture_history_entry() {
   local saved_fmt="${HISTTIMEFORMAT-}"
   HISTTIMEFORMAT=
-  local entry
-  entry="$(builtin history 1 2>/dev/null)"
+  local scratch="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.scrub"
+  local line entry=""
+  if builtin history 1 > "$scratch" 2>/dev/null; then
+    while IFS= read -r line; do
+      entry+="$line"$'\n'
+    done < "$scratch"
+    entry="${entry%$'\n'}"
+  fi
   HISTTIMEFORMAT="$saved_fmt"
-  printf '%s' "$entry"
+  _COSH_HISTORY_ENTRY_RESULT="$entry"
 }
 _cosh_history_no() {
-  printf '%s' "$1" | sed -E 's/^[[:space:]]*([0-9]+).*/\1/'
+  _cosh_history_no_var "$1"
+  printf '%s' "$_COSH_HISTORY_NO_RESULT"
+}
+_cosh_history_no_var() {
+  local first_line=${1%%$'\n'*}
+  if [[ "$first_line" =~ ^[[:space:]]*([0-9]+) ]]; then
+    _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}${1#"$first_line"}"
+  else
+    _COSH_HISTORY_NO_RESULT="$1"
+  fi
 }
 _cosh_history_command_from_entry() {
-  local saved_fmt="${HISTTIMEFORMAT-}"
-  HISTTIMEFORMAT=
-  local entry
-  entry="$(builtin history 1 2>/dev/null)"
-  HISTTIMEFORMAT="$saved_fmt"
-  printf '%s' "$entry" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//'
+  _cosh_capture_history_entry
+  _cosh_history_command_var "$_COSH_HISTORY_ENTRY_RESULT"
+  printf '%s' "$_COSH_HISTORY_COMMAND_RESULT"
+}
+_cosh_history_command_var() {
+  local entry="$1"
+  if [[ "$entry" =~ ^[[:space:]]*[0-9]+[[:space:]]* ]]; then
+    entry="${entry:${#BASH_REMATCH[0]}}"
+  fi
+  _COSH_HISTORY_COMMAND_RESULT="$entry"
 }
 _cosh_last_preexec_history_no() {
   local history_no="${_COSH_LAST_PREEXEC_HISTORY_NO:-}"
@@ -251,7 +313,11 @@ _cosh_command_has_secret() {
     return 0
   fi
   local lower
-  lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  if (( BASH_VERSINFO[0] >= 4 )); then
+    lower="${1,,}"
+  else
+    lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  fi
   case "$lower" in
     *"-----begin "*"private key-----"*)
       return 0
@@ -322,10 +388,12 @@ _cosh_command_has_secret() {
 }
 _cosh_scrub_sensitive_native_history() {
   [[ -o history ]] || return 0
-  local history_entry history_no command
-  history_entry="$(_cosh_history_entry)"
-  history_no="$(_cosh_history_no "$history_entry")"
-  command="$(_cosh_history_command_from_entry "$history_entry")"
+  _cosh_capture_history_entry
+  local history_entry="$_COSH_HISTORY_ENTRY_RESULT"
+  _cosh_history_no_var "$history_entry"
+  local history_no="$_COSH_HISTORY_NO_RESULT"
+  _cosh_history_command_var "$history_entry"
+  local command="$_COSH_HISTORY_COMMAND_RESULT"
   [[ -n "$history_no" && -n "$command" ]] || return 0
   if _cosh_command_has_secret "$command"; then
     builtin history -d "$history_no" 2>/dev/null || true
@@ -624,7 +692,9 @@ _cosh_is_pending_handoff_command() {
   if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 1
   fi
-  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+  local handoff_request
+  handoff_request="$(<"$COSH_HANDOFF_REQUEST_FILE")"
+  [[ "$handoff_request" == "$command" ]]
 }
 _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
@@ -648,7 +718,7 @@ _cosh_load_handoff_token() {
   _COSH_HANDOFF_TOKEN=""
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
      && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
-    _COSH_HANDOFF_TOKEN="$(cat -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null)" || _COSH_HANDOFF_TOKEN=""
+    _COSH_HANDOFF_TOKEN="$(<"${COSH_HANDOFF_REQUEST_FILE}.token")" || _COSH_HANDOFF_TOKEN=""
   fi
 }
 # Implicit-pager policy for one approved handoff. The sidecar file is written by
