@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 mod cleanup;
+mod cli;
 mod client;
 mod config;
 mod execute;

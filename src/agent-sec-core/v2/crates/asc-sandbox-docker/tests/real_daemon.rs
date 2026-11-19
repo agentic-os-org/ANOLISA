@@ -33,6 +33,51 @@ fn backend() -> DockerBackend {
     .unwrap()
 }
 
+fn control_directory() -> tempfile::TempDir {
+    let guard = Path::new(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard"));
+    tempfile::tempdir_in(guard.parent().unwrap()).unwrap()
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and a trusted guard installation"]
+fn writable_control_directory_is_rejected_before_start() {
+    let root = control_directory();
+    let control = root.path().join("control");
+    std::fs::create_dir(&control).unwrap();
+    let cli = control.join("docker");
+    let wrapper = b"#!/bin/sh\nexec /usr/bin/docker \"$@\"\n";
+    std::fs::write(&cli, wrapper).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tools = root.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let alias = tools.join("operator-cli");
+    std::os::unix::fs::symlink(&cli, &alias).unwrap();
+    let backend = DockerBackend::new(DockerConfig {
+        cli: alias,
+        host: "unix:///var/run/docker.sock".into(),
+        guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
+        image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
+        memory: None,
+        cpus: None,
+        pids_limit: Some(64),
+    })
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let nested = work.path().join("nested alias");
+    std::fs::create_dir(&nested).unwrap();
+    rustix::mount::mount_bind(&control, &nested).unwrap();
+    let _mount = Mounted(nested);
+    for granted in [tools.as_path(), control.as_path(), work.path()] {
+        let request = spec(granted, "from pathlib import Path; Path('started').touch()");
+        let error = backend.execute_bound(&request).unwrap_err();
+        assert!(
+            matches!(error, asc_pep_runtime::PepError::Unsupported(s) if s.contains("writable grant exposes the Docker CLI"))
+        );
+        assert!(!granted.join("started").exists());
+        assert_eq!(std::fs::read(&cli).unwrap(), wrapper);
+    }
+}
+
 fn spec(work: &Path, code: &str) -> ExecutionSpec {
     serde_json::from_value(serde_json::json!({
         "version": 1,
@@ -233,7 +278,7 @@ fn wait_for(mut ready: impl FnMut() -> bool) {
 fn supervisor_exit_removes_container() {
     if let Ok(work) = std::env::var("ASC_DOCKER_CHILD_WORK") {
         let backend = DockerBackend::new(DockerConfig {
-            cli: Path::new(&work).join("docker"),
+            cli: std::env::var_os("ASC_DOCKER_CHILD_CLI").unwrap().into(),
             host: "unix:///var/run/docker.sock".into(),
             guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
             image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
@@ -256,12 +301,14 @@ fn supervisor_exit_removes_container() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let work = directory.path();
-        let cli = work.join("docker");
+        let control = control_directory();
+        let cli = control.path().join("docker");
         std::fs::write(&cli, format!("#!/bin/sh\nif [ \"$5\" = start ]; then\n printf '%s' \"$8\" > '{}/name'\n printf '%s' \"$2\" > '{}/client'\nfi\nexec /usr/bin/docker \"$@\"\n", work.display(), work.display())).unwrap();
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "supervisor_exit_removes_container"])
             .env("ASC_DOCKER_CHILD_WORK", work)
+            .env("ASC_DOCKER_CHILD_CLI", &cli)
             .process_group(0)
             .spawn()
             .unwrap();
@@ -305,7 +352,8 @@ fn guard_eof_waits_for_inflight_create() {
     use std::io::{BufRead as _, Write as _};
     let directory = tempfile::tempdir().unwrap();
     let work = directory.path();
-    let cli = work.join("docker");
+    let control = control_directory();
+    let cli = control.path().join("docker");
     std::fs::write(&cli, format!("#!/bin/sh\nif [ \"$5\" = create ]; then\n touch '{}/creating'\n sleep 1\nfi\nexec /usr/bin/docker \"$@\"\n", work.display())).unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = DockerConfig {
@@ -367,7 +415,8 @@ fn source_replacement_at_start_keeps_authorized_inode() {
         std::fs::create_dir(&secret).unwrap();
         std::fs::write(work.join("value"), "authorized").unwrap();
         std::fs::write(secret.join("value"), "secret").unwrap();
-        let cli = directory.path().join("docker");
+        let control = control_directory();
+        let cli = control.path().join("docker");
         std::fs::write(&cli, format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = start ]; then\n /usr/bin/mv '{}' '{}'\n /usr/bin/ln -s '{}' '{}'\n fi\ndone\nexec /usr/bin/docker \"$@\"\n",
             work.display(), old.display(), secret.display(), work.display()
@@ -418,7 +467,8 @@ fn personal_context_and_proxy_config_are_isolated() {
     std::fs::create_dir(&config).unwrap();
     let contents = br#"{"currentContext":"missing-remote-context","proxies":{"default":{"httpProxy":"http://test.invalid:1"}}}"#;
     std::fs::write(config.join("config.json"), contents).unwrap();
-    let cli = directory.path().join("docker");
+    let control = control_directory();
+    let cli = control.path().join("docker");
     std::fs::write(
         &cli,
         format!(

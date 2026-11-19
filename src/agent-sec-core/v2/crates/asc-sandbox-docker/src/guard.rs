@@ -20,11 +20,24 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 enum Message {
-    Owned { directory: PathBuf },
-    Ready { directory: PathBuf, host: String },
-    Finished { code: Option<i32> },
-    Done { result: ExecutionResult },
-    Failed { error: String, unsupported: bool },
+    Owned {
+        directory: PathBuf,
+    },
+    Ready {
+        directory: PathBuf,
+        host: String,
+        cli_fd: std::os::fd::RawFd,
+    },
+    Finished {
+        code: Option<i32>,
+    },
+    Done {
+        result: ExecutionResult,
+    },
+    Failed {
+        error: String,
+        unsupported: bool,
+    },
 }
 
 fn receive<T: serde::de::DeserializeOwned>(reader: &mut impl BufRead) -> Result<T, DockerError> {
@@ -103,8 +116,12 @@ fn supervise(mut helper: Command, request: &Request) -> Result<ExecutionResult, 
         })?;
         match message {
             Message::Owned { directory } => recovery = Some(directory),
-            Message::Ready { directory, host } => {
-                let status = Command::new(&request.config.cli)
+            Message::Ready {
+                directory,
+                host,
+                cli_fd,
+            } => {
+                let status = Command::new(crate::cli::executable_path(child.id(), cli_fd))
                     .env_clear()
                     .env("PATH", "/usr/bin:/bin")
                     .arg("--config")
@@ -203,6 +220,7 @@ fn serve(
                 &Message::Ready {
                     directory: client.directory.clone(),
                     host: client.host.clone(),
+                    cli_fd: client.cli.fd(),
                 },
             )?;
             match receive(input)? {

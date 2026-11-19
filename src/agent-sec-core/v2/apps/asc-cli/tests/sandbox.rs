@@ -50,7 +50,8 @@ fn docker_cli_forwards_stdin_and_terminal_eof() {
 const DOCKER_STDIO: &str = r#"
 import errno, json, os, pathlib, pty, select, signal, subprocess, sys, tempfile, time
 
-with tempfile.TemporaryDirectory(prefix='asc-docker-stdio-') as directory:
+with tempfile.TemporaryDirectory(prefix='asc-docker-stdio-') as directory, \
+     tempfile.TemporaryDirectory(dir=pathlib.Path(sys.argv[1]).parent) as control:
     root = pathlib.Path(directory)
     work = root / 'work'
     work.mkdir()
@@ -60,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='asc-docker-stdio-') as directory:
             {'effect': 'allow', 'path': str(work), 'rights': ['read', 'write']}]},
         'execution': {'deny_paths': []}, 'network': {'mode': 'off'}}))
     # Record only this test's container and config directory; never read personal Docker config.
-    wrapper = root / 'docker'
+    wrapper = pathlib.Path(control) / 'docker'
     wrapper.write_text('#!/bin/sh\nif [ "$5" = start ]; then\n'
         f' printf "%s" "$8" > "{root}/name"\n'
         f' printf "%s" "$2" > "{root}/client"\n'

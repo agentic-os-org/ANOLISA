@@ -230,6 +230,12 @@ staging 对象；不支持远程 daemon 或未经验证的代理。标准 system
 Docker client 配置，所有调用固定同一 endpoint/config，不继承个人 context、proxy 或
 registry credentials；镜像必须已在该 daemon 缓存，禁止自动 pull。
 
+自定义 `--docker-cli` 应安装在可写工作区授权范围之外。可执行文件和解析路径时
+经过的目录都必须由 root 所有，组和其他用户不能拥有写权限。如果授权的可写目录与 CLI 位于同一文件系统，可执行
+文件必须只有一个硬链接。如果可写挂载暴露了可执行文件或解析配置路径时经过的任何目录，
+guard 会拒绝启动。这也包括中间符号链接所在的目录，以及通过绑定挂载指向这些对象的别名。
+前台连接、状态检查和清理都使用同一个已打开的可执行文件。
+
 构建和安装会同时提供 `asc-sandbox-docker-guard`，由 CLI 自动从同目录启动，不设
 setuid、不自动提权；库嵌入方可通过受信任的 `DockerConfig.guard` 指定安装位置。
 guard 在独立进程组中持有 staging/config，创建前登记资源，管道 EOF 表示监督进程
