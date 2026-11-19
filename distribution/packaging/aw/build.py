@@ -27,6 +27,8 @@ def build_targets(
         targets.append((repo / "providers/agent-sec-core", ("aw-provider-sec-core",)))
     if "tokenless" in selected:
         targets.append((repo / "providers/tokenless", ("aw-provider-tokenless",)))
+    if "ws-ckpt" in selected:
+        targets.append((repo / "providers/ws-ckpt", ("aw-provider-ws-ckpt",)))
     return targets
 
 

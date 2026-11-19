@@ -14,13 +14,14 @@ ANOLISA/
 │   └── aw-provider/         # Shared protocol and admission
 └── providers/               # Independent implementation workspaces
     ├── agent-sec-core/
-    └── tokenless/
+    ├── tokenless/
+    └── ws-ckpt/
 ```
 
 `aw-provider` is the protocol library shared by the Host and implementations.
 Each directory under `providers/` owns a concrete integration, including its
-program, schemas, examples, and tests. Existing binaries retain the names
-`aw-provider-sec-core` and `aw-provider-tokenless`, preserving packages and commands.
+program, schemas, examples, and tests. The first-party executables are
+`aw-provider-sec-core`, `aw-provider-tokenless`, and `aw-provider-ws-ckpt`.
 
 ## OS distribution design
 
@@ -68,6 +69,8 @@ cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
 cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
 cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo test --locked --manifest-path providers/tokenless/Cargo.toml
+cargo build --locked --manifest-path providers/ws-ckpt/Cargo.toml
+cargo test --locked --manifest-path providers/ws-ckpt/Cargo.toml
 ```
 
 The bundled workspaces currently use repository-local AW library paths; Tokenless
@@ -76,7 +79,7 @@ yet build outside the repository. Pinned SDKs, independent releases and artifact
 composition tests are deferred. Integration builds test framework, Provider and
 backend versions together; local extensions retain independent IDs and versions.
 
-`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes the scripts in
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"` invokes the scripts in
 `distribution/packaging/aw/` to build independent core and Provider archives.
 Local Provider extension
 installation accepts verified independent `package.json` bundles in the

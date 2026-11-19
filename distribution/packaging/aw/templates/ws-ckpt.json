@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "packages": [],
+  "constraints": [
+    {
+      "kind": "search_path",
+      "value": "${PROVIDERS_DIR}/ws-ckpt"
+    }
+  ],
+  "providers": {
+    "ws-ckpt": {
+      "protocol": "aw-provider/v1alpha1",
+      "transport": {
+        "type": "stdio",
+        "location": "agent",
+        "argv": [
+          "${PROVIDERS_DIR}/ws-ckpt/aw-provider-ws-ckpt",
+          "--cli",
+          "${WS_CKPT_CLI}"
+        ]
+      },
+      "timeout_ms": 4500,
+      "max_output_bytes": 16384,
+      "config": {}
+    }
+  },
+  "events": {
+    "input.submit": {
+      "enabled": true,
+      "steps": [
+        {
+          "id": "ws-ckpt-checkpoint",
+          "enabled": true,
+          "provider": "ws-ckpt",
+          "operation": "checkpoint",
+          "effects": ["observe"],
+          "on_error": "report"
+        }
+      ]
+    }
+  }
+}

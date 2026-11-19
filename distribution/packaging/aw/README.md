@@ -11,12 +11,12 @@ artifacts explicitly and use an absolute, empty output directory:
 
 ```bash
 make -C distribution aw-packages VERSION=0.1.1 \
-  COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
+  COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS
 ```
 
-`COMPONENTS` accepts `core`, `sec-core` and `tokenless`, separated by spaces.
+`COMPONENTS` accepts `core`, `sec-core`, `tokenless` and `ws-ckpt`, separated by spaces.
 Each selection produces its own archive; `VERSION` labels those artifacts and
 does not select a source revision. Assembly verifies the checkout stays on one
 unchanged Git commit and records that source identity.
@@ -28,7 +28,7 @@ aw/
 ├── common.py                     # Bounded commands, cancellation and copying
 ├── core.Makefile                 # Archive install entry; reuses AW install.mk
 ├── build-integration.sh          # Explicit backend build entry for acceptance
-├── integration.py                # Build sec-core and Tokenless
+├── integration.py                # Build sec-core, Tokenless and ws-ckpt
 ├── templates/                    # Policy data with explicit program paths
 └── tests/                        # Build selection and archive/install fixtures
 ```
@@ -39,17 +39,22 @@ Provider archives contain `package.json`, their bridge and private resources in
 `payload/`, and policy templates. Optional local Provider installation uses an
 already installed AW CLI. Provider archives contain no backend executables.
 
-Templates take `PROVIDERS_DIR`, the actual root containing the `sec-core` and
-`tokenless` Provider directories. Supply backend paths through `SEC_CORE_CLI`,
-`TOKENLESS_CLI` and `SOCKET` as applicable. This also supports an `AWPRJ`
+Templates take `PROVIDERS_DIR`, the actual root containing the installed
+Provider directories. Supply backend paths through `SEC_CORE_CLI`,
+`TOKENLESS_CLI`, `WS_CKPT_CLI` and `SOCKET` as applicable. This also supports an `AWPRJ`
 namespace or separate core and Provider prefixes.
 
 Native integration acceptance prepares backend binaries through a separate
 entrypoint; ordinary package assembly does not invoke it:
 
 ```bash
-make -C distribution aw-integration-backends BACKENDS='sec-core tokenless'
+make -C distribution aw-integration-backends BACKENDS='sec-core tokenless ws-ckpt'
 ```
+
+The AW integration workflow installs the candidate ws-ckpt Provider archive on
+a Linux VM, uses the candidate backend on a temporary Btrfs filesystem, and
+checks automatic snapshots, manual snapshots and rollback. An offline Qoder
+fixture submits the Hook without signing in to a model service.
 
 See the [source guide](../../../contribute/en/aw/building.md) and
 [installation guide](../../../docs/user-guide/en/aw/installation.md).

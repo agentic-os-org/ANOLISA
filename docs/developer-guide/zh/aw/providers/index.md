@@ -13,12 +13,13 @@ ANOLISA/
 │   └── aw-provider/         # 通用协议与准入
 └── providers/               # 各实现独立 workspace
     ├── agent-sec-core/
-    └── tokenless/
+    ├── tokenless/
+    └── ws-ckpt/
 ```
 
 `aw-provider` 是供 Host 和实现方复用的协议库。`providers/` 中的每个目录则对应一项
-具体集成，可以包含程序、Schema、配置示例和测试。现有二进制仍叫
-`aw-provider-sec-core`、`aw-provider-tokenless`，安装包和启动命令保持兼容。
+具体集成，可以包含程序、Schema、配置示例和测试。一方 Provider 的可执行文件为
+`aw-provider-sec-core`、`aw-provider-tokenless` 和 `aw-provider-ws-ckpt`。
 
 ## OS 分发设计
 
@@ -56,13 +57,15 @@ cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
 cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
 cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo test --locked --manifest-path providers/tokenless/Cargo.toml
+cargo build --locked --manifest-path providers/ws-ckpt/Cargo.toml
+cargo test --locked --manifest-path providers/ws-ckpt/Cargo.toml
 ```
 
-目前两个 workspace 通过仓库内路径复用 AW 库，Tokenless 组合测试还依赖 sec-core
+目前这些 workspace 通过仓库内路径复用 AW 库，Tokenless 组合测试还依赖 sec-core
 桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
 集成构建共同验证框架、Provider 与后端版本；本地扩展有独立的 ID 和版本。
 
-`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
 中的脚本构建独立 core 与 Provider 归档。本地 Provider 扩展安装可接受已核验的独立
 `package.json`，格式见[本地 Provider 包参考](../reference/packages.md)，不下载社区
 Provider 或解析产品名称。`aw-package` 的 Provider 文件事务保留为私有实现；
