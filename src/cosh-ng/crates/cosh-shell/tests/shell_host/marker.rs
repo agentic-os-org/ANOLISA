@@ -438,6 +438,154 @@ fn throttled_boundary_marker_is_fork_free() {
 }
 
 #[test]
+fn shell_oversized_history_privacy_and_recovery_contracts() {
+    let temp_root = std::env::temp_dir().join(format!("cosh-10317-contracts-{}", unique_suffix()));
+    std::fs::create_dir_all(temp_root.join("home")).unwrap();
+    std::fs::write(
+        temp_root.join("bash.sh"),
+        include_str!("../../src/shell_host/marker/bash.sh"),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_root.join("bash_prompt.sh"),
+        include_str!("../../src/shell_host/marker/bash_prompt.sh"),
+    )
+    .unwrap();
+    let Some(bash_exe) = Command::new("sh")
+        .args(["-c", "command -v bash"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let root = temp_root.to_string_lossy().to_string();
+    let setup = format!(
+        r#"set -o history
+export HISTFILE="{root}/home/.bash_history"
+HISTIGNORE='*'
+COLUMNS=1000000
+_COSH_SESSION_AI_ENABLED=1
+_COSH_CGROUP_DIR=none
+_COSH_BOUNDED_HANDOFF_COMMAND=''
+_COSH_HANDOFF_ACTIVE=0
+source "{root}/bash.sh"
+source "{root}/bash_prompt.sh"
+printf -v PAD '%20000s' ''
+PAD=${{PAD// /P}}
+"#
+    );
+    let run = |body: &str| -> std::process::Output {
+        let command = format!("{setup}\n{body}\nexit 0\n");
+        Command::new(&bash_exe)
+            .args(["-i", "-c", command.as_str()])
+            .env("HOME", temp_root.join("home"))
+            .env("COSH_MARKER_TOKEN", "witness-token")
+            .env("COSH_SESSION_ID", "witness-session")
+            .env("COSH_RECOVERY_REQUEST_FILE", temp_root.join("recovery"))
+            .env(
+                "COSH_HANDOFF_REQUEST_FILE",
+                temp_root.join("handoff-request"),
+            )
+            .env("COSH_TEST_ROOT", &root)
+            .output()
+            .unwrap()
+    };
+    let assert_ok = |label: &str, output: std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // [P1-2] An oversized entry cannot be fully secret-verified by the bounded
+    // window, so it is fail-closed omitted even when recovery state is set; an
+    // incomplete negative cannot exempt it from the prompt scrub.
+    assert_ok(
+        "oversized entry fail-closed omitted",
+        run(r#"
+{ builtin history -d "$HISTCMD" 2>/dev/null || true
+  READLINE_LINE="echo $PAD"
+  _cosh_guard_slash_submission true true
+  builtin history -s "$READLINE_LINE"
+  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
+if builtin history | grep -q "echo $PAD"; then echo 'oversized entry kept despite incomplete secret check' >&2; exit 1; fi
+"#),
+    );
+
+    // [P2-2] An oversized entry imported with `history -r` is not the current
+    // submission. A later short command excluded by HISTIGNORE leaves the
+    // imported entry as history 1; PS0 must not record it for cleanup.
+    assert_ok(
+        "imported oversized entry survives excluded submission",
+        run(r#"
+{ builtin history -d "$HISTCMD" 2>/dev/null || true
+  builtin history -s "echo prior"
+  _COSH_SUBMITTED_LINE="echo prior"
+  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"
+  printf 'echo %s\n' "$PAD" > "$COSH_TEST_ROOT/import"
+  history -r "$COSH_TEST_ROOT/import"
+  _COSH_SUBMITTED_LINE="echo short-excluded"
+  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre2.out"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
+builtin history | grep -q "echo $PAD" || { echo 'imported oversized entry deleted by scrub' >&2; exit 1; }
+"#),
+    );
+
+    // [P1-degraded] The memory-overage path stays fail-closed: PS0 records no
+    // submission, so the scrub omits the oversized entry anyway (fork-free).
+    assert_ok(
+        "degraded overage path scrubs fail-closed",
+        run(r#"
+{ builtin history -d "$HISTCMD" 2>/dev/null || true
+  mkdir -p "$COSH_TEST_ROOT/cg"
+  printf '200\n' > "$COSH_TEST_ROOT/cg/memory.current"
+  printf '100\n' > "$COSH_TEST_ROOT/cg/memory.high"
+  _COSH_CGROUP_DIR="$COSH_TEST_ROOT/cg"
+  builtin history -s "echo installed --api-key sk-degraded-witness-12345"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
+grep -q '"e":"p"' "$COSH_TEST_ROOT/precmd.out" || { echo 'degraded path did not emit compact boundary' >&2; exit 1; }
+if builtin history | grep -q "sk-degraded-witness-12345"; then echo 'degraded overage path retained sensitive entry' >&2; exit 1; fi
+"#),
+    );
+
+    // [P1-3] An oversized handoff command whose secret sits outside the bounded
+    // head+tail window must still emit a redacted preexec marker.
+    assert_ok(
+        "P1-3 oversized handoff redaction",
+        run(r#"
+printf -v HEAD9 '%9000s' ''
+HEAD9=${HEAD9// /A}
+printf -v TAIL9 '%9000s' ''
+TAIL9=${TAIL9// /B}
+printf '%s sk-abcdef123456 %s' "$HEAD9" "$TAIL9" > "$COSH_HANDOFF_REQUEST_FILE"
+_cosh_prepare_staged_handoff > "$COSH_TEST_ROOT/handoff.out"
+grep -q 'redacted sensitive command' "$COSH_TEST_ROOT/handoff.out" || { echo 'oversized handoff marker not redacted' >&2; exit 1; }
+if grep -q 'sk-abcdef123456' "$COSH_TEST_ROOT/handoff.out"; then echo 'oversized handoff secret emitted verbatim' >&2; exit 1; fi
+"#),
+    );
+
+    // [P2-3] A staged handoff with an oversized last history entry must not emit
+    // the untracked preexec placeholder (orphan command-start).
+    assert_ok(
+        "P2-3 staged handoff oversized guard",
+        run(r#"
+{ printf 'echo handoff-target' > "$COSH_HANDOFF_REQUEST_FILE"
+  builtin history -d "$HISTCMD" 2>/dev/null || true
+  builtin history -s "echo $PAD"
+  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"; }
+[[ ! -s "$COSH_TEST_ROOT/pre.out" ]] || { echo 'orphan oversized placeholder emitted beside staged handoff' >&2; exit 1; }
+"#),
+    );
+
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
 fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
     let detectors = [
         ("bash", include_str!("../../src/shell_host/marker/bash.sh")),

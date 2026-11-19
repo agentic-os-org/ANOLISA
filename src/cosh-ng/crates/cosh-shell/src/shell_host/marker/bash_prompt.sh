@@ -75,6 +75,15 @@ unset _cosh_user_handler_definition _cosh_user_handler_xtrace_prefix \
 _cosh_command_not_found_handle() {
   local command="$1"
   shift || true
+  local _cosh_route_chars=${#command}
+  local _cosh_route_arg
+  for _cosh_route_arg in "$@"; do
+    (( _cosh_route_chars += ${#_cosh_route_arg} + 1 ))
+  done
+  if (( _cosh_route_chars > _COSH_MAX_ROUTE_LINE_CHARS )); then
+    _cosh_delegate_bash_command_not_found "$command" "$@"
+    return $?
+  fi
   if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
     local history_entry history_no history_command classification_command first_word
     if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
@@ -285,6 +294,25 @@ _cosh_bounded_preexec_marker() {
     classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$command}"
     pending_recovery=true
   fi
+  if (( ${#classification_command} > _COSH_MAX_ROUTE_LINE_CHARS )); then
+    if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+      return 0
+    fi
+    # Record the oversized submission only when history 1 is this accepted
+    # line. Bash may have excluded the real command (HISTIGNORE), leaving a
+    # stale or imported oversized entry as history 1; that entry is not this
+    # submission and must not be scoped for cleanup.
+    local submitted="${_COSH_SUBMITTED_LINE:-}"
+    while [[ "$submitted" == ' '* || "$submitted" == $'\t'* ]]; do
+      submitted="${submitted#?}"
+    done
+    if [[ -n "$submitted" && "$command" == "$submitted" ]]; then
+      _cosh_remember_preexec_history_no "$history_no"
+    fi
+    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+    _cosh_emit_marker "preexec" "<redacted untracked command>" 0 false
+    return 0
+  fi
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 0
   fi
@@ -381,7 +409,7 @@ _cosh_precmd_marker() {
   _cosh_restore_handoff_pager_policy
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
-    _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
+    _COSH_PENDING_RECOVERY_HISTORY_INPUT _COSH_SUBMITTED_LINE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
   # The precmd marker still carries the handoff token (#2142): it closes the
   # same command the preexec claimed. Cleared right after so the following

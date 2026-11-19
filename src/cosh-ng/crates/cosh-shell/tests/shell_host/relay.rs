@@ -2090,6 +2090,204 @@ fn routing_c3_unwrapped_paste_uses_shell_newline_semantics() {
 }
 
 #[test]
+fn routing_c3_oversized_single_line_stays_shell_owned() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-oversized-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-oversized", &work_dir);
+    let mut input = b"nonexist_10317 ".to_vec();
+    input.extend(std::iter::repeat_n(b'P', 100 * 1024));
+    input.extend_from_slice(b"\necho PROBE_AFTER_OVERSIZED\n");
+    let mut rendered = Vec::new();
+    let started = std::time::Instant::now();
+    let output = run_raw_relay_bash(&config, std::io::Cursor::new(input), &mut rendered)
+        .expect("oversized single line");
+    let elapsed = started.elapsed();
+    let rendered = String::from_utf8_lossy(&rendered);
+    assert!(rendered.contains("PROBE_AFTER_OVERSIZED"), "{rendered}");
+    assert!(rendered.contains("command not found"), "{rendered}");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "oversized single line stalled the input path: {elapsed:?}"
+    );
+}
+
+#[test]
+fn routing_c3_oversized_command_omitted_from_native_history() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-oversized-history-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    let mut giant = b"nonexist_10317 ".to_vec();
+    giant.extend(std::iter::repeat_n(b'P', 17 * 1024));
+    giant.extend_from_slice(b"\necho PROBE_AFTER_OVERSIZED_HISTORY\n");
+    let mut config = ShellHostConfig::new("c3-oversized-history", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    let started = std::time::Instant::now();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(giant),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("oversized history relay");
+    let elapsed = started.elapsed();
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("PROBE_AFTER_OVERSIZED_HISTORY"),
+        "{rendered_text}"
+    );
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "oversized line must stay shell-owned: {:?}",
+        output.events
+    );
+    let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
+    assert!(
+        !history.contains("nonexist_10317"),
+        "oversized command retained in native history: {history}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "oversized command stalled the input path: {elapsed:?}"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn routing_c3_oversized_command_omitted_under_memory_overage() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-oversized-overage-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    let cg = root.join("cg");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::create_dir_all(&cg).expect("cg");
+    std::fs::write(cg.join("memory.current"), "200\n").expect("current");
+    std::fs::write(cg.join("memory.high"), "100\n").expect("high");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    let mut giant = b"nonexist_10317 ".to_vec();
+    giant.extend(std::iter::repeat_n(b'P', 17 * 1024));
+    giant.extend_from_slice(b"\necho PROBE_AFTER_OVERSIZED_OVERAGE\n");
+    let mut config = ShellHostConfig::new("c3-oversized-overage", &work_dir)
+        .with_env("HOME", home.display().to_string())
+        .with_env("_COSH_CGROUP_DIR", cg.display().to_string());
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(giant),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("oversized overage relay");
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("PROBE_AFTER_OVERSIZED_OVERAGE"),
+        "{rendered_text}"
+    );
+    let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
+    assert!(
+        !history.contains("nonexist_10317"),
+        "degraded overage path retained oversized command in native history: {history}"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn routing_c3_imported_oversized_midgap_secret_removed() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-imported-secret-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    let secret = "sk-import-mid-1234567890";
+    let mut entry = b"echo ".to_vec();
+    entry.extend(std::iter::repeat_n(b'A', 9000));
+    entry.extend_from_slice(format!(" {secret} ").as_bytes());
+    entry.extend(std::iter::repeat_n(b'B', 9000));
+    entry.push(b'\n');
+    std::fs::write(home.join("import"), entry).expect("import file");
+    let mut config = ShellHostConfig::new("c3-imported-secret", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(b"history -r \"$HOME/import\"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("echo PROBE_AFTER_IMPORT"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("imported secret relay");
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("PROBE_AFTER_IMPORT"),
+        "{rendered_text}"
+    );
+    let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
+    assert!(
+        !history.contains(secret),
+        "imported oversized mid-gap secret retained in native history: {history}"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn routing_c3_mirror_dirty_eof_never_appends_exit() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-c3-mirror-{}-{}",

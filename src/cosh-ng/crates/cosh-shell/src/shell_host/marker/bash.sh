@@ -13,6 +13,9 @@ readonly _COSH_MARKER_TOKEN="$COSH_MARKER_TOKEN"
 unset COSH_MARKER_TOKEN 2>/dev/null || true
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
+# Oversized lines bypass marker routing/scrub scans (#10317): bash-level
+# classification and secret regexes grow superlinearly and freeze input.
+_COSH_MAX_ROUTE_LINE_CHARS=16384
 # Login replay order: the system profile runs before the baseline handler
 # capture, the user's own login files after it. A real-login-identity session
 # starts Bash in posix mode, where the shell itself reads no startup files, so
@@ -308,15 +311,26 @@ _cosh_remember_preexec_history_no() {
   printf '%s\n' "$history_no" > "$state_file" 2>/dev/null || true
 }
 _cosh_command_has_secret() {
+  local input="$1"
+  # `complete` scans the whole line (used by the history scrub on non-current
+  # oversized entries, where a mid-gap credential must still be caught); the
+  # default bounded head+tail window keeps the interactive input path cheap.
+  if [[ "${2:-bounded}" != complete ]]; then
+    local secret_scan_limit=${_COSH_MAX_ROUTE_LINE_CHARS:-16384}
+    if (( ${#input} > secret_scan_limit )); then
+      local secret_tail_offset=$(( ${#input} - 8192 ))
+      input="${input:0:8192}${input:$secret_tail_offset:8192}"
+    fi
+  fi
   local jwt_pattern='(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}([^A-Za-z0-9_]|$)'
-  if [[ "$1" =~ $jwt_pattern ]]; then
+  if [[ "$input" =~ $jwt_pattern ]]; then
     return 0
   fi
   local lower
   if (( BASH_VERSINFO[0] >= 4 )); then
-    lower="${1,,}"
+    lower="${input,,}"
   else
-    lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    lower="$(printf '%s' "$input" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   fi
   case "$lower" in
     *"-----begin "*"private key-----"*)
@@ -395,6 +409,32 @@ _cosh_scrub_sensitive_native_history() {
   _cosh_history_command_var "$history_entry"
   local command="$_COSH_HISTORY_COMMAND_RESULT"
   [[ -n "$history_no" && -n "$command" ]] || return 0
+  if (( ${#command} > _COSH_MAX_ROUTE_LINE_CHARS )); then
+    # The current submission's oversized entry is fail-closed omitted without a
+    # scan (the freeze fix): the bounded window cannot fully verify it. Under
+    # memory overage PS0 recorded no submission, so omit unconditionally.
+    # Builtin reads keep the current-submission lookup fork-free.
+    if ! _cosh_memory_overage; then
+      local current_no="${_COSH_LAST_PREEXEC_HISTORY_NO:-}"
+      local state_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.preexec-history-no"
+      if [[ -f "$state_file" ]]; then
+        IFS= read -r current_no < "$state_file" 2>/dev/null || true
+      fi
+      if [[ "$history_no" != "$current_no" ]]; then
+        # A non-current oversized entry (imported via `history -r` or otherwise
+        # pre-existing) is not this submission, so the fail-closed omit does not
+        # apply; but it must still pass a COMPLETE secret check before it is
+        # allowed to persist — a mid-gap credential lies outside the bounded
+        # window. This mirrors the merge-base full-scan scrub.
+        if _cosh_command_has_secret "$command" complete; then
+          builtin history -d "$history_no" 2>/dev/null || true
+        fi
+        return 0
+      fi
+    fi
+    builtin history -d "$history_no" 2>/dev/null || true
+    return 0
+  fi
   if _cosh_command_has_secret "$command"; then
     builtin history -d "$history_no" 2>/dev/null || true
   fi
@@ -547,6 +587,17 @@ _cosh_guard_slash_submission() {
     set +x
   fi
   local input="$READLINE_LINE"
+  # Remember the accepted line so PS0 can prove which history entry belongs
+  # to this submission (Bash may exclude the real command via HISTIGNORE).
+  _COSH_SUBMITTED_LINE="$input"
+  # Oversized lines bypass the superlinear first-word/secret scans (#10317).
+  # The bounded secret window cannot fully verify them, so they are fail-closed
+  # omitted from native history by the prompt scrub — including edited lines.
+  # No history recovery is attempted for oversized input (intentional limit).
+  if (( ${#input} > _COSH_MAX_ROUTE_LINE_CHARS )); then
+    (( restore_xtrace == 1 )) && set -x
+    return 0
+  fi
   if [[ "${1:-false}" == true && "$input" == ' '* ]]; then
     input="${input# }"
   fi
@@ -643,6 +694,10 @@ _cosh_commit_pending_recovery_history() {
   case "$input" in
     ' '*|$'\t'*) return 0 ;;
   esac
+  # An oversized line cannot be fully secret-verified by the bounded window;
+  # an incomplete negative cannot establish it is safe to keep, so fail closed
+  # (the prompt scrub omits it). Recovery applies to normal-size lines only.
+  (( ${#input} > _COSH_MAX_ROUTE_LINE_CHARS )) && return 0
   _cosh_command_has_secret "$input" && return 0
 
   local history_entry history_no history_command
@@ -857,7 +912,11 @@ _cosh_prepare_staged_handoff() {
     builtin history -d "$history_no" 2>/dev/null || true
   fi
   display_command="$command"
-  if _cosh_command_has_secret "$command"; then
+  # An oversized command cannot be fully verified by the bounded head+tail
+  # secret window; a negative result is incomplete, so fail closed to the
+  # redacted placeholder (the emitted preexec marker cannot be retracted by
+  # the later history scrub). The handoff token is already loaded above.
+  if (( ${#command} > _COSH_MAX_ROUTE_LINE_CHARS )) || _cosh_command_has_secret "$command"; then
     display_command="<redacted sensitive command>"
   elif [[ -o history ]]; then
     builtin history -s "$command" 2>/dev/null || true
