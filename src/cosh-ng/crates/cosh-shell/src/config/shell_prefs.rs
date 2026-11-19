@@ -173,29 +173,15 @@ fn write_pref(
     guard: bool,
 ) -> Result<(), String> {
     let label = section.join(".");
-    let mut root = if path.exists() {
-        let content = std::fs::read_to_string(path)
-            .map_err(|err| format!("read config file failed: {err}"))?;
-        content
-            .parse::<toml::Value>()
-            .map_err(|err| {
-                format!("config file is not valid TOML; edit {label}.{key} manually: {err}")
-            })?
-            .as_table()
-            .cloned()
-            .ok_or_else(|| {
-                format!("config root is not a TOML table; edit {label}.{key} manually")
-            })?
-    } else {
-        if let Some(parent) = path.parent() {
-            if !guard {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("create config directory failed: {err}"))?;
-            }
-        }
-        toml::map::Map::new()
-    };
-    let mut table = &mut root;
+    let (path, _locks) = super::guarded_write::lock(path, guard)?;
+    let path = path.as_path();
+    let content = super::guarded_write::read(path, guard)?;
+    let mut document = content.parse::<toml::Value>().map_err(|err| {
+        format!("config file is not valid TOML; edit {label}.{key} manually: {err}")
+    })?;
+    let mut table = document
+        .as_table_mut()
+        .ok_or_else(|| format!("config root is not a TOML table; edit {label}.{key} manually"))?;
     for part in section {
         let node = table
             .entry(part.to_string())
@@ -205,13 +191,9 @@ fn write_pref(
             .ok_or_else(|| format!("[{label}] is not a TOML table; edit {label}.{key} manually"))?;
     }
     table.insert(key.to_string(), value);
-    let rendered = toml::to_string_pretty(&toml::Value::Table(root))
+    let rendered = toml::to_string_pretty(&document)
         .map_err(|err| format!("render config TOML failed: {err}"))?;
-    if guard {
-        return super::guarded_write::write(path, &rendered);
-    }
-    std::fs::write(path, rendered).map_err(|err| format!("write config file failed: {err}"))?;
-    Ok(())
+    super::guarded_write::write(path, &rendered, guard)
 }
 
 #[cfg(test)]

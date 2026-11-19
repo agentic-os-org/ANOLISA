@@ -14,6 +14,15 @@
 
 Core 按系统 → 用户 → 项目的顺序合并配置。项目配置可以设置 Agent、Skill、会话、`active_model` 和回答语言偏好，但会忽略 `active_provider`、Provider 定义、MCP server、Hook 定义、`agent.approval_mode`、`agent.allowed_tools` 和项目审计设置。`cosh-shell` 只读取用户文件，不读取系统或项目文件。
 
+普通用户运行 Cosh 时，使用 `/config language` 等交互式 Shell 命令保存设置，
+需要由当前账号拥有配置文件或符号链接指向的目标文件。仅有组写权限无法完成保存。
+Cosh 还需要能够打开配置锁，并在目标目录中替换配置文件。
+
+如果用户配置指向共享文件或管理员所有的文件，请向管理员获取适用于当前账号的设置。
+把这些设置另存为当前账号所有的私有副本，权限设为 `0600`，再将副本放到账号可写的
+`~/.copilot-shell/` 目录中，文件名为 `config.toml`。如果原路径是符号链接，
+用副本替换链接本身，并保留共享文件。然后重新运行 `/config language` 保存偏好。
+
 ECS 免配接入（`aliyun` 且 `auth_source = "ecs_identity"`）始终使用固定模型
 `auto`，`active_model` 和 Provider 的 `model` 均不能修改；选择该接入方式不会把
 项目模型保存为用户配置。需要自选模型时，可用 `/auth` 配置其它 Provider；

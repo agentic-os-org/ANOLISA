@@ -198,23 +198,9 @@ fn write_language_config_inner(path: &Path, language: &str, guard: bool) -> Resu
         .ok_or_else(|| format!("invalid language: {language}; supported: auto, en-US, zh-CN"))?;
     let language = setting.as_config_value();
 
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            if !guard {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("create config directory failed: {err}"))?;
-            }
-        }
-        let content = format!("[ui]\nlanguage = \"{language}\"\n");
-        if guard {
-            return super::guarded_write::write(path, &content);
-        }
-        return std::fs::write(path, content)
-            .map_err(|err| format!("write config file failed: {err}"));
-    }
-
-    let content =
-        std::fs::read_to_string(path).map_err(|err| format!("read config file failed: {err}"))?;
+    let (path, _locks) = super::guarded_write::lock(path, guard)?;
+    let path = path.as_path();
+    let content = super::guarded_write::read(path, guard)?;
     let mut value = content.parse::<toml::Value>().map_err(|err| {
         format!("config file is not valid TOML; edit ui.language manually: {err}")
     })?;
@@ -233,10 +219,7 @@ fn write_language_config_inner(path: &Path, language: &str, guard: bool) -> Resu
     );
     let rendered = toml::to_string_pretty(&value)
         .map_err(|err| format!("render config TOML failed: {err}"))?;
-    if guard {
-        return super::guarded_write::write(path, &rendered);
-    }
-    std::fs::write(path, rendered).map_err(|err| format!("write config file failed: {err}"))
+    super::guarded_write::write(path, &rendered, guard)
 }
 
 fn language_setting_from_config_path(path: &Path) -> Option<String> {

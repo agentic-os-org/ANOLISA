@@ -51,5 +51,5 @@ tracing-appender.workspace = true
 wait-timeout.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 tokio = { version = "1", features = ["test-util"] }

@@ -1173,6 +1173,7 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
 }
 
 mod guarded;
+pub(crate) use guarded::{lock as lock_user_config, replace as replace_user_config};
 
 /// Wizard-initiated persistence: ownership-checked, no-follow, and never
 /// treating an unreadable document as an empty one.
@@ -1225,12 +1226,17 @@ fn persist_config_inner(
     }
 
     let config_path = dir.join("config.toml");
+    let _lock = guarded::lock(dir, guard)?;
 
     let existing = if guard {
         guarded::verify_target(&config_path)?;
         guarded::read_existing(&config_path)?
     } else {
-        std::fs::read_to_string(&config_path).unwrap_or_default()
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("Failed to read config: {error}")),
+        }
     };
 
     let mut preserved = String::new();
@@ -1317,27 +1323,7 @@ fn persist_config_inner(
         preserved.push('\n');
     }
 
-    if guard {
-        return guarded::replace(dir, &config_path, &preserved);
-    }
-
-    let pid = std::process::id();
-    let tmp_path = dir.join(format!("config.toml.tmp.{pid}"));
-    std::fs::write(&tmp_path, &preserved).map_err(|e| format!("Failed to write config: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        let _ = std::fs::set_permissions(&tmp_path, perms);
-    }
-
-    std::fs::rename(&tmp_path, &config_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("Failed to rename config: {e}")
-    })?;
-
-    Ok(())
+    guarded::replace(dir, &config_path, &preserved, guard)
 }
 
 fn escape_toml_value(s: &str) -> String {
@@ -2277,6 +2263,23 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
             "https://sysom.cn-shanghai.aliyuncs.com"
         );
         assert_eq!(reloaded.access_key_id, "new-ak");
+    }
+
+    #[test]
+    fn persist_user_config_refuses_to_save_without_shared_lock() {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("config.toml");
+        let original = "[ui]\nlanguage = \"zh-CN\"\n";
+        std::fs::write(&path, original).expect("seed config");
+        std::fs::create_dir(dir.path().join(".config.toml.lock")).expect("unavailable lock");
+
+        let error = persist_config_to_dir(&CoreConfig::default(), dir.path())
+            .expect_err("require the config lock");
+        assert!(error.contains("config lock"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read config"),
+            original
+        );
     }
 
     #[test]
