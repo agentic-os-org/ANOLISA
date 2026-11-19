@@ -160,6 +160,15 @@ with os.fdopen(int(sys.argv[4]), 'w') as status:
             capture_output=True, text=True, timeout=20, cwd=root)
         assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
         assert 'Cedar inputs require the linux backend' in result.stderr, result.stderr
+    source.write_text(json.dumps(expected))
+    for program, error in [('true', 'absolute program path inside the image'),
+                           ('/usr/bin/true', 'docker CLI not found')]:
+        result = subprocess.run([str(cli), 'sandbox', 'run', '--backend', 'docker',
+            '--image', 'unused:test', '--docker-cli', str(root / 'absent-docker'),
+            '--permissions', str(source), '--', program],
+            capture_output=True, text=True, timeout=20, cwd=root)
+        assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+        assert error in result.stderr, result.stderr
     for invalid in [b'permit this is broken', b'\xff', b' ' * (4 * 1024 * 1024 + 1)]:
         source.write_bytes(invalid)
         result = subprocess.run([str(cli), 'sandbox', 'run', '--permissions', str(source), '--', '/usr/bin/true'],
