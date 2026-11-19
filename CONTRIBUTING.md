@@ -17,12 +17,11 @@ updates.
 
 ## Recommended contribution directions
 
-If you are looking for a contribution direction, we recommend starting with the
-component topics in [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
+If you are looking for a contribution direction, start with [Ways to Contribute](contribute/en/tracks.md) to pick a track that fits your background and environment, or explore component topics in [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
+For community roles, decision tiers, and component lifecycle rules, see [Community Governance](GOVERNANCE.md).
 Bug reports, bug fixes, and other Issues and PRs are also welcome.
 
-Roadmap topics are candidate directions, not scheduling commitments or tasks
-available to claim. To implement a roadmap direction, follow the Issue process:
+Roadmap topics list candidate directions; scope and claiming happen on the corresponding Issue. See [Issues, Roadmap, and Claiming Workflow](contribute/en/workflow.md) for the full label and `/claim` guide, or follow these steps:
 
 1. Search for an existing Issue covering the direction. If none exists, open an
    Issue linking to the source Discussion and describe the proposed scope.

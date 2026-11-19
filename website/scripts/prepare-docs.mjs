@@ -53,12 +53,12 @@ async function sourceDocuments(locale) {
     }
   }
   const suffix = locale === 'zh' ? '_zh' : '';
-  for (const [directory, target] of [
-    ['', 'contribute/index.md'],
-    ['src/aw', 'contribute/aw/index.md'],
-    ['src/cosh-ng', 'contribute/cosh-ng/index.md'],
+  for (const [source, target] of [
+    [`CONTRIBUTING${suffix}.md`, 'contribute/index.md'],
+    [`GOVERNANCE${suffix}.md`, 'contribute/governance.md'],
+    [`src/aw/CONTRIBUTING${suffix}.md`, 'contribute/aw/index.md'],
+    [`src/cosh-ng/CONTRIBUTING${suffix}.md`, 'contribute/cosh-ng/index.md'],
   ]) {
-    const source = path.posix.join(directory, `CONTRIBUTING${suffix}.md`);
     if (await exists(path.join(repoRoot, source))) documents.push({source, target});
   }
   const targets = new Set();
