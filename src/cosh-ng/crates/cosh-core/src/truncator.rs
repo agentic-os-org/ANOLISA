@@ -30,7 +30,7 @@ pub(crate) fn truncate_to_byte_limit(value: &str, max_bytes: usize) -> &str {
 /// descriptors just to keep the first thousand. Appending only what still fits
 /// covers the mirror case, where a single line dwarfs the whole budget and must
 /// not be materialized in full just to be trimmed after.
-fn bounded_head(output: &str, max_lines: usize, max_bytes: usize) -> String {
+pub(crate) fn bounded_head(output: &str, max_lines: usize, max_bytes: usize) -> String {
     let mut head = String::new();
     for (idx, line) in output.lines().take(max_lines).enumerate() {
         if idx > 0 {
