@@ -495,3 +495,135 @@ fn fallback_updates_project_the_candidate_and_preserve_rejected_policy() {
     );
     assert_eq!(active.host.configuration().as_value(), &rejected);
 }
+
+#[test]
+fn sdk_callbacks_reuse_cached_routes_and_adopt_resident_policy_updates() {
+    let f = Fixture::new();
+    let (root, id) = task(&f, "cached-routes");
+    let root_id = &root.binding.instance_id;
+    let initial_routes = {
+        let instances = f.runtime.instances.lock().unwrap();
+        Arc::clone(instances[&id].as_ref().unwrap().routes.as_ref().unwrap())
+    };
+    // Unknown event and step codes come directly from the cached PreparedRoutes.
+    let mut missing_event = callback(&f, &id);
+    if let Operation::SdkCallback { event, .. } = &mut missing_event {
+        *event = "input.submit".into();
+    }
+    code(
+        f.runtime.handle(
+            missing_event,
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ),
+        "sdk_event_unavailable",
+    );
+    let mut missing_step = callback(&f, &id);
+    if let Operation::SdkCallback { step_id, .. } = &mut missing_step {
+        *step_id = "retired".into();
+    }
+    code(
+        f.runtime.handle(
+            missing_step,
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ),
+        "sdk_step_unavailable",
+    );
+    f.runtime
+        .handle(
+            callback(&f, &id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    {
+        let mut instances = f.runtime.instances.lock().unwrap();
+        let scope = instances.get_mut(&id).unwrap().as_mut().unwrap();
+        assert!(Arc::ptr_eq(scope.routes.as_ref().unwrap(), &initial_routes));
+        scope.routes = None;
+    }
+    code(f.runtime.scope_policy(&id), "native_policy_unsupported");
+    code(
+        f.runtime.handle(
+            callback(&f, &id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ),
+        "native_policy_unsupported",
+    );
+    f.runtime
+        .release_instance(&id, Instant::now() + Duration::from_secs(5))
+        .unwrap();
+
+    // Hot policy activation refreshes cached routes on the root and subsequent Scopes.
+    let pid = std::process::id();
+    f.runtime.enable_reload(root_id).unwrap();
+    f.runtime.associate_process(root_id, pid).unwrap();
+    f.runtime
+        .lifecycle(root_id, pid, crate::LifecyclePhase::Ready, "")
+        .unwrap();
+    let expected = f.query("cached-routes")["policy_revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut updated_doc: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    updated_doc["spec"]["events"]["tool.before"]["steps"][0]["id"] = json!("observe-v2");
+    let request = crate::Request {
+        api_version: crate::VERSION.into(),
+        identity: Some(f.runtime.identity.clone()),
+        deadline_ns: crate::deadline::encode(Instant::now() + Duration::from_secs(5)).unwrap(),
+        operation: Operation::UpdatePolicy {
+            instance_id: root_id.clone(),
+            expected_revision: expected,
+            config: serde_json::to_string(&updated_doc).unwrap(),
+        },
+    };
+    // SAFETY: geteuid only reads this test process's effective UID.
+    f.runtime
+        .update_policy(
+            &request,
+            (unsafe { libc::geteuid() }, pid as i32),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    f.runtime
+        .lifecycle(root_id, pid, crate::LifecyclePhase::RequestStart, "turn-2")
+        .unwrap();
+    let next = f.open(root_id).unwrap();
+    let next_id = next["instance_id"].as_str().unwrap();
+    f.runtime.scope_policy(next_id).unwrap();
+    f.runtime
+        .acknowledge_scope(next_id, Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    code(
+        f.runtime.handle(
+            callback(&f, next_id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ),
+        "sdk_step_unavailable",
+    );
+    let mut updated_call = callback(&f, next_id);
+    if let Operation::SdkCallback { step_id, .. } = &mut updated_call {
+        *step_id = "observe-v2".into();
+    }
+    assert_eq!(
+        f.runtime
+            .handle(
+                updated_call,
+                Instant::now() + Duration::from_secs(5),
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+        fixture()["neutral_callback"]
+    );
+    f.runtime
+        .release_instance(next_id, Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    f.runtime
+        .lifecycle(root_id, pid, crate::LifecyclePhase::RequestEnd, "turn-2")
+        .unwrap();
+    f.call(RegistrationCommand::Release { handle: root })
+        .unwrap();
+}

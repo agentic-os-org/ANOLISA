@@ -7,7 +7,7 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep, StepExecution};
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsStr, fs, time::Duration};
 
@@ -271,56 +271,36 @@ fn routes(
     {
         return Err("DeepSeek final security gate requires a Provider step".into());
     }
-    let mut events = BTreeMap::new();
-    let mut hooks = Vec::new();
-    for event in [
-        "input.submit",
-        "tool.before",
-        "tool.after",
-        "security.violation",
-    ] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        if selected.is_empty() {
-            continue;
-        }
-        let budget = document["spec"]["events"][event]
-            .get("budget_ms")
-            .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-            .as_f64()
-            .map(|v| v as u64)
-            .ok_or("invalid DeepSeek event budget")?;
-        if !(1..=55000).contains(&budget) {
-            return Err("DeepSeek event budget must be 1..55000 ms".into());
-        }
-        for step in &selected {
-            if matches!(&step.execution, StepExecution::Provider { operation, .. } if operation == "check_skill")
-            {
-                return Err("DeepSeek cannot check a resolved Skill object".into());
+    let options = aw_core::routes::RouteOptions {
+        events: aw_core::routes::STANDARD_EVENTS,
+        observe_events: &[],
+        event_filter: aw_core::routes::EventFilter::All,
+        max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
+        reverse_on_result_replacement: false,
+        include_replace_result: false,
+        include_replace_input: false,
+        include_tool_selectors: false,
+        skill_check: aw_core::routes::SkillCheck::Unsupported,
+    };
+    let prepared =
+        aw_core::routes::compile(document, steps, &options).map_err(|error| match error {
+            aw_core::routes::RouteError::UnsupportedSkillCheck => {
+                "DeepSeek cannot check a resolved Skill object".into()
             }
-            hooks.push(json!({"event":event, "step":step.step_id,
-                "on_error":step.on_error, "budget_ms":budget}));
-        }
-        events.insert(
-            event.into(),
-            HookEvent {
-                budget_ms: budget,
-                replacement_step: selected
-                    .iter()
-                    .find(|s| s.execution.replaces_result())
-                    .map(|s| s.step_id.clone()),
-                steps: selected
-                    .into_iter()
-                    .map(|s| (s.step_id.clone(), s.on_error.clone()))
-                    .collect(),
-            },
-        );
-    }
-    Ok((events, hooks))
+            other => super::sdk_tools::format_route_error(
+                other,
+                "invalid DeepSeek event budget",
+                "DeepSeek event budget must be 1..55000 ms",
+                "DeepSeek event budget must be integer milliseconds in 1..55000 ms",
+            ),
+        })?;
+    Ok(super::sdk_tools::convert_routes(&prepared))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aw_core::admission::StepExecution;
     use std::path::PathBuf;
 
     #[test]
@@ -424,7 +404,10 @@ mod tests {
                 event_tools: vec!["*".into()],
                 step_tools: vec!["*".into()],
             };
-            assert!(routes(&document, &[step]).is_err(), "{on_error}");
+            assert_eq!(
+                routes(&document, &[step]).err().unwrap().to_string(),
+                "DeepSeek cannot check a resolved Skill object"
+            );
         }
     }
 }

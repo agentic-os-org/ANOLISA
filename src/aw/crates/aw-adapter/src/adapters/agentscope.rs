@@ -195,55 +195,38 @@ impl PreparedLaunch for Prepared {
     }
 }
 
+pub(crate) const fn route_options() -> aw_core::routes::RouteOptions<'static> {
+    // After wrappers are outermost, so they also observe an inner before denial.
+    aw_core::routes::RouteOptions {
+        events: &["input.submit", "tool.after", "tool.before"],
+        observe_events: &[],
+        event_filter: aw_core::routes::EventFilter::All,
+        max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
+        reverse_on_result_replacement: true,
+        include_replace_result: true,
+        include_replace_input: false,
+        include_tool_selectors: false,
+        skill_check: aw_core::routes::SkillCheck::Tool {
+            source_id: "agentscope",
+            tool_name: "Skill",
+        },
+    }
+}
+
 pub(crate) fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    let mut events = BTreeMap::new();
-    let mut hooks = Vec::new();
-    // After wrappers are outermost, so they also observe an inner before denial.
-    for event in ["input.submit", "tool.after", "tool.before"] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        if selected.is_empty() {
-            continue;
-        }
-        let budget = document["spec"]["events"][event]
-            .get("budget_ms")
-            .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-            .as_f64()
-            .map(|value| value as u64)
-            .ok_or("invalid native event budget")?;
-        if !(1..=55000).contains(&budget) {
-            return Err("AgentScope native event budgets must be 1..55000 ms".into());
-        }
-        let mut registration = selected.clone();
-        if selected.iter().any(|step| step.execution.replaces_result()) {
-            // After handlers unwind the native middleware stack inside out.
-            registration.reverse();
-        }
-        for step in registration {
-            let mut hook = json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()});
-            if super::sdk_tools::checks_skill(step, "agentscope") {
-                hook["skill_check"] = json!(true);
-            }
-            hooks.push(hook);
-        }
-        events.insert(
-            event.into(),
-            HookEvent {
-                budget_ms: budget,
-                replacement_step: selected
-                    .iter()
-                    .find(|step| step.execution.replaces_result())
-                    .map(|step| step.step_id.clone()),
-                steps: selected
-                    .into_iter()
-                    .map(|step| (step.step_id.clone(), step.on_error.clone()))
-                    .collect(),
-            },
-        );
-    }
-    Ok((events, hooks))
+    let prepared =
+        aw_core::routes::compile(document, steps, &route_options()).map_err(|error| {
+            super::sdk_tools::format_route_error(
+                error,
+                "invalid native event budget",
+                "AgentScope native event budgets must be 1..55000 ms",
+                "AgentScope native event budgets must be integer milliseconds in 1..55000 ms",
+            )
+        })?;
+    Ok(super::sdk_tools::convert_routes(&prepared))
 }
 
 fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {

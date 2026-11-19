@@ -241,55 +241,34 @@ impl PreparedLaunch for Prepared {
         })
     }
 }
+pub(crate) const fn route_options() -> aw_core::routes::RouteOptions<'static> {
+    aw_core::routes::RouteOptions {
+        events: &["input.submit", "tool.before", "tool.after"],
+        observe_events: &[],
+        event_filter: aw_core::routes::EventFilter::All,
+        max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
+        reverse_on_result_replacement: false,
+        include_replace_result: false,
+        include_replace_input: true,
+        include_tool_selectors: false,
+        skill_check: aw_core::routes::SkillCheck::InputSubmit,
+    }
+}
+
 pub(crate) fn routes(
     document: &Value,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    let mut events = BTreeMap::new();
-    let mut hooks = Vec::new();
-    for event in ["input.submit", "tool.before", "tool.after"] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        if selected.is_empty() {
-            continue;
-        }
-        let budget = document["spec"]["events"][event]
-            .get("budget_ms")
-            .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-            .as_f64()
-            .map(|v| v as u64)
-            .ok_or("invalid Pi event budget")?;
-        if !(1..=55000).contains(&budget) {
-            return Err("Pi event budget must be 1..55000 ms".into());
-        }
-        for step in &selected {
-            let mut hook = json!({"event":event,"step":step.step_id,"on_error":step.on_error,"budget_ms":budget});
-            if matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input"))
-            {
-                hook["replace_input"] = json!(true);
-            }
-            if event == "input.submit"
-                && matches!(&step.execution, aw_core::admission::StepExecution::Provider { operation, .. } if operation == "check_skill")
-            {
-                hook["skill_check"] = json!(true);
-            }
-            hooks.push(hook);
-        }
-        events.insert(
-            event.into(),
-            HookEvent {
-                budget_ms: budget,
-                replacement_step: selected
-                    .iter()
-                    .find(|step| step.execution.replaces_result())
-                    .map(|step| step.step_id.clone()),
-                steps: selected
-                    .into_iter()
-                    .map(|s| (s.step_id.clone(), s.on_error.clone()))
-                    .collect(),
-            },
-        );
-    }
-    Ok((events, hooks))
+    let prepared =
+        aw_core::routes::compile(document, steps, &route_options()).map_err(|error| {
+            super::sdk_tools::format_route_error(
+                error,
+                "invalid Pi event budget",
+                "Pi event budget must be 1..55000 ms",
+                "Pi event budget must be integer milliseconds in 1..55000 ms",
+            )
+        })?;
+    Ok(super::sdk_tools::convert_routes(&prepared))
 }
 
 // Model-issued tool IDs may recur in later turns; only this per-preparation UUID

@@ -49,6 +49,7 @@ struct Instance {
     policy_update: Arc<Mutex<()>>,
     release: Arc<Mutex<()>>,
     host: Arc<Host>,
+    routes: Option<Arc<aw_core::routes::PreparedRoutes>>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
     hook_open: Arc<Mutex<()>>,

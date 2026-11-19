@@ -10,7 +10,7 @@ use std::{
     fs,
     sync::{
         atomic::{AtomicBool, AtomicU64},
-        mpsc, Mutex,
+        mpsc,
     },
 };
 
@@ -267,25 +267,15 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
     .unwrap();
     runtime.instances.lock().unwrap().insert(
         "fixture".into(),
-        Some(Instance {
-            run: None,
-            native_facts: Arc::default(),
-            bytes: bytes.to_vec(),
-            context: ProcessContext {
+        Some(Instance::prepared(
+            bytes.to_vec(),
+            ProcessContext {
                 cwd: directory.clone(),
                 environment: BTreeMap::new(),
                 stderr_bytes: 1024,
             },
-            reload: None,
-            policy_update: Arc::new(Mutex::new(())),
-            release: Arc::new(Mutex::new(())),
-            host: Arc::new(host),
-            closing: false,
-            observation: None,
-            hooks: Arc::new(Mutex::new(BTreeMap::new())),
-            hook_open: Arc::new(Mutex::new(())),
-            invocations: Arc::default(),
-        }),
+            host,
+        )),
     );
     let hooks = Arc::clone(
         &runtime.instances.lock().unwrap()["fixture"]

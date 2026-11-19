@@ -629,3 +629,51 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
     );
     assert!(execution_claim("unsupported", &native).is_err());
 }
+
+#[test]
+fn scope_routes_match_scope_policy_and_reject_mismatched_targets() {
+    let doc = document("pi");
+    let capabilities = AdapterCapabilities {
+        adapter: "pi".into(),
+        version: "1.5.2".into(),
+        entrypoint: "sdk".into(),
+        events: BTreeMap::from([(
+            "tool.after".into(),
+            vec!["observe".into(), "replace_result".into()],
+        )]),
+        failure_actions: BTreeMap::new(),
+    };
+    let admitted = steps("tool.after", true);
+    let prepared = scope_routes(&doc, "target", &admitted, &capabilities).unwrap();
+    assert_eq!(
+        prepared.to_policy_value(),
+        scope_policy(&doc, "target", &admitted, &capabilities).unwrap()
+    );
+    assert_eq!(
+        prepared.event("tool.after").unwrap().replacement_step(),
+        Some("compress")
+    );
+    assert!(scope_routes(&doc, "missing", &admitted, &capabilities).is_err());
+    let mut invalid_sdk = crate::adapter::catalog::SDK.capabilities("v0", "application");
+    invalid_sdk.version = "v0".into();
+    assert_eq!(
+        scope_routes(&doc, "target", &[], &invalid_sdk)
+            .unwrap_err()
+            .to_string(),
+        "resident policy adapter differs from its target"
+    );
+    let mut null_budget = document("qoder");
+    null_budget["spec"]["execution"]["default_event_budget_ms"] = Value::Null;
+    assert_eq!(
+        plan(
+            &null_budget,
+            "target",
+            &steps("tool.after", true),
+            "tool.after"
+        )
+        .err()
+        .unwrap()
+        .to_string(),
+        "invalid event budget"
+    );
+}

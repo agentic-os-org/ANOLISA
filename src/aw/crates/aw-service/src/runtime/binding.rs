@@ -98,6 +98,7 @@ impl Runtime {
 
 impl Instance {
     pub(super) fn prepared(bytes: Vec<u8>, context: ProcessContext, host: aw_host::Host) -> Self {
+        let routes = Self::prepare_routes(&host);
         Self {
             run: None,
             native_facts: Arc::default(),
@@ -107,12 +108,26 @@ impl Instance {
             policy_update: Arc::new(Mutex::new(())),
             release: Arc::new(Mutex::new(())),
             host: Arc::new(host),
+            routes,
             closing: false,
             observation: None,
             hooks: Arc::new(Mutex::new(BTreeMap::new())),
             hook_open: Arc::new(Mutex::new(())),
             invocations: Arc::default(),
         }
+    }
+
+    pub(super) fn prepare_routes(
+        host: &aw_host::Host,
+    ) -> Option<Arc<aw_core::routes::PreparedRoutes>> {
+        aw_adapter::reload::scope_routes(
+            host.configuration().as_value(),
+            host.target(),
+            host.steps(),
+            host.capabilities(),
+        )
+        .ok()
+        .map(Arc::new)
     }
 }
 

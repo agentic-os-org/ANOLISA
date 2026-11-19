@@ -1,7 +1,10 @@
 //! Stable bridge plans keep native scheduling and lifecycle interpretation in Adapters.
 
 use crate::{adapter, HookEvent, HookOutput, NativeContext, NativeExit, Result};
-use aw_core::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::{
+    admission::{AdapterCapabilities, AdmittedStep},
+    routes::{GroupOrder, PreparedRoutes, RouteError, SkillCheck},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -54,24 +57,9 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     }
 }
 
-/// Check the ordinary resident adapters with immutable task policy snapshots.
+/// Check the ordinary resident adapters and standard Source profiles with immutable task snapshots.
 pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
-    if matches!(
-        (
-            capabilities.adapter.as_str(),
-            capabilities.entrypoint.as_str()
-        ),
-        ("agentscope", "factory")
-            | ("pi", "sdk")
-            | ("claude-sdk", "sdk-worker")
-            | ("sdk", "application")
-    ) {
-        return Ok(());
-    }
-    if !matches!(capabilities.adapter.as_str(), "qoder-sdk" | "qwenpaw") {
-        return Err("resident policy updates require a supported resident SDK or QwenPaw".into());
-    }
-    supported(capabilities)
+    crate::adapters::sdk_tools::resident_supported(capabilities)
 }
 
 /// Validate a replacement with the ordinary factory's native routing contract.
@@ -87,8 +75,22 @@ pub fn validate_resident(
         .map_err(|error| error.to_string())?;
     let steps = aw_core::admission::preflight(&config, target, capabilities)
         .map_err(|error| error.to_string())?;
-    scope_policy(document, target, &steps, capabilities)?;
+    scope_routes(document, target, &steps, capabilities)?;
     Ok(())
+}
+
+/// Compile an immutable task's [`PreparedRoutes`] without exposing Provider configuration.
+pub fn scope_routes(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<PreparedRoutes> {
+    resident_supported(capabilities)?;
+    if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
+        return Err("resident policy adapter differs from its target".into());
+    }
+    crate::adapters::sdk_tools::compile_resident_routes(document, steps, capabilities)
 }
 
 /// Project an immutable task's routes without exposing Provider configuration.
@@ -98,42 +100,7 @@ pub fn scope_policy(
     steps: &[AdmittedStep],
     capabilities: &AdapterCapabilities,
 ) -> Result<Value> {
-    resident_supported(capabilities)?;
-    if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
-        return Err("resident policy adapter differs from its target".into());
-    }
-    if capabilities.adapter == "sdk" {
-        let supported = adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
-        if capabilities.version != supported.version
-            || !capabilities.failure_actions.is_empty()
-            || capabilities.events.iter().any(|(event, effects)| {
-                supported
-                    .events
-                    .get(event)
-                    .is_none_or(|allowed| effects.iter().any(|effect| !allowed.contains(effect)))
-            })
-        {
-            return Err("unsupported semantic SDK profile or effect".into());
-        }
-    }
-    let (mut events, mut hooks) = match capabilities.adapter.as_str() {
-        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
-        "sdk" => crate::adapters::sdk_tools::routes(document, steps, "sdk")?,
-        "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, true)?,
-        "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
-        "pi" => crate::adapters::pi::routes(document, steps)?,
-        "claude-sdk" => crate::adapters::sdk_tools::routes(document, steps, "claude-sdk")?,
-        _ => return Err("unsupported resident policy adapter".into()),
-    };
-    if capabilities.adapter == "sdk" {
-        events.retain(|event, _| capabilities.events.contains_key(event));
-        hooks.retain(|hook| {
-            hook["event"]
-                .as_str()
-                .is_some_and(|event| capabilities.events.contains_key(event))
-        });
-    }
-    Ok(json!({"events": events, "hooks": hooks}))
+    Ok(scope_routes(document, target, steps, capabilities)?.to_policy_value())
 }
 
 /// Validate native scheduling and budget constraints before Provider preparation.
@@ -179,69 +146,71 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
     {
         return Err("unsupported native event".into());
     }
-    let selected = steps
-        .iter()
-        .filter(|step| step.event == event)
-        .collect::<Vec<_>>();
-    if adapter == "hermes" && event == "input.submit" && !selected.is_empty() {
+    if adapter == "hermes"
+        && event == "input.submit"
+        && steps.iter().any(|step| step.event == event)
+    {
         crate::adapters::hermes::validate_reload_submission(document, target)?;
     }
-    let replacement = selected.iter().any(|step| step.execution.replaces_result());
-    let mut ordered = selected
-        .iter()
-        .map(|step| Step {
-            id: step.step_id.clone(),
-            on_error: step.on_error.clone(),
-        })
-        .collect::<Vec<_>>();
-    let sequential = match adapter {
-        "qoder" => document["spec"]["agents"][target]["qoder"]["sequential"] == true,
-        "qoder-sdk" | "hermes" => true,
-        "openclaw" => event == "tool.before" || replacement,
-        "qwenpaw" => {
-            if event == "tool.after" && !replacement {
-                ordered.reverse();
-            }
-            true
+    let order = match adapter {
+        "qoder" if document["spec"]["agents"][target]["qoder"]["sequential"] == true => {
+            GroupOrder::Sequential
         }
+        "qoder" => GroupOrder::Parallel,
+        "qoder-sdk" | "hermes" => GroupOrder::Sequential,
+        "openclaw"
+            if event == "tool.before"
+                || steps
+                    .iter()
+                    .any(|step| step.event == event && step.execution.replaces_result()) =>
+        {
+            GroupOrder::Sequential
+        }
+        "openclaw" => GroupOrder::Parallel,
+        "qwenpaw" if event == "tool.after" => GroupOrder::ReverseUnlessReplacement,
+        "qwenpaw" => GroupOrder::Sequential,
         _ => return Err("unsupported runtime policy adapter".into()),
     };
-    let budget = document["spec"]["events"][event]
-        .get("budget_ms")
-        .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-        .as_f64()
-        .ok_or("invalid event budget")? as u64;
     let maximum = if adapter == "openclaw" { 12000 } else { 55000 };
-    if !(1..=maximum).contains(&budget) || (replacement && !sequential) {
-        return Err(format!(
-            "runtime policy requires 1..{maximum} ms budgets and ordered replacement"
-        )
-        .into());
-    }
+    let skill = if adapter == "hermes" {
+        SkillCheck::Tool {
+            source_id: "hermes",
+            tool_name: "skill_view",
+        }
+    } else {
+        SkillCheck::None
+    };
+    let scheduled = aw_core::routes::schedule_event(document, steps, event, maximum, order, skill)
+        .map_err(|error| match error {
+            RouteError::InvalidBudget => "invalid event budget".into(),
+            RouteError::NonIntegralBudget => {
+                "event budget must be an integer millisecond value".into()
+            }
+            RouteError::BudgetOutOfRange { .. } | RouteError::UnorderedReplacement => {
+                format!("runtime policy requires 1..{maximum} ms budgets and ordered replacement")
+            }
+            RouteError::UnsupportedSkillCheck => error.to_string(),
+        })?;
     Ok(Plan {
-        budget_ms: budget,
-        groups: if sequential {
-            ordered.into_iter().map(|step| vec![step]).collect()
-        } else if ordered.is_empty() {
-            vec![]
-        } else {
-            vec![ordered]
-        },
-        replacement,
+        budget_ms: scheduled.budget_ms,
+        groups: scheduled
+            .groups
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|step| Step {
+                        id: step.id,
+                        on_error: step.on_error,
+                    })
+                    .collect()
+            })
+            .collect(),
+        replacement: scheduled.replacement,
         observe: event != "input.submit"
             && (matches!(adapter, "qwenpaw" | "qoder-sdk")
                 || adapter::observation_enabled(document, target)),
-        skill_check: if adapter == "hermes" {
-            selected
-                .iter()
-                .filter(|step| {
-                    crate::adapters::sdk_tools::checks_skill_tool(step, "hermes", "skill_view")
-                })
-                .map(|step| step.on_error.clone())
-                .max_by_key(|action| action == "block")
-        } else {
-            None
-        },
+        skill_check: scheduled.skill_check,
     })
 }
 

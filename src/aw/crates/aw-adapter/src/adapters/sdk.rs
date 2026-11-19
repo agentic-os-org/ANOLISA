@@ -99,6 +99,24 @@ impl Adapter for Sdk {
     }
 }
 
+pub(crate) fn validate_capabilities(
+    capabilities: &aw_core::admission::AdapterCapabilities,
+) -> Result<()> {
+    let supported = crate::adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
+    if capabilities.version != supported.version
+        || !capabilities.failure_actions.is_empty()
+        || capabilities.events.iter().any(|(event, effects)| {
+            supported
+                .events
+                .get(event)
+                .is_none_or(|allowed| effects.iter().any(|effect| !allowed.contains(effect)))
+        })
+    {
+        return Err("unsupported semantic SDK profile or effect".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
