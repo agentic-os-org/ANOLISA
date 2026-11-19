@@ -1,0 +1,173 @@
+Internal ctest changing into directory: /work/build-ninja
+Test project /work/build-ninja
+      Start 38: ApprovalTests
+ 1/82 Test #38: ApprovalTests ....................................................   Passed    4.15 sec
+      Start  1: RunTests
+ 2/82 Test  #1: RunTests .........................................................   Passed    1.85 sec
+      Start  2: List::Tests::Output
+ 3/82 Test  #2: List::Tests::Output ..............................................   Passed    0.03 sec
+      Start  3: VerbosityIsPerReporter
+ 4/82 Test  #3: VerbosityIsPerReporter ...........................................   Passed    0.01 sec
+      Start  4: List::Tests::Quiet
+ 5/82 Test  #4: List::Tests::Quiet ...............................................   Passed    0.01 sec
+      Start  5: List::Tests::ExitCode
+ 6/82 Test  #5: List::Tests::ExitCode ............................................   Passed    0.02 sec
+      Start  6: List::Tests::XmlOutput
+ 7/82 Test  #6: List::Tests::XmlOutput ...........................................   Passed    0.02 sec
+      Start  7: List::Tests::Json::Normal
+ 8/82 Test  #7: List::Tests::Json::Normal ........................................   Passed    0.02 sec
+      Start  8: List::Tests::Json::Quiet
+ 9/82 Test  #8: List::Tests::Json::Quiet .........................................   Passed    0.02 sec
+      Start  9: List::Tests::Json::High
+10/82 Test  #9: List::Tests::Json::High ..........................................   Passed    0.02 sec
+      Start 10: List::Tags::Output
+11/82 Test #10: List::Tags::Output ...............................................   Passed    0.02 sec
+      Start 11: List::Tags::ExitCode
+12/82 Test #11: List::Tags::ExitCode .............................................   Passed    0.01 sec
+      Start 12: List::Tags::XmlOutput
+13/82 Test #12: List::Tags::XmlOutput ............................................   Passed    0.01 sec
+      Start 13: List::Tags::JsonOutput
+14/82 Test #13: List::Tags::JsonOutput ...........................................   Passed    0.01 sec
+      Start 14: List::Reporters::Output
+15/82 Test #14: List::Reporters::Output ..........................................   Passed    0.00 sec
+      Start 15: List::Reporters::ExitCode
+16/82 Test #15: List::Reporters::ExitCode ........................................   Passed    0.00 sec
+      Start 16: List::Reporters::XmlOutput
+17/82 Test #16: List::Reporters::XmlOutput .......................................   Passed    0.00 sec
+      Start 17: List::Reporters::JsonOutput
+18/82 Test #17: List::Reporters::JsonOutput ......................................   Passed    0.01 sec
+      Start 18: List::Listeners::Output
+19/82 Test #18: List::Listeners::Output ..........................................   Passed    0.01 sec
+      Start 19: List::Listeners::ExitCode
+20/82 Test #19: List::Listeners::ExitCode ........................................   Passed    0.00 sec
+      Start 20: List::Listeners::XmlOutput
+21/82 Test #20: List::Listeners::XmlOutput .......................................   Passed    0.01 sec
+      Start 21: List::Listeners::JsonOutput
+22/82 Test #21: List::Listeners::JsonOutput ......................................   Passed    0.01 sec
+      Start 22: NoAssertions
+23/82 Test #22: NoAssertions .....................................................   Passed    0.00 sec
+      Start 23: TestSpecs::CombiningMatchingAndNonMatchingIsOk-1
+24/82 Test #23: TestSpecs::CombiningMatchingAndNonMatchingIsOk-1 .................   Passed    0.01 sec
+      Start 24: TestSpecs::CombiningMatchingAndNonMatchingIsOk-2
+25/82 Test #24: TestSpecs::CombiningMatchingAndNonMatchingIsOk-2 .................   Passed    0.01 sec
+      Start 25: TestSpecs::NoMatchedTestsFail
+26/82 Test #25: TestSpecs::NoMatchedTestsFail ....................................   Passed    0.01 sec
+      Start 26: TestSpecs::OverrideFailureWithNoMatchedTests
+27/82 Test #26: TestSpecs::OverrideFailureWithNoMatchedTests .....................   Passed    0.01 sec
+      Start 27: TestSpecs::OverrideAllSkipFailure
+28/82 Test #27: TestSpecs::OverrideAllSkipFailure ................................   Passed    0.01 sec
+      Start 28: TestSpecs::NonMatchingTestSpecIsRoundTrippable
+29/82 Test #28: TestSpecs::NonMatchingTestSpecIsRoundTrippable ...................   Passed    0.01 sec
+      Start 29: Warnings::UnmatchedTestSpecIsAccepted
+30/82 Test #29: Warnings::UnmatchedTestSpecIsAccepted ............................   Passed    0.01 sec
+      Start 30: Warnings::MultipleWarningsCanBeSpecified
+31/82 Test #30: Warnings::MultipleWarningsCanBeSpecified .........................   Passed    0.01 sec
+      Start 31: TestSpecs::WarnUnmatchedTestSpecFailsWithUnmatchedTestSpec
+32/82 Test #31: TestSpecs::WarnUnmatchedTestSpecFailsWithUnmatchedTestSpec .......   Passed    0.01 sec
+      Start 32: UnmatchedOutputFilter
+33/82 Test #32: UnmatchedOutputFilter ............................................   Passed    0.01 sec
+      Start 33: FilteredSections::SimpleExample::1
+34/82 Test #33: FilteredSections::SimpleExample::1 ...............................   Passed    0.01 sec
+      Start 34: FilteredSections::SimpleExample::2
+35/82 Test #34: FilteredSections::SimpleExample::2 ...............................   Passed    0.01 sec
+      Start 35: FilteredSections::GeneratorsDontCauseInfiniteLoop
+36/82 Test #35: FilteredSections::GeneratorsDontCauseInfiniteLoop ................   Passed    0.00 sec
+      Start 36: FilteredSections::DifferentSimpleFilters
+37/82 Test #36: FilteredSections::DifferentSimpleFilters .........................   Passed    0.59 sec
+      Start 37: FilteredSections::HittingGeneratorsWithSectionFilterCausesSkip
+38/82 Test #37: FilteredSections::HittingGeneratorsWithSectionFilterCausesSkip ...   Passed    0.01 sec
+      Start 39: RegressionCheck-1670
+39/82 Test #39: RegressionCheck-1670 .............................................   Passed    0.01 sec
+      Start 40: VersionCheck
+40/82 Test #40: VersionCheck .....................................................   Passed    0.01 sec
+      Start 41: LibIdentityTest
+41/82 Test #41: LibIdentityTest ..................................................   Passed    0.01 sec
+      Start 42: FilenameAsTagsTest
+42/82 Test #42: FilenameAsTagsTest ...............................................   Passed    0.02 sec
+      Start 43: FilenameAsTagsMatching
+43/82 Test #43: FilenameAsTagsMatching ...........................................   Passed    0.01 sec
+      Start 44: EscapeSpecialCharactersInTestNames
+44/82 Test #44: EscapeSpecialCharactersInTestNames ...............................   Passed    0.01 sec
+      Start 45: NegativeSpecNoHiddenTests
+45/82 Test #45: NegativeSpecNoHiddenTests ........................................   Passed    0.03 sec
+      Start 46: TestsInFile::SimpleSpecs
+46/82 Test #46: TestsInFile::SimpleSpecs .........................................   Passed    0.00 sec
+      Start 47: TestsInFile::EscapeSpecialCharacters
+47/82 Test #47: TestsInFile::EscapeSpecialCharacters .............................   Passed    0.00 sec
+      Start 48: TestsInFile::InvalidTestNames-1
+48/82 Test #48: TestsInFile::InvalidTestNames-1 ..................................   Passed    0.01 sec
+      Start 49: TagAlias
+49/82 Test #49: TagAlias .........................................................   Passed    0.01 sec
+      Start 50: RandomTestOrdering
+50/82 Test #50: RandomTestOrdering ...............................................   Passed    0.11 sec
+      Start 51: CheckConvenienceHeaders
+51/82 Test #51: CheckConvenienceHeaders ..........................................   Passed    0.06 sec
+      Start 52: Benchmarking::SkipBenchmarkMacros
+52/82 Test #52: Benchmarking::SkipBenchmarkMacros ................................   Passed    0.01 sec
+      Start 53: Benchmarking::FailureReporting::ThrowingBenchmark
+53/82 Test #53: Benchmarking::FailureReporting::ThrowingBenchmark ................   Passed    1.85 sec
+      Start 54: Benchmarking::FailureReporting::FailedAssertion
+54/82 Test #54: Benchmarking::FailureReporting::FailedAssertion ..................   Passed    1.67 sec
+      Start 55: Benchmarking::FailureReporting::FailMacro
+55/82 Test #55: Benchmarking::FailureReporting::FailMacro ........................   Passed    1.65 sec
+      Start 56: Benchmarking::FailureReporting::ShouldFailIsRespected
+56/82 Test #56: Benchmarking::FailureReporting::ShouldFailIsRespected ............   Passed    2.00 sec
+      Start 57: ErrorHandling::InvalidTestSpecExitsEarly
+57/82 Test #57: ErrorHandling::InvalidTestSpecExitsEarly .........................   Passed    0.01 sec
+      Start 58: MultiReporter::CapturingReportersDontPropagateStdOut
+58/82 Test #58: MultiReporter::CapturingReportersDontPropagateStdOut .............   Passed    0.01 sec
+      Start 59: MultiReporter::NonCapturingReportersPropagateStdout
+59/82 Test #59: MultiReporter::NonCapturingReportersPropagateStdout ..............   Passed    0.01 sec
+      Start 60: Outputs::DashAsOutLocationSendsOutputToStdout
+60/82 Test #60: Outputs::DashAsOutLocationSendsOutputToStdout ....................   Passed    0.01 sec
+      Start 61: Reporters::DashAsLocationInReporterSpecSendsOutputToStdout
+61/82 Test #61: Reporters::DashAsLocationInReporterSpecSendsOutputToStdout .......   Passed    0.01 sec
+      Start 62: Reporters::ReporterSpecificColourOverridesDefaultColour
+62/82 Test #62: Reporters::ReporterSpecificColourOverridesDefaultColour ..........   Passed    0.00 sec
+      Start 63: Reporters::UnrecognizedOptionInSpecCausesError
+63/82 Test #63: Reporters::UnrecognizedOptionInSpecCausesError ...................   Passed    0.00 sec
+      Start 64: Colours::ColourModeCanBeExplicitlySetToAnsi
+64/82 Test #64: Colours::ColourModeCanBeExplicitlySetToAnsi ......................   Passed    0.01 sec
+      Start 65: Reporters::JUnit::NamespacesAreNormalized
+65/82 Test #65: Reporters::JUnit::NamespacesAreNormalized ........................   Passed    0.01 sec
+      Start 66: Reporters:Filters:compact
+66/82 Test #66: Reporters:Filters:compact ........................................   Passed    0.00 sec
+      Start 67: Reporters:RngSeed:compact
+67/82 Test #67: Reporters:RngSeed:compact ........................................   Passed    0.01 sec
+      Start 68: Reporters:Filters:console
+68/82 Test #68: Reporters:Filters:console ........................................   Passed    0.01 sec
+      Start 69: Reporters:RngSeed:console
+69/82 Test #69: Reporters:RngSeed:console ........................................   Passed    0.01 sec
+      Start 70: Reporters:Filters:JUnit
+70/82 Test #70: Reporters:Filters:JUnit ..........................................   Passed    0.01 sec
+      Start 71: Reporters:RngSeed:JUnit
+71/82 Test #71: Reporters:RngSeed:JUnit ..........................................   Passed    0.01 sec
+      Start 72: Reporters:Filters:SonarQube
+72/82 Test #72: Reporters:Filters:SonarQube ......................................   Passed    0.01 sec
+      Start 73: Reporters:RngSeed:SonarQube
+73/82 Test #73: Reporters:RngSeed:SonarQube ......................................   Passed    0.01 sec
+      Start 74: Reporters:Filters:TAP
+74/82 Test #74: Reporters:Filters:TAP ............................................   Passed    0.01 sec
+      Start 75: Reporters:RngSeed:TAP
+75/82 Test #75: Reporters:RngSeed:TAP ............................................   Passed    0.01 sec
+      Start 76: Reporters:Filters:XML
+76/82 Test #76: Reporters:Filters:XML ............................................   Passed    0.01 sec
+      Start 77: Reporters:RngSeed:XML
+77/82 Test #77: Reporters:RngSeed:XML ............................................   Passed    0.01 sec
+      Start 78: Reporters:Filters:JSON
+78/82 Test #78: Reporters:Filters:JSON ...........................................   Passed    0.01 sec
+      Start 79: Reporters:RngSeed:JSON
+79/82 Test #79: Reporters:RngSeed:JSON ...........................................   Passed    0.01 sec
+      Start 80: Bazel::RngSeedEnvVar::JustEnv
+80/82 Test #80: Bazel::RngSeedEnvVar::JustEnv ....................................   Passed    0.01 sec
+      Start 81: Bazel::RngSeedEnvVar::EnvHasPriorityOverCLI
+81/82 Test #81: Bazel::RngSeedEnvVar::EnvHasPriorityOverCLI ......................   Passed    0.01 sec
+      Start 82: Bazel::RngSeedEnvVar::MalformedValueIsIgnored
+82/82 Test #82: Bazel::RngSeedEnvVar::MalformedValueIsIgnored ....................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 82
+
+Label Time Summary:
+uses-python    =   4.90 sec*proc (4 tests)
+
+Total Test time (real) =  14.77 sec

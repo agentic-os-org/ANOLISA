@@ -48,6 +48,12 @@ prefixes without Stash while preserving failed tasks, warnings, and record order
 [Gradle build output](../../docs/user-guide/en/tokenless/index.md#gradle-build-output)
 for scope boundaries, output reconstruction, and validation limits.
 
+CTest output reaching PostTool can share repeated `/` and `::` test-name prefixes and
+dot-leader padding across both serial `Start`/result blocks and `-j` parallel interleaved
+streams without Stash while preserving failing tests, diagnostics, summaries, and record
+order. See [CTest output](../../docs/user-guide/en/tokenless/index.md#ctest-output) for
+scope boundaries, output reconstruction, and validation limits.
+
 ## Features
 
 | Capability | Savings indicator | Details |

@@ -3,6 +3,7 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod ctest;
 mod gradle;
 mod maven;
 mod pnpm;
@@ -115,26 +116,36 @@ impl BuildLogCompressor {
         };
         if !matches!(
             format,
-            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+            BuildLogFormat::Pnpm
+                | BuildLogFormat::Maven
+                | BuildLogFormat::Gradle
+                | BuildLogFormat::Ctest
         ) && store.is_none()
         {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
-        // Preserve already-compacted Gradle results as terminal even when an
+        // Preserve already-compacted Gradle and CTest results as terminal even when an
         // oversized preamble pushes the template header out of the sample window.
         if !matches!(
             format,
-            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
-        ) && gradle::is_compacted(&lines)
-        {
-            format = BuildLogFormat::Gradle;
+            BuildLogFormat::Pnpm
+                | BuildLogFormat::Maven
+                | BuildLogFormat::Gradle
+                | BuildLogFormat::Ctest
+        ) {
+            if gradle::is_compacted(&lines) {
+                format = BuildLogFormat::Gradle;
+            } else if ctest::is_compacted(&lines) {
+                format = BuildLogFormat::Ctest;
+            }
         }
-        let (maven_layouts, gradle_layouts) = match format {
-            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new()),
-            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines)),
-            _ => (Vec::new(), Vec::new()),
+        let (maven_layouts, gradle_layouts, ctest_layouts) = match format {
+            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new(), Vec::new()),
+            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines), Vec::new()),
+            BuildLogFormat::Ctest => (Vec::new(), Vec::new(), ctest::plan(&lines)),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
         };
         let mut maven_transfers = Vec::new();
         if format == BuildLogFormat::Maven
@@ -160,6 +171,13 @@ impl BuildLogCompressor {
             && let Some(generic) = detect_generic(&sample)
         {
             format = generic;
+        } else if format == BuildLogFormat::Ctest
+            && ctest_layouts.is_empty()
+            && !ctest::is_compacted(&lines)
+            && store.is_some()
+            && let Some(generic) = detect_generic(&sample)
+        {
+            format = generic;
         }
         let stripped = lines
             .iter()
@@ -179,6 +197,12 @@ impl BuildLogCompressor {
                 vec![LineRole::Summary; lines.len()],
                 HashSet::new(),
                 gradle_layouts,
+            )
+        } else if format == BuildLogFormat::Ctest {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                ctest_layouts,
             )
         } else {
             let templates = dominant_generic_templates(format, &stripped);
@@ -399,7 +423,8 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
-    // Keep CR visible to Maven and Gradle, whose layout grammars only handle LF records.
+    let ctest = ctest::detect(&sample);
+    // Keep CR visible to Maven, Gradle, and CTest, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
@@ -414,6 +439,9 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     }
     if gradle {
         return (Some(BuildLogFormat::Gradle), sample);
+    }
+    if ctest {
+        return (Some(BuildLogFormat::Ctest), sample);
     }
     let formats = [
         BuildLogFormat::Cargo,

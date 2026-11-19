@@ -571,3 +571,70 @@ fn isolated_gradle_markers_and_quoted_examples_do_not_override_enclosing_documen
         assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
     }
 }
+
+#[test]
+fn detects_serial_parallel_and_failure_ctest_logs() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_parallel.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/libgit2_offline_failure.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+}
+
+#[test]
+fn isolated_ctest_markers_and_quoted_examples_do_not_override_enclosing_documents() {
+    let valid_log = concat!(
+        "Test project /work/build\n",
+        "      Start  1: suite/a\n",
+        " 1/2 Test  #1: suite/a ..........................   Passed    0.01 sec\n",
+        "      Start  2: suite/b\n",
+        " 2/2 Test  #2: suite/b ..........................   Passed    0.01 sec\n",
+        "\n",
+        "100% tests passed, 0 tests failed out of 2\n",
+    );
+    for (before, after, expected) in [
+        (
+            "CTest output example:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "+ /usr/bin/cat ctest.log\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# CTest example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "Test project /work/build\n",
+        "      Start  1: suite/a\n",
+        "100% tests passed, 0 tests failed out of 1\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}

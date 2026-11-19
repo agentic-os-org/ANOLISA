@@ -23,6 +23,7 @@ pub(crate) fn generic_progress_template(line: &str) -> Option<String> {
         || trimmed.starts_with("Progress (")
         || super::maven::is_download_line(trimmed)
         || super::gradle::is_task_line(trimmed)
+        || super::ctest::is_ctest_line(trimmed)
     {
         return None;
     }

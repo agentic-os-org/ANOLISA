@@ -5642,3 +5642,244 @@ fn gradle_post_tool_retains_generic_recovery_when_no_task_layout_saves_tokens() 
         .unwrap();
     assert_eq!(compressed.replacen(marker, &payload, 1), input);
 }
+
+#[test]
+fn ctest_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt"
+    );
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "ctest")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/ctest/libgit2_offline_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(failed, "error", "ctest-error");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+
+    // Parallel interleaving with `|| true`: slow failing test's Start stays verbatim.
+    let mut masked_parallel_fail =
+        String::from("Test project /work/build\n      Start  1: suite/slow_fail\n");
+    for id in 2..=13 {
+        let ord = id - 1;
+        let tag = format!("#{id}");
+        let name = format!("suite/fast_{ord:02}");
+        masked_parallel_fail.push_str(&format!("      Start {id:2}: {name}\n"));
+        masked_parallel_fail.push_str(&format!(
+            "{ord:2}/13 Test {tag:>3}: {name} .................................   Passed    0.01 sec\n"
+        ));
+    }
+    masked_parallel_fail.push_str(
+        "13/13 Test  #1: suite/slow_fail ................................***Failed    1.25 sec\n\
+         assertion failed: expected ok\n",
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(
+        &masked_parallel_fail,
+        "success",
+        "ctest -j 2 --output-on-failure || true",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["recoverability"], "lossless");
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+    let compressed = result["output"].as_str().unwrap();
+    assert!(compressed.contains("      Start  1: suite/slow_fail\n"));
+    assert!(compressed.contains("***Failed"));
+    assert!(!compressed.lines().any(|line| {
+        line == "s\t1" || (line.starts_with("S\t") && line.contains("suite/slow_fail"))
+    }));
+
+    // Multi-block parallel `-j 2` passing run across MAX_ROWS stays >65% compacted end-to-end.
+    let mut parallel_400 =
+        String::from("Test project /work/build\n      Start   1: pkg/sub/case_0001\n");
+    for id in 2..=400 {
+        let ord = id - 1;
+        let tag = format!("#{}", ord);
+        let prev = format!("pkg/sub/case_{ord:04}");
+        let curr = format!("pkg/sub/case_{id:04}");
+        parallel_400.push_str(&format!("      Start {id:>3}: {curr}\n"));
+        parallel_400.push_str(&format!(
+            "{ord:>3}/400 Test {tag:>4}: {prev} ...............................   Passed    0.01 sec\n"
+        ));
+    }
+    parallel_400.push_str(
+        "400/400 Test #400: pkg/sub/case_0400 ...............................   Passed    0.01 sec\n\
+         \n100% tests passed, 0 tests failed out of 400\n",
+    );
+    let large_fixture = TempDataDir::new().unwrap();
+    let large_request =
+        build_log_request(&parallel_400, "success", "ctest -j 2 --output-on-failure");
+    let large_output = spawn_with_stdin(
+        large_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &large_request,
+    );
+    assert!(
+        large_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&large_output.stderr)
+    );
+    let large_response: serde_json::Value = serde_json::from_slice(&large_output.stdout).unwrap();
+    assert_eq!(large_response["protocol_version"], 2);
+    let large_result = &large_response["result"];
+    assert_eq!(large_result["disposition"], "applied");
+    assert_eq!(large_result["recoverability"], "lossless");
+    assert_eq!(large_result["stash_keys"], serde_json::json!([]));
+    let large_compressed = large_result["output"].as_str().unwrap();
+    assert!(
+        !large_compressed
+            .lines()
+            .any(|line| line.trim_start().starts_with("Start "))
+    );
+    let before_tokens = large_result["before_tokens"].as_u64().unwrap();
+    let after_tokens = large_result["after_tokens"].as_u64().unwrap();
+    assert!(
+        after_tokens * 100 < before_tokens * 35,
+        "expected >65% savings, got {before_tokens} -> {after_tokens}"
+    );
+}
+
+#[test]
+fn ctest_post_tool_retains_generic_recovery_when_no_test_layout_saves_tokens() {
+    let progress = (1..=20)
+        .map(|index| {
+            format!("processing generated ctest fixture file {index} of 20 in sample suite\n")
+        })
+        .collect::<String>();
+    let input = format!(
+        "$ ctest --test-dir /work/build\n\
+         Test project /work/build\n\
+               Start  1: runningCustomHarness\n\
+         {progress}\
+          1/1 Test  #1: runningCustomHarness .............   Passed    0.10 sec\n\
+         \n\
+         100% tests passed, 0 tests failed out of 1\n\
+         exit code: 0\n"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(&input, "success", "ctest-recovery");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "build_log");
+    assert_eq!(result["recoverability"], "retrievable");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let compressed = result["output"].as_str().unwrap();
+    let marker = compressed
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = store
+        .retrieve(result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(compressed.replacen(marker, &payload, 1), input);
+}

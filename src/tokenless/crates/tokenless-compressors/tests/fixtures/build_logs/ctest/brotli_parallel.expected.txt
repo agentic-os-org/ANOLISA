@@ -1,0 +1,142 @@
+Internal ctest changing into directory: /work/build-ninja
+Test project /work/build-ninja
+CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): {"rows":135,"total":"73","start_indent":6,"idx_width":2,"id_width":2,"col":79,"prefixes":["compatibility/tests/testdata/","roundtrip/c/common/dictionary.h/","roundtrip/c/dec/decode.c/","roundtrip/c/enc/encode.c/","roundtrip/tests/testdata/alice29.txt/","roundtrip/tests/testdata/asyoulik.txt/","roundtrip/tests/testdata/lcet10.txt/","roundtrip/tests/testdata/plrabn12.txt/"]}
+s	16
+SP	1	12	@6:11	0.81
+s	4
+P	2	16	@7:11	1.13
+s	28
+P	3	4	@4:11	0.33
+s	8
+P	4	28	@2:11	0.19
+s	20
+P	5	8	@5:11	0.28
+s	15
+P	6	20	@3:11	0.19
+s	11
+P	7	15	@7:9	0.10
+s	3
+P	8	11	@6:9	0.07
+s	14
+P	9	3	@4:9	0.07
+SP	10		@6:6	0.05
+s	27
+P	11	14	@7:6	0.08
+s	7
+P	12	27	@2:9	0.05
+s	19
+P	13	7	@5:9	0.06
+s	2
+P	14	19	@3:9	0.04
+s	13
+P	15	2	@4:6	0.03
+s	9
+P	16	13	@7:1	0.04
+s	26
+P	17	9	@6:1	0.04
+s	18
+P	18	26	@2:6	0.03
+s	6
+P	19	18	@3:6	0.04
+s	1
+P	20	6	@5:6	0.03
+s	59
+P	21	1	@4:1	0.04
+s	56
+P	22	59	@0:mapsdatazrh.compressed	0.03
+s	61
+P	23	56	@0:empty.compressed.17	0.02
+SP	24	21	@1:1	0.02
+s	72
+P	25	61	@0:plrabn12.txt.compressed	0.03
+s	22
+P	26	72	@0:zeros.compressed	0.02
+s	73
+P	27	22	@1:6	0.02
+s	63
+P	28	73	@0:zerosukkanooa.compressed	0.02
+s	24
+P	29	63	@0:quickfox_repeated.compressed	0.02
+SP	30	37	@0:cp852-utf8.compressed	0.02
+s	29
+P	31	24	@1:11	0.04
+s	5
+P	32	29	@0:10x10y.compressed	0.02
+SP	33	44	@0:empty.compressed.05	0.02
+s	62
+P	34	5	@5:1	0.03
+s	64
+P	35	62	@0:quickfox.compressed	0.01
+s	36
+P	36	64	@0:random_org_10k.bin.compressed	0.02
+s	30
+P	37	36	@0:cp1251-utf16le.compressed	0.02
+s	60
+P	38	30	@0:64x.compressed	0.02
+s	50
+P	39	60	@0:monkey.compressed	0.02
+s	54
+P	40	50	@0:empty.compressed.11	0.02
+s	67
+P	41	54	@0:empty.compressed.15	0.02
+s	45
+P	42	67	@0:x.compressed.00	0.02
+s	34
+P	43	45	@0:empty.compressed.06	0.01
+s	40
+P	44	34	@0:compressed_file.compressed	0.01
+s	43
+P	45	40	@0:empty.compressed.01	0.02
+s	55
+P	46	43	@0:empty.compressed.04	0.01
+s	68
+P	47	55	@0:empty.compressed.16	0.02
+s	17
+P	48	68	@0:x.compressed.01	0.01
+SP	49	66	@0:x.compressed	0.01
+s	46
+P	50	17	@3:1	0.02
+s	49
+P	51	46	@0:empty.compressed.07	0.01
+s	33
+P	52	49	@0:empty.compressed.10	0.01
+SP	53	32	@0:asyoulik.txt.compressed	0.01
+s	42
+P	54	33	@0:backward65536.compressed	0.02
+SP	55	53	@0:empty.compressed.14	0.01
+s	38
+P	56	42	@0:empty.compressed.03	0.02
+s	48
+P	57	38	@0:empty.compressed	0.02
+s	23
+P	58	48	@0:empty.compressed.09	0.02
+SP	59	58	@0:lcet10.txt.compressed	0.02
+s	65
+P	60	23	@1:9	0.02
+s	31
+P	61	65	@0:ukkonooa.compressed	0.02
+s	51
+P	62	31	@0:alice29.txt.compressed	0.02
+s	25
+P	63	51	@0:empty.compressed.12	0.02
+s	35
+P	64	25	@2:1	0.02
+s	57
+P	65	35	@0:compressed_repeated.compressed	0.02
+SP	66	39	@0:empty.compressed.00	0.01
+s	70
+P	67	57	@0:empty.compressed.18	0.02
+s	71
+P	68	70	@0:x.compressed.03	0.01
+s	69
+P	69	71	@0:xyzzy.compressed	0.02
+s	41
+P	70	69	@0:x.compressed.02	0.02
+s	52
+P	71	41	@0:empty.compressed.02	0.02
+SP	72	47	@0:empty.compressed.08	0.01
+P	73	52	@0:empty.compressed.13	0.02
+
+100% tests passed, 0 tests failed out of 73
+
+Total Test time (real) =   2.35 sec
