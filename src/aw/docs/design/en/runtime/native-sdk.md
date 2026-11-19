@@ -96,13 +96,14 @@ no blocking or final-delivery guarantee. Missing policy and transport fallback
 remain distinguishable. The application must confirm installed boundaries in
 `install(routes)` and verify adoption before declaring control effects.
 
-The shared vocabulary still has 16 Hooks. This initial ingress implements the
-three boundaries above. Native Hook sources and language instrumentation can
-feed it when their event semantics and adoption have been verified. Existing
-Qoder and QwenPaw integrations keep canonical native mapping where they support
-richer effects. Automatic source discovery, per-Hook source resolution, generic
-Python/JavaScript instrumentation backends and ptrace are planned. No mandatory
-dowhen dependency or second execution engine is introduced.
+The shared vocabulary has 16 Hooks. The Python `aw_sdk.sources` and TypeScript
+`@anolisa/aw-sdk/sources` modules implement the three boundaries above through
+explicit function wrapping or object instrumentation. They use one Admission and
+Task per session. Qoder and QwenPaw keep their native mapping for richer effects.
+Native Hook sources can use the same ingress once their event semantics and adoption
+are verified. The explicit wrappers use the existing execution engine and require
+no dowhen dependency. Automatic discovery, per-Hook source selection and ptrace
+remain planned.
 
 ## Client availability contract
 

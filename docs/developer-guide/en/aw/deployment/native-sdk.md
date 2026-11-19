@@ -216,7 +216,79 @@ restart with the corresponding AW executable available.
 
 Configure a target named `app` with `adapter: sdk` and the application's ordinary
 `argv`. The application starts itself; `aw run` cannot launch this profile.
-Start AW separately with the complete configuration. Use the
+Start AW separately with the complete configuration.
+
+For declarative wrapping or method instrumentation on any Python or Node/JS agent
+without writing a dedicated Rust Adapter, use the language-level Source Runtime
+(`@anolisa/aw-sdk/sources` in Node/TypeScript or `aw_sdk.sources` in Python):
+
+- Create a source with `LanguageSource.create(...)` in either language, building
+  canonical `aw-hook-source/v1` capabilities and route confirmation (`availability`
+  supports both `required` and `native_fallback`).
+- Open one session per request (`source.withSession(...)` / `source.session(...)`
+  in TypeScript; `async with source.session(...)` in Python) owning one
+  `Admission` and immutable `Task`. Narrowed session event lists cannot skip
+  admitted Task routes (`source_route_coverage_incomplete`).
+- Wrap callables or patch object methods with `session.wrapInput`,
+  `session.wrapTool`, `session.wrapInputStream` / `session.wrapToolStream`, and
+  `session.instrument` in TypeScript, or `session.wrap_input`,
+  `session.wrap_tool`, and `session.instrument` in Python. Blocked `input.submit`
+  and `tool.before` calls raise `SourceDenied` before native execution.
+  Input and tool wrappers deep-copy plain JSON arguments before admission and
+  use those copies for extraction and native execution, including the first
+  stream read. For class instances or other application-specific arguments,
+  supply `snapshotArg` (TypeScript) or `snapshot_arg` (Python). It must return a
+  separate argument of the expected native type and copy all mutable input the
+  callable reads, including during iteration. For example, a request containing
+  only a text field can use `snapshotArg: req => new RequestData(req.text)`.
+  An argument that needs a copy raises `source_input_snapshot_required` when
+  the callback is absent or returns the original object.
+  Set the callback in the method's `toolMethods` or `tool_methods` options
+  when using instrumentation. Python also accepts `snapshot_arg` on
+  `instrument` as a default for its methods. Custom tool input extractors
+  should read the copied arguments and include every field that policy needs to
+  check. The SDK rechecks that projection before dispatch.
+- For direct iteration in TypeScript, use `wrapInputStream`, `wrapToolStream`
+  or `{ stream: true }` with either a generator declaration or a factory. With
+  implicit detection, a native async generator returns an iterator and an
+  ordinary factory returns a Promise. Their TypeScript call signatures can be
+  identical, so `await wrapped(...args)` handles either return shape. Select an
+  explicit stream wrapper when a factory needs SDK-managed stream cleanup or
+  tool result collection.
+- A Task with an admitted `tool.after` route collects stream items up to
+  `maxStreamItems` / `max_stream_items`. When `extractResult` / `extract_result`
+  is set, it receives the collected native chunks (with plain JSON chunks copied
+  before yielding). A before-only Task or a Task in native
+  fallback passes through native results and stream items. Errors in result
+  extraction, normalization or collection carry `toolExecuted` / `tool_executed`.
+- Synchronous wrapped callables execute on the event loop thread; use `async`
+  callables or offload blocking work (such as `asyncio.to_thread` in Python) so
+  cancellation, concurrent sessions and `close` timeouts remain responsive.
+- Session close stops active streams and waits for admitted native calls,
+  in-flight `submit` / `beforeTool` / `before_tool` checks and
+  their `tool.after` observations before restoring patched methods and releasing
+  the Task. Python cancels the pending native read. In Node, pass `session.signal`
+  to blocking native reads. For caller cancellation, combine it with the caller's
+  signal using `AbortSignal.any` and pass that signal to both the read and
+  `extractSignal`. The SDK preserves direct `AbortSignal` arguments by reference.
+  If pending work exceeds the close timeout (defaulting to the session timeout,
+  or overridden per call with `{ timeoutMs }` / `timeout_ms`), close reports
+  `source_close_pending` while keeping patched methods and the Task in place as
+  work drains. Unblock the native work and await close again, including
+  `source.close()` if the source owns the Instance. After cancellation, session
+  close releases the Task and reports native cleanup failures, including those
+  from in-flight reads or stream factories. Once `source.close()` starts, all
+  existing sessions close concurrently and new sessions fail with `source_closed`.
+  Retrying a timed-out Source close also reports a native cleanup failure that
+  occurred between attempts.
+- One method on a given object instance may be instrumented by only one active
+  `SourceSession` at a time (`source_already_instrumented`); create per-request
+  object instances or wrap functions directly when serving concurrent sessions.
+
+See the [TypeScript Source example](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
+and [Python Source example](../../../../../src/aw/sdk/python/examples/language_source.py).
+
+For low-level direct callbacks, use the
 [TypeScript example](../../../../../src/aw/sdk/typescript/examples/application.mjs)
 or [Python example](../../../../../src/aw/sdk/python/examples/application.py), set
 `AW_SOCKET` to its private socket, and install the matching language package.
@@ -231,11 +303,10 @@ native execution, preserve native permission checks and close tasks after work
 has drained. Exact fields and supported effects are in the
 [semantic ingress contract](../../../../../src/aw/docs/design/en/runtime/native-sdk.md#shared-semantic-ingress).
 
-A native Hook or optional instrumentation source can feed these same callbacks.
-Source discovery and automatic coverage selection remain planned. Adding an
-application with these semantics needs no new framework-specific Rust Adapter.
-For richer native effects, use the optional integrations below and the
-[Python/QwenPaw guide](python-sdk.md).
+A native Hook or language instrumentation source can feed these same callbacks.
+Automatic Source discovery and coverage selection remain planned. Adding an
+application with these semantics needs only the core SDK and no framework-specific
+Rust Adapter. For richer native effects, use the framework integrations below and see the [Python/QwenPaw guide](python-sdk.md).
 
 ## Install and connect
 
