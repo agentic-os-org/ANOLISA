@@ -384,6 +384,17 @@ pub(crate) fn candidate_for_finding(
             quota_branches: None,
         });
     }
+    if base == "J23" && string_fact(report, "host.conntrack_netns_id").is_some() {
+        return Some(CandidateEpisode {
+            event: false,
+            key: "host|conntrack".to_string(),
+            problem: problem.to_string(),
+            severity,
+            epoch: None,
+            counter_window: None,
+            quota_branches: None,
+        });
+    }
     None
 }
 

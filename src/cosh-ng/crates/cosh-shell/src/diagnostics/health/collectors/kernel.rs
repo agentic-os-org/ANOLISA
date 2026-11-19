@@ -8,6 +8,7 @@ use oom::{
 };
 
 pub(crate) mod attribution;
+pub(crate) mod capacity;
 pub(crate) mod cgroup;
 mod collect;
 mod oom;

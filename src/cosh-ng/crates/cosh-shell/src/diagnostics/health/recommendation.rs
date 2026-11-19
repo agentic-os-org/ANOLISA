@@ -225,6 +225,14 @@ fn candidates_for_finding(
                     ));
                 }
             }
+            AdviceKind::SystemCapacity => items.push(try_item(
+                definition.legacy_id,
+                finding,
+                definition.label_id,
+                definition.reason_id,
+                finding.detail_args.clone(),
+                base,
+            )),
         }
     }
     items
@@ -278,6 +286,9 @@ fn prompt_id_for_label(label_id: HealthMessageId) -> Option<HealthMessageId> {
         }
         HealthMessageId::HealthTryReviewUnavailableChecks => {
             Some(HealthMessageId::HealthPromptReviewUnavailableChecks)
+        }
+        HealthMessageId::HealthTryInspectSystemCapacity => {
+            Some(HealthMessageId::HealthPromptInspectSystemCapacity)
         }
         _ => None,
     }

@@ -220,6 +220,7 @@ pub(crate) enum AdviceKind {
     HighLoad,
     ProcessMemory,
     UnavailableChecks,
+    SystemCapacity,
 }
 
 pub(crate) struct AdviceDefinition {
@@ -296,6 +297,15 @@ const UNAVAILABLE_CHECKS_ADVICE: AdviceDefinition = AdviceDefinition {
     bash_surface: false,
 };
 
+const SYSTEM_CAPACITY_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::SystemCapacity,
+    legacy_id: "T09",
+    prompt_id: HealthMessageId::HealthPromptInspectSystemCapacity,
+    label_id: HealthMessageId::HealthTryInspectSystemCapacity,
+    reason_id: HealthMessageId::HealthTryReasonSystemCapacity,
+    bash_surface: true,
+};
+
 pub(crate) const ADVICE_DEFINITIONS: &[AdviceDefinition] = &[
     MEMORY_PRESSURE_ADVICE,
     SWAP_PRESSURE_ADVICE,
@@ -305,6 +315,7 @@ pub(crate) const ADVICE_DEFINITIONS: &[AdviceDefinition] = &[
     HIGH_LOAD_ADVICE,
     PROCESS_MEMORY_ADVICE,
     UNAVAILABLE_CHECKS_ADVICE,
+    SYSTEM_CAPACITY_ADVICE,
 ];
 
 pub(crate) fn advice_definition(kind: AdviceKind) -> &'static AdviceDefinition {
@@ -317,6 +328,7 @@ pub(crate) fn advice_definition(kind: AdviceKind) -> &'static AdviceDefinition {
         AdviceKind::HighLoad => &HIGH_LOAD_ADVICE,
         AdviceKind::ProcessMemory => &PROCESS_MEMORY_ADVICE,
         AdviceKind::UnavailableChecks => &UNAVAILABLE_CHECKS_ADVICE,
+        AdviceKind::SystemCapacity => &SYSTEM_CAPACITY_ADVICE,
     }
 }
 
@@ -343,6 +355,7 @@ pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
     ("J20", &[AdviceKind::MemoryPressure]),
     ("J21", &[AdviceKind::DiskUsage]),
     ("J22", &[AdviceKind::HighLoad]),
+    ("J23", &[AdviceKind::SystemCapacity]),
 ];
 
 pub(crate) fn advice_for_rule(finding_id: &str) -> &'static [AdviceKind] {
@@ -521,7 +534,7 @@ mod tests {
     fn rule_advice_declares_every_rule_exactly_once() {
         let mut declared: Vec<&str> = RULE_ADVICE.iter().map(|(rule, _)| *rule).collect();
         declared.sort_unstable();
-        let expected: Vec<String> = (1..=22).map(|index| format!("J{index:02}")).collect();
+        let expected: Vec<String> = (1..=23).map(|index| format!("J{index:02}")).collect();
         assert_eq!(declared, expected);
         assert!(advice_for_rule("J01").is_empty());
         assert!(advice_for_rule("J14").is_empty());
@@ -573,14 +586,14 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08"]
+            ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"]
         );
         let bash: Vec<&str> = ADVICE_DEFINITIONS
             .iter()
             .filter(|item| item.bash_surface)
             .map(|item| item.legacy_id)
             .collect();
-        assert_eq!(bash, ["T01", "T02", "T03", "T04", "T06", "T07"]);
+        assert_eq!(bash, ["T01", "T02", "T03", "T04", "T06", "T07", "T09"]);
         for definition in ADVICE_DEFINITIONS {
             assert_eq!(
                 advice_definition(definition.kind).legacy_id,

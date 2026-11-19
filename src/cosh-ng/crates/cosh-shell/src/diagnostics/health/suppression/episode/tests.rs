@@ -788,3 +788,117 @@ fn psi_unknown_reading_never_recovers_episode() {
     sync(&mut state, &signal, 2000);
     assert!(state.volume.contains_key("host|psi_memory"));
 }
+
+fn conntrack_report(count: u64, max: u64) -> HealthScanReport {
+    let mut report = HealthScanReport::new("conntrack-test", 0);
+    for (key, value) in [
+        ("host.conntrack_count", HealthFactValue::Unsigned(count)),
+        ("host.conntrack_max", HealthFactValue::Unsigned(max)),
+        (
+            "host.conntrack_netns_id",
+            HealthFactValue::String("4:5".into()),
+        ),
+    ] {
+        report
+            .facts
+            .push(crate::diagnostics::health::model::HealthFact {
+                id: format!("id-{key}"),
+                key: key.to_string(),
+                category: crate::diagnostics::health::model::HealthFactCategory::Host,
+                value,
+                unit: None,
+                source: crate::diagnostics::health::model::HealthFactSource::Derived,
+                elapsed_ms: 0,
+            });
+    }
+    report
+        .check_results
+        .push(crate::diagnostics::health::model::HealthCheckResult {
+            id: "host.uptime".into(),
+            collector: Some(HealthCollector::Host),
+            status: HealthCheckStatus::Ok,
+            fact_ids: Vec::new(),
+            gaps: Vec::new(),
+            elapsed_ms: 0,
+        });
+    report
+}
+
+fn conntrack_candidate() -> CandidateEpisode {
+    CandidateEpisode {
+        event: false,
+        key: "host|conntrack".into(),
+        problem: "J23".into(),
+        severity: 3,
+        epoch: None,
+        counter_window: None,
+        quota_branches: None,
+    }
+}
+
+#[test]
+fn conntrack_only_critical_enters_and_zero_max_closes_member() {
+    let warning = signals_from_report(&conntrack_report(900_000, 1_000_000));
+    let member = warning
+        .volume
+        .iter()
+        .find(|member| member.key == "host|conntrack")
+        .unwrap();
+    assert!(!member.entered);
+    let critical = signals_from_report(&conntrack_report(999_000, 1_000_000));
+    let member = critical
+        .volume
+        .iter()
+        .find(|member| member.key == "host|conntrack")
+        .unwrap();
+    assert!(member.entered && member.valid);
+    let mut state = ledger();
+    assert!(deliverable(&state, &conntrack_candidate(), 1000));
+    record_delivery(&mut state, &conntrack_candidate(), 1000);
+    assert!(!deliverable(&state, &conntrack_candidate(), 2000));
+    let removed = signals_from_report(&conntrack_report(0, 0));
+    let member = removed
+        .volume
+        .iter()
+        .find(|member| member.key == "host|conntrack")
+        .unwrap();
+    assert!(member.exit && !member.entered);
+    sync(&mut state, &removed, 3000);
+    assert!(!state.volume.contains_key("host|conntrack"));
+    assert!(state.recoveries.contains_key("host|conntrack"));
+}
+
+#[test]
+fn conntrack_recovery_line_closes_and_recurrence_gate_applies() {
+    let mut state = ledger();
+    record_delivery(&mut state, &conntrack_candidate(), 1000);
+    let recovered = signals_from_report(&conntrack_report(800_000, 1_000_000));
+    sync(&mut state, &recovered, 2000);
+    assert!(!state.volume.contains_key("host|conntrack"));
+    assert!(!deliverable(
+        &state,
+        &conntrack_candidate(),
+        1000 + RECURRENCE_GATE_MS - 1
+    ));
+    assert!(deliverable(
+        &state,
+        &conntrack_candidate(),
+        1000 + RECURRENCE_GATE_MS
+    ));
+}
+
+#[test]
+fn conntrack_unknown_scalars_do_not_recover() {
+    let mut state = ledger();
+    record_delivery(&mut state, &conntrack_candidate(), 1000);
+    let mut report = conntrack_report(0, 0);
+    report.facts.retain(|fact| fact.key != "host.conntrack_max");
+    let signal = signals_from_report(&report);
+    assert!(!signal
+        .volume
+        .iter()
+        .any(|member| member.key == "host|conntrack"));
+    sync(&mut state, &signal, 2000);
+    assert!(state.volume.contains_key("host|conntrack"));
+}
+

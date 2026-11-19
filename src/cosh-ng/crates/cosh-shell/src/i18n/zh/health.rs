@@ -133,6 +133,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingPressureHigh => "{resource} 压力偏高",
         MessageId::HealthInsightPressureHigh => "{resource} {kind} 压力双窗持续偏高",
         MessageId::HealthEvidencePressureAvg => "{resource} {kind} 10s均值 {avg10}% · 60s均值 {avg60}%",
+        MessageId::HealthFindingConntrackCapacity => "conntrack 容量接近上限",
+        MessageId::HealthInsightConntrackCapacity => "连接跟踪容量接近耗尽",
+        MessageId::HealthEvidenceConntrack => "当前 netns conntrack {count}/{max}",
+        MessageId::HealthTryInspectSystemCapacity => "检查系统容量上限",
+        MessageId::HealthPromptInspectSystemCapacity => {
+            "帮我检查系统容量上限（文件句柄、conntrack）和主要占用，给出安全的缓解建议"
+        }
+        MessageId::HealthTryReasonSystemCapacity => "系统容量上限接近耗尽",
         MessageId::HealthFindingRecentOom => "近期 OOM 信号",
         MessageId::HealthFindingKernelPanic => "近期内核 panic",
         MessageId::HealthFindingServiceFailed => "服务失败",

@@ -165,6 +165,16 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthEvidencePressureAvg => {
             "{resource} {kind} avg10 {avg10}% · avg60 {avg60}%"
         }
+        MessageId::HealthFindingConntrackCapacity => "conntrack capacity near limit",
+        MessageId::HealthInsightConntrackCapacity => {
+            "connection tracking capacity is nearly exhausted"
+        }
+        MessageId::HealthEvidenceConntrack => "conntrack {count}/{max} in current netns",
+        MessageId::HealthTryInspectSystemCapacity => "Inspect system capacity limits",
+        MessageId::HealthPromptInspectSystemCapacity => {
+            "Help me check system capacity limits (file handles, conntrack) and the top consumers, then suggest safe relief"
+        }
+        MessageId::HealthTryReasonSystemCapacity => "a system capacity limit is near exhaustion",
         MessageId::HealthFindingRecentOom => "recent OOM signal",
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",

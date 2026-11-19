@@ -111,7 +111,7 @@ pub(crate) fn now_monotonic_ns() -> Option<u64> {
     }
 }
 
-fn journal_message(entry: &serde_json::Value) -> Option<String> {
+pub(super) fn journal_message(entry: &serde_json::Value) -> Option<String> {
     match entry.get("MESSAGE")? {
         serde_json::Value::String(message) => Some(message.clone()),
         serde_json::Value::Array(bytes) => {
@@ -125,8 +125,20 @@ fn journal_message(entry: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn journal_usec(entry: &serde_json::Value, key: &str) -> Option<u64> {
+pub(super) fn journal_usec(entry: &serde_json::Value, key: &str) -> Option<u64> {
     entry.get(key)?.as_str()?.parse().ok()
+}
+
+pub(super) fn journal_verified(entry: &serde_json::Value, ctx: &AttributionContext) -> bool {
+    entry.get("_TRANSPORT").and_then(|v| v.as_str()) == Some("kernel")
+        && entry.get("SYSLOG_FACILITY").and_then(|v| v.as_str()) == Some("0")
+        && match (
+            ctx.boot_id.as_deref(),
+            entry.get("_BOOT_ID").and_then(|v| v.as_str()),
+        ) {
+            (Some(expected), Some(actual)) => expected == actual,
+            _ => false,
+        }
 }
 
 /// Returns None when the output is not structured journal JSON at all, so the
@@ -161,15 +173,7 @@ pub(super) fn parse_journal_json_signals(
         if !super::is_oom_line(&lower) {
             continue;
         }
-        let verified = entry.get("_TRANSPORT").and_then(|v| v.as_str()) == Some("kernel")
-            && entry.get("SYSLOG_FACILITY").and_then(|v| v.as_str()) == Some("0")
-            && match (
-                ctx.boot_id.as_deref(),
-                entry.get("_BOOT_ID").and_then(|v| v.as_str()),
-            ) {
-                (Some(expected), Some(actual)) => expected == actual,
-                _ => false,
-            };
+        let verified = journal_verified(&entry, ctx);
         if !verified {
             unclocked += 1;
             continue;

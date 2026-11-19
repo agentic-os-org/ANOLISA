@@ -61,6 +61,9 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "health.pressure_notices" => {
                     config.health.pressure_notices = parse_bool_value(value);
                 }
+                "health.network_capacity_notices" => {
+                    config.health.network_capacity_notices = parse_bool_value(value);
+                }
                 "health.verbose" => config.health.verbose = parse_bool_value(value),
                 _ => {}
             }
@@ -254,6 +257,12 @@ pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshCon
         .and_then(toml::Value::as_bool)
     {
         config.health.pressure_notices = pressure_notices;
+    }
+    if let Some(network_capacity_notices) = health
+        .get("network_capacity_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.network_capacity_notices = network_capacity_notices;
     }
     if let Some(verbose) = health.get("verbose").and_then(toml::Value::as_bool) {
         config.health.verbose = verbose;

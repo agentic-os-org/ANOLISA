@@ -151,6 +151,12 @@ macro_rules! health_volume_ids {
             HealthFindingPressureHigh,
             HealthInsightPressureHigh,
             HealthEvidencePressureAvg,
+            HealthFindingConntrackCapacity,
+            HealthInsightConntrackCapacity,
+            HealthEvidenceConntrack,
+            HealthTryInspectSystemCapacity,
+            HealthPromptInspectSystemCapacity,
+            HealthTryReasonSystemCapacity,
         );
     };
 }

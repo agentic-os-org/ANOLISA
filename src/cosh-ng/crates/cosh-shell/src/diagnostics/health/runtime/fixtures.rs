@@ -149,6 +149,13 @@ fn fixture_source(name: &str) -> Option<&'static str> {
         "linux-pressure-low" | "pressure-low" => {
             Some(include_str!("../fixtures/linux-pressure-low.health"))
         }
+        "linux-conntrack" | "conntrack" => Some(include_str!("../fixtures/linux-conntrack.health")),
+        "linux-conntrack-low" | "conntrack-low" => {
+            Some(include_str!("../fixtures/linux-conntrack-low.health"))
+        }
+        "linux-conntrack-zero" | "conntrack-zero" => {
+            Some(include_str!("../fixtures/linux-conntrack-zero.health"))
+        }
         _ => None,
     }
 }
