@@ -18,6 +18,7 @@ mod logging;
 mod loop_detect;
 mod metrics;
 mod migrate;
+mod parent_watch;
 mod paths;
 mod process;
 mod protocol;

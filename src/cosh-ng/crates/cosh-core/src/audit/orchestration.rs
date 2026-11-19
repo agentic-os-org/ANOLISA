@@ -1,5 +1,7 @@
 //! Typed audit lifecycle projections used by the Core control loop.
 
+use std::time::Instant;
+
 use cosh_types::audit::{
     AuditApprovalData, AuditDecisionData, AuditLifecycleData, AuditOutcomeStatus,
     AuditProviderData, AuditToolData, KnownAuditEventType,
@@ -118,6 +120,11 @@ impl CoreAuditRecorder {
             None,
             &AuditLifecycleData::default(),
         );
+        self.open_turn = Some(super::OpenTurnAudit {
+            run_id: scope.run_id.to_string(),
+            turn_id: scope.turn_id.unwrap_or_default().to_string(),
+            provider: None,
+        });
     }
 
     pub(crate) fn record_turn_terminal(
@@ -126,6 +133,7 @@ impl CoreAuditRecorder {
         status: AuditOutcomeStatus,
         reason_code: Option<&str>,
     ) {
+        self.open_turn = None;
         let event_type = if status == AuditOutcomeStatus::Success {
             KnownAuditEventType::TurnCompleted
         } else {
@@ -152,14 +160,37 @@ impl CoreAuditRecorder {
         data: &AuditProviderData,
     ) -> Result<(), String> {
         let identity = self.scope_identity(scope);
-        self.barrier(
+        let result = self.barrier(
             KnownAuditEventType::ProviderRequestStarted,
             identity,
             AuditOutcomeStatus::Started,
             "provider",
             Some(provider),
             data,
-        )
+        );
+        match result {
+            Ok(()) => {
+                if let Some(open) = &mut self.open_turn {
+                    open.provider = Some(super::OpenProviderAudit {
+                        request_id: scope.request_id.unwrap_or_default().to_string(),
+                        provider_type: provider.to_string(),
+                        data: data.clone(),
+                        started: Instant::now(),
+                    });
+                }
+            }
+            Err(_) => {
+                // The provider was never called; end the turn with an audit
+                // failure so a later parent loss cannot append a cancelled
+                // terminal for a request that never started.
+                self.record_turn_terminal(
+                    CoreAuditScope::turn(scope.run_id, scope.turn_id.unwrap_or_default()),
+                    AuditOutcomeStatus::Failed,
+                    Some("audit_barrier_failed"),
+                );
+            }
+        }
+        result
     }
 
     pub(crate) fn record_provider_terminal(
@@ -171,6 +202,9 @@ impl CoreAuditRecorder {
         finish_category: &str,
         duration_ms: u64,
     ) {
+        if let Some(open) = &mut self.open_turn {
+            open.provider = None;
+        }
         let event_type = match status {
             AuditOutcomeStatus::Success => KnownAuditEventType::ProviderRequestCompleted,
             AuditOutcomeStatus::Cancelled => KnownAuditEventType::ProviderRequestCancelled,
@@ -188,6 +222,35 @@ impl CoreAuditRecorder {
                 finish_category: Some(finish_category.to_string()),
                 ..data.clone()
             },
+        );
+    }
+
+    /// Closes the lifecycles a parent-loss cancellation leaves open, with their
+    /// original IDs. Normal terminals clear the tracking, so a turn that already
+    /// completed can never receive a second terminal here.
+    pub(crate) fn finalize_parent_lost(&mut self) {
+        let Some(open) = self.open_turn.take() else {
+            return;
+        };
+        if let Some(provider) = open.provider {
+            self.record_provider_terminal(
+                CoreAuditScope::request(
+                    &open.run_id,
+                    Some(&open.turn_id),
+                    &provider.request_id,
+                    None,
+                ),
+                &provider.provider_type,
+                &provider.data,
+                AuditOutcomeStatus::Cancelled,
+                "parent_lost",
+                provider.started.elapsed().as_millis() as u64,
+            );
+        }
+        self.record_turn_terminal(
+            CoreAuditScope::turn(&open.run_id, &open.turn_id),
+            AuditOutcomeStatus::Cancelled,
+            Some("parent_lost"),
         );
     }
 

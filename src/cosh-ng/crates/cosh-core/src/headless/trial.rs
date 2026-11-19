@@ -534,12 +534,12 @@ mod tests {
             let line = serde_json::json!({"type":"registry_request","request_id":"switch-trial","domain":"auth","action":"activate_trial","params":null}).to_string();
             crate::registry::TEST_ECS_PROBE.scope((Ok(true),Arc::new(std::sync::atomic::AtomicUsize::new(0))),async {
                 let state_line = serde_json::json!({"type":"registry_request","request_id":"trial-state","domain":"auth","action":"state","params":{"probe_ecs_trial":true}}).to_string();
-                process_input_line(&state_line,&mut engine,&mut lines,&mut output,&args,&mut runtime,&mut extensions,&mut protocol).await;
+                process_input_line(&state_line,&mut engine,&mut lines,&mut output,&args,&mut runtime,&mut extensions,&mut protocol,&crate::parent_watch::ParentWatch::spawn()).await;
                 let response: serde_json::Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap_or(&output)).unwrap();
                 assert_eq!(response["data"]["ecs_trial"]["model"],expected_model);
                 assert_eq!(engine.config.ai.active_model,configured_model_before);
                 output.clear();
-                process_input_line(&line,&mut engine,&mut lines,&mut output,&args,&mut runtime,&mut extensions,&mut protocol).await;
+                process_input_line(&line,&mut engine,&mut lines,&mut output,&args,&mut runtime,&mut extensions,&mut protocol,&crate::parent_watch::ParentWatch::spawn()).await;
             }).await;
             let events: Vec<serde_json::Value> = String::from_utf8(output).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
             if fail_save {
@@ -557,7 +557,7 @@ mod tests {
             let saved = runtime.store.as_ref().unwrap().load(&runtime.record.session_id).unwrap();
             assert_eq!(saved.model, expected_model, "activation must persist before the next question");
             let shutdown = serde_json::json!({"type":"control_request","request_id":"shutdown","request":{"subtype":"shutdown"}}).to_string();
-            process_input_line(&shutdown,&mut engine,&mut lines,&mut Vec::new(),&args,&mut runtime,&mut extensions,&mut protocol).await;
+            process_input_line(&shutdown,&mut engine,&mut lines,&mut Vec::new(),&args,&mut runtime,&mut extensions,&mut protocol,&crate::parent_watch::ParentWatch::spawn()).await;
             let session_id = runtime.record.session_id.to_string();
             let mut resume_config = engine.config.clone();
             resume_config.session.persist_dir = root.path().join("sessions").to_str().unwrap().into();
@@ -763,6 +763,7 @@ mod tests {
                         &mut runtime,
                         &mut extensions,
                         &mut protocol,
+                        &crate::parent_watch::ParentWatch::spawn(),
                     )
                     .await;
                     if already_trial {
@@ -804,6 +805,7 @@ mod tests {
                         &mut runtime,
                         &mut extensions,
                         &mut protocol,
+                        &crate::parent_watch::ParentWatch::spawn(),
                     )
                     .await;
                     assert_eq!(engine.model, model);

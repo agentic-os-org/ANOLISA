@@ -112,6 +112,12 @@ pub struct CoshCore {
     /// it is a `OnceLock` rather than a plain field: the first failure is the
     /// diagnostic one and the session is over either way.
     control_transport_failure: OnceLock<String>,
+    /// First fire-and-forget emit failure (broken stdout), if any.
+    ///
+    /// Stream emits stay non-fatal mid-turn so declared tool calls still owe
+    /// results and approval audits pair (the checked-write contract); this
+    /// only marks the session for exit at the next line boundary.
+    emit_transport_failure: OnceLock<String>,
     execution_profile: ExecutionProfile,
 }
 
@@ -160,9 +166,25 @@ impl CoshCore {
 
     pub fn emit<W: Write>(&self, writer: &mut W, msg: &OutputMessage) {
         if let Ok(json) = serde_json::to_string(msg) {
-            let _ = writeln!(writer, "{json}");
-            let _ = writer.flush();
+            if let Err(error) = writeln!(writer, "{json}").and_then(|_| writer.flush()) {
+                self.note_emit_transport_failure(&error);
+            }
         }
+    }
+
+    /// Records broken stdout without disturbing the checked-write contract:
+    /// headless exits non-zero at the next line boundary (issue #10315).
+    fn note_emit_transport_failure(&self, error: &std::io::Error) {
+        let detail = format!("control transport emit failed: {error}");
+        if self.emit_transport_failure.set(detail.clone()).is_ok() {
+            tracing::error!("{detail}");
+            emit_fatal_diagnostic(&mut std::io::stderr().lock(), &detail);
+        }
+    }
+
+    /// The session-fatal emit failure, if stdout broke during this process.
+    pub fn emit_transport_failure(&self) -> Option<&str> {
+        self.emit_transport_failure.get().map(String::as_str)
     }
 
     /// Emits a control request whose response the core will then block on.
@@ -2428,7 +2450,7 @@ fn hold_approval_timeout_fatal(fatal_turn: &mut Option<FatalTurn>, request_id: &
 }
 
 /// Writes the fatal diagnostic without letting a broken stderr abort cleanup.
-fn emit_fatal_diagnostic<W: Write>(writer: &mut W, detail: &str) {
+pub(crate) fn emit_fatal_diagnostic<W: Write>(writer: &mut W, detail: &str) {
     let _ = writeln!(writer, "cosh-core fatal: {detail}");
 }
 

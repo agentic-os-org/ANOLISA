@@ -119,6 +119,7 @@ async fn next_background_compaction_turn(
         runtime,
         &mut extensions,
         &mut protocol,
+        &crate::parent_watch::ParentWatch::spawn(),
     )
     .await;
     assert!(matches!(result, InputLineResult::Continue));

@@ -111,6 +111,7 @@ impl CoshCore {
             ),
             approval_timed_out: std::sync::atomic::AtomicBool::new(false),
             control_transport_failure: std::sync::OnceLock::new(),
+            emit_transport_failure: std::sync::OnceLock::new(),
             execution_profile,
         };
         core.apply_execution_profile_constraints();
