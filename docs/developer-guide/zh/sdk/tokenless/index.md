@@ -413,10 +413,25 @@ summary = stats.summary()
 recent = stats.list(limit=20)
 
 print(status.database_path, summary.total.tokens_saved)
+scope = summary.summary_scope
+if scope is not None:
+    print(scope.records_selected, scope.records_total, scope.complete)
 if recent:
     record = stats.show(recent[0].id)
     change = stats.diff(record_id=record.id)
 ```
+
+`stats.summary()` 默认最多读取最新的 10,000 条记录。传入 `limit` 可调整统计窗口。
+`summary_scope` 报告扣除 dry-run 行之前的覆盖范围。
+
+- `records_selected` 是窗口内成功解码的记录数。
+- `records_total` 是同一快照中保存的全部压缩记录数。
+- 窗口覆盖全部压缩记录时，`complete` 为真。
+
+覆盖不完整时，`summary.attribution.retrieved_tokens` 和
+`summary.attribution.net_savings_tokens` 返回 `None`。毛节省量仍按窗口内选中的
+active 记录统计。检索查询失败时也可能没有检索计数。旧版原生后端可能返回
+`summary_scope=None`。
 
 Session 总览使用 `stats.diff(session_id="...")`；单次工具生命周期使用
 `stats.diff(session_id="...", tool_use_id="...")`；dry-run 与 active Session 对比使用
