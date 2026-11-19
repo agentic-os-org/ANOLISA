@@ -139,7 +139,7 @@ ordinary h2load traffic must not be described as malformed HTTP/2 testing.
 
 See the [benchmark usage guide](BENCHMARK_USAGE.md) for setup, common options, output files, and resource collection.
 
-`single_run/run.sh --agents N --tokens-per-second RATE` starts N independent Python clients. Each keeps one HTTPS/SSE request active and immediately starts another after completion. The token-paced mock sends repeated ` x`, verified with `tiktoken`'s `cl100k_base` before launch; input usage remains a synthetic 12 tokens per request.
+`single_run/run.sh --agents N --tokens-per-second RATE` starts N independent Python clients. Each keeps one HTTPS/SSE request active and immediately starts another after completion. The token-paced mock sends locally constructed ` x` fragments, counting each SSE delta as one synthetic test token and checking received counts against mock usage. No vocabulary is downloaded, and arbitrary model tokenization is not validated; input usage remains a synthetic 12 tokens per request.
 
 ```bash
 cd src/agentsight
@@ -147,7 +147,7 @@ bash scripts/benchmark/single_run/run.sh --agents 32 --tokens-per-second 100 \
   --duration 15 --tokens-per-response 200
 ```
 
-Install `scripts/benchmark/requirements.txt` in the active Python environment first. `tiktoken` caches its encoding data after the first download. This mode requires HTTP/1.1 SSE and does not require k6.
+Install `scripts/benchmark/requirements.txt` for the test suite and optional HTTP/2 mode. Agent mode uses Python's standard library, requires HTTP/1.1 SSE and does not require k6 or tiktoken.
 
 `--agents` and `--tokens-per-second` default to 32 and 100 when either selects agent mode. `--tokens-per-response` defaults to 1000; `--payload-kb` controls request padding. `--startup-delay` defaults to 5 seconds for probe discovery. The measurement duration excludes startup; final in-flight responses drain before exit. Use a fresh output directory per run.
 

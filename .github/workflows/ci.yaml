@@ -105,9 +105,9 @@ jobs:
 
           # Get changed files
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+            CHANGED=$(git diff --name-only --no-renames HEAD~1 HEAD || true)
           else
-            CHANGED=$(git diff --name-only --diff-filter=ACMRT HEAD || true)
+            CHANGED=$(git diff --name-only --no-renames --diff-filter=ACDMRT HEAD || true)
           fi
           echo "Changed files:"
           echo "$CHANGED"
@@ -131,6 +131,10 @@ jobs:
             AGENT_SEC=true
           fi
           if echo "$CHANGED" | grep -q "^src/agentsight/"; then
+            AGENTSIGHT=true
+          fi
+          # 保留组件的独立路径声明；共享源码打包入口作为额外触发条件。
+          if echo "$CHANGED" | grep -Eq '^\.github/actions/package-source/'; then
             AGENTSIGHT=true
           fi
           if echo "$CHANGED" | grep -q "^src/tokenless/"; then
@@ -1118,15 +1122,45 @@ jobs:
             exit 1
           fi
 
-      # Runs after the Rust build so the generated FFI header exists for the
-      # native tests. The suite spawns bare python3 subprocesses, hence PATH.
+      # 保留快速 benchmark 回归；仅相关 PR 执行有真实等待窗口的负载/资源集成用例。
+      # main/release 和手动执行仍覆盖全部用例，不改资源上限或覆盖率门禁。
+      - name: Decide whether the benchmark Python suite applies
+        id: benchmark
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          RUN=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # diff 不可读时执行完整用例，不能静默跳过。
+            if CHANGED=$(git diff --name-only --no-renames "origin/$BASE_REF...HEAD") \
+              && ! echo "$CHANGED" | grep -Eq '^src/agentsight/(scripts/|src/ffi(\.rs|/)|cbindgen\.toml$|build\.rs$|Cargo\.(toml|lock)$|agentsight\.json$|Makefile$|packaging/|dist/)|^\.github/(workflows/ci\.yaml$|actions/package-source/)'; then
+              RUN=false
+            fi
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "Benchmark Python suite: run=$RUN" >> "$GITHUB_STEP_SUMMARY"
+
+      # 本地合成测试数据不需要模型词表；先构建，保证 native 用例能读取生成的 FFI 头文件。
       - name: Test benchmark Python suite
         working-directory: src/agentsight/scripts/benchmark
         run: |
           uv venv "$RUNNER_TEMP/benchmark-venv" --python 3.11.6
           uv pip install --python "$RUNNER_TEMP/benchmark-venv/bin/python" -r requirements.txt
           PATH="$RUNNER_TEMP/benchmark-venv/bin:$PATH" \
-            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q tests
+            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q tests \
+              --ignore=tests/test_agent_load.py \
+              --ignore=tests/test_resource_run.py \
+              --ignore=tests/test_ffi_resource_run.py \
+              --ignore=tests/test_resource_port_reuse.py
+
+      - name: Test benchmark load and resource regressions
+        if: steps.benchmark.outputs.run == 'true'
+        working-directory: src/agentsight/scripts/benchmark
+        run: |
+          PATH="$RUNNER_TEMP/benchmark-venv/bin:$PATH" \
+            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q \
+              tests/test_agent_load.py tests/test_resource_run.py \
+              tests/test_ffi_resource_run.py tests/test_resource_port_reuse.py
 
   # =========================================================================
   # Step 7: Test AgentSight resources on a fixed kernel after the functional checks.
@@ -1238,7 +1272,6 @@ jobs:
           workspaces: src/agentsight
           cache-directories: |
             ${{ env.XDG_CACHE_HOME }}/agentsight-benchmark/target
-            ${{ env.XDG_CACHE_HOME }}/agentsight-benchmark/tiktoken
 
       - name: Install resource test dependencies
         run: |

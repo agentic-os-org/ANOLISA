@@ -17,7 +17,7 @@ source /tmp/agentsight-bench-venv/bin/activate
 python -m pip install -r scripts/benchmark/requirements.txt
 ```
 
-Agent 模式无需 k6。`tiktoken` 用于确认重复的 ` x` 文本每个片段对应一个 `cl100k_base` Token；首次使用会在测量窗口开始前下载并缓存编码数据。mock 的输入 usage 是每个请求固定 12 Token 的模拟值。
+Agent 模式无需 k6 或 tiktoken。测试数据在本地构造：每个 SSE delta 中的固定片段 ` x` 计一个合成测试 Token，并与 mock 上报的 usage 对账。不下载模型词表；这验证负载及协议处理，不验证任意模型的分词。mock 的输入 usage 是每个请求固定 12 Token 的模拟值。
 
 ## 2. 启动 32 个 Agent，每路 100 tok/s
 
@@ -132,7 +132,7 @@ bash scripts/benchmark/single_run/resource_run.sh \
   --output-dir /tmp/agentsight-resource-single
 ```
 
-脚本会在独立缓存的 venv 中准备缺失的 Python 依赖，冻结当前工作区，并使用 Cargo lock 文件编译 release 二进制。Git/源码模式需要项目的 Rust 和 Linux eBPF 构建依赖；已有二进制时可通过 `--agentsight-bin PATH` 跳过编译。构建和依赖缓存在 `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/` 下。采集和数据库校验会按需请求 `sudo`，可能需要输入密码；仅当当前用户已有 eBPF 权限时使用 `--no-sudo`。
+HTTP/1.1 资源负载仅使用 Python 标准库；特权运行时准备独立缓存的 venv，不下载 Python 包。脚本冻结当前工作区，并使用 Cargo lock 文件编译 release 二进制。Git/源码模式需要项目的 Rust 和 Linux eBPF 构建依赖；已有二进制时可通过 `--agentsight-bin PATH` 跳过编译。构建和依赖缓存在 `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/` 下。采集和数据库校验会按需请求 `sudo`，可能需要输入密码；仅当当前用户已有 eBPF 权限时使用 `--no-sudo`。
 
 脚本生成隔离配置、数据库和日志，等待采集初始化成功，然后执行已有负载和采集校验。正常结束、失败、Ctrl+C 或 SIGTERM 都会回收本次启动的进程。
 

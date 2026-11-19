@@ -22,10 +22,11 @@ source /tmp/agentsight-bench-venv/bin/activate
 python -m pip install -r scripts/benchmark/requirements.txt
 ```
 
-Agent mode does not require k6. `tiktoken` verifies that repeated ` x` text
-contains one `cl100k_base` token per fragment. Its encoding data is downloaded
-and cached on first use, before the measurement window. The mock reports a
-synthetic input usage of 12 tokens per request.
+Agent mode does not require k6 or tiktoken. It uses the locally constructed
+fragment ` x`, counting each SSE delta as one synthetic test token and checking
+received counts against mock usage. No model vocabulary is downloaded; this
+validates load and protocol handling, not arbitrary model tokenization. The mock
+reports a synthetic input usage of 12 tokens per request.
 
 ## 2. Start 32 Agents at 100 tok/s each
 
@@ -166,8 +167,9 @@ bash scripts/benchmark/single_run/resource_run.sh \
   --output-dir /tmp/agentsight-resource-single
 ```
 
-The script prepares missing Python dependencies in an isolated cached venv,
-freezes the current working tree, and builds a release binary with Cargo's lock
+The HTTP/1.1 resource runner uses Python's standard library; privileged runs
+prepare an isolated cached venv without downloading packages. The script freezes
+the current working tree and builds a release binary with Cargo's lock
 file. Git/source mode needs the project's Rust and Linux eBPF build prerequisites;
 use `--agentsight-bin PATH` to supply a prebuilt executable instead. Builds and
 dependencies are cached under `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/`.
