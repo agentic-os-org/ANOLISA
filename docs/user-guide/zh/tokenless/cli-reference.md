@@ -528,6 +528,7 @@ tokenless stats clear --yes
 `records_selected`、`records_total` 和 `complete`，这些条数在排除 dry-run 前统计。
 完整窗口仍提供取回成本和净节省量。记录、条数与成本来自同一 SQLite 读取快照，
 无需迁移已存储的数据。
+覆盖字段描述数据库仍保留的压缩记录。自动清理积压时，压缩记录与取回事件的删除进度可能不同。
 
 
 双跑对比：

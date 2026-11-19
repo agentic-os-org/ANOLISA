@@ -83,8 +83,12 @@ rows before dry-run exclusion; `records_total` counts all stored compression
 rows in the same database snapshot; `complete` indicates equal counts.
 Unreadable rows skipped by the reader also make a window incomplete, even
 when the limit covers all stored rows. If all rows decode successfully, a
-`--limit` at least as large as `records_total` restores full-history coverage.
+`--limit` at least as large as `records_total` covers all retained compression rows.
 Increasing the limit loads more records and their payloads into memory.
+
+The coverage fields describe the compression rows retained in the database.
+During automatic pruning, compression rows and retrieval events can be
+removed at different rates.
 
 ## Saving-rate field definitions
 

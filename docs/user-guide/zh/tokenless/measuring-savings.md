@@ -79,8 +79,10 @@ tokenless stats summary --limit 1000
 JSON 新增 `summary_scope`：`records_selected` 是排除 dry-run 前成功解码的记录数；
 `records_total` 是同一数据库快照内全部已存压缩记录数；`complete` 表示两者相等。
 读取器跳过无法解码的记录也会使窗口不完整，即使查询上限已覆盖全部记录。若所有记录
-均能解码，将 `--limit` 提高到至少 `records_total` 可恢复完整历史口径；增大上限会
+均能解码，将 `--limit` 提高到至少 `records_total` 可覆盖全部保留记录。增大上限会
 将更多记录及其负载载入内存。
+
+覆盖字段描述数据库仍保留的压缩记录。自动清理积压时，压缩记录与取回事件的删除进度可能不同。
 
 ## 节省率字段定义
 
