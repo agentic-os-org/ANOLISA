@@ -318,7 +318,7 @@ def summarize(args: argparse.Namespace, window: dict[str, float]) -> dict[str, A
         "distinct_agent_pids": len(set(pids)),
         "target_tokens_per_second_per_agent": args.tokens_per_second,
         "tokens_per_response": args.tokens_per_response,
-        "token_encoding": "cl100k_base",
+        "token_encoding": "synthetic-fixed-delta",
         "duration_seconds": args.duration,
         "rate_tolerance": args.rate_tolerance,
         "peak_active_streams": peak,
@@ -334,11 +334,9 @@ def summarize(args: argparse.Namespace, window: dict[str, float]) -> dict[str, A
 
 def run(args: argparse.Namespace) -> int:
     """Synchronize real worker processes before the timed measurement window."""
-    import tiktoken
-
-    encoding = tiktoken.get_encoding("cl100k_base")
-    if len(encoding.encode(TOKEN_TEXT * args.tokens_per_response)) != args.tokens_per_response:
-        raise ValueError("benchmark fixture is not one cl100k_base token per delta")
+    # 固定合成片段按每个 SSE delta 计一个测试 token，不给任意文本分词，也不下载词表。
+    if TOKEN_TEXT != " x":
+        raise ValueError("benchmark fixture must remain the pinned synthetic delta ' x'")
     if args.check_only:
         return 0
     args.output_dir.mkdir(parents=True, exist_ok=False)

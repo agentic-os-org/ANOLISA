@@ -26,7 +26,7 @@ OUTPUT_TOKENS = 8
 TOTAL_TOKENS = INPUT_TOKENS + OUTPUT_TOKENS
 PREFLIGHT_OUTPUT_TOKENS = 1
 PREFLIGHT_TOTAL_TOKENS = INPUT_TOKENS + PREFLIGHT_OUTPUT_TOKENS
-TOKEN_TEXT = " x"  # One cl100k_base token, including when repeated.
+TOKEN_TEXT = " x"  # 固定合成片段：每个 SSE delta 计一个测试 token，不代表真实模型分词。
 ENDPOINTS = {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 

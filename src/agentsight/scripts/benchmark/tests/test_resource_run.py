@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import csv
-import importlib.metadata
-import importlib.util
 import json
 import os
 import pty
@@ -122,15 +120,10 @@ def free_port() -> int:
 
 @pytest.fixture
 def environment(tmp_path: Path) -> dict[str, str]:
-    cache = tmp_path / "cache/agentsight-benchmark/tiktoken"
-    cache.mkdir(parents=True)
-    import tiktoken
-
-    tiktoken.get_encoding("cl100k_base")
-    existing = Path(os.environ.get("TIKTOKEN_CACHE_DIR", "/tmp/data-gym-cache"))
-    if existing.exists():
-        shutil.copytree(existing, cache, dirs_exist_ok=True)
-    return dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"), PYTHON=sys.executable)
+    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path / "cache"), PYTHON=sys.executable)
+    # 不让开发机已有变量掩盖干净 CI 环境的遗留读取；CLI 和 FFI 共用这个 fixture。
+    env.pop("TIKTOKEN_CACHE_DIR", None)
+    return env
 
 
 @pytest.fixture
@@ -141,9 +134,10 @@ def sudo_environment(
         pytest.skip("sudo authentication requires an unprivileged parent")
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tmp_path / "cache/agentsight-benchmark/venv").symlink_to(
-        isolated_runtime, target_is_directory=True
-    )
+    # 不再由词表缓存隐式创建父目录，sudo fixture 自行准备解释器链接目录。
+    runtime = Path(environment["XDG_CACHE_HOME"]) / "agentsight-benchmark/venv"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.symlink_to(isolated_runtime, target_is_directory=True)
     executable(
         tools / "sudo",
         """#!/usr/bin/env python3
@@ -177,43 +171,35 @@ raise SystemExit(child.wait())
     )
 
 
+@pytest.mark.parametrize(
+    "cache_exists", [False, True], ids=["fresh-cache", "existing-cache"]
+)
+def test_sudo_environment_prepares_runtime_without_token_cache(
+    tmp_path: Path,
+    environment: dict[str, str],
+    isolated_runtime: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_exists: bool,
+) -> None:
+    cache = Path(environment["XDG_CACHE_HOME"]) / "agentsight-benchmark"
+    if cache_exists:
+        cache.mkdir(parents=True)
+    # 只模拟夹具的非 root 分支，使目录准备回归在 root 开发机上也实际执行。
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    prepared = sudo_environment.__wrapped__(tmp_path, environment, isolated_runtime)
+    runtime = cache / "venv"
+    assert runtime.is_symlink()
+    assert runtime.resolve() == isolated_runtime.resolve()
+    assert (runtime / "bin/python").is_file()
+    assert "TIKTOKEN_CACHE_DIR" not in prepared
+    sudo = Path(prepared["PATH"].split(os.pathsep)[0]) / "sudo"
+    assert sudo.is_file() and os.access(sudo, os.X_OK)
+
+
 @pytest.fixture(scope="session")
 def isolated_runtime(tmp_path_factory: pytest.TempPathFactory) -> Path:
     runtime = tmp_path_factory.mktemp("memory-python") / "venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(runtime)], check=True)
-    packages = Path(
-        subprocess.check_output(
-            [
-                str(runtime / "bin/python3"),
-                "-c",
-                "import sysconfig; print(sysconfig.get_path('purelib'))",
-            ],
-            text=True,
-        ).strip()
-    )
-    # Copy installed test dependencies instead of requiring a network download.
-    for name in (
-        "tiktoken",
-        "tiktoken_ext",
-        "regex",
-        "requests",
-        "urllib3",
-        "idna",
-        "charset_normalizer",
-        "certifi",
-    ):
-        specification = importlib.util.find_spec(name)
-        assert specification is not None, f"test dependency is missing: {name}"
-        for location in specification.submodule_search_locations or ():
-            shutil.copytree(location, packages / name, dirs_exist_ok=True)
-    distribution = importlib.metadata.distribution("tiktoken")
-    metadata = next(
-        file
-        for file in distribution.files or ()
-        if file.name == "METADATA" and file.parent.suffix == ".dist-info"
-    )
-    metadata_directory = Path(distribution.locate_file(metadata)).parent
-    shutil.copytree(metadata_directory, packages / metadata_directory.name)
     return runtime
 
 

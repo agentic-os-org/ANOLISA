@@ -516,10 +516,8 @@ def main() -> int:
             os.environ,
             PATH=f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
             PYTHON=sys.executable,
-            TIKTOKEN_CACHE_DIR=str(cache / "tiktoken"),
             PYTHONDONTWRITEBYTECODE="1",
         )
-        (cache / "tiktoken").mkdir(parents=True, exist_ok=True)
         flags = (
             "agents",
             "tokens_per_second",
@@ -594,7 +592,6 @@ def main() -> int:
                         for key in (
                             "PATH",
                             "PYTHON",
-                            "TIKTOKEN_CACHE_DIR",
                             "PYTHONDONTWRITEBYTECODE",
                         )
                     },

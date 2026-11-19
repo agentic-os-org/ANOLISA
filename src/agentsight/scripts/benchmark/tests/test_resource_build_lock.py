@@ -10,6 +10,36 @@ import pytest
 from test_resource_run import resource_inputs
 
 
+def test_standard_library_runtime_needs_no_dependency_install(tmp_path: Path) -> None:
+    def forbidden(*args: object, **kwargs: object) -> int:
+        raise AssertionError("the resource runner must not download Python dependencies")
+
+    resource_inputs.ensure_python(tmp_path / "cache", tmp_path, [], forbidden)
+    assert not (tmp_path / "cache").exists()
+
+
+def test_privileged_runtime_creates_venv_without_pip(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    def record(command: list[str], log: Path) -> int:
+        commands.append(command)
+        return 0
+
+    cache = tmp_path / "cache"
+    with (
+        patch.object(resource_inputs.site, "ENABLE_USER_SITE", True),
+        patch.object(resource_inputs.os, "execv") as execute,
+    ):
+        resource_inputs.ensure_python(cache, tmp_path, [], record, require_venv=True)
+    assert commands == [
+        [resource_inputs.sys.executable, "-m", "venv", "--without-pip", str(cache / "venv")]
+    ]
+    execute.assert_called_once_with(
+        str(cache / "venv/bin/python3"),
+        [str(cache / "venv/bin/python3"), "-B", str(tmp_path / "resource_run.py")],
+    )
+
+
 @pytest.mark.parametrize("ffi", [False, True])
 def test_concurrent_build_cannot_replace_binary_before_publication(
     tmp_path: Path, ffi: bool

@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
-import importlib.metadata
-import importlib.util
 import math
 import os
 import shlex
@@ -124,19 +122,11 @@ def ensure_python(
     *,
     require_venv: bool = False,
 ) -> None:
-    """Use installed dependencies or prepare an isolated reusable virtual environment."""
-    try:
-        version = tuple(int(part) for part in importlib.metadata.version("tiktoken").split(".")[:2])
-        isolated = sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE
-        if (
-            (0, 8) <= version < (1, 0)
-            and importlib.util.find_spec("tiktoken") is not None
-            and (not require_venv or isolated)
-        ):
-            return
-    except (importlib.metadata.PackageNotFoundError, ValueError):
-        pass
-    print("Preparing benchmark Python dependencies...", flush=True)
+    """保留特权运行的隔离解释器；HTTP/1.1 资源负载只需要 Python 标准库。"""
+    isolated = sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE
+    if not require_venv or isolated:
+        return
+    print("Preparing isolated benchmark Python runtime...", flush=True)
     cache.mkdir(parents=True, exist_ok=True)
     interpreter = cache / "venv/bin/python3"
     command = [str(interpreter), "-B", str(harness / "resource_run.py"), *arguments]
@@ -144,13 +134,11 @@ def ensure_python(
     if interpreter.exists() and Path(sys.prefix).resolve() != interpreter.parents[1].resolve():
         os.execv(str(interpreter), command)
     if not interpreter.exists():
-        if run([sys.executable, "-m", "venv", str(cache / "venv")], cache / "setup.log"):
+        if run(
+            [sys.executable, "-m", "venv", "--without-pip", str(cache / "venv")],
+            cache / "setup.log",
+        ):
             raise RuntimeError(f"cannot create Python venv; see {cache / 'setup.log'}")
-    if run(
-        [str(interpreter), "-m", "pip", "install", "-r", str(harness.parent / "requirements.txt")],
-        cache / "setup.log",
-    ):
-        raise RuntimeError(f"cannot install Python dependencies; see {cache / 'setup.log'}")
     os.execv(str(interpreter), command)
 
 
