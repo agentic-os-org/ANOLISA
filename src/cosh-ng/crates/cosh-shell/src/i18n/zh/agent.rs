@@ -51,6 +51,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentCancelledReasonLabel => "原因:",
         MessageId::AgentCancelledUserRequestedReason => "用户请求取消",
         MessageId::AgentResponseTitle => "Agent 回复",
+        MessageId::AgentResponseTruncated => "回答已截断，仅影响此处显示，完整内容见会话记录。",
         MessageId::AgentGovernanceTitle => "治理",
         MessageId::AgentGovernanceStatusLine => "状态: {phase}",
         MessageId::AgentGovernanceReasonLine => "原因: {reason}",

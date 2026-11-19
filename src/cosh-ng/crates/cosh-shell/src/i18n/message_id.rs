@@ -124,4 +124,5 @@ collect_message_ids!([
     cosh_root_help_ids,
     guide_wizard_ids,
     guide_ai_management_ids,
+    agent_reply_truncation_ids,
 ],);

@@ -152,3 +152,13 @@ macro_rules! hook_notification_ids {
         );
     };
 }
+
+macro_rules! agent_reply_truncation_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentResponseTruncated,
+        );
+    };
+}

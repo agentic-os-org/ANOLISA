@@ -482,8 +482,11 @@ impl MarkdownStreamBlock {
             self.started = true;
         }
 
+        let width = self.renderer.content_width();
+        let i18n = self.renderer.i18n();
+        let truncation_notice = i18n.t(crate::MessageId::AgentResponseTruncated);
         for line in lines {
-            write_styled_card_line(output, self.renderer.content_width(), line)?;
+            write_styled_card_line(output, width, line, truncation_notice)?;
         }
         self.rendered_body = true;
         Ok(())
@@ -525,23 +528,25 @@ fn write_styled_card_line<W: Write>(
     output: &mut W,
     content_width: usize,
     line: Line<'static>,
+    truncation_notice: &str,
 ) -> io::Result<()> {
-    for row in styled_line_rows(content_width, line) {
+    let width = content_width.max(1) as u16;
+    let paragraph = Paragraph::new(line).wrap(Wrap { trim: true });
+    let height = paragraph.line_count(width).max(1);
+    // Ratatui shrinks both dimensions above u16::MAX cells.
+    let max_height = usize::from(u16::MAX / width);
+    let area = Rect::new(0, 0, width, height.min(max_height) as u16);
+    let mut buffer = Buffer::empty(area);
+    paragraph.render(area, &mut buffer);
+    for row in buffer_to_styled_lines(&buffer, area) {
         writeln!(output, "{}", styled_frame_line(content_width, &row))?;
     }
+    if height > max_height {
+        for row in wrap_plain_line(truncation_notice, content_width) {
+            writeln!(output, "{}", styled_frame_line(content_width, &row))?;
+        }
+    }
     Ok(())
-}
-
-fn styled_line_rows(content_width: usize, line: Line<'static>) -> Vec<String> {
-    let width = content_width.max(1);
-    let plain = line_to_string(&line);
-    let height = display_width(&plain).max(1).div_ceil(width).max(1);
-    let area = Rect::new(0, 0, width as u16, height as u16);
-    let mut buffer = Buffer::empty(area);
-    Paragraph::new(line)
-        .wrap(Wrap { trim: true })
-        .render(area, &mut buffer);
-    buffer_to_styled_lines(&buffer, area)
 }
 
 fn styled_frame_line(content_width: usize, content: &str) -> String {
