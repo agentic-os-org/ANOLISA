@@ -45,7 +45,7 @@ impl ScriptedBackend {
     }
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     directory: tempfile::TempDir,
     state: PathBuf,
     backend: ScriptedBackend,
@@ -53,7 +53,7 @@ struct Fixture {
     data: PathBuf,
 }
 
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");
     std::fs::create_dir_all(&state).unwrap();
@@ -78,6 +78,7 @@ case "$1" in
     [ -f "$state/fail-version" ] && exit 1
     echo 27.0.0 ;;
   create)
+    [ -f "$state/fail-create" ] && exit 1
     shift; printf '%s\n' "$@" > "$state/create.args"
     p=$(grep '^seccomp=' "$state/create.args" | head -n1 | cut -d= -f2-)
     cp "$p" "$state/seccomp.json" || exit 1
@@ -127,6 +128,10 @@ esac
 }
 
 impl Fixture {
+    pub(crate) fn config(&self) -> DockerConfig {
+        self.backend.0.config.clone()
+    }
+
     fn write_inspect(&self, network: &str) {
         let inspect = serde_json::json!([{
             "Path": "/usr/bin/python3", "Args": ["-c", "print(1)"],
@@ -164,7 +169,7 @@ impl Fixture {
         .unwrap();
     }
 
-    fn spec(&self) -> ExecutionSpec {
+    pub(crate) fn spec(&self) -> ExecutionSpec {
         let permissions: OsPermissionSet = serde_json::from_value(serde_json::json!({
             "version": 1,
             "filesystem": {"default": "deny", "rules": [
@@ -190,7 +195,7 @@ impl Fixture {
         }
     }
 
-    fn read_calls(&self, name: &str) -> Vec<String> {
+    pub(crate) fn read_calls(&self, name: &str) -> Vec<String> {
         std::fs::read_to_string(self.state.join(name))
             .map(|text| text.lines().map(str::to_owned).collect())
             .unwrap_or_default()
@@ -440,4 +445,39 @@ fn relative_cli_path_is_rejected_at_construction() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("absolute path"), "{error}");
+}
+
+#[test]
+fn production_execute_requires_the_configured_guard() {
+    let fixture = fixture();
+    let mut config = fixture.config();
+    config.guard = Some(fixture.directory.path().join("absent-guard"));
+    let backend = DockerBackend::new(config).unwrap();
+    let spec = fixture.spec();
+    let error = backend.execute(spec.launch, spec.permissions).unwrap_err();
+    assert!(
+        matches!(error, asc_pep_runtime::PepError::Unsupported(s) if s.contains("install asc-sandbox-docker-guard"))
+    );
+    assert!(!fixture.state.join("create.args").exists());
+}
+
+#[test]
+fn unknown_create_retains_the_recovery_record_after_cleanup_attempt() {
+    let fixture = fixture();
+    std::fs::write(fixture.state.join("fail-create"), "").unwrap();
+    let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
+    let calls = fixture.read_calls("client.calls");
+    let directory = Path::new(&calls[1]);
+    let recovery = directory.join("recovery.json");
+    let message = error.to_string();
+    assert!(message.contains("cleanup unconfirmed"), "{message}");
+    assert!(message.contains(recovery.to_str().unwrap()), "{message}");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(recovery).unwrap()).unwrap();
+    let removed = fixture.read_calls("rm.calls");
+    assert_eq!(record["container"], removed[2]);
+    assert_eq!(record["endpoint"], calls[3]);
+    assert_eq!(record["config"], calls[1]);
+    assert!(!fixture.state.join("start.args").exists());
+    std::fs::remove_dir_all(directory).unwrap();
 }

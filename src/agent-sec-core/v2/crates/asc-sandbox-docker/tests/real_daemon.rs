@@ -1,4 +1,4 @@
-//! Opt-in real-daemon regressions that touch only resources created by these tests.
+//! Guard process protocol checks and opt-in real-daemon regressions.
 #![cfg(target_os = "linux")]
 
 use asc_pep_runtime::SandboxBackend;
@@ -44,6 +44,52 @@ fn spec(work: &Path, code: &str) -> ExecutionSpec {
             ]}, "execution": {"deny_paths": []}, "network": {"mode": "off"}},
         "path_facts": []
     })).unwrap()
+}
+
+#[test]
+fn guard_distinguishes_invalid_frames_from_placement_failures() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let guard = env!("CARGO_BIN_EXE_asc-sandbox-docker-guard");
+    let root = tempfile::tempdir().unwrap();
+    let request = serde_json::json!({
+        "config": {
+            "cli": root.path().join("missing-cli"), "host": "unix:///run/docker.sock",
+            "image": "test:local"
+        },
+        "spec": spec(root.path(), "pass"),
+        "name": format!("asc-sandbox-{}", uuid::Uuid::new_v4())
+    });
+    for (input, framed) in [(request.to_string() + "\n", true), ("{".into(), false)] {
+        let mut child = Command::new(guard)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.success(), framed);
+        if framed {
+            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(reply["Failed"]["unsupported"], true);
+            assert!(
+                reply["Failed"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("docker CLI not found")
+            );
+        } else {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("guard pipe closed"));
+        }
+    }
 }
 
 // Derive only test-owned container config; do not build, access the network or alter user images.
