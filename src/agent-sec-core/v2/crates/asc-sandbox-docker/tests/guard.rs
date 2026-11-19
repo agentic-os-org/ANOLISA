@@ -26,14 +26,21 @@ fn parent_reports_attach_status_and_requires_confirmed_cleanup() {
     let fixture = fixture();
     let request = request(&fixture);
     let script = r#"
-import json, sys
+import json, os, sys
 request = json.loads(input())
 assert request["name"].startswith("asc-sandbox-")
 host = request["config"]["host"]
 directory = request["spec"]["launch"]["cwd"]
 print(json.dumps({"Owned": {"directory": directory}}), flush=True)
-print(json.dumps({"Ready": {"directory": directory, "host": host}}), flush=True)
+cli = open(request["config"]["cli"], "rb")
+path = request["config"]["cli"]
+# Model an operator replacing the pathname while the guard holds the executable.
+os.rename(path, path + ".original")
+with open(path, "w") as replacement:
+    replacement.write("inert replacement")
+print(json.dumps({"Ready": {"directory": directory, "host": host, "cli_fd": cli.fileno()}}), flush=True)
 assert json.loads(input()) == {"Finished": {"code": 7}}
+os.replace(path + ".original", path)
 print(json.dumps({"Done": {"result": {"installed": True, "started": True, "exit_code": 7}}}), flush=True)
 assert not sys.stdin.read()
 "#;

@@ -108,16 +108,17 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let backend = DockerBackend::new(DockerConfig {
-        cli,
-        host: "unix:///var/run/docker.sock".into(),
-        guard: None,
-        image: "agent@sha256:abc123".into(),
-        memory: None,
-        cpus: None,
-        pids_limit: None,
-    })
-    .unwrap();
+    let backend = DockerBackend {
+        config: DockerConfig {
+            cli,
+            host: "unix:///var/run/docker.sock".into(),
+            guard: None,
+            image: "agent@sha256:abc123".into(),
+            memory: None,
+            cpus: None,
+            pids_limit: None,
+        },
+    };
     Fixture {
         directory,
         state,
@@ -451,6 +452,7 @@ fn relative_cli_path_is_rejected_at_construction() {
 fn production_execute_requires_the_configured_guard() {
     let fixture = fixture();
     let mut config = fixture.config();
+    config.cli = "/usr/bin/true".into();
     config.guard = Some(fixture.directory.path().join("absent-guard"));
     let backend = DockerBackend::new(config).unwrap();
     let spec = fixture.spec();

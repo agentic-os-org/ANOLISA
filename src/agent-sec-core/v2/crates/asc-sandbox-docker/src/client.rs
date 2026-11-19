@@ -15,7 +15,7 @@ pub(crate) struct Client {
     preserve: std::cell::Cell<bool>,
     guard: Option<PathBuf>,
     pub(crate) host: String,
-    cli: PathBuf,
+    pub(crate) cli: crate::cli::PinnedCli,
     peer: Option<UnixStream>,
     daemon_root: Option<PathBuf>,
 }
@@ -64,7 +64,7 @@ impl Client {
             preserve: std::cell::Cell::new(false),
             guard: config.guard.clone(),
             host: format!("unix://{}", endpoint.display()),
-            cli: config.cli.clone(),
+            cli: crate::cli::PinnedCli::trusted(&config.cli)?,
             peer: Some(peer),
             daemon_root: Some(proc.join("root")),
         };
@@ -73,6 +73,7 @@ impl Client {
     }
 
     pub(crate) fn verify_mounts(&self, plan: &ContainerPlan) -> Result<(), DockerError> {
+        self.cli.verify_mounts(plan)?;
         for mount in &plan.mounts {
             let destination = Path::new(&mount.destination);
             let endpoint = Path::new(self.host.trim_start_matches("unix://"));
@@ -111,7 +112,10 @@ impl Client {
     }
 
     pub(crate) fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.cli);
+        let mut command = Command::new(crate::cli::executable_path(
+            std::process::id(),
+            self.cli.fd(),
+        ));
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -178,7 +182,7 @@ impl Client {
             preserve: std::cell::Cell::new(false),
             guard: None,
             host: config.host.clone(),
-            cli: config.cli.clone(),
+            cli: crate::cli::PinnedCli::scripted(&config.cli).unwrap(),
             peer: None,
             daemon_root: None,
         }

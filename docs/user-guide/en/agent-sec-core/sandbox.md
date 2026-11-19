@@ -310,6 +310,15 @@ listening FD. Each run uses a protected empty Docker client configuration; all
 calls use the same explicit endpoint/config without personal context, proxy or
 registry credentials. Images must already be cached; automatic pull is disabled.
 
+Install a custom `--docker-cli` outside writable workspace grants. Its
+executable and all directories used to resolve it must be root-owned and
+not writable by group or others. If a writable directory shares the CLI's
+filesystem, the executable must have a single hard link. The guard rejects
+writable mounts that expose the executable or any directory used to resolve
+the configured path, including directories containing intermediate symlinks.
+This check also covers bind-mount aliases. Foreground attach, inspection and
+cleanup use the same open executable.
+
 Build/install also delivers `asc-sandbox-docker-guard`, automatically launched
 beside the CLI without setuid or automatic privilege elevation. Library embedders
 can pin its installed path with trusted `DockerConfig.guard`. The guard owns

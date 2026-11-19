@@ -39,6 +39,8 @@ impl DockerBackend {
                 config.cli.display()
             )));
         }
+        #[cfg(target_os = "linux")]
+        crate::cli::PinnedCli::trusted(&config.cli)?;
         Ok(Self { config })
     }
 
@@ -451,9 +453,8 @@ mod tests {
 
     #[test]
     fn backend_is_object_safe() {
-        let cli = tempfile::NamedTempFile::new().unwrap();
         let config = DockerConfig {
-            cli: cli.path().to_owned(),
+            cli: "/usr/bin/true".into(),
             host: "unix:///var/run/docker.sock".into(),
             guard: None,
             image: "agent:1.0".into(),
