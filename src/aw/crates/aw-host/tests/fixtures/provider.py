@@ -53,6 +53,21 @@ if method == "describe":
     ]
     reply["operations"].append({"name":"submit", "events":["input.submit"], "effects":["observe", "block"]})
     reply["operations"].append({
+        "name": "lifecycle",
+        "events": ["session.start", "session.end"],
+        "effects": ["observe"],
+    })
+    reply["operations"].append({
+        "name": "stop",
+        "events": ["turn.stop"],
+        "effects": ["observe", "block"],
+    })
+    reply["operations"].append({
+        "name": "stop_second",
+        "events": ["turn.stop"],
+        "effects": ["observe", "block"],
+    })
+    reply["operations"].append({
         "name": "replace", "events": ["tool.after"], "effects": ["replace_result"]
     })
 elif method == "invoke":

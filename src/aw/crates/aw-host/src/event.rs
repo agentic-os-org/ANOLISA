@@ -5,7 +5,9 @@ use crate::{
     StepOutput,
 };
 use aw_core::admission::{AdmittedStep, StepExecution};
-use aw_provider::{Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION};
+use aw_provider::{
+    EventGate, GateKind, MutationSlot, Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,7 +25,7 @@ pub struct Event<'a> {
     host: &'a Host,
     value: Value,
     native_input: Option<Vec<u8>>,
-    name: String,
+    gate: EventGate,
     id: String,
     deadline: Instant,
     cancelled: &'a AtomicBool,
@@ -92,16 +94,13 @@ impl Host {
         }
         let name = value["name"]
             .as_str()
-            .ok_or(Error::Invalid("missing event name"))?
-            .to_owned();
+            .ok_or(Error::Invalid("missing event name"))?;
         let spec = &self.configuration().as_value()["spec"];
-        let configured = &spec["events"][&name];
-        if configured["enabled"] != true
-            || !matches!(
-                name.as_str(),
-                "input.submit" | "tool.before" | "tool.after" | "security.violation"
-            )
-        {
+        let configured = &spec["events"][name];
+        let Some(gate) = EventGate::for_event(name) else {
+            return Err(Error::Invalid("event was not enabled and admitted"));
+        };
+        if configured["enabled"] != true {
             return Err(Error::Invalid("event was not enabled and admitted"));
         }
         if native_input.is_none()
@@ -142,7 +141,7 @@ impl Host {
             host: self,
             value,
             native_input,
-            name,
+            gate,
             id: identifier()?,
             deadline,
             cancelled,
@@ -170,7 +169,7 @@ impl Event<'_> {
             .claimed
             .lock()
             .map_err(|_| Error::Invalid("step claim poisoned"))?;
-        if self.name != "tool.before"
+        if self.gate.mutation_slot() != Some(MutationSlot::PreToolInput)
             || self.native_input.is_none()
             || claimed.len() != 1
             || !claimed.contains(&first.step_id)
@@ -213,7 +212,9 @@ impl Event<'_> {
     /// Rejects non-native/after events, changed identity or input, invalid bounds,
     /// an expired budget or a poisoned callback lock.
     pub fn completion_view(&self, value: Value, input: Vec<u8>) -> Result<(), Error> {
-        if self.name != "tool.after" || self.native_input.is_none() {
+        if self.gate.mutation_slot() != Some(MutationSlot::PostToolResult)
+            || self.native_input.is_none()
+        {
             return Err(Error::Invalid(
                 "completion view requires a native after event",
             ));
@@ -257,12 +258,18 @@ impl Event<'_> {
         self.deadline
     }
 
+    /// Execution gate contract bound to this event.
+    pub fn gate(&self) -> EventGate {
+        self.gate
+    }
+
     /// Steps admitted for this event, retaining their configured order.
     pub fn steps(&self) -> impl Iterator<Item = &AdmittedStep> {
+        let name = self.gate.event();
         self.host
             .steps()
             .iter()
-            .filter(|step| step.event == self.name)
+            .filter(move |step| step.event == name)
     }
 
     /// Execute one retained step, preserving failure details and its `on_error` action.
@@ -420,11 +427,15 @@ impl Event<'_> {
                 }
             }
         };
-        let failure_action = result.is_err().then_some(match step.on_error.as_str() {
-            "block" => FailureAction::Block,
-            "withhold_result" => FailureAction::WithholdResult,
-            _ => FailureAction::Report,
-        });
+        let failure_action =
+            result
+                .is_err()
+                .then_some(match (self.gate.kind(), step.on_error.as_str()) {
+                    (GateKind::Lifecycle, _) => FailureAction::Report,
+                    (_, "block") => FailureAction::Block,
+                    (_, "withhold_result") => FailureAction::WithholdResult,
+                    _ => FailureAction::Report,
+                });
         Ok(Invocation {
             record,
             result,

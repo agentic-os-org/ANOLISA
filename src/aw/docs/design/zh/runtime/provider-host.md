@@ -72,13 +72,14 @@ Provider 操作描述可用 `event_adapters` 约束各事件支持的 Adapter。
 准备成功表示本地协议交互通过，不代表原生 Hook 已安装、绑定进入 `Ready` 或
 Agent 已采用策略。准入范围仍为：
 
-| 事件 | 候选效果 | 失败动作 |
-| --- | --- | --- |
-| `input.submit` | `observe`、`block` | `report`，或 Adapter 支持的 `block` |
-| `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
-| `tool.after` | `observe`, `replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
+| 事件 | 门禁类别 | 候选效果 | 失败动作 |
+| --- | --- | --- | --- |
+| `session.start`、`session.end` | Lifecycle | `observe` | `report` |
+| `input.submit`、`turn.stop`、`security.violation` | Decision | `observe`、`block` | `report`，或 Adapter 支持的 `block` |
+| `tool.before` | Mutation（`replace_input`） | `observe`、`block`、`replace_input` | `report`，或在 Adapter 支持时使用 `block` |
+| `tool.after` | Mutation（`replace_result`） | `observe`、`replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
 
-启用但不受支持的事件、guard、`ask`、输入替换效果及超出
+启用但不受支持的事件、guard、`ask` 及超出
 `native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../../../../../../docs/developer-guide/zh/aw/providers/protocol.md)。
 
 ## Adapter 执行语义

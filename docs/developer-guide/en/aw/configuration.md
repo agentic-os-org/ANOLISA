@@ -163,22 +163,29 @@ For Claude SDK `PreToolUse`, a native command's exit-0
 including its optional reason and early-event closure. This does not enable
 native approvals or input rewrites.
 
-Runtime currently admits `input.submit` observation/blocking, `tool.before` with
-`observe`/`block`/`replace_input`, and `tool.after`
-with `observe` or a single final structured `replace_result`, plus native steps
-at these points. `security.violation` admits a final `observe` or `block` step
-where an Adapter provides a checked delivery boundary. Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps them to
+Static validation and the `aw-provider`, `aw-core` and `aw-host` libraries admit
+`session.start` and `session.end` (`observe`), `input.submit` and `turn.stop`
+(`observe`/`block`), `tool.before` (`observe`/`block`/`replace_input`),
+`tool.after` (`observe` or a single final structured `replace_result`), and
+`security.violation` (`observe`/`block` where an Adapter provides a checked
+delivery boundary), plus native steps on `tool.before` and `tool.after`.
+Built-in Agent capability profiles and `aw run` dispatch currently cover
+`input.submit`, `tool.before`, `tool.after` and `security.violation`;
+`session.start`, `session.end` and `turn.stop` await native Source wiring.
+Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps tool Hooks to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
-are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK, Codex CLI and explicit AgentScope factories have launch Adapters;
+are not admitted at runtime. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK, Codex CLI and explicit AgentScope factories have launch Adapters;
 their verified baselines, entrypoints and
 after-event coverage are listed in the [native Agent reference](native-agents.md).
 
 ## Events, effects and tool selection
 
-The configuration recognizes these 16 names. Public Provider dispatch currently
-covers `input.submit`, `tool.before`, `tool.after` and `security.violation` where
-the selected Adapter supports them; the other twelve names remain reserved.
+The configuration recognizes these 16 names. Built-in Agent profiles currently
+dispatch `input.submit`, `tool.before`, `tool.after` and `security.violation` where
+the selected Adapter supports them; static validation and library-level `aw-host`
+also admit `session.start`, `session.end` and `turn.stop` pending native Source
+wiring, while the remaining nine names stay reserved.
 Implementation status is in the [16-Hook overview](../../../user-guide/en/aw/capabilities.md#16-common-hooks).
 See the [capability matrix](../../../user-guide/en/aw/capabilities.md#hook-support-matrix)
 for Adapter effect support.
@@ -208,7 +215,8 @@ Agent-loop result after `finalizeContent` and before Session commit. It permits
 `events.tool.before.guard` reference remains unsupported by runtime admission.
 Other Adapters require their own verified result boundary before enabling this event.
 
-Runtime admission supports `input.submit` observation/blocking, `tool.before`
+Runtime admission supports `session.start` and `session.end` observation,
+`input.submit` and `turn.stop` observation/blocking, `tool.before`
 observation/blocking/input replacement, `tool.after` observation/result replacement,
 and DeepSeek Harness `security.violation` observation/blocking.
 A `replace_input` step must be the first applicable before step, declare only
@@ -219,8 +227,10 @@ callback publishes it. Native authorization remains independent.
 An explicitly disabled before step can retain `ask` for future editing, without
 acquiring approval capability. Native host approval is unaffected.
 
-`on_error: block` is valid for `input.submit`, `tool.before`, and the verified
-DeepSeek Harness `security.violation` result boundary.
+`on_error: block` passes static validation for `input.submit`, `tool.before`,
+`turn.stop`, and the verified DeepSeek Harness `security.violation` result
+boundary; runtime admission requires Adapter support for blocking on that event
+(`session.start` and `session.end` accept `report` only).
 `withhold_result` is valid only after a tool. `report` records a failure and
 continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.
@@ -228,7 +238,8 @@ The service enforces these requirements at admission and execution. Ordinary
 Qoder SDK and QwenPaw resident launches declare `withhold_result` for structured Provider
 and boolean Hook after steps. Reloadable launches and native-command steps reject it.
 
-Both tool events and their steps accept `match.tools`. A step runs only when
+Both tool events and their steps accept `match.tools`. Active `input.submit`,
+`session.start`, `session.end` and `turn.stop` events and steps reject it. A step runs only when
 the tool matches both lists; entries within one list are alternatives. Omitting
 either selector, or using `["*"]`, selects all tools at that level. Lists must
 be nonempty and unique; `*` must stand alone. The rule applies to structured

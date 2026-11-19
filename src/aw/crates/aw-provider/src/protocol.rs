@@ -1,6 +1,6 @@
 //! Correlate external responses without granting execution or adoption authority.
 
-use crate::{parsing, Error, REQUEST_SCHEMA, RESPONSE_SCHEMA};
+use crate::{parsing, Error, EventGate, REQUEST_SCHEMA, RESPONSE_SCHEMA};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::OnceLock};
@@ -62,9 +62,9 @@ impl Outcome {
         &self.0
     }
 
-    /// Whether the Provider requested blocking this submission or tool attempt.
+    /// Whether the Provider requested blocking at this decision or pre-tool gate.
     ///
-    /// False adds no restriction; it does not authorize the native submission or tool.
+    /// False adds no restriction; it does not authorize native execution or delivery.
     pub fn requests_block(&self) -> bool {
         self.0["effects"]
             .as_array()
@@ -163,18 +163,14 @@ impl Protocol {
             return Err(Error::Invalid("request schema mismatch"));
         }
         if value["method"] == "invoke" {
-            let before = matches!(
-                value["event"]["name"].as_str(),
-                Some("input.submit" | "tool.before")
-            );
+            let gate = value["event"]["name"]
+                .as_str()
+                .and_then(EventGate::for_event)
+                .ok_or(Error::Invalid("invocation event is not implemented"))?;
             for effect in array(&value["allowed_effects"])? {
-                if effect != "observe"
-                    && !(before && effect == "block")
-                    && !(value["event"]["name"] == "security.violation" && effect == "block")
-                    && !(value["event"]["name"] == "tool.before" && effect == "replace_input")
-                    && !(!before
-                        && effect == "replace_result"
-                        && value["event"]["name"] == "tool.after")
+                if !effect
+                    .as_str()
+                    .is_some_and(|effect| gate.allows_effect(effect))
                 {
                     return Err(Error::Invalid("invocation effect is not implemented"));
                 }
@@ -303,17 +299,26 @@ impl Protocol {
                 if value["input_digest"] != request.0["input_digest"] {
                     return Err(Error::Invalid("response binding mismatch"));
                 }
+                let gate = request.0["event"]["name"]
+                    .as_str()
+                    .and_then(EventGate::for_event)
+                    .ok_or(Error::Invalid("invocation event is not implemented"))?;
                 let mut replacements = 0;
                 for effect in array(&value["effects"])? {
-                    if effect["type"] == "replace_input"
-                        && (value["effects"].as_array().map(Vec::len) != Some(1)
-                            || request.0["event"]["name"] != "tool.before")
+                    let Some(kind) = effect["type"].as_str() else {
+                        return Err(Error::Invalid("expected effect type"));
+                    };
+                    if !gate.allows_effect(kind) {
+                        return Err(Error::Invalid("response effect violates event gate"));
+                    }
+                    if kind == "replace_input"
+                        && value["effects"].as_array().map(Vec::len) != Some(1)
                     {
                         return Err(Error::Invalid(
                             "input replacement must be a sole pre-tool effect",
                         ));
                     }
-                    if effect["type"] == "replace_input"
+                    if kind == "replace_input"
                         && request.0["event"]["tool"]["input"]
                             .as_object()
                             .zip(effect["input"].as_object())
@@ -325,7 +330,7 @@ impl Protocol {
                             "input replacement must retain original argument keys",
                         ));
                     }
-                    if effect["type"] == "replace_result" {
+                    if kind == "replace_result" {
                         replacements += 1;
                         if replacements > 1 {
                             return Err(Error::Invalid("multiple result replacements"));

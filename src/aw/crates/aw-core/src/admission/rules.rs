@@ -1,6 +1,7 @@
 //! Pure capability admission rules for structured Providers and native hook steps.
 
 use super::{AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution};
+use aw_provider::{EventGate, MutationSlot};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -74,15 +75,20 @@ pub fn preflight(
     )?;
     for (event, effects) in &capabilities.events {
         require(
-            supported_event(event) && effects.iter().all(|effect| supported_effect(event, effect)),
+            EventGate::for_event(event)
+                .is_some_and(|gate| effects.iter().all(|effect| gate.allows_effect(effect))),
             "Adapter evidence exceeds the supported event or effect surface",
         )?;
     }
     for (event, actions) in &capabilities.failure_actions {
         require(
-            event == "tool.after"
-                && capabilities.events.contains_key(event)
-                && actions.iter().all(|action| action == "withhold_result"),
+            capabilities.events.contains_key(event)
+                && EventGate::for_event(event).is_some_and(|gate| {
+                    gate.mutation_slot() == Some(MutationSlot::PostToolResult)
+                        && actions
+                            .iter()
+                            .all(|action| gate.allows_extra_failure_action(action))
+                }),
             "Adapter evidence exceeds the supported failure action surface",
         )?;
     }
@@ -90,6 +96,25 @@ pub fn preflight(
         spec["execution"]["guarantee"] == "native_hook",
         "only native_hook execution can be admitted",
     )?;
+    for (event_name, event) in spec["events"].as_object().ok_or(AdmissionError::Rejected(
+        "configuration events must be an object",
+    ))? {
+        if event["enabled"] != true {
+            continue;
+        }
+        if let Some(gate) = EventGate::for_event(event_name) {
+            require(
+                gate.has_tool_payload()
+                    || (event.get("match").is_none()
+                        && event["steps"].as_array().is_some_and(|steps| {
+                            steps
+                                .iter()
+                                .all(|step| step["enabled"] == false || step.get("match").is_none())
+                        })),
+                "non-tool event does not support tool selectors",
+            )?;
+        }
+    }
     let mut candidates = Vec::new();
     for requirement in aw_config::requirements::project(config, target)? {
         let event_name = requirement.event;
@@ -99,10 +124,8 @@ pub fn preflight(
             .iter()
             .map(aw_config::requirements::StepRequirement::configuration)
             .collect();
-        require(
-            supported_event(event_name),
-            "enabled event is not supported",
-        )?;
+        let gate = EventGate::for_event(event_name)
+            .ok_or(AdmissionError::Rejected("enabled event is not supported"))?;
         let effects = capabilities
             .events
             .get(event_name)
@@ -119,7 +142,8 @@ pub fn preflight(
                 .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_result"))
         }) {
             require(
-                index + 1 == enabled.len(),
+                gate.mutation_slot() == Some(MutationSlot::PostToolResult)
+                    && index + 1 == enabled.len(),
                 "result replacement must be the last applicable enabled event step",
             )?;
         }
@@ -130,20 +154,16 @@ pub fn preflight(
                 && effects.iter().any(|effect| effect == "replace_input")
             {
                 require(
-                    index == 0 && step["effects"] == serde_json::json!(["replace_input"])
+                    gate.mutation_slot() == Some(MutationSlot::PreToolInput)
+                        && index == 0
+                        && step["effects"] == serde_json::json!(["replace_input"])
                         && enabled.iter().all(|step| step["on_error"] == "block"),
                     "input replacement requires a first sole-effect step and fail-closed before steps",
                 )?;
             }
         }
         for step in enabled {
-            candidates.push(preflight_step(
-                spec,
-                event_name,
-                step,
-                effects,
-                capabilities,
-            )?);
+            candidates.push(preflight_step(spec, gate, step, effects, capabilities)?);
         }
     }
     Ok(candidates)
@@ -151,11 +171,12 @@ pub fn preflight(
 
 fn preflight_step(
     spec: &Value,
-    event: &str,
+    gate: EventGate,
     step: &Value,
     adapter_effects: &[String],
     capabilities: &AdapterCapabilities,
 ) -> Result<AdmittedStep, AdmissionError> {
+    let event = gate.event();
     let provider_name = string(&step["provider"])?;
     let provider = spec["providers"]
         .get(provider_name)
@@ -173,6 +194,10 @@ fn preflight_step(
     )?;
     let execution = if protocol == "native-hook/v1alpha1" {
         require(step.get("native").is_some(), "native hook step is required")?;
+        require(
+            gate.allows_native_hook(),
+            "native hook step is not supported for this event",
+        )?;
         StepExecution::Native
     } else {
         let mut effects = Vec::new();
@@ -182,7 +207,7 @@ fn preflight_step(
         {
             let effect = string(effect)?;
             require(
-                supported_effect(event, effect)
+                gate.allows_effect(effect)
                     && adapter_effects.iter().any(|supported| supported == effect),
                 "requested effect is not supported by the implementation and Adapter",
             )?;
@@ -208,18 +233,20 @@ fn preflight_step(
     };
     let on_error = string(&step["on_error"])?;
     require(
-        on_error == "report"
-            || (matches!(event, "input.submit" | "tool.before" | "security.violation")
-                && on_error == "block"
-                && adapter_effects.iter().any(|effect| effect == "block"))
-            || (event == "tool.after"
-                && on_error == "withhold_result"
-                && capabilities
-                    .failure_actions
-                    .get(event)
-                    .is_some_and(|actions| {
-                        actions.iter().any(|action| action == "withhold_result")
-                    })),
+        gate.allows_failure_action(on_error)
+            && match on_error {
+                "report" => true,
+                "block" => adapter_effects.iter().any(|effect| effect == "block"),
+                "withhold_result" => {
+                    capabilities
+                        .failure_actions
+                        .get(event)
+                        .is_some_and(|actions| {
+                            actions.iter().any(|action| action == "withhold_result")
+                        })
+                }
+                _ => false,
+            },
         "failure action is not supported by the implementation and Adapter",
     )?;
     Ok(AdmittedStep {
@@ -282,23 +309,6 @@ fn check_provider(
         )?;
     }
     Ok(())
-}
-
-fn supported_event(event: &str) -> bool {
-    matches!(
-        event,
-        "input.submit" | "tool.before" | "tool.after" | "security.violation"
-    )
-}
-
-fn supported_effect(event: &str, effect: &str) -> bool {
-    matches!(
-        (event, effect),
-        ("input.submit" | "tool.before", "observe" | "block")
-            | ("tool.before", "replace_input")
-            | ("tool.after", "observe" | "replace_result")
-            | ("security.violation", "observe" | "block")
-    )
 }
 
 fn contains(value: &Value, expected: &str) -> bool {

@@ -5,10 +5,12 @@
 //! A successful check yields candidate effects, never a Core receipt or proof of
 //! adoption. Trusted Hosts retain execution, budget and audit responsibilities.
 
+mod gate;
 mod parsing;
 mod protocol;
 pub mod view;
 
+pub use gate::{EventGate, GateKind, MutationSlot};
 pub use protocol::{
     Description, Outcome, Protocol, ProviderEvidence, Reply, Request, ValidatedConfig,
 };

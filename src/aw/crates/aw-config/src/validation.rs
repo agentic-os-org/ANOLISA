@@ -64,10 +64,17 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             &format!("{path}/required"),
             "a disabled event cannot be required",
         )?;
+        let runtime_non_tool =
+            matches!(name.as_str(), "session.start" | "turn.stop" | "session.end");
         require(
             name != "input.submit" || event.get("match").is_none(),
             &path,
             "input.submit has no tool selectors",
+        )?;
+        require(
+            !(enabled && runtime_non_tool && event.get("match").is_some()),
+            &path,
+            "non-tool events have no tool selectors",
         )?;
         validate_tools(event, &path, &adapters)?;
         let mut ids = BTreeSet::new();
@@ -78,10 +85,16 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             .enumerate()
         {
             let path = format!("{path}/steps/{index}");
+            let active = enabled && step["enabled"] != false;
             require(
                 name != "input.submit" || step.get("match").is_none(),
                 &path,
                 "input.submit has no tool selectors",
+            )?;
+            require(
+                !(active && runtime_non_tool && step.get("match").is_some()),
+                &path,
+                "non-tool events have no tool selectors",
             )?;
             validate_tools(step, &path, &adapters)?;
             let id = step["id"].as_str().ok_or(Error::InvalidSchema)?;
@@ -128,7 +141,6 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 &format!("{path}/on_error"),
                 "native hooks support report or block failure actions",
             )?;
-            let active = enabled && step["enabled"] != false;
             for (index, effect) in step
                 .get("effects")
                 .and_then(Value::as_array)
@@ -143,7 +155,9 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                         matches!(effect, "observe" | "block" | "replace_input" | "ask")
                     }
                     "tool.after" => matches!(effect, "observe" | "replace_result"),
-                    "input.submit" | "security.violation" => matches!(effect, "observe" | "block"),
+                    "input.submit" | "turn.stop" | "security.violation" => {
+                        matches!(effect, "observe" | "block")
+                    }
                     _ => effect == "observe",
                 };
                 require(allowed, &path, "effect is not defined for this event")?;
@@ -159,7 +173,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                     "report" => true,
                     "block" => matches!(
                         name.as_str(),
-                        "input.submit" | "tool.before" | "security.violation"
+                        "input.submit" | "tool.before" | "turn.stop" | "security.violation"
                     ),
                     "withhold_result" => name == "tool.after",
                     _ => false,
