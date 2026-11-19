@@ -71,7 +71,11 @@ pub(crate) fn run(
         spec: spec.clone(),
         name,
     };
-    let mut child = Command::new(helper)
+    supervise(Command::new(helper), &request)
+}
+
+fn supervise(mut helper: Command, request: &Request) -> Result<ExecutionResult, DockerError> {
+    let mut child = helper
         .env_clear()
         .process_group(0)
         .stdin(Stdio::piped())
@@ -88,7 +92,7 @@ pub(crate) fn run(
             .take()
             .ok_or_else(|| DockerError::Protocol("guard output missing".into()))?,
     );
-    send(&mut input, &request)?;
+    send(&mut input, request)?;
     let mut recovery = None;
     loop {
         let message = receive(&mut output).map_err(|error| {
@@ -210,3 +214,7 @@ fn serve(
         },
     )
 }
+
+#[cfg(test)]
+#[path = "../tests/guard.rs"]
+mod tests;

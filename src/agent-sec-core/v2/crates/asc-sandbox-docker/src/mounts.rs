@@ -25,8 +25,16 @@ impl PinnedMounts {
                 "descriptor-pinned Docker mounts require host root and CAP_SYS_ADMIN".into(),
             ));
         }
-        let root = trusted_root()?;
-        let directory = tempfile::Builder::new().prefix("run-").tempdir_in(&root)?;
+        Self::stage(spec, plan, &trusted_root()?, Self::attach_tree)
+    }
+
+    fn stage(
+        spec: &ExecutionSpec,
+        plan: &mut ContainerPlan,
+        root: &Path,
+        attach: impl Fn(&mut Self, &File, &str, &Path) -> Result<(), DockerError>,
+    ) -> Result<Self, DockerError> {
+        let directory = tempfile::Builder::new().prefix("run-").tempdir_in(root)?;
         let mut pinned = Self {
             directory: Some(directory),
             paths: Vec::new(),
@@ -41,20 +49,6 @@ impl PinnedMounts {
             let source = open_source(Path::new(&mount.source))?;
             let metadata = source.metadata()?;
             verify_source(spec, &mount.source, &metadata)?;
-            let tree = rustix::mount::open_tree(
-                &source,
-                "",
-                OpenTreeFlags::OPEN_TREE_CLONE
-                    | OpenTreeFlags::OPEN_TREE_CLOEXEC
-                    | OpenTreeFlags::AT_EMPTY_PATH
-                    | OpenTreeFlags::AT_RECURSIVE,
-            )
-            .map_err(|error| {
-                DockerError::Unsupported(format!(
-                    "cannot pin bind source {}: {error}; require CAP_SYS_ADMIN and open_tree",
-                    mount.source
-                ))
-            })?;
             let target = pinned
                 .directory
                 .as_ref()
@@ -66,21 +60,7 @@ impl PinnedMounts {
             } else {
                 File::create_new(&target)?;
             }
-            rustix::mount::move_mount(
-                &tree,
-                "",
-                rustix::fs::CWD,
-                &target,
-                MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-            )
-            .map_err(std::io::Error::from)?;
-            // Track ownership before propagation setup can fail; never recursively delete a mounted workspace.
-            pinned.paths.push(target.clone());
-            rustix::mount::mount_change(
-                &target,
-                MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
-            )
-            .map_err(std::io::Error::from)?;
+            attach(&mut pinned, &source, &mount.source, &target)?;
             let actual = fs::metadata(&target)?;
             if actual.dev() != metadata.dev() || actual.ino() != metadata.ino() {
                 return Err(DockerError::Protocol(
@@ -97,6 +77,38 @@ impl PinnedMounts {
             plan.create_args[position] = mount.argument();
         }
         Ok(pinned)
+    }
+
+    fn attach_tree(&mut self, source: &File, name: &str, target: &Path) -> Result<(), DockerError> {
+        let tree = rustix::mount::open_tree(
+            source,
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::AT_RECURSIVE,
+        )
+        .map_err(|error| {
+            DockerError::Unsupported(format!(
+                "cannot pin bind source {name}: {error}; require CAP_SYS_ADMIN and open_tree"
+            ))
+        })?;
+        rustix::mount::move_mount(
+            &tree,
+            "",
+            rustix::fs::CWD,
+            target,
+            MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+        )
+        .map_err(std::io::Error::from)?;
+        // Record the mount before propagation setup can fail.
+        self.paths.push(target.to_owned());
+        rustix::mount::mount_change(
+            target,
+            MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+        )
+        .map_err(std::io::Error::from)?;
+        Ok(())
     }
 }
 
@@ -208,3 +220,7 @@ fn open_source(path: &Path) -> Result<File, DockerError> {
     }
     Ok(file)
 }
+
+#[cfg(test)]
+#[path = "../tests/mounts.rs"]
+mod tests;

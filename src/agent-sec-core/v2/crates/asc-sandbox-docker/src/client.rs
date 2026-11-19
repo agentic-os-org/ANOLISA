@@ -211,30 +211,34 @@ fn daemon_process(peer_pid: i32, endpoint: &Path) -> Result<PathBuf, DockerError
             .parse()
             .map_err(|_| DockerError::Unsupported("invalid local dockerd PID".into()))?;
         proc = PathBuf::from(format!("/proc/{pid}"));
-        let sockets = fs::read_to_string(proc.join("net/unix"))?;
-        let mut listener = false;
-        for line in sockets.lines().skip(1) {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() == 8
-                && fields[3] == "00010000"
-                && fs::canonicalize(fields[7]).is_ok_and(|path| path == endpoint)
-            {
-                let target = PathBuf::from(format!("socket:[{}]", fields[6]));
-                listener = fs::read_dir(proc.join("fd"))?
-                    .filter_map(Result::ok)
-                    .any(|entry| fs::read_link(entry.path()).is_ok_and(|path| path == target));
-                if listener {
-                    break;
-                }
-            }
-        }
-        if !listener {
+        if !owns_listener(&proc, endpoint)? {
             return Err(DockerError::Unsupported(
                 "cannot bind activated endpoint to dockerd".into(),
             ));
         }
     }
     Ok(proc)
+}
+
+#[cfg(target_os = "linux")]
+fn owns_listener(proc: &Path, endpoint: &Path) -> Result<bool, DockerError> {
+    let sockets = fs::read_to_string(proc.join("net/unix"))?;
+    for line in sockets.lines().skip(1) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() == 8
+            && fields[3] == "00010000"
+            && fs::canonicalize(fields[7]).is_ok_and(|path| path == endpoint)
+        {
+            let target = PathBuf::from(format!("socket:[{}]", fields[6]));
+            if fs::read_dir(proc.join("fd"))?
+                .filter_map(Result::ok)
+                .any(|entry| fs::read_link(entry.path()).is_ok_and(|path| path == target))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]
@@ -260,3 +264,7 @@ pub(crate) fn trusted_path(path: &Path, socket: bool) -> Result<(), DockerError>
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/client.rs"]
+mod tests;
