@@ -36,4 +36,20 @@ fn generic_templates_require_numbered_progress_language() {
         generic_progress_template("> Task :mod-2:buildingJar UP-TO-DATE"),
         None
     );
+    assert_eq!(
+        generic_progress_template("      Start  1: runningIntegrationTests"),
+        None
+    );
+    assert_eq!(
+        generic_progress_template(
+            " 1/12 Test  #1: buildingSuite ....................   Passed    0.05 sec"
+        ),
+        None
+    );
+    assert_eq!(
+        generic_progress_template(
+            " 2/12 Test  #2: compilingCase ....................***Failed    0.10 sec"
+        ),
+        None
+    );
 }

@@ -1,0 +1,338 @@
+[
+  {
+    "file": "brotli_serial.txt",
+    "environment": {
+      "repository": "google/brotli",
+      "tag": "v1.2.1",
+      "commit": "db24a98aed38a16de78cc05ca15cdd8dc2a0d92d",
+      "cmake_options": [],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "--output-on-failure"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "77cea8cebae753b00517e48419ab82248ed6d502fd210373ad12c0d4db2e4a4c",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "77cea8cebae753b00517e48419ab82248ed6d502fd210373ad12c0d4db2e4a4c"
+      }
+    },
+    "stream": "observed",
+    "sha256": "77cea8cebae753b00517e48419ab82248ed6d502fd210373ad12c0d4db2e4a4c"
+  },
+  {
+    "file": "brotli_parallel.txt",
+    "environment": {
+      "repository": "google/brotli",
+      "tag": "v1.2.1",
+      "commit": "db24a98aed38a16de78cc05ca15cdd8dc2a0d92d",
+      "cmake_options": [],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "-j",
+        "2",
+        "--output-on-failure"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "1c2a7e6fdf68873f04d00b8263d5ceb8fa8069ea211ca06382eea1ca45705098",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "1c2a7e6fdf68873f04d00b8263d5ceb8fa8069ea211ca06382eea1ca45705098"
+      }
+    },
+    "stream": "observed",
+    "sha256": "1c2a7e6fdf68873f04d00b8263d5ceb8fa8069ea211ca06382eea1ca45705098"
+  },
+  {
+    "file": "catch2_serial.txt",
+    "environment": {
+      "repository": "catchorg/Catch2",
+      "tag": "v3.16.1",
+      "commit": "08092139210881f01a34e60c5f2fd6afa0ea4024",
+      "cmake_options": [
+        "-DCATCH_DEVELOPMENT_BUILD=ON",
+        "-DCATCH_ENABLE_WERROR=OFF"
+      ],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "--output-on-failure"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "e15e7c39edb6aa2fb46728103af929ac84e1fe20d43d35ebfa6b7f30de061a85",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "e15e7c39edb6aa2fb46728103af929ac84e1fe20d43d35ebfa6b7f30de061a85"
+      }
+    },
+    "stream": "observed",
+    "sha256": "e15e7c39edb6aa2fb46728103af929ac84e1fe20d43d35ebfa6b7f30de061a85"
+  },
+  {
+    "file": "catch2_parallel.txt",
+    "environment": {
+      "repository": "catchorg/Catch2",
+      "tag": "v3.16.1",
+      "commit": "08092139210881f01a34e60c5f2fd6afa0ea4024",
+      "cmake_options": [
+        "-DCATCH_DEVELOPMENT_BUILD=ON",
+        "-DCATCH_ENABLE_WERROR=OFF"
+      ],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "-j",
+        "2",
+        "--output-on-failure"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "cd085c00511fe8eccad15140acb03cc206b96fee529a5542fe1d46566af1df4f",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "cd085c00511fe8eccad15140acb03cc206b96fee529a5542fe1d46566af1df4f"
+      }
+    },
+    "stream": "observed",
+    "sha256": "cd085c00511fe8eccad15140acb03cc206b96fee529a5542fe1d46566af1df4f"
+  },
+  {
+    "file": "fmt_serial.txt",
+    "environment": {
+      "repository": "fmtlib/fmt",
+      "tag": "12.2.1",
+      "commit": "208219daff58f2a7438f6931cc2ddc358acf33ef",
+      "cmake_options": [],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "--output-on-failure"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "fbce91cda30cb7d038ac0c95216f6ac75d8ab574f92318b82b5380dd27029e6b",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "fbce91cda30cb7d038ac0c95216f6ac75d8ab574f92318b82b5380dd27029e6b"
+      }
+    },
+    "stream": "observed",
+    "sha256": "fbce91cda30cb7d038ac0c95216f6ac75d8ab574f92318b82b5380dd27029e6b"
+  },
+  {
+    "file": "libgit2_offline_failure.txt",
+    "environment": {
+      "repository": "libgit2/libgit2",
+      "tag": "v1.9.7",
+      "commit": "49e408b3208bc3093757a1c2db938d3590f3f412",
+      "cmake_options": [],
+      "image": "tokenless-cpp-capture:ubuntu24.04",
+      "image_id": "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+      "tool_versions": {
+        "cmake": "cmake version 3.28.3",
+        "ctest": "ctest version 3.28.3",
+        "ninja": "1.11.1",
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "g++": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+      }
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--user",
+        "1000:1000",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:0d0b8bc917a614456fd58ff2c71dd1c6d036472c6ef9de6aa503ad70ae64dd46",
+        "ctest",
+        "--test-dir",
+        "/work/build-ninja",
+        "-j",
+        "2",
+        "--output-on-failure"
+      ],
+      "exit_code": 8,
+      "sha256": {
+        "stdout": "f8f1617cb74a0867ca1eb05063cf04406ad066861473ab72a942f2036f30004a",
+        "stderr": "18e00877dc1071c85cd4f479d451bebeef8309022e46cf8c63b0bed5151984a4",
+        "observed": "7c5df49d1e2bebb45e3e11a4fd353abc6a38999ff8323d7f7df3f3396db6efdf"
+      }
+    },
+    "stream": "observed",
+    "sha256": "7c5df49d1e2bebb45e3e11a4fd353abc6a38999ff8323d7f7df3f3396db6efdf"
+  }
+]

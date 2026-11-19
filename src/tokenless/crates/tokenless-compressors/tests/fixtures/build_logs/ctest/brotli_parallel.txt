@@ -1,0 +1,152 @@
+Internal ctest changing into directory: /work/build-ninja
+Test project /work/build-ninja
+      Start 16: roundtrip/tests/testdata/plrabn12.txt/11
+      Start 12: roundtrip/tests/testdata/lcet10.txt/11
+ 1/73 Test #12: roundtrip/tests/testdata/lcet10.txt/11 ........................   Passed    0.81 sec
+      Start  4: roundtrip/tests/testdata/alice29.txt/11
+ 2/73 Test #16: roundtrip/tests/testdata/plrabn12.txt/11 ......................   Passed    1.13 sec
+      Start 28: roundtrip/c/dec/decode.c/11
+ 3/73 Test  #4: roundtrip/tests/testdata/alice29.txt/11 .......................   Passed    0.33 sec
+      Start  8: roundtrip/tests/testdata/asyoulik.txt/11
+ 4/73 Test #28: roundtrip/c/dec/decode.c/11 ...................................   Passed    0.19 sec
+      Start 20: roundtrip/c/enc/encode.c/11
+ 5/73 Test  #8: roundtrip/tests/testdata/asyoulik.txt/11 ......................   Passed    0.28 sec
+      Start 15: roundtrip/tests/testdata/plrabn12.txt/9
+ 6/73 Test #20: roundtrip/c/enc/encode.c/11 ...................................   Passed    0.19 sec
+      Start 11: roundtrip/tests/testdata/lcet10.txt/9
+ 7/73 Test #15: roundtrip/tests/testdata/plrabn12.txt/9 .......................   Passed    0.10 sec
+      Start  3: roundtrip/tests/testdata/alice29.txt/9
+ 8/73 Test #11: roundtrip/tests/testdata/lcet10.txt/9 .........................   Passed    0.07 sec
+      Start 14: roundtrip/tests/testdata/plrabn12.txt/6
+ 9/73 Test  #3: roundtrip/tests/testdata/alice29.txt/9 ........................   Passed    0.07 sec
+      Start 10: roundtrip/tests/testdata/lcet10.txt/6
+10/73 Test #10: roundtrip/tests/testdata/lcet10.txt/6 .........................   Passed    0.05 sec
+      Start 27: roundtrip/c/dec/decode.c/9
+11/73 Test #14: roundtrip/tests/testdata/plrabn12.txt/6 .......................   Passed    0.08 sec
+      Start  7: roundtrip/tests/testdata/asyoulik.txt/9
+12/73 Test #27: roundtrip/c/dec/decode.c/9 ....................................   Passed    0.05 sec
+      Start 19: roundtrip/c/enc/encode.c/9
+13/73 Test  #7: roundtrip/tests/testdata/asyoulik.txt/9 .......................   Passed    0.06 sec
+      Start  2: roundtrip/tests/testdata/alice29.txt/6
+14/73 Test #19: roundtrip/c/enc/encode.c/9 ....................................   Passed    0.04 sec
+      Start 13: roundtrip/tests/testdata/plrabn12.txt/1
+15/73 Test  #2: roundtrip/tests/testdata/alice29.txt/6 ........................   Passed    0.03 sec
+      Start  9: roundtrip/tests/testdata/lcet10.txt/1
+16/73 Test #13: roundtrip/tests/testdata/plrabn12.txt/1 .......................   Passed    0.04 sec
+      Start 26: roundtrip/c/dec/decode.c/6
+17/73 Test  #9: roundtrip/tests/testdata/lcet10.txt/1 .........................   Passed    0.04 sec
+      Start 18: roundtrip/c/enc/encode.c/6
+18/73 Test #26: roundtrip/c/dec/decode.c/6 ....................................   Passed    0.03 sec
+      Start  6: roundtrip/tests/testdata/asyoulik.txt/6
+19/73 Test #18: roundtrip/c/enc/encode.c/6 ....................................   Passed    0.04 sec
+      Start  1: roundtrip/tests/testdata/alice29.txt/1
+20/73 Test  #6: roundtrip/tests/testdata/asyoulik.txt/6 .......................   Passed    0.03 sec
+      Start 59: compatibility/tests/testdata/mapsdatazrh.compressed
+21/73 Test  #1: roundtrip/tests/testdata/alice29.txt/1 ........................   Passed    0.04 sec
+      Start 56: compatibility/tests/testdata/empty.compressed.17
+22/73 Test #59: compatibility/tests/testdata/mapsdatazrh.compressed ...........   Passed    0.03 sec
+      Start 61: compatibility/tests/testdata/plrabn12.txt.compressed
+23/73 Test #56: compatibility/tests/testdata/empty.compressed.17 ..............   Passed    0.02 sec
+      Start 21: roundtrip/c/common/dictionary.h/1
+24/73 Test #21: roundtrip/c/common/dictionary.h/1 .............................   Passed    0.02 sec
+      Start 72: compatibility/tests/testdata/zeros.compressed
+25/73 Test #61: compatibility/tests/testdata/plrabn12.txt.compressed ..........   Passed    0.03 sec
+      Start 22: roundtrip/c/common/dictionary.h/6
+26/73 Test #72: compatibility/tests/testdata/zeros.compressed .................   Passed    0.02 sec
+      Start 73: compatibility/tests/testdata/zerosukkanooa.compressed
+27/73 Test #22: roundtrip/c/common/dictionary.h/6 .............................   Passed    0.02 sec
+      Start 63: compatibility/tests/testdata/quickfox_repeated.compressed
+28/73 Test #73: compatibility/tests/testdata/zerosukkanooa.compressed .........   Passed    0.02 sec
+      Start 24: roundtrip/c/common/dictionary.h/11
+29/73 Test #63: compatibility/tests/testdata/quickfox_repeated.compressed .....   Passed    0.02 sec
+      Start 37: compatibility/tests/testdata/cp852-utf8.compressed
+30/73 Test #37: compatibility/tests/testdata/cp852-utf8.compressed ............   Passed    0.02 sec
+      Start 29: compatibility/tests/testdata/10x10y.compressed
+31/73 Test #24: roundtrip/c/common/dictionary.h/11 ............................   Passed    0.04 sec
+      Start  5: roundtrip/tests/testdata/asyoulik.txt/1
+32/73 Test #29: compatibility/tests/testdata/10x10y.compressed ................   Passed    0.02 sec
+      Start 44: compatibility/tests/testdata/empty.compressed.05
+33/73 Test #44: compatibility/tests/testdata/empty.compressed.05 ..............   Passed    0.02 sec
+      Start 62: compatibility/tests/testdata/quickfox.compressed
+34/73 Test  #5: roundtrip/tests/testdata/asyoulik.txt/1 .......................   Passed    0.03 sec
+      Start 64: compatibility/tests/testdata/random_org_10k.bin.compressed
+35/73 Test #62: compatibility/tests/testdata/quickfox.compressed ..............   Passed    0.01 sec
+      Start 36: compatibility/tests/testdata/cp1251-utf16le.compressed
+36/73 Test #64: compatibility/tests/testdata/random_org_10k.bin.compressed ....   Passed    0.02 sec
+      Start 30: compatibility/tests/testdata/64x.compressed
+37/73 Test #36: compatibility/tests/testdata/cp1251-utf16le.compressed ........   Passed    0.02 sec
+      Start 60: compatibility/tests/testdata/monkey.compressed
+38/73 Test #30: compatibility/tests/testdata/64x.compressed ...................   Passed    0.02 sec
+      Start 50: compatibility/tests/testdata/empty.compressed.11
+39/73 Test #60: compatibility/tests/testdata/monkey.compressed ................   Passed    0.02 sec
+      Start 54: compatibility/tests/testdata/empty.compressed.15
+40/73 Test #50: compatibility/tests/testdata/empty.compressed.11 ..............   Passed    0.02 sec
+      Start 67: compatibility/tests/testdata/x.compressed.00
+41/73 Test #54: compatibility/tests/testdata/empty.compressed.15 ..............   Passed    0.02 sec
+      Start 45: compatibility/tests/testdata/empty.compressed.06
+42/73 Test #67: compatibility/tests/testdata/x.compressed.00 ..................   Passed    0.02 sec
+      Start 34: compatibility/tests/testdata/compressed_file.compressed
+43/73 Test #45: compatibility/tests/testdata/empty.compressed.06 ..............   Passed    0.01 sec
+      Start 40: compatibility/tests/testdata/empty.compressed.01
+44/73 Test #34: compatibility/tests/testdata/compressed_file.compressed .......   Passed    0.01 sec
+      Start 43: compatibility/tests/testdata/empty.compressed.04
+45/73 Test #40: compatibility/tests/testdata/empty.compressed.01 ..............   Passed    0.02 sec
+      Start 55: compatibility/tests/testdata/empty.compressed.16
+46/73 Test #43: compatibility/tests/testdata/empty.compressed.04 ..............   Passed    0.01 sec
+      Start 68: compatibility/tests/testdata/x.compressed.01
+47/73 Test #55: compatibility/tests/testdata/empty.compressed.16 ..............   Passed    0.02 sec
+      Start 17: roundtrip/c/enc/encode.c/1
+48/73 Test #68: compatibility/tests/testdata/x.compressed.01 ..................   Passed    0.01 sec
+      Start 66: compatibility/tests/testdata/x.compressed
+49/73 Test #66: compatibility/tests/testdata/x.compressed .....................   Passed    0.01 sec
+      Start 46: compatibility/tests/testdata/empty.compressed.07
+50/73 Test #17: roundtrip/c/enc/encode.c/1 ....................................   Passed    0.02 sec
+      Start 49: compatibility/tests/testdata/empty.compressed.10
+51/73 Test #46: compatibility/tests/testdata/empty.compressed.07 ..............   Passed    0.01 sec
+      Start 33: compatibility/tests/testdata/backward65536.compressed
+52/73 Test #49: compatibility/tests/testdata/empty.compressed.10 ..............   Passed    0.01 sec
+      Start 32: compatibility/tests/testdata/asyoulik.txt.compressed
+53/73 Test #32: compatibility/tests/testdata/asyoulik.txt.compressed ..........   Passed    0.01 sec
+      Start 42: compatibility/tests/testdata/empty.compressed.03
+54/73 Test #33: compatibility/tests/testdata/backward65536.compressed .........   Passed    0.02 sec
+      Start 53: compatibility/tests/testdata/empty.compressed.14
+55/73 Test #53: compatibility/tests/testdata/empty.compressed.14 ..............   Passed    0.01 sec
+      Start 38: compatibility/tests/testdata/empty.compressed
+56/73 Test #42: compatibility/tests/testdata/empty.compressed.03 ..............   Passed    0.02 sec
+      Start 48: compatibility/tests/testdata/empty.compressed.09
+57/73 Test #38: compatibility/tests/testdata/empty.compressed .................   Passed    0.02 sec
+      Start 23: roundtrip/c/common/dictionary.h/9
+58/73 Test #48: compatibility/tests/testdata/empty.compressed.09 ..............   Passed    0.02 sec
+      Start 58: compatibility/tests/testdata/lcet10.txt.compressed
+59/73 Test #58: compatibility/tests/testdata/lcet10.txt.compressed ............   Passed    0.02 sec
+      Start 65: compatibility/tests/testdata/ukkonooa.compressed
+60/73 Test #23: roundtrip/c/common/dictionary.h/9 .............................   Passed    0.02 sec
+      Start 31: compatibility/tests/testdata/alice29.txt.compressed
+61/73 Test #65: compatibility/tests/testdata/ukkonooa.compressed ..............   Passed    0.02 sec
+      Start 51: compatibility/tests/testdata/empty.compressed.12
+62/73 Test #31: compatibility/tests/testdata/alice29.txt.compressed ...........   Passed    0.02 sec
+      Start 25: roundtrip/c/dec/decode.c/1
+63/73 Test #51: compatibility/tests/testdata/empty.compressed.12 ..............   Passed    0.02 sec
+      Start 35: compatibility/tests/testdata/compressed_repeated.compressed
+64/73 Test #25: roundtrip/c/dec/decode.c/1 ....................................   Passed    0.02 sec
+      Start 57: compatibility/tests/testdata/empty.compressed.18
+65/73 Test #35: compatibility/tests/testdata/compressed_repeated.compressed ...   Passed    0.02 sec
+      Start 39: compatibility/tests/testdata/empty.compressed.00
+66/73 Test #39: compatibility/tests/testdata/empty.compressed.00 ..............   Passed    0.01 sec
+      Start 70: compatibility/tests/testdata/x.compressed.03
+67/73 Test #57: compatibility/tests/testdata/empty.compressed.18 ..............   Passed    0.02 sec
+      Start 71: compatibility/tests/testdata/xyzzy.compressed
+68/73 Test #70: compatibility/tests/testdata/x.compressed.03 ..................   Passed    0.01 sec
+      Start 69: compatibility/tests/testdata/x.compressed.02
+69/73 Test #71: compatibility/tests/testdata/xyzzy.compressed .................   Passed    0.02 sec
+      Start 41: compatibility/tests/testdata/empty.compressed.02
+70/73 Test #69: compatibility/tests/testdata/x.compressed.02 ..................   Passed    0.02 sec
+      Start 52: compatibility/tests/testdata/empty.compressed.13
+71/73 Test #41: compatibility/tests/testdata/empty.compressed.02 ..............   Passed    0.02 sec
+      Start 47: compatibility/tests/testdata/empty.compressed.08
+72/73 Test #47: compatibility/tests/testdata/empty.compressed.08 ..............   Passed    0.01 sec
+73/73 Test #52: compatibility/tests/testdata/empty.compressed.13 ..............   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 73
+
+Total Test time (real) =   2.35 sec

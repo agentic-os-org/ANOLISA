@@ -18,6 +18,10 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 进入 PostTool 的 Gradle 输出可在保留全部记录、失败任务与诊断输出的同时共享重复任务后缀与
 模块路径前缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [Gradle 构建输出](../../docs/user-guide/zh/tokenless/index.md#gradle-构建输出)。
 
+进入 PostTool 的 CTest 输出可在保留全部测试顺序、失败状态、诊断输出与汇总尾注的同时共享重复
+`/` 与 `::` 测试名前缀以及点线填充，支持串行 `Start`/结果成对行与 `-j` 并行交错流，无需
+Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输出](../../docs/user-guide/zh/tokenless/index.md#ctest-测试输出)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |

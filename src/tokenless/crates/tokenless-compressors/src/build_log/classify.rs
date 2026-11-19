@@ -13,6 +13,7 @@ pub(crate) enum BuildLogFormat {
     Pnpm,
     Maven,
     Gradle,
+    Ctest,
     Jest,
     Go,
     Make,
@@ -140,6 +141,7 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
         BuildLogFormat::Pnpm
         | BuildLogFormat::Maven
         | BuildLogFormat::Gradle
+        | BuildLogFormat::Ctest
         | BuildLogFormat::Generic => (false, false),
     };
     Evidence {
@@ -301,7 +303,10 @@ fn routine_family(
                 None
             }
         }
-        BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle => None,
+        BuildLogFormat::Pnpm
+        | BuildLogFormat::Maven
+        | BuildLogFormat::Gradle
+        | BuildLogFormat::Ctest => None,
         BuildLogFormat::Jest => (trimmed.starts_with("PASS ") || trimmed.starts_with('✓'))
             .then_some(RoutineFamily::JestPass),
         BuildLogFormat::Go => {

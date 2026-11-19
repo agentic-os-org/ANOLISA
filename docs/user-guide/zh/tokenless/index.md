@@ -384,7 +384,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm、Maven 和 Gradle 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm、Maven、Gradle 和 CTest 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
@@ -584,6 +584,21 @@ CRLF 换行、含非 SGR 控制字符、位于 Markdown 代码围栏内，或无
 token 数的输出保持原样；若没有可应用的 Gradle 布局编辑，带命令或退出码锚点的日志在 Stash
 与恢复通道可用时仍可使用既有的 `retrievable` 通用进度缩减。`Tool Error` 继续保持原文，
 PreTool RTK 命令改写行为不变。
+
+### CTest 测试输出
+
+已识别的成功原生 CTest 输出会通过现有 PostTool 内容路由压紧连续的非失败测试进度段，沿用
+`build_log_reduction` 操作并报告 `lossless`，无需恢复能力且不写入 Stash。压缩块以
+`CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): `
+与包含固定计数、列宽及共享 `/` 或 `::` 测试名前缀的 JSON 头部开始；展开后续各行即可在既有
+SGR 颜色清理后逐字还原串行 `Start`/结果成对行（`SP`、`SK`、`SD`）以及 `-j` 并行交错流
+（`s`/`S` 与 `P`/`K`/`D`）、点线宽度、状态后缀（`   Passed`、`***Skipped`、`***Not Run (Disabled)`）和耗时。
+
+`***Failed`、`***Timeout`、`***Exception: ...`、`***Not Run`、断言诊断、未配对 `Start` 行、`\t`
+缩进的 `The following tests FAILED:` / `did not run:` 汇总行、全部采用 CRLF 换行、含非
+SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符数与估算 token 数的输出均保持原样；
+若没有可应用的 CTest 布局编辑，带命令或退出码锚点的日志在 Stash 与恢复通道可用时仍可使用既有的
+`retrievable` 通用进度缩减。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
 
 ### CSV/TSV 压紧保留完整表格
 
