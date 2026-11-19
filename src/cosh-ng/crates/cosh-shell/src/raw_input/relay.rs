@@ -624,6 +624,14 @@ fn redraw_candidate_line(
 ) {
     let original = line_buffer.visible_line_bytes();
     send_shell_input_state(original.is_empty(), input_events);
+    // A streaming paste is fully buffered until the closer; redrawing the
+    // whole draft per chunk amplifies terminal output O(n²/chunk) (#10318).
+    // Coalesce echo into the single redraw the closer chunk already triggers.
+    // Skip before display construction: redaction copies the accumulated
+    // line, so building it per chunk is quadratic CPU as well as output.
+    if line_buffer.in_paste() {
+        return;
+    }
     if line_buffer.soft_newline_enabled
         && !line_buffer.in_paste()
         && contains_soft_newline_sequence(original)

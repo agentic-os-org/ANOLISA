@@ -2412,3 +2412,79 @@ fn routing_c3_explicit_draft_remains_the_only_multiline_agent_entry() {
             && event.message.as_deref() == Some("open")
     }));
 }
+
+// issue #10318: 100KB bracketed paste arrives in small terminal chunks; the
+// candidate echo must not amplify super-linearly (base: ~O(n²/chunk)).
+#[test]
+fn raw_relay_bash_large_bracketed_paste_echo_is_bounded() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash is unavailable");
+        return;
+    }
+
+    let root = tempfile::Builder::new()
+        .prefix("cosh-shell-paste-bounded-")
+        .tempdir()
+        .expect("paste bounded root");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS1='paste$ '\n").expect("bashrc");
+    let config = ShellHostConfig::new("paste-bounded", root.path().join("work"))
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home.display().to_string())
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+    let config = with_bracketed_paste_readline(config, true);
+
+    let payload_len = 102_400usize;
+    // Split quotes give each marker an echo form (with '') and an execution
+    // form (joined). The paste line and the recovery probe use distinct
+    // markers: if Ctrl-C fails to clear the line, the probe lands inside the
+    // trailing comment and Enter executes the pasted printf instead, which
+    // the joined paste marker would expose.
+    let mut payload = b"printf 'PASTE''LINEEXEC\\n' #".to_vec();
+    payload.resize(payload_len, b'x');
+
+    let mut actions = vec![
+        RawRelayAction::wait(Duration::from_millis(300)),
+        RawRelayAction::write(b"\x1b[200~".to_vec()),
+    ];
+    for chunk in payload.chunks(2048) {
+        actions.push(RawRelayAction::write(chunk.to_vec()));
+        actions.push(RawRelayAction::wait(Duration::from_millis(2)));
+    }
+    actions.push(RawRelayAction::write(b"\x1b[201~".to_vec()));
+    actions.push(RawRelayAction::wait(Duration::from_millis(300)));
+    // Abort the giant readline line instead of executing it: bash huge-line
+    // insertion cost is a separate issue (F3). tty ISIG delivers SIGINT
+    // immediately, so the session must stay responsive afterwards.
+    actions.push(RawRelayAction::write(vec![0x03]));
+    actions.push(RawRelayAction::wait(Duration::from_millis(500)));
+    actions.push(RawRelayAction::line("printf 'PROBE''AFTEROK\\n'"));
+    actions.push(RawRelayAction::wait(Duration::from_millis(1000)));
+    actions.push(RawRelayAction::line("exit"));
+
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(&config, actions, &mut rendered)
+        .expect("large bracketed paste");
+
+    let text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered.len() < 2_000_000,
+        "100KB paste echo must stay bounded, got {} bytes",
+        rendered.len()
+    );
+    assert!(
+        text.contains("PASTE''LINEEXEC"),
+        "payload echo must be present (echo form, quoted)"
+    );
+    assert!(
+        !text.contains("PASTELINEEXEC"),
+        "pasted line must not execute after Ctrl-C (joined form is execution-only)"
+    );
+    assert!(
+        text.contains("PROBEAFTEROK"),
+        "recovery probe must execute (joined form is execution-only)"
+    );
+    assert_eq!(output.exit_status, Some(0), "shell must exit cleanly");
+}
