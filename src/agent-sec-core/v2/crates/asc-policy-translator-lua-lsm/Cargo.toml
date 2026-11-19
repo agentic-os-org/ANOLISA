@@ -1,0 +1,20 @@
+[package]
+name = "asc-policy-translator-lua-lsm"
+description = "Pure policy translation to Lua-LSM deployment artifacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-file-policy.workspace = true
+asc-lua-lsm-protocol.workspace = true
+asc-policy-cedar.workspace = true
+asc-policy-types.workspace = true
+cedar-policy.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -303,6 +303,9 @@ strategy, and the transition from the V1 implementation and contracts. Keep
 the complete rationale and all actionable constraints in repository-accessible
 documents; development or acceptance must not depend on a private document.
 
+For changes to Cedar file conditions or enforcement backends, follow the
+[Cedar semantics and backend capabilities contract](docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#821-cedar-semantics-and-backend-capabilities).
+
 The current six language-independent behavior contracts are:
 
 - `docs/design/DAEMON_CURRENT_BEHAVIOR_zh.md`

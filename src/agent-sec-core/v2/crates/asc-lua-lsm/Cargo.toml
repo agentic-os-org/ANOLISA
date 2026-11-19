@@ -1,0 +1,25 @@
+[package]
+name = "asc-lua-lsm"
+description = "Compatibility facade and integration tests for the Lua-LSM backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-lua-lsm-client.workspace = true
+asc-lua-lsm-protocol.workspace = true
+asc-policy-translator-lua-lsm.workspace = true
+
+[dev-dependencies]
+asc-policy-types.workspace = true
+asc-policy-target-contracts.workspace = true
+rustix.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

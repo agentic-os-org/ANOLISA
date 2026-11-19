@@ -1,10 +1,11 @@
 //! Bounded Boolean lowering that preserves each operation's path conditions.
 
-use cedar_policy::pst::{BinaryOp, Expr, Literal, UnaryOp, Var};
+use asc_file_policy::{FilePathPattern, PatternSyntax};
+use cedar_policy::pst::{BinaryOp, Expr, Literal, PatternElem, UnaryOp, Var};
 
 use super::{
     MAX_TARGETS, Result,
-    paths::{Range, path_field, tree, validate_path},
+    paths::{PathScope, path_field, tree, validate_path},
 };
 
 pub(super) const DELETE: u8 = 1;
@@ -15,25 +16,30 @@ pub(super) const READ: u8 = 32;
 const ALL_OPERATIONS: u8 = WRITE_OPERATIONS | READ;
 
 #[derive(Clone)]
-pub(super) struct Branch {
+/// Conjunctive file conditions extracted from one Cedar statement.
+pub struct FileRule {
     pub(super) operations: u8,
-    pub(super) range: Option<Range>,
-    pub(super) excluded: Vec<Range>,
+    /// Positive literal scope, when supplied by equality or a tree expression.
+    pub range: Option<PathScope>,
+    pub(super) excluded: Vec<PathScope>,
+    /// All path predicates in this branch, including negated predicates.
+    pub patterns: Vec<FilePathPattern>,
     pub(super) origins: Vec<usize>,
 }
 
-impl Default for Branch {
+impl Default for FileRule {
     fn default() -> Self {
         Self {
             operations: ALL_OPERATIONS,
             range: None,
             excluded: Vec::new(),
+            patterns: Vec::new(),
             origins: Vec::new(),
         }
     }
 }
 
-pub(super) fn and(left: Vec<Branch>, right: &[Branch]) -> Result<Vec<Branch>> {
+pub(super) fn and(left: Vec<FileRule>, right: &[FileRule]) -> Result<Vec<FileRule>> {
     let mut result = Vec::new();
     for a in left {
         for b in right {
@@ -55,10 +61,16 @@ pub(super) fn and(left: Vec<Branch>, right: &[Branch]) -> Result<Vec<Branch>> {
             if excluded.len() > MAX_TARGETS {
                 return Err("EXPRESSION_LIMIT_EXCEEDED");
             }
-            result.push(Branch {
+            let mut patterns = a.patterns.clone();
+            patterns.extend(b.patterns.iter().cloned());
+            if patterns.len() > MAX_TARGETS {
+                return Err("EXPRESSION_LIMIT_EXCEEDED");
+            }
+            result.push(FileRule {
                 operations,
                 range,
                 excluded,
+                patterns,
                 origins: a.origins.iter().chain(&b.origins).copied().collect(),
             });
         }
@@ -66,7 +78,7 @@ pub(super) fn and(left: Vec<Branch>, right: &[Branch]) -> Result<Vec<Branch>> {
     Ok(result)
 }
 
-fn or(mut left: Vec<Branch>, right: Vec<Branch>) -> Result<Vec<Branch>> {
+fn or(mut left: Vec<FileRule>, right: Vec<FileRule>) -> Result<Vec<FileRule>> {
     if left.len() + right.len() > MAX_TARGETS {
         return Err("EXPRESSION_LIMIT_EXCEEDED");
     }
@@ -74,14 +86,14 @@ fn or(mut left: Vec<Branch>, right: Vec<Branch>) -> Result<Vec<Branch>> {
     Ok(left)
 }
 
-fn path(path: &str, is_tree: bool, negate: bool) -> Result<Vec<Branch>> {
+fn path(path: &str, is_tree: bool, negate: bool) -> Result<Vec<FileRule>> {
     validate_path(path)?;
     let range = if is_tree {
-        Range::Tree(path.into())
+        PathScope::Tree(path.into())
     } else {
-        Range::Exact(path.into())
+        PathScope::Exact(path.into())
     };
-    let mut branch = Branch::default();
+    let mut branch = FileRule::default();
     if negate {
         branch.excluded.push(range);
     } else {
@@ -95,7 +107,7 @@ fn operation_field(expr: &Expr) -> bool {
         matches!(expr.as_ref(), Expr::GetAttr { expr, attr } if attr == "input" && matches!(expr.as_ref(), Expr::Var(Var::Context))))
 }
 
-fn equality(field: &Expr, value: &Expr, negate: bool) -> Result<Vec<Branch>> {
+fn equality(field: &Expr, value: &Expr, negate: bool) -> Result<Vec<FileRule>> {
     if let Expr::Literal(Literal::String(value)) = value
         && path_field(field)
     {
@@ -110,16 +122,40 @@ fn equality(field: &Expr, value: &Expr, negate: bool) -> Result<Vec<Branch>> {
             "write" => WRITE,
             _ => return Err("UNSUPPORTED_OPERATION"),
         };
-        return Ok(vec![Branch {
+        return Ok(vec![FileRule {
             operations: if negate {
                 ALL_OPERATIONS & !operations
             } else {
                 operations
             },
-            ..Branch::default()
+            ..FileRule::default()
         }]);
     }
     Err("UNSUPPORTED_CONDITION")
+}
+
+fn like(pattern: &[PatternElem], negate: bool) -> FileRule {
+    let mut value = String::new();
+    for part in pattern {
+        match part {
+            PatternElem::Wildcard => value.push('*'),
+            PatternElem::Char(c) => {
+                if matches!(c, '*' | '\\') {
+                    value.push('\\');
+                }
+                value.push(*c);
+            }
+        }
+    }
+    let pattern = FilePathPattern {
+        syntax: PatternSyntax::CedarLike,
+        value,
+        negated: negate,
+    };
+    FileRule {
+        patterns: vec![pattern],
+        ..FileRule::default()
+    }
 }
 
 pub(super) fn expression(
@@ -127,7 +163,7 @@ pub(super) fn expression(
     negate: bool,
     depth: usize,
     origins: &mut std::ops::Range<usize>,
-) -> Result<Vec<Branch>> {
+) -> Result<Vec<FileRule>> {
     if depth > 64 {
         return Err("EXPRESSION_LIMIT_EXCEEDED");
     }
@@ -135,10 +171,11 @@ pub(super) fn expression(
         return path(&root, true, negate);
     }
     match expr {
+        Expr::Like { expr, pattern } if path_field(expr) => Ok(vec![like(pattern, negate)]),
         Expr::Literal(Literal::Bool(value)) => Ok(if *value == negate {
             vec![]
         } else {
-            vec![Branch::default()]
+            vec![FileRule::default()]
         }),
         Expr::UnaryOp {
             op: UnaryOp::Not,
@@ -196,7 +233,7 @@ pub(super) fn expression(
                 return Err("EXPRESSION_LIMIT_EXCEEDED");
             }
             let mut result = if negate {
-                vec![Branch::default()]
+                vec![FileRule::default()]
             } else {
                 vec![]
             };

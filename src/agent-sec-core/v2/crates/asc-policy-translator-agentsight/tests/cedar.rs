@@ -181,6 +181,7 @@ fn unsupported_read_scopes_and_conditions_reject_the_whole_policy() {
     );
     for (condition, code) in [
         (r#"resource.path != "/public""#, "UNBOUNDED_PATH_SCOPE"),
+        (r#"resource.path == "/work/a?.txt""#, "UNSUPPORTED_PATH"),
         (
             r#"resource.path == "/secret" && context.input.program == "/bin/cat""#,
             "UNSUPPORTED_CONDITION",

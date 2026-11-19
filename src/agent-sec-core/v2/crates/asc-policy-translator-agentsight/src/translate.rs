@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 
+use asc_agentsight_protocol::FileProtectionTarget;
+use asc_policy_cedar::file_protection::FileRule;
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::{
     Action, Category, Comparison, Condition, Effect, PolicySource, Resource, Scalar, Value,
@@ -110,22 +112,17 @@ fn compile_policy(
 ) -> Result<AgentSightPolicyPlan, TranslationRejection> {
     match &binding.policy.template {
         PolicySource::Cedar(source) => {
-            let policy = if let Some(syntax) = syntax {
-                crate::cedar::translate(syntax)?
+            let (policy, _) = if let Some(syntax) = syntax {
+                asc_policy_cedar::file_protection::translate_pst(syntax, cedar_target)?
             } else if let Some(selected) = &binding.policy.deployment {
                 if selected.backend != asc_policy_types::policy::DeploymentBackend::ActPlane {
                     return Err(rejection("INVALID_DEPLOYMENT_BACKEND"));
                 }
                 let files = asc_policy_cedar::deployment::selected_pst(source, selected)
                     .map_err(|_| rejection("INVALID_CEDAR_POLICY"))?;
-                crate::cedar::translate(&files)?
+                asc_policy_cedar::file_protection::translate_pst(&files, cedar_target)?
             } else {
-                let syntax =
-                    asc_policy_cedar::pst(source).map_err(|_| rejection("INVALID_CEDAR_POLICY"))?;
-                let files =
-                    asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File)
-                        .ok_or_else(|| rejection("CEDAR_EMPTY_EFFECTIVE_POLICY"))?;
-                crate::cedar::translate(&files)?
+                asc_policy_cedar::file_protection::translate(source, cedar_target)?
             };
             let content = serde_json::to_string(&policy)
                 .map_err(|_| rejection("POLICY_SERIALIZATION_FAILED"))?;
@@ -144,6 +141,22 @@ fn compile_policy(
             })
         }
     }
+}
+
+pub(super) fn cedar_target(rule: &FileRule) -> Result<Option<FileProtectionTarget>, &'static str> {
+    if !rule.patterns.is_empty() {
+        return Err("UNSUPPORTED_CONDITION");
+    }
+    let range = rule.range.as_ref().ok_or("UNBOUNDED_PATH_SCOPE")?;
+    let target = rule.target(range)?;
+    if let Some(target) = &target
+        && std::iter::once(&target.path)
+            .chain(target.exclusions.iter().map(|e| &e.path))
+            .any(|path| path.contains(['*', '?', '[', ']', '{', '}', '\\']))
+    {
+        return Err("UNSUPPORTED_PATH");
+    }
+    Ok(target)
 }
 
 fn compile_native(

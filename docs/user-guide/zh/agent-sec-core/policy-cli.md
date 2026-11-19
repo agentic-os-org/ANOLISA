@@ -20,6 +20,21 @@ Scope 受理不代表保护已生效。CLI 和 daemon 需一起升级：Scope up
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## Lua-LSM 文件后端
+
+管理员可设置 `AGENT_SEC_FILE_BACKEND=lua-lsm`，为新部署的文件 Binding 选择后端。
+默认仍为 `agentsight`，已有部署保留原 route。该后端需要兼容的 Lua-LSM 内核、
+初始 user namespace 中实际生效的 `CAP_MAC_ADMIN` 和可写的 securityfs，
+Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随后在同机执行的
+完整 daemon 测试中，模块开始卸载后发生内核崩溃，原因尚未确定；安装包的 systemd
+部署也未验证。配置和实现边界见 [后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
+
+daemon 停止和根进程退出都不会卸载 Lua 模块；显式清理 Scope 时卸载，重启时复核
+部署证据；更新通过旧模块迁移成员，覆盖孤儿后代。部分 rename 操作比 AgentSight 更严格。
+恢复时应同时保留 Client 状态目录和 Policy 数据库。切换默认后端不会迁移已有部署。
+下发读保护时拒绝已有文件映射，写保护拒绝已有共享可写映射。已测系统调用、
+语义差异和剩余验收项见后端说明的覆盖对照表。
+
 ## 内置凭据注入（未发布的 V2）
 
 `agent-sec-cli inject-credential` 为随包 GitHub Cedar 模板合并 fake 生成、Policy 创建和

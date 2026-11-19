@@ -211,6 +211,124 @@ fn factory(client: Arc<Client>) -> Arc<dyn TargetDeploymentClientFactory> {
 }
 
 #[test]
+fn lua_file_projection_preserves_gateway_rules_and_statement_errors() {
+    let (_, binding) = setup(&source());
+    let plans = target_plans(&binding, FilePolicyBackend::LuaLsm).unwrap();
+    assert_eq!(
+        plans
+            .iter()
+            .map(|(route, _)| route.as_str())
+            .collect::<Vec<_>>(),
+        vec![LUA_LSM_ROUTE, "gateway"]
+    );
+    let file: asc_lua_lsm_protocol::LuaLsmPlan =
+        serde_json::from_slice(&plans[0].1.content).unwrap();
+    assert_eq!(file.binding_id, binding.binding_id);
+    assert_eq!(
+        serde_json::to_value(&file.policy).unwrap(),
+        fixture()["expectedFileProtection"]
+    );
+    assert_eq!(
+        plans[1],
+        target_plans(&binding, FilePolicyBackend::AgentSight).unwrap()[1]
+    );
+
+    let unsupported_source = source().replace("file.write", "file.exec").replace(
+        " && context.input.operation == SecCore::WriteOperation::\"delete\"",
+        "",
+    );
+    let (_, unsupported) = setup(&unsupported_source);
+    assert_eq!(
+        target_plans(&unsupported, FilePolicyBackend::LuaLsm)
+            .unwrap_err()
+            .code,
+        "CEDAR_RULE_1_UNSUPPORTED_ACTION"
+    );
+}
+
+#[test]
+fn mixed_file_pattern_is_owned_by_the_selected_backend() {
+    let mut binding: PreparedBinding =
+        serde_json::from_value(fixture()["binding"].clone()).unwrap();
+    let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut binding.policy.template
+    else {
+        unreachable!()
+    };
+    source.text = source.text.replace(
+        r#"resource.path == "/work/data""#,
+        r#"(resource.path like "/work/*" && resource.path like "*.txt")"#,
+    );
+    let plans = target_plans(&binding, FilePolicyBackend::LuaLsm).unwrap();
+    let file: asc_lua_lsm_protocol::LuaLsmPlan =
+        serde_json::from_slice(&plans[0].1.content).unwrap();
+    assert_eq!(file.policy.targets[0].path, "/work");
+    assert_eq!(
+        file.patterns[&0]
+            .iter()
+            .map(|p| p.value.as_str())
+            .collect::<Vec<_>>(),
+        ["/work/*", "*.txt"]
+    );
+    assert!(file.policy.targets[0].protections.delete);
+    let network: asc_gateway_plan::GatewayBindingPlan =
+        serde_json::from_slice(&plans[1].1.content).unwrap();
+    assert_eq!(
+        serde_json::to_value(network.network).unwrap(),
+        fixture()["expectedGatewayNetwork"]
+    );
+    assert_eq!(
+        target_plans(&binding, FilePolicyBackend::AgentSight)
+            .unwrap_err()
+            .code,
+        "CEDAR_RULE_1_UNSUPPORTED_CONDITION"
+    );
+}
+
+#[test]
+fn mixed_lua_deployment_survives_root_exit() {
+    use asc_policy_repository::{BindingStateWrite, Deployment};
+
+    let (repository, binding) = setup(&source());
+    assert!(binding.policy.uses_credentials());
+    let original = repository
+        .get_binding_state(&binding.binding_id)
+        .unwrap()
+        .unwrap();
+    let mut ready = original.clone();
+    ready.binding.status = BindingStatus::Ready.into();
+    ready.deployments = [LUA_LSM_ROUTE, "gateway"]
+        .into_iter()
+        .map(|route| Deployment {
+            target: TargetRef {
+                route: route.into(),
+                id: binding.binding_id.to_string(),
+                cleanup: vec![1],
+            },
+            revision: binding.binding_revision,
+            presence: Presence::Present,
+            last_confirmed: Some(Presence::Present),
+        })
+        .collect();
+    repository
+        .compare_exchange_binding_state(&original, &BindingStateWrite::new(ready))
+        .unwrap();
+    let confirmed = repository
+        .get_binding_state(&binding.binding_id)
+        .unwrap()
+        .unwrap();
+    repository
+        .sync_scope_instances(&binding.scope.scope_id, &[])
+        .unwrap();
+    assert_eq!(
+        repository
+            .get_binding_state(&binding.binding_id)
+            .unwrap()
+            .unwrap(),
+        confirmed
+    );
+}
+
+#[test]
 fn network_without_credentials_is_routed_and_rejected_before_target_mutation() {
     let (repository, binding) = setup(
         r#"permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");"#,
@@ -222,6 +340,7 @@ fn network_without_credentials_is_routed_and_rejected_before_target_mutation() {
         factory(client("agentsight", &repository, &binding, &calls)),
         Some(factory(client("gateway", &repository, &binding, &calls))),
         Arc::new(TestClock::default()),
+        FilePolicyBackend::AgentSight,
     )
     .unwrap();
     core.reconcile(&binding.binding_id, &mut AttemptSchedule::default())
@@ -254,11 +373,12 @@ fn mixed_binding_requires_both_backends_and_retains_partial_cleanup_across_retry
         factory(file.clone()),
         Some(factory(gateway)),
         clock.clone(),
+        FilePolicyBackend::AgentSight,
     )
     .unwrap()
     .with_plan_builder(move |binding| {
         count.fetch_add(1, Ordering::SeqCst);
-        target_plans(binding)
+        target_plans(binding, FilePolicyBackend::AgentSight)
     });
     let mut schedule = AttemptSchedule::default();
     assert!(matches!(
@@ -346,6 +466,7 @@ fn failed_file_protection_does_not_enable_gateway_routing() {
         factory(file),
         Some(factory(gateway)),
         Arc::new(TestClock::default()),
+        FilePolicyBackend::AgentSight,
     )
     .unwrap();
     assert!(matches!(
@@ -389,6 +510,7 @@ fn mixed_binding_preflights_both_targets_before_modifying_either() {
             factory(file),
             Some(factory(gateway)),
             Arc::new(TestClock::default()),
+            FilePolicyBackend::AgentSight,
         )
         .unwrap();
         core.reconcile(&binding.binding_id, &mut AttemptSchedule::default())

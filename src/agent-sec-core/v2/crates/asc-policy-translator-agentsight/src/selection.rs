@@ -55,11 +55,16 @@ fn select(input: &ValidatedStatement<'_>) -> Selection {
         _ => input.operation_branches(),
     };
     let mut affected = vec![false; branches.len()];
-    let translated = crate::cedar::translate_with_origins(&syntax, branches.len(), |i, target| {
-        affected[i] |= target.protections.delete
-            || (target.kind == FileProtectionTargetKind::DirectoryTree
-                && target.protections.ordinary_write);
-    });
+    let translated = asc_policy_cedar::file_protection::translate_with_origins(
+        &syntax,
+        crate::translate::cedar_target,
+        branches.len(),
+        |i, target| {
+            affected[i] |= target.protections.delete
+                || (target.kind == FileProtectionTargetKind::DirectoryTree
+                    && target.protections.ordinary_write);
+        },
+    );
     // Admission considers the complete candidate. Dropping an unlowerable
     // statement here could make the rest of a previously rejected plan publish.
     if translated.is_err() {

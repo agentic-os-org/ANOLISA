@@ -33,6 +33,11 @@ members = [
     "crates/asc-skill-score",
     "crates/asc-agentsight-client",
     "crates/asc-agentsight-protocol",
+    "crates/asc-file-policy",
+    "crates/asc-lua-lsm",
+    "crates/asc-lua-lsm-client",
+    "crates/asc-lua-lsm-protocol",
+    "crates/asc-policy-translator-lua-lsm",
     "crates/asc-policy-translator-agentsight",
     "crates/asc-pep-runtime",
     "crates/asc-pdp-runtime",
@@ -64,6 +69,11 @@ asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
 asc-agentsight-client = { path = "crates/asc-agentsight-client" }
 asc-agentsight-protocol = { path = "crates/asc-agentsight-protocol" }
+asc-file-policy = { path = "crates/asc-file-policy" }
+asc-lua-lsm = { path = "crates/asc-lua-lsm" }
+asc-lua-lsm-client = { path = "crates/asc-lua-lsm-client" }
+asc-lua-lsm-protocol = { path = "crates/asc-lua-lsm-protocol" }
+asc-policy-translator-lua-lsm = { path = "crates/asc-policy-translator-lua-lsm" }
 asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
 asc-capability-prompt-scan = { path = "crates/asc-capability-prompt-scan" }
 asc-capability-skill-sec = { path = "crates/asc-capability-skill-sec" }
