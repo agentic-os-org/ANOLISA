@@ -14,7 +14,9 @@ from resident_contract import verify as verify_resident
 def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) -> tuple[str, bool]:
     """Missing evidence, stale binaries and skipped cases never count as passes."""
     sha(expected)
-    passed = all(outcomes.get(name) == "success" for name in ("plan", "packages", "native"))
+    passed = all(
+        outcomes.get(name) == "success" for name in ("plan", "packages", "ws-ckpt-btrfs", "native")
+    )
     rows = [
         f"# AW integration: `{expected}`",
         "",
@@ -76,6 +78,7 @@ def main() -> None:
         for name, variable in (
             ("plan", "PLAN_RESULT"),
             ("packages", "PACKAGE_RESULT"),
+            ("ws-ckpt-btrfs", "WS_CKPT_BTRFS_RESULT"),
             ("native", "NATIVE_RESULT"),
         )
     }

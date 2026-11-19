@@ -65,10 +65,11 @@ class PackageSelectionTests(GateFixture):
                 ["make", "-C", "distribution", "test-aw-packages"],
                 [
                     "make", "-C", "distribution", "aw-packages", "VERSION=0.1.1",
-                    "OUTPUT=" + str(output / "packages"), "COMPONENTS=core sec-core tokenless",
+                    "OUTPUT=" + str(output / "packages"),
+                    "COMPONENTS=core sec-core tokenless ws-ckpt",
                 ],
                 ["make", "-C", "distribution", "aw-integration-backends",
-                 "BACKENDS=sec-core tokenless"],
+                 "BACKENDS=sec-core tokenless ws-ckpt"],
             ],
         )
         self.assertFalse(any("packages_pty" in command for command in commands))
