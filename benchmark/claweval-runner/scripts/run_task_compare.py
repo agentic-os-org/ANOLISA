@@ -418,10 +418,9 @@ Batch mode:
             print(f"  [{mode:10s}] ❌ No trace generated")
 
     if results.get("native") and results.get("ce-runner"):
+        # Only commands that exist here: `scripts/check_trace_timestamps.py` is not
+        # in the tree, and a hint the reader cannot paste is worse than none.
         print(f"\n  You can now compare traces:")
-        print(f"    python scripts/check_trace_timestamps.py {results['native']}")
-        print(f"    python scripts/check_trace_timestamps.py {results['ce-runner']}")
-        print(f"\n  Or run tests:")
         print(f"    pytest tests/test_trace_timestamps.py -v")
 
 
@@ -499,7 +498,6 @@ def _run_batch_mode(args) -> None:
         entry.get("ce-runner") for entry in results.values()
     ):
         print(f"\n  Compare traces:")
-        print(f"    python scripts/check_trace_timestamps.py <trace_file>")
         print(f"    pytest tests/test_trace_timestamps.py -v")
 
 

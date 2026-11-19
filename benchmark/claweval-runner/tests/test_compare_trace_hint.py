@@ -19,6 +19,7 @@ Usage:
 """
 
 import importlib.util
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,6 +67,32 @@ def test_batch_mode_prints_the_hint_for_task_keyed_results(monkeypatch, capsys):
     module._run_batch_mode(_batch_args())
 
     assert HINT in capsys.readouterr().out
+
+
+def test_printed_hint_names_only_files_that_exist(monkeypatch, capsys):
+    module = _load_script()
+    monkeypatch.setattr(
+        module, "run_native_batch", lambda **_: {"T001": Path("/traces/T001_native.jsonl")}
+    )
+    monkeypatch.setattr(
+        module,
+        "run_ce_runner_batch",
+        lambda **_: {"T001": Path("/traces/T001_ce.jsonl")},
+    )
+
+    module._run_batch_mode(_batch_args())
+
+    printed = capsys.readouterr().out
+    repo = SCRIPT.parent.parent
+    referenced = re.findall(r"(?:python|pytest) (\S+\.py)", printed)
+    assert referenced, printed
+    for path in referenced:
+        assert (repo / path).exists(), f"hint names a missing file: {path}"
+    # The single-task hint has no harness of its own, so guard it at the source:
+    # re-adding the removed command would otherwise only show up when a user runs it.
+    assert "python scripts/check_trace_timestamps.py" not in SCRIPT.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_batch_mode_omits_the_hint_when_one_side_produced_no_trace(monkeypatch, capsys):
