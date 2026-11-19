@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::raw_input::RawInputMode;
+use crate::raw_input::{MainPromptGate, RawInputMode};
 
 const REQUEST_PATH_ENV: &str = "COSH_RAW_CLI_TEST_INPUT_READY_REQUEST";
 const TOKEN_ENV: &str = "COSH_RAW_CLI_TEST_INPUT_READY_TOKEN";
@@ -34,6 +34,7 @@ impl RawInputReadinessProbe {
         &mut self,
         output: &mut W,
         input_mode: &Arc<Mutex<RawInputMode>>,
+        main_prompt_gate: &MainPromptGate,
     ) -> io::Result<()> {
         let Some(request_path) = self.request_path.as_ref() else {
             return Ok(());
@@ -47,6 +48,12 @@ impl RawInputReadinessProbe {
             return Ok(());
         };
         if request <= self.acknowledged {
+            return Ok(());
+        }
+        // Tests type ahead of the routing gate unless the ack proves the gate
+        // is up: prompt_ready raises it, and a pending submit lowers it again,
+        // so this also covers the prompt transition after a shell command.
+        if !main_prompt_gate.is_path_prompt_ready() {
             return Ok(());
         }
 
@@ -119,7 +126,7 @@ mod tests {
         let mut output = Vec::new();
 
         probe
-            .acknowledge_if_ready(&mut output, &input_mode)
+            .acknowledge_if_ready(&mut output, &input_mode, &MainPromptGate::default())
             .expect("transitional mode");
         assert!(output.is_empty());
 
@@ -129,7 +136,14 @@ mod tests {
             installed_at: std::time::Instant::now(),
         };
         probe
-            .acknowledge_if_ready(&mut output, &input_mode)
+            .acknowledge_if_ready(&mut output, &input_mode, &MainPromptGate::default())
+            .expect("closed gate");
+        assert!(output.is_empty());
+
+        let open_gate = MainPromptGate::default();
+        open_gate.set_at_prompt(true);
+        probe
+            .acknowledge_if_ready(&mut output, &input_mode, &open_gate)
             .expect("ready capture");
 
         assert_eq!(output, b"\x1etest-token:1:capture=8\x1f");

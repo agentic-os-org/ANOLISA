@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
+    write_all_pty, MainPromptGate, RawInputEvent, RawInputMode, RawObserverAction,
+    UserPtyInputGeneration,
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
@@ -70,6 +71,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     resize: &mut UnixStream,
     input_mode: &Arc<Mutex<RawInputMode>>,
     input_generation: &UserPtyInputGeneration,
+    main_prompt_gate: &MainPromptGate,
     last_winsize: &mut Winsize,
     prompt: &str,
     recovery_request_file: &Path,
@@ -471,7 +473,7 @@ where
             )?;
             output.flush()?;
         }
-        input_readiness.acknowledge_if_ready(output, input_mode)?;
+        input_readiness.acknowledge_if_ready(output, input_mode, main_prompt_gate)?;
         publish_prompt_snapshot_if_drained(parser, pty_drained);
         // A quiet painted prompt writes off counted submits consumed by a
         // foreground program; occupancy held for unclassified input stays.

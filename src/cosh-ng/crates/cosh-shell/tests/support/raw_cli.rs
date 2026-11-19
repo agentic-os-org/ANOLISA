@@ -144,9 +144,27 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input_after_ready(
         extra_args,
         envs,
         Path::new(env!("CARGO_MANIFEST_DIR")),
-        chunks,
+        delayed_chunks(chunks),
         RawCliRunMode::Exclusive,
         Some(session_ready),
+        None,
+    )
+}
+
+pub(crate) fn run_raw_cli_with_args_env_and_input_steps(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    steps: Vec<RawCliInputStep>,
+) -> String {
+    run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        steps,
+        RawCliRunMode::Shared,
+        None,
         None,
     )
 }
@@ -471,7 +489,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
         extra_args,
         envs,
         Path::new(env!("CARGO_MANIFEST_DIR")),
-        chunks,
+        delayed_chunks(chunks),
         RawCliRunMode::Exclusive,
         None,
         None,
@@ -490,7 +508,7 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
         extra_args,
         envs,
         current_dir,
-        chunks,
+        delayed_chunks(chunks),
         RawCliRunMode::Shared,
         None,
         None,
@@ -510,7 +528,7 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input_after_mark
         extra_args,
         envs,
         current_dir,
-        chunks,
+        delayed_chunks(chunks),
         RawCliRunMode::Shared,
         None,
         Some(ready_marker),
@@ -719,12 +737,25 @@ impl RawCliInputReadiness {
     }
 }
 
+pub(crate) enum RawCliInputStep {
+    Delay(Duration),
+    Bytes(Vec<u8>),
+    WaitForInputReady,
+}
+
+fn delayed_chunks(chunks: Vec<(Vec<u8>, Duration)>) -> Vec<RawCliInputStep> {
+    chunks
+        .into_iter()
+        .flat_map(|(bytes, delay)| [RawCliInputStep::Delay(delay), RawCliInputStep::Bytes(bytes)])
+        .collect()
+}
+
 fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     adapter: &str,
     extra_args: &[&str],
     envs: &[(&str, &str)],
     current_dir: &Path,
-    chunks: Vec<(Vec<u8>, Duration)>,
+    steps: Vec<RawCliInputStep>,
     run_mode: RawCliRunMode,
     session_ready: Option<mpsc::Sender<()>>,
     ready_marker: Option<&str>,
@@ -741,10 +772,8 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         .stderr(Stdio::piped());
     configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
-    let mut input_readiness = session_ready.as_ref().map(|_| RawCliInputReadiness::new());
-    if let Some(input_readiness) = input_readiness.as_ref() {
-        input_readiness.configure(&mut command);
-    }
+    let mut input_readiness = RawCliInputReadiness::new();
+    input_readiness.configure(&mut command);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
     let stdout = child.stdout.take().expect("child stdout");
@@ -752,9 +781,6 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
     let stderr_reader = read_pipe(stderr);
     if let Some(session_ready) = session_ready {
-        let input_readiness = input_readiness
-            .as_mut()
-            .expect("session readiness probe is configured");
         let request = input_readiness.request();
         let mut observed = Vec::new();
         wait_for_raw_cli_input_ready(
@@ -777,17 +803,33 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
 
     {
         let mut stdin = child.stdin.take().expect("child stdin");
-        for (bytes, delay) in chunks {
-            thread::sleep(delay);
-            stdin.write_all(&bytes).expect("write delayed input");
-            stdin.flush().expect("flush delayed input");
+        let mut observed = Vec::new();
+        let mut ready_cursor = 0;
+        for step in steps {
+            match step {
+                RawCliInputStep::Delay(delay) => thread::sleep(delay),
+                RawCliInputStep::Bytes(bytes) => {
+                    stdin.write_all(&bytes).expect("write delayed input");
+                    stdin.flush().expect("flush delayed input");
+                }
+                RawCliInputStep::WaitForInputReady => {
+                    let request = input_readiness.request();
+                    wait_for_raw_cli_input_ready(
+                        &output_receiver,
+                        &mut observed,
+                        ready_cursor,
+                        input_readiness.token(),
+                        request,
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"));
+                    ready_cursor = observed.len();
+                }
+            }
         }
     }
 
     let mut output = wait_for_raw_cli_output_with_readers(child, (stdout_reader, stderr_reader));
-    if let Some(input_readiness) = input_readiness.as_ref() {
-        output.stdout = input_readiness.strip_frames(&output.stdout);
-    }
+    output.stdout = input_readiness.strip_frames(&output.stdout);
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",
