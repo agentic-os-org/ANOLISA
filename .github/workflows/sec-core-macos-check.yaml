@@ -30,8 +30,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src/agent-sec-core/v2
-      - name: Compile the V2 workspace and all test targets
-        run: cargo check --locked --workspace --all-targets
+      - name: Compile V2 workspace targets available on macOS
+        run: >-
+          cargo check --locked --workspace --all-targets
+          --exclude asc-lua-lsm-client
+          --exclude asc-lua-lsm
       - name: Test SkillSec ledger entry identity checks
         run: cargo test --locked -p asc-capability-skill-sec --lib ledger::storage::tests
       - name: Test SQLite policy path identity checks

@@ -1,0 +1,17 @@
+[package]
+name = "asc-lua-lsm-protocol"
+description = "Canonical Lua-LSM deployment artifacts shared by Translator and Client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-file-policy.workspace = true
+asc-policy-types.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

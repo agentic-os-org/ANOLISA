@@ -343,7 +343,28 @@ SecCore 以该接口的成功回执记录部署成功，具体生效保证由后
 
 Translator 表示纯翻译组件；Adapter 包括 Translator 和 Deployment Client，翻译端口仍名为 `TargetBindingAdapter`。
 职责对应参见[目标接口](../../v2/crates/asc-policy-target-contracts/src/lib.rs)和
-[Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)。目标接口携带源码快照；PEP Translator 在翻译时调用 `pst`。
+[Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)。对于同时含文件和网络规则的 Cedar Binding，
+daemon 对源码快照做一次校验，再将解析后的语法树（PST）按文件域和网络域分别交给对应的翻译器。
+
+#### 8.2.1 Cedar 语义与后端能力
+
+切换文件后端必须保持已准入策略的含义。新增文件条件或后端时，按下表确定责任归属。
+
+| 要判断的事 | 负责方 |
+|---|---|
+| SecCore 能否接受这份源码？ | Cedar 前端检查语法、引用的 schema 和公共编写规则。PAP 据此保存源码，准入结果与选用哪个文件后端无关。 |
+| 文件规则要求保护什么？ | 共享文件翻译逻辑从文件域 PST 提取操作、路径条件和排除项，保留原有的匹配、取反和转义语义。 |
+| 所选后端能否完整执行规则？ | 该后端的 Translator 作出判断并生成计划。任何必要条件无法表达时，Translator 在部署前拒绝翻译。共享表达式解析层应独立于后端能力开关。 |
+| 这台主机现在能否安装计划？ | Deployment Client 检查主机条件并报告部署结果。例如，扫描目录缺失或已有内存映射与保护要求冲突，都可能阻止 Lua-LSM 策略激活。 |
+
+例如，Cedar 的 `resource.path like "/work/*.txt"` 同时匹配 `/work/a.txt` 和
+`/work/sub/a.txt`，SecCore 原生的 `/work/*.txt` 只匹配前者。Lua-LSM Translator
+保留 Cedar 匹配条件，交由内核模块执行。AgentSight Translator 当前拒绝这一通用模式。
+混合 Binding 用例用同一份策略验证两种文件后端的翻译结果，同时核对 Gateway 收到的网络规则。[后端选择用例](../../v2/apps/asc-daemon/src/reconciliation/mixed_tests.rs)
+
+共享解析器为两个后端提取同一组文件条件。例如，对 `resource.path like "/work/*" && resource.path like "*.txt"`，
+Lua-LSM Translator 选取 `/work` 作为扫描目录，把两个条件都交给 Lua 匹配。
+AgentSight Translator 遇到通用模式会在生成计划前拒绝翻译。
 
 ### 8.3 表示选择与剩余设计问题
 
@@ -353,13 +374,13 @@ Translator 表示纯翻译组件；Adapter 包括 Translator 和 Deployment Clie
 `PolicyTemplate` 和 Cedar PST；[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)列明支持范围。
 不新增旧 JSON 转 Cedar、Cedar 转旧 AST 的公共转换层。第 5–7 节仅保留早期方案评估。
 
-前端检查语法、schema 和公共支持子集；Translator 检查后端能否表达条件、效果、匹配方式
-和容量约束。当前支持范围之外的语义须整体拒绝，不能删除不支持的语句后继续下发。
+每个 Translator 都要处理所属域中的全部语句。只要有一个条件或效果无法按原意执行，
+该 Binding 的计划生成就应失败，避免向任一目标下发不完整的策略。
 
 | 设计问题 | 对应阶段 | 已确定与待定边界 |
 |---|---|---|
 | D1：系统防护语义映射 | 前端 schema、运行时请求构造、Translator | 文件/程序调用/整体网络字段已定义；删除/普通写翻译已接入现有 PEP Adapter；运行时字段可信来源、请求映射和授权结果到约束的接口待实现；Hook 契约另议 |
-| D2：多 PEP 选择与协同 | 目标规划、部署编排、PEP 实施 | HTTP/文件混合部署要求 Gateway 与 AgentSight，并汇总就绪状态；通用能力选择、替代关系及 Sandbox 协同仍待设计 |
+| D2：多 PEP 选择与协同 | 目标规划、部署编排、PEP 实施 | HTTP/文件混合部署使用 Gateway 和选定的文件后端，并汇总就绪状态。通用能力选择、替代关系及 Sandbox 协同仍待设计。 |
 | D3：基础与运行时策略叠加 | PAP 组织策略、PDP 加载与决策 | 权限上限、组合方式、冲突、有效期、撤销后的恢复仍需单独设计；动态策略不能默认扩权 |
 | D4：AST 与检查位置 | 前端准入、加载、Translator | 原生 `PolicyTemplate` 与 Cedar PST；PAP 校验并保存源码，`pst` 重新解析保存的 Cedar 源码；Cedar 文件翻译已接入现有 PEP Adapter |
 

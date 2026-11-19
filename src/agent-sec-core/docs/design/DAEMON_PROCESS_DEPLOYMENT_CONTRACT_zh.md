@@ -517,6 +517,40 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 装配由 DPROC-021 验证，CLI/daemon 进程链路由上述 pytest E2E 验证。完整范围与命令见
 [生命周期契约的可执行验收](POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收)，不扩大其它 DPROC gate。
 
+### Lua-LSM 文件后端接线（DPROC-LUA-LSM-001）
+
+daemon 分别装配 `asc-policy-translator-lua-lsm`、`asc-lua-lsm-client`，通过
+`asc-lua-lsm-protocol` 共享内部产物和标准模板编码。Client 保留源码一致性校验，
+不依赖 Translator 或 Cedar；`asc-file-policy` 只包含共享数据类型，Cedar 文件
+策略翻译统一位于 `asc-policy-cedar::file_protection`。`asc-lua-lsm` 保留兼容
+导出及集成测试入口。
+
+`AGENT_SEC_FILE_BACKEND` 未设置或为 `agentsight` 时保留现有默认后端；显式设为
+`lua-lsm` 时，新文件 Binding 采用直接 securityfs Client。空值、大小写变体及未知值
+使启动失败。已有 TargetRef 的 route 保留，Gateway 路由不变，不自动迁移部署。
+选择 fixture 为 `v2/apps/asc-daemon/tests/fixtures/file-backends.json`，由 daemon 的
+`file_backend_selection_matches_the_deployment_contract_fixture` 执行。
+
+Linux 构建默认编入原生 Client。macOS CI 用 `--exclude asc-lua-lsm-client`
+和 `--exclude asc-lua-lsm` 跳过原生 Client 及其集成测试包，继续检查 daemon、
+Translator 和协议。非 Linux 构建显式选择 `lua-lsm` 时，daemon 拒绝启动。
+
+默认 system unit 不增加权限。Lua-LSM 部署额外需要初始 user namespace 中的
+`CAP_MAC_ADMIN`、可写的 `/sys/kernel/security/lua` 和私有
+`/var/lib/agent-sec/lua-lsm` 状态目录；管理员的 opt-in drop-in 见
+[后端说明](../../v2/crates/asc-lua-lsm/README_zh.md)。目标 systemd 环境仍需实测。
+
+停止 daemon 不卸载模块，发现根进程消失不清理 Lua 文件 Binding；显式 Scope
+清理导致 Binding 清理时仍下发删除。Policy Template 删除仍保留已有 Scope 快照。
+启动把 Ready Lua Binding 置为待复核并保留 Unknown 清理责任，
+只有匹配的本次 boot 部署输入证据和活动模板回调才能确认既有部署。
+缺失模块重下发，无法确认的模块保持 Unknown。其它后端保持原恢复语义。
+Repository 的两项 Lua 生命周期测试和 daemon 的
+`lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes` 验证本地接线；
+专用内核用例默认忽略，已在 Alibaba Cloud Linux 4 上通过 Translator/Client
+直连防护验收。隔离 QEMU 客体已运行 daemon 场景；宿主完整 daemon 测试在模块开始
+卸载后遇到内核崩溃，原因未明。安装包的 systemd 部署尚未验证。
+
 ## 9. 验收矩阵
 
 ### 9.1 **[CURRENT]** V1 oracle

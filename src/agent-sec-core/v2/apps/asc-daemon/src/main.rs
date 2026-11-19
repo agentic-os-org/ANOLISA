@@ -91,6 +91,14 @@ fn main() -> ExitCode {
     };
     report_startup("policy_storage", startup_started);
     let paths = asc_security_events::config::DaemonDataDirEnv::from_process();
+    let file_backend = match file_backend_from_env() {
+        Ok(backend) => backend,
+        Err(error) => {
+            report_error(&telemetry, &error);
+            telemetry.shutdown(TELEMETRY_SHUTDOWN);
+            return ExitCode::FAILURE;
+        }
+    };
     let data_dir = paths.override_dir.as_ref().unwrap_or(&paths.system_dir);
     let fallback = paths
         .override_dir
@@ -118,7 +126,14 @@ fn main() -> ExitCode {
     report_startup("tokio_runtime", startup_started);
     // Retain the singleton through the outer Tokio blocking-task shutdown window.
     let outcome = match run_with_shutdown_timeout(
-        run(*cli, &lease, &telemetry, repository, startup_started),
+        run(
+            *cli,
+            &lease,
+            &telemetry,
+            repository,
+            startup_started,
+            file_backend,
+        ),
         RUNTIME_SHUTDOWN_TIMEOUT,
     ) {
         Ok((exit_code, shutdown_plan)) => {
@@ -134,6 +149,23 @@ fn main() -> ExitCode {
     };
     telemetry.shutdown(TELEMETRY_SHUTDOWN);
     outcome
+}
+
+fn file_backend_from_env() -> std::io::Result<asc_daemon::FilePolicyBackend> {
+    let backend = asc_daemon::FilePolicyBackend::from_env().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid AGENT_SEC_FILE_BACKEND: {error}; expected agentsight or lua-lsm"),
+        )
+    })?;
+    #[cfg(not(target_os = "linux"))]
+    if backend == asc_daemon::FilePolicyBackend::LuaLsm {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "AGENT_SEC_FILE_BACKEND=lua-lsm requires Linux",
+        ));
+    }
+    Ok(backend)
 }
 
 fn report_startup(stage: &'static str, started: Instant) {
@@ -153,6 +185,7 @@ async fn run(
     telemetry: &asc_observability::TelemetryRuntime,
     repository: Arc<SqlitePolicyRepository>,
     startup_started: Instant,
+    file_backend: asc_daemon::FilePolicyBackend,
 ) -> (ExitCode, Option<sinks::ShutdownPlan>) {
     let mapping_path = std::path::Path::new("/etc/agent-sec/agent-types.json");
     let agent_types = agent_types::load(mapping_path).map_err(|error| {
@@ -295,9 +328,10 @@ async fn run(
         .as_ref()
         .map(|service| service.clone() as Arc<dyn asc_pap::ScopeExecution>);
     report_startup("policy_runtime", startup_started);
-    let mut policy_runtime = match asc_daemon::start_policy_reconciliation_with_gateway(
+    let mut policy_runtime = match asc_daemon::start_policy_reconciliation_with_backend(
         repository.clone(),
         gateway_service.clone(),
+        file_backend,
     ) {
         Ok(runtime) => runtime,
         Err(error) => {

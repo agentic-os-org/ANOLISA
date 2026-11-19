@@ -5,7 +5,8 @@ AgentSecCore's AgentSight Translator and Deployment Client. It contains the
 version-1 payload, its media type and serde definitions. The Translator constructs
 these types; the Client validates and sends them through the HTTP API.
 
-The crate is maintained in the SecCore workspace and depends only on `serde`.
+The crate is maintained in the SecCore workspace and depends on `serde` and the
+backend-neutral `asc-file-policy` data types. It has no Cedar compiler dependency.
 Protocol changes require an explicit supported-version decision and compatibility
 validation against the target release. Fixed JSON fixtures in the Translator and
 Client tests check the serialized contract.

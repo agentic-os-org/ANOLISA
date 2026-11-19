@@ -8,6 +8,7 @@
 pub mod advice;
 pub mod default_policy;
 pub mod deployment;
+pub mod file_protection;
 pub mod http;
 mod rewrite;
 pub mod schema;

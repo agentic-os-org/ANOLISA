@@ -40,7 +40,13 @@ starts the reconciliation service. Its `reconciliation.rs`
 composition module registers `AgentSightClientFactory::default()` without reading
 credentials or contacting the PEP. Each due attempt opens its own Client and reuses
 it through preparation and create/update, or through deletion for a saved route.
-Environment-based PEP selection is deferred. The Client owns endpoint/token-file
+`AGENT_SEC_FILE_BACKEND=lua-lsm` opts into the Lua-LSM direct kernel backend.
+The default remains AgentSight and saved deployment routes remain stable.
+See the [Lua-LSM implementation and validation boundaries](crates/asc-lua-lsm/README.md).
+Its production crates separate `asc-policy-translator-lua-lsm`,
+`asc-lua-lsm-protocol` and `asc-lua-lsm-client`; the original `asc-lua-lsm` entry
+retains compatibility exports and integration tests.
+The AgentSight Client owns endpoint/token-file
 defaults; daemon and CLI expose no AgentSight configuration options. Missing or
 invalid credentials are retryable Binding failures; each retry reads the token
 file again. Network failures also follow the Binding retry contract.
@@ -55,7 +61,8 @@ Individual Binding errors are rescheduled without closing PAP admission; exhaust
 CAS contention is distinct from storage unavailability. There is no automatic restart of a failed reconciliation runtime.
 Scope responses confirm intent admission, and GET/LIST expose subsequent completion.
 Startup restores discovery and pending or interrupted reconciliation from SQLite.
-Ready Bindings and terminal failures are not automatically reapplied.
+Ready Lua-LSM Bindings are rechecked on restart. Other Ready Bindings and terminal
+failures are not automatically reapplied.
 
 The Rust `agent-sec-cli` exposes 12 Policy, Scope and Binding administration commands through
 an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;

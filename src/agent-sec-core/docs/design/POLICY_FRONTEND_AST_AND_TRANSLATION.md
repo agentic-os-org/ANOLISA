@@ -405,7 +405,32 @@ the backend contract defines what taking effect guarantees.
 Translator denotes pure conversion; Adapter includes Translator and Deployment
 Client. The translation port remains `TargetBindingAdapter`. See the [target contracts](../../v2/crates/asc-policy-target-contracts/src/lib.rs)
 and [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs).
-The target interface carries a source snapshot; the PEP Translator calls `pst` for Cedar translation.
+For a mixed Cedar Binding, the daemon validates the source snapshot once and passes
+the file and network projections of the parsed syntax tree (PST) to their translators.
+
+#### 8.2.1 Cedar semantics and backend capabilities
+
+Switching the file backend must preserve the meaning of an admitted policy. Use
+the following boundaries when adding a file condition or a backend.
+
+| Decision | Owner |
+|---|---|
+| Can SecCore accept this source? | The Cedar frontend checks syntax, the referenced schema and the common authoring rules. PAP uses this result when saving the source, independently of the selected file backend. |
+| What does the file rule require? | Shared file translation extracts the operation, path conditions and exclusions from the file-domain PST. It preserves the source matching semantics, including negation and escaping. |
+| Can the selected backend enforce the complete rule? | Its Translator owns that decision and generates the target plan. If a required condition cannot be represented, it rejects the translation before deployment. Keep backend capability switches out of shared expression parsing. |
+| Can this host install the plan now? | The Deployment Client checks host prerequisites and reports the deployment result. For Lua-LSM, a missing scan directory or a conflicting existing memory mapping can prevent activation. |
+
+For example, Cedar `resource.path like "/work/*.txt"` matches both `/work/a.txt`
+and `/work/sub/a.txt`. Native SecCore `/work/*.txt` matches only the first path.
+The Lua-LSM Translator preserves the Cedar predicate for the kernel module.
+The AgentSight Translator currently rejects this general pattern. The mixed
+Binding test uses the same policy with both file backends and also checks the
+Gateway projection. [Backend selection test](../../v2/apps/asc-daemon/src/reconciliation/mixed_tests.rs)
+
+The shared parser extracts the same conjunction of file conditions for either backend.
+For `resource.path like "/work/*" && resource.path like "*.txt"`, the Lua-LSM
+Translator chooses `/work` as its scan directory and passes both predicates to Lua.
+The AgentSight Translator rejects general patterns before producing a plan.
 
 ### 8.3 Representation choice and remaining design questions
 
@@ -418,14 +443,14 @@ existing PEP Adapter handles `PolicyTemplate` and a Cedar PST subset; see
 There is no common native-JSON-to-Cedar or Cedar-to-native-AST conversion layer.
 Sections 5–7 retain the earlier alternative assessment only.
 
-The frontend checks syntax, schema and the common subset. Translator checks whether
-the backend can express conditions, effects and matching behavior within its limits.
-Unsupported semantics must reject the unit as a whole, not disappear during deployment.
+Each Translator must account for every statement in its domain projection.
+If any condition or effect cannot be enforced with its original meaning, planning
+for that Binding fails before any target receives a partial policy.
 
 | Design question | Processing stages | Decisions and remaining boundaries |
 |---|---|---|
 | D1: System protection semantics | Frontend schema, runtime request construction, Translator | File/invocation/coarse-network fields exist; file deletion/ordinary-write translation is connected to the existing PEP Adapter; trusted runtime field sources, request mapping and approved-constraint mapping remain open; Hook contracts are deferred |
-| D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Mixed HTTP/file deployment requires Gateway and AgentSight, with aggregate readiness; general capability selection, alternatives and Sandbox coordination remain open |
+| D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Mixed HTTP/file deployment uses Gateway and the selected file backend, with aggregate readiness. General capability selection, alternatives and sandbox coordination remain open. |
 | D3: Base and runtime composition | PAP policy assembly, PDP loading and decisions | Permission ceiling, composition, conflicts, lifetime and recovery after revocation need separate design; dynamic policies must not implicitly expand permissions |
 | D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar file translation is connected to the existing PEP Adapter |
 

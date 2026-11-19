@@ -27,6 +27,8 @@ asc-policy-runtime.workspace = true
 asc-pcp.workspace = true
 asc-agentsight-client.workspace = true
 asc-policy-translator-agentsight.workspace = true
+asc-lua-lsm-protocol.workspace = true
+asc-policy-translator-lua-lsm.workspace = true
 asc-policy-types.workspace = true
 asc-policy-cedar.workspace = true
 asc-gateway-plan.workspace = true
@@ -53,6 +55,9 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+asc-lua-lsm-client.workspace = true
 
 [dev-dependencies]
 asc-policy-repository-sqlite = { workspace = true, features = ["test-support"] }

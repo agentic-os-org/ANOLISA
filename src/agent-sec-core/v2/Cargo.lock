@@ -157,6 +157,7 @@ dependencies = [
 name = "asc-agentsight-protocol"
 version = "1.3.1"
 dependencies = [
+ "asc-file-policy",
  "serde",
 ]
 
@@ -319,6 +320,8 @@ dependencies = [
  "asc-foundation-types",
  "asc-gateway-plan",
  "asc-gateway-runtime",
+ "asc-lua-lsm-client",
+ "asc-lua-lsm-protocol",
  "asc-model-client",
  "asc-observability",
  "asc-pap",
@@ -330,6 +333,7 @@ dependencies = [
  "asc-policy-repository-sqlite",
  "asc-policy-runtime",
  "asc-policy-translator-agentsight",
+ "asc-policy-translator-lua-lsm",
  "asc-policy-types",
  "asc-security-events",
  "asc-telemetry",
@@ -479,6 +483,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-file-policy"
+version = "1.3.1"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "asc-foundation-types"
 version = "1.3.1"
 dependencies = [
@@ -539,6 +550,45 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "asc-lua-lsm"
+version = "1.3.1"
+dependencies = [
+ "asc-lua-lsm-client",
+ "asc-lua-lsm-protocol",
+ "asc-policy-target-contracts",
+ "asc-policy-translator-lua-lsm",
+ "asc-policy-types",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "asc-lua-lsm-client"
+version = "1.3.1"
+dependencies = [
+ "asc-file-policy",
+ "asc-lua-lsm-protocol",
+ "asc-policy-target-contracts",
+ "asc-policy-types",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "asc-lua-lsm-protocol"
+version = "1.3.1"
+dependencies = [
+ "asc-file-policy",
+ "asc-policy-types",
+ "serde",
 ]
 
 [[package]]
@@ -675,6 +725,7 @@ dependencies = [
 name = "asc-policy-cedar"
 version = "1.3.1"
 dependencies = [
+ "asc-file-policy",
  "asc-policy-types",
  "cedar-policy",
  "miette",
@@ -752,6 +803,18 @@ dependencies = [
  "asc-policy-types",
  "cedar-policy",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "asc-policy-translator-lua-lsm"
+version = "1.3.1"
+dependencies = [
+ "asc-file-policy",
+ "asc-lua-lsm-protocol",
+ "asc-policy-cedar",
+ "asc-policy-types",
+ "cedar-policy",
  "serde_json",
 ]
 

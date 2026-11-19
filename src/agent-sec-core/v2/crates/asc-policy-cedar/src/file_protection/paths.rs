@@ -1,27 +1,31 @@
 //! Literal path ranges and target-owned exclusions; no filesystem inspection.
 
-use asc_agentsight_protocol::{
+use asc_file_policy::{
     FileProtectionExclusion, FileProtectionExclusionKind, FileProtectionTarget,
     FileProtectionTargetKind,
 };
 use cedar_policy::pst::{BinaryOp, Expr, Literal, PatternElem, Var};
 
-use super::{Result, expressions::Branch, protections};
+use super::{Result, expressions::FileRule, protections};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Range {
+/// A literal file or directory-tree constraint on a Cedar path.
+pub enum PathScope {
+    /// A single path.
     Exact(String),
+    /// A directory and its descendants.
     Tree(String),
 }
 
-impl Range {
+impl PathScope {
     pub(super) fn path(&self) -> &str {
         match self {
             Self::Exact(path) | Self::Tree(path) => path,
         }
     }
 
-    pub(super) fn contains(&self, other: &Self) -> bool {
+    /// Whether every path in the other scope belongs to this scope.
+    pub fn contains(&self, other: &Self) -> bool {
         self == other
             || matches!(self, Self::Tree(_))
                 && (self.path() == other.path() || descendant(self.path(), other.path()))
@@ -38,7 +42,7 @@ pub(super) fn descendant(parent: &str, path: &str) -> bool {
 
 pub(super) fn validate_path(path: &str) -> Result<()> {
     if !path.starts_with('/')
-        || path.contains(['\0', '*', '?', '[', ']', '{', '}', '\\'])
+        || path.contains('\0')
         || path.contains("//")
         || path != "/" && path.ends_with('/')
         || path.split('/').any(|part| matches!(part, "." | ".."))
@@ -115,47 +119,50 @@ pub(super) fn tree(expr: &Expr) -> Option<String> {
     None
 }
 
-pub(super) fn target(branch: Branch) -> Result<Option<FileProtectionTarget>> {
-    if branch.operations == 0 {
-        return Ok(None);
-    }
-    let range = branch.range.ok_or("UNBOUNDED_PATH_SCOPE")?;
-    let mut exclusions: Vec<FileProtectionExclusion> = Vec::new();
-    for excluded in branch.excluded {
-        if excluded.contains(&range) {
-            return Ok(None);
+impl FileRule {
+    /// Materializes a target using the backend's chosen scope and the rule's exclusions.
+    /// The selected scope must respect the rule's positive literal constraint.
+    ///
+    /// # Errors
+    /// Returns an error for exclusions the structured target cannot represent.
+    pub fn target(&self, range: &PathScope) -> Result<Option<FileProtectionTarget>> {
+        let mut exclusions: Vec<FileProtectionExclusion> = Vec::new();
+        for excluded in &self.excluded {
+            if excluded.contains(range) {
+                return Ok(None);
+            }
+            if !range.contains(excluded) {
+                continue;
+            }
+            // Excluding only a directory root cannot be expressed as a strict
+            // descendant exclusion without also dropping the protected root.
+            if excluded.path() == range.path() {
+                return Err("UNSUPPORTED_ROOT_EXCLUSION");
+            }
+            let kind = match excluded {
+                PathScope::Exact(_) => FileProtectionExclusionKind::ExactEntry,
+                PathScope::Tree(_) => FileProtectionExclusionKind::DirectorySubtree,
+            };
+            if exclusions
+                .iter()
+                .any(|item| item.path == excluded.path() && item.kind != kind)
+            {
+                return Err("CONFLICTING_EXCLUSIONS");
+            }
+            exclusions.push(FileProtectionExclusion {
+                path: excluded.path().into(),
+                kind,
+            });
         }
-        if !range.contains(&excluded) {
-            continue;
-        }
-        // Excluding only a directory root cannot be expressed as a strict
-        // descendant exclusion without also dropping the protected root.
-        if excluded.path() == range.path() {
-            return Err("UNSUPPORTED_ROOT_EXCLUSION");
-        }
-        let kind = match excluded {
-            Range::Exact(_) => FileProtectionExclusionKind::ExactEntry,
-            Range::Tree(_) => FileProtectionExclusionKind::DirectorySubtree,
+        let kind = match range {
+            PathScope::Exact(_) => FileProtectionTargetKind::ExactFile,
+            PathScope::Tree(_) => FileProtectionTargetKind::DirectoryTree,
         };
-        if exclusions
-            .iter()
-            .any(|item| item.path == excluded.path() && item.kind != kind)
-        {
-            return Err("CONFLICTING_EXCLUSIONS");
-        }
-        exclusions.push(FileProtectionExclusion {
-            path: excluded.path().into(),
+        Ok(Some(FileProtectionTarget {
+            path: range.path().into(),
             kind,
-        });
+            protections: protections(self.operations),
+            exclusions,
+        }))
     }
-    let kind = match range {
-        Range::Exact(_) => FileProtectionTargetKind::ExactFile,
-        Range::Tree(_) => FileProtectionTargetKind::DirectoryTree,
-    };
-    Ok(Some(FileProtectionTarget {
-        path: range.path().into(),
-        kind,
-        protections: protections(branch.operations),
-        exclusions,
-    }))
 }

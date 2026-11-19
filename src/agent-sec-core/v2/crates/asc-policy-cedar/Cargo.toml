@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+asc-file-policy.workspace = true
 asc-policy-types = { workspace = true }
 cedar-policy = { workspace = true }
 miette = { workspace = true }

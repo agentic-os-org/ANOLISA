@@ -23,6 +23,27 @@ or grant permissions.
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## Lua-LSM file backend
+
+An administrator can select `AGENT_SEC_FILE_BACKEND=lua-lsm` for newly deployed
+file Bindings. The default remains `agentsight`; saved deployments keep their
+route. This backend requires a compatible Lua-LSM kernel and effective
+`CAP_MAC_ADMIN` in the initial user
+namespace and writable securityfs. Native Translator/Client enforcement tests
+pass on Alibaba Cloud Linux 4. A later full
+daemon test on that host ended in a kernel crash after module removal began; the
+cause remains unresolved. Packaged systemd deployment is also unverified. See
+the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README.md).
+
+Lua modules survive daemon stops and root-process exit; explicit Scope cleanup
+unloads them. Restart checks existing deployment evidence; updates transfer saved
+kernel membership, including orphans. Some rename operations are more restrictive
+than AgentSight. Preserve the Client state directory with the Policy
+database. Changing the default does not migrate existing deployments.
+Applying read protection rejects existing file mappings; write protection rejects
+existing shared writable mappings. See the backend coverage table for tested
+syscall entries, semantic differences and remaining acceptance work.
+
 ## Built-in credential injection (unreleased V2)
 
 `agent-sec-cli inject-credential` combines fake generation, Policy creation and

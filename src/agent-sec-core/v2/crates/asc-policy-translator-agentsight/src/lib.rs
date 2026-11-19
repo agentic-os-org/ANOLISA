@@ -10,7 +10,6 @@
 
 #![forbid(unsafe_code)]
 
-mod cedar;
 mod plan;
 pub mod selection;
 mod translate;
@@ -29,5 +28,5 @@ pub use translate::AgentSightTranslator;
 pub fn validate_file_protection(
     files: &cedar_policy::pst::PolicySet,
 ) -> Result<(), asc_policy_types::target::TranslationRejection> {
-    cedar::translate(files).map(|_| ())
+    asc_policy_cedar::file_protection::translate_pst(files, translate::cedar_target).map(|_| ())
 }

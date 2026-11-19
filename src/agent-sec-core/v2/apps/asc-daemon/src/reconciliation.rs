@@ -1,5 +1,8 @@
 //! Target-specific composition; queue and lifecycle remain in Policy Runtime.
 use asc_agentsight_client::AgentSightClientFactory;
+#[cfg(target_os = "linux")]
+use asc_lua_lsm_client::LuaLsmClient;
+use asc_lua_lsm_protocol::LUA_LSM_ROUTE;
 use asc_pcp::{
     AttemptSchedule, BindingReconciler, Clock, Disposition, RetryPolicy, StoreError,
     TargetDeploymentClient, TargetDeploymentClientFactory,
@@ -9,12 +12,49 @@ use asc_policy_runtime::reconciliation::{
     MonotonicClock, ReconcileAttempt, ReconciliationRuntime, RuntimeConfig,
 };
 use asc_policy_translator_agentsight::AgentSightTranslator;
+use asc_policy_translator_lua_lsm::LuaLsmTranslator;
 use asc_policy_types::binding::PreparedBinding;
 use asc_policy_types::target::{
     AdapterFault, Failure, FailureKind, TargetBindingPlan, TranslationOutcome,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, TryLockError};
+
+/// File-policy backend selected for new Bindings; saved deployments retain their route.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FilePolicyBackend {
+    /// Existing `AgentSight` HTTP deployment.
+    #[default]
+    AgentSight,
+    /// Direct Lua-LSM securityfs deployment.
+    LuaLsm,
+}
+
+impl FilePolicyBackend {
+    /// Reads the explicit daemon selection, preserving `AgentSight` when unset.
+    /// # Errors
+    /// Rejects unknown or non-Unicode values without silently changing backends.
+    pub fn from_env() -> Result<Self, StoreError> {
+        match std::env::var("AGENT_SEC_FILE_BACKEND") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            _ => Err(StoreError::Invalid),
+        }
+    }
+    fn parse(value: Option<&str>) -> Result<Self, StoreError> {
+        match value {
+            None | Some("agentsight") => Ok(Self::AgentSight),
+            Some("lua-lsm") => Ok(Self::LuaLsm),
+            _ => Err(StoreError::Invalid),
+        }
+    }
+    fn route(self) -> &'static str {
+        match self {
+            Self::AgentSight => "agentsight",
+            Self::LuaLsm => LUA_LSM_ROUTE,
+        }
+    }
+}
 
 struct GatewayAdmission<R> {
     repository: Arc<R>,
@@ -80,6 +120,33 @@ pub fn start_policy_reconciliation_with_gateway<
         repository,
         Arc::new(AgentSightClientFactory::default()),
         Some(factory),
+        FilePolicyBackend::AgentSight,
+    )
+}
+
+/// Composes the selected file backend while preserving routes of saved Bindings.
+/// # Errors
+/// Returns storage, recovery, configuration or worker startup failures.
+pub fn start_policy_reconciliation_with_backend<
+    R: BindingStateRepository + BindingReconcileCatalog + 'static,
+>(
+    repository: Arc<R>,
+    gateway: Option<Arc<asc_gateway_runtime::GatewayService>>,
+    backend: FilePolicyBackend,
+) -> Result<ReconciliationRuntime, StoreError> {
+    let factory: Arc<dyn TargetDeploymentClientFactory> = Arc::new(move || {
+        let service = gateway
+            .as_ref()
+            .ok_or_else(|| Failure::new(FailureKind::Retryable, "GATEWAY_UNAVAILABLE"))?;
+        Ok(Arc::new(asc_gateway_runtime::GatewayBindingClient::new(
+            service.clone(),
+        )) as Arc<dyn TargetDeploymentClient>)
+    });
+    start_with_factories(
+        repository,
+        Arc::new(AgentSightClientFactory::default()),
+        Some(factory),
+        backend,
     )
 }
 
@@ -92,19 +159,26 @@ pub fn start_policy_reconciliation_with_client<
     repository: Arc<R>,
     client: Arc<dyn TargetDeploymentClient>,
 ) -> Result<ReconciliationRuntime, StoreError> {
-    start_with_factories(repository, Arc::new(move || Ok(client.clone())), None)
+    start_with_factories(
+        repository,
+        Arc::new(move || Ok(client.clone())),
+        None,
+        FilePolicyBackend::AgentSight,
+    )
 }
 
 fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 'static>(
     repository: Arc<R>,
     file_factory: Arc<dyn TargetDeploymentClientFactory>,
     gateway_factory: Option<Arc<dyn TargetDeploymentClientFactory>>,
+    backend: FilePolicyBackend,
 ) -> Result<ReconciliationRuntime, StoreError> {
     let core = Arc::new(build_reconciler(
         repository.clone(),
         file_factory,
         gateway_factory,
         Arc::new(MonotonicClock::default()),
+        backend,
     )?);
     let attempt = Arc::new(GatewayAdmission {
         repository: repository.clone(),
@@ -114,13 +188,20 @@ fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 's
     ReconciliationRuntime::start(repository, attempt, RuntimeConfig::default())
 }
 
-fn build_reconciler<R: BindingStateRepository + 'static>(
+fn build_reconciler<R: BindingStateRepository + BindingReconcileCatalog + 'static>(
     repository: Arc<R>,
     file_factory: Arc<dyn TargetDeploymentClientFactory>,
     gateway_factory: Option<Arc<dyn TargetDeploymentClientFactory>>,
     clock: Arc<dyn Clock>,
+    backend: FilePolicyBackend,
 ) -> Result<BindingReconciler, StoreError> {
+    let routes = recover_file_bindings(repository.as_ref())?;
     let mut factories = BTreeMap::from([("agentsight".into(), file_factory)]);
+    #[cfg(target_os = "linux")]
+    {
+        let lua: Arc<dyn TargetDeploymentClient> = Arc::new(LuaLsmClient::default());
+        factories.insert(LUA_LSM_ROUTE.into(), Arc::new(move || Ok(lua.clone())));
+    }
     if let Some(factory) = gateway_factory {
         factories.insert("gateway".into(), factory);
     }
@@ -136,7 +217,16 @@ fn build_reconciler<R: BindingStateRepository + 'static>(
             max_delay_ms: 30_000,
         },
     )?
-    .with_plan_builder(target_plans))
+    .with_plan_builder(move |binding| {
+        let backend = routes.get(&binding.binding_id).map_or(backend, |route| {
+            if route == LUA_LSM_ROUTE {
+                FilePolicyBackend::LuaLsm
+            } else {
+                FilePolicyBackend::AgentSight
+            }
+        });
+        target_plans(binding, backend)
+    }))
 }
 
 fn translated_plan(
@@ -151,11 +241,17 @@ fn translated_plan(
     }
 }
 
-fn target_plans(binding: &PreparedBinding) -> Result<Vec<(String, TargetBindingPlan)>, Failure> {
+fn target_plans(
+    binding: &PreparedBinding,
+    backend: FilePolicyBackend,
+) -> Result<Vec<(String, TargetBindingPlan)>, Failure> {
     let asc_policy_types::authoring::PolicySource::Cedar(source) = &binding.policy.template else {
         return Ok(vec![(
-            "agentsight".into(),
-            translated_plan(AgentSightTranslator.translate(binding))?,
+            backend.route().into(),
+            translated_plan(match backend {
+                FilePolicyBackend::AgentSight => AgentSightTranslator.translate(binding),
+                FilePolicyBackend::LuaLsm => LuaLsmTranslator::default().translate(binding),
+            })?,
         )]);
     };
     let invalid_source = |_| Failure::new(FailureKind::Rejected, "INVALID_CEDAR_POLICY");
@@ -176,8 +272,15 @@ fn target_plans(binding: &PreparedBinding) -> Result<Vec<(String, TargetBindingP
     let mut plans = Vec::new();
     if let Some(files) = files {
         plans.push((
-            "agentsight".into(),
-            translated_plan(AgentSightTranslator.translate_cedar_pst(binding, &files))?,
+            backend.route().into(),
+            translated_plan(match backend {
+                FilePolicyBackend::AgentSight => {
+                    AgentSightTranslator.translate_cedar_pst(binding, &files)
+                }
+                FilePolicyBackend::LuaLsm => {
+                    LuaLsmTranslator::default().translate_cedar_pst(binding, &files)
+                }
+            })?,
         ));
     }
     if let Some(network) = network {
@@ -205,6 +308,54 @@ fn target_plans(binding: &PreparedBinding) -> Result<Vec<(String, TargetBindingP
 #[path = "reconciliation/mixed_tests.rs"]
 mod mixed_tests;
 
+fn recover_file_bindings<R: BindingStateRepository + BindingReconcileCatalog>(
+    repository: &R,
+) -> Result<BTreeMap<asc_policy_types::identifiers::ResourceId, String>, StoreError> {
+    use asc_policy_repository::{BindingStateWrite, ReconciliationPatch, WriteResult};
+    use asc_policy_types::{binding::BindingStatus, target::Presence};
+    let mut routes = BTreeMap::new();
+    let mut cursor = None;
+    loop {
+        let batch = repository.scan_reconciliation(cursor.as_ref(), 128)?;
+        for candidate in &batch {
+            let Some(record) = repository.get_binding_state(&candidate.id)? else {
+                continue;
+            };
+            if let Some(route) = record.deployments.iter().find_map(|deployment| {
+                matches!(
+                    deployment.target.route.as_str(),
+                    "agentsight" | LUA_LSM_ROUTE
+                )
+                .then(|| deployment.target.route.clone())
+            }) {
+                routes.insert(candidate.id.clone(), route.clone());
+                if route == LUA_LSM_ROUTE && record.binding.status.phase == BindingStatus::Ready {
+                    let mut deployments = record.deployments.clone();
+                    for deployment in &mut deployments {
+                        deployment.presence = Presence::Unknown;
+                    }
+                    let write = BindingStateWrite {
+                        write_id: uuid::Uuid::new_v4(),
+                        next: Some(ReconciliationPatch {
+                            status: Some(BindingStatus::PendingApply.into()),
+                            deployments: Some(deployments),
+                        }),
+                    };
+                    match repository.compare_exchange_binding_state(&record, &write)? {
+                        WriteResult::Applied(_) | WriteResult::AlreadyApplied(_) => {}
+                        WriteResult::Conflict => return Err(StoreError::Contended),
+                    }
+                }
+            }
+        }
+        if batch.len() < 128 {
+            break;
+        }
+        cursor = batch.last().map(|candidate| candidate.id.clone());
+    }
+    Ok(routes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +370,54 @@ mod tests {
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn file_backend_selection_matches_the_deployment_contract_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/file-backends.json")).unwrap();
+        for case in fixture.as_array().unwrap() {
+            let selected = FilePolicyBackend::parse(case["value"].as_str());
+            if let Some(route) = case["route"].as_str() {
+                assert_eq!(selected.unwrap().route(), route);
+            } else {
+                assert_eq!(selected, Err(StoreError::Invalid));
+            }
+        }
+    }
+
+    #[test]
+    fn lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes() {
+        let repository = SqlitePolicyRepository::temporary().unwrap();
+        let scope = admit_scope(&repository, "lua-recovery", false, 1);
+        let id = binding_ids(&repository, &scope).remove(0);
+        let original = repository.get_binding_state(&id).unwrap().unwrap();
+        let mut ready = original.clone();
+        ready.binding.status = BindingStatus::Ready.into();
+        ready.deployments = vec![Deployment {
+            target: TargetRef {
+                route: LUA_LSM_ROUTE.into(),
+                id: "asc_recovery_r1".into(),
+                cleanup: b"asc_recovery_r1".to_vec(),
+            },
+            revision: ready.binding.spec.binding_revision,
+            presence: Presence::Present,
+            last_confirmed: Some(Presence::Present),
+        }];
+        repository
+            .compare_exchange_binding_state(&original, &BindingStateWrite::new(ready))
+            .unwrap();
+        let routes = recover_file_bindings(&repository).unwrap();
+        assert_eq!(routes.get(&id).unwrap(), LUA_LSM_ROUTE);
+        let pending = repository.get_binding_state(&id).unwrap().unwrap();
+        assert_eq!(pending.binding.status.phase, BindingStatus::PendingApply);
+        assert_eq!(pending.deployments[0].presence, Presence::Unknown);
+        assert_eq!(
+            pending.deployments[0].last_confirmed,
+            Some(Presence::Present)
+        );
+        assert_eq!(recover_file_bindings(&repository).unwrap(), routes);
+        assert_eq!(repository.get_binding_state(&id).unwrap().unwrap(), pending);
+    }
 
     struct TestClock;
     impl Clock for TestClock {
