@@ -348,9 +348,10 @@ fn wait_for_raw_cli_input_ready(
     observed: &mut Vec<u8>,
     cursor: usize,
     token: &str,
+    channel: &str,
     request: u64,
 ) -> Result<(), String> {
-    let prefix = format!("\x1e{token}:{request}:");
+    let prefix = format!("\x1e{token}:{channel}:{request}:");
     let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
     loop {
         let window = &observed[cursor.min(observed.len())..];
@@ -634,6 +635,7 @@ fn run_raw_cli_marker_input_inner(
                 &mut observed,
                 cursor,
                 input_readiness.token(),
+                "input",
                 request,
             ) {
                 abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
@@ -670,8 +672,10 @@ fn run_raw_cli_marker_input_inner(
 struct RawCliInputReadiness {
     _directory: tempfile::TempDir,
     request_path: PathBuf,
+    routing_request_path: PathBuf,
     token: String,
     next_request: u64,
+    next_routing_request: u64,
 }
 
 impl RawCliInputReadiness {
@@ -681,6 +685,7 @@ impl RawCliInputReadiness {
             .tempdir()
             .expect("create exclusive raw CLI input readiness directory");
         let request_path = directory.path().join("request");
+        let routing_request_path = directory.path().join("routing-request");
         let token = format!(
             "cosh-input-ready-{}-{}",
             std::process::id(),
@@ -693,14 +698,20 @@ impl RawCliInputReadiness {
         Self {
             _directory: directory,
             request_path,
+            routing_request_path,
             token,
             next_request: 0,
+            next_routing_request: 0,
         }
     }
 
     fn configure(&self, command: &mut Command) {
         command
             .env("COSH_RAW_CLI_TEST_INPUT_READY_REQUEST", &self.request_path)
+            .env(
+                "COSH_RAW_CLI_TEST_ROUTING_READY_REQUEST",
+                &self.routing_request_path,
+            )
             .env("COSH_RAW_CLI_TEST_INPUT_READY_TOKEN", &self.token);
     }
 
@@ -709,6 +720,16 @@ impl RawCliInputReadiness {
         fs::write(&self.request_path, self.next_request.to_string())
             .expect("write raw CLI input readiness request");
         self.next_request
+    }
+
+    fn routing_request(&mut self) -> u64 {
+        self.next_routing_request = self.next_routing_request.saturating_add(1);
+        fs::write(
+            &self.routing_request_path,
+            self.next_routing_request.to_string(),
+        )
+        .expect("write raw CLI routing readiness request");
+        self.next_routing_request
     }
 
     fn token(&self) -> &str {
@@ -772,8 +793,14 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         .stderr(Stdio::piped());
     configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
-    let mut input_readiness = RawCliInputReadiness::new();
-    input_readiness.configure(&mut command);
+    let needs_readiness = session_ready.is_some()
+        || steps
+            .iter()
+            .any(|step| matches!(step, RawCliInputStep::WaitForInputReady));
+    let mut input_readiness = needs_readiness.then(RawCliInputReadiness::new);
+    if let Some(input_readiness) = input_readiness.as_ref() {
+        input_readiness.configure(&mut command);
+    }
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
     let stdout = child.stdout.take().expect("child stdout");
@@ -781,6 +808,9 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
     let stderr_reader = read_pipe(stderr);
     if let Some(session_ready) = session_ready {
+        let input_readiness = input_readiness
+            .as_mut()
+            .expect("session readiness probe is configured");
         let request = input_readiness.request();
         let mut observed = Vec::new();
         wait_for_raw_cli_input_ready(
@@ -788,6 +818,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
             &mut observed,
             0,
             input_readiness.token(),
+            "input",
             request,
         )
         .unwrap_or_else(|error| panic!("{error}"));
@@ -813,12 +844,16 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
                     stdin.flush().expect("flush delayed input");
                 }
                 RawCliInputStep::WaitForInputReady => {
-                    let request = input_readiness.request();
+                    let input_readiness = input_readiness
+                        .as_mut()
+                        .expect("routing readiness probe is configured");
+                    let request = input_readiness.routing_request();
                     wait_for_raw_cli_input_ready(
                         &output_receiver,
                         &mut observed,
                         ready_cursor,
                         input_readiness.token(),
+                        "routing",
                         request,
                     )
                     .unwrap_or_else(|error| panic!("{error}"));
@@ -829,7 +864,9 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     }
 
     let mut output = wait_for_raw_cli_output_with_readers(child, (stdout_reader, stderr_reader));
-    output.stdout = input_readiness.strip_frames(&output.stdout);
+    if let Some(input_readiness) = input_readiness.as_ref() {
+        output.stdout = input_readiness.strip_frames(&output.stdout);
+    }
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",
