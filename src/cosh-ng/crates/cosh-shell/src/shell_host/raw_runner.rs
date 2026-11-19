@@ -432,7 +432,7 @@ where
         Arc::clone(&input_mode),
         input_generation.clone(),
         RawInputShellRoute::new(
-            main_prompt_gate,
+            main_prompt_gate.clone(),
             slash_route_enabled,
             session.zsh_path_prompt_buffering.take(),
         )
@@ -471,6 +471,7 @@ where
         &mut resize_reader,
         &input_mode,
         &input_generation,
+        &main_prompt_gate,
         &mut last_winsize,
         relay_prompt,
         &session.recovery_request_file,

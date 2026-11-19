@@ -236,7 +236,11 @@ fn raw_cli_zsh_routes_fragmented_slash_leading_path_prompt() {
     .unwrap();
     let home_str = home.to_string_lossy().to_string();
     let prompt = "/nonexistent-cosh-1943/SKILL.md 帮我读一下";
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    // Type each fragment only once the routing gate is up. A submit lowers the
+    // gate until the next prompt_ready, and type-ahead written inside that
+    // window is forwarded to the PTY, so a fixed delay from spawn (or from the
+    // previous chunk) can execute a path line instead of routing it.
+    let output = run_raw_cli_with_args_env_and_input_steps(
         "fake",
         &["--shell", "zsh"],
         &[
@@ -248,26 +252,31 @@ fn raw_cli_zsh_routes_fragmented_slash_leading_path_prompt() {
             ("LC_ALL", "C.UTF-8"),
         ],
         vec![
-            (
-                b"echo private-sequence-command-ran".to_vec(),
-                Duration::from_millis(300),
-            ),
-            (b"\x1b[99;99u".to_vec(), Duration::from_millis(100)),
-            (b"\n".to_vec(), Duration::from_millis(300)),
-            (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
-            (b"\n".to_vec(), Duration::from_millis(50)),
-            (b"\x18b".to_vec(), Duration::from_millis(1_000)),
-            (
+            RawCliInputStep::WaitForInputReady,
+            RawCliInputStep::Delay(Duration::from_millis(300)),
+            RawCliInputStep::Bytes(b"echo private-sequence-command-ran".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(100)),
+            RawCliInputStep::Bytes(b"\x1b[99;99u".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(300)),
+            RawCliInputStep::Bytes(b"\n".to_vec()),
+            RawCliInputStep::WaitForInputReady,
+            RawCliInputStep::Delay(Duration::from_millis(300)),
+            RawCliInputStep::Bytes(prompt.as_bytes().to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(50)),
+            RawCliInputStep::Bytes(b"\n".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(1_000)),
+            RawCliInputStep::Bytes(b"\x18b".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(100)),
+            RawCliInputStep::Bytes(
                 b"fc -l -20 | grep -Fq -- \"$COSH_TEST_PATH_PROMPT\" && print \"$COSH_TEST_HISTORY_LEAK\"\n"
                     .to_vec(),
-                Duration::from_millis(100),
             ),
-            (
-                b"echo after-zsh-path-prompt\n".to_vec(),
-                Duration::from_millis(100),
-            ),
-            (b"TRAPURG\n".to_vec(), Duration::from_millis(100)),
-            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+            RawCliInputStep::Delay(Duration::from_millis(100)),
+            RawCliInputStep::Bytes(b"echo after-zsh-path-prompt\n".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(100)),
+            RawCliInputStep::Bytes(b"TRAPURG\n".to_vec()),
+            RawCliInputStep::Delay(Duration::from_millis(100)),
+            RawCliInputStep::Bytes(b"exit 0\n".to_vec()),
         ],
     );
     let _ = fs::remove_dir_all(&home);
