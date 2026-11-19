@@ -83,6 +83,8 @@ class BundleCommandTests(GateFixture):
                 (records / (description["package_id"] + ".json")).write_text(json.dumps(description))
                 shutil.copytree(bundle / "payload", prefix, dirs_exist_ok=True)
             elif args[:2] == ["config", "init"]:
+                if "--template" in args:
+                    assert Path(option("--template")).is_file()
                 Path(option("--config")).write_text("fixture")
             elif args[:2] == ["config", "validate"]:
                 assert Path(option("--config")).is_file()
@@ -101,7 +103,7 @@ class BundleCommandTests(GateFixture):
                 raise AssertionError(args)
             ''')
         sources = self.root / "source bundles"
-        for name in ("aw-core", "aw-provider-sec-core", "aw-provider-tokenless"):
+        for name in ("aw-core", "aw-provider-sec-core", "aw-provider-tokenless", "aw-provider-ws-ckpt"):
             bundle = sources / f"{name}-fixture"
             bundle.mkdir(parents=True)
             if name == "aw-core":
@@ -118,6 +120,14 @@ class BundleCommandTests(GateFixture):
                 payload = package / "payload/libexec/aw/providers" / provider / identifier
                 payload.parent.mkdir(parents=True)
                 payload.write_text("Provider fixture")
+                payload.chmod(0o755)
+                if provider == "ws-ckpt":
+                    example = package / "payload/share/aw/providers/ws-ckpt/examples/aw.yaml"
+                    example.parent.mkdir(parents=True)
+                    example.write_text("Example configuration")
+                    template = package / "templates/ws-ckpt.json"
+                    template.parent.mkdir()
+                    template.write_text("{}")
                 if name != missing_provider:
                     (package / "package.json").write_text(json.dumps({
                         "package_id":identifier,"version":"1.0.0","os":"linux","arch":"x86_64",
@@ -164,13 +174,17 @@ class BundleCommandTests(GateFixture):
         )
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
         installs = [call for call in calls if call["args"][0] == "install"]
-        self.assertEqual(len(installs), 4)
+        self.assertEqual(len(installs), 5)
         self.assertTrue(all("aw-provider-" in call["args"][2] for call in installs))
+        self.assertEqual(sum("aw-provider-ws-ckpt" in call["args"][2] for call in installs), 1)
         removals = [call for call in calls if call["args"][0] == "uninstall"]
-        self.assertEqual(len(removals), 2)
+        self.assertEqual(len(removals), 3)
         self.assertTrue(all("--yes" in call["args"] for call in removals))
-        self.assertEqual(sum(call["args"][:2] == ["config", "init"] for call in calls), 2)
-        self.assertEqual(sum(call["args"][:2] == ["config", "validate"] for call in calls), 2)
+        initializations = [call["args"] for call in calls if call["args"][:2] == ["config", "init"]]
+        self.assertEqual(len(initializations), 3)
+        (checkpoint_init,) = [args for args in initializations if "--template" in args]
+        self.assertEqual(Path(checkpoint_init[checkpoint_init.index("--template") + 1]).name, "ws-ckpt.json")
+        self.assertEqual(sum(call["args"][:2] == ["config", "validate"] for call in calls), 3)
         self.assertEqual(sum(call["args"][:2] == ["list", "--installed"] for call in calls), 2)
         self.assertTrue(all(Path(call["program"]).name == "aw" for call in calls))
 
