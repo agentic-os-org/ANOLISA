@@ -2,9 +2,9 @@
 
 use super::Runtime;
 use crate::{rejected, Availability, EventHandle, Result};
-use aw_adapter::{HookEvent, NativeContext, NativeExit};
+use aw_adapter::{NativeContext, NativeExit};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 pub(super) fn validate_availability(
     configuration: &aw_config::Configuration,
@@ -30,7 +30,7 @@ impl Runtime {
         close: bool,
         deadline: Instant,
     ) -> Result<Value> {
-        let (adapter_id, context, environment, route) = {
+        let (adapter_id, context, environment, on_error, replaces_result) = {
             let instances = self
                 .instances
                 .lock()
@@ -53,21 +53,17 @@ impl Runtime {
             {
                 return Err(rejected("sdk_scope_required"));
             }
-            let policy = aw_adapter::reload::scope_policy(
-                instance.host.configuration().as_value(),
-                instance.host.target(),
-                instance.host.steps(),
-                instance.host.capabilities(),
-            )
-            .map_err(|_| rejected("native_policy_unsupported"))?;
-            let routes: BTreeMap<String, HookEvent> =
-                serde_json::from_value(policy["events"].clone())
-                    .map_err(|_| rejected("sdk_routes_invalid"))?;
+            let routes = instance
+                .routes
+                .as_ref()
+                .ok_or_else(|| rejected("native_policy_unsupported"))?;
             let route = routes
-                .into_iter()
-                .find(|(name, _)| name == event)
-                .map(|(_, route)| route)
+                .event(event)
                 .ok_or_else(|| rejected("sdk_event_unavailable"))?;
+            let on_error = route
+                .step_on_error(step)
+                .ok_or_else(|| rejected("sdk_step_unavailable"))?
+                .to_owned();
             (
                 instance.host.capabilities().adapter.clone(),
                 NativeContext {
@@ -76,13 +72,10 @@ impl Runtime {
                     cwd: instance.context.cwd.clone(),
                 },
                 instance.context.environment.clone(),
-                route,
+                on_error,
+                route.replacement_step().is_some(),
             )
         };
-        let on_error = route
-            .steps
-            .get(step)
-            .ok_or_else(|| rejected("sdk_step_unavailable"))?;
         let adapter = aw_adapter::select(&adapter_id).map_err(|_| rejected("sdk_adapter"))?;
         let input = serde_json::to_vec(&native).map_err(|_| rejected("sdk_input_invalid"))?;
         let (normalized, native, input) = aw_adapter::callback::normalize(
@@ -91,7 +84,7 @@ impl Runtime {
             &context,
             event,
             input,
-            route.replacement_step.is_some(),
+            replaces_result,
         )
         .map_err(|_| rejected("sdk_input_invalid"))?;
         if close {
@@ -132,7 +125,7 @@ impl Runtime {
                     aw_adapter::callback::response(
                         adapter,
                         event,
-                        on_error,
+                        &on_error,
                         value,
                         &adapter_id,
                         &native,
@@ -142,7 +135,7 @@ impl Runtime {
                 });
             if matches!(event, "input.submit" | "tool.before")
                 && handle.steps.last().map(String::as_str) != Some(step)
-                && aw_adapter::callback::stops_before(&adapter_id, result.as_ref().ok(), on_error)
+                && aw_adapter::callback::stops_before(&adapter_id, result.as_ref().ok(), &on_error)
             {
                 // Retain the original denial/error if cleanup is uncertain.
                 let _ = self.close_event(&handle.event_id, id, deadline);

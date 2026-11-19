@@ -4,8 +4,8 @@ mod probe;
 
 use crate::{
     adapter::{
-        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        NativeContext, PreparedLaunch, Readiness,
+        Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan, NativeContext,
+        PreparedLaunch, Readiness,
     },
     read_file, Exit, Result,
 };
@@ -424,63 +424,43 @@ fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
+pub(crate) const fn route_options(observe: bool) -> aw_core::routes::RouteOptions<'static> {
+    // After wrappers are outermost, so they also observe an inner before denial.
+    aw_core::routes::RouteOptions {
+        events: &["tool.after", "tool.before", "input.submit"],
+        observe_events: if observe {
+            aw_core::routes::OBSERVED_TOOL_EVENTS
+        } else {
+            &[]
+        },
+        event_filter: aw_core::routes::EventFilter::All,
+        max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
+        reverse_on_result_replacement: true,
+        include_replace_result: true,
+        include_replace_input: false,
+        include_tool_selectors: true,
+        skill_check: aw_core::routes::SkillCheck::Tool {
+            source_id: "qwenpaw",
+            tool_name: "Skill",
+        },
+    }
+}
+
 pub(crate) fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
     observe: bool,
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    let mut events = BTreeMap::new();
-    let mut hooks = Vec::new();
-    // After wrappers are outermost, so they also observe an inner before denial.
-    for event in ["tool.after", "tool.before", "input.submit"] {
-        let selected = adapter::native_steps(steps, event, observe && event != "input.submit");
-        if selected.is_empty() {
-            continue;
-        }
-        let budget = document["spec"]["events"][event]
-            .get("budget_ms")
-            .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-            .as_f64()
-            .map(|value| value as u64)
-            .ok_or("invalid native event budget")?;
-        if !(1..=55000).contains(&budget) {
-            return Err("QwenPaw native event budgets must be 1..55000 ms".into());
-        }
-        let mut registration = selected.clone();
-        if selected.iter().any(|step| step.replaces_result) {
-            // After handlers unwind the native middleware stack inside out.
-            registration.reverse();
-        }
-        for step in registration {
-            let admitted = steps
-                .iter()
-                .find(|candidate| candidate.event == event && candidate.step_id == step.step_id);
-            let all_tools = vec!["*".to_owned()];
-            let mut hook = json!({"event": event, "step": step.step_id,
-                "on_error": step.on_error, "budget_ms": budget, "replace_result": step.replaces_result,
-                "event_tools": admitted.map(|step| &step.event_tools).unwrap_or(&all_tools),
-                "step_tools": admitted.map(|step| &step.step_tools).unwrap_or(&all_tools)});
-            if admitted.is_some_and(|step| super::sdk_tools::checks_skill(step, "qwenpaw")) {
-                hook["skill_check"] = json!(true);
-            }
-            hooks.push(hook);
-        }
-        events.insert(
-            event.into(),
-            HookEvent {
-                budget_ms: budget,
-                replacement_step: selected
-                    .iter()
-                    .find(|step| step.replaces_result)
-                    .map(|step| step.step_id.clone()),
-                steps: selected
-                    .into_iter()
-                    .map(|step| (step.step_id.clone(), step.on_error.clone()))
-                    .collect(),
-            },
-        );
-    }
-    Ok((events, hooks))
+    let prepared =
+        aw_core::routes::compile(document, steps, &route_options(observe)).map_err(|error| {
+            super::sdk_tools::format_route_error(
+                error,
+                "invalid native event budget",
+                "QwenPaw native event budgets must be 1..55000 ms",
+                "QwenPaw native event budgets must be integer milliseconds in 1..55000 ms",
+            )
+        })?;
+    Ok(super::sdk_tools::convert_routes(&prepared))
 }
 
 fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
@@ -532,6 +512,7 @@ fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter;
     use aw_core::admission::StepExecution;
 
     #[test]

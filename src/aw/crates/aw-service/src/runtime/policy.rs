@@ -466,6 +466,13 @@ impl Runtime {
             context,
             (deadline, cancelled),
         )?;
+        let routes = Instance::prepare_routes(&host);
+        if resident && routes.is_none() {
+            return Err(Error::Attempt {
+                code: "native_policy_unsupported".into(),
+                audit_key: attempt,
+            });
+        }
         let activated = (|| {
             let prepared = Instant::now();
             let mut instances = self
@@ -495,6 +502,7 @@ impl Runtime {
                 return Err(rejected("policy_update_cancelled"));
             }
             let revision = host.revision().to_owned();
+            instance.routes = routes;
             instance.host = std::sync::Arc::new(host);
             instance.bytes = bytes.to_vec();
             if self.audit.append(key, json!({"phase":"closed","status":"active",

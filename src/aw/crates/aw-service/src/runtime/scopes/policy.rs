@@ -89,13 +89,11 @@ impl Runtime {
         {
             return Err(rejected("scope_reload_unsupported"));
         }
-        let mut snapshot = aw_adapter::reload::scope_policy(
-            instance.host.configuration().as_value(),
-            instance.host.target(),
-            instance.host.steps(),
-            instance.host.capabilities(),
-        )
-        .map_err(|_| rejected("native_policy_unsupported"))?;
+        let mut snapshot = instance
+            .routes
+            .as_ref()
+            .ok_or_else(|| rejected("native_policy_unsupported"))?
+            .to_policy_value();
         snapshot["policy_revision"] = json!(instance.host.revision());
         owners
             .get_mut(id)
