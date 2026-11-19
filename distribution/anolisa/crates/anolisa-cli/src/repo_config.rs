@@ -1195,6 +1195,24 @@ mod tests {
         }
     }
 
+    /// The shipped RPM backend must reach the mirror over TLS.
+    #[test]
+    fn shipped_repo_configs_use_tls_for_rpm() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in ["../../templates/repo.toml", "../../manifests/repo.toml"] {
+            let path = manifest_dir.join(relative);
+            let content = std::fs::read_to_string(&path).expect("read shipped repo config");
+            let cfg = RepoConfig::from_toml_str(&content).expect("shipped repo config");
+            let rpm = cfg.backends.get("rpm").expect("rpm backend");
+            assert!(!rpm.insecure, "{relative}");
+            assert_eq!(rpm.gpgcheck, Some(true), "{relative}");
+            let url = cfg
+                .resolved_base_url("rpm", rpm, &host())
+                .expect("resolve rpm base_url");
+            assert!(url.starts_with("https://"), "{relative}: {url}");
+        }
+    }
+
     /// Configs written by older releases still carry the knobs and must load.
     #[test]
     fn legacy_raw_cache_knobs_still_parse() {
