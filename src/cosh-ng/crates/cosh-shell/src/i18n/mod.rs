@@ -428,7 +428,11 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardLoginPrivilegeDenied as usize + 1,
-            MessageId::ALL.len()
+            MessageId::AgentResponseTruncated as usize
+        );
+        assert_eq!(
+            MessageId::AgentResponseTruncated as usize,
+            MessageId::ALL.len() - 1
         );
     }
 

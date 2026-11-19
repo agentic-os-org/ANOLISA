@@ -941,6 +941,53 @@ fn markdown_body_evidence_survives_panel_finish_and_ignores_unwritten_text() {
 }
 
 #[test]
+fn markdown_stream_reports_truncated_oversized_styled_line() {
+    for (language, notice) in [
+        (crate::Language::EnUs, "Response truncated"),
+        (crate::Language::ZhCn, "回答已截断"),
+    ] {
+        let mut renderer = RatatuiInlineRenderer::with_width(100).with_language(language);
+        renderer.styled = true;
+        let content_width = renderer.content_width();
+        let mut stream = renderer.stream_markdown_agent();
+        let mut output = Vec::new();
+        let response = format!("{}BIGTAIL", "A".repeat(1_000_000));
+
+        stream.write_delta(&mut output, &response).unwrap();
+        assert!(stream.finish(&mut output, None).unwrap());
+        let text = strip_ansi_escape(&String::from_utf8(output).unwrap());
+
+        assert!(
+            text.contains(notice),
+            "missing truncation notice for {language:?}"
+        );
+        assert!(!text.contains("BIGTAIL"));
+        assert!(text.contains(&"A".repeat(content_width)));
+        assert_eq!(text.matches(notice).count(), 1);
+    }
+}
+
+#[test]
+fn markdown_stream_preserves_shorter_styled_fragments_after_word_wrap() {
+    let mut renderer = RatatuiInlineRenderer::with_width(100);
+    renderer.styled = true;
+    let word_len = renderer.content_width() + 3;
+    let chunk = format!("{}\n", "B".repeat(word_len));
+    let mut stream = renderer.stream_markdown_agent();
+    let mut output = Vec::new();
+    for _ in 0..100 {
+        stream.write_delta(&mut output, &chunk).unwrap();
+    }
+    stream.write_delta(&mut output, "MANYTAIL").unwrap();
+    assert!(stream.finish(&mut output, None).unwrap());
+
+    let text = strip_ansi_escape(&String::from_utf8(output).unwrap());
+    assert_eq!(text.matches('B').count(), word_len * 100);
+    assert!(text.contains("MANYTAIL"));
+    assert!(!text.contains("Response truncated"));
+}
+
+#[test]
 fn markdown_stream_starts_on_a_fresh_line_after_unterminated_tool_output() {
     let mut styled = RatatuiInlineRenderer::with_width(80);
     styled.styled = true;
