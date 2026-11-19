@@ -215,6 +215,7 @@ pub(super) fn finalize_approval_decision(
             actor,
             "staged_resolved_late_verdict",
         )
+        .is_some()
     });
     if !reconciled {
         state

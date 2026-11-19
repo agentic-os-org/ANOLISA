@@ -7,7 +7,7 @@ use crate::approval::handoff::{
 };
 use crate::runtime::prelude::*;
 
-pub(super) fn provider_approval_response(
+pub(crate) fn provider_approval_response(
     request: &RuntimeApprovalRequest,
     ctrl_request_id: &str,
 ) -> ApprovalResponse {
