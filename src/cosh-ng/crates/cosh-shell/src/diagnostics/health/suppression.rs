@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod claim;
+pub(crate) mod episode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::model::{

@@ -253,6 +253,7 @@ pub(crate) enum HealthFactSource {
     ProcLoadavg,
     ProcMeminfo,
     DfP,
+    Statfs,
     JournalctlK,
     Dmesg,
     Systemctl,

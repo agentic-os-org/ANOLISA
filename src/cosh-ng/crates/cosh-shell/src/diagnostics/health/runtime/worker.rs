@@ -162,6 +162,7 @@ fn run_worker() -> Result<(), ProtocolError> {
     }
     let memory_sample = std::cell::OnceCell::new();
     let disk_sample = std::cell::OnceCell::new();
+    let volume_sample = std::cell::OnceCell::new();
     let environment_sample = std::cell::OnceCell::<EnvironmentConfigSample>::new();
     let mut last_task_id = 0u64;
     loop {
@@ -287,9 +288,37 @@ fn run_worker() -> Result<(), ProtocolError> {
                             )
                         });
                         builder.set_sampled_at(*sampled_at);
+                        let (_, volume_sample) = volume_sample.get_or_init(|| {
+                            (
+                                now_millis(),
+                                collectors::read_volume_sample(&request.config),
+                            )
+                        });
+                        let volume_proven =
+                            volume_sample.volumes.iter().any(|volume| volume.proven());
                         match sample {
                             Ok(facts) => {
                                 facts.record(&mut builder, 0);
+                                collectors::record_volumes(
+                                    &mut builder,
+                                    volume_sample,
+                                    Some(spec.id),
+                                    0,
+                                );
+                                builder.add_check_done(spec.id);
+                            }
+                            Err(reason) if volume_proven => {
+                                tracing::debug!(
+                                    target: "cosh_health",
+                                    reason = ?reason,
+                                    "df sample failed; proven volume facts supersede the unavailable record"
+                                );
+                                collectors::record_volumes(
+                                    &mut builder,
+                                    volume_sample,
+                                    Some(spec.id),
+                                    0,
+                                );
                                 builder.add_check_done(spec.id);
                             }
                             Err(reason) => {

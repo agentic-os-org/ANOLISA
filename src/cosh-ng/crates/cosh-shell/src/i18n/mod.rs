@@ -431,7 +431,11 @@ mod tests {
             MessageId::AgentResponseTruncated as usize
         );
         assert_eq!(
-            MessageId::AgentResponseTruncated as usize,
+            MessageId::AgentResponseTruncated as usize + 1,
+            MessageId::HealthOomScopeCurrentCgroup as usize
+        );
+        assert_eq!(
+            MessageId::HealthEvidenceOomCounterWindow as usize,
             MessageId::ALL.len() - 1
         );
     }

@@ -397,6 +397,34 @@ pub(super) fn disk_evidence_text(
     report: &HealthScanReport,
     i18n: crate::I18n,
 ) -> Option<String> {
+    if let Some(members) = finding.detail_args.get("members") {
+        let mount = finding
+            .detail_args
+            .get("mount")
+            .map(String::as_str)
+            .unwrap_or("/");
+        let label = i18n.format(
+            crate::MessageId::HealthMetricDiskMountUsed,
+            &[("mount", &middle_ellipsis(mount, 26))],
+        );
+        let mut parts = vec![label];
+        if let Some(gib) = finding.detail_args.get("available_gib") {
+            parts.push(i18n.format(
+                crate::MessageId::HealthEvidenceVolumeAvailable,
+                &[("gib", gib)],
+            ));
+        }
+        if members.contains("inode") {
+            if let Some(count) = finding.detail_args.get("inode_free") {
+                parts.push(i18n.format(
+                    crate::MessageId::HealthEvidenceInodeFree,
+                    &[("count", count)],
+                ));
+            }
+        }
+        let separator = if is_zh(i18n) { "，" } else { "; " };
+        return Some(parts.join(separator));
+    }
     let scoped = finding.evidence_fact_ids.iter().find_map(|id| {
         let fact = report.facts.iter().find(|fact| {
             &fact.id == id
@@ -448,19 +476,69 @@ pub(super) fn disk_evidence_text(
 }
 
 pub(super) fn oom_evidence_text(report: &HealthScanReport, i18n: crate::I18n) -> Option<String> {
-    let age = number_fact(&report.facts, "kernel.oom_latest_age_seconds")
-        .map(|value| format_age_seconds(value as u64));
-    let process = string_fact(&report.facts, "kernel.oom_killed_process")
-        .or_else(|| string_fact(&report.facts, "kernel.oom_latest_process"));
-    let pid = number_fact(&report.facts, "kernel.oom_latest_pid");
-    let scope = string_fact(&report.facts, "kernel.oom_latest_scope_label_id")
-        .map(|value| oom_scope_label_from_id(value, i18n))
-        .or_else(|| {
-            string_fact(&report.facts, "kernel.oom_latest_constraint")
-                .map(|value| oom_scope_label_from_constraint(value, i18n))
-        });
-    let cgroup = string_fact(&report.facts, "kernel.oom_latest_oom_cgroup")
-        .or_else(|| string_fact(&report.facts, "kernel.oom_latest_task_cgroup"));
+    let attributed_scope = string_fact(&report.facts, "kernel.oom_attributed_scope");
+    if attributed_scope.is_none()
+        && number_fact(&report.facts, "kernel.cgroup_oom_kill_increment")
+            .is_some_and(|value| value > 0.0)
+        && string_fact(&report.facts, "kernel.current_cgroup_path").is_some()
+    {
+        if let (Some(start), Some(end), Some(delta)) = (
+            number_fact(&report.facts, "kernel.cgroup_oom_kill_window_start_epoch"),
+            number_fact(&report.facts, "kernel.cgroup_oom_kill_window_end_epoch"),
+            number_fact(&report.facts, "kernel.cgroup_oom_kill_increment"),
+        ) {
+            if end >= start {
+                let age = format_age_seconds((end - start) as u64);
+                return Some(i18n.format(
+                    crate::MessageId::HealthEvidenceOomCounterWindow,
+                    &[("age", &age), ("count", &format!("{delta:.0}"))],
+                ));
+            }
+        }
+    }
+    let attributed = attributed_scope.is_some();
+    let age = number_fact(
+        &report.facts,
+        if attributed {
+            "kernel.oom_attributed_age_seconds"
+        } else {
+            "kernel.oom_latest_age_seconds"
+        },
+    )
+    .map(|value| format_age_seconds(value as u64));
+    let process = if attributed {
+        string_fact(&report.facts, "kernel.oom_attributed_process")
+    } else {
+        string_fact(&report.facts, "kernel.oom_killed_process")
+            .or_else(|| string_fact(&report.facts, "kernel.oom_latest_process"))
+    };
+    let pid = number_fact(
+        &report.facts,
+        if attributed {
+            "kernel.oom_attributed_pid"
+        } else {
+            "kernel.oom_latest_pid"
+        },
+    );
+    let scope = match attributed_scope {
+        Some("current-cgroup") => Some(
+            i18n.t(crate::MessageId::HealthOomScopeCurrentCgroup)
+                .to_string(),
+        ),
+        Some("host") => Some(oom_scope_label_from_id("host", i18n)),
+        _ => string_fact(&report.facts, "kernel.oom_latest_scope_label_id")
+            .map(|value| oom_scope_label_from_id(value, i18n))
+            .or_else(|| {
+                string_fact(&report.facts, "kernel.oom_latest_constraint")
+                    .map(|value| oom_scope_label_from_constraint(value, i18n))
+            }),
+    };
+    let cgroup = if attributed {
+        string_fact(&report.facts, "kernel.oom_attributed_task_cgroup")
+    } else {
+        string_fact(&report.facts, "kernel.oom_latest_oom_cgroup")
+            .or_else(|| string_fact(&report.facts, "kernel.oom_latest_task_cgroup"))
+    };
 
     if age.is_none() && process.is_none() && pid.is_none() && scope.is_none() {
         return None;
@@ -497,18 +575,22 @@ pub(super) fn oom_evidence_text(report: &HealthScanReport, i18n: crate::I18n) ->
         };
         format_oom_evidence_sentence_en(&victim, scope.as_deref(), cgroup)
     };
-    let count = report
-        .facts
-        .iter()
-        .find(|fact| fact.key == "kernel.oom_event_count_last_1h")
-        .or_else(|| {
-            report
-                .facts
-                .iter()
-                .find(|fact| fact.key == "kernel.oom_event_count_last_24h")
-        })
-        .filter(|fact| number_from_fact(fact).is_some_and(|count| count > 0.0))
-        .and_then(|fact| format_evidence_fact(fact, report, i18n));
+    let count = if attributed {
+        None
+    } else {
+        report
+            .facts
+            .iter()
+            .find(|fact| fact.key == "kernel.oom_event_count_last_1h")
+            .or_else(|| {
+                report
+                    .facts
+                    .iter()
+                    .find(|fact| fact.key == "kernel.oom_event_count_last_24h")
+            })
+            .filter(|fact| number_from_fact(fact).is_some_and(|count| count > 0.0))
+            .and_then(|fact| format_evidence_fact(fact, report, i18n))
+    };
     Some(if let Some(count) = count {
         format!("{text}; {count}")
     } else {

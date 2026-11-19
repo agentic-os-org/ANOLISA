@@ -53,6 +53,7 @@ impl Fixture {
                     event: Some(("fixture-v1", evidence)),
                     severity: Some(severity.precedence()),
                     legacy_problems,
+                    episode: None,
                 },
             )
             .unwrap()
@@ -299,6 +300,7 @@ fn actual_bash_candidates_keep_the_same_help_and_event_when_oom_ages() {
                     event: candidate.event.as_ref().map(|(domain, value)| (*domain, value.as_str())),
                     severity: candidate.severity,
                     legacy_problems: &candidate.legacy_problems,
+                    episode: candidate.episode.clone(),
                 },
             )
             .unwrap();

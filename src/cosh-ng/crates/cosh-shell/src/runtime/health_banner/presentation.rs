@@ -83,6 +83,25 @@ pub(super) fn prepare(
         snapshot: snapshot.clone(),
         invitation: None,
     };
+    if let Some(path) = crate::diagnostics::health::suppression::episode::ledger_path() {
+        if let Some(mut ledger) =
+            crate::diagnostics::health::suppression::episode::load_or_default(&path)
+        {
+            let signal =
+                crate::diagnostics::health::suppression::episode::signals_from_report(report);
+            crate::diagnostics::health::suppression::episode::sync(&mut ledger, &signal, now_ms);
+            if let Err(error) =
+                crate::diagnostics::health::suppression::episode::write(&path, &ledger)
+            {
+                tracing::warn!(
+                    target: "cosh_health",
+                    path = %path.display(),
+                    error = ?error,
+                    "episode ledger write failed; recovery records and counter baselines may not persist across logins"
+                );
+            }
+        }
+    }
     if !ai_enabled || !snapshot.preferences.guide_enabled {
         return prepared;
     }
@@ -139,6 +158,7 @@ pub(super) fn prepare(
                         .map(|(domain, value)| (*domain, value.as_str())),
                     severity: invitation.severity,
                     legacy_problems: &invitation.legacy_problems,
+                    episode: invitation.episode.clone(),
                 },
             ),
             None => store.claim(runtime, snapshot, request, now_ms),

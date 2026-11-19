@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::private_state;
+mod claim_policy;
 pub(crate) mod cli;
 mod context;
+mod episode_claim;
 mod health_exposure;
 pub(crate) use context::{load_failure_context, valid_context_id};
 mod runtime;
@@ -19,12 +21,13 @@ const WEEK_MS: u64 = 7 * DAY_MS;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_CLAIMS: usize = 256;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct HealthExposure<'a> {
     pub(crate) evidence: &'a str,
     pub(crate) event: Option<(&'a str, &'a str)>,
     pub(crate) severity: Option<u8>,
     pub(crate) legacy_problems: &'a [String],
+    pub(crate) episode: Option<crate::diagnostics::health::suppression::episode::CandidateEpisode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +346,7 @@ impl GuideStore {
                 event: Some(("fixture-v1", evidence)),
                 severity: None,
                 legacy_problems: &[],
+                episode: None,
             },
         )
     }
@@ -406,41 +410,56 @@ impl GuideStore {
         } else {
             None
         };
-        if let Some(version) = health_evidence {
+        if let Some(version) = health_evidence.as_ref() {
             if version
                 .event
                 .is_some_and(|(domain, _)| !health_exposure::valid_event_domain(domain))
             {
                 return Err(Error::InvalidRequest);
             }
-            let legacy: Vec<_> = version
-                .legacy_problems
-                .iter()
-                .map(|problem| digest(&[request.host, problem]))
-                .collect();
+        }
+        let episode_candidate = health_evidence
+            .as_ref()
+            .and_then(|version| version.episode.as_ref());
+        let episode_claim = match episode_claim::prepare(episode_candidate, now_ms) {
+            Ok(claim) => claim,
+            Err(()) => return Ok(ClaimDecision::Suppressed),
+        };
+        if episode_candidate.is_none() {
+            if let Some(version) = health_evidence.as_ref() {
+                let legacy: Vec<_> = version
+                    .legacy_problems
+                    .iter()
+                    .map(|problem| digest(&[request.host, problem]))
+                    .collect();
+                if claims.entries.iter().any(|entry| {
+                    entry.host == host
+                        && matches!(entry.kind, InviteKind::LoginHealth | InviteKind::Failure)
+                        && now_ms.saturating_sub(entry.shown_at_ms) < DAY_MS
+                        && legacy.contains(&entry.problem)
+                        && !claim_policy::new_health_event(
+                            exposures.as_ref(),
+                            health_evidence.as_ref(),
+                            entry,
+                        )
+                }) {
+                    return Ok(ClaimDecision::Suppressed);
+                }
+            }
             if claims.entries.iter().any(|entry| {
-                entry.host == host
-                    && matches!(entry.kind, InviteKind::LoginHealth | InviteKind::Failure)
-                    && now_ms.saturating_sub(entry.shown_at_ms) < DAY_MS
-                    && legacy.contains(&entry.problem)
-                    && !new_health_event(exposures.as_ref(), health_evidence, entry)
+                suppresses(
+                    entry,
+                    &request,
+                    &host,
+                    &problem,
+                    &scope,
+                    now_ms,
+                    exposures.as_ref(),
+                    health_evidence.as_ref(),
+                )
             }) {
                 return Ok(ClaimDecision::Suppressed);
             }
-        }
-        if claims.entries.iter().any(|entry| {
-            suppresses(
-                entry,
-                &request,
-                &host,
-                &problem,
-                &scope,
-                now_ms,
-                exposures.as_ref(),
-                health_evidence,
-            )
-        }) {
-            return Ok(ClaimDecision::Suppressed);
         }
         claims
             .entries
@@ -450,7 +469,13 @@ impl GuideStore {
         }
         // Save the referenced context before committing suppression under the same lock.
         prepare()?;
+        if let Some(claim) = episode_claim {
+            if !episode_claim::commit(claim, now_ms) {
+                return Ok(ClaimDecision::Suppressed);
+            }
+        }
         let stored_problem = health_evidence
+            .as_ref()
             .filter(|_| request.kind == InviteKind::LoginHealth)
             .and_then(|version| version.legacy_problems.first())
             .map(|problem| digest(&[request.host, problem]))
@@ -465,7 +490,7 @@ impl GuideStore {
         let bytes = serde_json::to_vec(&claims).map_err(|_| Error::Corrupt)?;
         private_state::atomic_write(&self.root.join("claims.json"), &bytes, MAX_BYTES)?;
         if request.kind == InviteKind::LoginHealth {
-            if let Some(evidence) = health_evidence {
+            if let Some(evidence) = health_evidence.as_ref() {
                 let mut exposures = exposures.unwrap_or_default();
                 exposures
                     .entries
@@ -602,7 +627,7 @@ fn suppresses(
     scope: &str,
     now_ms: u64,
     exposures: Option<&health_exposure::HealthExposures>,
-    evidence: Option<HealthExposure<'_>>,
+    evidence: Option<&HealthExposure<'_>>,
 ) -> bool {
     if entry.host != host {
         return false;
@@ -617,7 +642,7 @@ fn suppresses(
                 || (matches!(entry.kind, InviteKind::LoginHealth | InviteKind::Failure)
                     && entry.problem == problem
                     && age < DAY_MS
-                    && !new_health_event(exposures, evidence, entry))
+                    && !claim_policy::new_health_event(exposures, evidence, entry))
         }
         InviteKind::Help => {
             entry.kind == InviteKind::Help && entry.problem == problem && age < 30_000
@@ -633,32 +658,6 @@ fn digest(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     format!("{:x}", hasher.finalize())
-}
-
-fn new_health_event(
-    exposures: Option<&health_exposure::HealthExposures>,
-    evidence: Option<HealthExposure<'_>>,
-    entry: &ClaimEntry,
-) -> bool {
-    let (Some(exposures), Some(evidence)) = (exposures, evidence) else {
-        return false;
-    };
-    if entry.kind != InviteKind::LoginHealth {
-        return false;
-    }
-    let Some((domain, event)) = evidence.event else {
-        return false;
-    };
-    health_exposure::paired(exposures, entry).is_some_and(|paired| {
-        paired.event.as_ref().is_some_and(|previous| {
-            previous.domain == domain
-                && (previous.identity != digest(&[event])
-                    || evidence
-                        .severity
-                        .zip(paired.severity)
-                        .is_some_and(|(current, old)| current > old))
-        })
-    })
 }
 
 fn claim_identity(entry: &ClaimEntry) -> String {

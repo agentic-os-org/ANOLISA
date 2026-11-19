@@ -17,6 +17,7 @@ mod memory;
 #[cfg(test)]
 use disk::collect_disk;
 pub(super) use disk::read_disk_sample;
+pub(super) use disk::volume::{read_volume_sample, record_volumes, VolumeSample};
 pub(crate) use disk::{parse_df_p, DiskFacts};
 mod system;
 pub(super) use memory::read_memory;

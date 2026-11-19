@@ -129,3 +129,18 @@ macro_rules! health_guidance_ids {
         $next!($remaining, $($ids,)* HealthMetricUsed,);
     };
 }
+
+// The v3.7 health-volume keys live in a trailing segment so every existing
+// MessageId discriminant stays stable.
+macro_rules! health_volume_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HealthOomScopeCurrentCgroup,
+            HealthEvidenceVolumeAvailable,
+            HealthEvidenceInodeFree,
+            HealthEvidenceOomCounterWindow,
+        );
+    };
+}

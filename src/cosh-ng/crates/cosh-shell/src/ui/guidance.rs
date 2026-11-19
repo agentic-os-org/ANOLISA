@@ -19,6 +19,7 @@ pub(crate) struct Invitation {
     pub(crate) event: Option<(&'static str, String)>,
     pub(crate) severity: Option<u8>,
     pub(crate) legacy_problems: Vec<String>,
+    pub(crate) episode: Option<crate::diagnostics::health::suppression::episode::CandidateEpisode>,
     target: Target,
 }
 
@@ -43,19 +44,30 @@ pub(crate) fn health_candidate(
         return None;
     }
     let text = format!("  cosh --ask {}", bash_arg(&prompt)?);
+    let problem = crate::diagnostics::health::prompt_selection::exposure_problem(report, item);
+    let severity = report
+        .findings
+        .iter()
+        .find(|finding| finding.id == item.finding_id)
+        .map(|finding| finding.severity.precedence());
+    let episode = severity.and_then(|severity| {
+        crate::diagnostics::health::suppression::episode::candidate_for_finding(
+            report,
+            &item.finding_id,
+            severity,
+            &problem,
+        )
+    });
     Some(Invitation {
-        problem: crate::diagnostics::health::prompt_selection::exposure_problem(report, item),
+        problem,
         text,
         evidence: Some(crate::diagnostics::health::exposure_evidence(report, item)),
         event: crate::diagnostics::health::prompt_selection::exposure_event(report, item),
-        severity: report
-            .findings
-            .iter()
-            .find(|finding| finding.id == item.finding_id)
-            .map(|finding| finding.severity.precedence()),
+        severity,
         legacy_problems: crate::diagnostics::health::prompt_selection::legacy_exposure_problems(
             item,
         ),
+        episode,
         target: Target::Bash,
     })
 }
@@ -68,6 +80,7 @@ pub(crate) fn login_entry(language: Language) -> Invitation {
     Invitation {
         target: Target::Bash,
         problem: "login-entry".to_string(),
+        episode: None,
         text: text.to_string(),
         evidence: None,
         event: None,
@@ -89,6 +102,7 @@ pub(crate) fn default_login(language: Language) -> Invitation {
         event: None,
         severity: None,
         legacy_problems: Vec::new(),
+        episode: None,
     }
 }
 
@@ -115,6 +129,7 @@ pub(crate) fn failure_invitation(
         event: None,
         severity: None,
         legacy_problems: Vec::new(),
+        episode: None,
     })
 }
 
