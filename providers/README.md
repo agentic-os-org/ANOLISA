@@ -10,6 +10,7 @@ and protocol libraries remain in `../src/aw/crates/`.
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README.md) | Command security checks | First-party sec-core CLI/backend |
 | [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | Separately installed Tokenless CLI |
+| [ws-ckpt](ws-ckpt/README.md) | Workspace snapshots on input submission | Separately installed ws-ckpt CLI and daemon |
 
 ## Contribute or distribute
 
@@ -42,8 +43,8 @@ are not yet supported. Standalone SDK publication and artifact-based composition
 are future work. Integration builds select and test compatible framework, Provider
 and backend versions together; extension packages have independent IDs and versions.
 
-The distribution target `make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` builds
-independent core, sec-core Provider and Tokenless Provider archives through scripts in
+The distribution target `make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"` builds
+independent archives for core and the three Providers through scripts in
 `distribution/packaging/aw/`. A new folder
 is not automatically bundled or installed; independent Providers supply their
 own installer. Bundling a new Provider also requires package manifest, build,

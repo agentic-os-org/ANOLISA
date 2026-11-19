@@ -18,6 +18,7 @@ COMPONENTS = {
     "core": "aw-core",
     "sec-core": "aw-provider-sec-core",
     "tokenless": "aw-provider-tokenless",
+    "ws-ckpt": "aw-provider-ws-ckpt",
 }
 MACHINES = {"x86_64": 62, "aarch64": 183}
 TEMPLATES = Path(__file__).resolve().parent / "templates"
@@ -32,7 +33,8 @@ def components(selection: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
         or len(selected) != len(set(selected))
         or any(v not in COMPONENTS for v in selected)
     ):
-        raise ValueError("components must be a nonempty unique list of core, sec-core, tokenless")
+        names = ", ".join(COMPONENTS)
+        raise ValueError(f"components must be a nonempty unique list of {names}")
     return selected
 
 
@@ -165,14 +167,10 @@ def _provider(
         "files": dict(sorted(files.items())),
     }
     (root / "package.json").write_text(json.dumps(description, indent=2))
-    copy_file(TEMPLATES / f"{role}.json", root / "templates" / f"{role}.json", cancel, 0o644)
-    copy_file(
-        TEMPLATES / "sec-core-tokenless.json",
-        root / "templates/sec-core-tokenless.json",
-        cancel,
-        0o644,
-    )
-    for name in ("tokenless-openclaw", "sec-core-tokenless-openclaw"):
+    templates = [role]
+    if role in ("sec-core", "tokenless"):
+        templates.extend(("sec-core-tokenless", "tokenless-openclaw", "sec-core-tokenless-openclaw"))
+    for name in templates:
         copy_file(TEMPLATES / f"{name}.json", root / "templates" / f"{name}.json", cancel, 0o644)
 
 
@@ -270,9 +268,12 @@ def assemble(
                 _provider(repo, root, component, version, source_commit, arch, cancel)
             roots[component] = root
         archives = []
-        for root in roots.values():
+        for component, root in roots.items():
             for language, filename in (("en", "README.md"), ("zh", "README_zh.md")):
-                (root / filename).write_text(_readme(repo, language))
+                if component == COMPONENTS["ws-ckpt"]:
+                    copy_file(repo / "providers/ws-ckpt" / filename, root / filename, cancel, 0o644)
+                else:
+                    (root / filename).write_text(_readme(repo, language))
             archive = stage / f"{root.name}.tar.gz"
             _archive(root, archive, cancel)
             archives.append(archive)

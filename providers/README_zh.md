@@ -9,6 +9,7 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README_zh.md) | 命令安全检查 | 第一方 sec-core CLI 与后端 |
 | [Tokenless](tokenless/README_zh.md) | 工具输出压缩和命令建议 | 单独安装的 Tokenless CLI |
+| [ws-ckpt](ws-ckpt/README_zh.md) | 提交输入时创建工作区快照 | 单独安装的 ws-ckpt CLI 和守护进程 |
 
 ## 协作与分发
 
@@ -29,12 +30,12 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 组件 owner 负责实现、依赖和发布；OS 发行方选择版本、验证组合并交付安装升级。
 一方 Provider 的目标是依赖固定版本的公共 AW 库，在仓库外构建、测试和发布。
 
-目前两个 Rust Provider 通过仓库内路径复用 AW 库，Tokenless 组合测试还使用 sec-core
+目前仓库中的 Rust Provider 通过仓库内路径复用 AW 库，Tokenless 组合测试还使用 sec-core
 桥接库，尚不支持仓库外构建。SDK 独立发布和基于产物的组合测试留待后续。
 集成构建共同选择并验证兼容的框架、Provider 与后端版本；扩展包有独立的 ID 和版本。
 
-distribution 的 `make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
-`distribution/packaging/aw/` 中的普通脚本构建独立 core、sec-core Provider、Tokenless Provider 归档。新增目录不会自动加入安装包；
+distribution 的 `make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"` 通过
+`distribution/packaging/aw/` 中的脚本为 core 和三个 Provider 各自构建独立归档。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。
 
 AW 的本地 raw 扩展安装器只接受声明 `aw-provider/v1alpha1` 的新 `package.json`
