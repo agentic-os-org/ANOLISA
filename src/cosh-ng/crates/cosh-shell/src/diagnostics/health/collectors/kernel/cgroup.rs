@@ -13,6 +13,8 @@ use super::super::super::model::{
 const SCALAR_MAX_BYTES: u64 = 2048;
 const MEMBERSHIP_MAX_BYTES: u64 = 8192;
 
+mod pids;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CgroupFacts {
     pub version: u8,
@@ -286,6 +288,21 @@ mod linux {
                 object_id,
                 started.elapsed().as_millis(),
             );
+            if let Some(mount) = mount.as_deref() {
+                pids::collect_pids(
+                    builder,
+                    Path::new(mount),
+                    &path,
+                    object_id,
+                    started.elapsed().as_millis(),
+                );
+                record_pids_increment(
+                    builder,
+                    object_id,
+                    now_epoch_seconds,
+                    started.elapsed().as_millis(),
+                );
+            }
         }
         record(
             builder,
@@ -410,6 +427,66 @@ mod linux {
             );
         }
         builder.set_scope(HealthFactScope::Host);
+    }
+
+    fn record_pids_increment(
+        builder: &mut HealthReportBuilder,
+        object_id: &str,
+        now_epoch_seconds: u64,
+        elapsed_ms: u128,
+    ) {
+        let events_max = builder.report().facts.iter().find_map(|fact| {
+            (fact.key == "kernel.cgroup_pids_events_max").then_some(match &fact.value {
+                HealthFactValue::Unsigned(value) => *value,
+                _ => 0,
+            })
+        });
+        let Some(count) = events_max else {
+            return;
+        };
+        builder.add_fact(
+            HealthFactCategory::Kernel,
+            "kernel.cgroup_pids_sampled_epoch",
+            HealthFactValue::Unsigned(now_epoch_seconds),
+            Some("seconds".to_string()),
+            HealthFactSource::Derived,
+            elapsed_ms,
+        );
+        let boot_id = builder.report().facts.iter().find_map(|fact| {
+            (fact.key == "kernel.boot_id").then(|| match &fact.value {
+                HealthFactValue::String(value) => value.clone(),
+                _ => String::new(),
+            })
+        });
+        let Some(boot_id) = boot_id.filter(|boot| !boot.is_empty()) else {
+            return;
+        };
+        let sample = episode::CounterSample {
+            boot_id,
+            cgroup_id: object_id.to_string(),
+            source: "pids.events".to_string(),
+            count,
+            sampled_epoch: now_epoch_seconds,
+        };
+        let increment = episode::ledger_path()
+            .and_then(|path| episode::load(&path))
+            .and_then(|ledger| episode::peek_pids_increment(&ledger, &sample));
+        if let Some((start, end, delta)) = increment {
+            for (key, value) in [
+                ("kernel.pids_events_max_increment", delta),
+                ("kernel.pids_events_max_window_start_epoch", start),
+                ("kernel.pids_events_max_window_end_epoch", end),
+            ] {
+                builder.add_fact(
+                    HealthFactCategory::Kernel,
+                    key,
+                    HealthFactValue::Unsigned(value),
+                    None,
+                    HealthFactSource::Derived,
+                    elapsed_ms,
+                );
+            }
+        }
     }
 }
 

@@ -16,6 +16,7 @@ fn signal(volume: Vec<VolumeMemberSignal>) -> EpisodeSignal {
         volume,
         quota: Vec::new(),
         counter: None,
+        pids_counter: None,
         candidate: None,
     }
 }
@@ -198,6 +199,7 @@ fn counter_first_nonzero_sample_is_historical_only() {
         volume: Vec::new(),
         quota: Vec::new(),
         counter: Some(sample.clone()),
+        pids_counter: None,
         candidate: None,
     };
     assert!(sync(&mut state, &sync_signal, 1000).is_none());
@@ -225,6 +227,7 @@ fn counter_true_increment_rolls_baseline_and_reports_window() {
             volume: Vec::new(),
             quota: Vec::new(),
             counter: Some(first),
+            pids_counter: None,
             candidate: None,
         },
         1000,
@@ -236,6 +239,7 @@ fn counter_true_increment_rolls_baseline_and_reports_window() {
             volume: Vec::new(),
             quota: Vec::new(),
             counter: Some(second.clone()),
+            pids_counter: None,
             candidate: None,
         },
         1200,
@@ -260,6 +264,7 @@ fn counter_reset_or_boot_change_rebuilds_baseline_without_event() {
             volume: Vec::new(),
             quota: Vec::new(),
             counter: Some(base.clone()),
+            pids_counter: None,
             candidate: None,
         },
         1000,
@@ -289,6 +294,7 @@ fn counter_reset_or_boot_change_rebuilds_baseline_without_event() {
                 volume: Vec::new(),
                 quota: Vec::new(),
                 counter: Some(changed),
+                pids_counter: None,
                 candidate: None,
             },
             2000,
@@ -389,6 +395,7 @@ fn quota_signal(
             psi_recovery,
         }],
         counter: None,
+        pids_counter: None,
         candidate: None,
     }
 }
@@ -902,3 +909,59 @@ fn conntrack_unknown_scalars_do_not_recover() {
     assert!(state.volume.contains_key("host|conntrack"));
 }
 
+#[test]
+fn pids_counter_baseline_rolls_independently_without_delivery() {
+    let mut state = ledger();
+    let first = CounterSample {
+        boot_id: "boot-a".into(),
+        cgroup_id: "1:2".into(),
+        source: "pids.events".into(),
+        count: 1,
+        sampled_epoch: 1000,
+    };
+    let second = CounterSample {
+        count: 4,
+        sampled_epoch: 1200,
+        ..first.clone()
+    };
+    sync(
+        &mut state,
+        &EpisodeSignal {
+            volume: Vec::new(),
+            quota: Vec::new(),
+            counter: None,
+            pids_counter: Some(first),
+            candidate: None,
+        },
+        1000,
+    );
+    assert_eq!(peek_pids_increment(&state, &second), Some((1000, 1200, 3)));
+    assert!(peek_increment(&state, &second).is_none());
+    sync(
+        &mut state,
+        &EpisodeSignal {
+            volume: Vec::new(),
+            quota: Vec::new(),
+            counter: None,
+            pids_counter: Some(second.clone()),
+            candidate: None,
+        },
+        1200,
+    );
+    assert!(peek_pids_increment(&state, &second).is_none());
+    let reset = CounterSample {
+        count: 0,
+        sampled_epoch: 1300,
+        ..second.clone()
+    };
+    assert!(peek_pids_increment(&state, &reset).is_none());
+    let other_boot = CounterSample {
+        boot_id: "boot-b".into(),
+        count: 9,
+        sampled_epoch: 1400,
+        ..second.clone()
+    };
+    assert!(peek_pids_increment(&state, &other_boot).is_none());
+    assert!(state.events.is_empty());
+    assert!(state.counter_delivered.is_none());
+}

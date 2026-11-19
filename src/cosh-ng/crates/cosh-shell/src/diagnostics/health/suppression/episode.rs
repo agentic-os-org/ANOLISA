@@ -93,6 +93,8 @@ pub(crate) struct EpisodeLedger {
     #[serde(default)]
     pub counter: Option<CounterBaseline>,
     #[serde(default)]
+    pub pids_counter: Option<CounterBaseline>,
+    #[serde(default)]
     pub counter_delivered: Option<CounterDelivery>,
     #[serde(default)]
     pub events: BTreeMap<String, EventDelivery>,
@@ -107,6 +109,7 @@ pub(crate) struct EpisodeSignal {
     pub volume: Vec<VolumeMemberSignal>,
     pub quota: Vec<QuotaComboSignal>,
     pub counter: Option<CounterSample>,
+    pub pids_counter: Option<CounterSample>,
     pub candidate: Option<CandidateEpisode>,
 }
 
@@ -208,6 +211,28 @@ pub(crate) fn peek_increment(
     sample: &CounterSample,
 ) -> Option<(u64, u64, u64)> {
     let baseline = ledger.counter.as_ref()?;
+    if baseline.boot_id != sample.boot_id
+        || baseline.cgroup_id != sample.cgroup_id
+        || baseline.source != sample.source
+    {
+        return None;
+    }
+    (sample.count > baseline.count && sample.sampled_epoch >= baseline.sampled_epoch).then(|| {
+        (
+            baseline.sampled_epoch,
+            sample.sampled_epoch,
+            sample.count - baseline.count,
+        )
+    })
+}
+
+/// E12 pids.events:max increment proof; diagnostics-only until non-probe
+/// attribution is proven, so no delivery state is attached.
+pub(crate) fn peek_pids_increment(
+    ledger: &EpisodeLedger,
+    sample: &CounterSample,
+) -> Option<(u64, u64, u64)> {
+    let baseline = ledger.pids_counter.as_ref()?;
     if baseline.boot_id != sample.boot_id
         || baseline.cgroup_id != sample.cgroup_id
         || baseline.source != sample.source
@@ -471,6 +496,15 @@ pub(crate) fn sync(
             }
         }
         ledger.counter = Some(CounterBaseline {
+            boot_id: sample.boot_id.clone(),
+            cgroup_id: sample.cgroup_id.clone(),
+            source: sample.source.clone(),
+            count: sample.count,
+            sampled_epoch: sample.sampled_epoch,
+        });
+    }
+    if let Some(sample) = &signal.pids_counter {
+        ledger.pids_counter = Some(CounterBaseline {
             boot_id: sample.boot_id.clone(),
             cgroup_id: sample.cgroup_id.clone(),
             source: sample.source.clone(),

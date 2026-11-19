@@ -135,7 +135,30 @@ pub(crate) fn signals_from_report(report: &HealthScanReport) -> EpisodeSignal {
         volume,
         quota,
         counter,
+        pids_counter: pids_counter_sample(report),
         candidate: None,
+    }
+}
+
+fn pids_counter_sample(report: &HealthScanReport) -> Option<CounterSample> {
+    match (
+        string_fact(report, "kernel.boot_id"),
+        string_fact(report, "kernel.cgroup_pids_object_id"),
+        unsigned_fact(report, "kernel.cgroup_pids_events_max"),
+        unsigned_fact(report, "kernel.cgroup_pids_sampled_epoch"),
+    ) {
+        (Some(boot_id), Some(cgroup_id), Some(count), Some(sampled_epoch))
+            if !boot_id.is_empty() && !cgroup_id.is_empty() =>
+        {
+            Some(CounterSample {
+                boot_id,
+                cgroup_id,
+                source: "pids.events".to_string(),
+                count,
+                sampled_epoch,
+            })
+        }
+        _ => None,
     }
 }
 

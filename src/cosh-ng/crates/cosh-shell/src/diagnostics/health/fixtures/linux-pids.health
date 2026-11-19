@@ -1,0 +1,37 @@
+# cosh-shell startup health fixture: R06 proven ceiling snapshot (D-only)
+host=fixture-linux-pids
+score=80
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.total_kib u64 33554432 KiB
+fact memory memory.available_mib u64 16000 MiB
+fact memory memory.available_kib u64 16384000 KiB
+fact memory memory.available_ratio f64 0.488 -
+fact memory memory.used_ratio f64 0.512 -
+fact memory memory.swap_total_mib u64 8192 MiB
+fact memory memory.swap_used_mib u64 0 MiB
+fact memory memory.swap_used_ratio f64 0.0 -
+fact cpu cpu.load_1m f64 0.8 -
+fact cpu cpu.load_5m f64 0.6 -
+fact cpu cpu.cores u64 4 -
+fact cpu cpu.load_per_core_1m f64 0.20 -
+fact cpu cpu.load_per_core_5m f64 0.15 -
+fact disk filesystem.max_used_ratio f64 0.42 -
+fact disk filesystem.available_gib f64 100.0 GiB
+fact disk filesystem.riskiest_mount str / -
+fact disk filesystem.root_used_ratio f64 0.42 -
+fact disk filesystem.root_available_gib f64 100.0 GiB
+fact host host.uptime_seconds u64 100000 seconds
+fact kernel kernel.current_cgroup_version u64 2 -
+fact kernel kernel.current_cgroup_path str /pids.slice -
+fact kernel kernel.current_cgroup_id str 8:88 -
+fact kernel kernel.cgroup_pids_current u64 104 -
+fact kernel kernel.cgroup_pids_max u64 100 -
+fact kernel kernel.cgroup_pids_object_id str 8:88 -
+fact kernel kernel.cgroup_pids_level str critical -
+fact kernel kernel.cgroup_pids_events_max u64 5 -
+fact kernel kernel.cgroup_pids_sampled_epoch u64 1700000000 seconds
+fact kernel kernel.cgroup_ancestor_1_path str / -
+fact kernel kernel.cgroup_ancestor_1_pids_current u64 50 -
+fact kernel kernel.cgroup_ancestor_1_pids_max u64 200 -
+fact kernel kernel.cgroup_ancestor_visible_depth u64 1 -
