@@ -46,10 +46,10 @@ SCRIPT = (
 TS = "2026-01-01T00:00:00Z"
 
 
-def tool_call(command):
+def tool_call(command, timestamp=TS):
     return json.dumps(
         {
-            "timestamp": TS,
+            "timestamp": timestamp,
             "message": {"content": [{"type": "toolCall", "arguments": {"command": command}}]},
         },
         ensure_ascii=False,
@@ -75,6 +75,68 @@ class SessionLogsTestCase(unittest.TestCase):
             text=True,
             timeout=60,
         )
+
+
+class TestDateBuckets(SessionLogsTestCase):
+    def test_report_dates_for_numeric_and_text_timestamps(self):
+        midnight = 1767225600000  # 2026-01-01T00:00:00Z in milliseconds
+        output = self.logs_dir / "usage.json"
+        command = "cat /skills/web/SKILL.md"
+        cases = (
+            ("UTC midnight on a western host", "PST8", (TS, midnight), "2026-01-01"),
+            ("UTC day end on an eastern host", "JST-9", (midnight - 1,), "2025-12-31"),
+            ("UTC host", "UTC0", (TS, midnight), "2026-01-01"),
+            ("fractional milliseconds", "PST8", (midnight + 0.5,), "2026-01-01"),
+            ("UTC midday", "PST8", (midnight + 43200000,), "2026-01-01"),
+            ("ISO offset date", "UTC0", ("2026-01-01T00:30:00+09:00",), "2026-01-01"),
+            ("naive ISO date", "PST8", ("2026-01-01T00:30:00",), "2026-01-01"),
+            ("invalid date", "UTC0", ("invalid",), "unknown"),
+            ("missing event date", "PST8", (midnight, None), "2026-01-01"),
+            ("negative epoch", "JST-9", (-1,), "1969-12-31"),
+        )
+        for label, zone, timestamps, date in cases:
+            with self.subTest(case=label), mock.patch.dict("os.environ", {"TZ": zone}):
+                self.write_log([tool_call(command, ts) for ts in timestamps])
+                proc = self.run_cli("--mode", "date", "--output", str(output))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stderr, "")
+                report = json.loads(output.read_text(encoding="utf-8"))
+                expected = {date: {"web": len(timestamps)}}
+                self.assertEqual(report["by_date"], expected)
+                self.assertEqual(report["by_session"][0]["dates"], expected)
+                self.assertIn(f"Total skill calls: {len(timestamps)}", proc.stdout)
+
+    def test_mixed_dates_and_zero_are_stable_across_time_zones(self):
+        command = "cat /skills/web/SKILL.md"
+        self.write_log([
+            tool_call(command, 1767225600000),
+            tool_call(command, "2026-01-01T00:30:00+09:00"),
+            tool_call(command, 0),
+        ])
+        second = self.log.with_name("s2.jsonl")
+        second.write_text(
+            tool_call(command, "2025-12-31T23:30:00-08:00") + "\n",
+            encoding="utf-8",
+        )
+        output = self.logs_dir / "usage.json"
+        expected_by_session = [
+            {"1970-01-01": {"web": 1}, "2026-01-01": {"web": 2}},
+            {"2025-12-31": {"web": 1}},
+        ]
+        expected_by_date = {
+            day: counts for dates in expected_by_session for day, counts in dates.items()
+        }
+        for zone in ("UTC0", "PST8", "JST-9"):
+            with self.subTest(zone=zone), mock.patch.dict("os.environ", {"TZ": zone}):
+                proc = self.run_cli("--mode", "date", "--output", str(output))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("Total skill calls: 4", proc.stdout)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["by_date"], expected_by_date)
+                self.assertCountEqual(
+                    [(session["calls"], session["dates"]) for session in report["by_session"]],
+                    list(zip((3, 1), expected_by_session)),
+                )
 
 
 class TestLogDecoding(SessionLogsTestCase):
