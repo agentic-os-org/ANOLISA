@@ -222,6 +222,40 @@ fn warning_and_unknown_mounts_produce_no_findings() {
 }
 
 #[test]
+fn project_quota_view_does_not_enter_or_recover_capacity_members() {
+    use crate::diagnostics::health::suppression::episode::{
+        signals_from_report, sync, volume_member_key, EpisodeLedger, VolumeEpisode,
+    };
+    use crate::diagnostics::health::HealthScanReport;
+
+    let mut ledger = EpisodeLedger::default();
+    for member in ["bytes", "inode"] {
+        ledger.volume.insert(
+            volume_member_key("/data", member, "253:0", ""),
+            VolumeEpisode {
+                severity: 4,
+                last_delivered_ms: 1000,
+            },
+        );
+    }
+    let delivered = ledger.clone();
+    for (bavail, favail) in [(0, 0), (50 * GIB_U64, 5000)] {
+        let mut report = HealthScanReport::new("quota-view", 2000);
+        report.facts = volume_facts("/data", true, GIB_U64, bavail, 10000, favail);
+        report.facts.push(fact(
+            "filesystem.mount./data.volume_project_quota",
+            HealthFactValue::Bool(true),
+        ));
+        let judgement = &evaluate_volumes(&report.facts)[0];
+        assert_eq!(judgement.bytes, MemberJudgement::UNKNOWN);
+        assert_eq!(judgement.inodes, MemberJudgement::UNKNOWN);
+        assert!(volume_findings(&report.facts).is_empty());
+        sync(&mut ledger, &signals_from_report(&report), 2000);
+        assert_eq!(ledger, delivered);
+    }
+}
+
+#[test]
 fn non_ext4_inode_member_is_not_applicable() {
     let mut facts = volume_facts("/", true, 99 * GIB_U64, 0, 0, 0);
     for item in &mut facts {
