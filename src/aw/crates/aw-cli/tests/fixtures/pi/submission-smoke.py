@@ -6,11 +6,34 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 import time
 
 from sdk_attach import call, run_application
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "scripts"))
+from native_cleanup import own_children, reap_children
+
+
+def assert_scanner_exited(scanner):
+    pid = scanner["pid"]
+    stat = Path(f"/proc/{pid}/stat")
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            return
+        if fields[19] != scanner["start"]:
+            return
+        # A timed-out Provider can exit before its scanner. Reap only our adopted child.
+        if fields[0] == "Z" and int(fields[1]) == os.getpid():
+            os.waitpid(pid, 0)
+            return
+        assert time.monotonic() < deadline, (scanner, fields[:2])
+        time.sleep(0.01)
 
 
 def main():
@@ -147,8 +170,7 @@ def main():
                     assert sum('scan-code' in item['argv'] for item in scanner_rows) == 2, scanner_rows
                 for line in (root / 'scanner.jsonl').read_text().splitlines():
                     scanner = json.loads(line)
-                    proc = Path(f"/proc/{scanner['pid']}/stat")
-                    assert not proc.exists() or proc.read_text().rsplit(')', 1)[1].split()[19] != scanner['start'], scanner
+                    assert_scanner_exited(scanner)
                 results.append({'case': name, **row, 'http_requests': len(requests), 'bindings': status['bindings'], 'events': status['events'],
                                 'invocations': status['resources']['usage']['invocations'], 'status': status})
             finally:
@@ -170,4 +192,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    own_children()
+    try:
+        main()
+    finally:
+        reap_children()

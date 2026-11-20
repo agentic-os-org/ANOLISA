@@ -101,8 +101,7 @@ def main():
                 assert status['resources']['usage']['invocations'] == 0, status
                 for line in (root / 'scanner.jsonl').read_text().splitlines():
                     scanner = json.loads(line)
-                    proc = Path(f"/proc/{scanner['pid']}/stat")
-                    assert not proc.exists() or proc.read_text().rsplit(')', 1)[1].split()[19] != scanner['start'], scanner
+                    submission.assert_scanner_exited(scanner)
                 rows.append({'case': scenario, **row, 'bindings': 0, 'events': 0, 'invocations': 0})
             finally:
                 try:
@@ -122,4 +121,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    submission.own_children()
+    try:
+        main()
+    finally:
+        submission.reap_children()
