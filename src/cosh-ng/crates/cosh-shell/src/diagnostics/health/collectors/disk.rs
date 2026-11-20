@@ -263,39 +263,12 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     root: bool,
     mounts: bool,
 ) -> Result<DiskFacts, HealthUnavailableReason> {
-    let local = if passive && mounts {
+    let local = if mounts && (passive || config.scan_mounts.is_none()) {
         local_mounts()
     } else {
         BTreeSet::new()
     };
-    let mut scope_incomplete = false;
-    let paths = if passive || config.scan_mounts.is_some() || !mounts {
-        // Same enabled-target policy as the statfs sample: only enabled checks'
-        // targets, capped identically, so both sources report one target set.
-        let (targets, _) = volume::declared_targets(config, root, mounts);
-        let mut paths = Vec::new();
-        for path in targets {
-            if path == "/" {
-                paths.push(path);
-                continue;
-            }
-            let absolute = std::path::Path::new(&path).is_absolute()
-                && !std::path::Path::new(&path)
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir));
-            if absolute && (!passive || local.contains(&path)) {
-                paths.push(path);
-            } else {
-                scope_incomplete = true;
-            }
-        }
-        if paths.is_empty() {
-            return Err(HealthUnavailableReason::Unsupported);
-        }
-        Some(paths)
-    } else {
-        None
-    };
+    let (paths, scope_incomplete) = df_operand_paths(config, passive, root, mounts, &local)?;
     let mut args = vec!["-k", "-P"];
     #[cfg(target_os = "linux")]
     args.push("-T");
@@ -327,6 +300,72 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
                 .is_none_or(|paths| paths.contains(&row.mount))
     });
     Ok(facts)
+}
+
+/// Selects the `df` operands under the enabled-target policy shared with the
+/// statfs sample. Returns `None` operands only where no local inventory exists
+/// to bound the probe, so a disabled check's target is never sampled.
+fn df_operand_paths(
+    config: &HealthConfig,
+    passive: bool,
+    root: bool,
+    mounts: bool,
+    local: &BTreeSet<String>,
+) -> Result<(Option<Vec<String>>, bool), HealthUnavailableReason> {
+    if passive || config.scan_mounts.is_some() || !mounts {
+        let (targets, _) = volume::declared_targets(config, root, mounts);
+        let mut scope_incomplete = false;
+        let mut paths = Vec::new();
+        for path in targets {
+            if path == "/" {
+                paths.push(path);
+                continue;
+            }
+            let absolute = std::path::Path::new(&path).is_absolute()
+                && !std::path::Path::new(&path)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir));
+            if absolute && (!passive || local.contains(&path)) {
+                paths.push(path);
+            } else {
+                scope_incomplete = true;
+            }
+        }
+        if paths.is_empty() {
+            return Err(HealthUnavailableReason::Unsupported);
+        }
+        return Ok((Some(paths), scope_incomplete));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut paths = Vec::new();
+        if root {
+            paths.push("/".to_string());
+        }
+        let mut scope_incomplete = false;
+        for mount in local {
+            if mount == "/" || paths.iter().any(|path| path == mount) {
+                continue;
+            }
+            if paths.len() >= volume::MAX_DECLARED_TARGETS {
+                scope_incomplete = true;
+                break;
+            }
+            paths.push(mount.clone());
+        }
+        if paths.is_empty() {
+            return Err(HealthUnavailableReason::Unsupported);
+        }
+        Ok((Some(paths), scope_incomplete))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No mount inventory to bound the probe to, so df runs without
+        // operands and the enabled-target retain below still drops rows for
+        // disabled checks.
+        let _ = (root, local);
+        Ok((None, false))
+    }
 }
 
 fn local_mounts() -> BTreeSet<String> {

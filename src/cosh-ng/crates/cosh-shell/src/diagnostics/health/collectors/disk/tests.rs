@@ -66,6 +66,7 @@ fn disk_nonzero_exit_without_valid_rows_remains_unavailable() {
     assert!(read_disk_sample(&config, false, false, true).is_err());
 }
 
+library_tests! {
 #[test]
 fn disk_root_only_never_samples_declared_mounts() {
     let _guard = crate::diagnostics::test_env::env_guard();
@@ -92,6 +93,37 @@ fn disk_mounts_only_drops_the_root_row() {
     assert!(sample.mounts.iter().all(|row| row.mount != "/"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn df_operands_on_an_on_demand_mounts_scan_exclude_disabled_checks() {
+    let local = ["/", "/data", "/logs"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let config = HealthConfig::default();
+    let (paths, incomplete) = df_operand_paths(&config, false, false, true, &local).unwrap();
+    assert_eq!(paths.unwrap(), ["/data", "/logs"]);
+    assert!(!incomplete);
+    let (paths, _) = df_operand_paths(&config, false, true, true, &local).unwrap();
+    assert_eq!(paths.unwrap(), ["/", "/data", "/logs"]);
+    assert_eq!(
+        df_operand_paths(&config, false, false, true, &BTreeSet::new()).err(),
+        Some(HealthUnavailableReason::Unsupported)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn df_operands_on_an_on_demand_scan_stay_within_the_target_cap() {
+    let local = (0..6)
+        .map(|index| format!("/m{index}"))
+        .collect::<BTreeSet<_>>();
+    let (paths, incomplete) =
+        df_operand_paths(&HealthConfig::default(), false, true, true, &local).unwrap();
+    assert_eq!(paths.unwrap(), ["/", "/m0", "/m1", "/m2"]);
+    assert!(incomplete);
+}
+
 #[test]
 fn disk_without_enabled_checks_is_unsupported() {
     let _guard = crate::diagnostics::test_env::env_guard();
@@ -99,4 +131,5 @@ fn disk_without_enabled_checks_is_unsupported() {
         read_disk_sample(&HealthConfig::default(), false, false, false).err(),
         Some(HealthUnavailableReason::Unsupported)
     );
+}
 }

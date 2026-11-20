@@ -126,6 +126,7 @@ fn declared_targets_cap_at_four_and_count_over_limit() {
     assert_eq!(over_limit, 0);
 }
 
+library_tests! {
 #[test]
 fn declared_targets_follow_enabled_checks() {
     let config = HealthConfig {
@@ -210,6 +211,7 @@ fn volume_proven_for_check_uses_only_its_own_targets() {
     });
     assert!(volume_proven_for_check(&sample, "filesystem.mounts"));
     assert!(volume_proven_for_check(&sample, "filesystem.root"));
+}
 }
 
 fn sample_with(volume: VolumeFacts) -> VolumeSample {
@@ -370,6 +372,7 @@ fn root_check_does_not_record_other_mounts() {
         .all(|fact| !fact.key.starts_with("filesystem.mount./data.")));
 }
 
+library_tests! {
 #[test]
 fn mounts_check_records_only_non_root_volumes() {
     let mut sample = sample_with(proven_root());
@@ -386,6 +389,7 @@ fn mounts_check_records_only_non_root_volumes() {
         .facts
         .iter()
         .any(|fact| fact.key == "filesystem.mount./data.volume_proven"));
+}
 }
 
 #[test]
