@@ -29,8 +29,8 @@ pub use load::load_config;
 pub(crate) use load::{load_guidance_config, parse_recommendations_environment_override};
 pub(crate) use model::ConsentedProjectHook;
 pub use model::{
-    CoshConfig, HealthConfig, HealthServiceConfig, HealthServiceExpectedState,
-    RecommendationsConfig,
+    CoshConfig, HealthConfig, HealthMaintenanceConfig, HealthServiceConfig,
+    HealthServiceExpectedState, RecommendationsConfig,
 };
 pub(crate) use shell_prefs::{
     analysis_mode_status, bash_history_status, parse_analysis_mode, write_analysis_mode,

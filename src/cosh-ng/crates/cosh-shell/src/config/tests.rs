@@ -398,6 +398,35 @@ fn network_capacity_notices_defaults_off_and_parses_in_both_formats() {
 }
 
 #[test]
+fn maintenance_window_parses_and_gates_by_epoch() {
+    assert!(!CoshConfig::default().health.maintenance_active(1000));
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        "[health.maintenance]\nenabled = true\nreason = \"drill\"\nuntil_epoch_seconds = 2000\n",
+        &mut cfg,
+    );
+    assert!(cfg.health.maintenance.enabled);
+    assert_eq!(cfg.health.maintenance.reason, "drill");
+    assert_eq!(cfg.health.maintenance.until_epoch_seconds, Some(2000));
+    assert!(cfg.health.maintenance_active(1999));
+    assert!(!cfg.health.maintenance_active(2000));
+    assert!(!cfg.health.maintenance_active(2001));
+    let mut open = CoshConfig::default();
+    parse_simple_config(
+        "health.maintenance.enabled = true\nhealth.maintenance.reason = planned\n",
+        &mut open,
+    );
+    assert!(open.health.maintenance_active(u64::MAX));
+    let mut legacy = CoshConfig::default();
+    parse_simple_config(
+        "health.maintenance.enabled = true\nhealth.maintenance.until_epoch_seconds = 50\n",
+        &mut legacy,
+    );
+    assert!(legacy.health.maintenance_active(49));
+    assert!(!legacy.health.maintenance_active(50));
+}
+
+#[test]
 fn parse_toml_health_config() {
     let content = r#"
 [health]
