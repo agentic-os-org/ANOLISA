@@ -253,13 +253,20 @@ fn stdout_epipe_exits_transport_failure() {
         .local_addr()
         .unwrap();
     configure(home.path(), address);
+    // Close the read end before the core exists so the first emit must hit
+    // EPIPE. With `Stdio::piped()` the harness briefly owns a reader, and a
+    // sibling test thread forking in the shared harness can inherit it across
+    // its fork->exec window: the emits then succeed, the EOF from
+    // `wait_timeout` closing stdin ends the session, and the case exits 0
+    // (#10360). A pipe with no reader has no such window.
+    let (read_end, write_end) = nix::unistd::pipe().unwrap();
+    drop(read_end);
     let mut child = core_command(home.path(), workspace.path())
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(fs::File::from(write_end)))
         .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()))
         .spawn()
         .unwrap();
-    drop(child.stdout.take().unwrap());
     send_lines(&mut child, &[INIT, USER]);
     let status = child
         .wait_timeout(Duration::from_secs(10))
