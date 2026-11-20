@@ -26,7 +26,7 @@ and existing build and test entry points.
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
 | **aw** | `src/aw/` | Rust | Linux only |
 
-> `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `aw` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
+> `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `aw` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows.
 
 ## 2. Development Commands
 
