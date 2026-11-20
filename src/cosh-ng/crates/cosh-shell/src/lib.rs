@@ -58,6 +58,9 @@ mod question_presentation_tests;
 #[path = "raw_input/public.rs"]
 pub mod raw_input;
 #[cfg(test)]
+#[path = "tools/readonly_rules/git_hooks_9514_tests.rs"]
+mod readonly_git_hooks_9514_tests;
+#[cfg(test)]
 #[path = "tools/readonly_interceptor_tests.rs"]
 mod readonly_interceptor_tests;
 #[cfg(test)]

@@ -923,6 +923,93 @@ fn approval_details_panel_renders_structured_request_context() {
 }
 
 #[test]
+fn approval_details_panel_surfaces_secondary_git_repo_config_warning() {
+    for (language, phrase) in [
+        (crate::Language::EnUs, "may run repo-embedded scripts"),
+        (crate::Language::ZhCn, "可能执行仓库内嵌脚本"),
+    ] {
+        let renderer = RatatuiInlineRenderer::with_width(70).with_language(language);
+        let text = renderer
+            .approval_details_panel_lines(ApprovalDetailsPanelModel {
+                id: "req-9",
+                run_id: "run-19",
+                source: "agent",
+                kind: "tool request",
+                status: "pending",
+                risk: "high",
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "sudo git diff",
+                request_id: None,
+                tool_use_id: None,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: Some(CommandAssessmentSummaryModel {
+                    impact: "high",
+                    execution: "ask-user",
+                    confidence: "high",
+                    primary_reason: "privilege-escalation",
+                    reason_trace: "privilege-escalation,git-repo-config-execution",
+                    auto_allow: None,
+                    output_stability: "stable-snapshot",
+                    output_exposure: "normal",
+                }),
+                audit_ref: None,
+            })
+            .join("\n");
+        assert!(text.contains("privilege-escalation"), "{text}");
+        assert!(text.contains(phrase), "{text}");
+    }
+}
+
+#[test]
+fn plain_approval_details_surface_secondary_git_repo_config_warning() {
+    for (language, phrase) in [
+        (crate::Language::EnUs, "may run repo-embedded scripts"),
+        (crate::Language::ZhCn, "可能执行仓库内嵌脚本"),
+    ] {
+        let renderer = RatatuiInlineRenderer::plain_with_width(80).with_language(language);
+        let text = renderer
+            .approval_details_panel_lines(ApprovalDetailsPanelModel {
+                id: "req-10",
+                run_id: "run-20",
+                source: "agent",
+                kind: "tool request",
+                status: "pending",
+                risk: "high",
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "sudo git diff",
+                request_id: None,
+                tool_use_id: None,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: Some(CommandAssessmentSummaryModel {
+                    impact: "high",
+                    execution: "ask-user",
+                    confidence: "high",
+                    primary_reason: "privilege-escalation",
+                    reason_trace: "privilege-escalation,git-repo-config-execution",
+                    auto_allow: None,
+                    output_stability: "stable-snapshot",
+                    output_exposure: "normal",
+                }),
+                audit_ref: None,
+            })
+            .join("\n");
+        if matches!(language, crate::Language::EnUs) {
+            assert!(
+                text.contains("Assessment: impact high; decision ask-user; confidence high"),
+                "{text}"
+            );
+        }
+        assert!(text.contains(phrase), "{text}");
+    }
+}
+
+#[test]
 fn approval_details_panel_uses_zh_catalog_labels() {
     let renderer = RatatuiInlineRenderer::with_width(70).with_language(crate::Language::ZhCn);
     let text = renderer

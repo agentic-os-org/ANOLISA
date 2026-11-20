@@ -153,6 +153,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseCommandSubstitution => "命令替换语法",
         MessageId::ApprovalRiskPhraseRedirectionWrite => "重定向写文件",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk 执行外部命令",
+        MessageId::ApprovalRiskPhraseGitRepoConfigExecution => "可能执行仓库内嵌脚本",
         MessageId::ApprovalRiskLevelUnknown => "未知风险",
         MessageId::ApprovalTurnExtensionSubject => "Agent 轮次预算",
         MessageId::ApprovalTurnExtensionPreview => {
