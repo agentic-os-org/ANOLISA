@@ -412,6 +412,7 @@ const ROOT_FILESYSTEM_KEYS: &[&str] = &[
     "filesystem.mount./.volume_inode_applicable",
     "filesystem.mount./.volume_readonly",
     "filesystem.mount./.volume_expected_writable",
+    "filesystem.mount./.volume_project_quota",
     "filesystem.volume_*",
 ];
 

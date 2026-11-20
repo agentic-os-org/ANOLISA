@@ -36,6 +36,22 @@ fn mountinfo_malformed_lines_are_dropped_not_zero_filled() {
 }
 
 #[test]
+fn mountinfo_detects_exact_enforced_project_quota_options() {
+    let content = "36 35 98:0 / / rw,prjquota - ext4 /dev/sda1 rw\n\
+                   41 36 0:42 / /a rw - xfs /dev/sdb1 rw,pquota\n\
+                   52 36 0:43 / /b rw - xfs /dev/sdc1 rw,pqnoenforce\n\
+                   53 36 0:44 / /c rw - xfs /dev/sdd1 rw,usrquota,nopquota\n";
+    let entries = parse_mountinfo(content);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.project_quota)
+            .collect::<Vec<_>>(),
+        [true, true, false, false],
+    );
+}
+
+#[test]
 fn fdinfo_mnt_id_extraction() {
     let content = "pos:\t0\nflags:\t02000002\nmnt_id:\t29\nino:\t123\n";
     assert_eq!(parse_fdinfo_mnt_id(content), Some(29));
@@ -137,6 +153,7 @@ fn proven_root() -> VolumeFacts {
         inode_applicable: true,
         readonly: Some(false),
         expected_writable: false,
+        project_quota: false,
         unknown: None,
     }
 }
@@ -213,6 +230,21 @@ fn proven_readonly_volume_records_readonly_true() {
         Some(HealthFactValue::Bool(true))
     );
 }
+}
+
+#[test]
+fn project_quota_fact_preserves_a_bound_readonly_mount() {
+    let mut volume = proven_root();
+    volume.project_quota = true;
+    volume.readonly = Some(true);
+    volume.expected_writable = true;
+    let report = record(&sample_with(volume), "filesystem.root");
+    assert!(report.facts.iter().any(|fact| {
+        fact.key == "filesystem.mount./.volume_project_quota"
+            && fact.value == HealthFactValue::Bool(true)
+    }));
+    let findings = crate::diagnostics::health::rules::ro::ro_findings(&report.facts);
+    assert!(findings.iter().any(|finding| finding.id == "J18"));
 }
 
 #[test]

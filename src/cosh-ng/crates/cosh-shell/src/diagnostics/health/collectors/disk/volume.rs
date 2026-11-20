@@ -66,6 +66,7 @@ pub(crate) struct VolumeFacts {
     pub inode_applicable: bool,
     pub readonly: Option<bool>,
     pub expected_writable: bool,
+    pub project_quota: bool,
     pub unknown: Option<VolumeUnknown>,
 }
 
@@ -85,6 +86,7 @@ impl VolumeFacts {
             inode_applicable: false,
             readonly: None,
             expected_writable: false,
+            project_quota: false,
             unknown: Some(reason),
         }
     }
@@ -105,6 +107,7 @@ pub(super) struct MountEntry {
     pub root: String,
     pub mount_point: String,
     pub fs_type: String,
+    pub project_quota: bool,
 }
 
 pub(super) fn decode_mountinfo_field(value: &str) -> String {
@@ -126,13 +129,22 @@ pub(super) fn parse_mountinfo(content: &str) -> Vec<MountEntry> {
             let dev = left_fields.next()?.to_string();
             let root = decode_mountinfo_field(left_fields.next()?);
             let mount_point = decode_mountinfo_field(left_fields.next()?);
-            let fs_type = right.split_whitespace().next()?.to_string();
+            let mount_options = left_fields.next().unwrap_or_default();
+            let mut right_fields = right.split_whitespace();
+            let fs_type = right_fields.next()?.to_string();
+            let super_options = right_fields.nth(1).unwrap_or_default();
+            // XFS accounting-only pqnoenforce does not narrow statfs.
+            let project_quota = mount_options
+                .split(',')
+                .chain(super_options.split(','))
+                .any(|option| matches!(option, "prjquota" | "pquota"));
             Some(MountEntry {
                 mnt_id,
                 dev,
                 root,
                 mount_point,
                 fs_type,
+                project_quota,
             })
         })
         .collect()
@@ -296,6 +308,16 @@ pub(crate) fn record_volumes(
             "volume_expected_writable",
             HealthFactValue::Bool(volume.expected_writable),
         );
+        if volume.project_quota {
+            builder.add_fact(
+                HealthFactCategory::Disk,
+                format!("{prefix}volume_project_quota"),
+                HealthFactValue::Bool(true),
+                None,
+                HealthFactSource::Derived,
+                elapsed_ms,
+            );
+        }
     }
     let summary_check = match check_id {
         Some("filesystem.mounts") => true,
@@ -483,6 +505,7 @@ mod linux {
                 inode_applicable: false,
                 readonly,
                 expected_writable,
+                project_quota: entry.project_quota,
                 unknown: Some(VolumeUnknown::InvalidStats),
             };
         }
@@ -497,6 +520,7 @@ mod linux {
             inode_applicable: inode_ok,
             readonly,
             expected_writable,
+            project_quota: entry.project_quota,
             unknown: None,
         }
     }

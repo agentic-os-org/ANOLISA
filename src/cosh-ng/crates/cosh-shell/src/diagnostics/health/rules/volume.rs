@@ -150,7 +150,8 @@ pub(crate) fn evaluate_volumes(facts: &[HealthFact]) -> Vec<VolumeJudgement> {
         .into_iter()
         .map(|mount| {
             let prefix = format!("filesystem.mount.{mount}.");
-            let proven = bool_value(facts, &format!("{prefix}volume_proven")) == Some(true);
+            let proven = bool_value(facts, &format!("{prefix}volume_proven")) == Some(true)
+                && bool_value(facts, &format!("{prefix}volume_project_quota")) != Some(true);
             // Only a volume-level read-write view may enter or exit the capacity
             // members. A read-only (or otherwise non-rw) view keeps any existing
             // member: it must not newly alert, and must not recover an episode
