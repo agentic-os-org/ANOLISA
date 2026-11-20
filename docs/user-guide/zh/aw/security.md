@@ -40,6 +40,8 @@ export AW_TEMPLATE_DIR="$PWD/$AW_SEC_BUNDLE/templates"
 沿用安装页的 `AW_HOME` 和 `AW_QODER`，将 CLI 和 socket 设为后端实际路径，
 并保留解包后的模板：
 
+此模板同时选择 Qoder 和 OpenClaw 的工具。按[配置说明](configuration.md#openclaw)将 `AW_NODE` 和 `AW_OPENCLAW` 设为已安装的 Node 可执行文件与 OpenClaw 入口脚本。
+
 ```bash
 export AW_SEC_CLI="$(command -v agent-sec-cli)"
 export AW_SEC_SOCKET=/run/agent-sec-core/daemon.sock
@@ -49,7 +51,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template "$AW_TEMPLATE_DIR/sec-core.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "SEC_CORE_CLI=$AW_SEC_CLI" --template-var "SOCKET=$AW_SEC_SOCKET" \
-  --qoder "$AW_QODER"
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw config validate --config "$AW_HOME/security.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder

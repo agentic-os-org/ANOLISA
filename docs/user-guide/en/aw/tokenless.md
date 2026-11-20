@@ -32,6 +32,8 @@ Avoid enabling an overlapping native Tokenless plugin in the same session.
 
 Select the installed Tokenless CLI and check its RTK version:
 
+The shipped policy selects tools from both Qoder and OpenClaw. Set `AW_NODE` and `AW_OPENCLAW` to the installed Node executable and OpenClaw entry script as shown in [Configuration](configuration.md#openclaw).
+
 ```bash
 export AW_TOKENLESS_CLI="$(command -v tokenless)"
 export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
@@ -41,7 +43,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template "$AW_TEMPLATE_DIR/tokenless.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
-  --qoder "$AW_QODER"
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw config validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder

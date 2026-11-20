@@ -77,7 +77,12 @@ jobs:
             [[ "$WORKFLOW_REF" = refs/heads/* ]]
             test "$WORKFLOW_SHA" = "$CANDIDATE_SHA"
           else
-            test "$WORKFLOW_REF" = refs/heads/main
+            if [[ "$WORKFLOW_REF" = refs/tags/aw/v* ]]; then
+              test "$EVENT_NAME" = push
+              test "$WORKFLOW_SHA" = "$CANDIDATE_SHA"
+            else
+              test "$WORKFLOW_REF" = refs/heads/main
+            fi
             git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
           fi
       - name: Validate native coverage and select pinned runtimes
@@ -92,6 +97,8 @@ jobs:
 
   packages:
     needs: plan
+    outputs:
+      native_artifact: ${{ steps.upload-native.outputs.artifact-id }}
     name: AW / Package install tests
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
@@ -166,6 +173,7 @@ jobs:
           printf '%s\n' "$CANDIDATE_SHA" > source-sha.txt
           tar -czf "$AW_PACKAGE_DIR/native.tar.gz" .
       - uses: actions/upload-artifact@v4
+        id: upload-native
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}
           path: ${{ env.AW_PACKAGE_DIR }}/native.tar.gz
@@ -273,6 +281,7 @@ jobs:
 
   native:
     needs: [plan, packages]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
     name: AW / Native (${{ matrix.agent }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
@@ -337,6 +346,7 @@ jobs:
 
   resident-image:
     needs: [plan, packages]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
     name: AW / Resident image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -379,6 +389,7 @@ jobs:
 
   resident-container:
     needs: [plan, resident-image]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.resident-image.result == 'success' }}
     name: AW / Resident (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
