@@ -2412,3 +2412,65 @@ fn routing_c3_explicit_draft_remains_the_only_multiline_agent_entry() {
             && event.message.as_deref() == Some("open")
     }));
 }
+
+/// #10318: a bracketed paste must echo with linear, bounded output. The
+/// relay redraws the whole candidate line for every input read, so a paste
+/// arriving in small reads costs O(bytes^2 / read) terminal output and stalls
+/// the session. Each size below is one PTY session that reaches the prompt
+/// first and then delivers the paste in 4 KiB reads, matching what an SSH
+/// terminal does for a large paste.
+///
+/// The tiers stay where the unfixed relay is unmistakably over budget: these
+/// sessions echoed about 35x of a 64 KiB paste and 53x of a 100 KiB paste
+/// before the fix, while the fixed relay stays near 5x. The bound is relative
+/// so it tracks the pasted size instead of a fixed byte budget.
+#[test]
+fn raw_relay_bash_bracketed_paste_echo_is_bounded() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash is unavailable");
+        return;
+    }
+
+    for kib in [64_usize, 100] {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-paste-bounded-{kib}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work dir");
+        let config = with_bracketed_paste_readline(
+            ShellHostConfig::new(format!("paste-bounded-{kib}"), &work_dir),
+            true,
+        );
+        let payload = "x".repeat(kib * 1024);
+        let mut actions = vec![RawRelayAction::wait(Duration::from_millis(400))];
+        actions.push(RawRelayAction::write("\x1b[200~".as_bytes().to_vec()));
+        for chunk in payload.as_bytes().chunks(4096) {
+            actions.push(RawRelayAction::write(chunk.to_vec()));
+        }
+        actions.push(RawRelayAction::write("\x1b[201~".as_bytes().to_vec()));
+        actions.push(RawRelayAction::wait(Duration::from_millis(100)));
+        // Discard the draft without flushing it to bash: a submit would make
+        // readline echo the whole paste a second time.
+        actions.push(RawRelayAction::write(vec![0x15]));
+        actions.push(RawRelayAction::wait(Duration::from_millis(100)));
+        actions.push(RawRelayAction::line("exit"));
+
+        let mut rendered = Vec::new();
+        run_raw_relay_bash_with_actions(&config, actions, &mut rendered)
+            .expect("bracketed paste relay");
+
+        let echoed = rendered.len();
+        let input_len = payload.len() + 12;
+        eprintln!(
+            "paste {kib}KiB: echoed {echoed} bytes ({:.1}x of {input_len})",
+            echoed as f64 / input_len as f64
+        );
+        assert!(
+            echoed < 8 * input_len,
+            "{kib}KiB bracketed paste echoed {echoed} bytes ({:.1}x of input); \
+             echo must grow with the paste instead of quadratically",
+            echoed as f64 / input_len as f64
+        );
+    }
+}

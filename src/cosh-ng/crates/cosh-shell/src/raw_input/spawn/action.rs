@@ -330,6 +330,13 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
                     &input_mode,
                     &mut state,
                 )?,
+                RawRelayAction::WaitForAssistanceToggle => {
+                    super::assistance::wait_for_assistance_toggle(
+                        &input_classifier,
+                        &input_mode,
+                        &state,
+                    )?
+                }
             }
             wait_for_pending_capture_replay(
                 &mut master,

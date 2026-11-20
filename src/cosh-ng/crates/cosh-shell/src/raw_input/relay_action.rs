@@ -7,6 +7,11 @@ pub enum RawRelayAction {
     Write(Vec<u8>),
     Resize(Winsize),
     Wait(Duration),
+    /// Blocks until the assistance toggle would be accepted: the shell has
+    /// painted a routable prompt and no draft occupies it. Scripted toggles
+    /// use this instead of a fixed sleep, because how long the shell needs
+    /// to repaint after a command depends on the runner's load.
+    WaitForAssistanceToggle,
 }
 
 impl RawRelayAction {
@@ -31,5 +36,9 @@ impl RawRelayAction {
 
     pub fn wait(duration: Duration) -> Self {
         Self::Wait(duration)
+    }
+
+    pub fn wait_for_assistance_toggle() -> Self {
+        Self::WaitForAssistanceToggle
     }
 }

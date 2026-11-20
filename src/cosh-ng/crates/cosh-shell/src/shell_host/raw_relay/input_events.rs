@@ -4,13 +4,12 @@ use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use unicode_width::UnicodeWidthChar;
-
 use super::super::prompt_replay::prompt_replay_bytes;
 use super::ShellEventView;
 use crate::raw_input::{update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction};
 use crate::types::ShellEvent;
 
+use super::display_scan::candidate_display_columns;
 use super::{OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR};
 
 /// Publishes a prompt snapshot only after the current PTY batch is drained.
@@ -37,50 +36,56 @@ pub(super) fn apply_prompt_boundary_evidence(
     }
 }
 
-/// Terminal display columns of candidate echo bytes: ANSI escape sequences
-/// are zero-width; other content is measured per Unicode width (CJK = 2).
-/// Keeps native erase math correct for multi-byte drafts (#1721 G9).
-pub(super) fn candidate_display_columns(bytes: &[u8]) -> usize {
-    // Sums real display widths (east-asian wide chars count 2), so the
-    // erase loop backspaces once per terminal column. Any terminal-specific
-    // wide-char overwrite quirk is covered by the `\x1b[K` clear plus the
-    // full-line rewrite that always follow the erase.
-    let text = String::from_utf8_lossy(bytes);
-    let mut columns = 0;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    for terminator in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&terminator) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    for terminator in chars.by_ref() {
-                        if terminator == '\x07' {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            continue;
-        }
-        columns += ch.width().unwrap_or(0);
-    }
-    columns
-}
-
 fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<()> {
     for _ in 0..columns {
         write!(output, "\x08 \x08")?;
     }
     Ok(())
+}
+
+/// Terminal-side memory of the candidate echo. Erasing costs three bytes per
+/// column and rewriting repeats the whole draft, so redrawing per input read
+/// is quadratic in a pasted draft (#10318). Remembering what is on screen lets
+/// a draft that only grew append its new suffix.
+#[derive(Debug, Default)]
+pub(super) struct CandidateEcho {
+    /// Bytes currently displayed after the prompt. Empty whenever a clear,
+    /// commit, or overlay left the cursor off the echo's end.
+    written: Vec<u8>,
+    /// Display columns of `written`, used by the native-mode erase loop.
+    columns: usize,
+    /// The last draw ended with an inline hint past the draft.
+    hint_written: bool,
+}
+
+impl CandidateEcho {
+    /// Whether the terminal already shows exactly `input`.
+    fn matches(&self, input: &[u8]) -> bool {
+        !self.written.is_empty() && !self.hint_written && self.written == input
+    }
+
+    /// Length of the already-drawn prefix of `input`, when the echo can be
+    /// extended in place instead of being erased and rewritten.
+    fn appendable_prefix_len(&self, input: &[u8]) -> Option<usize> {
+        (!self.written.is_empty()
+            && !self.hint_written
+            && input.len() > self.written.len()
+            && input.starts_with(&self.written))
+        .then_some(self.written.len())
+    }
+
+    /// Display columns currently echoed, for erase math and tests.
+    pub(super) fn display_columns(&self) -> usize {
+        self.columns
+    }
+
+    /// Drops the memory because something else now owns the line: a clear,
+    /// a commit, an overlay, or shell output repainting the screen.
+    pub(super) fn reset(&mut self) {
+        self.written.clear();
+        self.columns = 0;
+        self.hint_written = false;
+    }
 }
 
 pub(super) fn write_no_wrap_overlay<W, F>(output: &mut W, body: F) -> io::Result<()>
@@ -131,7 +136,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
     parser: &mut OscParser,
     output: &mut W,
     prompt: &str,
-    native_candidate_echoed_len: &mut usize,
+    candidate_echo: &mut CandidateEcho,
     prompt_replay: &mut PromptReplayTracker,
     prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<bool> {
@@ -220,39 +225,53 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_prompt_draft_event("cancel", Some(&payload));
             }
             RawInputEvent::CandidateRedraw { input, hint } => {
-                if native_mode {
-                    // Erase by display columns and rewrite the whole draft:
-                    // byte-offset math breaks on CJK and marker bytes (#1721).
-                    // Erase-to-EOL clears any stale inline hint residue.
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
-                    write!(output, "\x1b[K")?;
-                    output.write_all(&input)?;
-                    if let Some(hint) = hint {
-                        write_inline_hint(output, &hint)?;
-                    }
-                    *native_candidate_echoed_len = candidate_display_columns(&input);
-                } else {
-                    write!(output, "\r\x1b[2K")?;
-                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                    output.write_all(&input)?;
-                    if let Some(hint) = hint {
-                        write_inline_hint(output, &hint)?;
+                if hint.is_none() && candidate_echo.matches(&input) {
+                    // The draft did not change (for example the paste closer
+                    // arriving in its own read); redrawing would repeat it.
+                    continue;
+                }
+                match candidate_echo.appendable_prefix_len(&input) {
+                    Some(prefix_len) => output.write_all(&input[prefix_len..])?,
+                    None => {
+                        if native_mode {
+                            // Erase by display columns and rewrite the whole
+                            // draft: byte-offset math breaks on CJK and marker
+                            // bytes (#1721). Erase-to-EOL clears any stale
+                            // inline hint residue.
+                            erase_native_columns(output, candidate_echo.columns)?;
+                            write!(output, "\x1b[K")?;
+                            output.write_all(&input)?;
+                        } else {
+                            write!(output, "\r\x1b[2K")?;
+                            prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+                            output.write_all(&input)?;
+                        }
                     }
                 }
+                // Measure the whole draft: a CJK or emoji sequence split
+                // across two reads counts as replacement glyphs when only the
+                // appended suffix is measured, drifting the erase width that
+                // a later shrink relies on (#1721).
+                candidate_echo.columns = candidate_display_columns(&input);
+                if let Some(hint) = &hint {
+                    write_inline_hint(output, hint)?;
+                }
+                candidate_echo.hint_written = hint.is_some();
+                candidate_echo.written = input;
                 output.flush()?;
             }
             RawInputEvent::CandidateCommit(input) => {
                 if native_mode {
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    erase_native_columns(output, candidate_echo.columns)?;
                     write!(output, "\x1b[K")?;
                     output.write_all(&input)?;
-                    *native_candidate_echoed_len = 0;
                 } else {
                     write!(output, "\r\x1b[2K")?;
                     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                 }
                 output.write_all(b"\r\n")?;
+                candidate_echo.reset();
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {
@@ -260,7 +279,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     parser,
                     output,
                     prompt,
-                    native_candidate_echoed_len,
+                    candidate_echo,
                     prompt_presentation,
                 )?;
             }
@@ -284,16 +303,23 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 match plan {
                     super::selection_surface::CyclePlan::RedrawList { lines } => {
                         redraw_suggestion_list(output, &lines, prompt, &text, prompt_presentation)?;
+                        candidate_echo.reset();
                     }
                     super::selection_surface::CyclePlan::PromptLocal { label } => {
                         clear_prompt_ghost_line(
                             parser,
                             output,
                             prompt,
-                            native_candidate_echoed_len,
+                            candidate_echo,
                             prompt_presentation,
                         )?;
-                        super::write_prompt_ghost_labeled(output, &text, true, Some(&label))?;
+                        super::display_write::write_prompt_ghost_labeled(
+                            output,
+                            &text,
+                            true,
+                            Some(&label),
+                        )?;
+                        candidate_echo.reset();
                         output.flush()?;
                     }
                     super::selection_surface::CyclePlan::Ignore => {}
@@ -305,6 +331,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::AssistanceToggled => {
                 write!(output, "\r\x1b[2K")?;
                 prompt_presentation.write_restored_prompt(output, parser.last_prompt_display())?;
+                candidate_echo.reset();
                 output.flush()?;
             }
             RawInputEvent::PromptGhostIntercept {
@@ -319,13 +346,13 @@ pub(super) fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::CandidateClearLine => {
                 if native_mode {
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    erase_native_columns(output, candidate_echo.columns)?;
                     write!(output, "\x1b[K")?;
-                    *native_candidate_echoed_len = 0;
                 } else {
                     write!(output, "\r\x1b[2K")?;
                     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                 }
+                candidate_echo.reset();
                 output.flush()?;
             }
             RawInputEvent::UserIntercept(input, reason) => {
@@ -527,7 +554,7 @@ pub(super) fn redraw_suggestion_list<W: Write>(
     }
     write!(output, "\n\r\x1b[2K")?;
     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-    super::write_prompt_ghost(output, ghost_text, true)?;
+    super::display_write::write_prompt_ghost(output, ghost_text, true)?;
     write!(output, "\x1b[?7h")?;
     output.flush()
 }
@@ -536,7 +563,7 @@ fn clear_prompt_ghost_line<W: Write>(
     parser: &OscParser,
     output: &mut W,
     fallback_prompt: &str,
-    native_candidate_echoed_len: &mut usize,
+    candidate_echo: &mut CandidateEcho,
     prompt_presentation: &PromptPresentation,
 ) -> io::Result<()> {
     write!(output, "\r\x1b[2K")?;
@@ -546,6 +573,6 @@ fn clear_prompt_ghost_line<W: Write>(
     } else {
         prompt_presentation.write_replayed_prompt(output, replay)?;
     }
-    *native_candidate_echoed_len = 0;
+    candidate_echo.reset();
     output.flush()
 }

@@ -16,8 +16,9 @@ use crate::types::{ImplicitPagerPolicy, ShellHandoffRequest};
 use super::super::osc::OscParser;
 use super::super::prompt_presentation::PromptPresentation;
 use super::super::prompt_replay::{prompt_replay_bytes, PromptReplayTracker};
+use super::display_write::{write_pending_display, write_prompt_ghost};
+use super::mark_pending_prompt_replayed;
 use super::terminal_recovery::{PendingTerminalRecovery, TerminalRecoveryOwner};
-use super::{mark_pending_prompt_replayed, write_pending_display, write_prompt_ghost};
 
 fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
     std::fs::write(path, command.as_bytes())
