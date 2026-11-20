@@ -331,6 +331,29 @@ def test_main_invokes_observability_cli_with_record(monkeypatch, capsys):
     ]
     assert kwargs["text"] is True
     assert json.loads(kwargs["input"])["hook"] == "before_agent_run"
+    # The redaction calls must keep their full argv contract: the suite
+    # matched them only by a "scan-pii" substring, so dropping
+    # --redact-output or changing --source kept every test green while
+    # the real CLI stopped redacting. A response without a string
+    # redacted_text makes _redact_text return None, which becomes _DROP:
+    # the sensitive metric field is then omitted from the record, so a
+    # drifted argv silently loses audit data instead of redacting it.
+    redact_cmds = [c[0] for c in calls if "scan-pii" in c[0]]
+    assert redact_cmds
+    assert all(
+        cmd
+        == [
+            "agent-sec-cli",
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--redact-output",
+            "--source",
+            "observability",
+        ]
+        for cmd in redact_cmds
+    )
 
 
 def test_main_redacts_observability_payload_before_record(monkeypatch, capsys):
