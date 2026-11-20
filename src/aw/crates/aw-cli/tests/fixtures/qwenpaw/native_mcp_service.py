@@ -20,10 +20,7 @@ class NativeMcpServiceTests(unittest.IsolatedAsyncioTestCase):
     request = NativeFixture.request
 
     def setup_agent(self, *args, **kwargs):
-        middleware, agent, coordinator = NativeFixture.setup_agent(self, *args, **kwargs)
-        middleware.scope = self.middleware.scope
-        middleware.config = self.middleware.config
-        return middleware, agent, coordinator
+        return NativeFixture.setup_agent(self, *args, middleware=self.middleware, **kwargs)
 
     async def run_mcp(self, deny):
         async with self.fixture(hooks=self.middleware.config["hooks"]) as f:
