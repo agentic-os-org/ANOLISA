@@ -8,9 +8,8 @@ const HEADER: &str = "Maven templates (id<TAB>fields; interleave with literals):
 const PHASE: &str = "[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n";
 const CONTEXT: &str = "[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n[INFO] No sources to compile\n";
 
-#[path = "common/maven_oracle.rs"]
-mod oracle;
-use oracle::decode;
+mod common;
+use common::maven_oracle::{self as oracle, decode};
 
 fn downloads(rows: usize, prefix: &str) -> String {
     (0..rows).map(|index| {

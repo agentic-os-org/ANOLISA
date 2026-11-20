@@ -7,11 +7,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::scope::{self, MAX_BYTES, MAX_EDITS, MAX_ROWS, plain};
 use super::{LayoutEdit, saves_both};
 
-const MAX_ROWS: usize = 256;
-const MAX_BYTES: usize = 64 * 1024;
-const MAX_EDITS: usize = 256;
 const HEADER: &str = "Maven templates (id<TAB>fields; interleave with literals): ";
 
 // Captures are the variable fields; all intervening bytes become shared
@@ -72,38 +70,16 @@ pub(super) fn detect(sample: &[String]) -> bool {
     let Ok(patterns) = PATTERNS.as_ref() else {
         return false;
     };
-    // A quoted example is not a tool log. Keep head inspection inside the head
-    // window so a sample gap never hides an enclosing document or spans preambles.
-    let (head, tail) = match sample.iter().position(|line| line == "\0") {
-        Some(gap) => (&sample[..gap], Some(&sample[gap + 1..])),
-        None => (sample, None),
-    };
-    let first = head
-        .iter()
-        .find(|line| !line.trim().is_empty() && !is_preamble(line));
-    if first.is_none_or(|line| !is_log_head(line)) {
-        return false;
-    }
-    let head_fences = unfenced_runs(head);
-    if head_fences
-        .runs
-        .iter()
-        .any(|run| has_strong_evidence(run, patterns))
-    {
-        return true;
-    }
-    // Across a sample gap, fence state from the unsampled middle is unknown;
-    // accept tail evidence only when neither window carries an open/closing fence.
-    tail.is_some_and(|tail| {
-        !head_fences.unclosed && {
-            let tail_fences = unfenced_runs(tail);
-            !tail_fences.saw_fence
-                && tail_fences
-                    .runs
-                    .iter()
-                    .any(|run| has_strong_evidence(run, patterns))
-        }
-    })
+    scope::detect_sampled(
+        sample,
+        |head| {
+            head.iter()
+                .position(|line| !line.trim().is_empty() && !is_preamble(line))
+                .unwrap_or(head.len())
+        },
+        is_log_head,
+        |run| has_strong_evidence(run, patterns),
+    )
 }
 
 fn is_preamble(line: &str) -> bool {
@@ -111,68 +87,10 @@ fn is_preamble(line: &str) -> bool {
         return false;
     }
     line.starts_with("$ ")
-        || is_maven_xtrace(line)
-        || line.starts_with("Picked up JAVA_TOOL_OPTIONS: ")
-        || line.starts_with("Picked up _JAVA_OPTIONS: ")
-        || line.starts_with("NOTE: Picked up JDK_JAVA_OPTIONS: ")
-        || is_jvm_warning(line)
+        || scope::is_xtrace(line, &["mvn", "mvnw", "mvnDebug", "mvnd"])
+        || scope::is_java_env_option(line)
+        || scope::is_jvm_warning(line)
         || is_launcher_banner(line)
-}
-
-fn is_maven_xtrace(line: &str) -> bool {
-    let pluses = line.bytes().take_while(|&b| b == b'+').count();
-    if !matches!(pluses, 1 | 2) {
-        return false;
-    }
-    let Some(rest) = line[pluses..].strip_prefix(' ') else {
-        return false;
-    };
-    let Some(command) = rest
-        .split_ascii_whitespace()
-        .find(|token| !is_env_assignment(token))
-    else {
-        return false;
-    };
-    let binary = command.rsplit('/').next().unwrap_or(command);
-    matches!(binary, "mvn" | "mvnw" | "mvnDebug" | "mvnd")
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((name, _)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name.as_bytes()[0].is_ascii_alphabetic()
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-fn is_jvm_warning(line: &str) -> bool {
-    if (line.starts_with("OpenJDK ") || line.starts_with("Java HotSpot(TM) "))
-        && line.contains(" VM warning: ")
-    {
-        return true;
-    }
-    let Some(rest) = line.strip_prefix("WARNING: ") else {
-        return false;
-    };
-    [
-        "An illegal reflective access operation has occurred",
-        "Illegal reflective access by ",
-        "Please consider reporting this to the maintainers of ",
-        "Use --illegal-access=",
-        "All illegal access operations will be denied in a future release",
-        "A terminally deprecated method in ",
-        "A restricted method in ",
-        "Use --enable-native-access=",
-        "Restricted methods will be blocked in a future release",
-        "sun.misc.Unsafe::",
-        "java.lang.System::",
-        "java.lang.Runtime::",
-        "Unknown module: ",
-    ]
-    .iter()
-    .any(|prefix| rest.starts_with(prefix))
-        || (rest.starts_with("package ") && rest.contains(" not in "))
 }
 
 fn is_launcher_banner(line: &str) -> bool {
@@ -197,50 +115,6 @@ fn is_log_head(line: &str) -> bool {
         }
     }
     (plain(line) && (line.starts_with(HEADER) || is_download_line(line))) || raw_transfer(line)
-}
-
-struct Unfenced<'a> {
-    runs: Vec<&'a [String]>,
-    saw_fence: bool,
-    unclosed: bool,
-}
-
-fn unfenced_runs(segment: &[String]) -> Unfenced<'_> {
-    let mut runs = Vec::new();
-    let mut saw_fence = false;
-    let mut open_fence: Option<(u8, usize)> = None;
-    let mut run_start = 0;
-    for (index, line) in segment.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let marker = (*b"`~").into_iter().find_map(|ch| {
-            let count = trimmed.bytes().take_while(|&b| b == ch).count();
-            (count >= 3).then_some((ch, count, &trimmed[count..]))
-        });
-        if let Some((open_ch, open_len)) = open_fence {
-            if let Some((ch, count, rest)) = marker
-                && ch == open_ch
-                && count >= open_len
-                && rest.trim().is_empty()
-            {
-                open_fence = None;
-                run_start = index + 1;
-            }
-        } else if let Some((ch, count, _)) = marker {
-            saw_fence = true;
-            if run_start < index {
-                runs.push(&segment[run_start..index]);
-            }
-            open_fence = Some((ch, count));
-        }
-    }
-    if open_fence.is_none() && run_start < segment.len() {
-        runs.push(&segment[run_start..]);
-    }
-    Unfenced {
-        runs,
-        saw_fence,
-        unclosed: open_fence.is_some(),
-    }
 }
 
 fn has_strong_evidence(run: &[String], patterns: &[Regex]) -> bool {
@@ -428,13 +302,7 @@ fn plan_with_downloads(lines: &[&str], include_downloads: bool) -> Vec<LayoutEdi
 }
 
 fn complete(line: &str) -> Option<&str> {
-    (line.len() <= MAX_BYTES)
-        .then(|| line.strip_suffix('\n'))
-        .flatten()
-}
-
-fn plain(line: &str) -> bool {
-    !line.chars().any(char::is_control)
+    scope::complete_within(line, MAX_BYTES)
 }
 
 fn anchor(lines: &[&str], index: usize) -> bool {
