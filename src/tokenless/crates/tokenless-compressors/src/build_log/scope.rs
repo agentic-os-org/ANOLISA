@@ -231,7 +231,7 @@ fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
     })
 }
 
-fn step_fence(open_fence: &mut Option<(u8, usize)>, line: &str) -> bool {
+pub(super) fn step_fence(open_fence: &mut Option<(u8, usize)>, line: &str) -> bool {
     let marker = fence_marker(line);
     if let Some((open_ch, open_len)) = *open_fence {
         if let Some((ch, count, rest)) = marker
