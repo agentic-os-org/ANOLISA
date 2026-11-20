@@ -33,6 +33,7 @@ fact disk filesystem.mount./.volume_used_bytes u64 77309411328 bytes
 fact disk filesystem.mount./.volume_files u64 1000000 -
 fact disk filesystem.mount./.volume_favail u64 900000 -
 fact disk filesystem.mount./.volume_inode_applicable bool true -
+fact disk filesystem.mount./.volume_readonly bool false -
 fact host host.uptime_seconds u64 100000 seconds
 fact kernel kernel.boot_id str boot-a -
 fact kernel kernel.fs_event_source str journalctl -

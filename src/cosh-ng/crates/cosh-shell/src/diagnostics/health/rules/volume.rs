@@ -151,26 +151,33 @@ pub(crate) fn evaluate_volumes(facts: &[HealthFact]) -> Vec<VolumeJudgement> {
         .map(|mount| {
             let prefix = format!("filesystem.mount.{mount}.");
             let proven = bool_value(facts, &format!("{prefix}volume_proven")) == Some(true);
+            // Only a volume-level read-write view may enter or exit the capacity
+            // members. A read-only (or otherwise non-rw) view keeps any existing
+            // member: it must not newly alert, and must not recover an episode
+            // just because the read-only statvfs still reports headroom.
+            let rw_eligible = bool_value(facts, &format!("{prefix}volume_readonly")) == Some(false);
             let bavail = unsigned(facts, &format!("{prefix}volume_bavail_bytes"));
             let used = unsigned(facts, &format!("{prefix}volume_used_bytes"));
             let files = unsigned(facts, &format!("{prefix}volume_files"));
             let favail = unsigned(facts, &format!("{prefix}volume_favail"));
             let inode_applicable =
                 bool_value(facts, &format!("{prefix}volume_inode_applicable")) == Some(true);
-            let bytes = if proven {
+            let bytes = if proven && rw_eligible {
                 match (used, bavail) {
                     (Some(used), Some(bavail)) => judge_bytes(used, bavail),
                     _ => MemberJudgement::UNKNOWN,
                 }
+            } else if proven {
+                MemberJudgement::inactive()
             } else {
                 MemberJudgement::UNKNOWN
             };
-            let inodes = if proven && inode_applicable {
+            let inodes = if proven && rw_eligible && inode_applicable {
                 match (files, favail) {
                     (Some(files), Some(favail)) => judge_inodes(files, favail),
                     _ => MemberJudgement::UNKNOWN,
                 }
-            } else if proven && !inode_applicable {
+            } else if proven {
                 MemberJudgement::inactive()
             } else {
                 MemberJudgement::UNKNOWN
@@ -210,6 +217,7 @@ pub(crate) fn volume_findings(facts: &[HealthFact]) -> Vec<HealthFinding> {
                 &format!("{prefix}volume_favail"),
                 &format!("{prefix}volume_fs_type"),
                 &format!("{prefix}volume_device"),
+                &format!("{prefix}volume_readonly"),
             ],
         );
         if let Some(path) = super::fact(facts, &format!("{prefix}path")) {

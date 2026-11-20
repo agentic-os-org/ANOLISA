@@ -182,9 +182,37 @@ fn proven_volume_records_raw_fields_under_root_check() {
         Some(HealthFactValue::Bool(true))
     );
     assert_eq!(
+        fact("filesystem.mount./.volume_readonly"),
+        Some(HealthFactValue::Bool(false))
+    );
+    assert_eq!(
         fact("filesystem.volume_mnt_ns"),
         Some(HealthFactValue::String("mnt:[4026531840]".into()))
     );
+}
+
+library_tests! {
+#[test]
+fn proven_readonly_volume_records_readonly_true() {
+    let mut volume = proven_root();
+    volume.readonly = Some(true);
+    let report = record(&sample_with(volume), "filesystem.root");
+    let fact = |key: &str| {
+        report
+            .facts
+            .iter()
+            .find(|fact| fact.key == key)
+            .map(|fact| fact.value.clone())
+    };
+    assert_eq!(
+        fact("filesystem.mount./.volume_proven"),
+        Some(HealthFactValue::Bool(true))
+    );
+    assert_eq!(
+        fact("filesystem.mount./.volume_readonly"),
+        Some(HealthFactValue::Bool(true))
+    );
+}
 }
 
 #[test]

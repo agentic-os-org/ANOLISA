@@ -46,6 +46,10 @@ fn volume_facts(used: u64, bavail: u64, files: u64, favail: u64) -> Vec<HealthFa
             HealthFactValue::Bool(true),
         ),
         fact(
+            "filesystem.mount./.volume_readonly",
+            HealthFactValue::Bool(false),
+        ),
+        fact(
             "filesystem.mount./.volume_fs_type",
             HealthFactValue::String("ext4".into()),
         ),
@@ -402,4 +406,40 @@ fn file_nr_and_capacity_events_stay_diagnostics_only() {
         ..Default::default()
     };
     assert!(evaluate_judgement_rules(&report, &config).is_empty());
+}
+
+library_tests! {
+fn set_readonly(facts: &mut [HealthFact], readonly: bool) {
+    for fact in facts.iter_mut() {
+        if fact.key == "filesystem.mount./.volume_readonly" {
+            fact.value = HealthFactValue::Bool(readonly);
+        }
+    }
+}
+
+#[test]
+fn readonly_volume_with_critical_stats_stays_silent() {
+    let mut facts = volume_facts(99 * GIB, 0, 100000, 50000);
+    set_readonly(&mut facts, true);
+    let report = report_with(facts);
+    assert!(ids(&report).is_empty());
+}
+
+#[test]
+fn readonly_view_holds_existing_capacity_member() {
+    let rw = volume_facts(99 * GIB, 0, 100000, 50000);
+    let judged = super::volume::evaluate_volumes(&rw);
+    assert_eq!(
+        judged[0].bytes.entry,
+        Some(super::volume::MemberLevel::Critical)
+    );
+    let mut ro = rw.clone();
+    set_readonly(&mut ro, true);
+    let held = super::volume::evaluate_volumes(&ro);
+    assert_eq!(held[0].bytes.entry, None);
+    assert!(!held[0].bytes.exit);
+    assert!(held[0].bytes.valid);
+    assert_eq!(held[0].inodes.entry, None);
+    assert!(!held[0].inodes.exit);
+}
 }
