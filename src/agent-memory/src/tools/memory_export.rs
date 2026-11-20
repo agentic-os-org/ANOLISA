@@ -149,20 +149,12 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
         })
     {
         let entry = entry.map_err(|e| {
-            let path = e.path().unwrap_or(&svc.mount.root);
-            let relative = path.strip_prefix(&svc.mount.root).unwrap_or(path);
-            let relative = if relative.as_os_str().is_empty() {
-                ".".into()
-            } else {
-                relative.to_string_lossy().into_owned()
-            };
-            let kind = e.io_error().map_or(std::io::ErrorKind::Other, |e| e.kind());
-            let operation = if relative == "." && kind == std::io::ErrorKind::NotFound {
-                "mount root is missing"
-            } else {
-                "scan failed"
-            };
-            export_io_error(svc, &relative, operation, std::io::Error::new(kind, e))
+            let kind = e
+                .io_error()
+                .map_or(std::io::ErrorKind::Other, |io| io.kind());
+            let (location, operation) =
+                classify_walk_failure(e.path(), e.depth(), kind, &svc.mount.root);
+            export_io_error(svc, &location, operation, walk_error_cause(&e, kind))
         })?;
         if !entry.file_type().is_file() {
             continue;
@@ -251,6 +243,54 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
     Ok(json)
 }
 
+/// Classify a walk failure into its mount-relative location and the operation
+/// label the diagnostic uses.
+///
+/// `walkdir::Error` does not always carry a path — a failed directory read is
+/// reported by kind alone — and folding that case into the root with
+/// `unwrap_or(root)` made a mid-stream failure read as a missing store. Depth
+/// is always present and is what distinguishes the two: depth 0 is the root the
+/// walk started from, anything deeper is a location the walk could not name.
+fn classify_walk_failure(
+    location: Option<&std::path::Path>,
+    depth: usize,
+    kind: std::io::ErrorKind,
+    root: &std::path::Path,
+) -> (String, &'static str) {
+    let at_root = depth == 0;
+    if at_root && kind == std::io::ErrorKind::NotFound {
+        return (".".to_string(), "mount root is missing");
+    }
+    let location = match location {
+        Some(path) => {
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string_lossy().into_owned()
+            }
+        }
+        // No path: say so instead of claiming the failure happened at the root.
+        None if at_root => ".".to_string(),
+        None => "unknown location".to_string(),
+    };
+    (location, "scan failed")
+}
+
+/// The I/O cause to carry into the export error.
+///
+/// `walkdir::Error`'s own `Display` embeds the absolute host path it walked
+/// ("IO error for operation on <host path>: …"). That text reaches the audit log
+/// and, from there, a consolidated lesson and the next portable AMA export, so
+/// the underlying cause is rebuilt without it. The kind is preserved; anything
+/// the walk reports without an I/O error (a symlink loop) keeps a fixed label.
+fn walk_error_cause(err: &walkdir::Error, kind: std::io::ErrorKind) -> std::io::Error {
+    match err.io_error() {
+        Some(io) => std::io::Error::new(kind, io.to_string()),
+        None => std::io::Error::new(kind, "walk stopped without an I/O cause"),
+    }
+}
+
 fn export_io_error(
     svc: &MemoryService,
     path: &str,
@@ -272,6 +312,37 @@ fn export_io_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_failures_are_classified_without_the_host_path() {
+        let root = std::path::Path::new("/store/root");
+        // The documented root-missing case: depth 0 and NotFound.
+        assert_eq!(
+            classify_walk_failure(Some(root), 0, std::io::ErrorKind::NotFound, root),
+            (".".to_string(), "mount root is missing")
+        );
+        // A named location stays mount-relative.
+        assert_eq!(
+            classify_walk_failure(
+                Some(&root.join("notes/private")),
+                2,
+                std::io::ErrorKind::PermissionDenied,
+                root
+            ),
+            ("notes/private".to_string(), "scan failed")
+        );
+        // A pathless failure below the root must not be folded into the root:
+        // that made a mid-stream permission error read as a missing store.
+        assert_eq!(
+            classify_walk_failure(None, 2, std::io::ErrorKind::PermissionDenied, root),
+            ("unknown location".to_string(), "scan failed")
+        );
+        // A pathless failure at depth 0 is the root, even when it is not NotFound.
+        assert_eq!(
+            classify_walk_failure(None, 0, std::io::ErrorKind::PermissionDenied, root),
+            (".".to_string(), "scan failed")
+        );
+    }
 
     #[test]
     fn parse_frontmatter_with_yaml() {
