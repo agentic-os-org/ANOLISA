@@ -208,3 +208,39 @@ fn journal_byte_array_message_decodes() {
     let (events, _, _) = parse_journal_json_signals(&entry, &ctx()).unwrap();
     assert_eq!(events.len(), 1);
 }
+
+#[test]
+fn journal_boot_id_matches_dashed_proc_and_undashed_journald_forms() {
+    let mut context = ctx();
+    context.boot_id = Some("02f32e1b-ec44-42b8-ac2b-d1e46cb4e380".into());
+    let message = "Memory cgroup out of memory: Killed process 123 (worker) task_memcg=/user.slice/user-1000.slice/session-2.scope";
+    let undashed = journal_entry(
+        "kernel",
+        "0",
+        "02f32e1bec4442b8ac2bd1e46cb4e380",
+        900_000_000,
+        message,
+    );
+    let (events, unclocked, _) = parse_journal_json_signals(&undashed, &context).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(unclocked, 0);
+    let dashed = journal_entry(
+        "kernel",
+        "0",
+        "02f32e1b-ec44-42b8-ac2b-d1e46cb4e380",
+        900_000_000,
+        message,
+    );
+    let (events, _, _) = parse_journal_json_signals(&dashed, &context).unwrap();
+    assert_eq!(events.len(), 1);
+    let mismatched = journal_entry(
+        "kernel",
+        "0",
+        "ffffffffffffffffffffffffffffffff",
+        900_000_000,
+        message,
+    );
+    let (events, unclocked, _) = parse_journal_json_signals(&mismatched, &context).unwrap();
+    assert!(events.is_empty());
+    assert_eq!(unclocked, 1);
+}

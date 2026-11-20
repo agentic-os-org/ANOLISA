@@ -129,6 +129,22 @@ pub(super) fn journal_usec(entry: &serde_json::Value, key: &str) -> Option<u64> 
     entry.get(key)?.as_str()?.parse().ok()
 }
 
+/// `/proc/sys/kernel/random/boot_id` carries dashed 36-char UUIDs while
+/// journald `_BOOT_ID` stores the same id as 32 hex chars without dashes;
+/// normalize both before comparing so real systemd sources verify.
+fn boot_id_matches(expected: &str, actual: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| *ch != '-')
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+    let expected = normalize(expected);
+    let actual = normalize(actual);
+    !expected.is_empty() && expected == actual
+}
+
 pub(super) fn journal_verified(entry: &serde_json::Value, ctx: &AttributionContext) -> bool {
     entry.get("_TRANSPORT").and_then(|v| v.as_str()) == Some("kernel")
         && entry.get("SYSLOG_FACILITY").and_then(|v| v.as_str()) == Some("0")
@@ -136,7 +152,7 @@ pub(super) fn journal_verified(entry: &serde_json::Value, ctx: &AttributionConte
             ctx.boot_id.as_deref(),
             entry.get("_BOOT_ID").and_then(|v| v.as_str()),
         ) {
-            (Some(expected), Some(actual)) => expected == actual,
+            (Some(expected), Some(actual)) => boot_id_matches(expected, actual),
             _ => false,
         }
 }
