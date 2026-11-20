@@ -143,13 +143,17 @@ class NativeTests(GateFixture):
             (release, "refs/heads/main", False),
             (head, "refs/heads/feature", False),
             (head, "refs/tags/release", False),
+            (head, "refs/tags/aw/v1.0.0", True),
+            (base, "refs/tags/aw/v1.0.0", False),
+            (feature, "refs/tags/aw/v1.0.0", False),
         ):
             with self.subTest(candidate=candidate, ref=ref):
                 git("checkout", "--detach", candidate)
                 result = subprocess.run(
                     ["bash", "-euo", "pipefail", "-c", script],
                     cwd=self.root,
-                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref},
+                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref,
+                         "WORKFLOW_SHA": feature if candidate == feature else head, "EVENT_NAME": "push"},
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -167,6 +171,19 @@ class NativeTests(GateFixture):
                 ["bash", "-euc", script], env={**os.environ, "PLAN_RESULT": outcome}, timeout=5
             )
             self.assertEqual(result.returncode == 0, outcome == "success")
+
+    def test_native_workers_can_use_uploaded_binaries_after_a_package_test_failure(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        packages = jobs.split("  packages:\n", 1)[1].split("\n  native:\n", 1)[0]
+        self.assertIn("native_artifact: ${{ steps.upload-native.outputs.artifact-id }}", packages)
+        self.assertLess(packages.index("id: upload-native"), packages.index("Verify installed packages"))
+        for name in ("native", "resident-image"):
+            job = jobs.split(f"\n  {name}:\n", 1)[1].split("    name:", 1)[0]
+            self.assertIn("needs: [plan, packages]", job)
+            self.assertIn("!cancelled() && needs.plan.result == 'success' && "
+                          "needs.packages.outputs.native_artifact != ''", job)
+        self.assertIn("PACKAGE_RESULT: ${{ needs.packages.result }}", jobs)
 
     def test_new_agent_requires_native_accounting(self) -> None:
         (self.root / "tests").mkdir()

@@ -29,6 +29,8 @@ export AW_TEMPLATE_DIR="$PWD/$AW_TOKENLESS_BUNDLE/templates"
 
 选择已安装的 Tokenless CLI，并检查其 RTK 版本：
 
+此模板同时选择 Qoder 和 OpenClaw 的工具。按[配置说明](configuration.md#openclaw)将 `AW_NODE` 和 `AW_OPENCLAW` 设为已安装的 Node 可执行文件与 OpenClaw 入口脚本。
+
 ```bash
 export AW_TOKENLESS_CLI="$(command -v tokenless)"
 export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
@@ -38,7 +40,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template "$AW_TEMPLATE_DIR/tokenless.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
-  --qoder "$AW_QODER"
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw config validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder

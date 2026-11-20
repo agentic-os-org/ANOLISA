@@ -146,8 +146,8 @@ fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services
             state: &state,
             policy,
             qoder: Some(Path::new("/bin/true")),
-            node: None,
-            openclaw: None,
+            node: Some(Path::new("/bin/true")),
+            openclaw: Some(Path::new("/bin/true")),
         })
         .unwrap();
         let output = aw_exec::run(

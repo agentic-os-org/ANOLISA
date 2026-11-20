@@ -41,6 +41,8 @@ requires explicit `--scope system` and root privileges for writes.
 Keep `AW_HOME` and `AW_QODER` from installation. Set the CLI and socket to the
 backend's actual locations; keep the unpacked template available:
 
+The shipped policy selects tools from both Qoder and OpenClaw. Set `AW_NODE` and `AW_OPENCLAW` to the installed Node executable and OpenClaw entry script as shown in [Configuration](configuration.md#openclaw).
+
 ```bash
 export AW_SEC_CLI="$(command -v agent-sec-cli)"
 export AW_SEC_SOCKET=/run/agent-sec-core/daemon.sock
@@ -50,7 +52,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template "$AW_TEMPLATE_DIR/sec-core.json" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "SEC_CORE_CLI=$AW_SEC_CLI" --template-var "SOCKET=$AW_SEC_SOCKET" \
-  --qoder "$AW_QODER"
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw config validate --config "$AW_HOME/security.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
