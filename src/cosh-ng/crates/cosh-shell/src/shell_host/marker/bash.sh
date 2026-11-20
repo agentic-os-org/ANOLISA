@@ -272,11 +272,20 @@ _cosh_history_no() {
   printf '%s' "$_COSH_HISTORY_NO_RESULT"
 }
 _cosh_history_no_var() {
-  local first_line=${1%%$'\n'*}
-  if [[ "$first_line" =~ ^[[:space:]]*([0-9]+) ]]; then
-    _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}${1#"$first_line"}"
+  # The history number is the leading integer of the entry; read it from a
+  # bounded metadata prefix. Preserve a multi-line continuation, but avoid the
+  # superlinear quoted-literal prefix removal (${1#"$first_line"}) that froze
+  # giant single-line entries (#10317): an unquoted glob to the first newline
+  # is linear, and a single-line entry skips the continuation entirely.
+  local prefix="${1:0:64}"
+  if [[ "$prefix" =~ ^[[:space:]]*([0-9]+) ]]; then
+    if [[ "$1" == *$'\n'* ]]; then
+      _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}"$'\n'"${1#*$'\n'}"
+    else
+      _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}"
+    fi
   else
-    _COSH_HISTORY_NO_RESULT="$1"
+    _COSH_HISTORY_NO_RESULT=""
   fi
 }
 _cosh_history_command_from_entry() {
@@ -349,11 +358,17 @@ _cosh_command_has_secret() {
   local alibaba_pattern='(^|[^a-z0-9_])ltai[a-z0-9]{12,32}([^a-z0-9_]|$)'
   local aws_pattern='(^|[^a-z0-9_])(akia|asia)[a-z0-9]{16}([^a-z0-9_]|$)'
   if [[ "$lower" =~ $bearer_pattern
-     || "$lower" =~ $url_password_pattern
      || "$lower" =~ $github_pattern
      || "$lower" =~ $opaque_pattern
      || "$lower" =~ $alibaba_pattern
      || "$lower" =~ $aws_pattern ]]; then
+    return 0
+  fi
+  # The URL-credential regex is near-quadratic on long letter runs: every
+  # letter is a candidate scheme start and the matcher walks the rest before
+  # finding no "://" (#10317). Gate it on a linear glob precheck so benign
+  # giant pastes without a scheme separator never enter it.
+  if [[ "$lower" == *"://"* && "$lower" =~ $url_password_pattern ]]; then
     return 0
   fi
 
@@ -400,6 +415,32 @@ _cosh_command_has_secret() {
   fi
   return 1
 }
+_cosh_detect_secret_bounded() {
+  # Uniform bounded tri-state secret detection (#10317). The rule set and byte
+  # budget are identical for every record; size and source never select a
+  # different rule set or trigger an unbounded scan. Sets _COSH_SECRET_RESULT:
+  #   match      - a credential was found (definitive).
+  #   negative   - the whole record fit the budget and no credential matched.
+  #   incomplete - the record exceeded the budget; the bounded window matched
+  #                nothing, but the unexamined remainder may still hold a
+  #                credential. Such a negative must NOT authorize exposing the
+  #                original text.
+  local input="$1"
+  local budget=${_COSH_MAX_ROUTE_LINE_CHARS:-16384}
+  if (( ${#input} <= budget )); then
+    if _cosh_command_has_secret "$input" complete; then
+      _COSH_SECRET_RESULT=match
+    else
+      _COSH_SECRET_RESULT=negative
+    fi
+  else
+    if _cosh_command_has_secret "$input" bounded; then
+      _COSH_SECRET_RESULT=match
+    else
+      _COSH_SECRET_RESULT=incomplete
+    fi
+  fi
+}
 _cosh_scrub_sensitive_native_history() {
   [[ -o history ]] || return 0
   _cosh_capture_history_entry
@@ -409,34 +450,20 @@ _cosh_scrub_sensitive_native_history() {
   _cosh_history_command_var "$history_entry"
   local command="$_COSH_HISTORY_COMMAND_RESULT"
   [[ -n "$history_no" && -n "$command" ]] || return 0
-  if (( ${#command} > _COSH_MAX_ROUTE_LINE_CHARS )); then
-    # The current submission's oversized entry is fail-closed omitted without a
-    # scan (the freeze fix): the bounded window cannot fully verify it. Under
-    # memory overage PS0 recorded no submission, so omit unconditionally.
-    # Builtin reads keep the current-submission lookup fork-free.
-    if ! _cosh_memory_overage; then
-      local current_no="${_COSH_LAST_PREEXEC_HISTORY_NO:-}"
-      local state_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.preexec-history-no"
-      if [[ -f "$state_file" ]]; then
-        IFS= read -r current_no < "$state_file" 2>/dev/null || true
-      fi
-      if [[ "$history_no" != "$current_no" ]]; then
-        # A non-current oversized entry (imported via `history -r` or otherwise
-        # pre-existing) is not this submission, so the fail-closed omit does not
-        # apply; but it must still pass a COMPLETE secret check before it is
-        # allowed to persist — a mid-gap credential lies outside the bounded
-        # window. This mirrors the merge-base full-scan scrub.
-        if _cosh_command_has_secret "$command" complete; then
-          builtin history -d "$history_no" 2>/dev/null || true
-        fi
-        return 0
-      fi
-    fi
-    builtin history -d "$history_no" 2>/dev/null || true
-    return 0
-  fi
-  if _cosh_command_has_secret "$command"; then
-    builtin history -d "$history_no" 2>/dev/null || true
+  # Uniform bounded tri-state detection (#10317): every entry gets the same
+  # rules and byte budget; neither size nor source selects a slower scan or a
+  # length-based deletion. A detected credential is removed. A complete
+  # negative or an over-budget (incomplete) record is preserved — Cosh does not
+  # delete benign history it cannot fully verify, including under memory
+  # overage. Prompt-level cleanup is best-effort: a credential beyond the
+  # budget in an arbitrary-long record is not guaranteed to be caught here
+  # (Rust evidence redaction still covers marker/journal publication).
+  _cosh_detect_secret_bounded "$command"
+  if [[ "$_COSH_SECRET_RESULT" == match ]]; then
+    # `history -d` takes a position, not the multi-line identifier the number
+    # helper preserves for callers; use the leading number only so a
+    # within-budget multi-line secret entry is removable too.
+    builtin history -d "${history_no%%$'\n'*}" 2>/dev/null || true
   fi
 }
 _cosh_emit_marker() {
@@ -591,9 +618,10 @@ _cosh_guard_slash_submission() {
   # to this submission (Bash may exclude the real command via HISTIGNORE).
   _COSH_SUBMITTED_LINE="$input"
   # Oversized lines bypass the superlinear first-word/secret scans (#10317).
-  # The bounded secret window cannot fully verify them, so they are fail-closed
-  # omitted from native history by the prompt scrub — including edited lines.
-  # No history recovery is attempted for oversized input (intentional limit).
+  # The guard itself neither scans nor re-adds them. The prompt scrub applies
+  # the uniform bounded tri-state contract: it preserves an over-budget record
+  # unless the bounded window matches a credential (no length-based deletion),
+  # and Cosh only re-adds a recovered record on a complete negative.
   if (( ${#input} > _COSH_MAX_ROUTE_LINE_CHARS )); then
     (( restore_xtrace == 1 )) && set -x
     return 0
@@ -694,11 +722,12 @@ _cosh_commit_pending_recovery_history() {
   case "$input" in
     ' '*|$'\t'*) return 0 ;;
   esac
-  # An oversized line cannot be fully secret-verified by the bounded window;
-  # an incomplete negative cannot establish it is safe to keep, so fail closed
-  # (the prompt scrub omits it). Recovery applies to normal-size lines only.
-  (( ${#input} > _COSH_MAX_ROUTE_LINE_CHARS )) && return 0
-  _cosh_command_has_secret "$input" && return 0
+  # Cosh only writes a recovered record into native history on a COMPLETE
+  # negative (#10317). A match is a credential; an incomplete (over-budget)
+  # result cannot establish the record is safe to keep, so fail closed and let
+  # Bash's own acceptance stand without a Cosh re-add.
+  _cosh_detect_secret_bounded "$input"
+  [[ "$_COSH_SECRET_RESULT" == negative ]] || return 0
 
   local history_entry history_no history_command
   history_entry="$(_cosh_history_entry)"
@@ -912,11 +941,12 @@ _cosh_prepare_staged_handoff() {
     builtin history -d "$history_no" 2>/dev/null || true
   fi
   display_command="$command"
-  # An oversized command cannot be fully verified by the bounded head+tail
-  # secret window; a negative result is incomplete, so fail closed to the
-  # redacted placeholder (the emitted preexec marker cannot be retracted by
-  # the later history scrub). The handoff token is already loaded above.
-  if (( ${#command} > _COSH_MAX_ROUTE_LINE_CHARS )) || _cosh_command_has_secret "$command"; then
+  # Cosh publishes a handoff command's original text only on a COMPLETE
+  # negative (#10317). A match or an incomplete (over-budget) result fails
+  # closed to the redacted placeholder — the emitted preexec marker cannot be
+  # retracted by the later history scrub. The handoff token is loaded above.
+  _cosh_detect_secret_bounded "$command"
+  if [[ "$_COSH_SECRET_RESULT" != negative ]]; then
     display_command="<redacted sensitive command>"
   elif [[ -o history ]]; then
     builtin history -s "$command" 2>/dev/null || true
