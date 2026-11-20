@@ -26,6 +26,10 @@ pub(crate) const EVENT_MERGE_MS: u64 = 10 * 60 * 1000;
 pub(crate) struct VolumeEpisode {
     pub severity: u8,
     pub last_delivered_ms: u64,
+    /// Members the delivered card reported. Empty for records written before
+    /// per-member delivery, which cannot prove that a sibling was delivered.
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 /// Branch-aware R05 combination episode: max/high enter independently and the
@@ -45,6 +49,10 @@ pub(crate) struct QuotaEpisode {
 pub(crate) struct VolumeRecovery {
     pub recovered_ms: u64,
     pub last_delivered_ms: u64,
+    /// Members the recovered episode's card reported, carried over from the
+    /// delivery so a sibling card can require proof of its own delivery.
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -276,6 +284,7 @@ pub(crate) fn sync(
                     VolumeRecovery {
                         recovered_ms: now_ms,
                         last_delivered_ms: episode.last_delivered_ms,
+                        members: episode.members,
                     },
                 );
             }
@@ -307,6 +316,7 @@ pub(crate) fn sync(
                     VolumeRecovery {
                         recovered_ms: now_ms,
                         last_delivered_ms: episode.last_delivered_ms,
+                        members: Vec::new(),
                     },
                 );
             }
@@ -435,17 +445,25 @@ pub(crate) fn deliverable(
             return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
         }
     }
-    // A settled sibling recovery proves this merged card was delivered recently
-    // even when the ledger predates per-member records.
+    // This member's own recovery is the documented ten-minute recurrence
+    // boundary, so it takes precedence over a sibling's delivery record.
+    if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
+        return now_ms.saturating_sub(recovery.last_delivered_ms) >= RECURRENCE_GATE_MS;
+    }
+    // A sibling's recovery gates this card only when the earlier delivery
+    // provably reported this member; a byte-only card's recovery must not
+    // hide a first inode exhaustion.
     for sibling in &candidate.sibling_keys {
         if let Some(recovery) = ledger.recoveries.get(sibling) {
-            if now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS {
+            if recovery
+                .members
+                .iter()
+                .any(|member| member == &candidate.key)
+                && now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS
+            {
                 return false;
             }
         }
-    }
-    if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
-        return now_ms.saturating_sub(recovery.last_delivered_ms) >= RECURRENCE_GATE_MS;
     }
     true
 }
@@ -455,6 +473,7 @@ pub(crate) fn record_delivery(
     candidate: &CandidateEpisode,
     now_ms: u64,
 ) {
+    let mut protected = vec![candidate.key.clone()];
     if candidate.event {
         ledger.events.insert(
             candidate.key.clone(),
@@ -464,6 +483,7 @@ pub(crate) fn record_delivery(
                 epoch: candidate.epoch,
             },
         );
+        protected.push(candidate.problem.clone());
         ledger.channels.insert(
             candidate.problem.clone(),
             ChannelState {
@@ -496,19 +516,114 @@ pub(crate) fn record_delivery(
             episode.severity = candidate.severity;
             episode.last_delivered_ms = now_ms;
         } else {
-            for key in std::iter::once(&candidate.key).chain(candidate.companion_keys.iter()) {
+            let mut members = Vec::with_capacity(1 + candidate.companion_keys.len());
+            members.push(candidate.key.clone());
+            members.extend(candidate.companion_keys.iter().cloned());
+            protected.extend(members.iter().cloned());
+            for key in &members {
                 ledger.recoveries.remove(key);
                 ledger.volume.insert(
-                    key.to_string(),
+                    key.clone(),
                     VolumeEpisode {
                         severity: candidate.severity,
                         last_delivered_ms: now_ms,
+                        members: members.clone(),
                     },
                 );
             }
         }
     }
     prune(ledger, now_ms);
+    enforce_entry_limit(ledger, &protected);
+}
+
+/// Entry ceiling shared with `parse_ledger`; the loader rejects a ledger that
+/// exceeds it, so writes must never cross it.
+fn entry_count(ledger: &EpisodeLedger) -> usize {
+    ledger.volume.len()
+        + ledger.quota.len()
+        + ledger.recoveries.len()
+        + ledger.events.len()
+        + ledger.channels.len()
+}
+
+enum StoredEntry {
+    Volume(String),
+    Quota(String),
+    Recovery(String),
+    Event(String),
+    Channel(String),
+}
+
+impl StoredEntry {
+    fn remove(self, ledger: &mut EpisodeLedger) {
+        match self {
+            Self::Volume(key) => {
+                ledger.volume.remove(&key);
+            }
+            Self::Quota(key) => {
+                ledger.quota.remove(&key);
+            }
+            Self::Recovery(key) => {
+                ledger.recoveries.remove(&key);
+            }
+            Self::Event(key) => {
+                ledger.events.remove(&key);
+            }
+            Self::Channel(key) => {
+                ledger.channels.remove(&key);
+            }
+        }
+    }
+}
+
+/// Keeps a delivery inside the loader's entry ceiling by dropping the oldest
+/// entries that this delivery did not just write.
+fn enforce_entry_limit(ledger: &mut EpisodeLedger, protected: &[String]) {
+    while entry_count(ledger) > MAX_ENTRIES {
+        let Some(oldest) = oldest_unprotected(ledger, protected) else {
+            return;
+        };
+        oldest.remove(ledger);
+    }
+}
+
+fn oldest_unprotected(ledger: &EpisodeLedger, protected: &[String]) -> Option<StoredEntry> {
+    let mut oldest: Option<(u64, StoredEntry)> = None;
+    let mut keep = |time: u64, entry: StoredEntry| {
+        if oldest
+            .as_ref()
+            .is_none_or(|(oldest_time, _)| time < *oldest_time)
+        {
+            oldest = Some((time, entry));
+        }
+    };
+    for (key, entry) in &ledger.volume {
+        if !protected.iter().any(|item| item == key) {
+            keep(entry.last_delivered_ms, StoredEntry::Volume(key.clone()));
+        }
+    }
+    for (key, entry) in &ledger.quota {
+        if !protected.iter().any(|item| item == key) {
+            keep(entry.last_delivered_ms, StoredEntry::Quota(key.clone()));
+        }
+    }
+    for (key, entry) in &ledger.recoveries {
+        if !protected.iter().any(|item| item == key) {
+            keep(entry.recovered_ms, StoredEntry::Recovery(key.clone()));
+        }
+    }
+    for (key, entry) in &ledger.events {
+        if !protected.iter().any(|item| item == key) {
+            keep(entry.delivered_ms, StoredEntry::Event(key.clone()));
+        }
+    }
+    for (key, entry) in &ledger.channels {
+        if !protected.iter().any(|item| item == key) {
+            keep(entry.last_delivered_ms, StoredEntry::Channel(key.clone()));
+        }
+    }
+    oldest.map(|(_, entry)| entry)
 }
 
 #[cfg(test)]

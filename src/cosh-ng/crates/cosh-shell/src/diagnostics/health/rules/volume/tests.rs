@@ -235,6 +235,7 @@ fn project_quota_view_does_not_enter_or_recover_capacity_members() {
             VolumeEpisode {
                 severity: 4,
                 last_delivered_ms: 1000,
+                members: Vec::new(),
             },
         );
     }
@@ -281,6 +282,7 @@ fn volume_active_detects_any_proven_flag() {
     assert!(volume_active(&volume_facts("/", false, 0, 0, 0, 0)));
 }
 
+library_tests! {
 fn report_with_volume(
     mount: &str,
     proven: bool,
@@ -308,6 +310,7 @@ fn capacity_episodes(
             VolumeEpisode {
                 severity: 4,
                 last_delivered_ms: now_ms,
+                members: vec![volume_member_key("/data", member, "253:0", "")],
             },
         );
     }
@@ -432,4 +435,5 @@ fn unconfirmed_rw_view_holds_members_without_entering() {
     assert_eq!(judgement.bytes, MemberJudgement::inactive());
     assert_eq!(judgement.inodes, MemberJudgement::inactive());
     assert!(volume_findings(&facts).is_empty());
+}
 }
