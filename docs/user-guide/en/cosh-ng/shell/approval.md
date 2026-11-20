@@ -58,6 +58,25 @@ automatically after confirmation, and `shell.readonly` overrides and
 `shell.readonly_disabled` continue to control read-only eligibility (see
 [Configuration](../configuration.md)).
 
+### Git commands in auto mode
+
+In the default `auto` mode, every git command requires an approval card;
+there is no built-in git auto-approval exception. Git reads `.git/config`
+and `.gitattributes` from the repository it runs in, and those files can
+name programs that git executes on its own: `core.fsmonitor` on index
+refresh, `diff.<driver>.textconv` when generating patches, `gpg.program`
+when verifying signatures, the remote transport (`core.sshCommand`,
+credential helpers) when a partial clone lazily fetches a missing object,
+and pagers. The foreground shell can also expand a seemingly literal
+argument (bash globbing, zsh `EXTENDED_GLOB`) into options that reach
+those paths. The read-only classifier cannot see repository configuration
+or shell expansion, so git commands ask first instead of running
+automatically.
+
+Non-git read-only commands keep their existing auto-approval behavior.
+To run specific git commands without a card, use trust mode or explicit
+`shell.readonly` overrides; both are deliberate operator choices.
+
 Enable trust mode with a second confirmation:
 
 ```text

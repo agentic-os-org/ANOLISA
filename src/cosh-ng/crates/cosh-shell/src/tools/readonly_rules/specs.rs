@@ -109,7 +109,6 @@ pub static READONLY_SPECS: &[ReadonlySpec] = &[
     custom::SYSCTL,
     custom::TOP,
     custom::ENV,
-    subcommands::GIT,
     subcommands::CARGO,
     subcommands::DOCKER,
     subcommands::KUBECTL,

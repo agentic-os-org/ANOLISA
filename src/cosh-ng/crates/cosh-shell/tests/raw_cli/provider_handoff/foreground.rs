@@ -78,6 +78,87 @@ fn raw_cli_auto_provider_shell_permission_uses_foreground_handoff() {
 }
 
 #[test]
+fn raw_cli_auto_git_permission_cancels_without_foreground_handoff_in_bash() {
+    assert_auto_git_permission_cancels_without_foreground_handoff("bash");
+}
+
+#[test]
+fn raw_cli_auto_git_permission_cancels_without_foreground_handoff_in_zsh() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    assert_auto_git_permission_cancels_without_foreground_handoff("zsh");
+}
+
+fn assert_auto_git_permission_cancels_without_foreground_handoff(shell: &str) {
+    let home = temp_shell_home("auto-git-control-denial");
+    let cosh_core_path = home.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+IFS= read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"git-control-denial","model":"cosh-core-test"}'
+IFS= read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ctrl-git","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"git count-objects"},"tool_use_id":"toolu-git"}}'
+while IFS= read -r response; do
+  case "$response" in
+    *'"type":"approval_receipt"'*) continue ;;
+    *'"request_id":"ctrl-git"'*'"behavior":"deny"'*)
+      printf '%s\n' '{"type":"assistant","session_id":"git-control-denial","message":{"content":[{"type":"text","text":"Git control request denied."}]}}'
+      printf '%s\n' '{"type":"result","subtype":"success","session_id":"git-control-denial","is_error":false,"result":"done"}'
+      exit 0 ;;
+    *) break ;;
+  esac
+done
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"git-control-denial","is_error":true,"result":"expected Git permission denial"}'
+exit 1
+"#,
+    );
+    let home_str = home.to_string_lossy();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy();
+    let mut input = vec![(b"/mode approval auto\n".to_vec(), Duration::ZERO)];
+    if shell == "zsh" {
+        input.push((
+            b"setopt EXTENDED_GLOB; [[ -o EXTENDED_GLOB ]] && printf '%s %s\\n' extended_glob enabled\n"
+                .to_vec(),
+            Duration::from_millis(500),
+        ));
+    }
+    input.extend([
+        (
+            b"?? count Git objects\n".to_vec(),
+            Duration::from_millis(500),
+        ),
+        (b"\x1b".to_vec(), Duration::from_millis(1_500)),
+        (b"exit 0\n".to_vec(), Duration::from_millis(2_500)),
+    ]);
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &["--shell", shell],
+        &[
+            ("HOME", &home_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
+            ("COSH_SHELL_LANG", "en-US"),
+        ],
+        input,
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    if shell == "zsh" {
+        assert!(output.contains("extended_glob enabled"), "{output}");
+    }
+    assert!(output.contains("Mode set to auto."), "{output}");
+    assert!(!output.contains("Auto-approved req-1"), "{output}");
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("git count-objects"), "{output}");
+    assert!(output.contains("Cancelled req-1"), "{output}");
+    assert!(output.contains("Git control request denied."), "{output}");
+    assert!(!output.contains("Bash tool sent to shell"), "{output}");
+}
+
+#[test]
 fn raw_cli_control_shell_output_uses_foreground_transcript_by_default() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
