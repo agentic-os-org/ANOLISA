@@ -7,20 +7,23 @@ on:
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
-      - 'distribution/packaging/**'
+      - 'distribution/packaging/aw/**'
       - 'distribution/Makefile'
       - '.github/workflows/aw-ci.yml'
       - '.github/workflows/aw-integration.yml'
+      - '.github/workflows/aw-release.yml'
   pull_request:
     paths:
       - '.github/workflows/aw-ci.yml'
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
-      - 'distribution/packaging/**'
+      - 'distribution/packaging/aw/**'
       - 'distribution/Makefile'
       - '.github/workflows/aw-integration.yml'
+      - '.github/workflows/aw-release.yml'
   merge_group:
+  workflow_call:
   workflow_dispatch:
     inputs:
       integration:
@@ -88,8 +91,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-          # Scope checks compare the complete candidate history.
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -121,7 +122,9 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
         id: checks
-        run: '"${pythonLocation}/bin/python3" src/aw/scripts/check.py'
+        env:
+          CHECK_MODE: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'daily' || 'check' }}
+        run: '"${pythonLocation}/bin/python3" src/aw/scripts/check.py "$CHECK_MODE"'
 
   tokenless:
     name: AW / Tokenless compatibility

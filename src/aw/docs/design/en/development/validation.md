@@ -19,13 +19,8 @@ named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the
 repository-approved `tests/common/mod.rs` convention.
 
-AW/Provider and AW workflow changes run the full AW gate. Tokenless public
-CLI/protocol/runtime/statistics source, Provider protocol/executor source, RTK
-and package-builder inputs, dependency locks and toolchains also select real
-consumer compatibility through scripts/check.py. Ordinary AW runtime, installer,
-documentation and shared-crate test changes retain fixture coverage without a
-real backend build. Preserve Tokenless's independent component CI. Other
-component internals remain in component CI; validate newly consumed contracts explicitly.
+AW and Provider PRs run the shared regression inventory, workspace tests, format and lint checks. Main and release branch pushes and manual checks also run the two-umask package tests and rustdoc. A change confined to Tokenless backend inputs runs the real consumer compatibility job. A mixed change also runs the AW workspace checks.
+
 Keep daily checks credential-free. The nightly integration workflow builds all
 packages once and reuses checksummed candidate-SHA binaries for pinned
 native acceptance. Preserve exact version evidence, bounded processes, complete

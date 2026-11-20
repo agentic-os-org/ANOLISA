@@ -115,6 +115,11 @@ class ScopeTests(GateFixture):
         event["pull_request"]["head"]["sha"] = integration_head
         self.assertTrue(gate.scope("pull_request", event, integration_head, self.root))
 
+    def test_release_tag_requires_both_gates(self) -> None:
+        for compatibility in (False, True):
+            self.assertTrue(gate.scope("push", {"ref": "refs/tags/aw/v1.2.3"},
+                                       "a" * 40, compatibility=compatibility))
+
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
         head = self.commit("other.txt", "no AW change")

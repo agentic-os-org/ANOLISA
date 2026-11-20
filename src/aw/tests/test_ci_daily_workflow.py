@@ -56,8 +56,9 @@ class DailyWorkflowTests(GateFixture):
         self.assertIn("ref: ${{ github.sha }}", required)
         self.assertIn("run: python3 src/aw/scripts/check.py required", required)
         self.assertNotIn("continue-on-error:", required)
-        # Scope checks compare the complete candidate history.
-        self.assertIn("fetch-depth: 0", self.jobs["checks"])
+        # Only scope compares base and head. Workers test the selected checkout.
+        self.assertIn("fetch-depth: 0", self.jobs["scope"])
+        self.assertNotIn("fetch-depth: 0", self.jobs["checks"])
 
     def test_contract_checks_use_a_compatible_trusted_system_python(self) -> None:
         checks = self.jobs["checks"]
@@ -67,7 +68,7 @@ class DailyWorkflowTests(GateFixture):
         self.assertIn('"${pythonLocation}/bin/python3" src/aw/scripts/check.py', checks)
 
     def test_required_accepts_only_selected_success_and_explicit_noop(self) -> None:
-        for selected, tokenless in (("true", "true"), ("true", "false"), ("false", "false")):
+        for selected, tokenless in (("true", "true"), ("true", "false"), ("false", "true"), ("false", "false")):
             states = {"scope": "success", "checks": "success" if selected == "true" else "skipped",
                       "tokenless": "success" if tokenless == "true" else "skipped"}
             with self.subTest(selected=selected, tokenless=tokenless):
