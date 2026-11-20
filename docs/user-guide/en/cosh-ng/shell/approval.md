@@ -10,9 +10,11 @@ Switch with `/mode approval <mode>` or set `shell.approval_mode`.
 
 | Mode | Behavior |
 |------|----------|
-| `recommend` | Explain and suggest only; no tool calls are emitted. |
+| `recommend` | Explains and suggests; no side-effecting tool runs automatically except explicit `allowed_tools` entries; read-only inspection may still run. |
 | `auto` | Default. Eligible read-only or low-risk tools can run automatically; risky, guarded, or external work asks first. |
 | `trust` | Provider tool requests run automatically for this session after explicit confirmation. |
+
+Explicit `agent.allowed_tools` entries take precedence over the mode restrictions.
 
 In `auto` mode, eligible simple read-only commands can suppress stderr with
 `2>/dev/null` or `2>>/dev/null` without an approval card. Spaces after the

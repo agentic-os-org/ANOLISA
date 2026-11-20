@@ -42,7 +42,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalModeUnknownBody => "Unknown approval mode: {mode}",
         MessageId::ApprovalModeUsageFooter => "Use /mode approval recommend|auto|trust.",
         MessageId::ApprovalModeRecommendFooter => {
-            "Agent explains and suggests; no tool calls are emitted."
+            "Agent explains and suggests; no side-effecting tool runs automatically except explicit allowed_tools entries; read-only inspection may still run."
         }
         MessageId::ApprovalModeAutoFooter => {
             "Read-only tools auto-approved; risky requests need confirmation."

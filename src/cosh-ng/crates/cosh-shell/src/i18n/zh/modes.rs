@@ -41,7 +41,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalModeSetBody => "模式已设置为 {mode}。",
         MessageId::ApprovalModeUnknownBody => "未知审批模式: {mode}",
         MessageId::ApprovalModeUsageFooter => "使用 /mode approval recommend|auto|trust。",
-        MessageId::ApprovalModeRecommendFooter => "Agent 只解释和建议；不会发出 tool call。",
+        MessageId::ApprovalModeRecommendFooter => {
+            "Agent 只解释和建议；除显式 allowed_tools 外不自动执行有副作用的工具，只读检查仍可能运行。"
+        }
         MessageId::ApprovalModeAutoFooter => "只读工具会自动批准；高风险请求仍需确认。",
         MessageId::ApprovalModeTrustFooter => {
             "受支持普通工具自动批准并保留审计；未知工具、Hook 要求及高风险例外仍需确认。"

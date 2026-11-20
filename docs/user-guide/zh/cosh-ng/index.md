@@ -108,7 +108,7 @@ Enhanced Assisted 中的常用起始命令如下。
 /session list
 ```
 
-`/auth` 用于选择或更新模型提供商认证，`/help` 查看斜杠命令，`/status` 查看运行时和会话状态，`/mode approval recommend` 在每次 Agent 工具调用前请求确认，`/session list` 列出当前工作区可恢复的会话。
+`/auth` 用于选择或更新模型提供商认证，`/help` 查看斜杠命令，`/status` 查看运行时和会话状态，`/mode approval recommend` 让 Agent 只解释和建议（默认不自动执行有副作用的工具，只读检查仍可能运行，详见[工具审批](shell/approval.md)），`/session list` 列出当前工作区可恢复的会话。
 
 使用 `/session list --all` 可同时列出其他工作区创建的会话；恢复会话时，请先进入创建它的工作区。
 
