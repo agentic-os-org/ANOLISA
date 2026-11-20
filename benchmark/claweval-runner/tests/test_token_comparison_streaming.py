@@ -15,6 +15,7 @@
 import csv
 import importlib.util
 import json
+import subprocess
 import sys
 import tracemalloc
 from pathlib import Path
@@ -79,7 +80,7 @@ def test_counter_golden_values_and_tolerant_lines(
         )
     path.write_bytes(newline.join(lines).encode("utf-8"))
     result = getattr(MODULE, reader)(path)
-    expected = {"assistants": 2, "input": 6, "output": 4}
+    expected = {"assistants": 2, "has_usage_evidence": True, "input": 6, "output": 4}
     if reader == "session_totals":
         expected.update(total=10, cache_read=2, cache_write=4, last_total=5)
     else:
@@ -169,3 +170,76 @@ def test_offline_comparison_csv_contract(
     assert len(rows) == 1
     assert rows[0]["status"] == "ok"
     assert rows[0]["session_input"] == rows[0]["trace_input"] == "3"
+
+
+@pytest.mark.parametrize(
+    ("case", "status"),
+    [
+        ("non-objects", "insufficient_evidence"),
+        ("session-missing-usage", "insufficient_evidence"),
+        ("trace-missing-usage", "insufficient_evidence"),
+        ("partial-usage", "insufficient_evidence"),
+        ("missing-count", "insufficient_evidence"),
+        ("trace-end-only", "insufficient_evidence"),
+        ("zero", "ok"),
+        ("numeric-string-zero", "ok"),
+        ("mismatch", "input"),
+    ],
+)
+def test_cli_compares_only_measured_usage(tmp_path: Path, case: str, status: str) -> None:
+    run = tmp_path / "run-one"
+    sessions = run / "sessions"
+    sessions.mkdir(parents=True)
+    session = {"message": {"role": "assistant", "usage": {"input": 0, "output": 0}}}
+    trace = {
+        "type": "message",
+        "message": {"role": "assistant"},
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+    trace_end = {"type": "trace_end", "model_input_tokens": 0, "model_output_tokens": 0}
+    session_rows: list[Any] = [session]
+    trace_rows: list[Any] = [trace, trace_end]
+    if case == "non-objects":
+        session_rows = trace_rows = [None, [], "non-record", 42, False]
+    elif case == "session-missing-usage":
+        del session["message"]["usage"]
+    elif case == "trace-missing-usage":
+        del trace["usage"]
+    elif case == "partial-usage":
+        session_rows.append({"message": {"role": "assistant"}})
+        trace_rows.insert(1, trace)
+    elif case == "missing-count":
+        del trace["usage"]["output_tokens"]
+    elif case == "trace-end-only":
+        trace_rows = [trace_end]
+    elif case == "numeric-string-zero":
+        session["message"]["usage"] = {"input": "0", "output": "0"}
+    elif case == "mismatch":
+        session["message"]["usage"]["input"] = 1
+
+    (sessions / "trial.session.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
+    )
+    (run / "trial.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in trace_rows), encoding="utf-8"
+    )
+    output = tmp_path / "audit.csv"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(tmp_path), "--detail", "--csv", str(output)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"[{status}] run-one/trial" in result.stdout, result.stdout
+    assert f"  matched: {int(status == 'ok')}\n" in result.stdout
+    insufficient = int(status == "insufficient_evidence")
+    assert f"  insufficient_evidence: {insufficient}\n" in result.stdout
+    with output.open(encoding="utf-8", newline="") as source:
+        row, = csv.DictReader(source)
+    assert row["status"] == status
+    if status == "ok":
+        fields = ("session_input", "session_output", "trace_input", "trace_output")
+        assert [row[field] for field in fields] == ["0"] * 4
