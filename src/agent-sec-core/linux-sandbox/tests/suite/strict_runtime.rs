@@ -340,6 +340,8 @@ fn run_with(
             Stdio::piped(),
         ],
         extra_fds,
+        false,
+        Default::default(),
     )
 }
 
@@ -347,9 +349,15 @@ fn run_with_stdio(
     spec: &ExecutionSpec,
     [stdin, stdout, stderr]: [Stdio; 3],
     extra_fds: &[RawFd],
+    preflight: bool,
+    landlock: asc_sandbox_types::LandlockMode,
 ) -> (Output, Vec<BackendStatus>) {
     let mut input = tempfile::tempfile().unwrap();
-    serde_json::to_writer(&mut input, spec).unwrap();
+    serde_json::to_writer(
+        &mut input,
+        &asc_sandbox_types::LinuxExecutionSpec { spec, landlock },
+    )
+    .unwrap();
     input.flush().unwrap();
     input.seek(SeekFrom::Start(0)).unwrap();
     let mut fds = [0; 2];
@@ -359,6 +367,9 @@ fn run_with_stdio(
     let input_fd = input.as_raw_fd();
     let status_fd = writer.as_raw_fd();
     let mut command = Command::new(env!("CARGO_BIN_EXE_linux-sandbox"));
+    if preflight {
+        command.arg("--preflight-landlock");
+    }
     command.args([
         "--execution-spec-fd",
         &input_fd.to_string(),
@@ -422,6 +433,43 @@ fn collect_inner_profiles(spec: &ExecutionSpec, statuses: &[BackendStatus]) {
             "inner helper coverage profile was not collected"
         );
     }
+}
+
+#[test]
+fn required_preflight_installs_the_rules_without_starting_the_target() {
+    if !enabled() || std::env::var_os("ASC_LANDLOCK_INTEGRATION").is_none() {
+        return;
+    }
+    let work = tempfile::tempdir().unwrap();
+    let input = spec(work.path(), "echo started >> marker");
+    let mode = asc_sandbox_types::LandlockMode::Required;
+    let (output, statuses) = run_with_stdio(
+        &input,
+        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+        &[],
+        true,
+        mode,
+    );
+    assert!(output.status.success(), "{output:?} {statuses:?}");
+    assert!(matches!(
+        statuses.as_slice(),
+        [BackendStatus::InstalledWithLandlock {
+            landlock: asc_sandbox_types::LandlockStatus::Enforced { abi: 3.. }
+        }]
+    ));
+    assert!(!work.path().join("marker").exists());
+    let (output, statuses) = run_with_stdio(
+        &input,
+        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+        &[],
+        false,
+        mode,
+    );
+    assert!(output.status.success(), "{output:?} {statuses:?}");
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("marker")).unwrap(),
+        "started\n"
+    );
 }
 
 #[test]
@@ -990,7 +1038,7 @@ fn strict_runtime_rejects_directory_on_every_standard_descriptor() {
         request.path_facts.push(fact(secret.path()));
         let mut stdio = [Stdio::null(), Stdio::piped(), Stdio::piped()];
         stdio[fd] = Stdio::from(File::open(secret.path()).unwrap());
-        let (output, statuses) = run_with_stdio(&request, stdio, &[]);
+        let (output, statuses) = run_with_stdio(&request, stdio, &[], false, Default::default());
         assert_eq!(output.status.code(), Some(125), "fd {fd}: {statuses:?}");
         assert!(
             matches!(statuses.as_slice(), [BackendStatus::Failed { message }] if message.contains("directory standard I/O")),

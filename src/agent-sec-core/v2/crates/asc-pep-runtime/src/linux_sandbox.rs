@@ -2,8 +2,8 @@
 
 use crate::PepError;
 use asc_sandbox_types::{
-    BackendCapabilities, ExecutionResult, ExecutionSpec, LaunchSpec, OsPermissionSet, PathFact,
-    Validate, ValidationError,
+    BackendCapabilities, BackendSelection, ExecutionResult, ExecutionSpec, LaunchSpec,
+    LinuxSandboxOptions, OsPermissionSet, PathFact, Validate, ValidationError,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -14,12 +14,43 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct LinuxSandboxBackend {
     helper: PathBuf,
+    options: LinuxSandboxOptions,
 }
 
 impl LinuxSandboxBackend {
+    fn check_landlock(&self, mode: asc_sandbox_types::LandlockMode) -> Result<(), PepError> {
+        use asc_sandbox_types::LandlockMode;
+        let mode = match mode {
+            LandlockMode::Off => return Ok(()),
+            LandlockMode::Auto => "auto",
+            LandlockMode::Required => "required",
+        };
+        let reply = std::process::Command::new(&self.helper)
+            .args(["--check-landlock", mode])
+            .env_clear()
+            .output()?;
+        if !reply.status.success() || reply.stdout != b"landlock-write-v1\n" {
+            return Err(PepError::Unsupported(format!(
+                "Landlock {mode} preflight failed: {}",
+                String::from_utf8_lossy(&reply.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
     /// Uses a specific installed helper, never the target's PATH or environment.
     pub fn new(helper: PathBuf) -> Self {
-        Self { helper }
+        Self {
+            helper,
+            options: LinuxSandboxOptions::default(),
+        }
+    }
+
+    /// Pin the deployment settings for both preflight and execution.
+    #[must_use]
+    pub fn with_options(mut self, options: LinuxSandboxOptions) -> Self {
+        self.options = options;
+        self
     }
 
     /// Resolves the sibling helper installed with the CLI.
@@ -84,6 +115,7 @@ impl LinuxSandboxBackend {
     /// Rejects malformed input, changed paths, and unsupported helpers.
     pub fn execute_bound(&self, spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
         spec.validate()?;
+        self.check_landlock(self.options.landlock)?;
         for fact in &spec.path_facts {
             if path_fact(Path::new(&fact.path))? != *fact {
                 return Err(ValidationError::new(
@@ -93,11 +125,15 @@ impl LinuxSandboxBackend {
                 .into());
             }
         }
-        crate::supervisor::run(&self.helper, spec)
+        crate::supervisor::run_with_options(&self.helper, spec, self.options)
     }
 }
 
 impl crate::SandboxBackend for LinuxSandboxBackend {
+    fn selection(&self) -> BackendSelection {
+        BackendSelection::LinuxSandbox(self.options)
+    }
+
     fn capabilities(&self) -> Result<BackendCapabilities, PepError> {
         Self::capabilities(self)
     }
@@ -107,6 +143,11 @@ impl crate::SandboxBackend for LinuxSandboxBackend {
     }
 
     fn preflight(&self, spec: &ExecutionSpec) -> Result<(), PepError> {
+        self.check_landlock(self.options.landlock)?;
+        #[cfg(target_os = "linux")]
+        if self.options.landlock == asc_sandbox_types::LandlockMode::Required {
+            return crate::supervisor::preflight_landlock(&self.helper, spec, self.options);
+        }
         // The bwrap mount plan is backend-specific; other backends validate
         // their own placement inside execute_bound.
         #[cfg(target_os = "linux")]

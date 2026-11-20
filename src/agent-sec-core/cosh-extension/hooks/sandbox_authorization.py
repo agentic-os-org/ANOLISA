@@ -130,13 +130,11 @@ def prepare_authorized(input_data: dict[str, Any], command: str) -> dict[str, An
                 "upgrade Cosh NG to a matching build"
             )
         source = os.environ.get(SOURCE_ENV, "fixed")
-        if source == "fixed":
-            paths = importlib.import_module("sandbox_paths")
-            permissions = getattr(paths, "DEFAULT_PERMISSIONS_TEMPLATE", None)
-            if not isinstance(permissions, str) or not os.path.isabs(permissions):
-                raise ValueError(
-                    "installed sandbox permission template path is invalid"
-                )
+        paths = importlib.import_module("sandbox_paths")
+        permissions = getattr(paths, "DEFAULT_PERMISSIONS_TEMPLATE", None)
+        if not isinstance(permissions, str) or not os.path.isabs(permissions):
+            raise ValueError("installed sandbox permission template path is invalid")
+        landlock_config = os.path.join(os.path.dirname(permissions), "landlock.conf")
         # TODO(sec-core maintainers): Pin prepare/finish to a trusted installed CLI;
         # inherited PATH can select a workspace executable.
         executable = shutil.which("agent-sec-cli")
@@ -177,6 +175,14 @@ def prepare_authorized(input_data: dict[str, Any], command: str) -> dict[str, An
             extra = ["--runtime-permissions", preset]
         elif source != "fixed":
             raise ValueError(f"{SOURCE_ENV} must be fixed or command")
+        # Older CLIs accept the original prepare arguments. Forward every
+        # existing entry (including a dangling symlink) for strict CLI validation.
+        try:
+            os.lstat(landlock_config)
+        except FileNotFoundError:
+            pass
+        else:
+            extra.extend(["--landlock-config", landlock_config])
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             raise ValueError("sandbox authorization time budget exhausted")

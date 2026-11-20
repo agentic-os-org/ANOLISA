@@ -3,8 +3,9 @@
 use crate::{PepError, SandboxBackend, prepare_launch, prepare_path_facts};
 use asc_daemon_protocol::authorization::{
     AcceptedAuthorization, AgentPrincipal, CommandRequest, Decision, DecisionVerdict,
-    ExecutionReceipt, ExecutionResult, ExecutionSpec, FileRight, LaunchSpec, NetworkMode,
-    OsAuthorizationRequest, OsPermissionSet, PathFact, ReceiptAck, RuleEffect, Validate,
+    ExecutionPlan, ExecutionReceipt, ExecutionResult, ExecutionSpec, FileRight, LaunchSpec,
+    NetworkMode, OsAuthorizationRequest, OsPermissionSet, PathFact, ReceiptAck, RuleEffect,
+    Validate,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -259,7 +260,7 @@ impl PepRuntime {
         &self,
         prepared: &PreparedInvocation,
         decision: &Decision,
-    ) -> Result<ExecutionSpec, PepError> {
+    ) -> Result<ExecutionPlan, PepError> {
         verify_binding(&prepared.request, decision, now()?)?;
         let permissions = decision.effective_permissions.as_ref().ok_or_else(|| {
             PepError::Protocol("executable decision lacks effective permissions".into())
@@ -315,7 +316,10 @@ impl PepRuntime {
         };
         decision.validate_execution(&spec)?;
         self.backend.preflight(&spec)?;
-        Ok(spec)
+        Ok(ExecutionPlan {
+            spec,
+            backend: self.backend.selection(),
+        })
     }
 
     /// Accepts a pushed or pulled decision once, before its deadline, for this invocation.
@@ -382,7 +386,7 @@ impl PepRuntime {
         &mut self,
         request: &OsAuthorizationRequest,
         decision: Decision,
-        spec: Result<ExecutionSpec, PepError>,
+        plan: Result<ExecutionPlan, PepError>,
         client: &dyn AuthorizationClient,
         approval: Option<&mut dyn ApprovalHandler>,
         time: u64,
@@ -409,7 +413,13 @@ impl PepRuntime {
             ) {
                 return Err(PepError::Authorization(decision.reason.clone()));
             }
-            let spec = spec?;
+            let plan = plan?;
+            if plan.backend != self.backend.selection() {
+                return Err(PepError::Authorization(
+                    "accepted execution backend or options do not match".into(),
+                ));
+            }
+            let spec = plan.spec;
             decision.validate_execution(&spec)?;
             if decision.verdict == DecisionVerdict::StepUp {
                 let channel = approval.ok_or_else(|| {

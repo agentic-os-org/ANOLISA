@@ -135,6 +135,25 @@ fn bind_parent_lifetime(command: &mut Command) {
 /// Malformed descriptors and unsupported setup fail before target execution.
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|s| s == "--check-landlock") {
+        let result = match args.get(2).map(String::as_str) {
+            Some(mode) if args.len() == 3 => mode
+                .parse()
+                .map_err(unsupported)
+                .and_then(crate::landlock::check),
+            _ => Err(unsupported("expected --check-landlock MODE")),
+        };
+        return Some(match result {
+            Ok(_) => {
+                println!("landlock-write-v1");
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                125
+            }
+        });
+    }
     if args.get(1).is_some_and(|s| s == "--capabilities") {
         let result = capabilities().and_then(|capabilities| {
             serde_json::to_writer(std::io::stdout(), &capabilities)
@@ -151,10 +170,15 @@ pub fn try_run() -> Option<i32> {
         });
     }
     let inner = args.get(1).is_some_and(|s| s == "--strict-inner");
-    if !inner && args.get(1).is_none_or(|s| s != "--execution-spec-fd") {
+    let preflight = args.get(1).is_some_and(|s| s == "--preflight-landlock");
+    if !inner && !preflight && args.get(1).is_none_or(|s| s != "--execution-spec-fd") {
         return None;
     }
-    let options = if inner { &args[2..] } else { &args[1..] };
+    let options = if inner || preflight {
+        &args[2..]
+    } else {
+        &args[1..]
+    };
     let parsed = parse_fds(options);
     let (spec_fd, status_fd) = match parsed {
         Ok(fds) => fds,
@@ -202,11 +226,12 @@ pub fn try_run() -> Option<i32> {
             verify_installed_mounts(&launch.mounts)?;
             run_inner(&launch, &mut status)
         } else {
-            let spec: ExecutionSpec = serde_json::from_slice(&bytes)
+            let input: asc_sandbox_types::LinuxExecutionSpec = serde_json::from_slice(&bytes)
                 .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
+            let spec = input.spec;
             spec.validate()
                 .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
-            run_outer(&spec, &mut status)
+            run_outer(&spec, &mut status, preflight, input.landlock)
         }
     })();
     match result {
@@ -784,19 +809,26 @@ fn capabilities() -> Result<BackendCapabilities> {
     })
 }
 
-fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
+fn run_outer(
+    spec: &ExecutionSpec,
+    status: &mut File,
+    preflight: bool,
+    landlock: asc_sandbox_types::LandlockMode,
+) -> Result<i32> {
     validate_stdio()?;
     let helper = checked_helper()?;
     let prepared = prepare(spec)?;
     let bwrap = checked_bwrap()?;
-    if !prepared.root_writable && prepared.mounts.iter().any(|mount| mount.write) {
+    if !preflight && !prepared.root_writable && prepared.mounts.iter().any(|mount| mount.write) {
         // A failed diagnostic write must not reject an otherwise valid invocation.
         let _ = writeln!(
             std::io::stderr(),
             "linux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing"
         );
     }
-    let (mut command, preserved) = bwrap_command(spec, status, helper, prepared, bwrap)?;
+    let layer = crate::landlock::select(landlock)?;
+    let (mut command, preserved) =
+        bwrap_command(spec, status, helper, prepared, bwrap, preflight, layer)?;
     let mut keep: BTreeSet<RawFd> = preserved.iter().map(AsRawFd::as_raw_fd).collect();
     keep.insert(status.as_raw_fd());
     close_unlisted_fds(&keep)?;
@@ -821,8 +853,10 @@ fn bwrap_command(
     spec: &ExecutionSpec,
     status: &File,
     helper: File,
-    prepared: Prepared,
+    mut prepared: Prepared,
     bwrap: &str,
+    preflight: bool,
+    mut landlock: Option<crate::landlock::WriteLayer>,
 ) -> Result<(Command, Vec<File>)> {
     let mut command = Command::new(bwrap);
     command.env_clear().args([
@@ -844,7 +878,28 @@ fn bwrap_command(
     if spec.permissions.network.mode == NetworkMode::Off {
         command.arg("--unshare-net");
     }
+    if let Some(crate::landlock::WriteLayer::Install { grants, .. }) = &mut landlock {
+        for mount in prepared.mounts.iter().filter(|mount| mount.write) {
+            let metadata = mount.source.metadata()?;
+            grants.push(crate::landlock::WriteGrant {
+                path: mount.path.clone(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            });
+        }
+    }
+    if preflight {
+        // Keep the real Landlock grants, but make every host bind read-only before
+        // bubblewrap sets up nested mountpoints. A missing destination under a
+        // host bind must fail instead of creating an entry before approval.
+        for mount in &mut prepared.mounts {
+            mount.write = false;
+        }
+        prepared.root_writable = false;
+    }
     let inner = InnerLaunch {
+        preflight,
+        landlock,
         launch: spec.launch.clone(),
         network: spec.permissions.network.mode,
         noexec: prepared.noexec.clone(),
@@ -966,6 +1021,8 @@ fn append_mounts(
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InnerLaunch {
+    preflight: bool,
+    landlock: Option<crate::landlock::WriteLayer>,
     launch: asc_sandbox_types::LaunchSpec,
     network: NetworkMode,
     noexec: Vec<String>,
@@ -1124,7 +1181,18 @@ fn run_inner(spec: &InnerLaunch, status: &mut File) -> Result<i32> {
     }
     crate::seccomp::apply_strict_restrictions(spec.network == NetworkMode::Full)?;
     close_unlisted_fds(&BTreeSet::from([status.as_raw_fd()]))?;
-    emit(status, &BackendStatus::Installed)?;
+    let installed = match &spec.landlock {
+        Some(layer) => BackendStatus::InstalledWithLandlock {
+            landlock: layer.install()?,
+        },
+        None => BackendStatus::Installed,
+    };
+    emit(status, &installed)?;
+    // A pre-approval rehearsal ends in this PID namespace. Only the later
+    // execution handoff may start the target, after installing its own rules.
+    if spec.preflight {
+        return Ok(0);
+    }
     let mut target = Command::new(&spec.launch.resolved_program);
     target
         .arg0(&spec.launch.program)
@@ -1587,6 +1655,54 @@ mod tests {
     }
 
     #[test]
+    fn preflight_uses_readonly_binds_even_for_a_writable_root() {
+        let (_dir, mut spec) = fixture();
+        spec.permissions.filesystem.rules.push(
+            serde_json::from_value(serde_json::json!({
+                "effect":"allow", "path":"/", "rights":["read","write"]
+            }))
+            .unwrap(),
+        );
+        spec.path_facts.push(fact(Path::new("/")));
+        for preflight in [true, false] {
+            let plan = prepare(&spec).unwrap();
+            let binds = plan.mounts.len();
+            let layer = crate::landlock::WriteLayer::Install {
+                abi: 3,
+                grants: vec![],
+            };
+            let (command, files) = bwrap_command(
+                &spec,
+                &tempfile::tempfile().unwrap(),
+                tempfile::tempfile().unwrap(),
+                plan,
+                "bwrap",
+                preflight,
+                Some(layer),
+            )
+            .unwrap();
+            let args: Vec<_> = command.get_args().collect();
+            let bind_flag = if preflight {
+                "--ro-bind-fd"
+            } else {
+                "--bind-fd"
+            };
+            assert_eq!(args.iter().filter(|arg| **arg == bind_flag).count(), binds);
+            assert_eq!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--remount-ro" && pair[1] == "/"),
+                preflight
+            );
+            let inner: InnerLaunch = serde_json::from_reader(files.last().unwrap()).unwrap();
+            let Some(crate::landlock::WriteLayer::Install { grants, .. }) = inner.landlock else {
+                panic!("expected the requested write layer");
+            };
+            assert_eq!(grants.len(), binds);
+            assert!(grants.iter().any(|grant| grant.path == spec.launch.cwd));
+        }
+    }
+
+    #[test]
     fn installed_view_rejects_changed_ancestor_before_start() {
         if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_none() {
             return;
@@ -1627,6 +1743,8 @@ mod tests {
             File::open(helper).unwrap(),
             prepared,
             checked_bwrap().unwrap(),
+            false,
+            None,
         )
         .unwrap();
         assert!(!command.get_args().any(|arg| arg == "--chmod"));

@@ -5,6 +5,7 @@ import json
 import shlex
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,13 @@ CANDIDATE = {
 
 @pytest.fixture
 def dynamic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+    monkeypatch.setitem(
+        sys.modules,
+        "sandbox_paths",
+        SimpleNamespace(
+            DEFAULT_PERMISSIONS_TEMPLATE=str(tmp_path / "permissions.json.template")
+        ),
+    )
     monkeypatch.setenv(bridge.SOURCE_ENV, "command")
     monkeypatch.setenv(bridge.RUNTIME_ENV, str(tmp_path / "runtime.cedar"))
     monkeypatch.delenv("AGENT_SEC_COSH_SANDBOX_PERMISSIONS", raising=False)
@@ -69,10 +77,17 @@ def authorized(decision: str = "allow") -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("decision", ["allow", "ask", "block"])
+@pytest.mark.parametrize("configured", [False, True])
 def test_candidate_uses_same_command_cwd_and_private_cleaned_file(
-    dynamic: dict[str, str], monkeypatch: pytest.MonkeyPatch, decision: str
+    dynamic: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+    configured: bool,
 ) -> None:
     calls, paths = [], []
+    mode_file = Path(dynamic["cwd"]) / "landlock.conf"
+    if configured:
+        mode_file.write_text("required\n")
     command = "printf '%s' '$secret'; python3 run.py"
 
     def run(args: list[str], **kwargs: Any) -> SimpleNamespace:
@@ -92,6 +107,10 @@ def test_candidate_uses_same_command_cwd_and_private_cleaned_file(
         assert path.read_text() == ""
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert "--runtime-permissions" in args
+        if configured:
+            assert args[args.index("--landlock-config") + 1] == str(mode_file)
+        else:
+            assert "--landlock-config" not in args
         assert kwargs["timeout"] <= bridge.PREPARE_TIMEOUT
         return response(authorized(decision))
 

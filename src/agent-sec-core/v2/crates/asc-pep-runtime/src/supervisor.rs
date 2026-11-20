@@ -1,16 +1,39 @@
 //! Supervises the helper process group and verifies its installation handshake.
 
 use crate::PepError;
-use asc_sandbox_types::{ExecutionResult, ExecutionSpec};
+use asc_sandbox_types::{ExecutionResult, ExecutionSpec, LinuxSandboxOptions};
 use std::path::Path;
 
 /// Waits for the isolated process tree without changing host signal handlers.
 ///
 /// # Errors
 /// Returns errors before spawn or for malformed helper output.
-#[cfg(target_os = "linux")]
 pub fn run(helper: &Path, spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
-    linux::run(helper, spec)
+    run_with_options(helper, spec, LinuxSandboxOptions::default())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn run_with_options(
+    helper: &Path,
+    spec: &ExecutionSpec,
+    options: LinuxSandboxOptions,
+) -> Result<ExecutionResult, PepError> {
+    linux::run(helper, spec, options, false)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn preflight_landlock(
+    helper: &Path,
+    spec: &ExecutionSpec,
+    options: LinuxSandboxOptions,
+) -> Result<(), PepError> {
+    let result = linux::run(helper, spec, options, true)?;
+    if let Some(error) = result.error {
+        return Err(PepError::Unsupported(format!(
+            "Landlock required preflight failed: {error}"
+        )));
+    }
+    Ok(())
 }
 
 /// Linux namespace enforcement is unavailable on other operating systems.
@@ -18,13 +41,17 @@ pub fn run(helper: &Path, spec: &ExecutionSpec) -> Result<ExecutionResult, PepEr
 /// # Errors
 /// Always returns unsupported; never executes without isolation.
 #[cfg(not(target_os = "linux"))]
-pub fn run(_helper: &Path, _spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
+pub(crate) fn run_with_options(
+    _helper: &Path,
+    _spec: &ExecutionSpec,
+    _options: LinuxSandboxOptions,
+) -> Result<ExecutionResult, PepError> {
     Err(PepError::Unsupported("linux-sandbox requires Linux".into()))
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{ExecutionResult, ExecutionSpec, Path, PepError};
+    use super::{ExecutionResult, ExecutionSpec, LinuxSandboxOptions, Path, PepError};
     use asc_sandbox_types::BackendStatus;
     use rustix::fs::{MemfdFlags, SealFlags};
     use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -42,14 +69,26 @@ mod linux {
 
     #[derive(Default)]
     struct Handshake {
+        landlock: asc_sandbox_types::LandlockMode,
         result: ExecutionResult,
         exited: bool,
     }
     impl Handshake {
         fn accept(&mut self, message: Result<BackendStatus, String>) {
             match message {
-                Ok(BackendStatus::Installed) if !self.result.installed && !self.exited => {
+                Ok(BackendStatus::Installed)
+                    if self.landlock.is_off() && !self.result.installed && !self.exited =>
+                {
                     self.result.installed = true;
+                }
+                Ok(BackendStatus::InstalledWithLandlock { landlock })
+                    if !self.result.installed
+                        && !self.exited
+                        && landlock.satisfies(self.landlock) =>
+                {
+                    self.result.installed = true;
+                    self.result.evidence =
+                        asc_sandbox_types::BackendEvidence::LinuxSandbox { landlock };
                 }
                 Ok(BackendStatus::Started)
                     if self.result.installed && !self.result.started && !self.exited =>
@@ -71,14 +110,24 @@ mod linux {
         }
     }
 
-    pub(super) fn run(helper: &Path, spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
+    pub(super) fn run(
+        helper: &Path,
+        spec: &ExecutionSpec,
+        options: LinuxSandboxOptions,
+        preflight: bool,
+    ) -> Result<ExecutionResult, PepError> {
         let fd = rustix::fs::memfd_create(
             "asc-execution",
             MemfdFlags::ALLOW_SEALING | MemfdFlags::CLOEXEC,
         )
         .map_err(io)?;
         let mut input = File::from(fd);
-        input.write_all(&serde_json::to_vec(spec)?)?;
+        input.write_all(&serde_json::to_vec(
+            &asc_sandbox_types::LinuxExecutionSpec {
+                spec,
+                landlock: options.landlock,
+            },
+        )?)?;
         input.rewind()?;
         rustix::fs::fcntl_add_seals(
             &input,
@@ -93,6 +142,9 @@ mod linux {
             || std::io::stdout().is_terminal()
             || std::io::stderr().is_terminal();
         let mut command = Command::new(helper);
+        if preflight {
+            command.arg("--preflight-landlock");
+        }
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -118,7 +170,10 @@ mod linux {
             .ok_or_else(|| PepError::Protocol("invalid helper PID".into()))?;
         let (sender, receiver) = mpsc::channel();
         let reader = std::thread::spawn(move || read_status(File::from(read_fd), &sender));
-        let mut handshake = Handshake::default();
+        let mut handshake = Handshake {
+            landlock: options.landlock,
+            ..Handshake::default()
+        };
         let outcome = wait(&mut child, pid, terminal, &receiver, &mut handshake);
         if outcome.is_err() {
             terminate(pid, terminal);
@@ -130,7 +185,14 @@ mod linux {
             handshake.accept(message);
         }
         let monitor = outcome?;
-        if handshake.result.error.is_none() {
+        if preflight {
+            if handshake.result.error.is_none()
+                && !(monitor.success() && handshake.result.installed && !handshake.result.started)
+            {
+                handshake.result.error =
+                    Some("missing successful installation-only handshake".into());
+            }
+        } else if handshake.result.error.is_none() {
             if let Some(signal) = monitor.signal() {
                 handshake.result.cancel_signal.get_or_insert(signal);
             }

@@ -121,9 +121,17 @@ def test_sandbox_guard_registers_only_the_cosh_ng_lifecycle_events() -> None:
 
 
 @pytest.mark.parametrize("decision", ["allow", "ask", "block"])
+@pytest.mark.parametrize("config", ["missing", "regular", "dangling"])
 def test_authorization_preserves_native_decision_without_executing(
-    monkeypatch, decision
+    monkeypatch, tmp_path, decision, config
 ):
+    template = tmp_path / "permissions.json.template"
+    monkeypatch.setattr(paths, "DEFAULT_PERMISSIONS_TEMPLATE", str(template))
+    mode_file = template.with_name("landlock.conf")
+    if config == "regular":
+        mode_file.write_text("required\n")
+    elif config == "dangling":
+        mode_file.symlink_to(tmp_path / "absent")
     output = {
         "decision": decision,
         "reason": "Policy explanation",
@@ -148,6 +156,7 @@ def test_authorization_preserves_native_decision_without_executing(
         "prepare",
         "--permissions",
         paths.DEFAULT_PERMISSIONS_TEMPLATE,
+        *(["--landlock-config", str(mode_file)] if config != "missing" else []),
         "--timeout-ms",
         "5000",
     ]
