@@ -432,8 +432,11 @@ impl GenAIBuilder {
         // path decodes the wire body through `MessageParser`; the pending
         // record has to read the same fields or a drained Qoder call loses
         // its query, model, streaming flag and body session id. The match key
-        // above deliberately keeps the raw wire body, which is what the
-        // completing call computes for the same bytes.
+        // above keeps the raw wire body. For Qoder the completing call hashes
+        // the decoded JSON (`context.request` via `pending_match_key_json`),
+        // so the two keys differ and an idle-drain row is not reconciled with
+        // a later normal completion. This gap predates this change and is left
+        // untouched here.
         let decoded_wire_body = crate::analyzer::message::MessageParser::decode_request_body(
             &request.path,
             request.body(),
@@ -545,19 +548,30 @@ impl GenAIBuilder {
 
         // Extract model from the request body. A Qoder gateway request has no
         // top-level `model`: it names the model under `model_config`, the same
-        // two fields `QoderCliParser::parse_request` reads.
+        // two fields `QoderCliParser::parse_request` reads. Filter each
+        // candidate for empty text before falling back, so a Qoder body with
+        // `model: ""` and a real `key` still resolves to `key` like the live
+        // parser does.
         let model = llm_body
             .and_then(|v| {
-                v.get("model").and_then(|m| m.as_str()).or_else(|| {
-                    v.get("model_config").and_then(|config| {
-                        config
-                            .get("model")
-                            .and_then(|m| m.as_str())
-                            .or_else(|| config.get("key").and_then(|k| k.as_str()))
+                v.get("model")
+                    .and_then(|m| m.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        v.get("model_config").and_then(|config| {
+                            config
+                                .get("model")
+                                .and_then(|m| m.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    config
+                                        .get("key")
+                                        .and_then(|k| k.as_str())
+                                        .filter(|s| !s.is_empty())
+                                })
+                        })
                     })
-                })
             })
-            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
         // Extract provider from request path
@@ -2200,6 +2214,57 @@ mod tests {
         );
         assert!(pending.input_messages.is_some());
         assert!(pending.system_instructions.is_some());
+    }
+
+    /// Qoder gateway bodies carry `model_config: {"model": "", "key": ...}`
+    /// in real traffic (the live `QoderCliParser::parse_request` fixture uses
+    /// this shape). Each model candidate must be filtered for empty text
+    /// before the fallback, otherwise the empty `model` wins and the pending
+    /// record loses the model the live call would report.
+    #[test]
+    fn test_build_pending_from_request_qoder_empty_model_falls_back_to_key() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000002",
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model_config": {"model": "", "key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
+    }
+
+    /// An empty top-level `model` must not shadow the `model_config` fallback
+    /// either, matching `QoderCliParser::parse_request`.
+    #[test]
+    fn test_build_pending_from_request_empty_top_level_model_falls_back() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model": "",
+            "model_config": {"key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
     }
 
     #[test]
