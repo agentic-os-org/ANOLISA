@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-20
+
+### Fixed
+
+- Wait for FUSE readiness and return startup errors for background mounts.
+  Handle the `MountPending` timeout variant in exhaustive `FuseError` matches
+  ([#9913](https://github.com/agentic-os-org/ANOLISA/pull/9913)).
+- Skip `.jsonl` directories when reading chat logs
+  ([#10228](https://github.com/agentic-os-org/ANOLISA/pull/10228)).
+- Group numeric session timestamps by UTC date, including zero, and preserve ISO dates
+  ([#10357](https://github.com/agentic-os-org/ANOLISA/pull/10357)).
+
 ## [0.5.7] - 2026-11-11
 
 ### Fixed

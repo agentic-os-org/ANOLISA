@@ -77,6 +77,10 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/skills/skillfs-mount/
 
 %changelog
+* Fri Nov 20 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.8-1
+- Report background mount readiness, startup errors, and timeouts.
+- Skip chat-log directories and stabilize session usage dates.
+
 * Wed Nov 11 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.7-1
 - Preserve shell instructions across pip-only, wrapped, and multiline commands.
 - Fix live skill discovery, managed process identity, parsing, and usage logs.

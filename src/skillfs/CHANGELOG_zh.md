@@ -9,6 +9,17 @@
 
 ## [未发布]
 
+## [0.5.8] - 2026-11-20
+
+### 修复
+
+- 后台挂载等待 FUSE 就绪并返回启动错误。穷举匹配 `FuseError` 时需处理超时变体 `MountPending`
+  ([#9913](https://github.com/agentic-os-org/ANOLISA/pull/9913))。
+- 读取聊天日志时跳过以 `.jsonl` 结尾的目录
+  ([#10228](https://github.com/agentic-os-org/ANOLISA/pull/10228))。
+- 会话日志中的数字时间戳（含 `0`）按 UTC 日期归类，ISO 时间戳保留原日期
+  ([#10357](https://github.com/agentic-os-org/ANOLISA/pull/10357))。
+
 ## [0.5.7] - 2026-11-11
 
 ### 修复
