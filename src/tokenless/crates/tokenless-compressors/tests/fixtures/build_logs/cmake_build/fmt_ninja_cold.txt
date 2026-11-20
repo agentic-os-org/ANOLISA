@@ -1,0 +1,82 @@
+[1/77] Building CXX object CMakeFiles/fmt-c.dir/src/fmt-c.cc.o
+[2/77] Building CXX object CMakeFiles/fmt.dir/src/os.cc.o
+[3/77] Building CXX object test/CMakeFiles/test-main.dir/test-main.cc.o
+[4/77] Building CXX object test/CMakeFiles/test-main.dir/util.cc.o
+[5/77] Building CXX object test/CMakeFiles/test-main.dir/gtest-extra.cc.o
+[6/77] Building CXX object test/CMakeFiles/args-test.dir/args-test.cc.o
+[7/77] Building CXX object CMakeFiles/fmt.dir/src/format.cc.o
+[8/77] Linking CXX static library libfmt.a
+[9/77] Linking CXX static library libfmt-c.a
+[10/77] Building CXX object test/CMakeFiles/assert-test.dir/assert-test.cc.o
+[11/77] Building CXX object test/CMakeFiles/color-test.dir/color-test.cc.o
+[12/77] Building CXX object test/CMakeFiles/gtest-extra-test.dir/gtest-extra-test.cc.o
+[13/77] Building CXX object test/CMakeFiles/base-test.dir/base-test.cc.o
+[14/77] Building CXX object test/CMakeFiles/format-impl-test.dir/format-impl-test.cc.o
+[15/77] Building CXX object test/CMakeFiles/format-impl-test.dir/header-only-test.cc.o
+[16/77] Building CXX object test/CMakeFiles/format-impl-test.dir/test-main.cc.o
+[17/77] Building CXX object test/CMakeFiles/chrono-test.dir/chrono-test.cc.o
+[18/77] Building CXX object test/CMakeFiles/format-impl-test.dir/gtest-extra.cc.o
+[19/77] Building CXX object test/CMakeFiles/format-test.dir/format-test.cc.o
+[20/77] Building CXX object test/CMakeFiles/format-impl-test.dir/util.cc.o
+[21/77] Building CXX object test/CMakeFiles/format-impl-test.dir/__/src/os.cc.o
+[22/77] Building CXX object test/CMakeFiles/ostream-test.dir/ostream-test.cc.o
+[23/77] Building CXX object test/CMakeFiles/compile-test.dir/compile-test.cc.o
+[24/77] Building CXX object test/CMakeFiles/ranges-test.dir/ranges-odr-test.cc.o
+[25/77] Building CXX object test/CMakeFiles/ranges-test.dir/ranges-test.cc.o
+[26/77] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/test-main.cc.o
+[27/77] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/no-builtin-types-test.cc.o
+[28/77] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/util.cc.o
+[29/77] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/gtest-extra.cc.o
+[30/77] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/__/src/os.cc.o
+[31/77] Building CXX object test/CMakeFiles/scan-test.dir/test-main.cc.o
+[32/77] Building CXX object test/CMakeFiles/scan-test.dir/scan-test.cc.o
+[33/77] Building CXX object test/CMakeFiles/scan-test.dir/gtest-extra.cc.o
+[34/77] Building CXX object test/CMakeFiles/printf-test.dir/printf-test.cc.o
+[35/77] Building CXX object test/CMakeFiles/scan-test.dir/util.cc.o
+[36/77] Building CXX object test/CMakeFiles/scan-test.dir/__/src/os.cc.o
+[37/77] Building CXX object test/CMakeFiles/unicode-test.dir/test-main.cc.o
+[38/77] Building CXX object test/CMakeFiles/unicode-test.dir/unicode-test.cc.o
+[39/77] Building CXX object test/CMakeFiles/std-test.dir/std-test.cc.o
+[40/77] Building CXX object test/CMakeFiles/unicode-test.dir/gtest-extra.cc.o
+[41/77] Building CXX object test/CMakeFiles/unicode-test.dir/util.cc.o
+[42/77] Building CXX object test/CMakeFiles/unicode-test.dir/__/src/os.cc.o
+[43/77] Building CXX object test/CMakeFiles/perf-sanity.dir/perf-sanity.cc.o
+[44/77] Linking CXX executable bin/perf-sanity
+[45/77] Building CXX object test/CMakeFiles/posix-mock-test.dir/posix-mock-test.cc.o
+[46/77] Building CXX object test/CMakeFiles/enforce-checks-test.dir/enforce-checks-test.cc.o
+[47/77] Building CXX object test/CMakeFiles/posix-mock-test.dir/test-main.cc.o
+[48/77] Building CXX object test/CMakeFiles/posix-mock-test.dir/gtest-extra.cc.o
+[49/77] Building CXX object test/CMakeFiles/posix-mock-test.dir/util.cc.o
+[50/77] Building CXX object test/CMakeFiles/posix-mock-test.dir/__/src/format.cc.o
+[51/77] Building C object test/CMakeFiles/c-test.dir/c-test.c.o
+In file included from /work/source/test/c-test.c:8:
+/work/source/include/fmt/fmt-c.h: In function ‘fmt_from_int’:
+/work/source/include/fmt/fmt-c.h:59:1: note: the ABI of passing union with ‘long double’ has changed in GCC 4.4
+   59 | static inline fmt_arg fmt_from_int(long long x) {
+      | ^~~~~~
+[52/77] Linking CXX executable bin/c-test
+[53/77] Building CXX object test/CMakeFiles/os-test.dir/os-test.cc.o
+[54/77] Building CXX object test/CMakeFiles/xchar-test.dir/xchar-test.cc.o
+[55/77] Building CXX object test/gtest/CMakeFiles/gtest.dir/gmock-gtest-all.cc.o
+[56/77] Linking CXX static library test/gtest/libgtest.a
+[57/77] Linking CXX static library test/libtest-main.a
+[58/77] Linking CXX executable bin/format-impl-test
+[59/77] Linking CXX executable bin/no-builtin-types-test
+[60/77] Linking CXX executable bin/args-test
+[61/77] Linking CXX executable bin/assert-test
+[62/77] Linking CXX executable bin/base-test
+[63/77] Linking CXX executable bin/chrono-test
+[64/77] Linking CXX executable bin/color-test
+[65/77] Linking CXX executable bin/gtest-extra-test
+[66/77] Linking CXX executable bin/format-test
+[67/77] Linking CXX executable bin/ostream-test
+[68/77] Linking CXX executable bin/compile-test
+[69/77] Linking CXX executable bin/ranges-test
+[70/77] Linking CXX executable bin/printf-test
+[71/77] Linking CXX executable bin/scan-test
+[72/77] Linking CXX executable bin/std-test
+[73/77] Linking CXX executable bin/unicode-test
+[74/77] Linking CXX executable bin/enforce-checks-test
+[75/77] Linking CXX executable bin/posix-mock-test
+[76/77] Linking CXX executable bin/xchar-test
+[77/77] Linking CXX executable bin/os-test

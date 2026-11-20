@@ -1,0 +1,43 @@
+[1/43] Building C object CMakeFiles/brotlicommon.dir/c/common/constants.c.o
+[2/43] Building C object CMakeFiles/brotlicommon.dir/c/common/context.c.o
+[3/43] Building C object CMakeFiles/brotlicommon.dir/c/common/platform.c.o
+[4/43] Building C object CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o
+[5/43] Building C object CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o
+[6/43] Building C object CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o
+[7/43] Building C object CMakeFiles/brotlicommon.dir/c/common/transform.c.o
+[8/43] Linking C shared library libbrotlicommon.so.1.2.1
+[9/43] Creating library symlink libbrotlicommon.so.1 libbrotlicommon.so
+[10/43] Building C object CMakeFiles/brotlidec.dir/c/dec/prefix.c.o
+[11/43] Building C object CMakeFiles/brotlidec.dir/c/dec/huffman.c.o
+[12/43] Building C object CMakeFiles/brotlidec.dir/c/dec/state.c.o
+[13/43] Building C object CMakeFiles/brotlidec.dir/c/dec/static_init.c.o
+[14/43] Building C object CMakeFiles/brotlidec.dir/c/dec/decode.c.o
+[15/43] Linking C shared library libbrotlidec.so.1.2.1
+[16/43] Creating library symlink libbrotlidec.so.1 libbrotlidec.so
+[17/43] Building C object CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o
+[18/43] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o
+[19/43] Building C object CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o
+[20/43] Building C object CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o
+[21/43] Building C object CMakeFiles/brotlienc.dir/c/enc/command.c.o
+[22/43] Building C object CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o
+[23/43] Building C object CMakeFiles/brotlienc.dir/c/enc/cluster.c.o
+[24/43] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o
+[25/43] Building C object CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o
+[26/43] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o
+[27/43] Building C object CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o
+[28/43] Building C object CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o
+[29/43] Building C object CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o
+[30/43] Building C object CMakeFiles/brotlienc.dir/c/enc/encode.c.o
+[31/43] Building C object CMakeFiles/brotlienc.dir/c/enc/histogram.c.o
+[32/43] Building C object CMakeFiles/brotlienc.dir/c/enc/memory.c.o
+[33/43] Building C object CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o
+[34/43] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o
+[35/43] Building C object CMakeFiles/brotlienc.dir/c/enc/metablock.c.o
+[36/43] Building C object CMakeFiles/brotlienc.dir/c/enc/static_init.c.o
+[37/43] Building C object CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o
+[38/43] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o
+[39/43] Building C object CMakeFiles/brotli.dir/c/tools/brotli.c.o
+[40/43] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o
+[41/43] Linking C shared library libbrotlienc.so.1.2.1
+[42/43] Creating library symlink libbrotlienc.so.1 libbrotlienc.so
+[43/43] Linking C executable brotli

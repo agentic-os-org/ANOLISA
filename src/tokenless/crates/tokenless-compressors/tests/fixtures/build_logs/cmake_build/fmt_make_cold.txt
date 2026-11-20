@@ -1,0 +1,108 @@
+[  1%] Building CXX object test/gtest/CMakeFiles/gtest.dir/gmock-gtest-all.cc.o
+[  2%] Building CXX object CMakeFiles/fmt.dir/src/format.cc.o
+[  3%] Building CXX object CMakeFiles/fmt.dir/src/os.cc.o
+[  5%] Linking CXX static library libfmt.a
+[  5%] Built target fmt
+[  6%] Building CXX object CMakeFiles/fmt-c.dir/src/fmt-c.cc.o
+[  7%] Linking CXX static library libfmt-c.a
+[  7%] Built target fmt-c
+[  9%] Building CXX object test/CMakeFiles/perf-sanity.dir/perf-sanity.cc.o
+[ 10%] Linking CXX executable ../bin/perf-sanity
+[ 10%] Built target perf-sanity
+[ 11%] Building C object test/CMakeFiles/c-test.dir/c-test.c.o
+In file included from /work/source/test/c-test.c:8:
+/work/source/include/fmt/fmt-c.h: In function ‘fmt_from_int’:
+/work/source/include/fmt/fmt-c.h:59:1: note: the ABI of passing union with ‘long double’ has changed in GCC 4.4
+   59 | static inline fmt_arg fmt_from_int(long long x) {
+      | ^~~~~~
+[ 12%] Linking CXX executable ../bin/c-test
+[ 12%] Built target c-test
+[ 14%] Linking CXX static library libgtest.a
+[ 14%] Built target gtest
+[ 15%] Building CXX object test/CMakeFiles/test-main.dir/test-main.cc.o
+[ 16%] Building CXX object test/CMakeFiles/format-impl-test.dir/format-impl-test.cc.o
+[ 18%] Building CXX object test/CMakeFiles/test-main.dir/gtest-extra.cc.o
+[ 19%] Building CXX object test/CMakeFiles/test-main.dir/util.cc.o
+[ 20%] Linking CXX static library libtest-main.a
+[ 20%] Built target test-main
+[ 22%] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/no-builtin-types-test.cc.o
+[ 23%] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/test-main.cc.o
+[ 24%] Building CXX object test/CMakeFiles/format-impl-test.dir/header-only-test.cc.o
+[ 25%] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/gtest-extra.cc.o
+[ 27%] Building CXX object test/CMakeFiles/format-impl-test.dir/test-main.cc.o
+[ 28%] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/util.cc.o
+[ 29%] Building CXX object test/CMakeFiles/format-impl-test.dir/gtest-extra.cc.o
+[ 31%] Building CXX object test/CMakeFiles/no-builtin-types-test.dir/__/src/os.cc.o
+[ 32%] Building CXX object test/CMakeFiles/format-impl-test.dir/util.cc.o
+[ 33%] Linking CXX executable ../bin/no-builtin-types-test
+[ 33%] Built target no-builtin-types-test
+[ 35%] Building CXX object test/CMakeFiles/scan-test.dir/scan-test.cc.o
+[ 36%] Building CXX object test/CMakeFiles/format-impl-test.dir/__/src/os.cc.o
+[ 37%] Linking CXX executable ../bin/format-impl-test
+[ 37%] Built target format-impl-test
+[ 38%] Building CXX object test/CMakeFiles/std-test.dir/std-test.cc.o
+[ 40%] Building CXX object test/CMakeFiles/scan-test.dir/test-main.cc.o
+[ 41%] Building CXX object test/CMakeFiles/scan-test.dir/gtest-extra.cc.o
+[ 42%] Building CXX object test/CMakeFiles/scan-test.dir/util.cc.o
+[ 44%] Linking CXX executable ../bin/std-test
+[ 44%] Built target std-test
+[ 45%] Building CXX object test/CMakeFiles/unicode-test.dir/unicode-test.cc.o
+[ 46%] Building CXX object test/CMakeFiles/scan-test.dir/__/src/os.cc.o
+[ 48%] Building CXX object test/CMakeFiles/unicode-test.dir/test-main.cc.o
+[ 49%] Building CXX object test/CMakeFiles/unicode-test.dir/gtest-extra.cc.o
+[ 50%] Linking CXX executable ../bin/scan-test
+[ 50%] Built target scan-test
+[ 51%] Building CXX object test/CMakeFiles/xchar-test.dir/xchar-test.cc.o
+[ 53%] Building CXX object test/CMakeFiles/unicode-test.dir/util.cc.o
+[ 54%] Building CXX object test/CMakeFiles/unicode-test.dir/__/src/os.cc.o
+[ 55%] Linking CXX executable ../bin/unicode-test
+[ 55%] Built target unicode-test
+[ 57%] Building CXX object test/CMakeFiles/enforce-checks-test.dir/enforce-checks-test.cc.o
+[ 58%] Linking CXX executable ../bin/xchar-test
+[ 58%] Built target xchar-test
+[ 59%] Building CXX object test/CMakeFiles/posix-mock-test.dir/posix-mock-test.cc.o
+[ 61%] Linking CXX executable ../bin/enforce-checks-test
+[ 61%] Built target enforce-checks-test
+[ 62%] Building CXX object test/CMakeFiles/os-test.dir/os-test.cc.o
+[ 63%] Building CXX object test/CMakeFiles/posix-mock-test.dir/__/src/format.cc.o
+[ 64%] Linking CXX executable ../bin/os-test
+[ 64%] Built target os-test
+[ 66%] Building CXX object test/CMakeFiles/posix-mock-test.dir/test-main.cc.o
+[ 67%] Building CXX object test/CMakeFiles/posix-mock-test.dir/gtest-extra.cc.o
+[ 68%] Building CXX object test/CMakeFiles/posix-mock-test.dir/util.cc.o
+[ 70%] Building CXX object test/CMakeFiles/args-test.dir/args-test.cc.o
+[ 71%] Linking CXX executable ../bin/posix-mock-test
+[ 71%] Built target posix-mock-test
+[ 72%] Building CXX object test/CMakeFiles/base-test.dir/base-test.cc.o
+[ 74%] Linking CXX executable ../bin/args-test
+[ 74%] Built target args-test
+[ 75%] Building CXX object test/CMakeFiles/assert-test.dir/assert-test.cc.o
+[ 76%] Linking CXX executable ../bin/assert-test
+[ 76%] Built target assert-test
+[ 77%] Building CXX object test/CMakeFiles/chrono-test.dir/chrono-test.cc.o
+[ 79%] Linking CXX executable ../bin/base-test
+[ 79%] Built target base-test
+[ 80%] Building CXX object test/CMakeFiles/color-test.dir/color-test.cc.o
+[ 81%] Linking CXX executable ../bin/color-test
+[ 81%] Built target color-test
+[ 83%] Building CXX object test/CMakeFiles/gtest-extra-test.dir/gtest-extra-test.cc.o
+[ 84%] Linking CXX executable ../bin/gtest-extra-test
+[ 84%] Built target gtest-extra-test
+[ 85%] Building CXX object test/CMakeFiles/format-test.dir/format-test.cc.o
+[ 87%] Linking CXX executable ../bin/chrono-test
+[ 87%] Built target chrono-test
+[ 88%] Building CXX object test/CMakeFiles/ostream-test.dir/ostream-test.cc.o
+[ 89%] Linking CXX executable ../bin/ostream-test
+[ 89%] Built target ostream-test
+[ 90%] Building CXX object test/CMakeFiles/compile-test.dir/compile-test.cc.o
+[ 92%] Linking CXX executable ../bin/compile-test
+[ 93%] Linking CXX executable ../bin/format-test
+[ 93%] Built target compile-test
+[ 94%] Building CXX object test/CMakeFiles/printf-test.dir/printf-test.cc.o
+[ 94%] Built target format-test
+[ 96%] Building CXX object test/CMakeFiles/ranges-test.dir/ranges-test.cc.o
+[ 97%] Building CXX object test/CMakeFiles/ranges-test.dir/ranges-odr-test.cc.o
+[ 98%] Linking CXX executable ../bin/ranges-test
+[ 98%] Built target ranges-test
+[100%] Linking CXX executable ../bin/printf-test
+[100%] Built target printf-test
