@@ -877,6 +877,29 @@ struct Renderer<'a> {
     lossy: bool,
 }
 
+// Byte offsets belong to one append-only output buffer. Reset both when that
+// buffer is cleared, truncated or rewritten; nested buffers track independently.
+#[derive(Default)]
+struct InlineCodeBoundaries {
+    first_start: Option<usize>,
+    last_end: Option<usize>,
+}
+
+impl InlineCodeBoundaries {
+    // `prefix` is already-rendered text about to be appended before the fence
+    // (empty for a new span). Its own trailing backslashes are already doubled.
+    fn start_span(&mut self, out: &mut String, prefix: &str) {
+        if prefix.is_empty() && self.last_end == Some(out.len()) {
+            out.push_str("<!-- -->");
+        } else if out.ends_with('\\') && prefix.bytes().all(|b| b == b'\\') {
+            // Only the parent's literal run still needs one escape per slash.
+            let backslashes = out.bytes().rev().take_while(|&b| b == b'\\').count();
+            out.extend(std::iter::repeat_n('\\', backslashes));
+        }
+        self.first_start.get_or_insert(out.len() + prefix.len());
+    }
+}
+
 impl<'a> Renderer<'a> {
     fn page(nodes: &'a [Node]) -> Self {
         Self {
@@ -1046,6 +1069,7 @@ impl<'a> Renderer<'a> {
         let mut blocks: Vec<String> = Vec::new();
         let mut inline = String::new();
         let mut inline_open = false;
+        let mut boundaries = InlineCodeBoundaries::default();
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(child, node, in_sectioning) {
@@ -1054,13 +1078,15 @@ impl<'a> Renderer<'a> {
             }
             if self.renders_as_block(child, node) {
                 flush_inline(&mut blocks, &mut inline, &mut inline_open);
+                // Clearing the inline buffer also invalidates its byte offsets.
+                boundaries = InlineCodeBoundaries::default();
                 let child_sectioning = in_sectioning || is_sectioning(node);
                 let rendered = self.block(child, child_sectioning);
                 if !rendered.trim().is_empty() {
                     blocks.push(rendered);
                 }
             } else {
-                self.inline(child, &mut inline, in_sectioning);
+                self.inline(child, &mut inline, in_sectioning, &mut boundaries);
                 inline_open = true;
             }
         }
@@ -1114,7 +1140,12 @@ impl<'a> Renderer<'a> {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let level = node.local_name().as_bytes()[1] - b'0';
                 let mut text = String::new();
-                self.inline_children(id, &mut text, in_sectioning);
+                self.inline_children(
+                    id,
+                    &mut text,
+                    in_sectioning,
+                    &mut InlineCodeBoundaries::default(),
+                );
                 let text = self.collapse_inline_block(&text);
                 if text.is_empty() {
                     return String::new();
@@ -1152,7 +1183,12 @@ impl<'a> Renderer<'a> {
             "hr" => "---".to_owned(),
             "dt" => {
                 let mut text = String::new();
-                self.inline_children(id, &mut text, in_sectioning);
+                self.inline_children(
+                    id,
+                    &mut text,
+                    in_sectioning,
+                    &mut InlineCodeBoundaries::default(),
+                );
                 format!("**{}**", self.collapse_inline_block(&text))
             }
             "dd" => indent(&self.blocks(id, in_sectioning), "  "),
@@ -1191,7 +1227,12 @@ impl<'a> Renderer<'a> {
                     self.block(child, in_sectioning || is_sectioning(child_node))
                 } else {
                     let mut text = String::new();
-                    self.inline(child, &mut text, in_sectioning);
+                    self.inline(
+                        child,
+                        &mut text,
+                        in_sectioning,
+                        &mut InlineCodeBoundaries::default(),
+                    );
                     text.trim().to_owned()
                 };
                 if !rendered.trim().is_empty() {
@@ -1261,7 +1302,12 @@ impl<'a> Renderer<'a> {
                 self.blocks(child, in_sectioning)
             } else {
                 let mut text = String::new();
-                self.inline(child, &mut text, in_sectioning);
+                self.inline(
+                    child,
+                    &mut text,
+                    in_sectioning,
+                    &mut InlineCodeBoundaries::default(),
+                );
                 text.trim().to_owned()
             };
             // An empty item leaves a gap in the numbers, and content
@@ -1315,7 +1361,12 @@ impl<'a> Renderer<'a> {
             match node.local_name() {
                 "caption" => {
                     let mut text = String::new();
-                    self.inline_children(child, &mut text, in_sectioning);
+                    self.inline_children(
+                        child,
+                        &mut text,
+                        in_sectioning,
+                        &mut InlineCodeBoundaries::default(),
+                    );
                     caption = Some(self.collapse_inline_block(&text));
                 }
                 "thead" | "tbody" | "tfoot" => {
@@ -1445,18 +1496,30 @@ impl<'a> Renderer<'a> {
         out.trim_end().to_owned()
     }
 
-    fn inline_children(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline_children(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        boundaries: &mut InlineCodeBoundaries,
+    ) {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(child, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
-            self.inline(child, out, in_sectioning);
+            self.inline(child, out, in_sectioning, boundaries);
         }
     }
 
-    fn inline(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        boundaries: &mut InlineCodeBoundaries,
+    ) {
         if self.depth == MAX_DEPTH {
             self.lossy = true;
             push_collapsed(
@@ -1466,11 +1529,17 @@ impl<'a> Renderer<'a> {
             return;
         }
         self.depth += 1;
-        self.inline_at_depth(id, out, in_sectioning);
+        self.inline_at_depth(id, out, in_sectioning, boundaries);
         self.depth -= 1;
     }
 
-    fn inline_at_depth(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline_at_depth(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        boundaries: &mut InlineCodeBoundaries,
+    ) {
         let node = &self.nodes[id];
         let mut apart = false;
         if let RenderPolicy::Fragment(plan) = self.policy {
@@ -1536,7 +1605,7 @@ impl<'a> Renderer<'a> {
                         out.push(' ');
                     }
                     out.push_str(open);
-                    self.inline_children(id, out, in_sectioning);
+                    self.inline_children(id, out, in_sectioning, boundaries);
                     if let Some(close) = close {
                         out.push_str(close);
                     }
@@ -1562,7 +1631,7 @@ impl<'a> Renderer<'a> {
                         self.count_removals(id, in_sectioning);
                         let _ = write!(out, "${tex}$");
                     }
-                    None => self.inline_children(id, out, in_sectioning),
+                    None => self.inline_children(id, out, in_sectioning, boundaries),
                 }
             }
             NodeKind::Element { .. } => match node.local_name() {
@@ -1591,10 +1660,12 @@ impl<'a> Renderer<'a> {
                 }
                 "a" => {
                     let mut text = String::new();
-                    self.inline_children(id, &mut text, in_sectioning);
-                    let trimmed = text.trim();
-                    // Whitespace at the edges of the link text separates it
-                    // from its neighbours, as `wrapped` keeps it for emphasis.
+                    let mut text_boundaries = InlineCodeBoundaries::default();
+                    self.inline_children(id, &mut text, in_sectioning, &mut text_boundaries);
+                    let from_start = text.trim_start();
+                    let leading = text.len() - from_start.len();
+                    let trimmed = from_start.trim_end();
+                    // Link-edge whitespace separates spans before adjacency is checked.
                     if text.starts_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
@@ -1607,7 +1678,15 @@ impl<'a> Renderer<'a> {
                             let _ =
                                 write!(out, "[{trimmed}]{}", link_tail(&target, title.as_deref()));
                         }
-                        _ => out.push_str(trimmed),
+                        _ => {
+                            if let Some(first) = text_boundaries.first_start {
+                                boundaries.start_span(out, &text[leading..first]);
+                            }
+                            out.push_str(trimmed);
+                            if text_boundaries.last_end == Some(leading + trimmed.len()) {
+                                boundaries.last_end = Some(out.len());
+                            }
+                        }
                     }
                     if text.ends_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
                         out.push(' ');
@@ -1623,10 +1702,10 @@ impl<'a> Renderer<'a> {
                         .map(|line| collapse(line))
                         .filter(|line| !line.is_empty());
                     if let Some(first) = spans.next() {
-                        push_code_span(out, &first);
+                        push_code_span(out, &first, boundaries);
                         for line in spans {
                             out.push('\n');
-                            push_code_span(out, &line);
+                            push_code_span(out, &line, boundaries);
                         }
                     }
                 }
@@ -1637,7 +1716,7 @@ impl<'a> Renderer<'a> {
                     if !out.is_empty() && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
-                    self.inline_children(id, out, in_sectioning);
+                    self.inline_children(id, out, in_sectioning, boundaries);
                     if !out.is_empty() && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
@@ -1653,7 +1732,7 @@ impl<'a> Renderer<'a> {
                         out.push('\n');
                     }
                 }
-                _ => self.inline_children(id, out, in_sectioning),
+                _ => self.inline_children(id, out, in_sectioning, boundaries),
             },
             _ => {}
         }
@@ -1687,7 +1766,12 @@ impl<'a> Renderer<'a> {
 
     fn wrapped(&mut self, id: usize, out: &mut String, marker: &str, in_sectioning: bool) {
         let mut text = String::new();
-        self.inline_children(id, &mut text, in_sectioning);
+        self.inline_children(
+            id,
+            &mut text,
+            in_sectioning,
+            &mut InlineCodeBoundaries::default(),
+        );
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return;
@@ -1943,9 +2027,17 @@ fn span(node: &Node, attr: &str) -> usize {
 /// run in the text, exactly like a code block's. One linear scan finds that
 /// run; probing with `contains` for every prefix length is quadratic in the
 /// run length, which untrusted HTML controls.
-fn push_code_span(out: &mut String, text: &str) {
+fn push_code_span(out: &mut String, text: &str, boundaries: &mut InlineCodeBoundaries) {
+    boundaries.start_span(out, "");
+    // CommonMark strips one padding space from each edge, preserving backticks.
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
     let ticks = "`".repeat(longest_backtick_run(text) + 1);
-    let _ = write!(out, "{ticks}{text}{ticks}");
+    let _ = write!(out, "{ticks}{pad}{text}{pad}{ticks}");
+    boundaries.last_end = Some(out.len());
 }
 
 /// Appends text with HTML whitespace collapsing; a run of whitespace becomes
@@ -1955,6 +2047,7 @@ fn push_code_span(out: &mut String, text: &str) {
 /// rendered into its own buffer (emphasis, link text, a heading) counts as
 /// a line start too; the extra backslash there is harmless.
 fn push_collapsed(out: &mut String, text: &str) {
+    // Literal text backticks remain unescaped, including next to code spans.
     let mut escape_at = None;
     let mut seen_visible = false;
     for (index, c) in text.char_indices() {

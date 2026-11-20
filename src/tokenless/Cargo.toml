@@ -53,6 +53,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 similar = "2"
 pyo3 = "0.24.2"
 tempfile = "3"
+# CommonMark parser for renderer regression tests; not linked into the CLI.
+pulldown-cmark = { version = "0.13", default-features = false }
 # Fetched and patched by packaging/build/setup-rtk.sh; excluded from the
 # members above so workspace-wide fmt, clippy, and tests leave the vendored
 # upstream alone.
