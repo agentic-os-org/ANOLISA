@@ -172,6 +172,57 @@ fn old_helper_cannot_accept_a_required_landlock_handoff() {
 }
 
 #[test]
+fn required_preflight_accepts_only_a_successful_installation_only_handshake() {
+    use asc_sandbox_types::{LandlockMode, LinuxSandboxOptions};
+    let (directory, mut runtime, launch, permissions) = fixture_with_options(LinuxSandboxOptions {
+        landlock: LandlockMode::Required,
+    });
+    let helper = directory.path().join("helper");
+    std::fs::write(
+        &helper,
+        r#"#!/bin/sh
+case "$1" in
+    --capabilities) echo '{"strict_filesystem":true,"noexec":true,"network_off":true}' ;;
+    --check-landlock) echo landlock-write-v1 ;;
+    --preflight-landlock) cat "${0%/*}/frames" > "/proc/self/fd/$5"; exit "$(cat "${0%/*}/code")" ;;
+    *) exit 99 ;;
+esac
+"#,
+    )
+    .unwrap();
+    let client = client(DecisionVerdict::StepUp);
+    let (request, decision) = runtime
+        .authorize(&principal(), launch, &permissions, &client)
+        .unwrap();
+    let installed =
+        r#"{"stage":"installed_with_landlock","landlock":{"state":"enforced","abi":3}}"#;
+    for (frames, code, valid) in [
+        (format!("{installed}\n"), "0", true),
+        (String::new(), "0", false),
+        (format!("{installed}\n"), "2", false),
+        (
+            format!("{installed}\n{{\"stage\":\"started\"}}\n"),
+            "0",
+            false,
+        ),
+    ] {
+        std::fs::write(directory.path().join("frames"), frames).unwrap();
+        std::fs::write(directory.path().join("code"), code).unwrap();
+        let result = runtime.prepare_execution(&request, &decision);
+        if valid {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing successful installation-only handshake")
+            );
+        }
+    }
+}
+
+#[test]
 fn required_installation_failure_precedes_step_up_approval() {
     let (directory, mut runtime, launch, permissions) =
         fixture_with_options(asc_sandbox_types::LinuxSandboxOptions {

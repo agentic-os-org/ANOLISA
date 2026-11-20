@@ -151,6 +151,38 @@ fn collect_inner_profiles(spec: &ExecutionSpec, statuses: &[BackendStatus]) {
 }
 
 #[test]
+fn landlock_probe_distinguishes_protocol_errors_from_kernel_support() {
+    let probe = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_linux-sandbox"))
+            .arg("--check-landlock")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for (args, diagnostic) in [
+        (&[][..], "expected --check-landlock MODE"),
+        (&["unknown"][..], "expected off, auto or required"),
+        (&["off", "extra"][..], "expected --check-landlock MODE"),
+    ] {
+        let reply = probe(args);
+        assert_eq!(reply.status.code(), Some(125));
+        assert!(reply.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&reply.stderr).contains(diagnostic));
+    }
+    assert_eq!(probe(&["off"]).stdout, b"landlock-write-v1\n");
+    if enabled() {
+        let reply = probe(&["auto"]);
+        assert!(reply.status.success(), "{reply:?}");
+        assert_eq!(reply.stdout, b"landlock-write-v1\n");
+    }
+    if std::env::var_os("ASC_LANDLOCK_INTEGRATION").is_some() {
+        let reply = probe(&["required"]);
+        assert!(reply.status.success(), "{reply:?}");
+        assert_eq!(reply.stdout, b"landlock-write-v1\n");
+    }
+}
+
+#[test]
 fn required_preflight_installs_the_rules_without_starting_the_target() {
     if !enabled() || std::env::var_os("ASC_LANDLOCK_INTEGRATION").is_none() {
         return;

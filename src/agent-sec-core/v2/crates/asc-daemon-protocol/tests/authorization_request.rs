@@ -144,3 +144,23 @@ fn execution_receipts_keep_backend_evidence_strict_and_flat() {
     wire["unexpected"] = json!(true);
     assert!(serde_json::from_value::<ExecutionResult>(wire).is_err());
 }
+
+#[test]
+fn linux_installation_evidence_is_valid_only_for_a_compatible_backend() {
+    use asc_daemon_protocol::authorization::{BackendEvidence, BackendSelection, LandlockStatus};
+
+    let enforced = BackendEvidence::LinuxSandbox {
+        landlock: LandlockStatus::Enforced { abi: 3 },
+    };
+    let docker = Some(BackendSelection::Docker {});
+    assert!(BackendEvidence::None.matches_installation(docker, true));
+    assert!(!enforced.matches_installation(docker, true));
+    assert!(enforced.matches_installation(None, true));
+    assert!(!enforced.matches_installation(None, false));
+    let invalid = BackendEvidence::LinuxSandbox {
+        landlock: LandlockStatus::Skipped {
+            reason: String::new(),
+        },
+    };
+    assert!(!invalid.matches_installation(None, true));
+}
