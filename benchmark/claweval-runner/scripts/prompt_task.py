@@ -120,11 +120,13 @@ def _send_prompt(prompt: str, agent_id: str, timeout: int) -> str:
             timeout=api_timeout,
         )
         resp.raise_for_status()
+    except httpx.TimeoutException:
+        # TimeoutException subclasses HTTPError, so this clause has to come
+        # first or every timeout is reported as a generic API failure.
+        log(f"  [ERROR] HTTP API call timed out after {api_timeout}s")
+        return ""
     except httpx.HTTPError as exc:
         log(f"  [ERROR] HTTP API call failed: {exc}")
-        return ""
-    except httpx.TimeoutException:
-        log(f"  [ERROR] HTTP API call timed out after {api_timeout}s")
         return ""
 
     # Locate the session file created by this request
