@@ -153,6 +153,21 @@ default PID namespace. `hostPID: true` / `--pid=host` remains supported but is n
 the enforcer and its target share a container PID namespace. Capture and analysis are unaffected
 by policy-application errors.
 
+Binding installation attempts to adopt pre-existing descendants in at most four passes, then checks coverage read-only.
+The check retains observed PID/start-time identities, including live descendants reparented outside the tree.
+Failed map writes preserve partial inactive state instead of deleting keys a concurrent fork may activate;
+retries reuse identical state only, and conflicting state remains a visible coverage gap.
+Generic file bindings return `Degraded` on missing coverage, map/procfs errors, or PID namespace mismatches.
+The HTTP API redacts `message`; inspect enforcer daemon logs for PID/map/procfs details.
+Credential policy application rejects partial coverage and removes the partial binding. Failed cleanup is
+persisted as `Detaching` for a detach retry; rejected credential intent is not automatically reapplied.
+Cleanup starts only after this intent is stored. If SQLite cannot store it, partial backend protection may
+remain; restore database availability so reconciliation can retry. A storage error is not a cleanup acknowledgement.
+A live child reparented to a subreaper retains its adopted protection. Adoption requires verified initial-namespace procfs PIDs;
+container-local root binding remains supported, but descendant adoption is reported as incomplete.
+Keep the tree quiescent during Apply: this is not atomic isolation. Treat `Degraded` as incomplete protection.
+Quiesce or restart the tree before detaching and applying again; detach temporarily removes protection.
+
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
 

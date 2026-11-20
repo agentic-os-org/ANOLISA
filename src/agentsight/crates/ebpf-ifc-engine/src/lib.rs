@@ -35,6 +35,7 @@ mod file_protection_rename_tests;
 mod file_protection_tree_read_tests;
 #[cfg(test)]
 mod file_protection_write_tests;
+mod process_adoption;
 mod target_identity;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,

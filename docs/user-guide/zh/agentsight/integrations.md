@@ -127,6 +127,20 @@ ActPlane 策略下发支持宿主的初始 PID namespace，也支持容器的默
 当 enforcer 与目标进程共享容器 PID namespace 时，无需设置 `hostPID: true` / `--pid=host`，
 这些 host PID 部署方式仍然受支持。策略下发错误不影响采集与分析。
 
+安装 Binding 时会尝试收养 Apply 前已存在的后代，最多扫描四轮，最后只读核验覆盖。
+核验保留已见 PID/启动时间身份，包括被接管到进程树外的存活后代。
+map 写入失败时保留未激活的部分状态，不删除可能被并发 fork 激活的 key；
+重试只复用相同状态，冲突状态仍明确报告覆盖缺口。
+普通文件 Binding 遇到漏覆盖、map/procfs 错误或 PID namespace 不匹配时返回 `Degraded`。
+HTTP API 会脱敏 `message`；具体 PID/map/procfs 诊断需查看 enforcer 守护进程日志。
+凭据策略下发会拒绝部分覆盖并清理部分 Binding；清理失败时持久化为 `Detaching`，便于重试解除，
+被拒绝的凭据意图不会自动重新 Apply。
+清理只在该意图成功保存后开始；SQLite 写入失败时，后端可能保留部分保护，需要恢复数据库可用性，
+由 reconciliation 重试。存储错误不表示清理已经完成。
+同一存活孩子被 subreaper（接管孤儿进程的祖先进程）接管后保留保护。收养要求验证 procfs 属于初始 PID namespace；
+容器内根进程绑定仍然支持，但后代收养会报告覆盖未完成。Apply 期间需暂停进程树变化，不提供原子隔离保证。
+`Degraded` 表示保护不完整；暂停或重启进程树后，解除并重新 Apply。解除期间保护暂时失效。
+
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
 

@@ -28,11 +28,12 @@ ACTPLANE_POST_0012_BPF_BUILD_BLOB="c3ba506d246d3139b8ee148d942db6ba4159b1b9"
 ACTPLANE_PATCHED_BPF_BUILD_BLOB="5afc700b0d50f7fb6e543ba2130b2208ffc1ecf0"
 ACTPLANE_BASE_BPF_MAKEFILE_BLOB="eddb4267ba5a10e7f94ad64f19323040368813c1"
 ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB="b354320bf25dacc72af1a60419f81ea0a173eb1f"
-ACTPLANE_STAGED_BPF_LIB_BLOB="ca0237ced96ec8440563616cfaf5c9178ca0f29a"
+ACTPLANE_STAGED_BPF_LIB_BLOB="f4fd517aaa98a69dcf5b94319a541665bd16ffa2"
 ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB="b92b9f26d9831f8d06676f71f8eb7e220fa782e5"
 ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB="3e3543dff9a498860029c680cbf6396f63144146"
 ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB="045357084756cfe0dd04e1be27aa4419efe6db5b"
 ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB="ea7b633428af01a056f55436e77a85b3176f14f9"
+ACTPLANE_STAGED_PROCESS_ADOPTION_BLOB="7c58ff5beb88e0bd64ec4de22729c56ee0c1a4f4"
 ACTPLANE_STAGED_BPF_BUILD_BLOB="5afc700b0d50f7fb6e543ba2130b2208ffc1ecf0"
 ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB="9fc5e88912c9e57294a764c58b1bc9147eae3584"
 ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB="ff8025973dd72060d4dec1967c695717da3aa005"
@@ -324,6 +325,7 @@ STAGED_GENERATION_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE
 STAGED_GENERATION_TESTS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_generation_tests.rs")
 STAGED_MAP_WRITER_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_map_writer.rs")
 STAGED_PINNED_MAPS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_pinned_maps.rs")
+STAGED_ADOPTION_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/process_adoption.rs")
 STAGED_TARGET_IDENTITY_RUST_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/target_identity.rs")
 STAGED_TARGET_IDENTITY_C_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/target_identity.bpf.c")
 STAGED_FILE_READ_GUARD_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/file_read_guard.bpf.h")
@@ -336,6 +338,7 @@ if [ "$STAGED_BPF_BUILD_BLOB" != "$ACTPLANE_STAGED_BPF_BUILD_BLOB" ] \
     || [ "$STAGED_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
     || [ "$STAGED_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
     || [ "$STAGED_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$STAGED_ADOPTION_BLOB" != "$ACTPLANE_STAGED_PROCESS_ADOPTION_BLOB" ] \
     || [ "$STAGED_TARGET_IDENTITY_RUST_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB" ] \
     || [ "$STAGED_TARGET_IDENTITY_C_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB" ] \
     || [ "$STAGED_FILE_READ_GUARD_BLOB" != "$ACTPLANE_STAGED_FILE_READ_GUARD_BLOB" ] \
@@ -348,7 +351,7 @@ fi
 for engine_file in process.bpf.c target_identity.bpf.c process.h file_read_guard.bpf.h taint.h taint_engine.bpf.h capability.bpf.h channel.bpf.h; do
     cp "$VENDORED_ENGINE_DIR/$engine_file" "$SOURCE_DIR/bpf/$engine_file"
 done
-for engine_file in lib.rs target_identity.rs file_protection_generation.rs file_protection_generation_tests.rs file_protection_map_writer.rs file_protection_pinned_maps.rs; do
+for engine_file in lib.rs target_identity.rs file_protection_generation.rs file_protection_generation_tests.rs file_protection_map_writer.rs file_protection_pinned_maps.rs process_adoption.rs; do
     cp "$VENDORED_ENGINE_DIR/src/$engine_file" "$SOURCE_DIR/bpf/src/$engine_file"
 done
 cp "$VENDORED_ENGINE_DIR/build.rs" "$SOURCE_DIR/bpf/build.rs"
@@ -378,6 +381,7 @@ ACTUAL_GENERATION_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protectio
 ACTUAL_GENERATION_TESTS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_generation_tests.rs)
 ACTUAL_MAP_WRITER_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_map_writer.rs)
 ACTUAL_PINNED_MAPS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_pinned_maps.rs)
+ACTUAL_ADOPTION_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/process_adoption.rs)
 ACTUAL_TARGET_IDENTITY_RUST_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/target_identity.rs)
 ACTUAL_TARGET_IDENTITY_C_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/target_identity.bpf.c)
 ACTUAL_FILE_READ_GUARD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/file_read_guard.bpf.h)
@@ -389,6 +393,7 @@ if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
     || [ "$ACTUAL_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
     || [ "$ACTUAL_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
     || [ "$ACTUAL_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$ACTUAL_ADOPTION_BLOB" != "$ACTPLANE_STAGED_PROCESS_ADOPTION_BLOB" ] \
     || [ "$ACTUAL_TARGET_IDENTITY_RUST_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB" ] \
     || [ "$ACTUAL_TARGET_IDENTITY_C_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB" ] \
     || [ "$ACTUAL_FILE_READ_GUARD_BLOB" != "$ACTPLANE_STAGED_FILE_READ_GUARD_BLOB" ] \

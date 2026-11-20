@@ -47,6 +47,7 @@ struct ScriptedClient {
     applied: Mutex<Vec<uuid::Uuid>>,
     credential_applied: Mutex<Vec<ApplyCredentialPolicy>>,
     operations: Mutex<Vec<String>>,
+    fail_detaches: Mutex<bool>,
 }
 
 impl ScriptedClient {
@@ -59,6 +60,7 @@ impl ScriptedClient {
             applied: Mutex::new(Vec::new()),
             credential_applied: Mutex::new(Vec::new()),
             operations: Mutex::new(Vec::new()),
+            fail_detaches: Mutex::new(false),
         }
     }
 
@@ -74,6 +76,7 @@ impl ScriptedClient {
             applied: Mutex::new(Vec::new()),
             credential_applied: Mutex::new(Vec::new()),
             operations: Mutex::new(Vec::new()),
+            fail_detaches: Mutex::new(false),
         }
     }
 
@@ -90,6 +93,7 @@ impl ScriptedClient {
             applied: Mutex::new(Vec::new()),
             credential_applied: Mutex::new(Vec::new()),
             operations: Mutex::new(Vec::new()),
+            fail_detaches: Mutex::new(false),
         }
     }
 
@@ -199,6 +203,12 @@ impl DesiredStateClient for ScriptedClient {
             .lock()
             .expect("operation record should not be poisoned")
             .push(format!("detach:{binding_id}"));
+        if *self.fail_detaches.lock().unwrap() {
+            return Err(EnforcementError::Remote {
+                code: "kernel_failure".into(),
+                message: "injected detach failure".into(),
+            });
+        }
         self.actual
             .lock()
             .expect("actual bindings should not be poisoned")
@@ -279,6 +289,93 @@ fn credential_binding(request: &ApplyCredentialPolicy, domain_id: u32) -> Bindin
         },
         domain_id,
     )
+}
+
+#[test]
+fn partial_credential_ack_is_persisted_then_removed_and_not_replayed() {
+    let store = EnforcementStore::open(":memory:").unwrap();
+    let request = credential_request("00000000-0000-0000-0000-000000000091", 300);
+    store.begin_credential_policy_intent(&request).unwrap();
+    let mut binding = credential_binding(&request, 7);
+    binding.state = BindingState::Degraded;
+    binding.message = Some("private map diagnostic".into());
+    let client = ScriptedClient::with_credential_applies(vec![], vec![Ok(binding)], vec![]);
+    reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).unwrap();
+    let rejected = store.binding(request.binding_id).unwrap().unwrap();
+    assert_eq!(rejected.state, BindingState::Failed);
+    assert_eq!(rejected.domain_id, None);
+    assert!(!rejected.message.unwrap().contains("private map"));
+    assert!(client.bindings().unwrap().is_empty());
+    reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).unwrap();
+    assert_eq!(client.credential_applied().len(), 1);
+}
+
+#[test]
+fn partial_credential_cleanup_failure_retains_detachable_record_without_reapply() {
+    let store = EnforcementStore::open(":memory:").unwrap();
+    let request = credential_request("00000000-0000-0000-0000-000000000092", 300);
+    store.begin_credential_policy_intent(&request).unwrap();
+    let mut binding = credential_binding(&request, 7);
+    binding.state = BindingState::Degraded;
+    let client = ScriptedClient::with_credential_applies(vec![], vec![Ok(binding)], vec![]);
+    *client.fail_detaches.lock().unwrap() = true;
+    assert!(reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).is_err());
+    let pending = store.binding(request.binding_id).unwrap().unwrap();
+    assert_eq!(pending.state, BindingState::Detaching);
+    assert_eq!(pending.domain_id, Some(7));
+    assert_eq!(client.bindings().unwrap().len(), 1);
+    *client.fail_detaches.lock().unwrap() = false;
+    reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).unwrap();
+    assert_eq!(
+        store.binding(request.binding_id).unwrap().unwrap().state,
+        BindingState::Detached
+    );
+    assert_eq!(client.credential_applied().len(), 1);
+    assert!(client.bindings().unwrap().is_empty());
+}
+
+#[test]
+fn failed_cleanup_intent_write_retains_backend_until_storage_recovers() {
+    let database = TestDatabase::new();
+    let store = EnforcementStore::open(&database.path).unwrap();
+    let request = credential_request("00000000-0000-0000-0000-000000000093", 300);
+    store.begin_credential_policy_intent(&request).unwrap();
+    let mut binding = credential_binding(&request, 7);
+    binding.state = BindingState::Degraded;
+    let client = ScriptedClient::with_credential_applies(
+        vec![binding.clone()],
+        vec![Ok(binding.clone())],
+        vec![],
+    );
+    let connection = Connection::open(&database.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_cleanup_intent BEFORE INSERT ON enforcement_bindings
+        WHEN NEW.state = 'detaching' BEGIN SELECT RAISE(FAIL, 'injected SQLite failure'); END;",
+        )
+        .unwrap();
+    assert!(reject_partial_credential(&client, &store, &request, binding).is_err());
+    assert_eq!(client.bindings().unwrap().len(), 1);
+    assert!(
+        client.operations().is_empty(),
+        "must not detach without durable intent"
+    );
+    assert!(store.binding(request.binding_id).unwrap().is_none());
+    assert_eq!(
+        store.credential_policy_intents().unwrap()[0].state,
+        BindingState::Pending
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_cleanup_intent")
+        .unwrap();
+    reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).unwrap();
+    assert!(client.bindings().unwrap().is_empty());
+    assert_eq!(
+        store.binding(request.binding_id).unwrap().unwrap().state,
+        BindingState::Failed
+    );
+    reconcile_desired_state(&client, &store, uuid::Uuid::new_v4()).unwrap();
+    assert_eq!(client.credential_applied().len(), 1);
 }
 
 #[test]
