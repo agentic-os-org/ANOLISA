@@ -152,6 +152,10 @@ fn volume_facts(
             HealthFactValue::Bool(true),
         ),
         fact(
+            &format!("{prefix}volume_readonly"),
+            HealthFactValue::Bool(false),
+        ),
+        fact(
             &format!("{prefix}volume_fs_type"),
             HealthFactValue::String("ext4".into()),
         ),
