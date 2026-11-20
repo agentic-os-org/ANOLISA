@@ -101,6 +101,7 @@ constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
                            (engine.parents[1] / "scripts/build-enforcer.sh").read_text(), re.M))
 for relative, key in (("build.rs", "BPF_BUILD"), ("src/lib.rs", "BPF_LIB"),
                       ("src/file_protection_pinned_maps.rs", "FILE_PROTECTION_PINNED_MAPS"),
+                      ("src/process_adoption.rs", "PROCESS_ADOPTION"),
                       ("src/target_identity.rs", "TARGET_IDENTITY_RUST"),
                       ("target_identity.bpf.c", "TARGET_IDENTITY_C"),
                       ("file_read_guard.bpf.h", "FILE_READ_GUARD")):
@@ -283,7 +284,7 @@ for name in ("process.bpf.c", "target_identity.bpf.c", "process.h", "file_read_g
 (source / "bpf/src").mkdir()
 for name in ("lib.rs", "target_identity.rs", "file_protection_generation.rs",
              "file_protection_generation_tests.rs", "file_protection_map_writer.rs",
-             "file_protection_pinned_maps.rs"):
+             "file_protection_pinned_maps.rs", "process_adoption.rs"):
     (engine / "src" / name).write_bytes(f"staged-{name}".encode())
 for arch in ("x86_64", "aarch64"):
     (engine / "prebuilt" / arch).mkdir()
@@ -361,7 +362,7 @@ source = pathlib.Path(patch_config.split('path="')[1].rstrip('"'))
 assert (source / "build.rs").read_bytes() == b"staged-build"
 for name in ("lib.rs", "target_identity.rs", "file_protection_generation.rs",
              "file_protection_generation_tests.rs", "file_protection_map_writer.rs",
-             "file_protection_pinned_maps.rs"):
+             "file_protection_pinned_maps.rs", "process_adoption.rs"):
     path = source / "src" / name
     assert path.read_bytes() == f"staged-{name}".encode()
     if os.environ.get("FIXTURE_MUTATE_SOURCE") == name:
@@ -438,7 +439,7 @@ done
 
 for source_file in lib.rs target_identity.rs file_protection_generation.rs \
     file_protection_generation_tests.rs file_protection_map_writer.rs \
-    file_protection_pinned_maps.rs file_read_guard.bpf.h target_identity.bpf.c; do
+    file_protection_pinned_maps.rs process_adoption.rs file_read_guard.bpf.h target_identity.bpf.c; do
     if "${fixture_env[@]}" "FIXTURE_MUTATE_SOURCE=$source_file" \
         "$fixture_root/scripts/build-enforcer.sh" >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
         printf 'attested build accepted a mutation of %s\n' "$source_file" >&2

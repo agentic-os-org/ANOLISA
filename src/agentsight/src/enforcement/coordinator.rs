@@ -590,6 +590,22 @@ impl EnforcementCoordinator {
             .client
             .apply_credential_policy(request.clone(), lease.subscription_id)
         {
+            Ok(binding) if binding.state == BindingState::Degraded => {
+                reconciliation::reject_partial_credential(
+                    &self.client,
+                    &self.store,
+                    &request,
+                    binding,
+                )?;
+                Err(persisted_unacknowledged(
+                    request.binding_id,
+                    BindingState::Failed,
+                    EnforcementCoordinatorError::EnforcementUnavailable(
+                        "credential protection coverage incomplete; partial binding was removed"
+                            .into(),
+                    ),
+                ))
+            }
             Ok(binding) => {
                 if !credential_binding_matches_request(&request, &binding) {
                     return Err(EnforcementStoreError::InvalidCredentialPolicySnapshot {
@@ -1169,6 +1185,73 @@ mod tests {
             coordinator.credential_apply_claim_lease(),
             Duration::from_secs(80)
         );
+    }
+
+    #[test]
+    fn credential_apply_rejects_partial_coverage_but_keeps_cleanup_manageable() {
+        for cleanup_fails in [false, true] {
+            let binding_id = Uuid::new_v4();
+            let policy = CredentialExfiltrationPolicy {
+                policy_id: "credential".into(),
+                revision: 1,
+                source_patterns: vec!["/tmp/fixture".into()],
+                trusted_endpoints: vec![],
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 300,
+                destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
+                mode: agentsight_enforcement_protocol::PolicyMode::Audit,
+            };
+            let request = ApplyCredentialPolicy {
+                binding_id,
+                agent_id: "agent-1".into(),
+                session_id: None,
+                root_pid: 42,
+                process_start_time: 7,
+                policy,
+            };
+            let mut compiled = fixture_policy(binding_id);
+            compiled.policy_id = request.policy.policy_id.clone();
+            compiled.policy_revision = "1".into();
+            compiled.policy_mode = Some(request.policy.mode);
+            let partial = Binding {
+                request: compiled,
+                state: BindingState::Degraded,
+                message: Some("private map diagnostic".into()),
+                domain_id: Some(7),
+            };
+            let cleanup = if cleanup_fails {
+                Err(RemoteError {
+                    code: "kernel_failure".into(),
+                    message: "cleanup failed".into(),
+                })
+            } else {
+                Ok(ResponseBody::Detached)
+            };
+            let (client, server, socket) = fixture_enforcer(vec![
+                Ok(ResponseBody::Health(fixture_health(true, None))),
+                Ok(ResponseBody::Applied(partial)),
+                cleanup,
+            ]);
+            let coordinator =
+                EnforcementCoordinator::new(client, EnforcementStore::open(":memory:").unwrap());
+            let worker = coordinator.ingestion_readiness.candidate();
+            coordinator.ingestion_readiness.install(Arc::clone(&worker));
+            make_ready(&coordinator.ingestion_readiness, &worker);
+            assert!(coordinator.apply_credential_policy(request).is_err());
+            let record = coordinator.store.binding(binding_id).unwrap().unwrap();
+            assert_eq!(
+                record.state,
+                if cleanup_fails {
+                    BindingState::Detaching
+                } else {
+                    BindingState::Failed
+                }
+            );
+            assert_eq!(record.domain_id, if cleanup_fails { Some(7) } else { None });
+            assert!(!record.message.unwrap().contains("private map"));
+            server.join().unwrap();
+            std::fs::remove_file(socket).unwrap();
+        }
     }
 
     #[test]

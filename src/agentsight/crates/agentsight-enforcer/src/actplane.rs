@@ -46,6 +46,7 @@ mod file_protection_topology;
 mod file_protection_tree_scan;
 mod inode_policy;
 mod preexisting_maps;
+mod process_adoption;
 use file_protection_policy::{NormalizedFileProtectionPolicy, NormalizedFileProtectionTarget};
 use file_protection_runtime::{ActiveFileProtection, PreparedFileProtection};
 use inode_policy::InodePolicy;
@@ -610,9 +611,21 @@ impl ActPlaneBackend {
             }
         }
 
-        let binding = Binding {
+        let adoption = process_adoption::adopt(
+            self.engine.as_ref(),
+            request.root_pid,
+            request.process_start_time,
+            kernel_pid,
+            self.control_pid,
+            id,
+        );
+        let mut binding = Binding {
             request,
-            state: BindingState::Enforced,
+            state: if migration.failed_pids.is_empty() {
+                BindingState::Enforced
+            } else {
+                BindingState::Degraded
+            },
             message: if migration.is_empty() {
                 None
             } else {
@@ -620,6 +633,7 @@ impl ActPlaneBackend {
             },
             domain_id: Some(id),
         };
+        adoption.annotate(&mut binding);
         let (reasons, rule_names, label_names) = match compiled {
             Some(compiled) => (
                 compiled.reasons,
@@ -724,10 +738,11 @@ impl ActPlaneBackend {
         let result = self.install_prepared_locked(&mut bindings, prepared, None);
         match &result {
             Ok(binding) => log::info!(
-                "policy enforced: binding_id={} root_pid={} domain_id={:?}",
+                "policy applied: binding_id={} root_pid={} domain_id={:?} state={:?}",
                 binding.request.binding_id,
                 binding.request.root_pid,
-                binding.domain_id
+                binding.domain_id,
+                binding.state
             ),
             Err(error) => log::error!("policy apply failed: binding_id={binding_id}: {error}"),
         }
