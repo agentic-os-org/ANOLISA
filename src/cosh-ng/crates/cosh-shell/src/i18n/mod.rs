@@ -435,7 +435,11 @@ mod tests {
             MessageId::HealthOomScopeCurrentCgroup as usize
         );
         assert_eq!(
-            MessageId::HealthEvidenceSoftLockup as usize,
+            MessageId::HealthEvidenceSoftLockup as usize + 1,
+            MessageId::HealthFindingExt4ReadonlyRemount as usize
+        );
+        assert_eq!(
+            MessageId::HealthPromptInspectFilesystemEvent as usize,
             MessageId::ALL.len() - 1
         );
     }

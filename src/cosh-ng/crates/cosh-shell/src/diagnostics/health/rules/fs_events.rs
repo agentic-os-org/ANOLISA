@@ -20,7 +20,7 @@ const MECHANISMS: &[MechanismRule] = &[
     MechanismRule {
         prefix: "ext4_forced_ro",
         id: "J24",
-        title: HealthMessageId::HealthFindingExt4Error,
+        title: HealthMessageId::HealthFindingExt4ReadonlyRemount,
         critical_age: Some(300),
         warning_age: 3600,
     },

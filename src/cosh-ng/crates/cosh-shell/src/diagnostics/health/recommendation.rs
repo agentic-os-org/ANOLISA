@@ -171,7 +171,10 @@ fn candidates_for_finding(
                     ));
                 }
             }
-            AdviceKind::DiskUsage | AdviceKind::ServiceStatus => items.push(try_item(
+            AdviceKind::DiskUsage
+            | AdviceKind::ServiceStatus
+            | AdviceKind::SystemCapacity
+            | AdviceKind::FilesystemEvent => items.push(try_item(
                 definition.legacy_id,
                 finding,
                 definition.label_id,
@@ -227,14 +230,6 @@ fn candidates_for_finding(
                     ));
                 }
             }
-            AdviceKind::SystemCapacity => items.push(try_item(
-                definition.legacy_id,
-                finding,
-                definition.label_id,
-                definition.reason_id,
-                finding.detail_args.clone(),
-                base,
-            )),
         }
     }
     items
@@ -291,6 +286,9 @@ fn prompt_id_for_label(label_id: HealthMessageId) -> Option<HealthMessageId> {
         }
         HealthMessageId::HealthTryInspectSystemCapacity => {
             Some(HealthMessageId::HealthPromptInspectSystemCapacity)
+        }
+        HealthMessageId::HealthTryInspectFilesystemEvent => {
+            Some(HealthMessageId::HealthPromptInspectFilesystemEvent)
         }
         _ => None,
     }

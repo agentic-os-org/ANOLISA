@@ -221,6 +221,7 @@ pub(crate) enum AdviceKind {
     ProcessMemory,
     UnavailableChecks,
     SystemCapacity,
+    FilesystemEvent,
 }
 
 pub(crate) struct AdviceDefinition {
@@ -306,6 +307,15 @@ const SYSTEM_CAPACITY_ADVICE: AdviceDefinition = AdviceDefinition {
     bash_surface: true,
 };
 
+const FILESYSTEM_EVENT_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::FilesystemEvent,
+    legacy_id: "T10",
+    prompt_id: HealthMessageId::HealthPromptInspectFilesystemEvent,
+    label_id: HealthMessageId::HealthTryInspectFilesystemEvent,
+    reason_id: HealthMessageId::HealthFindingExt4ReadonlyRemount,
+    bash_surface: true,
+};
+
 pub(crate) const ADVICE_DEFINITIONS: &[AdviceDefinition] = &[
     MEMORY_PRESSURE_ADVICE,
     SWAP_PRESSURE_ADVICE,
@@ -316,6 +326,7 @@ pub(crate) const ADVICE_DEFINITIONS: &[AdviceDefinition] = &[
     PROCESS_MEMORY_ADVICE,
     UNAVAILABLE_CHECKS_ADVICE,
     SYSTEM_CAPACITY_ADVICE,
+    FILESYSTEM_EVENT_ADVICE,
 ];
 
 pub(crate) fn advice_definition(kind: AdviceKind) -> &'static AdviceDefinition {
@@ -329,6 +340,7 @@ pub(crate) fn advice_definition(kind: AdviceKind) -> &'static AdviceDefinition {
         AdviceKind::ProcessMemory => &PROCESS_MEMORY_ADVICE,
         AdviceKind::UnavailableChecks => &UNAVAILABLE_CHECKS_ADVICE,
         AdviceKind::SystemCapacity => &SYSTEM_CAPACITY_ADVICE,
+        AdviceKind::FilesystemEvent => &FILESYSTEM_EVENT_ADVICE,
     }
 }
 
@@ -356,7 +368,7 @@ pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
     ("J21", &[AdviceKind::DiskUsage]),
     ("J22", &[AdviceKind::HighLoad]),
     ("J23", &[AdviceKind::SystemCapacity]),
-    ("J24", &[AdviceKind::DiskUsage]),
+    ("J24", &[AdviceKind::FilesystemEvent]),
     ("J25", &[AdviceKind::DiskUsage]),
     ("J26", &[AdviceKind::DiskUsage]),
     ("J27", &[AdviceKind::DiskUsage]),
@@ -594,14 +606,14 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"]
+            ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10"]
         );
         let bash: Vec<&str> = ADVICE_DEFINITIONS
             .iter()
             .filter(|item| item.bash_surface)
             .map(|item| item.legacy_id)
             .collect();
-        assert_eq!(bash, ["T01", "T02", "T03", "T04", "T06", "T07", "T09"]);
+        assert_eq!(bash, ["T01", "T02", "T03", "T04", "T06", "T07", "T09", "T10"]);
         for definition in ADVICE_DEFINITIONS {
             assert_eq!(
                 advice_definition(definition.kind).legacy_id,

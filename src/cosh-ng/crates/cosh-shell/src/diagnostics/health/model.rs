@@ -474,10 +474,14 @@ pub(crate) enum HealthMessageId {
     HealthTryReasonHighLoad,
     HealthTryReasonMissingCoreCheck,
     HealthTryReasonSystemCapacity,
+    HealthFindingExt4ReadonlyRemount,
+    HealthTryInspectFilesystemEvent,
+    HealthPromptInspectFilesystemEvent,
 }
 
 impl HealthMessageId {
     pub(crate) fn to_i18n(self) -> crate::MessageId {
+        use crate::MessageId;
         match self {
             Self::HealthBannerTitle => crate::MessageId::HealthBannerTitle,
             Self::HealthBannerTryLabel => crate::MessageId::HealthBannerTryLabel,
@@ -587,6 +591,11 @@ impl HealthMessageId {
                 crate::MessageId::HealthFindingConntrackCapacity
             }
             Self::HealthFindingExt4Error => crate::MessageId::HealthFindingExt4Error,
+            Self::HealthFindingExt4ReadonlyRemount => MessageId::HealthFindingExt4ReadonlyRemount,
+            Self::HealthTryInspectFilesystemEvent => MessageId::HealthTryInspectFilesystemEvent,
+            Self::HealthPromptInspectFilesystemEvent => {
+                MessageId::HealthPromptInspectFilesystemEvent
+            }
             Self::HealthFindingJournalError => crate::MessageId::HealthFindingJournalError,
             Self::HealthFindingXfsShutdown => crate::MessageId::HealthFindingXfsShutdown,
             Self::HealthFindingBlockIoError => crate::MessageId::HealthFindingBlockIoError,

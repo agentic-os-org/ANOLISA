@@ -176,6 +176,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HealthTryReasonSystemCapacity => "a system capacity limit is near exhaustion",
         MessageId::HealthFindingExt4Error => "ext4 filesystem error",
+        MessageId::HealthFindingExt4ReadonlyRemount => "ext4 read-only remount recorded",
+        MessageId::HealthTryInspectFilesystemEvent => "Investigate ext4 remount",
+        MessageId::HealthPromptInspectFilesystemEvent => {
+            "Check the mount options and recent kernel logs for {mount} ({device}) after the ext4 read-only remount. Use read-only checks."
+        }
         MessageId::HealthInsightExt4Error => "ext4 reported an error on this filesystem",
         MessageId::HealthFindingJournalError => "ext4 journal error",
         MessageId::HealthInsightJournalError => "the ext4 journal aborted or hit flush errors",

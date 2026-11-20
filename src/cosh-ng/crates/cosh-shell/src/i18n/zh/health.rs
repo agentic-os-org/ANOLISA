@@ -142,6 +142,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HealthTryReasonSystemCapacity => "系统容量上限接近耗尽",
         MessageId::HealthFindingExt4Error => "ext4 文件系统错误",
+        MessageId::HealthFindingExt4ReadonlyRemount => "记录到 ext4 只读重挂载",
+        MessageId::HealthTryInspectFilesystemEvent => "排查 ext4 重挂载",
+        MessageId::HealthPromptInspectFilesystemEvent => {
+            "核对 {mount}（{device}）的挂载选项和近期内核日志，排查 ext4 只读重挂载。仅做只读检查。"
+        }
         MessageId::HealthInsightExt4Error => "ext4 在该文件系统上报出错误",
         MessageId::HealthFindingJournalError => "ext4 日志错误",
         MessageId::HealthInsightJournalError => "ext4 日志中止或出现刷写错误",
