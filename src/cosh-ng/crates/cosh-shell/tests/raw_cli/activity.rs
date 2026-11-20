@@ -8,7 +8,7 @@ fn raw_cli_details_for_activity_uses_structured_panel() {
         &[("COSH_SHELL_LANG", "en-US")],
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
-            ("cosh-osc$", b"?? request tool approval\n"),
+            ("cosh-osc$", b"?? request safe shell tool\n"),
             ("stdout: 24", b"/details out-1\n"),
             ("Activity details out-1", b"exit\n"),
         ],
@@ -42,7 +42,7 @@ fn raw_cli_activity_details_uses_zh_language_env() {
         &[("COSH_SHELL_LANG", "zh-CN")],
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
-            ("cosh-osc$", b"?? request tool approval\n"),
+            ("cosh-osc$", b"?? request safe shell tool\n"),
             ("stdout: 24", b"/details out-1\n"),
             ("活动详情 out-1", b"exit\n"),
         ],

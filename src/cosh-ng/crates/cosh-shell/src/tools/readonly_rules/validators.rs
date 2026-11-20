@@ -436,77 +436,34 @@ pub(super) fn is_readonly_env(tokens: &[String]) -> bool {
     tokens.len() == 1
 }
 
-pub(super) fn is_readonly_git_stash(tokens: &[String]) -> bool {
-    if tokens.len() < 3 {
-        return false;
-    }
-    matches!(tokens[2].as_str(), "list" | "show")
-}
-
-pub(super) fn is_readonly_git_branch(tokens: &[String]) -> bool {
-    let args = &tokens[2..];
-    if args.is_empty() {
-        return true;
-    }
-
-    let mut idx = 0;
-    let mut saw_list_mode = false;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "-a" | "-r" | "-l" | "--all" | "--remotes" | "--list" | "--no-color" => {
-                saw_list_mode = true;
-                idx += 1;
-            }
-            "--sort" | "--format" => {
-                if args.get(idx + 1).is_none() {
-                    return false;
-                }
-                saw_list_mode = true;
-                idx += 2;
-            }
-            arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {
-                saw_list_mode = true;
-                idx += 1;
-            }
-            arg if arg.starts_with('-') => return false,
-            arg => {
-                if !saw_list_mode || !is_safe_readonly_path(arg) {
-                    return false;
-                }
-                idx += 1;
-            }
-        }
-    }
-
-    true
-}
-
 pub(super) fn is_readonly_git_config(tokens: &[String]) -> bool {
     if tokens.len() < 3 {
         return false;
     }
     let args = &tokens[2..];
-    match args[0].as_str() {
-        "--get" | "--get-all" => args.len() >= 2,
-        "--list" | "-l" => args.len() == 1,
+    // --blob/--file select config sources that git loads through the object
+    // reader (partial-clone lazy fetch) or the filesystem; only plain key
+    // reads and bare listing stay auto-approved.
+    match args {
+        [flag, key] if flag == "--get" || flag == "--get-all" => {
+            !key.is_empty()
+                && !key.starts_with('-')
+                && key.contains('.')
+                && !key.contains(char::is_whitespace)
+        }
+        [flag] if flag == "--list" || flag == "-l" => true,
         _ => false,
     }
 }
 
-pub(super) fn is_readonly_git_tag(tokens: &[String]) -> bool {
-    if tokens.len() < 2 {
-        return false;
-    }
+pub(super) fn is_readonly_git_remote(tokens: &[String]) -> bool {
+    // update/show contact remotes (core.sshCommand, credential helpers) and
+    // add/remove/set-url/rename/prune mutate config; only local reads stay.
     let args = &tokens[2..];
-    args.is_empty()
-        || args
-            .iter()
-            .all(|a| matches!(a.as_str(), "-l" | "--list" | "-n" | "--sort" | "--column"))
-}
-
-pub(super) fn is_readonly_git_reflog(tokens: &[String]) -> bool {
-    if tokens.len() < 3 {
-        return false;
+    match args {
+        [] => true,
+        [flag] if flag == "-v" || flag == "--verbose" => true,
+        [sub, name] if sub == "get-url" && is_safe_readonly_path(name) => true,
+        _ => false,
     }
-    tokens[2] == "show"
 }

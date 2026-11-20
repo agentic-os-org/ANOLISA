@@ -2844,7 +2844,7 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
         ],
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
-            ("cosh-osc$ ", b"?? request tool approval\n"),
+            ("cosh-osc$ ", b"?? request safe shell tool\n"),
             ("Deferred req-1", b""),
             ("cosh-osc$ ", b"exit\n"),
         ],
@@ -2853,7 +2853,7 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
     assert!(output.contains("approval: auto"), "{output}");
     assert!(!output.contains("Analysis: smart"), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(!output.contains("Approval req-"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("Approved req-1"), "{output}");

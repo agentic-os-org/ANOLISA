@@ -449,14 +449,14 @@ fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
     let output = run_raw_cli_with_env(
         "fake",
         "/mode approval auto\n\
-         ?? request tool approval\n\
+         ?? request safe shell tool\n\
          exit\n",
         &[("COSH_SHELL_LANG", "en-US")],
     );
 
     assert!(output.contains("Mode set to auto."), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("Command result analysis for req-1"));
