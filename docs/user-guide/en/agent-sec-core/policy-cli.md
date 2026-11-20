@@ -64,6 +64,65 @@ To revoke injection, execute the returned Scope deletion command, wait for clean
 then delete the Policy. See the [Gateway contract (Chinese)](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)
 for readiness, response-rewrite limits and partial-failure recovery.
 
+## Gateway CA formats (unreleased V2)
+
+With a matching V2 CLI, daemon and gateway addon installed, query the public trust
+files after enabling the gateway. The query authenticates the daemon, is read-only,
+and fails if either format is not ready; it never generates or repairs files.
+All Scopes share these files on the daemon host. A returned path does not copy a
+file to a remote client or configure the Agent's TLS library.
+
+```bash
+agent-sec-cli --socket "$SOCKET" gateway ca
+agent-sec-cli --socket "$SOCKET" gateway ca --format pem
+agent-sec-cli --socket "$SOCKET" gateway ca --format pkcs12
+```
+
+The default result is:
+
+```json
+{
+  "caBundlePaths": {
+    "pem": "/run/agent-sec-gateway/ca-bundle.pem",
+    "pkcs12": "/run/agent-sec-gateway/ca-bundle.p12"
+  }
+}
+```
+
+`--format pem` or `--format pkcs12` keeps only that entry inside `caBundlePaths`;
+unknown formats are rejected. Both files contain the same complete certificate
+set: the host system PEM roots plus the gateway's public CA, with no private key.
+The PKCS12 file uses Java trusted certificate entries and the public password
+`changeit`. This password supports loading and integrity checking; it is not a
+secret or an access-control mechanism. Do not use mitmproxy's private-key keystore.
+
+For PEM-aware libraries, point `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, or
+`GIT_SSL_CAINFO` at `caBundlePaths.pem`, as applicable. `inject-credential` reports
+both paths under `gateway.caBundlePaths` when available and gives PEM instructions.
+JVM TLS does not generally use those environment variables. Configure the
+application's truststore explicitly, for example:
+
+```bash
+"$JAVA_HOME/bin/java" \
+  -Djavax.net.ssl.trustStore=/run/agent-sec-gateway/ca-bundle.p12 \
+  -Djavax.net.ssl.trustStoreType=PKCS12 \
+  -Djavax.net.ssl.trustStorePassword=changeit \
+  -jar agent.jar
+```
+
+This selects system-plus-gateway roots **instead of** the JVM's default `cacerts`;
+JVM-only enterprise roots are not added automatically. If needed, prepare an
+application-specific merged truststore yourself. The gateway never modifies the
+system trust store, JDK `cacerts`, `JAVA_TOOL_OPTIONS`, or Agent startup arguments,
+and generating PKCS12 requires no JDK or external crypto tool on the daemon host.
+
+A gateway restart reuses its CA rather than creating one per format. If trust
+contents change, reload the application's TLS context. `gateway disable` retains
+both public files while removing plans and secrets; it does not make fake tokens
+work on direct connections. Files under `/run` do not survive a host reboot.
+CLI, daemon and addon must be updated or rolled back together; this unreleased
+contract adds no legacy migration or format-version change.
+
 ## Policy database location
 
 With no nonempty `AGENT_SEC_DATA_DIR`, the daemon checks two Policy database paths:

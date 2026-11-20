@@ -843,8 +843,16 @@ uses exclusive 0600 output and prints no Token; unknown heuristics fail explicit
 Native credential execution, KeyAdd, `gateway credentials` and corresponding RPCs
 are removed. Old Gateway policy/Store/plan/snapshot data is explicitly rejected;
 there is no migration, overwrite or inferred conversion. Root pair list/remove uses
-opaque IDs. Scope-free `gateway ca` returns only `{caBundlePath}` for one shared
-public CA after actual Gateway readiness checks; no GitHub environment mapping.
+opaque IDs. Scope-free `gateway.ca` returns `{caBundlePaths: {pem, pkcs12}}` with
+absolute paths to the shared public trust bundles after current-instance, generation
+and matching PEM/PKCS12 digest checks. Both contain system PEM roots plus the gateway
+CA, without private keys. CLI `gateway ca --format pem|pkcs12` selects output only;
+RPC params stay `{}` and malformed success results fail. PKCS12 uses Java trusted
+entries and the public, non-secret password `changeit`; it replaces the selected
+JVM's default roots, not its `cacerts` file. Queries do not repair files or alter
+Agent configuration. Existing format versions stay unchanged; CLI/daemon/addon
+must update or roll back together, without a legacy migration. See the
+[CA format guide](../../../../docs/user-guide/en/agent-sec-core/policy-cli.md#gateway-ca-formats-unreleased-v2).
 Pair removal returns `{pairid}`, and listing returns `{pairids: string[]}`.
 The sole `github.cedar` asset covers eight auto/basic REST/Smart HTTP rules;
 source/raw/RPM deliver no `github.json` or `github-policy.json` wrapper. Rewriting

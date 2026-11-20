@@ -272,7 +272,7 @@ impl InjectCredentialCommand {
         let ca = if ready {
             call(socket, timeout, GATEWAY_CA, &json!({}))
                 .ok()
-                .and_then(|value| value["caBundlePath"].as_str().map(str::to_owned))
+                .and_then(|value| super::gateway::ca_bundle_paths(&value).ok())
         } else {
             None
         };
@@ -283,7 +283,7 @@ impl InjectCredentialCommand {
         )];
         if ca.is_some() {
             next.push(
-                "point SSL_CERT_FILE/REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO at caBundlePath".into(),
+                "point SSL_CERT_FILE/REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO at caBundlePaths.pem".into(),
             );
         } else if !enabled {
             next.push(format!(
@@ -305,7 +305,7 @@ impl InjectCredentialCommand {
             "pairIds": pair_ids,
             "scopeId": created.scope_id,
             "fakeTokenFile": plan.delivered,
-            "gateway": {"enabled": enabled, "ready": ready, "caBundlePath": ca},
+            "gateway": {"enabled": enabled, "ready": ready, "caBundlePaths": ca},
             "bindings": bindings,
             "next": next,
             "teardown": created.teardown,

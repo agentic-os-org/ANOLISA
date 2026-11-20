@@ -24,6 +24,7 @@ use asc_policy_types::scope::{
     PolicyReference, PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus,
 };
 use asc_policy_types::target::{FailureKind, PreparedApply, TargetBindingPlan};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     GATEWAY_BINDING_FORMAT, GatewayAccount, GatewayBindingClient, GatewayConfig, GatewayError,
@@ -72,6 +73,7 @@ struct HostLog {
     account: bool,
     account_uid: Option<u32>,
     active: bool,
+    main_pid: u32,
     installed_rules: Option<String>,
     processes: BTreeMap<u32, TestProcess>,
     moves: Vec<u32>,
@@ -150,7 +152,11 @@ impl Host for FakeHost {
             .unwrap_or_else(|| ("boot-1".into(), "pid:[1]".into())))
     }
     fn start_unit(&self, _: &str) -> Result<(), GatewayError> {
-        self.log().active = true;
+        let mut log = self.log();
+        if !log.active {
+            log.main_pid += 1;
+        }
+        log.active = true;
         Ok(())
     }
     fn stop_unit(&self, _: &str) -> Result<(), GatewayError> {
@@ -164,6 +170,10 @@ impl Host for FakeHost {
     }
     fn unit_active(&self, _: &str) -> bool {
         self.log().active
+    }
+    fn unit_pid(&self, _: &str) -> Option<u32> {
+        let log = self.log();
+        log.active.then_some(log.main_pid).filter(|pid| *pid != 0)
     }
     fn routing_active(&self) -> Result<bool, GatewayError> {
         Ok(self.log().installed_rules.is_some())
@@ -306,18 +316,32 @@ impl Host for FakeHost {
 struct DataPlane {
     stop: Arc<AtomicBool>,
     reject: Arc<AtomicBool>,
+    hold_conversion: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl DataPlane {
-    fn start(runtime: &Path) -> Self {
+    fn start(runtime: &Path, host: FakeHost) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let reject = Arc::new(AtomicBool::new(false));
-        let (stopped, rejected, root) = (stop.clone(), reject.clone(), runtime.to_owned());
+        let hold_conversion = Arc::new(AtomicBool::new(false));
+        let (stopped, rejected, held, root) = (
+            stop.clone(),
+            reject.clone(),
+            hold_conversion.clone(),
+            runtime.to_owned(),
+        );
         let thread = std::thread::spawn(move || {
             let mut loaded = None;
             let mut written = String::new();
+            let mut converted = None;
+            // The addon first sees no complete PEM; this must not abort cold publication.
+            let mut report = serde_json::json!({"pemSha256": null, "pkcs12Sha256": null,
+                "error": "cannot convert the CA bundle to PKCS#12"});
             while !stopped.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(10));
+                let Some(pid) = host.unit_pid("test") else {
+                    continue;
+                };
                 let Ok(bytes) = fs::read(root.join("active.json")) else {
                     continue;
                 };
@@ -329,20 +353,57 @@ impl DataPlane {
                 if error.is_none() {
                     loaded = Some(generation);
                 }
-                let health = serde_json::json!({"loadedGeneration": loaded, "lastAttempt": {"generation": generation, "error": error}}).to_string();
-                if root.join("status").is_dir() && health != written {
-                    let _ = fs::write(root.join("status/ca-cert.pem"), CA);
-                    let tmp = root.join("status/.health.tmp");
-                    if fs::write(&tmp, &health).is_ok() {
-                        let _ = fs::rename(tmp, root.join("status/health.json"));
+                if !held.load(Ordering::SeqCst)
+                    && let Ok(pem) = fs::read(root.join("ca-bundle.pem"))
+                    && (converted.as_ref() != Some(&pem)
+                        || !root.join("status/ca-bundle.p12").is_file())
+                {
+                    let pem_hash = format!("{:x}", Sha256::digest(&pem));
+                    // Opaque deterministic bytes test publication/digest contracts, not cryptography.
+                    let pkcs12 = format!("fixture-pkcs12:{pem_hash}").into_bytes();
+                    if crate::files::write_atomic(
+                        &root.join("status"),
+                        "ca-bundle.p12",
+                        &pkcs12,
+                        0o644,
+                        None,
+                    )
+                    .is_ok()
+                    {
+                        report = serde_json::json!({"pemSha256": pem_hash,
+                            "pkcs12Sha256": format!("{:x}", Sha256::digest(&pkcs12)), "error": null});
+                        converted = Some(pem);
                     }
-                    written = health;
+                }
+                let health = serde_json::json!({"pid": pid, "loadedGeneration": loaded,
+                    "lastAttempt": {"generation": generation, "error": error}, "caPkcs12": report})
+                .to_string();
+                if root.join("status").is_dir() && health != written {
+                    let _ = crate::files::write_atomic(
+                        &root.join("status"),
+                        "ca-cert.pem",
+                        CA.as_bytes(),
+                        0o644,
+                        None,
+                    );
+                    if crate::files::write_atomic(
+                        &root.join("status"),
+                        "health.json",
+                        health.as_bytes(),
+                        0o644,
+                        None,
+                    )
+                    .is_ok()
+                    {
+                        written = health;
+                    }
                 }
             }
         });
         Self {
             stop,
             reject,
+            hold_conversion,
             thread: Some(thread),
         }
     }
@@ -384,9 +445,9 @@ impl Fixture {
         fs::set_permissions(&ca, fs::Permissions::from_mode(0o644)).unwrap();
         config.system_ca_bundles = vec![ca];
         config.load_timeout = Duration::from_secs(2);
-        let plane = DataPlane::start(&config.runtime_dir);
         let host = FakeHost::default();
         host.log().account = true;
+        let plane = DataPlane::start(&config.runtime_dir, host.clone());
         Self {
             host,
             repository,
@@ -942,7 +1003,10 @@ fn preparation_is_durable_without_pid_or_proxy_and_public_ca_requires_ready_gene
     let grant_json = serde_json::to_value(&grant).unwrap();
     assert_eq!(
         grant_json,
-        serde_json::json!({"caBundlePath": fixture.config.runtime_dir.join("ca-bundle.pem")})
+        serde_json::json!({"caBundlePaths": {
+            "pem": fixture.config.runtime_dir.join("ca-bundle.pem"),
+            "pkcs12": fixture.config.runtime_dir.join("ca-bundle.p12")
+        }})
     );
     assert!(!grant_json.to_string().contains(REAL));
     assert!(!grant_json.to_string().contains(FAKE));
@@ -1026,6 +1090,255 @@ fn readiness_and_public_ca_reject_unavailable_ca_generation_or_proxy() {
     assert!(!fixture.host.log().active);
     assert!(service.ca().is_err());
 }
+#[test]
+fn ca_requires_current_process_and_matching_complete_bundle_report() {
+    let mut fixture = Fixture::new();
+    fixture.old_publication();
+    let service = fixture.service();
+    let root = &fixture.config.runtime_dir;
+    let health_path = root.join("status/health.json");
+    let health: serde_json::Value =
+        serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+    let pem = fs::read(root.join("ca-bundle.pem")).unwrap();
+    let pkcs12 = fs::read(root.join("ca-bundle.p12")).unwrap();
+    for (field, value) in [
+        (
+            "pid",
+            serde_json::json!(health["pid"].as_u64().unwrap() + 1),
+        ),
+        ("caPkcs12", serde_json::Value::Null),
+        (
+            "caError",
+            serde_json::json!("cannot publish the CA certificate"),
+        ),
+    ] {
+        let mut invalid = health.clone();
+        invalid[field] = value;
+        fs::write(&health_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(!service.status(UID).ready, "{field}");
+        assert!(service.ca().is_err(), "{field}");
+    }
+    for (field, value) in [
+        ("pemSha256", serde_json::json!("0".repeat(64))),
+        ("pkcs12Sha256", serde_json::json!("0".repeat(64))),
+        ("pkcs12Sha256", serde_json::Value::Null),
+        ("error", serde_json::json!("cannot convert the CA bundle")),
+    ] {
+        let mut invalid = health.clone();
+        invalid["caPkcs12"][field] = value;
+        fs::write(&health_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(!service.status(UID).ready, "{field}");
+        assert!(service.ca().is_err(), "{field}");
+    }
+    fs::write(&health_path, serde_json::to_vec(&health).unwrap()).unwrap();
+    assert!(service.ca().is_ok());
+    // Matching just the appended gateway CA cannot validate a changed system-root set.
+    fs::write(
+        root.join("ca-bundle.pem"),
+        format!(
+            "# different roots\n{}",
+            String::from_utf8(pem.clone()).unwrap()
+        ),
+    )
+    .unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    fs::write(root.join("ca-bundle.pem"), &pem).unwrap();
+    let mut private = b"-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n".to_vec();
+    private.extend_from_slice(&pem);
+    let mut invalid = health.clone();
+    invalid["caPkcs12"]["pemSha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&private)));
+    fs::write(&health_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    fs::write(root.join("ca-bundle.pem"), &private).unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    fs::write(&health_path, serde_json::to_vec(&health).unwrap()).unwrap();
+    fs::write(root.join("ca-bundle.pem"), &pem).unwrap();
+    fs::write(root.join("ca-bundle.p12"), b"different keystore").unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    fs::write(root.join("ca-bundle.p12"), &pkcs12).unwrap();
+    // The root-published keystore is authoritative; queries never repair from status output.
+    fs::remove_file(root.join("status/ca-bundle.p12")).unwrap();
+    assert!(service.ca().is_ok());
+    fixture.host.stop_unit("test").unwrap();
+    fixture.host.start_unit("test").unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    fixture.plane = DataPlane::start(root, fixture.host.clone());
+    service.recover().unwrap();
+    assert!(service.status(UID).ready);
+    // Restart preserves the gateway CA; PKCS#12 encryption bytes need not be deterministic.
+    assert_eq!(fs::read(root.join("ca-bundle.pem")).unwrap(), pem);
+}
+
+#[test]
+fn ca_queries_reject_unsafe_health_and_public_files_without_repair() {
+    let mut fixture = Fixture::new();
+    fixture.old_publication();
+    let service = fixture.service();
+    let root = &fixture.config.runtime_dir;
+    for name in [
+        "status/health.json",
+        "status/ca-cert.pem",
+        "ca-bundle.pem",
+        "ca-bundle.p12",
+    ] {
+        let path = root.join(name);
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            crate::files::read_owned(&path, bytes.len() as u64, account().uid.wrapping_add(1))
+                .is_err()
+        );
+        for mode in [0o664, 0o646] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(!service.status(UID).ready, "{name} {mode:o}");
+            assert!(service.ca().is_err());
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let linked = root.join("linked");
+        fs::hard_link(&path, &linked).unwrap();
+        assert!(!service.status(UID).ready, "{name} hard link");
+        assert!(service.ca().is_err());
+        fs::remove_file(&linked).unwrap();
+        fs::rename(&path, &linked).unwrap();
+        symlink(&linked, &path).unwrap();
+        assert!(!service.status(UID).ready, "{name} symlink");
+        assert!(service.ca().is_err());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!service.status(UID).ready, "{name} directory");
+        assert!(service.ca().is_err());
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&linked, &path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(service.status(UID).ready);
+    }
+    let runtime = crate::runtime::RuntimeDirectory {
+        root: root.clone(),
+        gateway: crate::files::Owner {
+            uid: account().uid,
+            gid: account().gid,
+        },
+    };
+    let generation = service.lock().state.generation;
+    let pid = fixture.host.unit_pid("test").unwrap();
+    let path = root.join("status/ca-bundle.p12");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        runtime
+            .await_pkcs12(generation, pid, Duration::ZERO)
+            .is_err()
+    );
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(32 * 1024 * 1024)
+        .unwrap();
+    assert!(
+        runtime
+            .await_pkcs12(generation, pid, Duration::ZERO)
+            .is_err()
+    );
+    let public = root.join("ca-bundle.p12");
+    let bytes = fs::read(&public).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&public)
+        .unwrap()
+        .set_len(32 * 1024 * 1024)
+        .unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    fs::write(&public, bytes).unwrap();
+    assert!(service.status(UID).ready);
+    let health = root.join("status/health.json");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&health)
+        .unwrap()
+        .set_len(64 * 1024 + 1)
+        .unwrap();
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+}
+
+#[test]
+fn private_system_material_never_enters_the_public_pem() {
+    let mut fixture = Fixture::new();
+    fixture.plane.stop();
+    let runtime = crate::runtime::RuntimeDirectory {
+        root: fixture.config.runtime_dir.clone(),
+        gateway: crate::files::Owner {
+            uid: account().uid,
+            gid: account().gid,
+        },
+    };
+    runtime.prepare().unwrap();
+    fs::write(runtime.root.join("status/ca-cert.pem"), CA).unwrap();
+    let system = &fixture.config.system_ca_bundles[0];
+    fs::write(
+        system,
+        b"-----BEGIN PRIVATE KEY-----\nsecret-test-only\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    fs::set_permissions(system, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        runtime
+            .publish_ca_bundle(&fixture.config.system_ca_bundles, Duration::ZERO)
+            .is_err()
+    );
+    assert!(!runtime.root.join("ca-bundle.pem").exists());
+    fs::write(runtime.root.join("ca-bundle.pem"), b"existing-public-bytes").unwrap();
+    assert!(
+        runtime
+            .publish_ca_bundle(&fixture.config.system_ca_bundles, Duration::ZERO)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(runtime.root.join("ca-bundle.pem")).unwrap(),
+        b"existing-public-bytes"
+    );
+}
+
+#[test]
+fn pem_update_waits_for_conversion_and_timeout_withdraws_publication() {
+    let mut fixture = Fixture::new();
+    fixture.config.load_timeout = Duration::from_millis(500);
+    let service = fixture.service();
+    service.enable().unwrap();
+    let before = service.ca().unwrap();
+    let old = fs::read(&before.ca_bundle_paths.pkcs12).unwrap();
+    let routed = fixture.rules();
+    fixture.plane.hold_conversion.store(true, Ordering::SeqCst);
+    fs::write(
+        &fixture.config.system_ca_bundles[0],
+        format!("# new system roots\n{CA}"),
+    )
+    .unwrap();
+    let error = service.recover().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("PKCS#12 conversion did not become current")
+    );
+    assert!(!service.status(UID).ready);
+    assert!(service.ca().is_err());
+    assert!(!fixture.host.log().active);
+    assert!(!fixture.config.runtime_dir.exists());
+    assert_ne!(routed, crate::nft::render_delete());
+    assert_eq!(fixture.rules(), crate::nft::render_delete());
+    fixture.plane.hold_conversion.store(false, Ordering::SeqCst);
+    service.recover().unwrap();
+    assert!(service.status(UID).ready);
+    assert_ne!(
+        fs::read(service.ca().unwrap().ca_bundle_paths.pkcs12).unwrap(),
+        old
+    );
+}
+
 #[test]
 fn unsupported_cgroup_v2_refuses_empty_enable_without_host_or_state_mutation() {
     let fixture = Fixture::new();
@@ -3288,12 +3601,27 @@ fn disable_withdraws_routes_before_proxy_and_retains_public_ca() {
     fixture.key(REAL);
     service.enable().unwrap();
     let ca = fs::read(fixture.config.runtime_dir.join("ca-bundle.pem")).unwrap();
+    let pkcs12 = fs::read(fixture.config.runtime_dir.join("ca-bundle.p12")).unwrap();
     fixture.host.log().operations.clear();
     service.disable().unwrap();
     assert_eq!(fixture.host.log().operations, vec!["unroute", "stop"]);
     assert_eq!(
         fs::read(fixture.config.runtime_dir.join("ca-bundle.pem")).unwrap(),
         ca
+    );
+    assert_eq!(
+        fs::read(fixture.config.runtime_dir.join("ca-bundle.p12")).unwrap(),
+        pkcs12
+    );
+    let remaining: BTreeSet<_> = fs::read_dir(&fixture.config.runtime_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        remaining,
+        ["ca-bundle.pem", "ca-bundle.p12"]
+            .map(std::ffi::OsString::from)
+            .into()
     );
     assert!(service.ca().is_err());
 }
