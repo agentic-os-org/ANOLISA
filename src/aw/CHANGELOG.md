@@ -2,6 +2,83 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## [0.2.0] - 2026-11-20
+
+### Added
+
+- **AW**: Updated to v0.2.0, ship Python and TypeScript runtime SDKs with
+  optional Claude, QwenPaw, Pi and Qoder adapters, so applications can install the
+  integration they use and keep their native startup and configuration
+  ([#10211](https://github.com/agentic-os-org/ANOLISA/pull/10211),
+  [#10325](https://github.com/agentic-os-org/ANOLISA/pull/10325)).
+- **AW**: Updated to v0.2.0, compile target-specific startup hints offline with
+  `aw config descriptor`. SDK applications can use one policy configuration for
+  multiple targets and validate a matching descriptor before installing callbacks
+  ([#10244](https://github.com/agentic-os-org/ANOLISA/pull/10244)).
+- **AW**: Updated to v0.2.0, connect application-owned Claude and Pi workers before
+  protected work and support background attachment for the pinned Hermes 0.23.1
+  Gateway. Resident integrations keep work bound to the active policy until
+  callbacks and cleanup drain
+  ([#10290](https://github.com/agentic-os-org/ANOLISA/pull/10290),
+  [#10304](https://github.com/agentic-os-org/ANOLISA/pull/10304)).
+- **AW**: Updated to v0.2.0, add native Codex and DeepSeek Harness profiles and
+  admit final result checks on the verified Qoder SDK, Claude SDK, OpenClaw and
+  DeepSeek Harness profiles. Exact versions, transports and covered result types
+  are listed in the [capability reference](../../docs/user-guide/en/aw/capabilities.md#hook-support-matrix).
+
+### Changed
+
+- **AW**: Updated to v0.2.0, unify live connection, policy updates and service
+  control under the commands below. Update scripts that use retired command
+  spellings before switching binaries
+  ([#10279](https://github.com/agentic-os-org/ANOLISA/pull/10279)).
+- **AW**: Updated to v0.2.0, deliver the six SDK artifacts from one revision with
+  an `aw-sdk-candidate/v2` receipt. The four adapter packages require the matching
+  0.2.0 core SDK. Existing SDK import paths forward to the installed adapter
+  ([#10325](https://github.com/agentic-os-org/ANOLISA/pull/10325)).
+- **AW**: Updated to v0.2.0, support decision, constrained mutation and lifecycle
+  events in the Provider contract. Native execution requires an admitted
+  integration for the particular Hook and effect
+  ([#10321](https://github.com/agentic-os-org/ANOLISA/pull/10321)).
+
+### Fixed
+
+- **AW**: Updated to v0.2.0, restore checked text replacement for supported
+  QwenPaw tool results before stream and model delivery. Required check failures
+  withhold the original result
+  ([#10201](https://github.com/agentic-os-org/ANOLISA/pull/10201)).
+- **AW**: Updated to v0.2.0, correlate Hermes tool output with the originating
+  call so the active policy checks the matching result
+  ([#10304](https://github.com/agentic-os-org/ANOLISA/pull/10304)).
+
+### Support and deployment
+
+Linux supports [AW-managed launch, prepared native startup, and application-owned SDK integration](../../docs/developer-guide/en/aw/deployment/lifecycle.md).
+Consult the [Hook matrix](../../docs/user-guide/en/aw/capabilities.md#hook-support-matrix)
+for observation, blocking, checked input replacement, and text result replacement
+by Agent and mode. The framework-free `sdk/application` profile supports input and
+before-tool observation and blocking, plus after-tool observation. See the
+[Skill checks](../../docs/user-guide/en/aw/capabilities.md#skill-checks) and
+[MCP and policy updates](../../docs/user-guide/en/aw/capabilities.md#mcp-and-policy-updates)
+for supported sources, managed MCP paths and the idle boundary for each mode.
+
+| Previous entrypoint | 0.2.0 entrypoint |
+| --- | --- |
+| `aw agent connect` or `aw install --config FILE --agent TARGET` | `aw connect --config FILE --agent TARGET` |
+| `aw instance attach` | `aw connect` with native `--agent` and `--pid`, or SDK selection |
+| `aw instance attach --remove` or `aw instance detach` | `aw disconnect` with the native target and PID, or `--sdk-instance` |
+| `aw instance update` | `aw update` |
+| `aw serve`, `aw status`, `aw stop` | `aw service serve`, `aw service status`, `aw service stop` |
+| `aw validate` | `aw config validate` |
+
+Keep application runtimes and credentials in the native environment. Install the
+selected Provider bridges with the matching AW version and provision their
+backends separately. Stop affected instances before upgrading, validate the
+configuration with the new binary, regenerate any deployment descriptors, and
+restart the service and applications through the selected entrypoints. Keep
+the previous binary, Provider and SDK packages, configuration and launcher
+scripts together for rollback.
+
 ## [0.1.1] - 2026-11-12
 
 ### Added

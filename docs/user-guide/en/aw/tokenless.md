@@ -17,7 +17,7 @@ Prepare the AW CLI, `AW_HOME` and `AW_QODER` using [installation](installation.m
 then install the bridge into its own extension prefix:
 
 ```bash
-export AW_VERSION=0.1.1
+export AW_VERSION=0.2.0
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"

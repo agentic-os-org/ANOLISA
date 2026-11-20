@@ -2,6 +2,66 @@
 
 [English](CHANGELOG.md)
 
+## [0.2.0] - 2026-11-20
+
+### 新增
+
+- **AW**：更新至 v0.2.0，交付 Python 和 TypeScript 运行时 SDK，以及可选的 Claude、
+  QwenPaw、Pi 和 Qoder 适配包。应用按需安装对应适配包，沿用原生启动和配置
+  （[#10211](https://github.com/agentic-os-org/ANOLISA/pull/10211)、
+  [#10325](https://github.com/agentic-os-org/ANOLISA/pull/10325)）。
+- **AW**：更新至 v0.2.0，支持通过 `aw config descriptor` 离线编译目标专用启动信息。
+  SDK 应用可用一份策略配置接入多个目标，并在安装回调前校验各自的 Descriptor
+  （[#10244](https://github.com/agentic-os-org/ANOLISA/pull/10244)）。
+- **AW**：更新至 v0.2.0，支持应用持有的 Claude 和 Pi worker 在受保护任务开始前挂接，
+  并为固定版本 Hermes 0.23.1 Gateway 提供后台挂接。常驻任务在回调和清理排空前继续使用
+  开始时的策略（[#10290](https://github.com/agentic-os-org/ANOLISA/pull/10290)、
+  [#10304](https://github.com/agentic-os-org/ANOLISA/pull/10304)）。
+- **AW**：更新至 v0.2.0，新增 Codex 和 DeepSeek Harness 原生适配，并在已验证的
+  Qoder SDK、Claude SDK、OpenClaw 和 DeepSeek Harness profile 中支持最终结果检查。
+  具体版本、传输和结果类型见[能力说明](../../docs/user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
+
+### 变更
+
+- **AW**：更新至 v0.2.0，统一实例连接、策略更新和服务控制命令。使用旧命令的脚本需在切换
+  二进制前按下表迁移（[#10279](https://github.com/agentic-os-org/ANOLISA/pull/10279)）。
+- **AW**：更新至 v0.2.0，从同一源码版本交付六个 SDK 包，附 `aw-sdk-candidate/v2` 校验记录。
+  四个适配包均依赖对应语言的 0.2.0 核心 SDK，旧导入路径转发到已安装的适配包
+  （[#10325](https://github.com/agentic-os-org/ANOLISA/pull/10325)）。
+- **AW**：更新至 v0.2.0，Provider 合同支持决策、限定位置的修改与生命周期事件。
+  原生执行需要对应 Hook 和效果通过接入准入
+  （[#10321](https://github.com/agentic-os-org/ANOLISA/pull/10321)）。
+
+### 修复
+
+- **AW**：更新至 v0.2.0，恢复受支持 QwenPaw 工具结果在流式和模型交付前的受检文本替换。
+  必需检查失败时扣留原始结果（[#10201](https://github.com/agentic-os-org/ANOLISA/pull/10201)）。
+- **AW**：更新至 v0.2.0，将 Hermes 工具输出与发起调用对应起来，使生效策略检查对应的结果
+  （[#10304](https://github.com/agentic-os-org/ANOLISA/pull/10304)）。
+
+### 支持与部署
+
+Linux 支持 [AW 受管启动、已准备的原生启动和应用持有的 SDK 接入](../../docs/developer-guide/zh/aw/deployment/lifecycle.md)。
+各 Agent 和模式的观察、阻断、受检输入替换与文本结果替换范围见
+[Hook 矩阵](../../docs/user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
+无框架的 `sdk/application` profile 支持输入和工具执行前观察及阻断，以及工具执行后观察。
+各模式支持的来源、受管 MCP 路径与空闲更新条件见
+[Skill 校验](../../docs/user-guide/zh/aw/capabilities.md#skill-校验)和
+[MCP 与策略更新](../../docs/user-guide/zh/aw/capabilities.md#mcp-与策略更新)。
+
+| 原入口 | 0.2.0 入口 |
+| --- | --- |
+| `aw agent connect` 或 `aw install --config FILE --agent TARGET` | `aw connect --config FILE --agent TARGET` |
+| `aw instance attach` | `aw connect`，按原生 `--agent` 和 `--pid` 或 SDK 实例选择 |
+| `aw instance attach --remove` 或 `aw instance detach` | `aw disconnect`，按原生目标和 PID 或 `--sdk-instance` 选择 |
+| `aw instance update` | `aw update` |
+| `aw serve`、`aw status`、`aw stop` | `aw service serve`、`aw service status`、`aw service stop` |
+| `aw validate` | `aw config validate` |
+
+应用运行时和凭据继续由原生环境管理。选装与 AW 同版本的 Provider 桥接包，并单独部署后端。
+升级前停止受影响实例，使用新二进制校验配置，重新生成使用中的 Descriptor，再通过选定入口
+启动服务和应用。回退所需的旧版二进制、Provider 和 SDK 包、配置及启动脚本应成套保留。
+
 ## [0.1.1] - 2026-11-12
 
 ### 新增

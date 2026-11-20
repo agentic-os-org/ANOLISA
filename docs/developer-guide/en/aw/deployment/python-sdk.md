@@ -29,10 +29,10 @@ Install the core wheel (and only the optional framework adapter wheel your
 application uses) in the application's environment:
 
 ```bash
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.1.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.2.0-py3-none-any.whl
 # Optional framework adapters (install only when needed):
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.1.1-py3-none-any.whl
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.1.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.2.0-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.2.0-py3-none-any.whl
 ```
 
 The top-level `aw_sdk` import loads no Agent framework and the core wheel ships
