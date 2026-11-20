@@ -12,6 +12,15 @@
 #     deploy time.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-openclaw}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
@@ -19,12 +28,30 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # Allow the orchestrator (or a packaging script) to inject a specific openclaw
 # binary. Defaults to whatever `openclaw` resolves to on PATH.
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+# The OpenClaw home and state directory come from the explicit overrides
+# first and from the home directory second. They stay empty when neither
+# names a location, so the check below can tell "not configured" from
+# "configured to /".
+OPENCLAW_HOME="${OPENCLAW_HOME:-}"
+if [ -z "$OPENCLAW_HOME" ] && [ -n "$HOME_DIR" ]; then
+    OPENCLAW_HOME="$HOME_DIR/.openclaw"
+fi
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
-export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+export PATH="${USER_LOCAL_BIN}${OPENCLAW_STATE_DIR:+${OPENCLAW_STATE_DIR%/}/bin:}/usr/local/bin:$PATH"
+
+# The installer deploys the plugin into the OpenClaw state directory, so that
+# directory has to be known before anything is written. A path built from a
+# missing HOME would land under /, and an explicit OPENCLAW_HOME or
+# OPENCLAW_STATE_DIR still names a real directory.
+if [ -z "$OPENCLAW_STATE_DIR" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the OpenClaw state directory: HOME is unset and no override names it." >&2
+    echo "[${COMPONENT}] Set HOME, OPENCLAW_HOME or OPENCLAW_STATE_DIR to the directory to use, then retry." >&2
+    exit 1
+fi
 
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
 

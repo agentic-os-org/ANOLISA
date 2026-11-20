@@ -2,6 +2,15 @@
 # install.sh — Install the native Tokenless plugin for Qoder CLI.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-qoder}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
@@ -9,14 +18,23 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PLUGIN_DIR="$ADAPTER_DIR/qoder"
 PLUGIN_JSON="$PLUGIN_DIR/.qoder-plugin/plugin.json"
 
+# The Qoder installation directory comes from the explicit override first
+# and from the home directory second. It stays empty when neither names a
+# location, so the lookup below has nothing to read rather than a path
+# under /.
+QODER_HOME="${QODER_HOME:-}"
+if [ -z "$QODER_HOME" ] && [ -n "$HOME_DIR" ]; then
+    QODER_HOME="$HOME_DIR/.qoder"
+fi
+
 find_qodercli() {
     local versioned_glob latest_versioned candidate
-    versioned_glob="$HOME/.qoder/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}"
+    versioned_glob="${QODER_HOME:+$QODER_HOME/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}}"
     # shellcheck disable=SC2086 # Intentional version glob expansion.
     latest_versioned="$(ls -d $versioned_glob 2>/dev/null | sort -V | tail -1 || true)"
 
     for candidate in "$latest_versioned" \
-                     "$HOME/.qoder/bin/qodercli/qodercli" \
+                     "${QODER_HOME:+$QODER_HOME/bin/qodercli/qodercli}" \
                      "qodercli"; do
         [ -n "$candidate" ] || continue
         if [ -x "$candidate" ] || command -v "$candidate" >/dev/null 2>&1; then
@@ -29,6 +47,11 @@ find_qodercli() {
 
 QODERCLI="$(find_qodercli || true)"
 if [ -z "$QODERCLI" ]; then
+    if [ -z "$QODER_HOME" ]; then
+        echo "[${COMPONENT}] ERROR: HOME is unset and QODER_HOME is not set, so there is no Qoder installation directory to read" >&2
+        echo "    Set HOME or QODER_HOME to the Qoder installation directory, then retry." >&2
+        exit 1
+    fi
     echo "[${COMPONENT}] ERROR: qodercli not found, aborting plugin registration" >&2
     echo "    Install Qoder CLI first: https://qoder.com/cli" >&2
     exit 1

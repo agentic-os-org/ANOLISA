@@ -5,15 +5,42 @@
 # invoked by component Makefile/build-all instead of a shared manifest runner.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this uninstaller with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-openclaw}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+# The OpenClaw home and state directory come from the explicit overrides
+# first and from the home directory second. They stay empty when neither
+# names a location, so the check below can tell "not configured" from
+# "configured to /".
+OPENCLAW_HOME="${OPENCLAW_HOME:-}"
+if [ -z "$OPENCLAW_HOME" ] && [ -n "$HOME_DIR" ]; then
+    OPENCLAW_HOME="$HOME_DIR/.openclaw"
+fi
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
-export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+export PATH="${USER_LOCAL_BIN}${OPENCLAW_STATE_DIR:+${OPENCLAW_STATE_DIR%/}/bin:}/usr/local/bin:$PATH"
+
+# The uninstaller removes the plugin from the OpenClaw state directory, so
+# that directory has to be known before anything is removed. A path built
+# from a missing HOME would sit under /, and an explicit OPENCLAW_HOME or
+# OPENCLAW_STATE_DIR still names a real directory.
+if [ -z "$OPENCLAW_STATE_DIR" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the OpenClaw state directory: HOME is unset and no override names it." >&2
+    echo "[${COMPONENT}] Set HOME, OPENCLAW_HOME or OPENCLAW_STATE_DIR to the directory to use, then retry." >&2
+    exit 1
+fi
 
 if [ -z "$OPENCLAW_BIN" ]; then
     OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"

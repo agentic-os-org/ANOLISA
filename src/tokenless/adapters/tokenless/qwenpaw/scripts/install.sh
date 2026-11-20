@@ -9,6 +9,15 @@
 # version, so that asset is probed before the bundle is handed over.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this installer with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-qwenpaw}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
@@ -16,15 +25,34 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # COPAW_WORKING_DIR, else a legacy ~/.copaw, else ~/.qwenpaw.
 QWENPAW_WORKING_DIR="${QWENPAW_WORKING_DIR:-${COPAW_WORKING_DIR:-}}"
 if [ -z "$QWENPAW_WORKING_DIR" ]; then
-    if [ -d "$HOME/.copaw" ]; then QWENPAW_WORKING_DIR="$HOME/.copaw"; else QWENPAW_WORKING_DIR="$HOME/.qwenpaw"; fi
+    if [ -z "$HOME_DIR" ]; then
+        # Without a home there is no directory to derive the working
+        # directory from, and guessing one would put the plugin under /.
+        QWENPAW_WORKING_DIR=""
+    elif [ -d "$HOME_DIR/.copaw" ]; then
+        QWENPAW_WORKING_DIR="$HOME_DIR/.copaw"
+    else
+        QWENPAW_WORKING_DIR="$HOME_DIR/.qwenpaw"
+    fi
 fi
 QWENPAW_BIN="${QWENPAW_BIN:-}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
-export PATH="${QWENPAW_HOME:-$HOME/.qwenpaw}/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+export PATH="${QWENPAW_HOME:-${HOME_DIR:+$HOME_DIR/.qwenpaw}}/bin:${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/qwenpaw"
 PLUGIN_DST="${QWENPAW_WORKING_DIR%/}/plugins/${PLUGIN_ID}"
+
+# The installer copies the plugin bundle into the QwenPaw working directory,
+# so that directory has to be known before anything is written. A path built
+# from a missing HOME would land under /, and an explicit QWENPAW_WORKING_DIR
+# or COPAW_WORKING_DIR still names a real directory.
+if [ -z "$QWENPAW_WORKING_DIR" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the QwenPaw working directory: HOME is unset and no override names it." >&2
+    echo "[${COMPONENT}] Set HOME, QWENPAW_WORKING_DIR or COPAW_WORKING_DIR to the directory to use, then retry." >&2
+    exit 1
+fi
 
 # QwenPaw installs requirements.txt with its own interpreter (the CLI's
 # shebang). On a platform without a matching wheel pip installs nothing and
