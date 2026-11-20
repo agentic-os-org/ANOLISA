@@ -102,11 +102,12 @@ class NativeFixture(unittest.IsolatedAsyncioTestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    def setup_agent(self, tool, *, hooks=None, context=None, coordinator=None, toolkit=None):
+    def setup_agent(self, tool, *, hooks=None, context=None, coordinator=None, toolkit=None, middleware=None):
         coordinator = coordinator or ToolCoordinator()
         bind_coordinator(coordinator)
-        middleware = ResidentMiddleware({"hooks": hooks or []}, PLUGIN.AwToolMiddleware,
-                                        context or SimpleNamespace())
+        if middleware is None:
+            middleware = ResidentMiddleware({"hooks": hooks or []}, PLUGIN.AwToolMiddleware,
+                                            context or SimpleNamespace())
         async def available(name, groups):
             return SimpleNamespace(input_schema={})
         async def call_tool(tool_call, state):
