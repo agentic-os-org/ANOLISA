@@ -149,7 +149,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Nov 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Fri Nov 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Point sec-core and Tokenless status users to AW and show adapter enable times.
+- Use HTTPS for the shipped RPM repository.
+- Refresh component catalog versions and drop the cosh-switch payload entry.
+
+* Thu Nov 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.4.1-1
 - Reject unsupported telemetry preparation options and preserve warnings in JSON.
 - Quote executable paths in generated telemetry service units.
 - Refresh component catalog versions.

@@ -9,6 +9,30 @@
 
 ## [未发布]
 
+## [0.4.2] - 2026-11-20
+
+### 变更
+
+- 通过 AW 运行 sec-core 或 Tokenless 时，`anolisa status <component>` 和
+  `anolisa adapter status [component]` 的文本输出提示使用
+  `aw inspect --config /path/to/aw.yaml --json` 查看 Provider 状态和最近的执行记录。
+  适配器状态也会在有记录时显示启用时间，JSON 输出字段为 `enabled_at`
+  ([#10377](https://github.com/agentic-os-org/ANOLISA/pull/10377))。
+- 将组件目录更新到 Agent Memory `0.2.16`、AgentSight `0.16.2`、cosh-ng `0.30.0`、
+  agent-sec-core `1.3.0`、SkillFS `0.5.8`、Tokenless `0.9.6` 和 ws-ckpt `0.7.3`。
+
+### 移除
+
+- 从内置的 cosh-ng 安装契约中移除 `cosh-switch`，与 `0.30.0` 的安装包一致。
+  升级 cosh-ng 前，请移除脚本中对 `cosh-switch` 的调用
+  ([#9968](https://github.com/agentic-os-org/ANOLISA/pull/9968))。
+
+### 修复
+
+- 内置 RPM 仓库改用 `mirrors-ssl.aliyuncs.com` 的 HTTPS 地址，通过 TLS 下载元数据
+  和软件包。如果升级后 `/etc/anolisa/repo.toml` 仍指向旧镜像，请手动更新 RPM 地址
+  ([#10312](https://github.com/agentic-os-org/ANOLISA/pull/10312))。
+
 ## [0.4.1] - 2026-11-12
 
 ### 变更

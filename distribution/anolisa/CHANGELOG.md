@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-20
+
+### Changed
+
+- Text output from `anolisa status <component>` and
+  `anolisa adapter status [component]` points sec-core and Tokenless users
+  running through AW to
+  `aw inspect --config /path/to/aw.yaml --json` for Provider status and recent
+  executions. Adapter status also reports the recorded enable time when
+  available, as `enabled_at` in JSON output
+  ([#10377](https://github.com/agentic-os-org/ANOLISA/pull/10377)).
+- Update the component catalog to Agent Memory `0.2.16`, AgentSight `0.16.2`,
+  cosh-ng `0.30.0`, agent-sec-core `1.3.0`, SkillFS `0.5.8`, Tokenless `0.9.6`,
+  and ws-ckpt `0.7.3`.
+
+### Removed
+
+- Drop `cosh-switch` from the bundled cosh-ng install contract to match the
+  `0.30.0` packages. Remove calls to `cosh-switch` from scripts before upgrading
+  cosh-ng ([#9968](https://github.com/agentic-os-org/ANOLISA/pull/9968)).
+
+### Fixed
+
+- Use HTTPS at `mirrors-ssl.aliyuncs.com` for the shipped RPM repository so
+  metadata and package downloads use TLS. If `/etc/anolisa/repo.toml` still
+  points to the old mirror after upgrading, update its RPM URL manually
+  ([#10312](https://github.com/agentic-os-org/ANOLISA/pull/10312)).
+
 ## [0.4.1] - 2026-11-12
 
 ### Changed
