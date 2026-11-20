@@ -13,6 +13,8 @@ mod bwrap_args;
 #[cfg(target_os = "linux")]
 mod cli;
 #[cfg(target_os = "linux")]
+mod landlock;
+#[cfg(target_os = "linux")]
 mod proxy;
 #[cfg(target_os = "linux")]
 pub mod runtime;

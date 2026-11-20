@@ -320,7 +320,7 @@ pub(crate) fn apply_strict_restrictions(network_enabled: bool) -> Result<()> {
     }
     rules.insert(
         libc::SYS_ioctl,
-        [libc::TIOCSTI, 0x541c]
+        [libc::TIOCSTI as _, 0x541c]
             .into_iter()
             .map(|request| {
                 SeccompRule::new(vec![SeccompCondition::new(

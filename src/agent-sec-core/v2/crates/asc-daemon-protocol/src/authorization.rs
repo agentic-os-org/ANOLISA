@@ -330,7 +330,7 @@ pub struct DecisionClaim {
     pub run_id: Option<String>,
     /// Pinned local state transferred only when accepting a decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution: Option<ExecutionSpec>,
+    pub execution: Option<ExecutionPlan>,
 }
 
 /// Immutable invocation retained by the daemon while the host asks the user.
@@ -338,7 +338,7 @@ pub struct DecisionClaim {
 #[serde(deny_unknown_fields)]
 pub struct AcceptedAuthorization {
     /// Pinned by the PEP before presenting any approval.
-    pub execution: ExecutionSpec,
+    pub execution: ExecutionPlan,
     /// Original request bound to the decision.
     pub request: OsAuthorizationRequest,
     /// Final decision; callers cannot replace it during handoff.

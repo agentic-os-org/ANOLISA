@@ -396,6 +396,10 @@ fn recursive_readonly_matches(host: &serde_json::Value, mount: &crate::MountPlan
 }
 
 impl SandboxBackend for DockerBackend {
+    fn selection(&self) -> asc_sandbox_types::BackendSelection {
+        asc_sandbox_types::BackendSelection::Docker {}
+    }
+
     fn capabilities(&self) -> Result<BackendCapabilities, PepError> {
         let client = Client::new(&self.config).map_err(PepError::from)?;
         Self::capabilities_with_client(&client)

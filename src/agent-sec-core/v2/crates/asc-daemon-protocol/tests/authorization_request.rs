@@ -69,3 +69,78 @@ fn os_adapter_rejects_unknown_actions_subjects_resources_and_fields() {
     });
     assert!(serde_json::from_value::<OsAuthorizationRequest>(old).is_err());
 }
+
+#[test]
+fn backend_plans_preserve_linux_wire_compatibility_and_reject_mixed_backends() {
+    use asc_daemon_protocol::authorization::{
+        BackendSelection, ExecutionPlan, ExecutionSpec, LandlockMode, LinuxSandboxOptions,
+    };
+    let spec = json!({
+        "version":1,
+        "launch":{"program":"echo","resolved_program":"/bin/echo","args":[],"cwd":"/","env":{}},
+        "permissions":os_request().context.requested_permissions,
+        "path_facts":[]
+    });
+    for mode in [
+        LandlockMode::Off,
+        LandlockMode::Auto,
+        LandlockMode::Required,
+    ] {
+        let mut wire = spec.clone();
+        if !mode.is_off() {
+            wire["landlock"] = json!(mode);
+        }
+        let plan: ExecutionPlan = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            plan.backend,
+            BackendSelection::LinuxSandbox(LinuxSandboxOptions { landlock: mode })
+        );
+        assert_eq!(serde_json::to_value(&plan.spec).unwrap(), spec);
+        assert_eq!(serde_json::to_value(&plan).unwrap(), wire);
+        if !mode.is_off() {
+            assert!(serde_json::from_value::<ExecutionSpec>(wire).is_err());
+        }
+    }
+    let docker = json!({"backend":{"kind":"docker"}, "spec":spec});
+    let plan: ExecutionPlan = serde_json::from_value(docker.clone()).unwrap();
+    assert_eq!(plan.backend, BackendSelection::Docker {});
+    assert_eq!(serde_json::to_value(plan).unwrap(), docker);
+    let mut extra = docker.clone();
+    extra["landlock"] = json!("required");
+    let mut mixed = docker.clone();
+    mixed["backend"]["landlock"] = json!("required");
+    let mut unknown = docker.clone();
+    unknown["backend"]["kind"] = json!("unknown");
+    let mut legacy = spec.clone();
+    legacy["backend"] = json!({"kind":"docker"});
+    let mut nested = docker;
+    nested["spec"]["landlock"] = json!("required");
+    for invalid in [extra, mixed, unknown, legacy, nested] {
+        assert!(
+            serde_json::from_value::<ExecutionPlan>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn execution_receipts_keep_backend_evidence_strict_and_flat() {
+    use asc_daemon_protocol::authorization::{BackendEvidence, ExecutionResult, LandlockStatus};
+    let mut result = ExecutionResult::default();
+    let mut wire = serde_json::to_value(&result).unwrap();
+    assert!(wire.get("landlock").is_none());
+    result.evidence = BackendEvidence::LinuxSandbox {
+        landlock: LandlockStatus::Enforced { abi: 3 },
+    };
+    wire["landlock"] = json!({"state":"enforced","abi":3});
+    assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<ExecutionResult>(wire.clone()).unwrap(),
+        result
+    );
+    wire["landlock"] = json!({"state":"unknown"});
+    assert!(serde_json::from_value::<ExecutionResult>(wire.clone()).is_err());
+    wire.as_object_mut().unwrap().remove("landlock");
+    wire["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<ExecutionResult>(wire).is_err());
+}

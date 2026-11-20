@@ -1183,8 +1183,8 @@ when {{ resource.path == {} || resource.path like {} }};"#,
         parent.to_str().unwrap(),
         FileRight::Read
     ));
-    let spec = runtime.prepare_execution(&prepared, &decision).unwrap();
-    let result = backend.execute_bound(&spec).unwrap();
+    let plan = runtime.prepare_execution(&prepared, &decision).unwrap();
+    let result = backend.execute_bound(&plan.spec).unwrap();
     assert!(result.installed && result.started, "{result:?}");
     assert_eq!(result.exit_code, Some(0), "{result:?}");
     assert_eq!(

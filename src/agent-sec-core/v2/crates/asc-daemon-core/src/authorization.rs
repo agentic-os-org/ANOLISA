@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use asc_daemon_protocol::authorization::{
-    AcceptedAuthorization, ClaimPhase, ClaimResponse, Decision, DecisionClaim, DecisionVerdict,
-    ExecutionReceipt, ExecutionSpec, OsAuthorizationRequest, ReceiptAck, Validate,
+    AcceptedAuthorization, BackendSelection, ClaimPhase, ClaimResponse, Decision, DecisionClaim,
+    DecisionVerdict, ExecutionPlan, ExecutionReceipt, OsAuthorizationRequest, ReceiptAck, Validate,
 };
 use asc_security_events::{EventResult, SecurityEvent};
 
@@ -43,7 +43,9 @@ struct PendingDecision {
     request: OsAuthorizationRequest,
     decision: Decision,
     accepted_at: Option<u64>,
-    execution: Option<ExecutionSpec>,
+    execution: Option<ExecutionPlan>,
+    // Retain the requirement after the one-time transfer consumes execution.
+    accepted_backend: Option<BackendSelection>,
     claimed: bool,
     run_id: Option<String>,
     reporting: bool,
@@ -60,9 +62,10 @@ impl PendingDecision {
             .as_ref()
             .ok_or(AuthorizationError::InvalidArgument)?;
         self.decision
-            .validate_execution(execution)
+            .validate_execution(&execution.spec)
             .map_err(|_| AuthorizationError::Conflict)?;
         self.execution = Some(execution.clone());
+        self.accepted_backend = Some(execution.backend);
         self.run_id.clone_from(&claim.run_id);
         self.accepted_at = Some(now);
         Ok(())
@@ -149,6 +152,7 @@ impl AuthorizationService {
                 reporting: false,
                 failed_receipt: None,
                 execution: None,
+                accepted_backend: None,
             },
         );
         Ok(decision)
@@ -278,7 +282,7 @@ impl AuthorizationService {
         if item.reporting {
             return Err(AuthorizationError::Conflict);
         }
-        validate_receipt(&item.decision, receipt)?;
+        validate_receipt(&item.decision, item.accepted_backend, receipt)?;
         let event = receipt_event(peer, receipt, &item.decision)?;
         if item
             .failed_receipt
@@ -362,10 +366,14 @@ fn ensure_capacity(
 
 fn validate_receipt(
     decision: &Decision,
+    accepted_backend: Option<BackendSelection>,
     receipt: &ExecutionReceipt,
 ) -> Result<(), AuthorizationError> {
     let result = &receipt.result;
     if receipt.request_id != decision.request_id
+        || !result
+            .evidence
+            .matches_installation(accepted_backend, result.installed)
         || receipt.execution_id != decision.execution_id
         || (result.started && !result.installed)
         || (result.exit_code.is_some() && result.signal.is_some())
@@ -461,6 +469,7 @@ pub enum AuthorizationError {
 mod tests {
     use super::*;
     use asc_daemon_protocol::authorization::ExecutionResult;
+    use asc_daemon_protocol::authorization::{BackendEvidence, LandlockMode};
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -533,15 +542,20 @@ mod tests {
             .unwrap(),
         )
     }
-    fn execution(decision: &Decision) -> ExecutionSpec {
+    fn execution(decision: &Decision) -> ExecutionPlan {
         let mut launch = serde_json::to_value(&decision.launch).unwrap();
         launch["env"] = json!({"BOUND": "original"});
-        ExecutionSpec {
-            version: 1,
-            launch: serde_json::from_value(launch).unwrap(),
-            permissions: decision.effective_permissions.clone().unwrap(),
-            path_facts: vec![],
-            mount_aliases: vec![],
+        ExecutionPlan {
+            backend: BackendSelection::LinuxSandbox(
+                asc_daemon_protocol::authorization::LinuxSandboxOptions::default(),
+            ),
+            spec: asc_daemon_protocol::authorization::ExecutionSpec {
+                version: 1,
+                launch: serde_json::from_value(launch).unwrap(),
+                permissions: decision.effective_permissions.clone().unwrap(),
+                path_facts: vec![],
+                mount_aliases: vec![],
+            },
         }
     }
 
@@ -553,6 +567,7 @@ mod tests {
             approval: None,
             recorded_at: 120,
             result: ExecutionResult {
+                evidence: BackendEvidence::None,
                 installed: true,
                 started: true,
                 exit_code: Some(0),
@@ -584,11 +599,18 @@ mod tests {
             .execution
             .as_mut()
             .unwrap()
+            .spec
             .launch
             .args
             .push("tampered".into());
         assert!(service.claim(peer(1000), &claim, 101).is_err());
-        claim.execution = Some(execution(&decision));
+        let mut bound = execution(&decision);
+        bound.backend = BackendSelection::LinuxSandbox(
+            asc_daemon_protocol::authorization::LinuxSandboxOptions {
+                landlock: LandlockMode::Required,
+            },
+        );
+        claim.execution = Some(bound.clone());
         assert!(matches!(
             service.claim(peer(1001), &claim, 101),
             Err(AuthorizationError::Forbidden)
@@ -610,7 +632,7 @@ mod tests {
             .unwrap()
             .authorization
             .unwrap();
-        assert_eq!(accepted.execution, execution(&decision));
+        assert_eq!(accepted.execution, bound);
         assert_eq!(accepted.request, request);
         assert_eq!(accepted.decision, decision);
         assert_eq!(accepted.accepted_at, 101);
@@ -619,6 +641,16 @@ mod tests {
         let mut report = receipt(&decision);
         report.approval = Some(true);
         claim.phase = ClaimPhase::Abandon;
+        assert!(service.report(peer(1000), &report).is_err());
+        report.result.evidence = BackendEvidence::LinuxSandbox {
+            landlock: asc_daemon_protocol::authorization::LandlockStatus::Skipped {
+                reason: "LSM disabled".into(),
+            },
+        };
+        assert!(service.report(peer(1000), &report).is_err());
+        report.result.evidence = BackendEvidence::LinuxSandbox {
+            landlock: asc_daemon_protocol::authorization::LandlockStatus::Enforced { abi: 3 },
+        };
         service.report(peer(1000), &report).unwrap();
         assert!(
             service

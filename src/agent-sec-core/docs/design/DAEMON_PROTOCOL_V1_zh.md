@@ -1338,6 +1338,15 @@ agent 只含可选 agent_type。未知 action、绑定不一致、未知字段�
 通用 context 可供其它 consumer 定义；当前 RPC 只处理 OS 请求，未提供通用非 OS 决策端。
 PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。
 execute 和 abandon 只传标识与阶段。daemon 与授权客户端须同步升级。
+daemon 在 accept 时一起保存公共执行规格和执行后端。现有 Cosh 的平铺
+`execution` 报文对应 Linux 后端，其中可选的 `execution.landlock` 为
+`auto` 或 `required`，省略表示 `off`。执行时从这次交接恢复模式。
+Docker 计划使用 `{"backend":{"kind":"docker"},"spec":...}`，其中
+`spec` 仅包含公共字段。未知后端、混用后端字段以及恢复时后端不匹配都会被拒绝。
+成功安装整体沙箱后，非 off 模式的回执在 `result.landlock` 携带
+`{"state":"enforced","abi":3}`（abi 为实际探测值）或
+`{"state":"skipped","reason":"..."}`。安装失败走既有 error 字段。旧严格解码器
+拒绝未知字段，默认关闭时沿用原报文。
 Decision 返回最终命令、有效权限、策略版本、接收期限和 warnings。仅当路径条件要求区分文件与目录时，require_files 列出须由执行侧核实为文件的路径。
 `approval_requirements` 是 V2 sandbox 决定附带的展示来源，缺省为空，空列表不序列化。
 每项包含 `target` 与可选的策略 `message`：target.kind 为 execution、filesystem 或 network。
