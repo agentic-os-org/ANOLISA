@@ -63,6 +63,7 @@ export async function rpc(endpoint, identity, operation, timeoutMs, signal) {
     const socket = net.createConnection({ path: endpoint });
     let data = Buffer.alloc(0),
       size,
+      reply,
       settled = false;
     const finish = (error, value) => {
       if (settled) return;
@@ -73,11 +74,16 @@ export async function rpc(endpoint, identity, operation, timeoutMs, signal) {
       if (error) reject(error);
       else resolve(value);
     };
+    // A complete validated frame stays authoritative if socket teardown stalls.
+    const close = (error) => {
+      if (reply) finish(reply.error, reply.value);
+      else finish(error);
+    };
     const abort = () =>
-      finish(signal.reason ?? new DOMException("Cancelled", "AbortError"));
+      close(signal.reason ?? new DOMException("Cancelled", "AbortError"));
     const left = Number((expires - process.hrtime.bigint()) / 1000000n);
     const timer = setTimeout(
-      () => finish(new AwError("ETIMEDOUT", { transport: true })),
+      () => close(new AwError("ETIMEDOUT", { transport: true })),
       Math.max(0, left),
     );
     signal?.addEventListener("abort", abort, { once: true });
@@ -86,11 +92,9 @@ export async function rpc(endpoint, identity, operation, timeoutMs, signal) {
       socket.write(Buffer.concat([prefix, payload]));
     });
     socket.on("error", (error) =>
-      finish(new AwError(error.code, { transport: true, cause: error })),
+      close(new AwError(error.code, { transport: true, cause: error })),
     );
-    socket.on("end", () => {
-      if (!settled) finish(new AwError("ECONNRESET", { transport: true }));
-    });
+    socket.on("end", () => close(new AwError("ECONNRESET", { transport: true })));
     socket.on("data", (chunk) => {
       if (settled) return;
       if (process.hrtime.bigint() >= expires)
@@ -119,11 +123,15 @@ export async function rpc(endpoint, identity, operation, timeoutMs, signal) {
         if (response.error !== null) {
           if (typeof response.error !== "string" || response.result !== null)
             throw new AwError("invalid_response");
-          throw new AwError(response.error);
+          reply = { error: new AwError(response.error) };
+        } else {
+          if (!response.result || typeof response.result !== "object")
+            throw new AwError("invalid_response");
+          reply = { value: response };
         }
-        if (!response.result || typeof response.result !== "object")
-          throw new AwError("invalid_response");
-        finish(null, response);
+        // Each AW connection carries one reply. Let the peer retire its slot
+        // before the caller submits another operation on a fresh connection.
+        socket.end();
       } catch (error) {
         finish(
           error instanceof AwError
