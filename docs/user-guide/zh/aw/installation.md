@@ -10,6 +10,8 @@
 
 ## 获取安装包
 
+在 [GitHub Releases](https://github.com/agentic-os-org/ANOLISA/releases?q=aw%2Fv) 选择带附件的 `aw/vX.Y.Z`，下载所需的核心包、Provider 包和 `SHA256SUMS`。同一版本还提供三个 Python wheel、三个 npm 包及其源码校验记录。
+
 使用目标源码提交中[已成功的 AW Integration run](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-integration.yml) 的产物，并核对配套
 `SHA256SUMS`。校验和用于发现损坏，不是发布者签名。开发交付入口见
 [源码构建](../../../../contribute/zh/aw/building.md)。
@@ -34,16 +36,24 @@ owner 的发行件或原生 core 包安装。
 export AW_VERSION=0.2.0
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
-sha256sum -c SHA256SUMS
-tar -xzf "$AW_BUNDLE.tar.gz"
 export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"
 export AW_PREFIX="$HOME/.local"
-make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
-aw --version
+
+verify_aw_archive() {
+  awk -v archive="$1" '$0 == $1 "  " archive' SHA256SUMS | sha256sum --strict --check -
+}
+
+(
+  set -e
+  verify_aw_archive "$AW_BUNDLE.tar.gz"
+  tar -xzf "$AW_BUNDLE.tar.gz"
+  make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
+  aw --version
+)
 ```
 
-所有校验和应报告 `OK`，`aw --version` 应显示已安装版本。
+所选归档应报告 `OK`，随后显示已安装的 AW 版本。
 
 可修改 `AW_PREFIX` 选择安装目录。系统安装可由管理员执行
 `sudo make -C "$AW_BUNDLE_DIR" install PREFIX=/usr/local`。
@@ -52,11 +62,15 @@ aw --version
 
 ```bash
 export AW_PROVIDER_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
-tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
-install -d -m 700 "$HOME/.local/lib/aw"
-aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
-aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+(
+  set -e
+  verify_aw_archive "$AW_PROVIDER_BUNDLE.tar.gz"
+  tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
+  install -d -m 700 "$HOME/.local/lib/aw"
+  aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
+  aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+)
 ```
 
 需要安全检查时，使用相同方式安装独立 sec-core 归档。

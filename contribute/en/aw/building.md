@@ -98,3 +98,12 @@ SDK wheel construction and its offline install test also require packaging tools
 python3 -m pip install setuptools==68.1.2 wheel==0.42.0
 python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-dir src/aw/target/sdk-package
 ```
+
+## GitHub Release
+
+Run **Release / AW** manually on main for a candidate build. The workflow runs
+the full contract gate and native integration against that commit, verifies the
+three Linux x86_64 archives and rebuilds the six SDK payloads for comparison.
+Download the verified set from the workflow artifacts. A push of `aw/vX.Y.Z`
+publishes those assets when the tag matches the source package versions and its
+commit belongs to main. The release includes `SHA256SUMS` and `sdk-candidate.json`.

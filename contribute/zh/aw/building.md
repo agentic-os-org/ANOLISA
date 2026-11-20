@@ -93,3 +93,10 @@ SDK wheel 构建与离线安装测试还需要打包工具：
 python3 -m pip install setuptools==68.1.2 wheel==0.42.0
 python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-dir src/aw/target/sdk-package
 ```
+
+## GitHub Release
+
+在 main 上手动运行 **Release / AW** 可验证候选版本。工作流对同一提交运行完整合同检查和原生集成，
+核对三个 Linux x86_64 归档，并重新构建六个 SDK 比对包内容。通过后可从工作流下载候选产物。
+推送 `aw/vX.Y.Z` 时，工作流检查提交已进入 main、tag 与各包版本一致，验收通过后将这些产物、
+`SHA256SUMS` 和 `sdk-candidate.json` 一并发布到 GitHub Release。

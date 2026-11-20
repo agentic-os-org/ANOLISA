@@ -16,6 +16,10 @@ on:
         default: false
   workflow_call:
     inputs:
+      release_version:
+        description: Validated release version for native archives
+        type: string
+        required: false
       candidate_sha:
         required: true
         type: string
@@ -144,9 +148,12 @@ jobs:
       - name: Install packaging prerequisite
         run: apt-get install -y --no-install-recommends python3
       - name: Test installer and build independent artifacts
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           make -C distribution test-aw-packages
-          make -C distribution aw-packages VERSION=0.2.0 \
+          # Standalone integration uses the candidate Makefile's default version.
+          make -C distribution aw-packages ${RELEASE_VERSION:+"VERSION=$RELEASE_VERSION"} \
             OUTPUT="$AW_PACKAGE_DIR/packages" COMPONENTS="core sec-core tokenless"
           make -C distribution aw-integration-backends BACKENDS="sec-core tokenless"
       - name: Stage the same build for native acceptance

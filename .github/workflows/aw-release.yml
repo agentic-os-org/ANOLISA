@@ -1,0 +1,100 @@
+name: Release / AW
+
+on:
+  workflow_call:
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN:
+        required: false
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aw-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Match the source package versions to the release tag
+        id: version
+        run: |
+          version=$(python3 -B distribution/packaging/aw/release_version.py)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$GITHUB_REF_NAME" = "aw/v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  contracts:
+    needs: candidate
+    uses: ./.github/workflows/aw-ci.yml
+
+  integration:
+    needs: candidate
+    uses: ./.github/workflows/aw-integration.yml
+    with:
+      candidate_sha: ${{ needs.candidate.outputs.sha }}
+      release_version: ${{ needs.candidate.outputs.version }}
+      credential_free: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.fork }}
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ !github.event.repository.fork && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
+
+  assets:
+    needs: [candidate, contracts, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE: ${{ needs.candidate.outputs.sha }}
+      VERSION: ${{ needs.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - run: python3 -m pip install setuptools==68.1.2 wheel==0.42.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-integration-linux-x86_64-${{ env.CANDIDATE }}
+          path: native-archives
+      - name: Verify installed archives and assemble the matching SDKs
+        run: |
+          sdk=distribution/packaging/aw/sdk_candidate.py
+          python3 -B "$sdk" build --repo . --candidate "$CANDIDATE" --output assets
+          python3 -B "$sdk" verify --repo . --candidate "$CANDIDATE" --receipt assets/sdk-candidate.json
+          cd native-archives
+          for component in aw-core aw-provider-sec-core aw-provider-tokenless; do
+            archive="$component-$VERSION-linux-x86_64"
+            receipt=package.json
+            if [[ "$component" == aw-core ]]; then receipt=share/doc/aw/source.json; fi
+            tar -xOf "$archive.tar.gz" "$archive/$receipt" |
+              jq -e --arg id "$component" --arg version "$VERSION" --arg sha "$CANDIDATE" \
+                '.package_id == $id and .version == $version and .source_commit == $sha'
+            sha256sum "$archive.tar.gz" >> ../assets/SHA256SUMS
+            mv "$archive.tar.gz" ../assets/
+          done
+          diff -u SHA256SUMS ../assets/SHA256SUMS
+          cd ../assets
+          sha256sum *.tgz *.whl sdk-candidate.json >> SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aw-release-${{ env.CANDIDATE }}
+          path: assets/
+          if-no-files-found: error
+          retention-days: 28

@@ -1,7 +1,11 @@
 """Keep documented split package operations on the explicitly selected database."""
 
+import hashlib
+import os
 import re
 import shlex
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -69,6 +73,36 @@ class ScopeDocumentationTests(unittest.TestCase):
             for command in commands:
                 self.assertEqual(option(command, "--prefix"), "$AW_EXTENSION_PREFIX")
                 self.assertEqual(command[0], "aw")
+
+    def test_install_example_requires_a_matching_checksum_before_extraction(self) -> None:
+        for language in ("en", "zh"):
+            text = self.guide(GUIDES[0], language)
+            script = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)[0]
+            version = re.search(r"^export AW_VERSION=(.+)$", script, re.MULTILINE).group(1)
+            archive = f"aw-core-{version}-linux-{os.uname().machine}.tar.gz"
+            payload = b"selected archive"
+            digest = hashlib.sha256(payload).hexdigest()
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / archive).write_bytes(payload)
+                (root / "sdk-candidate.json").write_bytes(b"{}")
+                receipt = hashlib.sha256(b"{}").hexdigest() + "  sdk-candidate.json\n"
+                for command in ("tar", "make", "aw"):
+                    stub = root / command
+                    stub.write_text(f"#!/bin/sh\necho {command} >> calls\n")
+                    stub.chmod(0o755)
+                for entry, valid in (("", False), ("0" * 64 + "  " + archive, False),
+                                     (digest + "  " + archive, True)):
+                    with self.subTest(language=language, entry=entry):
+                        (root / "SHA256SUMS").write_text(receipt + entry + "\n")
+                        calls = root / "calls"
+                        calls.write_text("")
+                        result = subprocess.run(
+                            ["bash", "-c", script], cwd=root, timeout=5, capture_output=True,
+                            env={**os.environ, "HOME": directory, "PATH": f"{root}:/usr/bin:/bin"},
+                        )
+                        self.assertEqual(result.returncode == 0, valid, result.stderr)
+                        self.assertEqual(calls.read_text().splitlines(), ["tar", "make", "aw"] if valid else [])
 
     def test_developer_package_example_uses_one_scope_and_prefix(self) -> None:
         for language in ("en", "zh"):

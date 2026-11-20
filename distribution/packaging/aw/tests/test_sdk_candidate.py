@@ -114,6 +114,35 @@ def stage_fixture_artifacts(root, contents=None):
     return records
 
 
+class ReleaseVersionTests(unittest.TestCase):
+    @unittest.skipUnless(sys.version_info >= (3, 11), "release version checks require Python 3.11")
+    def test_release_requires_matching_binary_and_sdk_versions(self):
+        from release_version import release_version
+
+        repo = Path(__file__).resolve().parents[4]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifests = [
+                *repo.glob("src/aw/crates/*/Cargo.toml"),
+                repo / "providers/agent-sec-core/Cargo.toml",
+                repo / "providers/tokenless/Cargo.toml",
+            ]
+            for kind, _, directory in candidate.SDK_PACKAGES:
+                manifests.append(repo / directory / ("package.json" if kind == "npm" else "pyproject.toml"))
+            for manifest in manifests:
+                target = root / manifest.relative_to(repo)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(manifest, target)
+            version = release_version(root)
+            for manifest in manifests:
+                target = root / manifest.relative_to(repo)
+                with self.subTest(manifest=target.name):
+                    target.write_text(target.read_text().replace(version, "999.0.0", 1))
+                    with self.assertRaisesRegex(ValueError, "inconsistent AW release versions"):
+                        release_version(root)
+                    shutil.copyfile(manifest, target)
+
+
 class CandidateTests(unittest.TestCase):
     def test_full_commit_required(self):
         for value in ("main", "a" * 39, "A" * 40):

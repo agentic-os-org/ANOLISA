@@ -191,6 +191,25 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertIn("sec-core/v1.0.0...sec-core/v1.2.3", self.notes())
         self.assertIn("sec-core/v1.0.0...sec-core/v1.2.3", (self.root / "summary").read_text())
 
+    def test_aw_publishes_the_verified_set_with_component_notes(self) -> None:
+        self.release("aw/v1.2.3", "- AW package changes.", "src/aw/CHANGELOG.md")
+        output = self.root / "aw-release"
+        output.mkdir()
+        names = ["sdk-candidate.json", "SHA256SUMS"]
+        for role in ("core", "provider-sec-core", "provider-tokenless"):
+            names.append(f"aw-{role}-1.2.3-linux-x86_64.tar.gz")
+        for suffix in ("tgz", "whl"):
+            names.extend(f"sdk-{index}.{suffix}" for index in range(3))
+        for name in names:
+            (output / name).touch()
+        result, calls = self.publish(component="aw", tag="aw/v1.2.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(call for call in calls if call[:2] == ["release", "create"])
+        self.assertIn("--verify-tag", create)
+        self.assertIn("--latest=false", create)
+        self.assertEqual(set(create[-len(names):]), {str(output / name) for name in names})
+        self.assertIn("AW package changes.", self.notes())
+
     def test_curated_entry_is_the_only_content_source(self) -> None:
         self.commit("internal security implementation", SEC_PATH)
         self.commit("fix(sec-core): misleading subject", TOKENLESS_PATH)

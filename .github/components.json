@@ -253,7 +253,7 @@
       "label": "component:aw",
       "commit_scope": "aw",
       "commit_scope_aliases": [],
-      "release_tag_prefix": null,
+      "release_tag_prefix": "aw/v",
       "ci_key": null,
       "issue_triagers": [
         "kongche-jbw"
