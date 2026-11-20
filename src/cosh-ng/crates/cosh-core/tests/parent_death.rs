@@ -7,7 +7,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::IntoRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -265,20 +267,27 @@ fn stdout_epipe_exits_transport_failure() {
         .local_addr()
         .unwrap();
     configure(home.path(), address);
-    // Close the read end before the core exists so the first emit must hit
-    // EPIPE. With `Stdio::piped()` the harness briefly owns a reader, and a
-    // sibling test thread forking in the shared harness can inherit it across
-    // its fork->exec window: the emits then succeed, the EOF from
-    // `wait_timeout` closing stdin ends the session, and the case exits 0
-    // (#10360). A pipe with no reader has no such window.
-    let (read_end, write_end) = nix::unistd::pipe().unwrap();
-    drop(read_end);
-    let mut child = core_command(home.path(), workspace.path())
+    let mut command = core_command(home.path(), workspace.path());
+    command
         .stdin(Stdio::piped())
-        .stdout(Stdio::from(fs::File::from(write_end)))
-        .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()))
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()));
+    // Build the pipe in the forked child that becomes core and close the read
+    // end there before exec. The read end then never exists in the shared
+    // libtest process, so a sibling test thread forking in its own fork->exec
+    // window has nothing to inherit; creating the pipe here instead would keep
+    // the #10360 window open between `pipe()` and the close.
+    unsafe {
+        command.pre_exec(|| {
+            let (read_end, write_end) = nix::unistd::pipe()?;
+            let read_fd = read_end.into_raw_fd();
+            let write_fd = write_end.into_raw_fd();
+            nix::unistd::close(read_fd)?;
+            nix::unistd::dup2(write_fd, 1)?; // 1 is STDOUT_FILENO.
+            nix::unistd::close(write_fd)?;
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
     send_lines(&mut child, &[INIT, USER]);
     let status = child
         .wait_timeout(Duration::from_secs(10))
