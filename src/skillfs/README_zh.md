@@ -50,7 +50,7 @@ SkillFS 是面向 agent skill 的本地 FUSE 文件系统。它解析 `SKILL.md`
 
 ## 范围
 
-- 公开 CLI 命令是 `mount`、`stop`、`classify`、`validate` 和 `list`。
+- 公开 CLI 命令是 `mount`、`stop`、`explain`、`classify`、`validate` 和 `list`。
 - skill 可见性由 `skillfs-views.toml` 控制。
 - FUSE 支持挂载期间写透传，但只有 `SKILL.md` 变化会触发 store 同步。
 - 权威 skill key 是目录名，不是 rename 后可能滞后的 frontmatter `name:`。
@@ -127,6 +127,9 @@ cargo run -p skillfs -- list /path/to/skills
 # 生成或查看 skillfs-views.toml
 cargo run -p skillfs -- classify /path/to/skills
 
+# 不挂载，解释源优先级与视图归属
+cargo run -p skillfs -- explain --config /path/to/skillfs-mount.toml
+
 # 挂载 FUSE 文件系统
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
 
@@ -154,6 +157,10 @@ skillfs mount --config /path/to/skillfs-mount.toml --managed
 `skillfs stop <MOUNTPOINT>`，再通过 `--config ... --managed` 重新启动。
 TOML 示例、支持的参数和 OpenClaw 接入限制见
 [配置参考](../../docs/user-guide/zh/skillfs/index.md#挂载配置)。
+
+`explain` 在不挂载的情况下检查当前配置，不查询正在运行的 managed worker。
+参数、JSON 字段、exit code 和不完整结果的语义见
+[诊断参考](../../docs/user-guide/zh/skillfs/index.md#explain)。
 
 ### Managed Mount 模式
 
@@ -402,7 +409,7 @@ YAML 格式错误、非法的 `direction`/`auto_apply`/`match` 值、重复或�
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
   skillfs-fuse/   FUSE 文件系统与 POSIX passthrough 层
-  skillfs-cli/    mount / stop / classify / validate / list
+  skillfs-cli/    mount / stop / explain / classify / validate / list
 container/        Sidecar 镜像：Dockerfile、entrypoint、preflight、mount probe
 deploy/kubernetes/  Kubernetes Sidecar manifest 与示例 Skill source
 docs/specs/       实现规格

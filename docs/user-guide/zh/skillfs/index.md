@@ -244,6 +244,81 @@ skillfs stop /mnt/skillfs &&
 
 ## CLI 工具
 
+### explain
+
+在挂载前或排查来源优先级时，检查现有[挂载配置](#挂载配置)，也支持单源配置：
+
+```bash
+skillfs explain --config /path/to/skillfs-mount.toml
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo --format json
+```
+
+这些命令要求所用构建包含 `explain`；使用已安装的 release 时，先通过
+`skillfs explain --help` 检查是否可用。配置中的 source 和 mountpoint 路径遵循
+上文的绝对路径规则。`--skill` **精确匹配 skill 目录名**，而非 frontmatter 名称；
+省略时报告所有已发现的 skills。默认输出文本；`--format json` 在 stdout 输出一个
+JSON 对象。日志默认写入 stderr，显式指定 `--log-file` 时写入对应文件。
+
+命令读取当前文件，不读取运行中 worker 的冻结输入或已加载 views。结果不能证明挂载
+存在或 Agent 已加载某个 skill，也不是并发修改期间的原子快照。不支持 `--mountpoint`。
+诊断不会创建挂载点、修改配置/source/managed state、写入 SLS operation records，
+也不会启动 supervisor、watcher 或 FUSE session。显式请求的日志文件仍遵循现有的
+创建/追加规则。诊断结束后无需执行 stop 或回退操作。
+
+处理顺序固定为：解析配置，验证并规范化**全部**来源，按来源顺序加载 skills，最后读取
+首个规范化来源的 `skillfs-views.toml`。阻断错误会停止后续阶段，例如后续来源验证
+失败时，不会报告之前来源的 skill 加载证据。筛选在诊断后进行，不能隐藏其他 skill
+的阻断错误。同名 skill 整体选用较早来源；被遮蔽的损坏副本保持现有的非阻断处理，
+扫描深度和加载上限不变，规范化后相同的来源去重。完整报告按名称排序 skills，按来源
+优先级及路径排序遮蔽副本；不完整报告只保留已确认的证据。
+
+| Exit code | 含义 |
+| --- | --- |
+| `0` | 完整诊断，包括扫描完成但没有精确名称匹配 |
+| `1` | 诊断不完整，或输出失败 |
+| `2` | CLI 用法错误，包括传入 `--mountpoint` |
+
+JSON schema version 1 使用以下字段。参数解析后的诊断错误仍会输出报告，前提是
+stdout 可写。
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version`、`target`、`status` | `1`、`"configuration"`，以及 `"complete"` 或 `"incomplete"` |
+| `config_path`、`mountpoint`、`sources` | 输入配置路径、规范化挂载点（或 `null`），以及已确认的 canonical 来源顺序 |
+| `phase`、`blocker` | 不完整报告中提供：`config`、`source_validation`、`source_loading` 或 `views_loading`，以及带上下文的错误 |
+| `requested_skill`、`selection_status` | 请求的精确名称（或 `null`）；状态为 `all`、`discovered`、`not_discovered` 或 `unknown` |
+| `views` | 首个来源的 views `path`、`status`，以及有效默认 view 名称（或 `null`） |
+| `skills` | 已确认的胜出副本，仅在全部诊断工作结束后筛选 |
+| `skills[].selected`、`skills[].shadowed` | 副本的 canonical `source`、`SKILL.md` `path`、`parse_status`、`parse_message` 和 `enabled` 元数据 |
+| `skills[].effective_default`、`default_reason` | 布尔成员关系或 `"unknown"`，以及下表中的原因 |
+| `skills[].configured_views`、`secondary_views` | 按配置顺序排列的全部 configured/secondary view 名称；未知时为 `null` |
+
+选中副本的 parse status 为 `ok` 或 `degraded`。遮蔽副本还可能是 `error` 或
+`unloadable`；无法加载的副本使用 `enabled: null`。Parse message 为字符串或 `null`。
+`enabled: false` 只是元数据，不是额外的可见性条件。已确认身份但被拒绝的 skill
+可以是 `discovered`，同时没有已确认的胜出记录。`not_discovered` 表示 skill 扫描
+已完成且没有匹配，即使后续 views 阶段失败也是如此；扫描中断且尚未确认匹配时为
+`unknown`。不会推断未发现的名称到底不存在还是被忽略。
+
+Views 阶段执行前的状态为 `unknown`，执行后为 `absent`、`loaded` 或
+`invalid_or_unreadable`。只有真正缺失才使用现有的无 views 配置行为。格式错误、
+权限失败以及悬空的 views 符号链接会使成员结论保持 unknown，并返回 exit 1，同时
+保留来源证据。这种更严格的诊断不会改变现有 mount 对配置的接受行为。只有首个来源
+的文件生效，不会回退到后续来源的 views 文件。
+
+| `default_reason` | 有效默认视图成员关系 |
+| --- | --- |
+| `explicit` | 出现在第一个标记 `default = true` 的 view 中 |
+| `unassigned` | 没有分配到任何 view，自动纳入；没有默认 view 时也如此 |
+| `assigned_secondary` | 仅分配到有效默认 view 之外，不出现在默认目录列表中 |
+| `no_views_configuration` | Views 文件缺失，纳入所有已发现的 skills |
+| `unknown` | 诊断在确定成员关系前中断 |
+
+成员关系不互斥：同一 skill 可以同时属于有效默认 view 和多个 secondary views。
+后续标记 `default = true` 的 views 仍是 secondary。没有默认 view 时，显式分配的
+secondary skills 保持 secondary，未分配的 skills 仍纳入有效默认视图。
+
 ### validate
 
 ```bash

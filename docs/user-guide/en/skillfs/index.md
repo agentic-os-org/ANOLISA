@@ -268,6 +268,92 @@ this mount's coverage. To roll back, stop a managed mount with
 
 ## CLI Utilities
 
+### explain
+
+Inspect an existing [mount configuration](#mount-configuration), including a
+single-source configuration, before mounting or when investigating precedence:
+
+```bash
+skillfs explain --config /path/to/skillfs-mount.toml
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo --format json
+```
+
+These commands require a build containing `explain`; check availability with
+`skillfs explain --help` when using an installed release. The configuration's
+source and mountpoint paths follow the absolute-path rules above. `--skill`
+matches the skill **directory name exactly**, not its frontmatter name; omit it
+to report all discovered skills. Text is the default; `--format json` emits one
+JSON object on stdout. Logs use stderr unless an explicit `--log-file` redirects
+them to a file.
+
+The command reads current files, not a running worker's frozen inputs or loaded
+views. It does not prove that a mount exists or that an agent loaded a skill,
+and concurrent edits are not an atomic snapshot. `--mountpoint` is not supported.
+Diagnosis does not create a mountpoint, change configuration/source/managed
+state, emit SLS operation records, or start a supervisor, watcher or FUSE session.
+An explicitly requested log file still follows the existing create/append rules.
+No stop or rollback operation is needed after diagnosis.
+
+Processing order is fixed: parse configuration, validate and normalize **all**
+sources, load skills in source order, then read the first normalized source's
+`skillfs-views.toml`. A blocker stops later phases. For example, an invalid later
+source leaves no skill-loading evidence from earlier sources. Filtering is
+applied after diagnosis and cannot hide an unrelated blocker. Earlier sources
+win whole skills; shadowed broken copies keep the existing nonblocking behavior,
+scan depth and load limits are unchanged, and canonical source aliases are
+deduplicated. Complete reports sort skills by name and shadowed copies by source
+precedence and path; incomplete reports retain only confirmed evidence.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Complete diagnosis, including a completed scan with no exact-name match |
+| `1` | Incomplete diagnosis, or an output error |
+| `2` | Command-line usage error, including `--mountpoint` |
+
+JSON schema version 1 uses the following fields. Diagnostic failures after
+argument parsing still emit the report, provided stdout can be written.
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `target`, `status` | `1`, `"configuration"`, and `"complete"` or `"incomplete"` |
+| `config_path`, `mountpoint`, `sources` | Input config path, normalized mountpoint (or `null`), and confirmed canonical source order |
+| `phase`, `blocker` | Present on incomplete reports: `config`, `source_validation`, `source_loading` or `views_loading`, with a contextual error |
+| `requested_skill`, `selection_status` | Requested exact name (or `null`); `all`, `discovered`, `not_discovered` or `unknown` |
+| `views` | First source's views `path`, `status`, and effective default view name (or `null`) |
+| `skills` | Confirmed winners, filtered only after all diagnostic work |
+| `skills[].selected`, `skills[].shadowed` | Copies with canonical `source`, `SKILL.md` `path`, `parse_status`, `parse_message` and `enabled` metadata |
+| `skills[].effective_default`, `default_reason` | Boolean membership or `"unknown"`, plus the reason below |
+| `skills[].configured_views`, `secondary_views` | All configured/secondary view names in configuration order, or `null` while unknown |
+
+Selected copies have `ok` or `degraded` parse status. Shadowed copies can also be
+`error` or `unloadable`; an unloadable copy has `enabled: null`. Parse messages
+are strings or `null`. `enabled: false` is metadata, not another visibility gate.
+A known rejected identity can be `discovered` without a confirmed winner row.
+`not_discovered` means the skill scan finished without a match, even if views
+subsequently fail; an interrupted scan without a known match yields `unknown`.
+It does not infer whether an undiscovered name was missing or ignored.
+
+Views status is `unknown` until that phase runs, then `absent`, `loaded`, or
+`invalid_or_unreadable`. Only genuine absence selects the existing no-views
+behavior. Malformed files, permission failures and dangling views symlinks make
+membership unknown and return exit 1 while preserving source evidence. This
+stricter diagnostic does not change the existing mount acceptance behavior.
+Only the first source's file contributes; later files are never fallback views.
+
+| `default_reason` | Effective default membership |
+| --- | --- |
+| `explicit` | Listed in the first view marked `default = true` |
+| `unassigned` | Listed in no configured view; included automatically, even without a default view |
+| `assigned_secondary` | Assigned only outside the effective default; excluded from its directory listing |
+| `no_views_configuration` | Views file absent; all discovered skills are included |
+| `unknown` | Diagnosis stopped before membership could be established |
+
+Membership is not exclusive: a skill may belong to the effective default and
+multiple secondary views simultaneously. Later views marked `default = true`
+remain secondary. With no default view, explicitly assigned secondary skills
+stay secondary and unassigned skills remain in the effective default.
+
 ### validate
 
 ```bash

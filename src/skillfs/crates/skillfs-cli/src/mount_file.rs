@@ -18,6 +18,32 @@ pub(super) struct MountFile {
     pub(super) sources: Vec<PathBuf>,
 }
 
+/// Borrowed observations of the existing validation and merge decisions.
+pub(super) trait Observer {
+    /// Record the normalized mountpoint without creating it.
+    fn mountpoint(&mut self, _path: &Path) {}
+    /// Record one validated, canonical, deduplicated source.
+    fn source(&mut self, _path: &Path) {}
+    /// Record an accepted whole-skill winner.
+    fn selected(&mut self, _source: &Path, _name: &str, _entry: &skillfs_core::SkillEntry) {}
+    /// Record a loaded copy hidden by an earlier source.
+    fn shadowed(&mut self, _source: &Path, _name: &str, _entry: &skillfs_core::SkillEntry) {}
+    /// Record a nonblocking failed copy hidden by an earlier source.
+    fn shadowed_error(
+        &mut self,
+        _source: &Path,
+        _name: &str,
+        _error: &skillfs_core::store::LoadError,
+    ) {
+    }
+    /// Preserve discovery of a failing skill when its identity is known.
+    fn rejected(&mut self, _name: Option<&str>) {}
+}
+
+struct IgnoreObservations;
+
+impl Observer for IgnoreObservations {}
+
 /// Recognize mount keys while preserving legacy security configuration files.
 pub(super) fn load(path: &Path) -> Result<Option<MountFile>> {
     let text = std::fs::read_to_string(path)
@@ -57,7 +83,12 @@ pub(super) fn validate_options(args: &clap::ArgMatches) -> Result<()> {
 
 impl MountFile {
     /// Resolve and deduplicate roots before creating any mount resources.
-    pub(super) fn validate(mut self) -> Result<Self> {
+    pub(super) fn validate(self) -> Result<Self> {
+        self.validate_observed(&mut IgnoreObservations)
+    }
+
+    /// Validate every source before callers may start observing skill loads.
+    pub(super) fn validate_observed(mut self, observer: &mut impl Observer) -> Result<Self> {
         if self.sources.is_empty() {
             return Err("mount config sources must not be empty".into());
         }
@@ -76,6 +107,7 @@ impl MountFile {
             mountpoint.push(part);
         }
         self.mountpoint = super::lexical_absolute(&mountpoint)?;
+        observer.mountpoint(&self.mountpoint);
         let mut roots = Vec::new();
         for source in self.sources {
             let root = source
@@ -91,6 +123,7 @@ impl MountFile {
                 .into());
             }
             if !roots.contains(&root) {
+                observer.source(&root);
                 roots.push(root);
             }
         }
@@ -101,6 +134,15 @@ impl MountFile {
 
 /// Merge complete skills by directory name without changing source files.
 pub(super) fn load_sources(roots: &[PathBuf], config: &ParseConfig) -> Result<SkillStore> {
+    load_sources_observed(roots, config, &mut IgnoreObservations)
+}
+
+/// Observe merge decisions without allocating diagnostic records for mounts.
+pub(super) fn load_sources_observed(
+    roots: &[PathBuf],
+    config: &ParseConfig,
+    observer: &mut impl Observer,
+) -> Result<SkillStore> {
     let mut merged = SkillStore::new();
     for root in roots {
         let mut store = SkillStore::new();
@@ -113,6 +155,7 @@ pub(super) fn load_sources(roots: &[PathBuf], config: &ParseConfig) -> Result<Sk
         let winners: HashSet<String> = merged.iter().map(|(name, _)| name.clone()).collect();
         for (name, entry) in store.iter() {
             if let Some(winner) = merged.get(name) {
+                observer.shadowed(root, name, entry);
                 // The earlier source already provides this skill; a broken
                 // copy in a lower-precedence source (invalid YAML, oversized
                 // SKILL.md, ...) is irrelevant to what gets served, so warn
@@ -122,15 +165,18 @@ pub(super) fn load_sources(roots: &[PathBuf], config: &ParseConfig) -> Result<Sk
                 continue;
             }
             if let skillfs_core::ParseStatus::Error(error) = &entry.parse_status {
+                observer.rejected(Some(name));
                 return Err(format!("{}: {error}", entry.source_path.display()).into());
             }
             if merged.len() >= config.max_skills {
+                observer.rejected(Some(name));
                 return Err(format!(
                     "combined sources exceed max skills limit ({})",
                     config.max_skills
                 )
                 .into());
             }
+            observer.selected(root, name, entry);
             merged.upsert(entry.clone());
         }
         // The loader reports a failed SKILL.md (e.g. oversized) without
@@ -140,14 +186,17 @@ pub(super) fn load_sources(roots: &[PathBuf], config: &ParseConfig) -> Result<Sk
         // root reports (two of its directories colliding on one leaf name)
         // names a skill no winner provides and stays fatal.
         for error in &errors {
-            if let Some(skill) = error_skill_name(error) {
-                if winners.contains(&skill) {
+            let skill = error_skill_name(error);
+            if let Some(skill) = skill {
+                if winners.contains(skill) {
+                    observer.shadowed_error(root, skill, error);
                     tracing::warn!(skill = %skill, shadowed = %error.path.display(),
                         error = %error.error,
                         "duplicate skill: earlier source wins over a broken copy");
                     continue;
                 }
             }
+            observer.rejected(skill);
             return Err(format!("{}: {}", error.path.display(), error.error).into());
         }
     }
@@ -159,7 +208,7 @@ pub(super) fn load_sources(roots: &[PathBuf], config: &ParseConfig) -> Result<Sk
 /// path, so the parent directory's leaf name names the skill at fault.
 /// Errors for anything else (the source root itself, the max-skills
 /// guard, non-UTF-8 names) carry no skill identity.
-fn error_skill_name(error: &skillfs_core::store::LoadError) -> Option<String> {
+fn error_skill_name(error: &skillfs_core::store::LoadError) -> Option<&str> {
     if error.path.file_name()? != "SKILL.md" {
         return None;
     }
@@ -168,7 +217,6 @@ fn error_skill_name(error: &skillfs_core::store::LoadError) -> Option<String> {
         .parent()?
         .file_name()
         .and_then(|name| name.to_str())
-        .map(str::to_string)
 }
 
 #[cfg(test)]
