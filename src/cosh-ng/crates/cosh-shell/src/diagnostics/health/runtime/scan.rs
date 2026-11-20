@@ -287,6 +287,7 @@ impl HealthScanHandle {
             running.builder.clear_login_config();
         }
         running.builder.seal_pending(reason, elapsed);
+        super::super::collectors::bind_fs_chain_mounts(&mut running.builder, elapsed);
         let mut report = running
             .builder
             .finish(running.request.started_at_ms.saturating_add(elapsed));

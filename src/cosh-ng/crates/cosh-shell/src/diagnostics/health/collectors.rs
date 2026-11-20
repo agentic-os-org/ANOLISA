@@ -37,7 +37,10 @@ pub(crate) use command::{
 };
 #[cfg(test)]
 use kernel::parse_kernel_signals_with_boot_epoch;
-pub(crate) use kernel::{collect_kernel_signals, parse_kernel_signals, KernelSignalFacts};
+pub(crate) use kernel::{
+    collect_kernel_signals, fs_events::bind_fs_chain_mounts, parse_kernel_signals,
+    KernelSignalFacts,
+};
 
 const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
 

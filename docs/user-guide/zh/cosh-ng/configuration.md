@@ -129,6 +129,8 @@ critical_mounts = ["/", "/var"]
 expected_writable_mounts = ["/data"]
 pressure_notices = false
 network_capacity_notices = false
+fs_event_notices = false
+host_event_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -160,6 +162,12 @@ expected = "active"
   弹提示（J20/J21/J22）。关闭时这些事实仍可在诊断详情查看。
 - `network_capacity_notices`（默认 `false`）：开启后，conntrack 连接跟踪容量
   接近上限时弹提示（J23）；普通 90% 水位仅进诊断详情。
+- `fs_event_notices`（默认 `false`）：控制文件系统事件提示（J24–J29：ext4
+  错误/强制只读、journal abort/flush、XFS shutdown、块 I/O）。属渐进放量，
+  默认关闭；文件系统事件的放量另需设备生命期证据，仅打开此开关并不授权
+  默认曝光。
+- `host_event_notices`（默认 `false`）：控制内核主机事件提示（J30 hung task、
+  J31 soft lockup）。同属渐进放量默认关闭；开启是逐规则试点决定，不是默认开启。
 - `[health.checks]`：按检查 ID 开关单项采集，例如 `"filesystem.mounts" = true`
   启用全部声明挂载的卷级统计（默认只查根挂载）。
 - `[health.maintenance]`：声明维护/演练窗口，`enabled = true` 开启，
@@ -167,10 +175,11 @@ expected = "active"
   窗口内只抑制登录横幅的提示卡，事实采集与状态恢复照常进行；到期自动恢复。
 
 文件句柄水位（R07）、pids 任务额度（R06）、内核硬件事件/进程 segfault/网卡
-超时（E08–E10）以及 ext4/JBD2/XFS/块 I/O 故障链（E02–E05）中证据不足的部分
-首批仅进诊断详情，不弹提示；hung task 与 soft lockup 的近期完整记录会弹提示
-（J30/J31）。所有提示沿用 2 小时冷却、恢复静默与 10 分钟复发门，登录健康
-路径总预算 300ms 不变。
+超时（E08–E10）首批仅进诊断详情，不弹提示。ext4/JBD2/XFS/块 I/O 故障链
+（E02–E05，J24–J29）与 hung task/soft lockup 的近期完整记录（J30/J31）分别
+由 `fs_event_notices` 和 `host_event_notices` 控制：两者默认关闭，未显式开启
+前不弹提示，且文件系统事件的放量另需设备生命期证据。所有提示沿用 2 小时冷却、
+恢复静默与 10 分钟复发门，登录健康路径总预算 300ms 不变。
 
 `login_identity`（默认 `true`）让交互式 Enhanced 登录 shell 拥有真实的 login
 身份：内层 bash 以登录 shell 启动（`shopt -q login_shell` == yes），像 `bash

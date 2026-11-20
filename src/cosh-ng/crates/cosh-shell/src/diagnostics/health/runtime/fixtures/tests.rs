@@ -229,7 +229,11 @@ fn pids_fixture_stays_diagnostics_only() {
 
 #[test]
 fn fs_events_fixture_emits_proven_chain_findings() {
-    let report = fixture_report("linux-fs-events", &HealthConfig::default(), &options());
+    let config = HealthConfig {
+        fs_event_notices: true,
+        ..HealthConfig::default()
+    };
+    let report = fixture_report("linux-fs-events", &config, &options());
     let mut found: Vec<(String, HealthSeverity)> = report
         .findings
         .iter()
@@ -261,7 +265,11 @@ fn fs_events_fixture_emits_proven_chain_findings() {
 
 #[test]
 fn host_events_fixture_emits_recent_records_only() {
-    let report = fixture_report("linux-host-events", &HealthConfig::default(), &options());
+    let config = HealthConfig {
+        host_event_notices: true,
+        ..HealthConfig::default()
+    };
+    let report = fixture_report("linux-host-events", &config, &options());
     let mut found: Vec<(String, HealthSeverity)> = report
         .findings
         .iter()
@@ -286,4 +294,22 @@ fn host_events_fixture_emits_recent_records_only() {
     )
     .unwrap();
     assert_eq!(lockup.problem, "soft-lockup|boot-a|cpu3");
+}
+
+library_tests! {
+#[test]
+fn host_event_notices_gate_defaults_off() {
+    let off = fixture_report("linux-host-events", &HealthConfig::default(), &options());
+    assert!(
+        !off.findings.iter().any(|finding| finding.id == "J30" || finding.id == "J31"),
+        "host event notices must be silent under default config"
+    );
+    let on_config = HealthConfig {
+        host_event_notices: true,
+        ..HealthConfig::default()
+    };
+    let on = fixture_report("linux-host-events", &on_config, &options());
+    assert!(on.findings.iter().any(|finding| finding.id == "J30"));
+    assert!(on.findings.iter().any(|finding| finding.id == "J31"));
+}
 }

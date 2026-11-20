@@ -328,6 +328,16 @@ fn span_within(a: &FsLine, b: &FsLine) -> bool {
     a.epoch.abs_diff(b.epoch) <= CHAIN_SPAN_SECONDS
 }
 
+/// Causal order: the pairing error must occur no later than the forced-ro
+/// anchor. An error logged after the remount (e.g. during unmount) is not the
+/// cause of the remount and must not promote the chain.
+fn occurs_not_after(a: &FsLine, b: &FsLine) -> bool {
+    if let (Some(left), Some(right)) = (a.monotonic_ns, b.monotonic_ns) {
+        return left <= right;
+    }
+    a.epoch <= b.epoch
+}
+
 fn same_device(a: &FsLine, b: &FsLine) -> bool {
     a.device == b.device
 }
@@ -386,7 +396,7 @@ pub(crate) fn build_chains(
         let error = events
             .iter()
             .filter(|line| line.kind == FsEventKind::Ext4Error && same_device(line, anchor))
-            .find(|line| span_within(line, anchor));
+            .find(|line| span_within(line, anchor) && occurs_not_after(line, anchor));
         match error {
             Some(error) => chains.push(make_chain(
                 "ext4-forced-ro",
@@ -418,6 +428,7 @@ pub(crate) fn build_chains(
             line.kind == FsEventKind::Ext4ForcedRo
                 && same_device(line, anchor)
                 && span_within(line, anchor)
+                && occurs_not_after(anchor, line)
         });
         if absorbed {
             continue;
@@ -558,7 +569,7 @@ pub(crate) fn build_chains(
 }
 
 mod record;
-pub(crate) use record::record_fs_chains;
+pub(crate) use record::{bind_fs_chain_mounts, record_fs_chains};
 
 #[cfg(test)]
 mod tests;
