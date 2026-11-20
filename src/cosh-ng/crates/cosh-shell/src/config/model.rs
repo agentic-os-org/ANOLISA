@@ -82,6 +82,8 @@ pub struct HealthConfig {
     pub policies: std::collections::BTreeMap<String, Vec<String>>,
     pub verbose: bool,
     pub services: Vec<HealthServiceConfig>,
+    #[serde(default)]
+    pub maintenance: HealthMaintenanceConfig,
 }
 
 impl Default for HealthConfig {
@@ -99,7 +101,28 @@ impl Default for HealthConfig {
             policies: Default::default(),
             verbose: false,
             services: Vec::new(),
+            maintenance: HealthMaintenanceConfig::default(),
         }
+    }
+}
+
+/// Declared maintenance/drill window. Suppression only affects notice
+/// presentation; fact collection and episode state tracking are unaffected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthMaintenanceConfig {
+    pub enabled: bool,
+    pub reason: String,
+    pub until_epoch_seconds: Option<u64>,
+}
+
+impl HealthConfig {
+    /// Active when enabled and either open-ended or before the declared end.
+    pub fn maintenance_active(&self, now_epoch_seconds: u64) -> bool {
+        self.maintenance.enabled
+            && self
+                .maintenance
+                .until_epoch_seconds
+                .is_none_or(|until| now_epoch_seconds < until)
     }
 }
 

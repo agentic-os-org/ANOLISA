@@ -64,6 +64,15 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "health.network_capacity_notices" => {
                     config.health.network_capacity_notices = parse_bool_value(value);
                 }
+                "health.maintenance.enabled" => {
+                    config.health.maintenance.enabled = parse_bool_value(value);
+                }
+                "health.maintenance.reason" => {
+                    config.health.maintenance.reason = value.to_string();
+                }
+                "health.maintenance.until_epoch_seconds" => {
+                    config.health.maintenance.until_epoch_seconds = value.parse().ok();
+                }
                 "health.verbose" => config.health.verbose = parse_bool_value(value),
                 _ => {}
             }
@@ -317,6 +326,20 @@ pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshCon
             .iter()
             .filter_map(parse_health_service)
             .collect::<Vec<_>>();
+    }
+    if let Some(maintenance) = health.get("maintenance").and_then(toml::Value::as_table) {
+        if let Some(enabled) = maintenance.get("enabled").and_then(toml::Value::as_bool) {
+            config.health.maintenance.enabled = enabled;
+        }
+        if let Some(reason) = maintenance.get("reason").and_then(toml::Value::as_str) {
+            config.health.maintenance.reason = reason.to_string();
+        }
+        if let Some(until) = maintenance
+            .get("until_epoch_seconds")
+            .and_then(toml::Value::as_integer)
+        {
+            config.health.maintenance.until_epoch_seconds = u64::try_from(until).ok();
+        }
     }
 }
 

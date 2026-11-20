@@ -237,6 +237,62 @@ fn suppressed_or_corrupt_primary_invitation_does_not_fall_back_to_generic_promot
 }
 
 #[test]
+fn declared_maintenance_suppresses_the_notice_card_but_keeps_facts() {
+    use crate::config::{HealthConfig, HealthLoginConfig, HealthMaintenanceConfig};
+    use crate::diagnostics::health::{HealthMessageId, HealthTryItem, HealthTryKind};
+    let (dir, store) = fixture();
+    let snapshot = store.snapshot(None).unwrap();
+    let mut report = report();
+    report.try_items.push(HealthTryItem {
+        id: "memory-primary".to_string(),
+        label_id: HealthMessageId::HealthTryAnalyzeMemoryPressure,
+        label_args: Default::default(),
+        prompt_id: Some(HealthMessageId::HealthPromptAnalyzeMemoryPressure),
+        prompt_args: Default::default(),
+        kind: HealthTryKind::AskAgent,
+        command: None,
+        reason_id: HealthMessageId::HealthTryReasonMemoryLow,
+        reason_args: Default::default(),
+        score: 100,
+        finding_id: String::new(),
+    });
+    report.login_config = Some(HealthLoginConfig {
+        health: HealthConfig {
+            maintenance: HealthMaintenanceConfig {
+                enabled: true,
+                reason: "planned failover drill".to_string(),
+                until_epoch_seconds: Some(2000),
+            },
+            ..HealthConfig::default()
+        },
+        language: "en-US".to_string(),
+        ai_enabled: true,
+    });
+    let renderer = RatatuiInlineRenderer::plain_with_width(80);
+    let suppressed = presentation::prepare(
+        &report,
+        &renderer,
+        (&store, None, &snapshot),
+        Language::EnUs,
+        true,
+        1000,
+    );
+    let text = suppressed.final_text(&store, None);
+    assert!(text.contains("42%"));
+    assert!(!text.contains("cosh --ask"));
+    let expired = presentation::prepare(
+        &report,
+        &renderer,
+        (&store, None, &snapshot),
+        Language::EnUs,
+        true,
+        3_000_000,
+    );
+    assert!(expired.final_text(&store, None).contains("cosh --ask"));
+    let _ = dir;
+}
+
+#[test]
 fn private_absolute_budget_rejects_expired_or_invalid_deadlines_without_rearming() {
     let mut options = Options {
         budget: Duration::from_millis(500),

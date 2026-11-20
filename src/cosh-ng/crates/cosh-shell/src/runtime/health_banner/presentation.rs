@@ -106,7 +106,11 @@ pub(super) fn prepare(
         return prepared;
     }
     let had_candidate = !report.try_items.is_empty();
-    let candidate = if snapshot.preferences.banner_enabled {
+    let maintenance_active = report
+        .login_config
+        .as_ref()
+        .is_some_and(|config| config.health.maintenance_active(now_ms / 1000));
+    let candidate = if snapshot.preferences.banner_enabled && !maintenance_active {
         guidance::health_candidate(report, language)
     } else {
         None
