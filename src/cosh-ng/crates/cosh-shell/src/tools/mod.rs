@@ -4,6 +4,7 @@ pub(crate) mod command_risk;
 mod command_risk_build;
 mod command_risk_carried;
 mod command_risk_compound;
+mod command_risk_git;
 mod command_risk_launcher;
 mod command_risk_model;
 mod command_risk_parser;

@@ -3,16 +3,17 @@
 //! diagnostic and readonly pipeline heuristics.
 
 use super::command_risk::{
-    stage_assessment, AssessmentConfidence, AssessmentPolicy, AutoAllowEvidence, CommandAssessment,
-    CommandShape, ExecutionDecision, InteractionRequirement, OutputExposure, OutputStability,
-    RiskImpact, SideEffectClass,
+    insert_structural_reason, stage_assessment, AssessmentConfidence, AssessmentPolicy,
+    AutoAllowEvidence, CommandAssessment, CommandShape, ExecutionDecision, InteractionRequirement,
+    OutputExposure, OutputStability, RiskImpact, SideEffectClass,
 };
 use super::command_risk_build::{
     assessment, basename, dedupe_reasons, downloaded_program_file,
     interpreter_consumes_stdin_as_program, max_output_exposure, max_output_stability,
     min_confidence, network_download_effect,
 };
-use super::command_risk_launcher::{walk_launcher_chain, LauncherWalk};
+use super::command_risk_git::{disclose_stage_git_repo_config, git_repo_config_reason};
+use super::command_risk_launcher::{launcher_payload_offset, walk_launcher_chain, LauncherWalk};
 use super::command_risk_parser::{is_env_assignment, ParsedCommand};
 use super::command_risk_verdict::launcher_walk_verdict;
 use super::is_sensitive_target;
@@ -31,6 +32,7 @@ pub(super) fn assess_pipeline(
     let mut reasons = Vec::new();
     let mut any_unknown = false;
     let mut all_diagnostic = true;
+    let mut git_family_present = false;
 
     let mut has_upstream_network_output = false;
     let mut downloaded_files = Vec::new();
@@ -63,6 +65,13 @@ pub(super) fn assess_pipeline(
                 }
                 side_effects.extend(effects);
                 reasons.extend(stage_reasons);
+                let payload = launcher_payload_offset(stage_tokens)
+                    .map(|offset| &stage_tokens[offset..])
+                    .unwrap_or(stage_tokens);
+                if let Some(reason) = git_repo_config_reason(payload) {
+                    insert_structural_reason(&mut reasons, reason);
+                    git_family_present = true;
+                }
                 all_diagnostic = false;
                 continue;
             }
@@ -83,7 +92,11 @@ pub(super) fn assess_pipeline(
             has_upstream_network_output |= writes_stdout;
             downloaded_files.extend(output_files);
         }
-        let stage = stage_assessment(&program, stage_tokens);
+        let mut stage = stage_assessment(&program, stage_tokens);
+        let payload = launcher_payload_offset(stage_tokens)
+            .map(|offset| &stage_tokens[offset..])
+            .unwrap_or(stage_tokens);
+        git_family_present |= disclose_stage_git_repo_config(&mut stage, payload);
         impact = impact.max(stage.impact);
         confidence = min_confidence(confidence, stage.confidence);
         output_stability = max_output_stability(output_stability, stage.output_stability);
@@ -134,6 +147,13 @@ pub(super) fn assess_pipeline(
     reasons.push("pipeline-not-auto-executable");
     if side_effects.is_empty() {
         side_effects.push(SideEffectClass::None);
+    }
+
+    // Ask-mode cards must disclose even when the readonly-pipeline branch
+    // above lowered the aggregate impact; auto gating stays with the allowlist.
+    if !policy.auto_mode && git_family_present {
+        impact = RiskImpact::High;
+        insert_structural_reason(&mut reasons, "git-repo-config-execution");
     }
 
     let auto_allow = if policy.auto_mode && readonly_pipeline_evidence && impact == RiskImpact::Low

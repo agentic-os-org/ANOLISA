@@ -129,6 +129,11 @@ fn parse_interceptor_tokens(tokens: &[String]) -> Option<InterceptorTokens<'_>> 
     })
 }
 
+/// Pure payload view for risk classification only; execution keeps the wrapper.
+pub(crate) fn interceptor_payload_for_assessment(tokens: &[String]) -> Option<&[String]> {
+    parse_interceptor_tokens(tokens).map(|peeled| peeled.payload)
+}
+
 /// Peels an interceptor wrapper from a simple command, assessing the
 /// payload under the shared readonly rules while keeping the wrapper
 /// as the executed program. Every deviation from the emitted

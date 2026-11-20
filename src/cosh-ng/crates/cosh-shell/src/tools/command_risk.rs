@@ -6,6 +6,8 @@ use super::command_risk_build::{
     max_output_stability, min_confidence, network_download_effect,
 };
 use super::command_risk_compound::{assess_stripped_compound, compound_segments, finalize_complex};
+use super::command_risk_git::{disclose_stage_git_repo_config, git_repo_config_reason};
+use super::command_risk_launcher::launcher_payload_offset;
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
 use super::command_risk_pipeline::assess_pipeline;
 use super::command_risk_verdict::high_risk_program_assessment;
@@ -219,13 +221,20 @@ pub(super) fn assess_simple_command(
         );
     }
 
-    if let Some(high) = high_risk_program_assessment(
+    if let Some(mut high) = high_risk_program_assessment(
         policy.source,
         command,
         parsed.shape,
         &program,
         command_tokens,
     ) {
+        let payload = launcher_payload_offset(command_tokens)
+            .map(|offset| &command_tokens[offset..])
+            .unwrap_or(command_tokens);
+        if let Some(reason) = git_repo_config_reason(payload) {
+            high.impact = RiskImpact::High;
+            insert_structural_reason(&mut high.reasons, reason);
+        }
         return high;
     }
 
@@ -239,12 +248,18 @@ pub(super) fn assess_simple_command(
         stage.impact = RiskImpact::Low;
         stage.confidence = AssessmentConfidence::High;
         stage.reasons.insert(0, evidence.reason_code());
+        if !policy.auto_mode {
+            disclose_stage_git_repo_config(&mut stage, command_tokens);
+        }
         return finalize_simple(policy, command, parsed.shape, stage, Some(evidence));
     }
     if let Some(readonly) = direct_readonly_evidence(command) {
         stage.impact = RiskImpact::Low;
         stage.confidence = AssessmentConfidence::High;
         stage.reasons.insert(0, readonly.reason_code());
+        if !policy.auto_mode {
+            disclose_stage_git_repo_config(&mut stage, command_tokens);
+        }
         return finalize_simple(
             policy,
             command,
@@ -273,6 +288,10 @@ pub(super) fn assess_simple_command(
         );
     }
 
+    let payload = launcher_payload_offset(command_tokens)
+        .map(|offset| &command_tokens[offset..])
+        .unwrap_or(command_tokens);
+    disclose_stage_git_repo_config(&mut stage, payload);
     finalize_simple(policy, command, parsed.shape, stage, None)
 }
 

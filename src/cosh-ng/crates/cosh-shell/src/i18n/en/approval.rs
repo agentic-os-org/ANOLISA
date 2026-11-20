@@ -177,6 +177,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseCommandSubstitution => "command substitution",
         MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
+        MessageId::ApprovalRiskPhraseGitRepoConfigExecution => "may run repo-embedded scripts",
         MessageId::ApprovalRiskLevelUnknown => "unknown risk",
         MessageId::ApprovalTurnExtensionSubject => "Agent turn budget",
         MessageId::ApprovalTurnExtensionPreview => {
