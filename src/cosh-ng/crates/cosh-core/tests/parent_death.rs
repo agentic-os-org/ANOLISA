@@ -217,9 +217,11 @@ fn release_trigger(path: &Path) {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn parent_death_midturn_cancels_turn() {
+    // Linux adopts the orphaned core so its own exit code is observable;
+    // macOS has no subreaper and falls back to the pre-existing observation.
+    #[cfg(target_os = "linux")]
     nix::sys::prctl::set_child_subreaper(true).unwrap();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -228,6 +230,8 @@ fn parent_death_midturn_cancels_turn() {
     configure(home.path(), address);
     let (mut wrapper, pidfile, trigger) =
         spawn_wrapper(home.path(), workspace.path(), None, None, Some(&stderr_log));
+    #[cfg(not(target_os = "linux"))]
+    let _ = &pidfile;
     send_lines(&mut wrapper, &[INIT, USER]);
     started_rx
         .recv_timeout(Duration::from_secs(10))
@@ -240,12 +244,33 @@ fn parent_death_midturn_cancels_turn() {
             .is_some(),
         "wrapper parent did not exit"
     );
-    // Observe the core's own exit rather than EOF on the shell's stdout pipe:
-    // a sibling test thread forking in this harness can inherit that write end
-    // across its fork->exec window, and the EOF would then not arrive until
-    // the sibling's child exits, unrelated to parent death (#10360).
-    let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
-    assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST");
+    #[cfg(target_os = "linux")]
+    {
+        // Observe the core's own exit rather than EOF on the shell's stdout
+        // pipe: a sibling test thread forking in this harness can inherit that
+        // write end across its fork->exec window, and the EOF would then not
+        // arrive until the sibling's child exits, unrelated to parent death
+        // (#10360).
+        let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
+        assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The orphan is not our child on macOS, so its exit code cannot be
+        // reaped; keep the pre-change observation: the core's exit closes the
+        // inherited stdout pipe and the read here reaches EOF.
+        let mut stdout = wrapper.stdout.take().expect("wrapper stdout");
+        let (eof_tx, eof_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = stdout.read_to_end(&mut sink);
+            let _ = eof_tx.send(());
+        });
+        assert!(
+            eof_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "cosh-core orphan kept stdout open after parent death"
+        );
+    }
     let stderr = fs::read_to_string(&stderr_log).unwrap_or_default();
     assert!(
         stderr.contains("parent process lost"),
