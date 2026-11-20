@@ -397,6 +397,33 @@ fn network_capacity_notices_defaults_off_and_parses_in_both_formats() {
     assert!(cfg.health.network_capacity_notices);
 }
 
+library_tests! {
+#[test]
+fn fs_and_host_event_notices_default_off_and_parse_in_both_formats() {
+    assert!(!CoshConfig::default().health.fs_event_notices);
+    assert!(!CoshConfig::default().health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.fs_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.fs_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nfs_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.fs_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.host_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nhost_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        "[health]\nfs_event_notices = false\nhost_event_notices = false\n",
+        &mut cfg,
+    );
+    assert!(!cfg.health.fs_event_notices);
+    assert!(!cfg.health.host_event_notices);
+}
+}
+
 #[test]
 fn maintenance_window_parses_and_gates_by_epoch() {
     assert!(!CoshConfig::default().health.maintenance_active(1000));

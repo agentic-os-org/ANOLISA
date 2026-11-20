@@ -147,6 +147,8 @@ critical_mounts = ["/", "/var"]
 expected_writable_mounts = ["/data"]
 pressure_notices = false
 network_capacity_notices = false
+fs_event_notices = false
+host_event_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -187,6 +189,15 @@ detail (`cosh doctor`) is unaffected:
 - `network_capacity_notices` (default `false`): when enabled, conntrack
   connection-tracking capacity near its limit raises a notice (J23); an
   ordinary 90% water level stays in the diagnostic detail.
+- `fs_event_notices` (default `false`): gates filesystem-event notices
+  (J24–J29: ext4 error/forced read-only, journal abort/flush, XFS shutdown,
+  block I/O). These notices are part of the progressive rollout and stay off
+  by default; filesystem-event promotion is additionally held pending
+  device-lifecycle evidence, so enabling this switch alone does not authorize
+  default exposure.
+- `host_event_notices` (default `false`): gates kernel host-event notices
+  (J30 hung task, J31 soft lockup). Off by default under the same progressive
+  rollout; enabling it is a per-rule pilot decision, not a default-on change.
 - `[health.checks]`: toggles individual collectors by check ID, for example
   `"filesystem.mounts" = true` enables volume statistics for all declared
   mounts (by default only the root mount is checked).
@@ -196,13 +207,15 @@ detail (`cosh doctor`) is unaffected:
   window only the login-banner notice card is suppressed; fact collection
   and state recovery continue, and notices resume automatically after it.
 
-File-handle water level (R07), pids task quota (R06), kernel hardware
-events/process segfaults/NIC timeouts (E08-E10), and the under-proven parts of
-the ext4/JBD2/XFS/block-I/O fault chains (E02-E05) stay diagnostics-only in
-this batch and raise no notice; recent complete hung-task and soft-lockup
-records raise notices (J30/J31). All notices keep the two-hour cooldown,
-silent recovery, and ten-minute recurrence gate, and the 300ms login health
-budget is unchanged.
+File-handle water level (R07), pids task quota (R06), and kernel hardware
+events/process segfaults/NIC timeouts (E08-E10) stay diagnostics-only in this
+batch and raise no notice. The ext4/JBD2/XFS/block-I/O fault chains (E02-E05,
+J24-J29) and recent complete hung-task/soft-lockup records (J30/J31) are
+gated by `fs_event_notices` and `host_event_notices` respectively: both default
+off, so they raise no notice until explicitly enabled, and filesystem-event
+promotion is additionally held pending device-lifecycle evidence. All notices
+keep the two-hour cooldown, silent recovery, and ten-minute recurrence gate,
+and the 300ms login health budget is unchanged.
 
 `login_identity` (default `true`) gives an interactive Enhanced login shell a
 real login identity: the inner bash starts as a login shell (`shopt -q

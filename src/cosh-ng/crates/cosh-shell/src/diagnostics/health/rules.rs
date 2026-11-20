@@ -285,9 +285,13 @@ pub(crate) fn evaluate_judgement_rules(
         findings.extend(conntrack::conntrack_findings(facts));
     }
 
-    findings.extend(fs_events::fs_event_findings(facts));
+    if config.fs_event_notices {
+        findings.extend(fs_events::fs_event_findings(facts));
+    }
 
-    findings.extend(host_events::host_event_findings(facts));
+    if config.host_event_notices {
+        findings.extend(host_events::host_event_findings(facts));
+    }
 
     findings.sort_by_key(|finding| {
         (

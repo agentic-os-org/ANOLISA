@@ -308,3 +308,325 @@ fn journal_verification_and_epoch_required() {
     assert!(lines.events.is_empty());
     assert_eq!(lines.unverified, 1);
 }
+
+library_tests! {
+fn chain_facts_builder() -> crate::diagnostics::health::builder::HealthReportBuilder {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    let mut builder = crate::diagnostics::health::builder::HealthReportBuilder::new("scan-bind", 0);
+    builder.add_fact(
+        HealthFactCategory::Kernel,
+        "kernel.fs_ext4_forced_ro_candidates",
+        HealthFactValue::String(
+            r#"[{"device":"dm-0","dev_t":"253:0","age_seconds":12,"identity":"ext4-forced-ro|dm-0|epoch:1095","epoch":1095,"operation":null}]"#
+                .into(),
+        ),
+        None,
+        HealthFactSource::Derived,
+        0,
+    );
+    builder
+}
+
+fn add_volume_device(
+    builder: &mut crate::diagnostics::health::builder::HealthReportBuilder,
+    mount: &str,
+    dev_t: &str,
+) {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    builder.add_fact(
+        HealthFactCategory::Disk,
+        format!("filesystem.mount.{mount}.volume_device"),
+        HealthFactValue::String(dev_t.into()),
+        None,
+        HealthFactSource::Statfs,
+        0,
+    );
+}
+
+fn fact_value(
+    builder: &crate::diagnostics::health::builder::HealthReportBuilder,
+    key: &str,
+) -> Option<crate::diagnostics::health::model::HealthFactValue> {
+    builder
+        .report()
+        .facts
+        .iter()
+        .find(|fact| fact.key == key)
+        .map(|fact| fact.value.clone())
+}
+
+#[test]
+fn bind_fs_chain_mounts_binds_volume_fact_from_other_worker() {
+    use crate::diagnostics::health::model::HealthFactValue;
+    let mut builder = chain_facts_builder();
+    add_volume_device(&mut builder, "/data", "253:0");
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"),
+        Some(HealthFactValue::String("/data".into()))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_degraded_reason"),
+        None
+    );
+}
+
+#[test]
+fn bind_fs_chain_mounts_keeps_unbound_device_degraded() {
+    use crate::diagnostics::health::model::HealthFactValue;
+    let mut builder = chain_facts_builder();
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"), None);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_degraded_reason"),
+        Some(HealthFactValue::String("device-unbound".into()))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_degraded_age_seconds"),
+        Some(HealthFactValue::Unsigned(12))
+    );
+}
+
+#[test]
+fn bind_fs_chain_mounts_leaves_existing_mount_untouched() {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    let mut builder = chain_facts_builder();
+    builder.add_fact(
+        HealthFactCategory::Kernel,
+        "kernel.fs_ext4_forced_ro_mount",
+        HealthFactValue::String("/fixture".into()),
+        None,
+        HealthFactSource::Derived,
+        0,
+    );
+    add_volume_device(&mut builder, "/data", "253:0");
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"),
+        Some(HealthFactValue::String("/fixture".into()))
+    );
+    assert_eq!(
+        builder
+            .report()
+            .facts
+            .iter()
+            .filter(|fact| fact.key == "kernel.fs_ext4_forced_ro_mount")
+            .count(),
+        1
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn record_fs_chains_defers_mount_binding_to_parent() {
+    use crate::diagnostics::health::model::HealthFactValue;
+    let Some(device) = std::fs::read_dir("/sys/class/block")
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .and_then(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    else {
+        return;
+    };
+    let Ok(dev_t) = std::fs::read_to_string(format!("/sys/class/block/{device}/dev")) else {
+        return;
+    };
+    let dev_t = dev_t.trim().to_string();
+    let chain = FsChain {
+        mechanism: "ext4-forced-ro",
+        device: device.clone(),
+        fs_device: device.clone(),
+        age_seconds: 5,
+        epoch: 1095,
+        identity: format!("ext4-forced-ro|{device}|epoch:1095"),
+        operation: None,
+        eligible: true,
+        degraded_reason: None,
+    };
+    let mut builder =
+        crate::diagnostics::health::builder::HealthReportBuilder::new("scan-split", 0);
+    record_fs_chains(&mut builder, &[chain], &FsLines::default(), 0);
+    let candidates = match fact_value(&builder, "kernel.fs_ext4_forced_ro_candidates") {
+        Some(HealthFactValue::String(json)) => json,
+        other => panic!("expected candidates fact, got {other:?}"),
+    };
+    assert!(candidates.contains(&dev_t));
+    assert_eq!(fact_value(&builder, "kernel.fs_ext4_forced_ro_dev_t"), None);
+    assert_eq!(fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"), None);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_degraded_reason"),
+        None
+    );
+    add_volume_device(&mut builder, "/mnt/test", &dev_t);
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_dev_t"),
+        Some(HealthFactValue::String(dev_t.clone()))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_age_seconds"),
+        Some(HealthFactValue::Unsigned(5))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"),
+        Some(HealthFactValue::String("/mnt/test".into()))
+    );
+    let findings =
+        crate::diagnostics::health::rules::fs_events::fs_event_findings(&builder.report().facts);
+    assert!(findings.iter().any(|finding| finding.id == "J24"));
+}
+
+#[test]
+fn forced_ro_requires_error_not_after_anchor() {
+    let anchor = line(FsEventKind::Ext4ForcedRo, "dm-0", 1100);
+    let late_error = line(FsEventKind::Ext4Error, "dm-0", 1102);
+    let lines = lines_with(vec![anchor.clone(), late_error], vec![]);
+    let chains = build_chains(&lines, &ctx(), 1100);
+    let forced = chains
+        .iter()
+        .find(|chain| chain.mechanism == "ext4-forced-ro")
+        .expect("forced-ro chain");
+    assert!(!forced.eligible);
+    assert_eq!(forced.degraded_reason, Some("no-error-anchor"));
+
+    let early_error = line(FsEventKind::Ext4Error, "dm-0", 1098);
+    let lines = lines_with(vec![anchor, early_error], vec![]);
+    let chains = build_chains(&lines, &ctx(), 1100);
+    let forced = chains
+        .iter()
+        .find(|chain| chain.mechanism == "ext4-forced-ro")
+        .expect("forced-ro chain");
+    assert!(forced.eligible);
+    assert_eq!(forced.degraded_reason, None);
+}
+
+#[test]
+fn bind_selects_newest_bound_not_newest_global() {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    let mut builder =
+        crate::diagnostics::health::builder::HealthReportBuilder::new("scan-order", 0);
+    builder.add_fact(
+        HealthFactCategory::Kernel,
+        "kernel.fs_ext4_forced_ro_candidates",
+        HealthFactValue::String(
+            r#"[{"device":"dm-1","dev_t":"253:1","age_seconds":2,"identity":"ext4-forced-ro|dm-1|epoch:1099","epoch":1099,"operation":null},{"device":"dm-0","dev_t":"253:0","age_seconds":10,"identity":"ext4-forced-ro|dm-0|epoch:1090","epoch":1090,"operation":null}]"#
+                .into(),
+        ),
+        None,
+        HealthFactSource::Derived,
+        0,
+    );
+    add_volume_device(&mut builder, "/data", "253:0");
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"),
+        Some(HealthFactValue::String("/data".into()))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_device"),
+        Some(HealthFactValue::String("dm-0".into()))
+    );
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_age_seconds"),
+        Some(HealthFactValue::Unsigned(10))
+    );
+}
+
+#[test]
+fn fs_event_notices_gate_defaults_off() {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    let mut builder = crate::diagnostics::health::builder::HealthReportBuilder::new("scan-gate", 0);
+    for (key, value) in [
+        (
+            "kernel.fs_ext4_forced_ro_age_seconds",
+            HealthFactValue::Unsigned(5),
+        ),
+        (
+            "kernel.fs_ext4_forced_ro_mount",
+            HealthFactValue::String("/data".into()),
+        ),
+        (
+            "kernel.fs_ext4_forced_ro_device",
+            HealthFactValue::String("dm-0".into()),
+        ),
+        (
+            "kernel.fs_ext4_forced_ro_dev_t",
+            HealthFactValue::String("253:0".into()),
+        ),
+        (
+            "kernel.fs_ext4_forced_ro_identity",
+            HealthFactValue::String("ext4-forced-ro|dm-0|epoch:1095".into()),
+        ),
+        (
+            "kernel.fs_ext4_forced_ro_epoch",
+            HealthFactValue::Unsigned(1095),
+        ),
+        ("kernel.boot_id", HealthFactValue::String("boot-a".into())),
+        (
+            "kernel.fs_event_source",
+            HealthFactValue::String("journalctl".into()),
+        ),
+    ] {
+        builder.add_fact(
+            HealthFactCategory::Kernel,
+            key,
+            value,
+            None,
+            HealthFactSource::Derived,
+            0,
+        );
+    }
+    let report = builder.finish(1);
+    let off_config = crate::config::HealthConfig::default();
+    let off = crate::diagnostics::health::rules::evaluate_judgement_rules(&report, &off_config);
+    assert!(!off.iter().any(|finding| finding.id.starts_with("J24")));
+    let on_config = crate::config::HealthConfig {
+        fs_event_notices: true,
+        ..crate::config::HealthConfig::default()
+    };
+    let on = crate::diagnostics::health::rules::evaluate_judgement_rules(&report, &on_config);
+    assert!(on.iter().any(|finding| finding.id.starts_with("J24")));
+}
+
+/// Characterization of the device-lifetime gap (independent review point 1):
+/// the binding protocol carries only the current sysfs dev_t, not the
+/// event-time device generation. A same-boot, same-name, same-dev_t old event
+/// therefore binds to a recreated volume. This is why FS-event B promotion is
+/// blocked until lifecycle evidence enters the protocol; the default-off gate
+/// limits exposure in the meantime. The fact remains visible at D tier.
+#[test]
+fn same_dev_t_old_event_binds_recreated_volume_lifecycle_unproven() {
+    use crate::diagnostics::health::model::{
+        HealthFactCategory, HealthFactSource, HealthFactValue,
+    };
+    let mut builder =
+        crate::diagnostics::health::builder::HealthReportBuilder::new("scan-lifecycle", 0);
+    builder.add_fact(
+        HealthFactCategory::Kernel,
+        "kernel.fs_ext4_forced_ro_candidates",
+        HealthFactValue::String(
+            r#"[{"device":"dm-0","dev_t":"253:0","age_seconds":3600,"identity":"ext4-forced-ro|dm-0|epoch:100","epoch":100,"operation":null}]"#
+                .into(),
+        ),
+        None,
+        HealthFactSource::Derived,
+        0,
+    );
+    add_volume_device(&mut builder, "/recreated-volume", "253:0");
+    bind_fs_chain_mounts(&mut builder, 1);
+    assert_eq!(
+        fact_value(&builder, "kernel.fs_ext4_forced_ro_mount"),
+        Some(HealthFactValue::String("/recreated-volume".into()))
+    );
+}
+}
