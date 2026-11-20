@@ -16,6 +16,8 @@
 
 只有在启动 Core 时加入 `--enable-shell-evidence-tool` 才会提供 `cosh_shell_evidence`。已连接的 MCP 工具使用 `mcp__<server>__<tool>` 形式的名称；Extensions 也可以加入自己的外部工具名。
 
+`edit` 要求精确匹配 `old_string`，包括空白字符。默认情况下，匹配必须唯一：`aba` 在 `ababa` 中出现两次，因此 `edit` 不会修改文件。要指定其中一处，请在 `old_string` 中加入更多上下文。设置 `replace_all=true` 时，`edit` 从左到右替换互不重叠的匹配项：将 `ababa` 中的 `aba` 替换为 `X`，结果为 `Xba`。
+
 ## 审批选择
 
 | Core mode | ReadOnly | FileEdit | Shell、network、MCP、external |

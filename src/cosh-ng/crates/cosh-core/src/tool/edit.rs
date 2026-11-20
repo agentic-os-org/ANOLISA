@@ -13,7 +13,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string occurrence with a new string. The old_string must match exactly (including whitespace and indentation)."
+        "Edit a file by replacing exact text, including whitespace and indentation. By default, old_string must occur exactly once, counting overlapping matches."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -34,7 +34,7 @@ impl Tool for EditTool {
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "If true, replace all occurrences (default: false)"
+                    "description": "If true, replace all non-overlapping matches from left to right (default: false)"
                 }
             },
             "required": ["path", "old_string", "new_string"]
@@ -108,25 +108,36 @@ impl EditTool {
             .map_err(|e| format!("Failed to read {}: {e}", display_path.display()))?;
         after_snapshot().await;
 
-        let count = content.matches(old_string).count();
-        if count == 0 {
+        let mut matches = content.match_indices(old_string).peekable();
+        let Some(&(first, _)) = matches.peek() else {
             return Ok(ToolResult::error(format!(
                 "old_string not found in {}",
                 display_path.display()
             )));
-        }
-        if count > 1 && !replace_all {
+        };
+        // A second match may start inside the first, but never inside a UTF-8 character.
+        let mut tail = content[first..].chars();
+        if !replace_all && tail.next().is_some() && tail.as_str().contains(old_string) {
             return Ok(ToolResult::error(format!(
-                "old_string found {count} times in {}. Use replace_all=true to replace all, or provide more context to make the match unique.",
+                "old_string found more than once in {}. Provide more context to make the match unique, or use replace_all=true for non-overlapping matches.",
                 display_path.display()
             )));
         }
 
-        let new_content = if replace_all {
-            content.replace(old_string, new_string)
-        } else {
-            content.replacen(old_string, new_string, 1)
-        };
+        let mut new_content =
+            String::with_capacity(content.len() - old_string.len() + new_string.len());
+        let mut end = 0;
+        let mut count = 0usize;
+        for (start, matched) in matches {
+            new_content.push_str(&content[end..start]);
+            new_content.push_str(new_string);
+            end = start + matched.len();
+            count += 1;
+            if !replace_all {
+                break;
+            }
+        }
+        new_content.push_str(&content[end..]);
 
         if let Err(error) =
             atomic_file::replace(&target, new_content.into_bytes(), Some(snapshot)).await
@@ -163,24 +174,19 @@ mod tests {
     async fn edit_single_replacement() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.txt");
-        fs::write(&path, "hello world").unwrap();
-
-        let tool = EditTool;
-        let result = tool
-            .invoke(
-                serde_json::json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "hello",
-                    "new_string": "goodbye"
-                }),
-                &test_ctx(directory.path()),
-            )
-            .await
-            .unwrap();
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(path).unwrap();
-        assert_eq!(content, "goodbye world");
+        let ctx = test_ctx(directory.path());
+        for (before, old, after) in [("文 hello world", "hello", "文 X world"), ("", "", "X")] {
+            fs::write(&path, before).unwrap();
+            let result = EditTool
+                .invoke(
+                    serde_json::json!({"path": path, "old_string": old, "new_string": "X"}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(!result.is_error, "{}", result.output);
+            assert_eq!(fs::read(&path).unwrap(), after.as_bytes());
+        }
     }
 
     #[tokio::test]
@@ -203,6 +209,7 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("not found"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "hello world");
     }
 
     #[tokio::test]
@@ -253,47 +260,60 @@ mod tests {
     async fn edit_ambiguous_without_replace_all() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.txt");
-        fs::write(&path, "aaa bbb aaa").unwrap();
-
-        let tool = EditTool;
-        let result = tool
-            .invoke(
-                serde_json::json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "aaa",
-                    "new_string": "ccc"
-                }),
-                &test_ctx(directory.path()),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_error);
-        assert!(result.output.contains("2 times"));
+        let ctx = test_ctx(directory.path());
+        for (before, old) in [
+            ("aaa bbb aaa", "aaa"),
+            ("ababa", "aba"),
+            ("前:哈哈哈", "哈哈"),
+            ("   code", "  "),
+            ("\n\n\n", "\n\n"),
+            ("文", ""),
+        ] {
+            fs::write(&path, before).unwrap();
+            let result = EditTool
+                .invoke(
+                    serde_json::json!({
+                        "path": path, "old_string": old, "new_string": "X", "replace_all": false
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(result.is_error, "accepted {old:?} in {before:?}");
+            assert!(
+                result.output.contains("more than once"),
+                "{}",
+                result.output
+            );
+            assert_eq!(fs::read(&path).unwrap(), before.as_bytes());
+        }
     }
 
     #[tokio::test]
     async fn edit_replace_all() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.txt");
-        fs::write(&path, "aaa bbb aaa").unwrap();
-
-        let tool = EditTool;
-        let result = tool
-            .invoke(
-                serde_json::json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "aaa",
-                    "new_string": "ccc",
-                    "replace_all": true
-                }),
-                &test_ctx(directory.path()),
-            )
-            .await
-            .unwrap();
-        assert!(!result.is_error);
-
-        let content = std::fs::read_to_string(path).unwrap();
-        assert_eq!(content, "ccc bbb ccc");
+        let ctx = test_ctx(directory.path());
+        for (before, old, after, count) in [
+            ("aaa bbb aaa", "aaa", "X bbb X", 2),
+            ("ababa", "aba", "Xba", 1),
+            ("文", "", "X文X", 2),
+        ] {
+            fs::write(&path, before).unwrap();
+            let result = EditTool
+                .invoke(
+                    serde_json::json!({
+                        "path": path, "old_string": old, "new_string": "X", "replace_all": true
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(!result.is_error, "{}", result.output);
+            let expected = format!("Replaced {count} occurrence(s)");
+            assert!(result.output.starts_with(&expected), "{}", result.output);
+            assert_eq!(fs::read(&path).unwrap(), after.as_bytes());
+        }
     }
 
     #[tokio::test]
