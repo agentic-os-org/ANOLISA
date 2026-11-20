@@ -51,16 +51,14 @@ pub struct MemorySummary {
 /// Simple frontmatter parser — extracts key: value pairs from YAML block.
 fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
     let mut fm = HashMap::new();
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            for line in rest[..end].lines() {
-                if let Some((key, value)) = line.split_once(": ") {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    // Skip list items and nested keys
-                    if !key.starts_with(' ') && !key.starts_with('-') {
-                        fm.insert(key.to_string(), value.to_string());
-                    }
+    if let Some((fm_str, _)) = super::frontmatter::split(content) {
+        for line in fm_str.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                // Skip list items and nested keys
+                if !key.starts_with(' ') && !key.starts_with('-') {
+                    fm.insert(key.to_string(), value.to_string());
                 }
             }
         }
