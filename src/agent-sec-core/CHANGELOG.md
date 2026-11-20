@@ -1,5 +1,94 @@
 # Changelog
 
+## 1.3.0
+
+**Breaking Changes**
+
+- Replaced the native credential execution contract with explicit Cedar policy:
+  `gateway key add` and `gateway credentials` are removed, HTTP credential policies
+  need `--schema-revision 2`, pair administration uses opaque IDs, and existing
+  gateway state must be re-registered. (#9836)
+- Made `responseRewrite` a required boolean in authored policies, gateway plans and
+  addon decisions; existing string values such as `"buffered"` are rejected and must
+  be rewritten as `true` or `false`. (#9854)
+- Made raw Cedar the default `policy create/update --file` input and removed
+  `policy default --cedar`; callers that still pass JSON envelopes must add
+  `--language json`. (#9858)
+- Removed `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` in favor of the installed
+  `sandbox/permissions.json.template`, and gated all-shell authorization behind
+  `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`. (#9954)
+- Dropped the deployment authorization configuration: `baseline_policy`,
+  `task_policy`, `environment_permissions` and the configurable TTL are rejected, and
+  the daemon authorizes every ordinary startup from the current PAP policy set with a
+  fixed 60-second decision window. (#10053)
+- Skipped Gateway startup by default; deployments that use the Gateway must start
+  `agent-sec-daemon serve --enable-gateway` or add the flag to their unit. (#10220)
+- Moved the Gateway Binding payload to `agent-sec-gateway-binding/v2` without the
+  authored mixed Policy text, so daemon and gateway must be upgraded together. (#10258)
+
+**Cedar Policy Engine**
+
+- Resolved request authorization from PAP-maintained policies instead of configured
+  baseline/task Policy IDs, caching one compiled set and failing closed on read or
+  compilation errors. (#9902)
+- Added `intent propose-command` so a PreToolUse hook can turn a rewritten shell
+  command and cwd into a validated Cedar candidate without the original task text. (#9879)
+- Added the local `agent-sec-cli intent init` subcommand, which compiles explicit
+  allow/deny rules into validated Cedar without a model or network. (#9915)
+- Added `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` to generate the sandbox
+  permission request from the original command and canonical cwd. (#9918)
+- Mapped missing-path `create` grants onto write access for the existing parent
+  directory, so commands such as `mkdir -p a/b` run under a directory write grant. (#10241)
+
+**Sandbox Backends**
+
+- Added the `asc-sandbox-docker` crate and `agent-sec-cli sandbox run --backend docker`,
+  translating only the exactly expressible permission subset onto one container and
+  failing closed as `Unsupported` for anything containers cannot express. (#9906)
+- Added optional `excluded_paths` on deny rules, so a granted child directory stays
+  usable beneath a denied parent while parent enumeration and siblings remain
+  inaccessible. (#10255)
+
+**Credential Protection**
+
+- Added `agent-sec-cli inject-credential --builtin github` to generate the fake,
+  register the packaged GitHub Policy and assign the Scope in one command. (#10184)
+- Released the credential store `flock` explicitly on drop, so reopening the store
+  succeeds even when child processes inherited the descriptor. (#10273)
+
+**Runtime Stability**
+
+- Retired previous-boot Bindings after a reboot by filtering recovery instances through
+  the current boot ID before discovery. (#10191)
+- Isolated torn JSONL tails so an interrupted record no longer absorbs the next event
+  written by the Rust event log. (#10202)
+- Reported the actual latest hardening scan outcome in `agent-sec-cli events --summary`
+  and labeled measurements from older scans as historical. (#10108)
+- Percent-encoded SQLite read-only URIs so event and observability readers open data
+  directories whose paths contain URI delimiters or percent escapes. (#9993)
+
+**Scanner & Policy Engine**
+
+- Rejected non-object JSON in `scan-prompt` multi-turn mode with a usage error instead
+  of an attribute failure. (#8800)
+- Scanned large Bash scripts with linear start detection and bounded verification, so
+  benign near-matches no longer exhaust the regex budget before the relevant command. (#10107)
+
+**Build & Packaging**
+
+- Aligned `make uninstall` file paths with `make install`, so the systemd unit and the
+  five adapter payloads installed by the public target are also removed. (#10131)
+
+**Testing & CI**
+
+- Replaced the time-budget-dependent PII report case with a deterministic report unit
+  test. (#9917)
+- Aligned the gateway recovery fixture with the boolean `responseRewrite` schema. (#9960)
+- Copied the CLI through a child process in tests to avoid `ETXTBSY` from inherited
+  descriptors. (#9961)
+- Split sec-core validation into component, V2 and Linux E2E coverage producers behind
+  one coverage gate. (#10019)
+
 ## 1.2.1
 
 **Breaking Changes**
