@@ -10,12 +10,12 @@
 
 ```bash
 make -C distribution aw-packages VERSION=0.1.1 \
-  COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
+  COMPONENTS='core sec-core tokenless ws-ckpt' OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS
 ```
 
-`COMPONENTS` 接受空格分隔的 `core`、`sec-core`、`tokenless`，每个选择独立生成
+`COMPONENTS` 接受空格分隔的 `core`、`sec-core`、`tokenless`、`ws-ckpt`，每个选择独立生成
 一个归档。`VERSION` 标记产物版本，不选择源码修订。装配过程检查工作树始终对应
 同一个未变更的 Git commit，并记录源码身份。
 
@@ -26,7 +26,7 @@ aw/
 ├── common.py                     # 有界子进程、取消与复制
 ├── core.Makefile                 # 归档安装入口，复用 AW install.mk
 ├── build-integration.sh          # 验收时显式构建后端的入口
-├── integration.py                # 构建 sec-core 和 Tokenless
+├── integration.py                # 构建 sec-core、Tokenless 和 ws-ckpt
 ├── templates/                    # 使用显式程序路径的策略数据
 └── tests/                        # 构建选择、归档及安装夹具
 ```
@@ -36,15 +36,19 @@ core 交付 `bin/aw`、普通安装 Makefile 和许可证／来源文档，使�
 `package.json`、`payload/` 中的桥接程序和自身资源，以及策略模板。可选的本地
 Provider 安装使用已经装好的 AW CLI；Provider 归档不包含后端可执行文件。
 
-模板的 `PROVIDERS_DIR` 是实际包含 `sec-core`、`tokenless` Provider 目录的根。
-按所选策略显式传递后端路径 `SEC_CORE_CLI`、`TOKENLESS_CLI` 和 `SOCKET`，因此
+模板的 `PROVIDERS_DIR` 是实际包含已安装的 Provider 目录的根路径。
+按所选策略显式传递后端路径 `SEC_CORE_CLI`、`TOKENLESS_CLI`、`WS_CKPT_CLI` 和 `SOCKET`，因此
 支持 `AWPRJ` 命名空间及不同的 core／Provider 前缀。
 
 原生集成验收通过单独入口准备后端，普通组包不调用它：
 
 ```bash
-make -C distribution aw-integration-backends BACKENDS='sec-core tokenless'
+make -C distribution aw-integration-backends BACKENDS='sec-core tokenless ws-ckpt'
 ```
+
+AW 集成流程在 Linux VM 安装候选 ws-ckpt Provider 归档，让同一版本的后端在
+临时 Btrfs 文件系统上运行，验证自动快照、手动快照和回滚。测试替身触发
+Qoder 提交 Hook，无需登录模型服务。
 
 参见[源码构建指南](../../../contribute/zh/aw/building.md)和
 [安装指南](../../../docs/user-guide/zh/aw/installation.md)。

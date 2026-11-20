@@ -441,27 +441,25 @@ class RpmTests(Fixture):
 
     def test_actual_archive_source_records_through_cpio_pipeline(self):
         records = []
-        for role, identity in package.COMPONENTS.items():
-            root = self.repo / (role + "-stage")
+        for name in sorted(candidate.PACKAGES):
+            root = self.repo / (name + "-stage")
             root.mkdir()
-            if role == "core":
+            if name == "aw":
                 package._core(
                     self.repo, root, self.version, self.commit, "x86_64", self.cancel
                 )
                 source = root / "share/doc/aw/source.json"
-                name = "aw"
             else:
                 package._provider(
                     self.repo,
                     root,
-                    identity,
+                    name,
                     self.version,
                     self.commit,
                     "x86_64",
                     self.cancel,
                 )
                 source = root / "package.json"
-                name = identity
             path = self.cpio(name, json.loads(source.read_text()))
             record = candidate.rpm_declaration(path, self.cancel)
             self.assertEqual(record["commit"], self.commit)

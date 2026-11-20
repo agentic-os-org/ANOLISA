@@ -1,0 +1,84 @@
+# Replace paths; native profiles and credentials stay external.
+# Interactive Hermes uses the native ws-ckpt plugin.
+# Install it with: ws-ckpt plugin install --runtime hermes
+# Bind from the Skill after startup. For unattended setup, bind a workspace in advance.
+#   aw-provider-ws-ckpt bind --agent qoder --workspace /absolute/path/to/workspace
+# Run from outside that workspace.
+#   PATH="/opt/bin:$PATH" aw run --config aw.yaml --agent qoder
+# The first input.submit checks and installs the configured Skill. The Agent's
+# Skill discovery determines when the session can load it.
+# For conversational controls, set WS_CKPT_AW_TARGET and
+# WS_CKPT_AW_PROVIDER in the target's launch environment.
+# The Provider stores bindings and switches at .local/state/ws-ckpt/aw-policy.json
+# under its account's system home. Existing switch entries are used when that workspace is bound.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: workspace-checkpoints
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/path/to/aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 9000
+  audit:
+    enabled: true
+    payload: metadata_only
+  # Under one account, ws-ckpt shares the workspace binding for the same target
+  # name across AW configuration files. Use distinct names (qoder-project-a and
+  # qoder-project-b) for independent bindings and automatic snapshot switches.
+  # Use the chosen name in aw run --agent, Provider bind --agent,
+  # WS_CKPT_AW_TARGET, and the Provider's skills mapping below.
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [/absolute/path/to/qodercli]
+    # Set a project Skill path under the Provider config for each target that needs installation.
+    qoder-sdk:
+      adapter: qoder-sdk
+      argv: [/absolute/path/to/node, /absolute/path/to/qoder-worker.mjs]
+    agentscope:
+      adapter: agentscope
+      argv: [/absolute/path/to/sdk-python, /absolute/path/to/application.py]
+    qwenpaw:
+      adapter: qwenpaw
+      argv: [/absolute/path/to/qwenpaw, app]
+    pi:
+      adapter: pi
+      argv: [/absolute/path/to/node, /absolute/path/to/pi-application.mjs]
+    claude:
+      adapter: claude-sdk
+      argv: [/absolute/path/to/python, /absolute/path/to/claude-worker.py]
+  providers:
+    ws-ckpt:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-ws-ckpt
+          # The Skill resolves ws-ckpt via PATH. Use the same executable here.
+          # With /opt/bin/ws-ckpt, verify PATH before launching the Agent.
+          #   PATH="/opt/bin:$PATH" command -v ws-ckpt  # prints /opt/bin/ws-ckpt
+          - --cli
+          - /absolute/path/to/ws-ckpt
+      timeout_ms: 7500
+      max_output_bytes: 16384
+      config:
+        skills:
+          qoder:
+            source: /absolute/path/to/installed/ws-ckpt-skill
+            destination: .qoder/skills/ws-ckpt
+  events:
+    input.submit:
+      enabled: true
+      steps:
+        - id: ws-ckpt-checkpoint
+          # Keep the route enabled. The private policy file defaults to off.
+          enabled: true
+          provider: ws-ckpt
+          operation: checkpoint
+          effects: [observe]
+          on_error: report

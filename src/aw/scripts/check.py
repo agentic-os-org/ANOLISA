@@ -240,7 +240,7 @@ def check() -> None:
             capture=True,
         )
     )
-    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless", "ws-ckpt")]
     metadata["provider_workspaces"] = []
     for root in provider_roots:
         run(["cargo", "fmt", "--all", "--", "--check"], root)

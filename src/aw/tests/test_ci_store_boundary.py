@@ -28,10 +28,10 @@ class StoreBoundaryGateTests(GateFixture):
             self.assertIn("providers/agent-sec-core", text)
             self.assertIn("providers/tokenless", text)
 
-    def test_three_workspaces_have_full_checks_and_compiled_inventory(self) -> None:
+    def test_all_workspaces_have_full_checks_and_compiled_inventory(self) -> None:
         repo = self.root
         aw = repo / "src/aw"
-        providers = [repo / "providers" / name for name in ("agent-sec-core", "tokenless")]
+        providers = [repo / "providers" / name for name in ("agent-sec-core", "tokenless", "ws-ckpt")]
         calls = []
 
         def run(command: list[str], cwd: Path, **kwargs: object) -> str:
