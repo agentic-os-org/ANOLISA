@@ -138,8 +138,10 @@ bash: hello: command not found
 
 ECS 默认免配置接入的候选实现可在首次模型请求时引导开通并自动继续，无需先执行 `/auth`；现有 Provider 配置优先。需要服务端支持 ECS 实例身份交换，详见[模型与认证](../../docs/user-guide/zh/cosh-ng/core/providers.md#ecs-免配置接入)。
 
-用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
-调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
+用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望 Agent
+只解释和建议、默认不自动执行有副作用的工具，运行 `/mode approval recommend`
+（只读检查仍可能运行，显式 `allowed_tools` 例外），详见
+[工具审批](../../docs/user-guide/zh/cosh-ng/shell/approval.md)。Shell 和 Core 的审批设置
 统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。

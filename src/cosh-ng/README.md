@@ -152,8 +152,11 @@ request and resume automatically without `/auth`; existing providers take
 precedence. The service must support ECS identity exchange. See [providers and authentication](../../docs/user-guide/en/cosh-ng/core/providers.md#automatic-model-access-on-ecs).
 
 Use `/auth` to choose a supported provider plan, `/help` to list current slash
-commands, and `/mode approval recommend` when every Agent tool call should wait
-for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
+commands, and `/mode approval recommend` to keep the Agent explaining and
+suggesting with no side-effecting tool running automatically by default
+(read-only inspection may still run; explicit `allowed_tools` entries
+excepted — see [Tool Approval](../../docs/user-guide/en/cosh-ng/shell/approval.md)).
+Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. In enhanced integration, the cosh-core runtime makes
 `/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
