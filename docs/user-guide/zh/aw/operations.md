@@ -73,12 +73,18 @@ aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --yes
 | 现象 | 处理 |
 | --- | --- |
 | 校验通过，启动失败 | 检查错误所指的 Agent 版本、程序路径和 Provider 配置 |
+| Claude Python SDK 启动预检报 `command execution deadline exceeded` | 在配置指定的解释器环境中检查 Python 启动与 APM 初始化耗时 |
 | 配置修改未生效 | 退出 Agent，用原配置停止旧服务，再启动新配置 |
 | 配置或目录权限错误 | 使用当前用户拥有的私有目录，配置编辑避免符号链接 |
 | 服务协议不匹配 | 用旧二进制停止服务，再统一使用新 AW |
 | 强制退出后留下 socket | 确认原服务已退出，再移除它遗留的 `aw.sock`，保留 journal |
 | `native_event_limit` | 重启 AW 管理的 Agent 实例；仅新建原生会话不会重置计数 |
 | 压缩统计为空 | 确认发生了受支持的工具调用，并检查录制设置 |
+
+对于 Claude Python SDK，`aw run` 和 `aw instance prepare` 的版本探测上限为 15 秒，
+包含 Python 启动和自动插桩初始化。内置 CLI 的 `--version` 命令单独限时 4 秒。
+启用 `security.violation` 后会另行执行指纹探测，上限同为 15 秒。两次探测均使用配置指定的
+解释器并继承应用环境。
 
 更多命令可用 `aw --help`、`aw commands` 查询。补全脚本由 `aw completion bash`（或 `zsh`、`fish`）输出。
 自动化报告见[CLI 参考](../../../developer-guide/zh/aw/reference/cli.md)，容器持久化和容量见[部署指南](../../../developer-guide/zh/aw/deployment/lifecycle.md)。

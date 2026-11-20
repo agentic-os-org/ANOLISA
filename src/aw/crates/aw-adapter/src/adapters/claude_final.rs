@@ -1,5 +1,6 @@
 //! Exact bundled-runtime admission and the Claude final tool-result dialect.
 
+use super::claude_sdk::PYTHON_PROBE_TIMEOUT;
 use crate::{
     adapter::{self, LaunchContext, LaunchInput, NativeContext},
     Result,
@@ -18,8 +19,11 @@ pub(super) fn profile(
         return Ok(None);
     }
     let script = "import claude_agent_sdk, hashlib, json, platform; from pathlib import Path; root = Path(claude_agent_sdk.__file__).parent; print(json.dumps({'platform': platform.machine(), 'sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in ['_bundled/claude', '_internal/query.py', '_internal/transport/subprocess_cli.py', 'types.py']}}))";
-    let output =
-        adapter::Probe(cancelled).version_output(&input.command, &["-c".into(), script.into()])?;
+    let output = adapter::Probe(cancelled).version_output_with_timeout(
+        &input.command,
+        &["-c".into(), script.into()],
+        PYTHON_PROBE_TIMEOUT,
+    )?;
     let actual: Value = serde_json::from_str(&output)?;
     select_profile(version, cli, &actual)
 }

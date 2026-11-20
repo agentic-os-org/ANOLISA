@@ -78,12 +78,19 @@ For `needs_recovery`, stop package writers and follow [package recovery](../../.
 | Symptom | Action |
 | --- | --- |
 | Validation passes but launch fails | Check the reported Agent version, executable path and Provider configuration |
+| Claude Python SDK startup reports `command execution deadline exceeded` during preflight | Check Python startup and APM initialization in the configured interpreter's environment |
 | Edits do not take effect | Exit the Agent, stop the old service with its original configuration, then restart |
 | Unsafe configuration or directory | Use a private directory owned by the current user; avoid symlinks when editing |
 | Service protocol mismatch | Stop the service with the old binary, then use the new AW consistently |
 | Socket remains after forced exit | Confirm the old service has exited, remove only its stale `aw.sock` and retain journal |
 | `native_event_limit` | Restart the AW-managed Agent instance; a new native session does not reset its count |
 | Empty compression statistics | Confirm supported tool calls occurred and check recording settings |
+
+For the Claude Python SDK, `aw run` and `aw instance prepare` allow 15 seconds for
+the version probe, including Python startup and automatic instrumentation. The
+bundled CLI's `--version` command has its own 4-second limit. Enabling
+`security.violation` adds a separate 15-second fingerprint probe. Both probes
+use the configured interpreter and inherit the application's environment.
 
 Use `aw --help` and `aw commands` to discover commands. `aw completion bash` (or `zsh`, `fish`) prints a completion script.
 See the [CLI reference](../../../developer-guide/en/aw/reference/cli.md) for automation reports and [deployment guide](../../../developer-guide/en/aw/deployment/lifecycle.md) for persistence and capacity.
