@@ -469,6 +469,8 @@ impl GuideStore {
         }
         // Save the referenced context before committing suppression under the same lock.
         prepare()?;
+        let claims_path = self.root.join("claims.json");
+        let previous_claims = private_state::read_bounded(&claims_path, MAX_BYTES)?;
         let stored_problem = health_evidence
             .as_ref()
             .filter(|_| request.kind == InviteKind::LoginHealth)
@@ -483,9 +485,16 @@ impl GuideStore {
             shown_at_ms: now_ms,
         });
         let bytes = serde_json::to_vec(&claims).map_err(|_| Error::Corrupt)?;
-        private_state::atomic_write(&self.root.join("claims.json"), &bytes, MAX_BYTES)?;
+        private_state::atomic_write(&claims_path, &bytes, MAX_BYTES)?;
+        let mut exposure_backup = None;
         if request.kind == InviteKind::LoginHealth {
             if let Some(evidence) = health_evidence.as_ref() {
+                // An unreadable exposure record fails the delivery closed for
+                // the same reason `health_exposure::read` did above.
+                let Ok(backup) = health_exposure::backup(&self.root) else {
+                    restore_private_file(&claims_path, previous_claims.as_deref())?;
+                    return Ok(ClaimDecision::Suppressed);
+                };
                 let mut exposures = exposures.unwrap_or_default();
                 exposures
                     .entries
@@ -508,14 +517,26 @@ impl GuideStore {
                 if exposures.entries.len() > MAX_CLAIMS
                     || health_exposure::write(&self.root, &exposures).is_err()
                 {
+                    // Undo the claim so a card that was never delivered cannot
+                    // suppress the next attempt.
+                    restore_private_file(&claims_path, previous_claims.as_deref())?;
+                    health_exposure::restore(&self.root, &backup)?;
                     return Ok(ClaimDecision::Suppressed);
                 }
+                exposure_backup = Some(backup);
             }
         }
         // Record the episode only once the card is durably claimed; a failed
         // claim must not consume the cooldown of still-undelivered members.
         if let Some(claim) = episode_claim {
             if !episode_claim::commit(claim, now_ms) {
+                // The episode write failed after the claim and exposure were
+                // persisted; restore both so the failed delivery records
+                // nothing and the next scan can retry.
+                restore_private_file(&claims_path, previous_claims.as_deref())?;
+                if let Some(backup) = exposure_backup {
+                    health_exposure::restore(&self.root, &backup)?;
+                }
                 return Ok(ClaimDecision::Suppressed);
             }
         }
@@ -649,6 +670,15 @@ fn suppresses(
         InviteKind::Help => {
             entry.kind == InviteKind::Help && entry.problem == problem && age < 30_000
         }
+    }
+}
+
+/// Restores a private-state file to the bytes captured before this claim, or
+/// removes it when it did not exist.
+fn restore_private_file(path: &Path, previous: Option<&[u8]>) -> Result<(), Error> {
+    match previous {
+        Some(bytes) => Ok(private_state::atomic_write(path, bytes, MAX_BYTES)?),
+        None => Ok(private_state::remove_owner_file(path)?),
     }
 }
 

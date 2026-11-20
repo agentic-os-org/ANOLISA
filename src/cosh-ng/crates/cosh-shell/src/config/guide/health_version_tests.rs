@@ -65,26 +65,33 @@ impl Fixture {
         now_ms: u64,
         episode: crate::diagnostics::health::suppression::episode::CandidateEpisode,
     ) -> ClaimDecision {
-        self.store
-            .claim_health_version(
-                Some(&self.runtime),
-                &self.snapshot,
-                ClaimRequest {
-                    kind: InviteKind::LoginHealth,
-                    host: "host",
-                    problem: "T03",
-                    session,
-                },
-                now_ms,
-                HealthExposure {
-                    evidence: "volume-evidence",
-                    event: None,
-                    severity: Some(HealthSeverity::Critical.precedence()),
-                    legacy_problems: &[],
-                    episode: Some(episode),
-                },
-            )
-            .unwrap()
+        self.try_claim_episode(session, now_ms, episode).unwrap()
+    }
+
+    fn try_claim_episode(
+        &self,
+        session: &str,
+        now_ms: u64,
+        episode: crate::diagnostics::health::suppression::episode::CandidateEpisode,
+    ) -> Result<ClaimDecision, Error> {
+        self.store.claim_health_version(
+            Some(&self.runtime),
+            &self.snapshot,
+            ClaimRequest {
+                kind: InviteKind::LoginHealth,
+                host: "host",
+                problem: "T03",
+                session,
+            },
+            now_ms,
+            HealthExposure {
+                evidence: "volume-evidence",
+                event: None,
+                severity: Some(HealthSeverity::Critical.precedence()),
+                legacy_problems: &[],
+                episode: Some(episode),
+            },
+        )
     }
 }
 
@@ -376,15 +383,79 @@ fn failed_episode_write_keeps_the_merged_card_deliverable() {
     );
 
     let fixture = Fixture::new();
-    let decision = fixture.claim_episode("failed", 1000, merged_volume_episode());
-    assert!(matches!(decision, ClaimDecision::Suppressed));
     let path = ledger_path().expect("ledger path");
-    assert!(!path.exists(), "a failed write must not persist a ledger");
+    for round in 0..3 {
+        let decision = fixture.claim_episode(
+            &format!("failed-{round}"),
+            1000 + round,
+            merged_volume_episode(),
+        );
+        assert!(matches!(decision, ClaimDecision::Suppressed));
+        assert!(
+            fixture.store.read_claims().unwrap().entries.is_empty(),
+            "round {round} must not keep a claim"
+        );
+        assert!(
+            health_exposure::read(fixture.store.root())
+                .unwrap()
+                .entries
+                .is_empty(),
+            "round {round} must not keep an exposure"
+        );
+        assert!(!path.exists(), "a failed write must not persist a ledger");
+    }
 
     std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let decision = fixture.claim_episode("retry", 2000, merged_volume_episode());
-    assert!(matches!(decision, ClaimDecision::Claimed(_)));
+    let decision = fixture.claim_episode("failed-2", 2000, merged_volume_episode());
+    assert!(
+        matches!(decision, ClaimDecision::Claimed(_)),
+        "the same session must be able to retry once nothing was recorded"
+    );
+    let decision = fixture.claim_episode("retry", 3000, merged_volume_episode());
+    assert!(matches!(decision, ClaimDecision::Suppressed));
     let ledger = load(&path).expect("ledger written on the retry");
+    for member in ["bytes", "inode"] {
+        assert!(
+            ledger
+                .volume
+                .contains_key(&volume_member_key("/", member, "253:0", "1:2")),
+            "{member}"
+        );
+    }
+
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+}
+
+#[test]
+fn claims_write_failure_does_not_record_the_episode() {
+    use crate::diagnostics::health::suppression::episode::{ledger_path, load, volume_member_key};
+
+    let _lock = crate::diagnostics::test_env::env_guard();
+    if unsafe { nix::libc::geteuid() } == 0 {
+        // Root bypasses the read-only directory this test relies on.
+        return;
+    }
+    let fixture = Fixture::new();
+    let root = fixture.store.root().to_path_buf();
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var(
+        "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+        root.join("health-suppression"),
+    );
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let path = ledger_path().expect("ledger path");
+
+    let decision = fixture.try_claim_episode("blocked", 1000, merged_volume_episode());
+    assert!(decision.is_err(), "{decision:?}");
+    assert!(!path.exists(), "an unclaimed delivery records no ledger");
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let decision = fixture.claim_episode("blocked", 1000, merged_volume_episode());
+    assert!(matches!(decision, ClaimDecision::Claimed(_)));
+    let ledger = load(&path).expect("ledger written once the claim succeeds");
     for member in ["bytes", "inode"] {
         assert!(
             ledger
