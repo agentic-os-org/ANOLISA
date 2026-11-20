@@ -469,11 +469,6 @@ impl GuideStore {
         }
         // Save the referenced context before committing suppression under the same lock.
         prepare()?;
-        if let Some(claim) = episode_claim {
-            if !episode_claim::commit(claim, now_ms) {
-                return Ok(ClaimDecision::Suppressed);
-            }
-        }
         let stored_problem = health_evidence
             .as_ref()
             .filter(|_| request.kind == InviteKind::LoginHealth)
@@ -515,6 +510,13 @@ impl GuideStore {
                 {
                     return Ok(ClaimDecision::Suppressed);
                 }
+            }
+        }
+        // Record the episode only once the card is durably claimed; a failed
+        // claim must not consume the cooldown of still-undelivered members.
+        if let Some(claim) = episode_claim {
+            if !episode_claim::commit(claim, now_ms) {
+                return Ok(ClaimDecision::Suppressed);
             }
         }
         Ok(ClaimDecision::Claimed(Claim {

@@ -65,3 +65,38 @@ fn disk_nonzero_exit_without_valid_rows_remains_unavailable() {
     };
     assert!(read_disk_sample(&config, false, false, true).is_err());
 }
+
+#[test]
+fn disk_root_only_never_samples_declared_mounts() {
+    let _guard = crate::diagnostics::test_env::env_guard();
+    let config = HealthConfig {
+        scan_mounts: Some((0..5).map(|index| format!("/cosh/m{index}")).collect()),
+        ..HealthConfig::default()
+    };
+    let sample = read_disk_sample(&config, false, true, false)
+        .expect("declared mounts stay unsampled when the mounts check is disabled");
+    assert!(sample.mounts.iter().all(|row| row.mount == "/"));
+    assert!(sample.root_used_ratio.is_some());
+}
+
+#[test]
+fn disk_mounts_only_drops_the_root_row() {
+    let _guard = crate::diagnostics::test_env::env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let config = HealthConfig {
+        scan_mounts: Some(vec![directory.path().to_string_lossy().into_owned()]),
+        ..HealthConfig::default()
+    };
+    let sample = read_disk_sample(&config, false, false, true)
+        .expect("df on a non-mount path still yields the containing row");
+    assert!(sample.mounts.iter().all(|row| row.mount != "/"));
+}
+
+#[test]
+fn disk_without_enabled_checks_is_unsupported() {
+    let _guard = crate::diagnostics::test_env::env_guard();
+    assert_eq!(
+        read_disk_sample(&HealthConfig::default(), false, false, false).err(),
+        Some(HealthUnavailableReason::Unsupported)
+    );
+}

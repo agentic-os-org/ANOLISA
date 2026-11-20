@@ -27,6 +27,8 @@ fn volume_candidate(key: &str, severity: u8) -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: key.to_string(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J09:/".into(),
         severity,
         epoch: None,
@@ -39,6 +41,8 @@ fn event_candidate(key: &str, severity: u8, epoch: Option<u64>) -> CandidateEpis
     CandidateEpisode {
         event: true,
         key: key.to_string(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity,
         epoch,
@@ -311,6 +315,8 @@ fn log_event_inside_delivered_counter_window_only_supplements() {
     let counter = CandidateEpisode {
         event: true,
         key: "cgroup-counter-v1|counter:boot-a:1:2:1000:1200:2".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity: 4,
         epoch: Some(1200),
@@ -333,6 +339,8 @@ fn counter_candidate_covered_by_delivered_log_is_suppressed() {
     let counter = CandidateEpisode {
         event: true,
         key: "cgroup-counter-v1|counter:boot-a:1:2:1000:1200:2".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity: 4,
         epoch: Some(1200),
@@ -369,6 +377,8 @@ fn quota_candidate(max_entry: bool, high_entry: bool) -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "cgroup|1:2|quota".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J19".into(),
         severity: 3,
         epoch: None,
@@ -707,6 +717,8 @@ fn psi_candidate() -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "host|psi_memory".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J20".into(),
         severity: 3,
         epoch: None,
@@ -837,6 +849,8 @@ fn conntrack_candidate() -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "host|conntrack".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J23".into(),
         severity: 3,
         epoch: None,
@@ -972,6 +986,8 @@ fn fs_event_candidate(identity: &str, dev_t: &str, severity: u8) -> CandidateEpi
     CandidateEpisode {
         event: true,
         key: format!("fs-event-v1|boot-a|{identity}"),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: format!("block-io|{dev_t}"),
         severity,
         epoch: Some(1700000000),
@@ -1005,4 +1021,148 @@ fn fs_event_severity_escalation_passes_merge_window() {
         ..warning.clone()
     };
     assert!(deliverable(&state, &critical, 2000));
+}
+
+const MERGED_BYTES: &str = "/|bytes|253:0|1:2";
+const MERGED_INODE: &str = "/|inode|253:0|1:2";
+
+fn merged_candidate(
+    key: &str,
+    companions: &[&str],
+    siblings: &[&str],
+    severity: u8,
+) -> CandidateEpisode {
+    CandidateEpisode {
+        event: false,
+        key: key.to_string(),
+        companion_keys: companions.iter().map(|key| key.to_string()).collect(),
+        sibling_keys: siblings.iter().map(|key| key.to_string()).collect(),
+        problem: "J09:/".into(),
+        severity,
+        epoch: None,
+        counter_window: None,
+        quota_branches: None,
+    }
+}
+
+#[test]
+fn merged_card_records_every_member_and_clears_them_independently() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 1000));
+    record_delivery(&mut state, &merged, 1000);
+    assert!(state.volume.contains_key(MERGED_BYTES));
+    assert!(state.volume.contains_key(MERGED_INODE));
+
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, true, false, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.contains_key(MERGED_BYTES));
+    assert!(!state.volume.contains_key(MERGED_INODE));
+    assert_eq!(
+        state
+            .recoveries
+            .get(MERGED_INODE)
+            .map(|row| row.recovered_ms),
+        Some(2000)
+    );
+
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        3000,
+    );
+    assert!(state.volume.is_empty());
+    assert_eq!(
+        state
+            .recoveries
+            .get(MERGED_BYTES)
+            .map(|row| row.recovered_ms),
+        Some(3000)
+    );
+}
+
+#[test]
+fn single_member_recovery_does_not_repost_the_remaining_member() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, true, false, true),
+        ]),
+        2000,
+    );
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(!deliverable(&state, &inode_only, 2000));
+    assert!(!deliverable(
+        &state,
+        &inode_only,
+        1000 + STATE_COOLDOWN_MS - 1
+    ));
+    assert!(deliverable(&state, &inode_only, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn legacy_ledger_recovery_gates_the_merged_card_sibling() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    sync(
+        &mut state,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+    assert!(state.recoveries.contains_key(MERGED_BYTES));
+
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(!deliverable(&state, &inode_only, 2000));
+    assert!(!deliverable(
+        &state,
+        &inode_only,
+        1000 + STATE_COOLDOWN_MS - 1
+    ));
+    assert!(deliverable(&state, &inode_only, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn live_sibling_episode_does_not_hide_a_new_member_entry() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(deliverable(&state, &inode_only, 2000));
+}
+
+#[test]
+fn failed_delivery_records_nothing_and_the_retry_records_every_member() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
+    assert!(deliverable(&state, &merged, 1000));
+    assert!(state.volume.is_empty());
+    assert!(deliverable(&state, &merged, 2000));
+    record_delivery(&mut state, &merged, 2000);
+    assert_eq!(
+        state
+            .volume
+            .get(MERGED_BYTES)
+            .map(|row| row.last_delivered_ms),
+        Some(2000)
+    );
+    assert_eq!(
+        state
+            .volume
+            .get(MERGED_INODE)
+            .map(|row| row.last_delivered_ms),
+        Some(2000)
+    );
 }

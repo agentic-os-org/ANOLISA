@@ -58,6 +58,48 @@ impl Fixture {
             )
             .unwrap()
     }
+
+    fn claim_episode(
+        &self,
+        session: &str,
+        now_ms: u64,
+        episode: crate::diagnostics::health::suppression::episode::CandidateEpisode,
+    ) -> ClaimDecision {
+        self.store
+            .claim_health_version(
+                Some(&self.runtime),
+                &self.snapshot,
+                ClaimRequest {
+                    kind: InviteKind::LoginHealth,
+                    host: "host",
+                    problem: "T03",
+                    session,
+                },
+                now_ms,
+                HealthExposure {
+                    evidence: "volume-evidence",
+                    event: None,
+                    severity: Some(HealthSeverity::Critical.precedence()),
+                    legacy_problems: &[],
+                    episode: Some(episode),
+                },
+            )
+            .unwrap()
+    }
+}
+
+fn merged_volume_episode() -> crate::diagnostics::health::suppression::episode::CandidateEpisode {
+    crate::diagnostics::health::suppression::episode::CandidateEpisode {
+        event: false,
+        key: "/|bytes|253:0|1:2".into(),
+        companion_keys: vec!["/|inode|253:0|1:2".into()],
+        sibling_keys: vec!["/|inode|253:0|1:2".into()],
+        problem: "T03:/".into(),
+        severity: 4,
+        epoch: None,
+        counter_window: None,
+        quota_branches: None,
+    }
 }
 
 #[test]
@@ -309,5 +351,51 @@ fn actual_bash_candidates_keep_the_same_help_and_event_when_oom_ages() {
         } else {
             assert!(matches!(decision, ClaimDecision::Suppressed));
         }
+    }
+}
+
+#[test]
+fn failed_episode_write_keeps_the_merged_card_deliverable() {
+    use crate::diagnostics::health::suppression::episode::{ledger_path, load, volume_member_key};
+
+    let _lock = crate::diagnostics::test_env::env_guard();
+    if unsafe { nix::libc::geteuid() } == 0 {
+        // Root bypasses the read-only directory this test relies on.
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let store = root.join("store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var(
+        "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+        store.join("health-suppression"),
+    );
+
+    let fixture = Fixture::new();
+    let decision = fixture.claim_episode("failed", 1000, merged_volume_episode());
+    assert!(matches!(decision, ClaimDecision::Suppressed));
+    let path = ledger_path().expect("ledger path");
+    assert!(!path.exists(), "a failed write must not persist a ledger");
+
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let decision = fixture.claim_episode("retry", 2000, merged_volume_episode());
+    assert!(matches!(decision, ClaimDecision::Claimed(_)));
+    let ledger = load(&path).expect("ledger written on the retry");
+    for member in ["bytes", "inode"] {
+        assert!(
+            ledger
+                .volume
+                .contains_key(&volume_member_key("/", member, "253:0", "1:2")),
+            "{member}"
+        );
+    }
+
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
     }
 }

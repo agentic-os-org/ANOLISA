@@ -146,6 +146,12 @@ pub(crate) struct CounterSample {
 pub(crate) struct CandidateEpisode {
     pub event: bool,
     pub key: String,
+    /// Capacity members the card also reports; recorded with the key so one
+    /// member recovering does not re-post the remaining member's card.
+    pub companion_keys: Vec<String>,
+    /// Capacity siblings used only to gate legacy ledgers written before a
+    /// merged card recorded every member; never recorded.
+    pub sibling_keys: Vec<String>,
     pub problem: String,
     pub severity: u8,
     pub epoch: Option<u64>,
@@ -429,6 +435,15 @@ pub(crate) fn deliverable(
             return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
         }
     }
+    // A settled sibling recovery proves this merged card was delivered recently
+    // even when the ledger predates per-member records.
+    for sibling in &candidate.sibling_keys {
+        if let Some(recovery) = ledger.recoveries.get(sibling) {
+            if now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS {
+                return false;
+            }
+        }
+    }
     if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
         return now_ms.saturating_sub(recovery.last_delivered_ms) >= RECURRENCE_GATE_MS;
     }
@@ -481,13 +496,16 @@ pub(crate) fn record_delivery(
             episode.severity = candidate.severity;
             episode.last_delivered_ms = now_ms;
         } else {
-            ledger.volume.insert(
-                candidate.key.clone(),
-                VolumeEpisode {
-                    severity: candidate.severity,
-                    last_delivered_ms: now_ms,
-                },
-            );
+            for key in std::iter::once(&candidate.key).chain(candidate.companion_keys.iter()) {
+                ledger.recoveries.remove(key);
+                ledger.volume.insert(
+                    key.to_string(),
+                    VolumeEpisode {
+                        severity: candidate.severity,
+                        last_delivered_ms: now_ms,
+                    },
+                );
+            }
         }
     }
     prune(ledger, now_ms);

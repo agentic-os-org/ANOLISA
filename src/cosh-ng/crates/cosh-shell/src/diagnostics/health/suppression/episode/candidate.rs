@@ -24,13 +24,36 @@ pub(crate) fn candidate_for_finding(
             .split_once(':')
             .map(|(_, mount)| mount.to_string())
             .unwrap_or_else(|| "/".to_string());
-        let member = if base == "J17" { "inode" } else { "bytes" };
         let prefix = format!("filesystem.mount.{mount}.");
         let device = string_fact(report, &format!("{prefix}volume_device")).unwrap_or_default();
         let fsid = string_fact(report, &format!("{prefix}volume_fsid")).unwrap_or_default();
+        let bytes_key = volume_member_key(&mount, "bytes", &device, &fsid);
+        let inode_key = volume_member_key(&mount, "inode", &device, &fsid);
+        // A merged card covers every capacity member it reports; record each
+        // listed member so a single-member recovery cannot re-post the rest.
+        let members = report
+            .findings
+            .iter()
+            .find(|finding| finding.id == finding_id)
+            .and_then(|finding| finding.detail_args.get("members"))
+            .map(String::as_str)
+            .unwrap_or(if base == "J17" { "inode" } else { "bytes" });
+        let (key, companion_keys, sibling_key) = if base == "J17" {
+            (inode_key, Vec::new(), bytes_key)
+        } else {
+            let companions = members
+                .split('+')
+                .any(|member| member == "inode")
+                .then(|| inode_key.clone())
+                .into_iter()
+                .collect();
+            (bytes_key, companions, inode_key)
+        };
         return Some(CandidateEpisode {
             event: false,
-            key: volume_member_key(&mount, member, &device, &fsid),
+            key,
+            companion_keys,
+            sibling_keys: vec![sibling_key],
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -42,6 +65,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: false,
             key: "host|memory".to_string(),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -60,6 +85,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: false,
             key: volume_member_key(&mount, "ro", &device, &fsid),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -73,6 +100,8 @@ pub(crate) fn candidate_for_finding(
                 return Some(CandidateEpisode {
                     event: false,
                     key: format!("service|{name}"),
+                    companion_keys: Vec::new(),
+                    sibling_keys: Vec::new(),
                     problem: problem.to_string(),
                     severity,
                     epoch: None,
@@ -95,6 +124,8 @@ pub(crate) fn candidate_for_finding(
             return Some(CandidateEpisode {
                 event: true,
                 key: format!("{domain}|{identity}|pid:{pid}"),
+                companion_keys: Vec::new(),
+                sibling_keys: Vec::new(),
                 problem: problem.to_string(),
                 severity,
                 epoch: unsigned_fact(report, "kernel.oom_attributed_epoch"),
@@ -114,6 +145,8 @@ pub(crate) fn candidate_for_finding(
                 "cgroup-counter-v1|{}",
                 counter_identity(&sample, window, delta)
             ),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: Some(window.1),
@@ -127,6 +160,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: false,
             key: format!("cgroup|{id}|quota"),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -155,6 +190,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: false,
             key,
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -166,6 +203,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: false,
             key: "host|conntrack".to_string(),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem: problem.to_string(),
             severity,
             epoch: None,
@@ -193,6 +232,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: true,
             key: format!("fs-event-v1|{boot}|{identity}"),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem,
             severity,
             epoch: unsigned_fact(report, &format!("kernel.fs_{prefix}_epoch")),
@@ -220,6 +261,8 @@ pub(crate) fn candidate_for_finding(
         return Some(CandidateEpisode {
             event: true,
             key: format!("host-event-v1|{boot}|{kind}|{identity}"),
+            companion_keys: Vec::new(),
+            sibling_keys: Vec::new(),
             problem,
             severity,
             epoch: None,

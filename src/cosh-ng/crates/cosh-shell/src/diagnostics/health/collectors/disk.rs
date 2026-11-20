@@ -270,30 +270,29 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     };
     let mut scope_incomplete = false;
     let paths = if passive || config.scan_mounts.is_some() || !mounts {
-        let mut paths = BTreeSet::new();
-        if root {
-            paths.insert("/".to_string());
-        }
-        if mounts {
-            for path in config.scan_mounts.as_deref().unwrap_or_default() {
-                if path == "/" {
-                    continue;
-                }
-                let absolute = std::path::Path::new(path).is_absolute()
-                    && !std::path::Path::new(path)
-                        .components()
-                        .any(|component| matches!(component, std::path::Component::ParentDir));
-                if absolute && (!passive || local.contains(path)) {
-                    paths.insert(path.clone());
-                } else {
-                    scope_incomplete = true;
-                }
+        // Same enabled-target policy as the statfs sample: only enabled checks'
+        // targets, capped identically, so both sources report one target set.
+        let (targets, _) = volume::declared_targets(config, root, mounts);
+        let mut paths = Vec::new();
+        for path in targets {
+            if path == "/" {
+                paths.push(path);
+                continue;
+            }
+            let absolute = std::path::Path::new(&path).is_absolute()
+                && !std::path::Path::new(&path)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir));
+            if absolute && (!passive || local.contains(&path)) {
+                paths.push(path);
+            } else {
+                scope_incomplete = true;
             }
         }
         if paths.is_empty() {
             return Err(HealthUnavailableReason::Unsupported);
         }
-        Some(paths.into_iter().collect::<Vec<_>>())
+        Some(paths)
     } else {
         None
     };
