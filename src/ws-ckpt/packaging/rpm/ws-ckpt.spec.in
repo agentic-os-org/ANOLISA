@@ -283,6 +283,12 @@ if [ -f "$state_dir/state" ]; then
 fi
 
 %changelog
+* Fri Nov 20 2026 Yuanhong Peng <yummypeng@linux.alibaba.com> - 0.7.3-1
+- feat(ckpt): expose guarded rollback in the CLI
+- feat(ckpt): add JSON output for file diffs
+- fix(ckpt): escape status and command receipts
+- fix(ckpt): escape list fields and guard new IDs
+
 * Fri Nov 13 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.7.2-1
 - Recursive watching no longer follows directory symlinks inside a workspace; writes under a symlink target are detected only by a workspace registered on that target directory
 - Fixed rollback leaking one inotify watch per watched directory; rollback now releases the retired tree's watches before swapping and fails before the swap if they cannot be detached

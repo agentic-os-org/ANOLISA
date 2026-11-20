@@ -2,6 +2,18 @@
 
 [English](CHANGELOG.md)
 
+## 0.7.3
+
+### Added
+
+- 新增 `ws-ckpt rollback --json`，以机器可读的 JSON 输出回滚与预览结果；新增 `ws-ckpt rollback --guarded --json`，提供 guarded 回滚协议：兼容性检查、精确预览、确认后执行与持久化结果查询；guarded 结果查询也接受合法的历史快照 ID (#10233)
+- 新增 `ws-ckpt diff --format json`，返回文件级变更与耗时秒数；省略 `--to` 时与当前工作区比较 (#9368)
+
+### Fixed
+
+- `ws-ckpt list` 表格字段、`ws-ckpt status` 工作区行与命令回执中的控制字符和反斜杠现在会被转义，每个条目保持单行显示；JSON 输出保留原始值 (#9987)
+- `ws-ckpt checkpoint` 现在会在任何工作区变更之前拒绝包含控制字符的快照 ID；历史 ID 仍可通过 diff、回滚预览、回滚与删除使用 (#9987)
+
 ## 0.7.2
 
 ### Changed

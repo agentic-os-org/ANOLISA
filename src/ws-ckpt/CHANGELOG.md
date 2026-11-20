@@ -2,6 +2,16 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.7.3
+
+### Added
+- Added `ws-ckpt rollback --json` for machine-readable rollback and preview results, and `ws-ckpt rollback --guarded --json` for the guarded protocol: compatibility checks, exact preview, confirmed execution and durable result lookup; guarded result lookup also accepts valid legacy snapshot IDs (#10233)
+- Added `ws-ckpt diff --format json` returning file-level changes and elapsed seconds; omit `--to` to compare against the current workspace (#9368)
+
+### Fixed
+- Escaped control characters and backslashes in `ws-ckpt list` table fields, `ws-ckpt status` workspace rows and command receipts so each entry stays on one line; JSON output keeps the original values (#9987)
+- Rejected snapshot IDs containing control characters at `ws-ckpt checkpoint` creation before any workspace mutation; historical IDs remain usable through diff, rollback preview, rollback and delete (#9987)
+
 ## 0.7.2
 
 ### Changed
