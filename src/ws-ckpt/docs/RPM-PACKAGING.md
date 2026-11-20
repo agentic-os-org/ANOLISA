@@ -12,7 +12,7 @@ make srpm         # 只生成 SRPM（用于 Koji 提交）
 
 `bash ./build-rpm.sh` 是兼容入口，等价于 `make rpm`；`bash ./build-rpm.sh --srpm` 等价于 `make srpm`。
 
-> **前置依赖**：`yum install -y rpm-build cargo rust gcc make pkgconfig systemd-rpm-macros nodejs npm`（要求 `rust >= 1.70`、`nodejs >= 18`）。脚本不预检这些依赖，缺失时在中途失败。
+> **前置依赖**：`yum install -y rpm-build cargo rust gcc make pkgconfig systemd-rpm-macros nodejs npm`（要求 `rust >= 1.91`、`nodejs >= 18`）。脚本不预检这些依赖，缺失时在中途失败。
 
 打包流程（`packaging/rpm/build.sh`）：
 

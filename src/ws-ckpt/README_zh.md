@@ -49,7 +49,7 @@ ws-ckpt/
 
 - Linux（推荐 Alinux 4）
 - btrfs 文件系统
-- Rust 1.70+
+- Rust 1.91+
 
 工作区根目录不能是活跃的挂载点。初始化时会把原目录改名后作为备份，而 `rename(2)` 对
 「自身是挂载点」的目录会返回 `EBUSY` —— 最常见的是 in-place 模式的 SkillFS 挂载。执行

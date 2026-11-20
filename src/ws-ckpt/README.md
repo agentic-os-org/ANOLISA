@@ -51,7 +51,7 @@ ws-ckpt/
 
 - Linux (Alinux 4 recommended)
 - btrfs filesystem
-- Rust 1.70+
+- Rust 1.91+
 
 The workspace root must not be an active mount point. Initialization moves the
 original directory aside as a backup, and `rename(2)` fails with `EBUSY` on a

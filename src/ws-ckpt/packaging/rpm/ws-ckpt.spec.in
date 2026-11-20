@@ -13,8 +13,8 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
-BuildRequires:  cargo >= 1.70
-BuildRequires:  rust >= 1.70
+BuildRequires:  cargo >= 1.91
+BuildRequires:  rust >= 1.91
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconfig
