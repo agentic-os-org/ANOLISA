@@ -14,11 +14,7 @@ Rust、Python、JavaScript（`.js`、`.mjs`、`.cjs`）文件上限为 699 行�
 超限前按职责拆分为具名相邻模块，保留测试入口与断言，不通过压缩代码或新豁免绕过限制。
 `mod.rs` 只允许仓库规范中的 `tests/common/mod.rs`。
 
-AW/Provider 与 AW workflow 变更运行完整 AW gate。Tokenless 公共 CLI／协议／运行时／
-统计源码、Provider 协议／executor、RTK、打包构建输入、依赖锁及 toolchain 变更，还需
-通过 `scripts/check.py` 选择真实消费者兼容测试。普通 AW 运行时、安装器、文档和共享
-crate 测试变更保留夹具覆盖，无需真实后端构建。保留 Tokenless 独立组件 CI，其他组件
-内部由各自 CI 验证；新增消费合同需要显式校验。
+AW 与 Provider PR 运行共享回归清单、workspace 测试、格式检查与 Clippy。主线、发行分支推送和手工检查额外运行两种 umask 下的包测试及 rustdoc。仅改动 Tokenless 后端输入时运行真实消费者兼容测试，同时修改 AW 时两项均运行。
 
 日常检查无需凭据。夜间集成一次构建全部包，复用带校验和、绑定候选 SHA 的二进制做
 固定版本原生验收。保留精确版本证据、有期限的进程、完整报告和人工验收边界，缺失或

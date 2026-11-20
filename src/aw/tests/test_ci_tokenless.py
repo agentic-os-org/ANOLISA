@@ -26,7 +26,7 @@ class TokenlessTests(GateFixture):
                     outcome in {"success", "failure", "cancelled"},
                 )
 
-    def test_public_backend_and_installer_changes_select_both_checks(self):
+    def test_backend_only_changes_select_the_consumer_check(self):
         for path in (
             "src/tokenless/crates/tokenless-runtime/src/entry.rs",
             "src/tokenless/crates/tokenless-cli/build.rs",
@@ -54,7 +54,8 @@ class TokenlessTests(GateFixture):
         ):
             event = {"pull_request": {"base": {"sha": "a" * 40}, "head": {"sha": "b" * 40}}}
             with self.subTest(path=path), patch.object(gate, "git", return_value=path):
-                self.assertTrue(gate.scope("pull_request", event, "c" * 40))
+                self.assertEqual(gate.scope("pull_request", event, "c" * 40),
+                                 not path.startswith("src/tokenless/"))
                 self.assertTrue(gate.scope("pull_request", event, "c" * 40, compatibility=True))
         for path in ("src/tokenless/README.md", "src/tokenless/adapters/other.js", "src/agent-memory/src/lib.rs"):
             with self.subTest(path=path), patch.object(gate, "git", return_value=path):

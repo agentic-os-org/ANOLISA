@@ -132,6 +132,8 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
         # Base-branch AW updates must not select an unrelated PR.
         comparisons = [f"{base}...{head}"]
     elif event_name == "push":
+        if event.get("ref", "").startswith("refs/tags/aw/v"):
+            return True
         before, after = sha(event["before"]), sha(event["after"])
         if after != actual:
             raise ValueError("push after SHA does not match checkout")
@@ -160,8 +162,9 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
     return any(
         tokenless_input(path) if compatibility else
         (path.startswith(("src/aw/", "providers/", "distribution/packaging/aw/"))
-         or tokenless_input(path) or path == "distribution/Makefile"
-         or path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-integration.yml"})
+         or path == "distribution/Makefile"
+         or path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-integration.yml",
+                     ".github/workflows/aw-release.yml"})
         for path in changed
     )
 
@@ -223,7 +226,7 @@ def package_permissions() -> None:
             run(command, AW, timeout=120, umask=mask)
 
 
-def check() -> None:
+def check(*, daily: bool = False) -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
     selftest()
@@ -254,10 +257,11 @@ def check() -> None:
     check_inventory(metadata)
     for root in [AW, *provider_roots]:
         run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)
-    package_permissions()
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
-    for root in [AW, *provider_roots]:
-        run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)
+    if not daily:
+        package_permissions()
+        for root in [AW, *provider_roots]:
+            run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)
     if candidate() != actual:
         raise ValueError("checkout changed during validation")
     output(tested_sha=actual)
@@ -270,7 +274,7 @@ def required(env: dict[str, str]) -> None:
         raise ValueError("scope failed or candidate SHA does not match the event")
     selected, checks = env.get("SELECTED"), env.get("CHECKS_RESULT")
     if selected == "false" and checks == "skipped":
-        print("AW gate not applicable: no AW paths changed")
+        print("AW workspace checks not selected")
     elif selected == "true" and checks == "success" and env.get("TESTED_SHA") == actual:
         print(f"AW gate passed for {actual}")
     else:
@@ -292,7 +296,7 @@ def interrupted(signum: int, _frame: object) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", nargs="?", default="check", choices=("scope", "check", "required")
+        "command", nargs="?", default="check", choices=("scope", "daily", "check", "required")
     )
     command = parser.parse_args().command
     signal.signal(signal.SIGTERM, interrupted)
@@ -306,8 +310,8 @@ def main() -> int:
                               compatibility=True)
             output(selected=str(selected).lower(), tokenless=str(tokenless).lower(),
                    candidate_sha=actual)
-        elif command == "check":
-            check()
+        elif command in ("check", "daily"):
+            check(daily=command == "daily")
         else:
             required(dict(os.environ))
     except subprocess.CalledProcessError as error:
