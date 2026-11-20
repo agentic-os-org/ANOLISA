@@ -220,6 +220,13 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+`anolisa status <component>` 显示组件安装状态及关联的 Adapter。
+`anolisa adapter status` 检查已有接入，并在有有效记录时显示启用时间。
+通过 AW 运行 sec-core 或 Tokenless 时，两个命令都会提示使用
+`aw inspect --config /path/to/aw.yaml --json`，组件索引不可用时也会给出该提示。
+请以启动 AW 服务的用户执行查询，沿用相同的 `XDG_RUNTIME_DIR` 设置，并传入启动配置的
+绝对路径，以查看 Provider 状态及最近执行记录。详见 [AW 命令参考](../aw/cli-reference.md#aw-inspect)。
+
 对于 OpenClaw 插件，`adapter enable` 默认同意插件声明的能力。ANOLISA 仅在
 对应命令的 help 列出 `--accept-capabilities` 时，将该参数添加到安装和激活
 命令。可通过以下选项拒绝自动授予同意：

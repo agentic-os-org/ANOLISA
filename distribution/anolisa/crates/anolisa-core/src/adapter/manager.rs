@@ -215,6 +215,8 @@ pub struct StatusEntry {
     pub component: String,
     /// Framework the receipt targets.
     pub framework: String,
+    /// Recorded enable time, available for an enabled receipt with a valid timestamp.
+    pub enabled_at: Option<String>,
     /// The driver's status report for this receipt.
     pub report: AdapterStatusReport,
 }
@@ -1553,6 +1555,9 @@ impl AdapterManager {
                 continue;
             }
             let framework = claim.framework.clone();
+            let enabled_at = (claim.status == ClaimStatus::Enabled
+                && chrono::DateTime::parse_from_rfc3339(&claim.enabled_at).is_ok())
+            .then(|| claim.enabled_at.clone());
             let source = self.source_probe(&claim.component, &claim.framework, &state);
             let driver = match self.registry.get(&framework) {
                 Some(d) => d,
@@ -1562,6 +1567,7 @@ impl AdapterManager {
                     entries.push(StatusEntry {
                         component: claim.component.clone(),
                         framework,
+                        enabled_at,
                         report: with_managed_conditions(
                             unverified_report("no built-in driver for framework"),
                             claim,
@@ -1664,6 +1670,7 @@ impl AdapterManager {
             entries.push(StatusEntry {
                 component: claim.component.clone(),
                 framework,
+                enabled_at,
                 report,
             });
         }

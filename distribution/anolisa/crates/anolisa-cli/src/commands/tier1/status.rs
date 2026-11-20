@@ -303,6 +303,9 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         render_warnings(&view.warnings);
         render_human(&records, ctx.verbose, ctx.no_color);
         render_quarantined(&quarantined, ctx.no_color);
+        if let Some(component) = selected_component.as_deref() {
+            common::print_aw_status_hint(Some(component));
+        }
     }
     Ok(())
 }

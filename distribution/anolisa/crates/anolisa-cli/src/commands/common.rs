@@ -28,6 +28,20 @@ const INSTALLED_COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
 /// Filename used for the locally persisted installed component contract.
 const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 
+const AW_STATUS_HINT: &str = "For sec-core or Tokenless running through AW, check Provider status \
+                             and recent executions.\n  aw inspect --config /path/to/aw.yaml --json";
+
+fn is_aw_provider_component(component: &str) -> bool {
+    matches!(component, "sec-core" | "agent-sec-core" | "tokenless")
+}
+
+/// Directs status readers to the AW runtime view for the shipped Providers.
+pub(crate) fn print_aw_status_hint(component: Option<&str>) {
+    if component.is_none_or(is_aw_provider_component) {
+        println!("{AW_STATUS_HINT}");
+    }
+}
+
 /// Build the layout for the active install mode, honoring `--prefix`
 /// (system-mode) and the current process user's home (user-mode).
 pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
@@ -462,11 +476,16 @@ pub(crate) fn unsupported_component_error(command: &str, input: &str) -> CliErro
 /// index could be loaded. Distinct from [`unsupported_component_error`] so
 /// callers can tell "the index rejected this" from "nothing could check it".
 pub(crate) fn component_index_unavailable_error(command: &str, input: &str) -> CliError {
+    let mut reason = format!(
+        "component index is unavailable; cannot validate component '{input}'; run `anolisa list` to inspect repository metadata"
+    );
+    if matches!(command, "status" | "adapter status") && is_aw_provider_component(input) {
+        reason.push('\n');
+        reason.push_str(AW_STATUS_HINT);
+    }
     CliError::Runtime {
         command: command.to_string(),
-        reason: format!(
-            "component index is unavailable; cannot validate component '{input}'; run `anolisa list` to inspect repository metadata"
-        ),
+        reason,
     }
 }
 

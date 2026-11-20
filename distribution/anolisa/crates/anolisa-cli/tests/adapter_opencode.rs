@@ -72,11 +72,9 @@ sha256 = "{:x}"
     std::fs::write(&opencode, "#!/bin/sh\nexit 99\n").unwrap();
     std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
     let host_config = config.join("opencode");
-    let run = |flags: &[&str], command: &[&str]| -> Value {
-        let mut args = vec!["--json", "--install-mode", "user"];
-        args.extend_from_slice(flags);
-        args.push("adapter");
-        args.extend_from_slice(command);
+    let invoke = |arguments: &[&str]| -> String {
+        let mut args = vec!["--install-mode", "user"];
+        args.extend_from_slice(arguments);
         let output = common::run_with_path_env(
             &args,
             &[
@@ -96,8 +94,20 @@ sha256 = "{:x}"
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).unwrap()
+        String::from_utf8(output.stdout).unwrap()
     };
+    let run = |flags: &[&str], command: &[&str]| -> Value {
+        let mut args = vec!["--json"];
+        args.extend_from_slice(flags);
+        args.push("adapter");
+        args.extend_from_slice(command);
+        serde_json::from_str(&invoke(&args)).unwrap()
+    };
+    let aw_command = "aw inspect --config /path/to/aw.yaml --json";
+    assert!(invoke(&["status", "tokenless"]).contains(aw_command));
+    let before_enable = invoke(&["adapter", "status", "tokenless"]);
+    assert!(before_enable.contains("No adapter receipts."));
+    assert!(before_enable.contains(aw_command));
     let scan = run(&[], &["scan"]);
     assert!(scan.to_string().contains("opencode"));
     let link = host_config.join("plugins/tokenless.js");
@@ -108,6 +118,13 @@ sha256 = "{:x}"
     assert_eq!(std::fs::read_link(&link).unwrap(), plugin);
     let status = run(&[], &["status", "tokenless"]);
     let receipt = &status["data"]["receipts"][0];
+    let enabled_at = enabled["data"]["claim"]["enabled_at"].as_str().unwrap();
+    assert_eq!(receipt["enabled_at"], enabled_at);
+    let all_adapters = invoke(&["adapter", "status"]);
+    assert!(all_adapters.contains(&format!("Enabled at: {enabled_at}")));
+    assert_eq!(all_adapters.matches(aw_command).count(), 1);
+    assert!(invoke(&["--quiet", "status", "tokenless"]).is_empty());
+    assert!(invoke(&["--quiet", "adapter", "status", "tokenless"]).is_empty());
     assert_eq!(receipt["summary"], "unknown", "{status}");
     assert!(
         receipt["conditions"]
