@@ -161,20 +161,25 @@ mod tests {
         if let Some(root) = std::env::var_os("ASC_LANDLOCK_TEST_CHILD") {
             let root = std::path::Path::new(&root);
             let allowed = root.join("allowed");
-            let metadata = allowed.metadata().unwrap();
-            let layer = WriteLayer::Install {
-                abi: kernel_abi().unwrap(),
-                grants: vec![WriteGrant {
-                    path: allowed.to_str().unwrap().into(),
+            let writable_file = root.join("writable-file");
+            let grants = [&allowed, &writable_file].map(|path| {
+                let metadata = path.metadata().unwrap();
+                WriteGrant {
+                    path: path.to_str().unwrap().into(),
                     device: metadata.dev(),
                     inode: metadata.ino(),
-                }],
+                }
+            });
+            let layer = WriteLayer::Install {
+                abi: kernel_abi().unwrap(),
+                grants: grants.into(),
             };
             assert!(matches!(
                 layer.install().unwrap(),
                 LandlockStatus::Enforced { .. }
             ));
             std::fs::write(allowed.join("ok"), b"child").unwrap();
+            std::fs::write(writable_file, b"short").unwrap();
             assert_eq!(
                 std::fs::write(root.join("blocked"), b"no")
                     .unwrap_err()
@@ -192,6 +197,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("allowed")).unwrap();
         std::fs::write(root.path().join("existing"), b"original").unwrap();
+        std::fs::write(root.path().join("writable-file"), b"long original value").unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -201,6 +207,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(child.status.success(), "{child:?}");
+        assert_eq!(
+            std::fs::read(root.path().join("writable-file")).unwrap(),
+            b"short"
+        );
         assert_eq!(
             std::fs::read(root.path().join("allowed/grandchild")).unwrap(),
             b"ok\n"
@@ -234,6 +244,7 @@ mod tests {
             assert!(select_with(LandlockMode::Required, || Ok(abi)).is_err());
         }
         for mode in [LandlockMode::Auto, LandlockMode::Required] {
+            assert!(select_with(mode, || Ok(0)).is_err());
             assert!(
                 select_with(mode, || Err(std::io::Error::from_raw_os_error(libc::EPERM))).is_err()
             );
@@ -242,5 +253,39 @@ mod tests {
                 Some(WriteLayer::Install { abi: 3, .. })
             ));
         }
+    }
+
+    #[test]
+    fn auto_preserves_the_probe_reason_in_installation_evidence() {
+        let layer = select_with(LandlockMode::Auto, || Ok(2)).unwrap().unwrap();
+        assert_eq!(
+            layer.install().unwrap(),
+            LandlockStatus::Skipped {
+                reason: "ABI 2 is older than required ABI 3".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn installation_rejects_a_replaced_write_grant() {
+        if std::env::var_os("ASC_LANDLOCK_INTEGRATION").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output");
+        let original = File::create(&path).unwrap();
+        let metadata = original.metadata().unwrap();
+        std::fs::rename(&path, dir.path().join("previous")).unwrap();
+        File::create(&path).unwrap();
+        let layer = WriteLayer::Install {
+            abi: kernel_abi().unwrap(),
+            grants: vec![WriteGrant {
+                path: path.to_str().unwrap().into(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }],
+        };
+        let error = layer.install().unwrap_err().to_string();
+        assert!(error.contains("writable object changed"), "{error}");
     }
 }

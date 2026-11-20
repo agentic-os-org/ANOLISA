@@ -205,7 +205,12 @@ impl Fixture {
 
 #[test]
 fn successful_run_maps_the_container_lifecycle() {
+    use asc_pep_runtime::SandboxBackend;
     let fixture = fixture();
+    assert_eq!(
+        fixture.backend.0.selection(),
+        asc_sandbox_types::BackendSelection::Docker {}
+    );
     fixture.write_inspect("none");
     let result = fixture.backend.execute_bound(&fixture.spec()).unwrap();
     assert!(result.installed);
