@@ -167,6 +167,12 @@ impl RatatuiInlineRenderer {
         ];
         if let Some(assessment) = model.assessment {
             lines.insert(6, assessment_summary_line(&i18n, assessment));
+            for (offset, row) in git_repo_config_secondary_rows(&i18n, assessment, usize::MAX)
+                .into_iter()
+                .enumerate()
+            {
+                lines.insert(7 + offset, row);
+            }
         }
         if let Some(audit_ref) = model.audit_ref {
             lines.insert(6, audit_ref_line(audit_ref));
@@ -445,7 +451,36 @@ fn assessment_summary_rows(
         content_width,
         2,
     ));
+    rows.extend(git_repo_config_secondary_rows(
+        i18n,
+        assessment,
+        content_width,
+    ));
     rows
+}
+
+// Keep the single primary reason on the card, but surface the git
+// repo-config warning in details when a stronger explanation is primary.
+// Shared by the bordered and plain-text detail renderers.
+fn git_repo_config_secondary_rows(
+    i18n: &crate::I18n,
+    assessment: CommandAssessmentSummaryModel<'_>,
+    content_width: usize,
+) -> Vec<String> {
+    if assessment.primary_reason == "git-repo-config-execution"
+        || !assessment
+            .reason_trace
+            .split(',')
+            .any(|reason| reason == "git-repo-config-execution")
+    {
+        return Vec::new();
+    }
+    let phrase = i18n.t(crate::MessageId::ApprovalRiskPhraseGitRepoConfigExecution);
+    wrapped_preview_rows(
+        &super::approval_reason::approval_reason_line(phrase, *i18n),
+        content_width,
+        2,
+    )
 }
 
 fn user_facing_subject(i18n: &crate::I18n, subject: &str) -> String {

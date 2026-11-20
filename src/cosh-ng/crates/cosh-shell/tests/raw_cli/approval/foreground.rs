@@ -10,7 +10,8 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
 
     assert!(output.contains("Preparing a streamed tool request before finishing."));
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Bash · medium risk"));
+    assert!(output.contains("Bash · high risk"));
+    assert!(output.contains("may run repo-embedded scripts"));
     assert!(output.contains("$ git status --short"));
     assert!(!output.contains("Subject: Bash"));
     assert!(!output.contains("Subject: tool Bash"));

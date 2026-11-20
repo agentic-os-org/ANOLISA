@@ -126,4 +126,5 @@ collect_message_ids!([
     guide_ai_management_ids,
     agent_reply_truncation_ids,
     health_volume_ids,
+    approval_git_repo_config_ids,
 ],);

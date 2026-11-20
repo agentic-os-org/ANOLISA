@@ -486,6 +486,7 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (false, "ps aux | head -5", "AskUser|Medium|Medium|None|None|[None, None]|diagnostic-pipeline-heuristic,pipeline-not-auto-executable"),
     (false, "ps aux | awk '{print $1}'", "AskUser|Medium|Medium|None|None|[None, None]|pipeline-not-auto-executable"),
     (false, "cd /tmp && pwd", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,bounded-readonly,unknown-command"),
+    (false, "cd /tmp && git status", "AskUser|High|Low|None|None|[Unknown]|and-or-list-not-auto-executable,git-repo-config-execution,unknown-command"),
     (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation, Unknown]|and-or-list-not-auto-executable,bounded-readonly,privilege-escalation,unknown-command"),
     (false, "echo hi && rm -rf /tmp/x", "AskUser|High|Medium|None|None|[Unknown, FilesystemDelete]|and-or-list-not-auto-executable,bounded-readonly,filesystem-delete,unknown-command"),
     (false, "echo hi; ls -la", "AskUser|Low|Medium|None|None|[Unknown]|bounded-readonly,sequence-not-auto-executable,unknown-command"),
@@ -519,6 +520,13 @@ fn command_risk_primary_reason_prefers_structural_verdict() {
     let and_or = ask("cd /tmp && pwd");
     assert_eq!(and_or.primary_reason(), "and-or-list-not-auto-executable");
     assert!(and_or.reasons.contains(&"unknown-command"));
+
+    // R1b: a high-risk explanation outranks the structural verdict.
+    let git_and_or = ask("cd /tmp && git status");
+    assert_eq!(git_and_or.primary_reason(), "git-repo-config-execution");
+    assert!(git_and_or
+        .reasons
+        .contains(&"and-or-list-not-auto-executable"));
 
     // R2: sequences follow the same rule.
     let sequence = ask("echo hi; ls -la");
@@ -676,6 +684,17 @@ fn compound_high_risk_tails_survive_null_redirection_stripping() {
     let readonly = ask("cd /tmp && pwd 2>/dev/null");
     assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
     assert!(readonly.reasons.contains(&"output-suppressed"));
+
+    // Repo-config disclosure survives stderr suppression on the git family.
+    let git_readonly = ask("cd /tmp && git status 2>/dev/null");
+    assert_eq!(
+        git_readonly.impact,
+        RiskImpact::High,
+        "{:?}",
+        git_readonly.reasons
+    );
+    assert!(git_readonly.reasons.contains(&"git-repo-config-execution"));
+    assert!(git_readonly.reasons.contains(&"output-suppressed"));
 }
 
 #[test]
@@ -808,6 +827,14 @@ fn compound_without_null_redirection_assesses_all_segments() {
     // whitelisted pair aggregates to Low without any auto-allow evidence.
     let readonly = ask("cd /tmp && pwd");
     assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
+    let git_readonly = ask("cd /tmp && git status");
+    assert_eq!(
+        git_readonly.impact,
+        RiskImpact::High,
+        "{:?}",
+        git_readonly.reasons
+    );
+    assert!(git_readonly.reasons.contains(&"git-repo-config-execution"));
     let whitelisted = ask("pwd && df -h");
     assert_eq!(
         whitelisted.impact,
