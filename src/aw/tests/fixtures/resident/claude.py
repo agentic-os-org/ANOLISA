@@ -280,6 +280,12 @@ async def main():
     # Host readiness must precede the first task/client.
     config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
     assert Path(config["ready_path"]).exists()
+    if scenario == "observation":
+        await task(0, "allow")
+        await task(1, "deny")
+        assert RESULTS[0]["instance"] != RESULTS[1]["instance"]
+        (ROOT / "result.json").write_text(json.dumps({"tasks": 2, "cases": RESULTS, "passed": True}))
+        return
     if scenario == "settings":
         from claude_settings import run
 
