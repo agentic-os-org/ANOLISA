@@ -1,7 +1,7 @@
 {
   "id": "aw-sdk",
   "name": "AW SDK middleware",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "general",
   "entry": {"backend": "plugin.py"},
   "dependencies": []

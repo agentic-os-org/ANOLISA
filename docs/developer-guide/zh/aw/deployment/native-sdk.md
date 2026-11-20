@@ -255,10 +255,10 @@ Service 在有序步骤间持续使用同一事件截止时间。
 在应用目录安装核心候选 tarball，并按需仅安装实际使用的可选框架适配包：
 
 ```bash
-npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-0.2.0.tgz
 # 可选框架适配包（按需安装）：
-npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.1.1.tgz
-npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.1.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.2.0.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.2.0.tgz
 ```
 
 使用应用用户持有的私有目录中的绝对 socket 路径。同用户运行 AW，完整配置中设置

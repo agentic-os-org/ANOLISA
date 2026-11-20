@@ -64,7 +64,7 @@ class PackageSelectionTests(GateFixture):
             [
                 ["make", "-C", "distribution", "test-aw-packages"],
                 [
-                    "make", "-C", "distribution", "aw-packages", "VERSION=0.1.1",
+                    "make", "-C", "distribution", "aw-packages", "VERSION=0.2.0",
                     "OUTPUT=" + str(output / "packages"), "COMPONENTS=core sec-core tokenless",
                 ],
                 ["make", "-C", "distribution", "aw-integration-backends",
