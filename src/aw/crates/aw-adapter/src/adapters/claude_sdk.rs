@@ -11,6 +11,9 @@ use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, time::Duration};
 
+// Includes interpreter startup and inherited Python instrumentation.
+pub(super) const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(crate) struct ClaudeSdk;
 struct Prepared {
     input: LaunchInput,
@@ -41,8 +44,11 @@ impl Adapter for ClaudeSdk {
             return Err("Claude SDK requires a Python worker script or -m module".into());
         }
         let script = "from importlib.metadata import version; from pathlib import Path; import claude_agent_sdk, subprocess; bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'; print(version('claude-agent-sdk') + ':' + subprocess.check_output([str(bundled), '--version'], timeout=4, text=True).strip())";
-        let output = adapter::Probe(cancelled)
-            .version_output(&input.command, &["-c".into(), script.into()])?;
+        let output = adapter::Probe(cancelled).version_output_with_timeout(
+            &input.command,
+            &["-c".into(), script.into()],
+            PYTHON_PROBE_TIMEOUT,
+        )?;
         let (sdk, cli) = output
             .split_once(':')
             .ok_or("Claude SDK probe must report SDK and bundled CLI versions")?;

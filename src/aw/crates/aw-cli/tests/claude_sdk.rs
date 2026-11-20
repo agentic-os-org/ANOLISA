@@ -15,6 +15,9 @@ mod event_receipt;
 #[path = "claude_sdk/submission.rs"]
 mod submission;
 
+#[path = "claude_sdk/probe.rs"]
+mod probe;
+
 #[test]
 fn final_runtime_gate_checks_owned_bytes_and_native_identity() {
     let fixture = Fixture::new();
