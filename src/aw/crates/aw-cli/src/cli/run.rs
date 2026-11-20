@@ -195,16 +195,18 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             return Err("configuration path already selects another service; use aw update for its active instances or stop it before launching the edited configuration".into());
         }
     }
-    let service = launch_service::ensure_service(
-        &bytes,
-        &executable,
-        Instant::now() + Duration::from_secs(30),
-    )?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let service = launch_service::ensure_service(&bytes, &executable, deadline)?;
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
     if remember_connection {
-        super::connection::remember(configuration, &service.paths.socket, &service.client)?;
+        super::connection::remember(
+            configuration,
+            &service.paths.socket,
+            &service.client,
+            deadline,
+        )?;
     }
     let mut artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");

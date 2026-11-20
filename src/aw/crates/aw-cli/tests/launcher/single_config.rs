@@ -155,6 +155,50 @@ fn receipt(fixture: &Fixture) -> std::path::PathBuf {
 }
 
 #[test]
+fn sdk_pid_connect_bounds_connection_lock_wait_by_caller_deadline() {
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let _service = Service::start(&fixture, &fixture.document());
+    let config = fixture.root.join("aw.json");
+    let connect = || {
+        let mut command = fixture.command();
+        command
+            .args(["connect", "--config"])
+            .arg(&config)
+            .args([
+                "--sdk-pid",
+                &std::process::id().to_string(),
+                "--timeout-ms",
+                "100",
+            ])
+            .env("XDG_RUNTIME_DIR", &fixture.root);
+        command
+    };
+    // An unregistered PID still records the service before SDK discovery.
+    assert!(!fixture.run(connect()).status.success());
+    let record = fixture
+        .root
+        .join("aw/connections")
+        .join(receipt(&fixture).file_name().unwrap());
+    let held = fs::File::open(record.with_extension("lock")).unwrap();
+    held.lock().unwrap();
+    for recorded in [true, false] {
+        if !recorded {
+            fs::remove_file(&record).unwrap();
+        }
+        // Leave scheduling headroom below the independent one-second lock cap.
+        let output =
+            Process::spawn(&fixture, connect()).finish_with_timeout(Duration::from_millis(750));
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("AW connection is being changed"),
+            "{output:?}"
+        );
+        assert_eq!(record.exists(), recorded);
+    }
+}
+
+#[test]
 fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_stop() {
     use aw_service::{Client, Operation};
     use std::time::{Duration, Instant};

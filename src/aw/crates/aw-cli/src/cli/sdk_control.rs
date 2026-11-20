@@ -45,7 +45,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
             if client.identity().config_revision != format!("{:x}", Sha256::digest(&bytes)) {
                 return Err("service configuration does not match the supplied file; use aw update for active instances or stop the service before attaching the edited configuration".into());
             }
-            super::connection::remember(config, &socket, &client)?;
+            super::connection::remember(config, &socket, &client, deadline)?;
             None
         } else {
             let service = aw_service::launch_service::ensure_service(
@@ -53,7 +53,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
                 &std::env::current_exe()?,
                 deadline,
             )?;
-            super::connection::remember(config, &service.paths.socket, &service.client)?;
+            super::connection::remember(config, &service.paths.socket, &service.client, deadline)?;
             Some(service)
         }
     } else {

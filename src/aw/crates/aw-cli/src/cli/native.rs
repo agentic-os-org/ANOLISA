@@ -173,7 +173,7 @@ pub(super) fn prepare_with(
             (service.client.clone(), service.paths.socket.clone())
         }
     };
-    super::connection::remember(&configuration, &socket, &client)?;
+    super::connection::remember(&configuration, &socket, &client, deadline)?;
     let state_dir = socket.parent().ok_or("native service directory missing")?;
     let request_id = fs::read_to_string("/proc/sys/kernel/random/uuid")?
         .trim()

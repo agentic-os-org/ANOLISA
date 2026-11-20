@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from importlib.metadata import version
 from pathlib import Path
 
@@ -269,7 +270,7 @@ def main() -> None:
             assert status["bindings"] == 0 and status["events"] == 0, status
             assert not list(state.glob("launch-*"))
             journals = list(state.rglob("*.jsonl"))
-            assert len(journals) == 1492, ("missing durable event journals", len(journals))
+            kinds = Counter()
             verified = []
             for journal in journals:
                 audit = subprocess.run(
@@ -281,9 +282,22 @@ def main() -> None:
                 )
                 checked = json.loads(audit.stdout)["result"]
                 assert checked["terminal"] is True, checked
-                if checked["records"][0]["record"]["plan"]["kind"] == "event":
+                kind = checked["records"][0]["record"]["plan"]["kind"]
+                kinds[kind] += 1
+                if kind == "event":
                     assert checked["records"][-1]["record"]["status"] in {"closed", "completed"}
                 verified.append(checked)
+            # Each prepared instance emits a start fact; both root workers also emit an end fact.
+            assert kinds == {
+                "event": 608,
+                "preparation": 294,
+                "task_scope": 292,
+                "scope_acknowledged": 292,
+                "instance_owner": 2,
+                "bridge_ready": 2,
+                "process_association": 2,
+                "runtime_fact": len(instances) + 2 * len(launches),
+            }, kinds
             (args.output / "verified-audit.json").write_text(json.dumps(verified, indent=2))
             (args.output / "callbacks.json").write_text(json.dumps(callbacks, indent=2))
             (args.output / "native-callbacks.json").write_text(

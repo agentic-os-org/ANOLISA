@@ -15,7 +15,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -125,7 +125,9 @@ fn read(path: &Path, configuration: &Path) -> Result<Option<Connection>> {
     Ok(Some(connection))
 }
 
-fn lock(path: &Path) -> Result<File> {
+const MAX_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+fn lock(path: &Path, deadline: Instant) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -135,16 +137,36 @@ fn lock(path: &Path) -> Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path.with_extension("lock"))?;
     private_file(&file)?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("AW connection is being changed; retry explicitly".into());
+    while Instant::now() < deadline {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) {
+            return Err(error.into());
+        }
+        std::thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
-    Ok(file)
+    Err("AW connection is being changed; retry explicitly".into())
 }
 
-pub(super) fn remember(config: &Path, socket: &Path, client: &Client) -> Result<()> {
+pub(super) fn remember(
+    config: &Path,
+    socket: &Path,
+    client: &Client,
+    deadline: Instant,
+) -> Result<()> {
     let (configuration, path) = location(config, true)?.ok_or("AW connection directory missing")?;
-    let _lock = lock(&path)?;
+    let _lock = lock(&path, deadline.min(Instant::now() + MAX_LOCK_WAIT))?;
     if let Some(previous) = read(&path, &configuration)? {
+        if previous.socket == socket && &previous.identity == client.identity() {
+            return Ok(());
+        }
         if previous.socket != socket && previous.socket.try_exists()? {
             return Err("configuration path already selects another service; stop it before reconnecting, or use a separate config path".into());
         }
@@ -199,7 +221,7 @@ pub(crate) fn forget(config: &Path, identity: &Identity) -> Result<()> {
     let Some((configuration, path)) = location(config, false)? else {
         return Ok(());
     };
-    let _lock = lock(&path)?;
+    let _lock = lock(&path, Instant::now() + MAX_LOCK_WAIT)?;
     if let Some(connection) = read(&path, &configuration)? {
         if &connection.identity == identity {
             fs::remove_file(path)?;

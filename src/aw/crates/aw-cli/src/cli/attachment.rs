@@ -164,7 +164,7 @@ fn attach(
         _ => unreachable!("an existing or ensured service is always selected"),
     };
     let state_dir = socket.parent().ok_or("service socket has no parent")?;
-    super::connection::remember(source.1, socket, client)?;
+    super::connection::remember(source.1, socket, client, deadline)?;
     let directory = tempfile::Builder::new()
         .prefix("attach-")
         .tempdir_in(state_dir)?;
