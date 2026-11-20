@@ -112,6 +112,7 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                 }
                             }
                             facts.record(builder, output.elapsed_ms);
+                            let mut context_budget = super::fs_events::ContextBudget::new();
                             let capacity = super::capacity::parse_journal_capacity_events(
                                 &output.stdout,
                                 &verified_ctx,
@@ -125,6 +126,7 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                             let fs_lines = super::fs_events::parse_journal_fs_lines(
                                 &output.stdout,
                                 &verified_ctx,
+                                &mut context_budget,
                             );
                             let fs_chains = super::fs_events::build_chains(
                                 &fs_lines,
@@ -185,6 +187,7 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                         facts.oom_latest_confidence = Some("low".to_string());
                                     }
                                     facts.record(builder, text.elapsed_ms);
+                                    let mut context_budget = super::fs_events::ContextBudget::new();
                                     let capacity = super::capacity::parse_text_capacity_events(
                                         &text.stdout,
                                         "journalctl-text",
@@ -197,6 +200,7 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                     let fs_lines = super::fs_events::parse_text_fs_lines(
                                         &text.stdout,
                                         "journalctl-text",
+                                        &mut context_budget,
                                     );
                                     let fs_chains = super::fs_events::build_chains(
                                         &fs_lines,
@@ -401,13 +405,17 @@ fn collect_kernel_from_dmesg(
                 }
             }
             facts.record(builder, output.elapsed_ms);
+            let mut context_budget = super::fs_events::ContextBudget::new();
             let capacity = super::capacity::parse_text_capacity_events(
                 &output.filtered.lines.join("\n"),
                 "dmesg",
             );
             super::capacity::record_capacity_events(builder, &capacity, output.elapsed_ms);
-            let fs_lines =
-                super::fs_events::parse_text_fs_lines(&output.filtered.lines.join("\n"), "dmesg");
+            let fs_lines = super::fs_events::parse_text_fs_lines(
+                &output.filtered.lines.join("\n"),
+                "dmesg",
+                &mut context_budget,
+            );
             let fs_chains = super::fs_events::build_chains(&fs_lines, ctx, now_epoch_seconds);
             super::fs_events::record_fs_chains(builder, &fs_chains, &fs_lines, output.elapsed_ms);
             let host_events = super::host_events::parse_text_host_events(
