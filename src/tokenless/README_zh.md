@@ -22,6 +22,8 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 `/` 与 `::` 测试名前缀以及点线填充，支持串行 `Start`/结果成对行与 `-j` 并行交错流，无需
 Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输出](../../docs/user-guide/zh/tokenless/index.md#ctest-测试输出)。
 
+进入 PostTool 的 Ninja（`[k/N]`）与非冗长 CMake Unix Makefiles（`[PPP%]`）构建进度输出可在保留编译诊断、失败输出与记录顺序的同时共享重复动作词、目录前缀与目标后缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [CMake 与 Ninja 构建输出](../../docs/user-guide/zh/tokenless/index.md#cmake-与-ninja-构建输出)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |

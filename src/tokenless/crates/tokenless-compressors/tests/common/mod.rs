@@ -6,4 +6,5 @@
 pub mod build_log_harness;
 pub mod ctest_oracle;
 pub mod gradle_oracle;
+pub mod literal_oracle;
 pub mod maven_oracle;

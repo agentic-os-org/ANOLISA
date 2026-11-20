@@ -638,3 +638,66 @@ fn isolated_ctest_markers_and_quoted_examples_do_not_override_enclosing_document
         assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
     }
 }
+
+#[test]
+fn detects_ninja_and_cmake_make_build_logs_and_isolates_quotes() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_make_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/fmt_ninja_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/fmt_make_incremental.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+
+    let valid_log = concat!(
+        "[1/3] Building CXX object CMakeFiles/app.dir/a.cpp.o\n",
+        "[2/3] Building CXX object CMakeFiles/app.dir/b.cpp.o\n",
+        "[3/3] Linking CXX executable app\n",
+    );
+    for (before, after, expected) in [
+        (
+            "Ninja build example:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "+ /usr/bin/cat ninja.log\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# Build example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "[1/1] Building CXX object CMakeFiles/app.dir/a.cpp.o\n",
+        "[100%] Built target app\n",
+        "[1/2] Check configuration\n[2/2] Done\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}

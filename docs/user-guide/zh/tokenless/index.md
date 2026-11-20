@@ -600,6 +600,12 @@ SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符
 若没有可应用的 CTest 布局编辑，带命令或退出码锚点的日志在 Stash 与恢复通道可用时仍可使用既有的
 `retrievable` 通用进度缩减。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
 
+### CMake 与 Ninja 构建输出
+
+已识别的成功 Ninja（`[k/N] <action>`）与非冗长 CMake Unix Makefiles（`[PPP%] <action>`）构建进度输出会通过现有 PostTool 内容路由压紧连续的编译、链接、符号链接、目标完成、代码生成及 Qt AutoMOC/UIC/RCC 进度行，沿用 `build_log_reduction` 操作并报告 `lossless`，无需恢复能力且不写入 Stash。压缩块以 `CMake/Ninja templates (id<TAB>fields; interleave with literals): ` 与包含模板字面量及行数的 JSON 头部开始；将后续每行的步数/百分比字段及目标短名按模板编号与字面量交错拼接，即可在既有 SGR 颜色清理后按原顺序逐字还原每条步数、动态 `/total`、空格对齐百分比、目标路径与扩展名后缀。
+
+`FAILED:`、`ninja: build stopped:`、自定义 `[k/N]` / `[PPP%]` 计数步骤、编译器告警/错误/注释诊断、源码摘录、全部采用 CRLF 换行、含非 SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符数与估算 token 数的块均在原位保持原文。手写 `Makefile` 继续沿用既有 `Make` 路由，`Make VERBOSE=1` 编译命令行亦不进入该无损布局通道；在开启 Stash 与恢复通道时，混合输出会在已压紧的 CMake/Ninja 块、自定义计数步骤、Markdown 代码围栏与含非 SGR 控制字符行之外保留既有的可恢复常规省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 通用进度缩减），合并配置与构建等未命中 `CmakeBuild` 头部检测的输出同样继续支持带锚点的 `Generic` 缩减。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
+
 ### CSV/TSV 压紧保留完整表格
 
 宿主支持用文本替换输出时，成功的 CSV/TSV 工具结果可以被压紧。文件来源结果、失败工具、

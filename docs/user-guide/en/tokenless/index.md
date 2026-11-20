@@ -650,6 +650,12 @@ Recognized successful CTest output compacts contiguous non-failing test-progress
 
 `***Failed`, `***Timeout`, `***Exception: ...`, `***Not Run`, assertion failures, unpaired `Start` lines, `\t`-indented `The following tests FAILED:` / `did not run:` summaries, CRLF-only output, non-SGR control characters, Markdown-fenced snippets, and blocks without net character and estimated-token savings remain verbatim. If no CTest layout edits apply, command/exit-anchored logs can still use retrievable `Generic` progress reduction when Stash and recovery are available; Tool Errors keep their original output, and PreTool RTK rewriting is unchanged.
 
+### CMake and Ninja build output
+
+Recognized successful Ninja (`[k/N] <action>`) and non-verbose CMake Unix Makefiles (`[PPP%] <action>`) build-progress output compacts contiguous compilation, linking, symlink, target-completion, code-generation, and Qt AutoMOC/UIC/RCC lines through the existing PostTool content route under `build_log_reduction` (`lossless`), without requiring recovery or writing to Stash. A compact block starts with `CMake/Ninja templates (id<TAB>fields; interleave with literals): ` and a JSON header of template literals and row count; interleaving each row's step or percentage field and target stem with its literal template restores every step, dynamic `/total`, space-padded percentage, target path, and extension suffix in order after SGR color cleanup.
+
+`FAILED:`, `ninja: build stopped:`, custom `[k/N]` / `[PPP%]` counter steps, compiler warnings/errors/notes, source snippets, CRLF-only output, non-SGR control characters, Markdown-fenced snippets, and blocks without net character and estimated-token savings stay verbatim in place. Handwritten `Makefile` output keeps its existing `Make` route and `VERBOSE=1` compiler invocations remain outside this layout pass; when Stash and recovery are active, mixed logs keep retrievable routine omission (scored formats such as `Make` or `Cargo`, plus command/exit-anchored `Generic` progress) outside compacted CMake/Ninja blocks, custom counter steps, Markdown fences, and non-SGR control lines, and combined configure-and-build logs whose head declines `CmakeBuild` detection likewise retain anchored `Generic` reduction. Tool Errors keep their original output, and PreTool RTK rewriting is unchanged.
+
 ### CSV/TSV compaction preserves complete tables
 
 Successful CSV/TSV tool results can be compacted when the host can replace output with text.

@@ -52,4 +52,12 @@ fn generic_templates_require_numbered_progress_language() {
         ),
         None
     );
+    assert_eq!(
+        generic_progress_template("[1/12] Building CXX object CMakeFiles/app.dir/running.cpp.o"),
+        Some("[0/0] Building CXX object CMakeFiles/app.dir/running.cpp.o".to_owned())
+    );
+    assert_eq!(
+        generic_progress_template("[ 25%] Compiling C object CMakeFiles/app.dir/checking.c.o"),
+        Some("[ 0%] Compiling C object CMakeFiles/app.dir/checking.c.o".to_owned())
+    );
 }
