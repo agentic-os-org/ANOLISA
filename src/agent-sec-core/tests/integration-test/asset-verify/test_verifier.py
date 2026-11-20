@@ -208,6 +208,19 @@ class TestVerifySkillsDir(unittest.TestCase):
         with self.assertRaises(NotADirectoryError):
             verify_skills_dir(file_path, [])
 
+    def test_dangling_symlink_entry_is_skipped(self):
+        root = Path(self.tmpdir) / "skills"
+        root.mkdir()
+        (root / "real-skill").mkdir()
+        (root / "broken-link").symlink_to(root / "missing-target")
+
+        results = verify_skills_dir(str(root), [])
+
+        self.assertEqual(results["checked"], 1)
+        self.assertEqual(
+            [failure["name"] for failure in results["failed"]], ["real-skill"]
+        )
+
     def test_unreadable_root_is_an_error(self):
         root = Path(self.tmpdir) / "skills"
         root.mkdir()
