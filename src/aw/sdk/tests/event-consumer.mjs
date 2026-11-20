@@ -25,13 +25,37 @@ async function probe(operation) {
     socket.on("connect", () => socket.write(Buffer.concat([header, request])));
     socket.on("data", (chunk) => {
       data = Buffer.concat([data, chunk]);
-      if (data.length < 4 || data.length < 4 + data.readUInt32BE(0)) return;
-      socket.destroy();
+    });
+    // The control probe occupies the fixture's only connection until the server closes it.
+    socket.on("end", () => {
+      if (data.length < 4 || data.length !== 4 + data.readUInt32BE(0)) {
+        reject(Error("incomplete AW probe response"));
+        return;
+      }
       const response = JSON.parse(data.subarray(4));
       if (response.error) reject(Error(response.error));
       else resolve(response.result);
     });
   });
+}
+async function waitForProvider(call, settled) {
+  let earlyResult;
+  settled.then((error) => {
+    earlyResult = error ?? Error(`${call} completed before Provider startup`);
+  });
+  const deadline = performance.now() + 5000;
+  while (performance.now() < deadline) {
+    if (earlyResult) throw earlyResult;
+    try {
+      const pid = Number(await readFile(`${root}/event-pid`, "utf8"));
+      assert.ok(Number.isSafeInteger(pid) && pid > 0, `invalid Provider PID for ${call}`);
+      return pid;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw Error(`${call} Provider startup timed out`);
 }
 const client = new Instance({
   endpoint,
@@ -93,17 +117,7 @@ try {
       () => null,
       (error) => error,
     );
-    let pid;
-    const expires = performance.now() + 5000;
-    while (!pid) {
-      try {
-        pid = Number(await readFile(`${root}/event-pid`, "utf8"));
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-      assert.ok(performance.now() < expires);
-      if (!pid) await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    const pid = await waitForProvider(call, settled);
     assert.deepEqual(
       (await probe({ method: "sdk_control", command: { action: "list" } }))
         .applications,
@@ -132,17 +146,7 @@ try {
       () => null,
       (error) => error,
     );
-  let pid;
-  const deadline = performance.now() + 5000;
-  while (!pid) {
-    try {
-      pid = Number(await readFile(`${root}/event-pid`, "utf8"));
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    assert.ok(performance.now() < deadline);
-    if (!pid) await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const pid = await waitForProvider("scope-close", pending);
   await task.close();
   assert.ok(await pending);
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });

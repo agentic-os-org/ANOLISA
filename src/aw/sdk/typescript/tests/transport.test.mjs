@@ -15,11 +15,11 @@ const identity = {
   generation: "test-generation",
   config_revision: "test-revision",
 };
-async function server(handler) {
+async function server(handler, options = {}) {
   const directory = await mkdtemp("/tmp/aw-sdk-wire-");
   const endpoint = `${directory}/aw.sock`;
   const sockets = new Set();
-  const listener = net.createServer((socket) => {
+  const listener = net.createServer(options, (socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
@@ -28,7 +28,7 @@ async function server(handler) {
       data = Buffer.concat([data, chunk]);
       if (data.length < 4 || data.length < data.readUInt32BE(0) + 4) return;
       const request = JSON.parse(data.subarray(4));
-      const reply = (result, error = null) => {
+      const reply = (result, error = null, end = true) => {
         const body = Buffer.from(
           JSON.stringify({
             api_version: contract.service_protocol,
@@ -39,7 +39,10 @@ async function server(handler) {
         );
         const size = Buffer.alloc(4);
         size.writeUInt32BE(body.length);
-        if (!socket.destroyed) socket.end(Buffer.concat([size, body]));
+        if (socket.destroyed) return;
+        const frame = Buffer.concat([size, body]);
+        if (end) socket.end(frame);
+        else socket.write(frame);
       };
       handler(request.operation, reply, socket, request);
     });
@@ -57,6 +60,37 @@ async function server(handler) {
     },
   };
 }
+
+test("sequential requests wait for the service to release the connection", async () => {
+  let retired = 0;
+  const peer = await server((_op, reply, socket) => {
+    reply({ available: true }, null, false);
+    socket.on("end", () => {
+      retired++;
+      socket.end();
+    });
+  }, { allowHalfOpen: true });
+  try {
+    for (const expected of [1, 2]) {
+      await rpc(peer.endpoint, identity, { method: "status" }, 2000);
+      assert.equal(retired, expected);
+    }
+  } finally {
+    await peer.close();
+  }
+});
+
+test("a complete reply survives a peer that holds the socket past the deadline", async () => {
+  const peer = await server((_op, reply) => {
+    reply({ available: true }, null, false);
+  }, { allowHalfOpen: true });
+  try {
+    const response = await rpc(peer.endpoint, identity, { method: "status" }, 250);
+    assert.deepEqual(response.result, { available: true });
+  } finally {
+    await peer.close();
+  }
+});
 
 test("missing identity is encoded as null in a valid request frame", async () => {
   const identities = [];
