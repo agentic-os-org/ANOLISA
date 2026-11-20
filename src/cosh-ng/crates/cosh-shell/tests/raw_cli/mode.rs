@@ -449,14 +449,14 @@ fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
     let output = run_raw_cli_with_env(
         "fake",
         "/mode approval auto\n\
-         ?? request tool approval\n\
+         ?? request safe shell tool\n\
          exit\n",
         &[("COSH_SHELL_LANG", "en-US")],
     );
 
     assert!(output.contains("Mode set to auto."), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("Command result analysis for req-1"));
@@ -537,6 +537,30 @@ fn raw_cli_auto_mode_still_asks_for_unsafe_bash_tool() {
         output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
         "{output}"
     );
+    assert!(output.contains("Cancelled req-1"), "{output}");
+    assert!(!output.contains("Auto-approved"), "{output}");
+    assert!(!output.contains("Approved req-1"), "{output}");
+}
+
+#[test]
+fn raw_cli_auto_mode_asks_for_expandable_git_config_key() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
+            ("Mode set to auto.", b"?? git config probe\n"),
+            ("req-1", b"\x1b"),
+            ("Cancelled req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
+        ],
+    );
+
+    assert!(output.contains("Mode set to auto."), "{output}");
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("git config --get *.*"), "{output}");
     assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(!output.contains("Auto-approved"), "{output}");
     assert!(!output.contains("Approved req-1"), "{output}");

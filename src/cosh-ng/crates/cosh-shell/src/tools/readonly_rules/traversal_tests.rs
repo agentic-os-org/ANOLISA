@@ -156,6 +156,6 @@ fn git_grep_is_not_builtin_readonly() {
     ] {
         assert!(!allowed(command), "{command}");
     }
-    assert!(allowed("git status --short"));
-    assert!(allowed("git ls-files"));
+    assert!(allowed("df -h"));
+    assert!(allowed("uptime"));
 }

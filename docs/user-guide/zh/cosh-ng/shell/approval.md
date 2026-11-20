@@ -49,6 +49,20 @@ cosh 评估被包裹的只读命令，并执行包裹后的形态，
 二次确认后自动执行 Provider 工具请求，`shell.readonly` 覆盖与
 `shell.readonly_disabled` 继续控制只读资格（见[配置](../configuration.md)）。
 
+### auto 模式下的 git 命令
+
+默认 `auto` 模式下，所有 git 命令都需要审批卡片，没有内建的 git 免审批
+例外。git 会读取所在仓库的 `.git/config` 与 `.gitattributes`，而这些文件
+可以指定 git 自行执行的程序：索引刷新时的 `core.fsmonitor`、生成补丁时的
+`diff.<driver>.textconv`、验证签名时的 `gpg.program`、partial clone 按需
+抓取缺失对象时的远端传输（`core.sshCommand`、凭据助手），以及分页器。
+前台 shell 还可能把看似字面量的参数展开（bash 通配、zsh `EXTENDED_GLOB`）
+成进入上述路径的选项。只读分类器看不到仓库配置，也看不到 shell 展开，
+因此 git 命令改为先询问，而不是自动执行。
+
+非 git 的只读命令保持原有免审批行为。如需让特定 git 命令免卡片执行，
+请显式使用 trust 模式或 `shell.readonly` 覆盖；两者都是操作者的明确选择。
+
 使用下面的命令二次确认trust模式：
 
 ```text
