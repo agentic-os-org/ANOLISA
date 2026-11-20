@@ -3,16 +3,45 @@
 //! block request completion failures. Missing causal or exclusion evidence
 //! degrades to diagnostics-only; admin operations never alert.
 
-use std::fs;
-use std::io::Read;
-use std::path::Path;
-
-use super::super::super::builder::HealthReportBuilder;
-use super::super::super::model::{HealthFactCategory, HealthFactSource, HealthFactValue};
 use super::attribution::{journal_message, journal_usec, journal_verified, AttributionContext};
 
 pub(crate) const FS_EVENT_QUOTA: usize = 64;
 pub(crate) const FS_CONTEXT_QUOTA: usize = 8;
+
+/// Shared context-record budget across kernel event mechanisms (V37-X-02).
+/// Causal/exclusion context lines draw from one pool so no single mechanism
+/// can crowd out another's exclusion evidence; exhaustion degrades dependent
+/// chains to diagnostics-only.
+#[derive(Debug, Clone)]
+pub(crate) struct ContextBudget {
+    remaining: usize,
+    pub(crate) dropped: u64,
+}
+
+impl ContextBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            remaining: FS_CONTEXT_QUOTA,
+            dropped: 0,
+        }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining > 0 {
+            self.remaining -= 1;
+            true
+        } else {
+            self.dropped += 1;
+            false
+        }
+    }
+}
+
+impl Default for ContextBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 pub(crate) const CHAIN_SPAN_SECONDS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,12 +209,10 @@ fn is_context(kind: FsEventKind) -> bool {
     )
 }
 
-fn push_line(lines: &mut FsLines, line: FsLine) {
+fn push_line(lines: &mut FsLines, line: FsLine, budget: &mut ContextBudget) {
     if is_context(line.kind) {
-        if lines.context.len() < FS_CONTEXT_QUOTA {
+        if budget.take() {
             lines.context.push(line);
-        } else {
-            lines.dropped_context += 1;
         }
     } else if lines.events.len() < FS_EVENT_QUOTA {
         lines.events.push(line);
@@ -194,7 +221,11 @@ fn push_line(lines: &mut FsLines, line: FsLine) {
     }
 }
 
-pub(crate) fn parse_journal_fs_lines(content: &str, ctx: &AttributionContext) -> FsLines {
+pub(crate) fn parse_journal_fs_lines(
+    content: &str,
+    ctx: &AttributionContext,
+    budget: &mut ContextBudget,
+) -> FsLines {
     let mut lines = FsLines {
         source: "journalctl",
         ..FsLines::default()
@@ -232,13 +263,19 @@ pub(crate) fn parse_journal_fs_lines(content: &str, ctx: &AttributionContext) ->
                 operation,
                 verified: true,
             },
+            budget,
         );
     }
+    lines.dropped_context = budget.dropped;
     lines
 }
 
 /// Text/dmesg fallback keeps diagnostics-only lines without time eligibility.
-pub(crate) fn parse_text_fs_lines(content: &str, source: &'static str) -> FsLines {
+pub(crate) fn parse_text_fs_lines(
+    content: &str,
+    source: &'static str,
+    budget: &mut ContextBudget,
+) -> FsLines {
     let mut lines = FsLines {
         source,
         ..FsLines::default()
@@ -257,8 +294,10 @@ pub(crate) fn parse_text_fs_lines(content: &str, source: &'static str) -> FsLine
                 operation,
                 verified: false,
             },
+            budget,
         );
     }
+    lines.dropped_context = budget.dropped;
     lines
 }
 
@@ -518,181 +557,8 @@ pub(crate) fn build_chains(
     chains
 }
 
-fn valid_device_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-}
-
-fn resolve_dev_t(device: &str) -> Option<String> {
-    if !valid_device_name(device) {
-        return None;
-    }
-    let path = format!("/sys/class/block/{device}/dev");
-    let file = fs::File::open(path).ok()?;
-    let mut content = String::new();
-    file.take(64).read_to_string(&mut content).ok()?;
-    let trimmed = content.trim();
-    let (major, minor) = trimmed.split_once(':')?;
-    (major.parse::<u64>().is_ok() && minor.parse::<u64>().is_ok()).then(|| trimmed.to_string())
-}
-
-fn mount_for_dev_t(builder: &HealthReportBuilder, dev_t: &str) -> Option<String> {
-    builder.report().facts.iter().find_map(|fact| {
-        let mount = fact
-            .key
-            .strip_prefix("filesystem.mount.")
-            .and_then(|suffix| suffix.strip_suffix(".volume_device"))?;
-        match &fact.value {
-            HealthFactValue::String(value) if value == dev_t => Some(mount.to_string()),
-            _ => None,
-        }
-    })
-}
-
-/// Record the newest eligible-and-mapped chain per mechanism plus the newest
-/// degraded reason; unbound devices and admin/truncated chains stay D.
-pub(crate) fn record_fs_chains(
-    builder: &mut HealthReportBuilder,
-    chains: &[FsChain],
-    lines: &FsLines,
-    elapsed_ms: u128,
-) {
-    fn add(
-        builder: &mut HealthReportBuilder,
-        key: String,
-        value: HealthFactValue,
-        elapsed_ms: u128,
-    ) {
-        builder.add_fact(
-            HealthFactCategory::Kernel,
-            key,
-            value,
-            None,
-            HealthFactSource::Derived,
-            elapsed_ms,
-        );
-    }
-    if !chains.is_empty() || lines.unverified > 0 {
-        add(
-            builder,
-            "kernel.fs_event_source".to_string(),
-            HealthFactValue::String(lines.source.to_string()),
-            elapsed_ms,
-        );
-    }
-    for (key, value) in [
-        ("kernel.fs_event_dropped_events", lines.dropped_events),
-        ("kernel.fs_event_dropped_context", lines.dropped_context),
-        ("kernel.fs_event_unverified", lines.unverified),
-    ] {
-        if value > 0 {
-            add(
-                builder,
-                key.to_string(),
-                HealthFactValue::Unsigned(value),
-                elapsed_ms,
-            );
-        }
-    }
-    for mechanism in [
-        "ext4-forced-ro",
-        "ext4-error",
-        "jbd2-abort",
-        "jbd2-flush",
-        "xfs-shutdown",
-        "block-io",
-    ] {
-        let prefix = format!("kernel.fs_{}", mechanism.replace('-', "_"));
-        let candidates = chains.iter().filter(|chain| chain.mechanism == mechanism);
-        let eligible = candidates
-            .clone()
-            .filter(|chain| chain.eligible)
-            .min_by_key(|chain| chain.age_seconds);
-        if let Some(chain) = eligible {
-            if let Some(dev_t) = resolve_dev_t(&chain.fs_device) {
-                if let Some(mount) = mount_for_dev_t(builder, &dev_t) {
-                    add(
-                        builder,
-                        format!("{prefix}_age_seconds"),
-                        HealthFactValue::Unsigned(chain.age_seconds),
-                        elapsed_ms,
-                    );
-                    add(
-                        builder,
-                        format!("{prefix}_device"),
-                        HealthFactValue::String(chain.device.clone()),
-                        elapsed_ms,
-                    );
-                    add(
-                        builder,
-                        format!("{prefix}_dev_t"),
-                        HealthFactValue::String(dev_t),
-                        elapsed_ms,
-                    );
-                    add(
-                        builder,
-                        format!("{prefix}_mount"),
-                        HealthFactValue::String(mount),
-                        elapsed_ms,
-                    );
-                    add(
-                        builder,
-                        format!("{prefix}_identity"),
-                        HealthFactValue::String(chain.identity.clone()),
-                        elapsed_ms,
-                    );
-                    add(
-                        builder,
-                        format!("{prefix}_epoch"),
-                        HealthFactValue::Unsigned(chain.epoch),
-                        elapsed_ms,
-                    );
-                    if let Some(operation) = chain.operation {
-                        add(
-                            builder,
-                            format!("{prefix}_operation"),
-                            HealthFactValue::String(operation.to_string()),
-                            elapsed_ms,
-                        );
-                    }
-                    continue;
-                }
-            }
-            add(
-                builder,
-                format!("{prefix}_degraded_reason"),
-                HealthFactValue::String("device-unbound".to_string()),
-                elapsed_ms,
-            );
-            add(
-                builder,
-                format!("{prefix}_degraded_age_seconds"),
-                HealthFactValue::Unsigned(chain.age_seconds),
-                elapsed_ms,
-            );
-            continue;
-        }
-        if let Some(chain) = candidates
-            .filter(|chain| !chain.eligible)
-            .min_by_key(|chain| chain.age_seconds)
-        {
-            add(
-                builder,
-                format!("{prefix}_degraded_reason"),
-                HealthFactValue::String(chain.degraded_reason.unwrap_or("unknown").to_string()),
-                elapsed_ms,
-            );
-            add(
-                builder,
-                format!("{prefix}_degraded_age_seconds"),
-                HealthFactValue::Unsigned(chain.age_seconds),
-                elapsed_ms,
-            );
-        }
-    }
-}
+mod record;
+pub(crate) use record::record_fs_chains;
 
 #[cfg(test)]
 mod tests;

@@ -234,6 +234,7 @@ fn block_io_only_read_write_and_text_is_unverified() {
     let text = parse_text_fs_lines(
         "blk_update_request: I/O error, dev sda, sector 1 op 0x0:(READ)",
         "dmesg",
+        &mut ContextBudget::new(),
     );
     let chains = build_chains(&text, &ctx(), 1100);
     assert_eq!(chains[0].degraded_reason, Some("source-unverified"));
@@ -250,16 +251,37 @@ fn quotas_drop_excess_events_and_context() {
         context.push(line(FsEventKind::XfsCause, "sda1", 1000 + index as u64));
     }
     let mut lines = FsLines::default();
+    let mut budget = ContextBudget::new();
     for event in events {
-        push_line(&mut lines, event);
+        push_line(&mut lines, event, &mut budget);
     }
     for cause in context {
-        push_line(&mut lines, cause);
+        push_line(&mut lines, cause, &mut budget);
     }
     assert_eq!(lines.events.len(), FS_EVENT_QUOTA);
     assert_eq!(lines.context.len(), FS_CONTEXT_QUOTA);
     assert_eq!(lines.dropped_events, 5);
-    assert_eq!(lines.dropped_context, 3);
+    assert_eq!(budget.dropped, 3);
+}
+
+#[test]
+fn context_budget_is_joint_across_mechanisms() {
+    let mut lines = FsLines::default();
+    let mut budget = ContextBudget::new();
+    for index in 0..5 {
+        push_line(
+            &mut lines,
+            line(FsEventKind::XfsCause, "sda1", 1000 + index),
+            &mut budget,
+        );
+        push_line(
+            &mut lines,
+            line(FsEventKind::JournalCauseIo, "sda1-8", 1000 + index),
+            &mut budget,
+        );
+    }
+    assert_eq!(lines.context.len(), FS_CONTEXT_QUOTA);
+    assert_eq!(budget.dropped, 2);
 }
 
 #[test]
@@ -272,7 +294,7 @@ fn journal_verification_and_epoch_required() {
         "__REALTIME_TIMESTAMP": "1700000000000000",
         "__MONOTONIC_TIMESTAMP": "1099000000",
     });
-    let lines = parse_journal_fs_lines(&entry.to_string(), &ctx());
+    let lines = parse_journal_fs_lines(&entry.to_string(), &ctx(), &mut ContextBudget::new());
     assert_eq!(lines.events.len(), 1);
     assert_eq!(lines.events[0].age_seconds(&ctx(), 1100), 1);
     let forged = serde_json::json!({
@@ -282,7 +304,7 @@ fn journal_verification_and_epoch_required() {
         "_BOOT_ID": "boot-a",
         "__REALTIME_TIMESTAMP": "1700000000000000",
     });
-    let lines = parse_journal_fs_lines(&forged.to_string(), &ctx());
+    let lines = parse_journal_fs_lines(&forged.to_string(), &ctx(), &mut ContextBudget::new());
     assert!(lines.events.is_empty());
     assert_eq!(lines.unverified, 1);
 }
