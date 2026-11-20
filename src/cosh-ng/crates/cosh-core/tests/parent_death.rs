@@ -24,8 +24,13 @@ const INIT: &str =
 const USER: &str = r#"{"type":"user","message":{"role":"user","content":"write a long essay about mountains"},"parent_tool_use_id":null}"#;
 // The wrapper backgrounds core keeping the test's stdin pipe on fd 3 (sh
 // would otherwise redirect background stdin to /dev/null) and exits only
-// once the test drops the trigger file, i.e. after a witnessed in-flight turn.
-const WRAPPER: &str = "exec 3<&0; core=\"$1\"; pidfile=\"$2\"; trigger=\"$3\"; shift 3; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; while [ ! -f \"$trigger\" ]; do sleep 0.1; done; sleep 0.5; exit 0";
+// once the test releases the trigger FIFO, i.e. after a witnessed in-flight
+// turn. The release path must not exec anything: earlier versions polled with
+// an external `sleep`, and an exec intercepted by a host security agent can
+// stall for seconds inside fork/vfork, which pushed the wrapper past the exit
+// deadline under load (#10360). Blocking builtin `read` and an immediate exit
+// keep the path exec-free.
+const WRAPPER: &str = "exec 3<&0; core=\"$1\"; pidfile=\"$2\"; trigger=\"$3\"; shift 3; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; read -r _ < \"$trigger\"; exit 0";
 
 fn configure(home: &Path, address: SocketAddr) {
     let directory = home.join(".copilot-shell");
@@ -141,6 +146,11 @@ fn spawn_wrapper(
 ) -> (std::process::Child, PathBuf, PathBuf) {
     let pidfile = home.join("core.pid");
     let trigger = home.join("kill-now");
+    nix::unistd::mkfifo(
+        &trigger,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
     let mut wrapper = Command::new("sh");
     wrapper
         .arg("-c")
@@ -186,13 +196,22 @@ fn core_pid(pidfile: &Path) -> i32 {
     fs::read_to_string(pidfile).unwrap().trim().parse().unwrap()
 }
 
-fn release_fifo(path: &Path) {
+fn release_fifo(path: &Path) -> bool {
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
     use std::os::unix::io::FromRawFd;
-    if let Ok(fd) = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
-        let mut file = unsafe { fs::File::from_raw_fd(fd) };
-        let _ = file.write_all(b"release\n");
+    let Ok(fd) = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) else {
+        return false;
+    };
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(b"release\n").is_ok()
+}
+
+fn release_trigger(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !release_fifo(path) {
+        assert!(Instant::now() < deadline, "trigger FIFO has no reader");
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -209,7 +228,7 @@ fn parent_death_midturn_cancels_turn() {
     started_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("provider request started");
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -341,7 +360,7 @@ fn parent_death_closed_pipes_exit_75_and_audit_cancel() {
     // panic on stderr EPIPE and must still finalize the audit lifecycle.
     drop(wrapper.stdout.take().unwrap());
     drop(wrapper.stderr.take().unwrap());
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -466,7 +485,7 @@ name = "slow-hook"
             .exists()),
         "second turn hook did not start"
     );
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -504,7 +523,7 @@ name = "slow-hook"
         failed_turns.is_empty(),
         "no turn may receive a terminal after completion: {events}"
     );
-    release_fifo(&hook_fifo);
+    let _ = release_fifo(&hook_fifo);
     server.join().unwrap();
 }
 
@@ -602,7 +621,7 @@ name = "slow-hook"
             .exists()),
         "second turn hook did not start"
     );
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -635,6 +654,6 @@ name = "slow-hook"
         events.contains("session.ended"),
         "session.ended missing: {events}"
     );
-    release_fifo(&hook_fifo);
+    let _ = release_fifo(&hook_fifo);
     std::mem::forget(server);
 }
