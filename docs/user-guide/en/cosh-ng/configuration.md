@@ -144,6 +144,9 @@ bash_history = false
 enabled = true
 role = "web-server"
 critical_mounts = ["/", "/var"]
+expected_writable_mounts = ["/data"]
+pressure_notices = false
+network_capacity_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -168,6 +171,38 @@ fall back to `false`.
 `analysis_mode` accepts `smart`, `auto`, or `manual`; shell approval accepts
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
+
+The `[health]` notice switches default to off. They only control whether the
+matching notice appears in the login banner; fact collection in the diagnostic
+detail (`cosh doctor`) is unaffected:
+
+- `expected_writable_mounts` (default `[]`): mounts expected to be writable.
+  Only a read-only deviation on these mounts raises a notice; ordinary
+  read-only mounts stay in the diagnostic detail.
+- `pressure_notices` (default `false`): when enabled, a tight current-cgroup
+  memory quota combined with sustained same-group PSI stall raises a notice
+  (J19), and sustained dual-window memory/IO/CPU PSI pressure on the host or
+  current group raises notices (J20/J21/J22). When disabled, these facts
+  remain visible in the diagnostic detail.
+- `network_capacity_notices` (default `false`): when enabled, conntrack
+  connection-tracking capacity near its limit raises a notice (J23); an
+  ordinary 90% water level stays in the diagnostic detail.
+- `[health.checks]`: toggles individual collectors by check ID, for example
+  `"filesystem.mounts" = true` enables volume statistics for all declared
+  mounts (by default only the root mount is checked).
+- `[health.maintenance]`: declares a maintenance/drill window. Set
+  `enabled = true`, describe the `reason`, and optionally set
+  `until_epoch_seconds` (Unix seconds; omitted means open-ended). During the
+  window only the login-banner notice card is suppressed; fact collection
+  and state recovery continue, and notices resume automatically after it.
+
+File-handle water level (R07), pids task quota (R06), kernel hardware
+events/process segfaults/NIC timeouts (E08-E10), and the under-proven parts of
+the ext4/JBD2/XFS/block-I/O fault chains (E02-E05) stay diagnostics-only in
+this batch and raise no notice; recent complete hung-task and soft-lockup
+records raise notices (J30/J31). All notices keep the two-hour cooldown,
+silent recovery, and ten-minute recurrence gate, and the 300ms login health
+budget is unchanged.
 
 `login_identity` (default `true`) gives an interactive Enhanced login shell a
 real login identity: the inner bash starts as a login shell (`shopt -q

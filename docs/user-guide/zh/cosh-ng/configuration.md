@@ -126,6 +126,9 @@ bash_history = false
 enabled = true
 role = "web-server"
 critical_mounts = ["/", "/var"]
+expected_writable_mounts = ["/data"]
+pressure_notices = false
+network_capacity_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -146,6 +149,28 @@ expected = "active"
 
 `analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
 `auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
+
+`[health]` 的提示开关默认关闭，只控制是否在登录横幅弹出对应提示，不影响
+诊断详情（`cosh doctor`）里的事实采集：
+
+- `expected_writable_mounts`（默认 `[]`）：声明期望可写的挂载点。只有这些
+  挂载点出现只读偏离时才弹提示；普通只读挂载仅进诊断详情。
+- `pressure_notices`（默认 `false`）：开启后，当前 cgroup 内存额度吃紧且同组
+  PSI 持续停顿时弹提示（J19），主机或当前组的内存/IO/CPU PSI 双窗持续偏高时
+  弹提示（J20/J21/J22）。关闭时这些事实仍可在诊断详情查看。
+- `network_capacity_notices`（默认 `false`）：开启后，conntrack 连接跟踪容量
+  接近上限时弹提示（J23）；普通 90% 水位仅进诊断详情。
+- `[health.checks]`：按检查 ID 开关单项采集，例如 `"filesystem.mounts" = true`
+  启用全部声明挂载的卷级统计（默认只查根挂载）。
+- `[health.maintenance]`：声明维护/演练窗口，`enabled = true` 开启，
+  `reason` 写明原因，`until_epoch_seconds` 可选（Unix 秒，省略则长期有效）。
+  窗口内只抑制登录横幅的提示卡，事实采集与状态恢复照常进行；到期自动恢复。
+
+文件句柄水位（R07）、pids 任务额度（R06）、内核硬件事件/进程 segfault/网卡
+超时（E08–E10）以及 ext4/JBD2/XFS/块 I/O 故障链（E02–E05）中证据不足的部分
+首批仅进诊断详情，不弹提示；hung task 与 soft lockup 的近期完整记录会弹提示
+（J30/J31）。所有提示沿用 2 小时冷却、恢复静默与 10 分钟复发门，登录健康
+路径总预算 300ms 不变。
 
 `login_identity`（默认 `true`）让交互式 Enhanced 登录 shell 拥有真实的 login
 身份：内层 bash 以登录 shell 启动（`shopt -q login_shell` == yes），像 `bash
