@@ -288,6 +288,57 @@ fn adapter_status_quiet_suppresses_human_stdout() {
 }
 
 #[test]
+fn named_status_keeps_aw_guidance_when_component_index_is_unavailable() {
+    let fixture = QuietFixture::empty();
+    let config_dir = fixture.prefix.join("etc/anolisa");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            fixture.prefix.join("missing-repo").display()
+        ),
+    )
+    .expect("repo config");
+
+    let aw_command = "aw inspect --config /path/to/aw.yaml --json";
+    for command in [&["status"][..], &["adapter", "status"][..]] {
+        for (component, needs_aw_hint) in [
+            ("tokenless", true),
+            ("sec-core", true),
+            ("agent-sec-core", true),
+            ("unrelated", false),
+        ] {
+            let mut args = vec!["--no-color"];
+            args.extend(command);
+            args.push(component);
+            let human = fixture.run(&args);
+            assert_eq!(human.status.code(), Some(1));
+            assert!(human.stdout.is_empty());
+            let reason = stderr(&human);
+            assert!(
+                reason.contains("component index is unavailable"),
+                "{reason}"
+            );
+            assert!(reason.contains("anolisa list"), "{reason}");
+            assert_eq!(reason.contains(aw_command), needs_aw_hint, "{reason}");
+
+            args[0] = "--json";
+            let json = fixture.run(&args);
+            assert_eq!(json.status.code(), Some(1));
+            let envelope: Value = serde_json::from_slice(&json.stdout).expect("error envelope");
+            assert_eq!(envelope["error"]["code"], "EXECUTION_FAILED");
+            let reason = envelope["error"]["reason"].as_str().expect("error reason");
+            assert!(
+                reason.contains("component index is unavailable"),
+                "{reason}"
+            );
+            assert_eq!(reason.contains(aw_command), needs_aw_hint, "{reason}");
+        }
+    }
+}
+
+#[test]
 fn adapter_status_without_quiet_prints_human_empty_state() {
     let fixture = QuietFixture::empty();
     let output = fixture.run(&["--no-color", "adapter", "status"]);

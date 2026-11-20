@@ -240,6 +240,15 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+`anolisa status <component>` shows the installation and its associated adapters.
+`anolisa adapter status` checks each existing adapter and displays its recorded
+enable time when available. For sec-core or Tokenless running through AW, both
+commands point to `aw inspect --config /path/to/aw.yaml --json`, including when
+the component index is unavailable. Use the absolute path to the launch
+configuration. Run the query as the user who started the AW service, with the
+same `XDG_RUNTIME_DIR` setting, to check Provider status and recent executions.
+See the [AW command reference](../aw/cli-reference.md#aw-inspect).
+
 For OpenClaw plugins, `adapter enable` accepts the plugin's declared capabilities
 by default. ANOLISA adds `--accept-capabilities` to installation and activation
 only when the corresponding command's help advertises it. To withhold these

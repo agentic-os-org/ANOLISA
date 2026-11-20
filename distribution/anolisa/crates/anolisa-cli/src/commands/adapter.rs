@@ -221,6 +221,9 @@ struct DisablePayload {
 struct StatusRow {
     component: String,
     framework: String,
+    /// Omitted when there is no valid timestamp for an enabled receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_at: Option<String>,
     #[serde(flatten)]
     report: AdapterStatusReport,
 }
@@ -637,6 +640,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             .map(|e| StatusRow {
                 component: e.component,
                 framework: e.framework,
+                enabled_at: e.enabled_at,
                 report: e.report,
             })
             .collect();
@@ -649,7 +653,6 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 
     if report.entries.is_empty() {
         println!("No adapter receipts.");
-        return Ok(());
     }
     for e in &report.entries {
         println!(
@@ -658,6 +661,9 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             e.framework,
             summary_label(&e.report.summary),
         );
+        if let Some(enabled_at) = &e.enabled_at {
+            println!("  Enabled at: {enabled_at}");
+        }
         for cond in &e.report.conditions {
             let reason = cond
                 .reason
@@ -667,6 +673,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             println!("  {:?} = {:?}{}", cond.kind, cond.status, reason);
         }
     }
+    common::print_aw_status_hint(component.as_deref());
     Ok(())
 }
 
