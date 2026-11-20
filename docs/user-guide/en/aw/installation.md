@@ -11,6 +11,8 @@ baseline. For other Agents, see [Configuration and Agent launch](configuration.m
 
 ## Get a package
 
+For a published `aw/vX.Y.Z` with release assets, download the core or Provider archives and `SHA256SUMS` from [GitHub Releases](https://github.com/agentic-os-org/ANOLISA/releases?q=aw%2Fv). The same release contains three Python wheels, three npm packages and their source receipt.
+
 Use artifacts from a [successful AW Integration run](https://github.com/agentic-os-org/ANOLISA/actions/workflows/aw-integration.yml) for the intended
 source commit. Check the matching `SHA256SUMS`; checksums detect corruption and
 are not publisher signatures. See [source builds](../../../../contribute/en/aw/building.md)
@@ -36,16 +38,24 @@ From the downloaded artifact directory, install the prebuilt AW CLI as your user
 export AW_VERSION=0.2.0
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
-sha256sum -c SHA256SUMS
-tar -xzf "$AW_BUNDLE.tar.gz"
 export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"
 export AW_PREFIX="$HOME/.local"
-make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
-aw --version
+
+verify_aw_archive() {
+  awk -v archive="$1" '$0 == $1 "  " archive' SHA256SUMS | sha256sum --strict --check -
+}
+
+(
+  set -e
+  verify_aw_archive "$AW_BUNDLE.tar.gz"
+  tar -xzf "$AW_BUNDLE.tar.gz"
+  make -C "$AW_BUNDLE_DIR" install PREFIX="$AW_PREFIX"
+  aw --version
+)
 ```
 
-Each checksum should report `OK`; `aw --version` should print the installed version.
+The selected archive should report `OK`, followed by the installed AW version.
 
 Change `AW_PREFIX` to choose an installation directory. For a system installation,
 an administrator can use
@@ -55,11 +65,15 @@ To add a local Provider extension, install it into a separate extension prefix:
 
 ```bash
 export AW_PROVIDER_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
-tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
-install -d -m 700 "$HOME/.local/lib/aw"
-aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
-aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+(
+  set -e
+  verify_aw_archive "$AW_PROVIDER_BUNDLE.tar.gz"
+  tar -xzf "$AW_PROVIDER_BUNDLE.tar.gz"
+  install -d -m 700 "$HOME/.local/lib/aw"
+  aw install --prefix "$AW_EXTENSION_PREFIX" --bundle "$PWD/$AW_PROVIDER_BUNDLE"
+  aw list --installed --prefix "$AW_EXTENSION_PREFIX"
+)
 ```
 
 Use the independent sec-core archive in the same way when security checks are needed.

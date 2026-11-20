@@ -42,36 +42,37 @@ class PackageSelectionTests(GateFixture):
         make.chmod(0o700)
         capture = self.root / "commands"
         output = self.root / "package output"
-        subprocess.run(
-            ["/bin/sh", "-eu", "-c", script],
-            cwd=self.root,
-            env={
-                "PATH": str(binary),
-                "GITHUB_WORKSPACE": str(self.root / "container workspace"),
-                "AW_PACKAGE_DIR": str(output),
-                "AW_PACKAGE_COMMANDS": str(capture),
-            },
-            check=True,
-            timeout=10,
-        )
-        commands = [
-            row.decode().split("\0")
-            for row in capture.read_bytes().split(b"\0\0")
-            if row
-        ]
-        self.assertEqual(
-            commands,
-            [
-                ["make", "-C", "distribution", "test-aw-packages"],
-                [
-                    "make", "-C", "distribution", "aw-packages", "VERSION=0.2.0",
-                    "OUTPUT=" + str(output / "packages"), "COMPONENTS=core sec-core tokenless",
-                ],
-                ["make", "-C", "distribution", "aw-integration-backends",
-                 "BACKENDS=sec-core tokenless"],
-            ],
-        )
-        self.assertFalse(any("packages_pty" in command for command in commands))
+        release = (AW.parents[1] / ".github/workflows/aw-release.yml").read_text()
+        self.assertIn("release_version: ${{ needs.candidate.outputs.version }}", release)
+        self.assertIn("RELEASE_VERSION: ${{ inputs.release_version }}", step)
+        for version in ("", "3.2.1"):
+            with self.subTest(release_version=version):
+                capture.write_bytes(b"")
+                subprocess.run(
+                    ["/bin/sh", "-eu", "-c", script],
+                    cwd=self.root,
+                    env={
+                        "PATH": str(binary),
+                        "GITHUB_WORKSPACE": str(self.root / "container workspace"),
+                        "AW_PACKAGE_DIR": str(output),
+                        "AW_PACKAGE_COMMANDS": str(capture),
+                        "RELEASE_VERSION": version,
+                    },
+                    check=True,
+                    timeout=10,
+                )
+                commands = [
+                    row.decode().split("\0") for row in capture.read_bytes().split(b"\0\0") if row
+                ]
+                version_args = [f"VERSION={version}"] if version else []
+                self.assertEqual(commands, [
+                    ["make", "-C", "distribution", "test-aw-packages"],
+                    ["make", "-C", "distribution", "aw-packages", *version_args,
+                     "OUTPUT=" + str(output / "packages"), "COMPONENTS=core sec-core tokenless"],
+                    ["make", "-C", "distribution", "aw-integration-backends",
+                     "BACKENDS=sec-core tokenless"],
+                ])
+                self.assertFalse(any("packages_pty" in command for command in commands))
 
     def test_python_free_installer_precedes_python_enabled_make_builds(self) -> None:
         workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
