@@ -18,8 +18,10 @@
 
 The index follows the same ordering as ce_runner's discover_tasks (and the
 claw-eval --range slice): task directories that contain a task.yaml are sorted
-by directory name, then enumerated starting at 1. With 300 tasks the index
-range is 1-300, so an index can be fed back into `--range N-N` to locate a task.
+by directory name, then enumerated starting at 1 (after any --prefix filter,
+matching discover_tasks, which also filters by prefix before the --range
+slice). With 300 tasks the index range is 1-300, so an index can be fed back
+into `--range N-N` to locate a task.
 
 Usage:
     python scripts/task_index_map.py
@@ -38,9 +40,10 @@ TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
 def scan_task_index(tasks_dir: Path, prefix: str | None = None) -> list[tuple[int, str]]:
     """Return a list of (index, task_id) pairs.
 
-    task_id is the task directory name. The index is the 1-based position in the
-    name-sorted list of all task directories, assigned before any --prefix filter
-    so that indices stay stable and match discover_tasks / --range semantics.
+    task_id is the task directory name. The index is the 1-based position in
+    the name-sorted list of task directories AFTER the --prefix filter, so an
+    index can be fed back into `ce-runner --prefix <p> --range N-N` (which
+    also filters by prefix before slicing, like discover_tasks).
     """
     if not tasks_dir.is_dir():
         print(f"ERROR: tasks directory not found: {tasks_dir}", file=sys.stderr)
@@ -51,10 +54,9 @@ def scan_task_index(tasks_dir: Path, prefix: str | None = None) -> list[tuple[in
         if d.is_dir() and (d / "task.yaml").exists()
     )
 
-    mapping = list(enumerate(task_ids, start=1))
     if prefix:
-        mapping = [(i, name) for i, name in mapping if name.startswith(prefix)]
-    return mapping
+        task_ids = [name for name in task_ids if name.startswith(prefix)]
+    return list(enumerate(task_ids, start=1))
 
 
 def print_mapping(mapping: list[tuple[int, str]]) -> None:
