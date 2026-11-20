@@ -7,6 +7,7 @@ mod ctest;
 mod gradle;
 mod maven;
 mod pnpm;
+mod scope;
 mod template;
 mod trace;
 

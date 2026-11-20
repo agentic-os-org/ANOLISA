@@ -11,16 +11,12 @@ use std::hash::Hash;
 
 use serde_json::json;
 
+#[cfg(test)]
+use super::scope::MAX_LINE_BYTES;
+use super::scope::{self, MAX_BYTES, MAX_EDITS, MAX_ROWS, complete, plain, valid_line};
 use super::{LayoutEdit, saves_both};
 
-// Lines exceeding MAX_LINE_BYTES close the active CTest scope locally;
-// any single line exceeding MAX_BYTES disables CTest edits for the whole result.
-// MAX_BYTES also caps `is_compacted_header`, which holds for every emitted block
-// because `saves_both` keeps each replacement strictly shorter than its <= MAX_BYTES slice.
-const MAX_LINE_BYTES: usize = 4096;
-const MAX_ROWS: usize = 256;
-const MAX_BYTES: usize = 64 * 1024;
-const MAX_EDITS: usize = 256;
+// MAX_BYTES caps compacted headers because `saves_both` keeps each replacement shorter than its slice.
 const HEADER: &str =
     "CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): ";
 
@@ -85,30 +81,12 @@ enum ParsedRow<'a> {
 
 /// Detects a CTest output stream from a bounded head-and-tail sample.
 pub(super) fn detect(sample: &[String]) -> bool {
-    let (head, tail) = match sample.iter().position(|line| line == "\0") {
-        Some(gap) => (&sample[..gap], Some(&sample[gap + 1..])),
-        None => (sample, None),
-    };
-    let head_start = skip_leading_preambles(head);
-    let first = head[head_start..]
-        .iter()
-        .find(|line| !line.trim().is_empty());
-    if first.is_none_or(|line| !is_log_head(line)) {
-        return false;
-    }
-
-    let head_fences = unfenced_runs(head);
-    if head_fences.runs.iter().any(|run| has_strong_evidence(run)) {
-        return true;
-    }
-
-    // Across a sample gap, fence state from the unsampled middle is unknown.
-    tail.is_some_and(|tail| {
-        !head_fences.unclosed && {
-            let tail_fences = unfenced_runs(tail);
-            !tail_fences.saw_fence && tail_fences.runs.iter().any(|run| has_strong_evidence(run))
-        }
-    })
+    scope::detect_sampled(
+        sample,
+        |head| scope::skip_leading_preambles(head, is_static_preamble),
+        is_log_head,
+        has_strong_evidence,
+    )
 }
 
 /// Plans atomic lossless template edits across contiguous non-failing CTest blocks.
@@ -120,33 +98,19 @@ pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
     let mut edits = Vec::new();
     let mut active = true;
     let mut open_fence = None;
-    let mut index = leading_preamble_len(lines);
+    let mut index = scope::leading_preamble_len(lines, is_static_preamble);
 
     while index < lines.len() {
-        let raw_body = lines[index].strip_suffix('\n').unwrap_or(lines[index]);
-        if step_fence(&mut open_fence, raw_body) {
-            active = false;
-            index += 1;
-            continue;
-        }
-        let Some(line) = complete(lines[index]) else {
-            active = false;
+        let Some(line) = scope::enter_line(
+            lines,
+            index,
+            &mut active,
+            &mut open_fence,
+            is_compactable_row,
+        ) else {
             index += 1;
             continue;
         };
-        if !plain(line) {
-            active = false;
-            index += 1;
-            continue;
-        }
-        if !active {
-            if reopen_anchor(lines, index) {
-                active = true;
-            } else {
-                index += 1;
-                continue;
-            }
-        }
 
         if !is_compactable_row(line) {
             if !is_in_scope_lifecycle(line) {
@@ -320,29 +284,7 @@ pub(super) fn is_ctest_line(line: &str) -> bool {
 
 /// Keeps compacted CTest outputs terminal across repeated passes.
 pub(super) fn is_compacted(lines: &[&str]) -> bool {
-    let mut open_fence = None;
-    lines.iter().any(|raw| {
-        let line = raw.strip_suffix('\n').unwrap_or(raw);
-        !step_fence(&mut open_fence, line) && is_compacted_header(line)
-    })
-}
-
-fn valid_line(line: &str) -> bool {
-    line.len() <= MAX_LINE_BYTES && plain(line)
-}
-
-fn complete(line: &str) -> Option<&str> {
-    (line.len() <= MAX_LINE_BYTES)
-        .then(|| line.strip_suffix('\n'))
-        .flatten()
-}
-
-fn plain(line: &str) -> bool {
-    !line.chars().any(char::is_control)
-}
-
-fn is_compacted_header(line: &str) -> bool {
-    line.len() <= MAX_BYTES && plain(line) && line.starts_with(HEADER)
+    scope::is_compacted(lines, HEADER)
 }
 
 fn is_ctest_digits(value: &str) -> bool {
@@ -526,7 +468,7 @@ fn is_no_tests(line: &str) -> bool {
 }
 
 fn is_log_head(line: &str) -> bool {
-    is_compacted_header(line)
+    scope::is_compacted_header(line, HEADER)
         || is_test_project(line)
         || parse_start(line).is_some()
         || is_complete_result_evidence(line)
@@ -538,157 +480,23 @@ fn is_in_scope_lifecycle(line: &str) -> bool {
         || line.starts_with("Internal ctest changing into directory: ")
 }
 
-fn is_exit_anchor(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("exit code:")
-        .or_else(|| lower.strip_prefix("exit status:"));
-    rest.is_some_and(|tail| {
-        let trimmed = tail.trim();
-        let digits = trimmed.strip_prefix('-').unwrap_or(trimmed);
-        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-    })
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((name, _)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name.as_bytes()[0].is_ascii_alphabetic()
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-fn is_ctest_xtrace(line: &str) -> bool {
-    let pluses = line.bytes().take_while(|&b| b == b'+').count();
-    if !matches!(pluses, 1 | 2) {
-        return false;
-    }
-    let Some(rest) = line[pluses..].strip_prefix(' ') else {
-        return false;
-    };
-    let Some(command) = rest
-        .split_ascii_whitespace()
-        .find(|token| !is_env_assignment(token))
-    else {
-        return false;
-    };
-    let binary = command.rsplit('/').next().unwrap_or(command);
-    matches!(binary, "ctest" | "ctest.exe")
-}
-
 fn is_static_preamble(line: &str) -> bool {
     if !valid_line(line) {
         return false;
     }
     line.starts_with("$ ")
-        || is_exit_anchor(line)
-        || is_ctest_xtrace(line)
+        || scope::is_exit_anchor(line)
+        || scope::is_xtrace(line, &["ctest", "ctest.exe"])
         || line.starts_with("Internal ctest changing into directory: ")
         || (line.starts_with("Cannot find file: ") && line.ends_with("/DartConfiguration.tcl"))
         || line.starts_with("UpdateCTestConfiguration  from :")
         || line.starts_with("Parse Config file:")
 }
 
-fn skip_leading_preambles(lines: &[String]) -> usize {
-    let mut index = 0usize;
-    while index < lines.len() {
-        let line = lines[index].as_str();
-        if !valid_line(line) {
-            break;
-        }
-        if line.trim().is_empty() || is_static_preamble(line) {
-            index += 1;
-        } else {
-            break;
-        }
-    }
-    index
-}
-
-fn leading_preamble_len(lines: &[&str]) -> usize {
-    let mut last_preamble = None;
-    for (index, &raw) in lines.iter().take(100).enumerate() {
-        let Some(line) = complete(raw) else {
-            break;
-        };
-        if !plain(line) {
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        if is_static_preamble(line) {
-            last_preamble = Some(index);
-        } else {
-            break;
-        }
-    }
-    last_preamble.map_or(0, |index| index + 1)
-}
-
-struct Unfenced<'a> {
-    runs: Vec<&'a [String]>,
-    saw_fence: bool,
-    unclosed: bool,
-}
-
-fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
-    let trimmed = line.trim_start();
-    (*b"`~").into_iter().find_map(|ch| {
-        let count = trimmed.bytes().take_while(|&b| b == ch).count();
-        (count >= 3).then_some((ch, count, &trimmed[count..]))
-    })
-}
-
-fn step_fence(open_fence: &mut Option<(u8, usize)>, line: &str) -> bool {
-    let marker = fence_marker(line);
-    if let Some((open_ch, open_len)) = *open_fence {
-        if let Some((ch, count, rest)) = marker
-            && ch == open_ch
-            && count >= open_len
-            && rest.trim().is_empty()
-        {
-            *open_fence = None;
-        }
-        return true;
-    }
-    if let Some((ch, count, _)) = marker {
-        *open_fence = Some((ch, count));
-        return true;
-    }
-    false
-}
-
-fn unfenced_runs(segment: &[String]) -> Unfenced<'_> {
-    let mut runs = Vec::new();
-    let mut saw_fence = false;
-    let mut open_fence = None;
-    let mut run_start = 0;
-    for (index, line) in segment.iter().enumerate() {
-        let was_open = open_fence.is_some();
-        let is_fenced = step_fence(&mut open_fence, line);
-        if !was_open && is_fenced {
-            saw_fence = true;
-            if run_start < index {
-                runs.push(&segment[run_start..index]);
-            }
-        } else if was_open && open_fence.is_none() {
-            run_start = index + 1;
-        }
-    }
-    if open_fence.is_none() && run_start < segment.len() {
-        runs.push(&segment[run_start..]);
-    }
-    Unfenced {
-        runs,
-        saw_fence,
-        unclosed: open_fence.is_some(),
-    }
-}
-
 fn has_strong_evidence(run: &[String]) -> bool {
-    let compacted = run.iter().any(|line| is_compacted_header(line));
+    let compacted = run
+        .iter()
+        .any(|line| scope::is_compacted_header(line, HEADER));
     let result_count = run
         .iter()
         .filter(|line| is_complete_result_evidence(line))
@@ -698,14 +506,6 @@ fn has_strong_evidence(run: &[String]) -> bool {
             is_complete_result_evidence(line) || is_ctest_summary(line) || is_no_tests(line)
         });
     compacted || result_count >= 2 || project_with_outcome
-}
-
-fn reopen_anchor(lines: &[&str], index: usize) -> bool {
-    complete(lines[index]).is_some_and(is_compactable_row)
-        && lines
-            .get(index + 1)
-            .and_then(|line| complete(line))
-            .is_some_and(is_compactable_row)
 }
 
 fn mode<T: Copy + Default + Eq + Hash + Ord>(values: impl Iterator<Item = T>) -> T {
