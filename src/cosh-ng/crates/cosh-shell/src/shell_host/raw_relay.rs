@@ -22,6 +22,8 @@ use super::prompt_presentation::PromptPresentation;
 use super::prompt_replay::PromptReplayTracker;
 
 mod activity;
+mod display_scan;
+mod display_write;
 mod eof_shutdown;
 mod input_events;
 mod input_readiness;
@@ -35,10 +37,15 @@ use activity::{
     poll_driver_completion, relay_wait_timeout, wait_for_relay_activity, RelayActivity,
 };
 pub(super) use activity::{DriverCompletion, RawActionWatchdog};
+use display_scan::candidate_display_columns;
+use display_write::{
+    reset_candidate_echo_for_display, write_pending_display,
+    write_pending_display_preserving_prompt_ghost,
+};
 use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
 use input_events::{
-    apply_prompt_boundary_evidence, candidate_display_columns, drain_raw_input_events,
-    observe_with_input_mode_lock, publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
+    apply_prompt_boundary_evidence, drain_raw_input_events, observe_with_input_mode_lock,
+    publish_prompt_snapshot_if_drained, CandidateEcho,
 };
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
@@ -86,7 +93,7 @@ where
 {
     let mut buffer = [0_u8; 8192];
     let mut display_start = parser.display_position();
-    let mut native_candidate_echoed_len = 0;
+    let mut candidate_echo = CandidateEcho::default();
     let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
     let mut blocked_prompt_generation = None;
     let mut last_pty_output: Option<Instant> = None;
@@ -120,7 +127,7 @@ where
             parser,
             output,
             prompt,
-            &mut native_candidate_echoed_len,
+            &mut candidate_echo,
             &mut prompt_replay,
             prompt_presentation,
         )? {
@@ -145,7 +152,7 @@ where
                         parser,
                         output,
                         prompt,
-                        &mut native_candidate_echoed_len,
+                        &mut candidate_echo,
                         &mut prompt_replay,
                         prompt_presentation,
                     )? {
@@ -183,6 +190,7 @@ where
                 &mut prompt_replay,
                 prompt_presentation,
                 input_mode,
+                &mut candidate_echo,
             )?;
             output.flush()?;
         }
@@ -211,7 +219,7 @@ where
                         parser,
                         output,
                         prompt,
-                        &mut native_candidate_echoed_len,
+                        &mut candidate_echo,
                         &mut prompt_replay,
                         prompt_presentation,
                     )? {
@@ -226,27 +234,24 @@ where
                         // just the prompt repaint replay dedup strips.
                         match cut_kind {
                             DisplayCutKind::PromptBoundary => {
-                                apply_prompt_boundary_evidence(
+                                apply_prompt_boundary_cut(
                                     parser,
+                                    &mut display_start,
+                                    cut,
                                     &mut prompt_replay,
                                     &mut blocked_prompt_generation,
-                                );
-                                // #1932: the soft-newline upgrade submitted a
-                                // synthetic empty line for this boundary; its
-                                // accept echo is visually blank, so drop it
-                                // instead of surfacing a stray blank line.
-                                if parser.take_synthetic_prompt_repaint()
-                                    && cut > display_start
-                                    && candidate_display_columns(
-                                        parser.read_display_range(display_start, cut)?.as_ref(),
-                                    ) == 0
-                                {
-                                    display_start = cut;
-                                }
+                                    &mut candidate_echo,
+                                )?;
                             }
                             DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
                         }
                         if !hold_shell_output && cut > display_start {
+                            reset_candidate_echo_for_display(
+                                parser,
+                                display_start,
+                                cut,
+                                &mut candidate_echo,
+                            )?;
                             prompt_presentation.write_display_slice(
                                 parser,
                                 output,
@@ -269,7 +274,7 @@ where
                                         parser,
                                         output,
                                         prompt,
-                                        &mut native_candidate_echoed_len,
+                                        &mut candidate_echo,
                                         &mut prompt_replay,
                                         prompt_presentation,
                                     )? {
@@ -315,6 +320,7 @@ where
                                 &mut prompt_replay,
                                 prompt_presentation,
                                 input_mode,
+                                &mut candidate_echo,
                             )?;
                             output.flush()?;
                         }
@@ -401,7 +407,7 @@ where
             parser,
             output,
             prompt,
-            &mut native_candidate_echoed_len,
+            &mut candidate_echo,
             &mut prompt_replay,
             prompt_presentation,
         )? {
@@ -426,7 +432,7 @@ where
                         parser,
                         output,
                         prompt,
-                        &mut native_candidate_echoed_len,
+                        &mut candidate_echo,
                         &mut prompt_replay,
                         prompt_presentation,
                     )? {
@@ -468,6 +474,7 @@ where
                 &mut prompt_replay,
                 prompt_presentation,
                 input_mode,
+                &mut candidate_echo,
             )?;
             output.flush()?;
         }
@@ -535,72 +542,32 @@ where
     Ok(())
 }
 
-fn write_pending_display<W: Write>(
-    parser: &OscParser,
-    output: &mut W,
+/// Applies a prompt-boundary cut to the relay's display and echo state.
+///
+/// The shell repainting its prompt invalidates the echo memory unless the
+/// cut is side-effect-free: a boundary that carries no bytes at all (the
+/// prompt display was already flushed) or only restyles the terminal leaves
+/// the drawn draft untouched, so the memory stays valid.
+fn apply_prompt_boundary_cut(
+    parser: &mut OscParser,
     display_start: &mut usize,
+    cut: usize,
     prompt_replay: &mut PromptReplayTracker,
-    prompt_presentation: &mut PromptPresentation,
+    blocked_prompt_generation: &mut Option<u64>,
+    candidate_echo: &mut CandidateEcho,
 ) -> io::Result<()> {
-    let display_end = parser.display_position();
-    prompt_presentation.write_display_slice(
-        parser,
-        output,
-        *display_start,
-        display_end,
-        prompt_replay,
-    )?;
-    *display_start = display_end;
-    Ok(())
-}
-
-fn write_pending_display_preserving_prompt_ghost<W: Write>(
-    parser: &OscParser,
-    output: &mut W,
-    display_start: &mut usize,
-    prompt_replay: &mut PromptReplayTracker,
-    prompt_presentation: &mut PromptPresentation,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-) -> io::Result<()> {
-    write_pending_display(
-        parser,
-        output,
-        display_start,
-        prompt_replay,
-        prompt_presentation,
-    )?;
-    let ghost = input_mode.lock().ok().and_then(|mode| match &*mode {
-        RawInputMode::PromptGhost { text, route } => Some((
-            text.clone(),
-            matches!(
-                route,
-                crate::raw_input::PromptGhostRoute::AgentSelection { .. }
-            ),
-        )),
-        _ => None,
-    });
-    if let Some((text, selection)) = ghost {
-        write_prompt_ghost(output, &text, selection)?;
+    reset_candidate_echo_for_display(parser, *display_start, cut, candidate_echo)?;
+    apply_prompt_boundary_evidence(parser, prompt_replay, blocked_prompt_generation);
+    // #1932: the soft-newline upgrade submitted a synthetic empty line for
+    // this boundary; its accept echo is visually blank, so drop it instead
+    // of surfacing a stray blank line.
+    if parser.take_synthetic_prompt_repaint()
+        && cut > *display_start
+        && candidate_display_columns(parser.read_display_range(*display_start, cut)?.as_ref()) == 0
+    {
+        *display_start = cut;
     }
     Ok(())
-}
-
-fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> io::Result<()> {
-    write_prompt_ghost_labeled(output, text, selection, None)
-}
-
-fn write_prompt_ghost_labeled<W: Write>(
-    output: &mut W,
-    text: &str,
-    selection: bool,
-    label: Option<&str>,
-) -> io::Result<()> {
-    let marker = if selection { " ›" } else { "" };
-    let prefix = match label {
-        Some(label) => format!("{marker} {label} "),
-        None => format!("{marker} "),
-    };
-    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{prefix}{text}"))
 }
 
 fn drain_observer_until_released<W: Write, F>(

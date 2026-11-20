@@ -1,4 +1,6 @@
-use super::input_events::latest_capture_submission_generation;
+use super::display_scan::scan_display;
+use super::display_write::write_prompt_ghost;
+use super::input_events::{latest_capture_submission_generation, write_no_wrap_overlay};
 use super::*;
 use crate::raw_input::UserPtyInputGeneration;
 
@@ -153,7 +155,7 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut display_start = 0usize;
-    let mut echoed = 0usize;
+    let mut candidate_echo = CandidateEcho::default();
     let mut prompt_presentation = PromptPresentation::new(false);
 
     parser
@@ -178,7 +180,7 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -216,7 +218,7 @@ fn prompt_local_cycle_shows_number_and_question_once() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut parser = parser_for_test("surface-local");
     let mut output = Vec::new();
-    let mut echoed = 0;
+    let mut candidate_echo = CandidateEcho::default();
     let (_, mut replay) = tracker_for_test();
     let mut presentation = PromptPresentation::new(false);
     let payload = crate::raw_input::SuggestionSurfacePayload {
@@ -246,7 +248,7 @@ fn prompt_local_cycle_shows_number_and_question_once() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut replay,
         &mut presentation,
     )
@@ -390,7 +392,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
     let (generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
-    let mut echoed = 0usize;
+    let mut candidate_echo = CandidateEcho::default();
     let mut prompt_presentation = PromptPresentation::new(false);
 
     let barrier_count = |parser: &OscParser, component| {
@@ -417,7 +419,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -442,7 +444,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -470,7 +472,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -512,7 +514,7 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         &mut parser,
         &mut Vec::new(),
         "prompt$ ",
-        &mut 0,
+        &mut CandidateEcho::default(),
         &mut prompt_replay,
         &mut PromptPresentation::new(false),
     )
@@ -537,7 +539,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let (_generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
-    let mut echoed = 0usize;
+    let mut candidate_echo = CandidateEcho::default();
     let mut prompt_presentation = PromptPresentation::new(false);
 
     sender
@@ -551,7 +553,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         &mut parser,
         &mut output,
         "",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -561,7 +563,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         output,
         b"\x1b[K/m\x1b7\x1b[?7l\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b[?7h\x1b8"
     );
-    assert_eq!(echoed, 2);
+    assert_eq!(candidate_echo.display_columns(), 2);
     assert!(!output.windows(3).any(|window| window == b"\x1b[s"));
     assert!(!output.windows(3).any(|window| window == b"\x1b[u"));
 }
@@ -572,7 +574,7 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
     let (_generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
-    let mut echoed = 0usize;
+    let mut candidate_echo = CandidateEcho::default();
     // Status symbols enabled: candidate redraws must still not publish.
     let mut prompt_presentation = PromptPresentation::new(true);
 
@@ -596,7 +598,7 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
         &mut parser,
         &mut output,
         "prompt> ",
-        &mut echoed,
+        &mut candidate_echo,
         &mut prompt_replay,
         &mut prompt_presentation,
     )
@@ -618,7 +620,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
         let (_generation, mut prompt_replay) = tracker_for_test();
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut output = Vec::new();
-        let mut echoed = 0usize;
+        let mut candidate_echo = CandidateEcho::default();
         let mut prompt_presentation = PromptPresentation::new(false);
 
         sender
@@ -632,7 +634,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
             &mut parser,
             &mut output,
             prompt,
-            &mut echoed,
+            &mut candidate_echo,
             &mut prompt_replay,
             &mut prompt_presentation,
         )
@@ -1255,6 +1257,7 @@ fn assert_prompt_fragment_restore(stale_replay: bool, pending: bool, ghost: Opti
     parser
         .feed(b"\x1b[?2004h[root@host]# ")
         .expect("feed prompt fragment");
+    let mut candidate_echo = CandidateEcho::default();
     write_pending_display_preserving_prompt_ghost(
         &parser,
         &mut output,
@@ -1262,6 +1265,7 @@ fn assert_prompt_fragment_restore(stale_replay: bool, pending: bool, ghost: Opti
         &mut prompt_replay,
         &mut prompt_presentation,
         &input_mode,
+        &mut candidate_echo,
     )
     .expect("write prompt fragment");
 
@@ -1287,7 +1291,7 @@ fn capture_batch_is_drained_under_mode_lock_before_observe() {
     let mut output = Vec::new();
     let (_, mut replay) = tracker_for_test();
     let mut presentation = PromptPresentation::new(false);
-    let mut echoed = 0;
+    let mut candidate_echo = CandidateEcho::default();
     let action = observe_with_input_mode_lock(
         &mut |view: ShellEventView<'_>, _: &mut Vec<u8>| {
             assert!(mode.try_lock().is_err(), "observe must hold the mode lock");
@@ -1307,7 +1311,7 @@ fn capture_batch_is_drained_under_mode_lock_before_observe() {
                 parser,
                 output,
                 "prompt> ",
-                &mut echoed,
+                &mut candidate_echo,
                 &mut replay,
                 &mut presentation,
             )?);
@@ -1320,4 +1324,647 @@ fn capture_batch_is_drained_under_mode_lock_before_observe() {
         *mode.try_lock().expect("mode lock released after update"),
         RawInputMode::RawPassthrough
     ));
+}
+
+/// #10318 review: a multi-byte character split across two reads must not
+/// drift the echoed column count. Measuring only the appended suffix turns
+/// each half into a width-1 replacement glyph, and the erase after a shorter
+/// draft then overruns the line (#1721).
+#[test]
+fn split_multibyte_candidate_redraw_keeps_the_erase_width_exact() {
+    // (partial read that ends inside the character, complete draft, columns)
+    let cases: [(&[u8], &[u8], usize); 2] = [
+        (b"a\xe4", "a\u{4e2d}".as_bytes(), 3),
+        (b"a\xf0", "a\u{1f600}".as_bytes(), 3),
+    ];
+    for (partial, complete, columns) in cases {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut parser = parser_for_test("candidate-split-multibyte");
+        let (_generation, mut prompt_replay) = tracker_for_test();
+        let mut output = Vec::new();
+        let mut candidate_echo = CandidateEcho::default();
+        let mut prompt_presentation = PromptPresentation::new(false);
+        let send = |input: &[u8]| {
+            sender
+                .send(RawInputEvent::CandidateRedraw {
+                    input: input.to_vec(),
+                    hint: None,
+                })
+                .expect("queue redraw");
+        };
+
+        send(partial);
+        send(complete);
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("draw split multi-byte draft");
+        let drawn_len = output.len();
+
+        send(b"a");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("shrink multi-byte draft");
+
+        let mut expected = Vec::new();
+        for _ in 0..columns {
+            expected.extend_from_slice(b"\x08 \x08");
+        }
+        expected.extend_from_slice(b"\x1b[Ka");
+        assert_eq!(
+            &output[drawn_len..],
+            expected.as_slice(),
+            "erase width drifted for a draft split inside {complete:?}"
+        );
+    }
+}
+
+/// #10318 review: shell output between two redraws repaints the line the echo
+/// memory assumed. The relay must rebuild the whole draft instead of appending
+/// to a prefix the screen no longer shows.
+#[test]
+fn shell_output_invalidates_the_candidate_echo() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-echo-pty-output");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+    let mut display_start = 0;
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abc".to_vec(),
+            hint: None,
+        })
+        .expect("queue first redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("draw draft");
+
+    // A background job notification rewrites the candidate line.
+    parser.feed(b"[1]+ Done\r\n$ ").expect("feed shell output");
+    write_pending_display_preserving_prompt_ghost(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+        &mode,
+        &mut candidate_echo,
+    )
+    .expect("relay shell output");
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abcdef".to_vec(),
+            hint: None,
+        })
+        .expect("queue grown redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("redraw grown draft");
+
+    assert!(
+        output.ends_with(b"\x1b[Kabcdef"),
+        "draft after shell output was appended, not repainted: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+/// #10318 review: control-only shell output (an OSC title, a cursor-style
+/// change) draws no cells, so it must not drop the echo memory. Treating its
+/// zero width as a line repaint makes the next shorter draft erase nothing
+/// and leaves the old draft on screen with the new one appended.
+#[test]
+fn control_only_pty_output_keeps_the_candidate_echo() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-echo-control-output");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+    let mut display_start = 0;
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abc".to_vec(),
+            hint: None,
+        })
+        .expect("queue first redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("draw draft");
+
+    // A background process retitles the terminal without touching the line.
+    parser
+        .feed(b"\x1b]0;background job\x07")
+        .expect("feed OSC title");
+    write_pending_display_preserving_prompt_ghost(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+        &mode,
+        &mut candidate_echo,
+    )
+    .expect("relay control-only output");
+    assert_eq!(
+        candidate_echo.display_columns(),
+        3,
+        "control-only output must keep the echo width"
+    );
+    let drawn_len = output.len();
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"ab".to_vec(),
+            hint: None,
+        })
+        .expect("queue shortened redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("redraw shortened draft");
+
+    let mut expected = Vec::new();
+    for _ in 0..3 {
+        expected.extend_from_slice(b"\x08 \x08");
+    }
+    expected.extend_from_slice(b"\x1b[Kab");
+    assert_eq!(
+        &output[drawn_len..],
+        expected.as_slice(),
+        "shortened redraw repeated the draft: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+/// #10318 review: a prompt boundary whose cut writes no bytes (the prompt
+/// display was already flushed) must not drop the echo memory; otherwise the
+/// next shorter redraw erases zero columns and duplicates the draft.
+#[test]
+fn empty_prompt_boundary_keeps_the_candidate_echo() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-echo-empty-boundary");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+    let mut display_start = 0;
+    let mut blocked_prompt_generation = None;
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abc".to_vec(),
+            hint: None,
+        })
+        .expect("queue first redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("draw draft");
+
+    feed_shell_ready(&mut parser);
+    let cuts = parser.drain_intervention_display_cuts();
+    assert_eq!(cuts.len(), 1, "precmd must produce one display cut");
+    let (cut, kind) = cuts[0];
+    assert!(matches!(kind, DisplayCutKind::PromptBoundary));
+    assert_eq!(cut, display_start, "the boundary must write no bytes");
+    apply_prompt_boundary_cut(
+        &mut parser,
+        &mut display_start,
+        cut,
+        &mut prompt_replay,
+        &mut blocked_prompt_generation,
+        &mut candidate_echo,
+    )
+    .expect("apply empty prompt boundary");
+    assert_eq!(
+        candidate_echo.display_columns(),
+        3,
+        "a boundary without visible output must keep the echo width"
+    );
+    let drawn_len = output.len();
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"ab".to_vec(),
+            hint: None,
+        })
+        .expect("queue shortened redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("redraw shortened draft");
+
+    let mut expected = Vec::new();
+    for _ in 0..3 {
+        expected.extend_from_slice(b"\x08 \x08");
+    }
+    expected.extend_from_slice(b"\x1b[Kab");
+    assert_eq!(
+        &output[drawn_len..],
+        expected.as_slice(),
+        "shortened redraw repeated the draft: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+/// #10318 review: a clear or line-erase sequence draws zero visible cells but
+/// wipes the line the echo memory describes. Keeping the memory makes the next
+/// grown redraw append a suffix to a prefix the screen no longer shows.
+#[test]
+fn clear_sequences_invalidate_the_candidate_echo() {
+    // (shell output after the draft, name)
+    let cases: [(&[u8], &str); 2] = [
+        (b"\x1b[H\x1b[2J", "screen clear"),
+        (b"\r\x1b[K", "line erase"),
+    ];
+    for (sequence, name) in cases {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut parser = parser_for_test("candidate-echo-clear");
+        let (_generation, mut prompt_replay) = tracker_for_test();
+        let mut output = Vec::new();
+        let mut candidate_echo = CandidateEcho::default();
+        let mut prompt_presentation = PromptPresentation::new(false);
+        let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+        let mut display_start = 0;
+
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: b"abc".to_vec(),
+                hint: None,
+            })
+            .expect("queue first redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("draw draft");
+
+        parser.feed(sequence).expect("feed clear sequence");
+        write_pending_display_preserving_prompt_ghost(
+            &parser,
+            &mut output,
+            &mut display_start,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+            &mode,
+            &mut candidate_echo,
+        )
+        .expect("relay clear sequence");
+
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: b"abcd".to_vec(),
+                hint: None,
+            })
+            .expect("queue grown redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("redraw grown draft");
+
+        assert!(
+            output.ends_with(b"\x1b[Kabcd"),
+            "{name} left a stale prefix: the grown draft was appended, not repainted: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+}
+
+/// #10318 review: OSC may end with ST (`ESC \`) as well as BEL. A scanner
+/// that only knows BEL runs an ST-terminated OSC to the end of the span, so
+/// text after it counts as zero columns and never invalidates the echo.
+#[test]
+fn st_terminated_osc_does_not_swallow_following_text() {
+    assert_eq!(
+        candidate_display_columns(b"a\x1b]0;title\x1b\\b"),
+        2,
+        "text after an ST-terminated OSC must count its columns"
+    );
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-echo-st-osc");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+    let mut display_start = 0;
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abc".to_vec(),
+            hint: None,
+        })
+        .expect("queue first redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("draw draft");
+
+    // The shell retitles the window, then writes visible text on the line.
+    parser
+        .feed(b"\x1b]0;job\x1b\\done")
+        .expect("feed ST-terminated OSC and text");
+    write_pending_display_preserving_prompt_ghost(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+        &mode,
+        &mut candidate_echo,
+    )
+    .expect("relay OSC and text");
+
+    sender
+        .send(RawInputEvent::CandidateRedraw {
+            input: b"abc".to_vec(),
+            hint: None,
+        })
+        .expect("queue unchanged redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("redraw after visible text");
+
+    assert!(
+        output.ends_with(b"\x1b[Kabc"),
+        "text after the ST-terminated OSC was swallowed: the draft was not repainted: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+/// #10318 review: DECRC (`ESC 8`) restores a saved cursor position and the
+/// `ESC #` family repaints cells (`ESC # 8` fills the screen with `E`), so
+/// neither may leave the echo memory describing the line. Saving the cursor
+/// and charset selection only affect later interpretation.
+#[test]
+fn cursor_restore_and_line_size_sequences_invalidate_the_candidate_echo() {
+    // (shell output after the draft, name)
+    let cases: [(&[u8], &str); 3] = [
+        (b"\x1b8", "DECRC"),
+        (b"\x1b#8", "DECALN"),
+        (b"\x1b#6", "double-width line"),
+    ];
+    for (sequence, name) in cases {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut parser = parser_for_test("candidate-echo-decks");
+        let (_generation, mut prompt_replay) = tracker_for_test();
+        let mut output = Vec::new();
+        let mut candidate_echo = CandidateEcho::default();
+        let mut prompt_presentation = PromptPresentation::new(false);
+        let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+        let mut display_start = 0;
+
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: b"abc".to_vec(),
+                hint: None,
+            })
+            .expect("queue first redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("draw draft");
+
+        parser.feed(sequence).expect("feed escape sequence");
+        write_pending_display_preserving_prompt_ghost(
+            &parser,
+            &mut output,
+            &mut display_start,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+            &mode,
+            &mut candidate_echo,
+        )
+        .expect("relay escape sequence");
+
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: b"abcd".to_vec(),
+                hint: None,
+            })
+            .expect("queue grown redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            "",
+            &mut candidate_echo,
+            &mut prompt_replay,
+            &mut prompt_presentation,
+        )
+        .expect("redraw grown draft");
+
+        assert!(
+            output.ends_with(b"\x1b[Kabcd"),
+            "{name} left a stale prefix: the grown draft was appended, not repainted: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+
+    for sequence in [b"\x1b7".as_slice(), b"\x1b(B", b"\x1b%G", b"\x1b="] {
+        assert!(
+            scan_display(sequence).inert,
+            "{:?} was treated as a screen change",
+            String::from_utf8_lossy(sequence)
+        );
+    }
+}
+
+/// #10318 review: a draft or display span that ends in a lone ESC leaves the
+/// scanner with an unfinished sequence. The scan has to consume that byte and
+/// finish; revisiting it never advanced the cursor and froze the relay.
+#[test]
+fn trailing_escape_byte_ends_the_display_scan() {
+    assert_eq!(candidate_display_columns(b"a\x1b"), 1);
+    assert_eq!(candidate_display_columns(b"\x1b"), 0);
+    assert!(
+        !scan_display(b"a\x1b").inert,
+        "an unfinished sequence may move the cursor"
+    );
+}
+
+/// #10318: each input read redraws the candidate draft; echoing only the
+/// suffix keeps a paste's terminal output linear in its size.
+#[test]
+fn growing_candidate_redraw_echoes_only_the_new_suffix() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-append-echo");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+
+    const READ_BYTES: usize = 8192;
+    const READS: usize = 8;
+    let mut draft = vec![b'x'; READ_BYTES];
+    for _ in 0..READS {
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: draft.clone(),
+                hint: None,
+            })
+            .expect("queue paste read");
+        draft.extend(std::iter::repeat_n(b'x', READ_BYTES));
+    }
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("draw paste reads");
+
+    let draft_len = READ_BYTES * READS;
+    // A safe redraw after the first read would repeat the whole draft, so the
+    // payload bytes must appear exactly once.
+    assert_eq!(
+        output.iter().filter(|byte| **byte == b'x').count(),
+        draft_len,
+        "draft echoed more than once"
+    );
+    assert!(
+        output.len() < draft_len + 32,
+        "paste echo wrote {} bytes for a {draft_len}-byte draft",
+        output.len()
+    );
+    assert_eq!(candidate_echo.display_columns(), draft_len);
+}
+
+#[test]
+fn unchanged_candidate_redraw_writes_nothing() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("candidate-unchanged-echo");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut output = Vec::new();
+    let mut candidate_echo = CandidateEcho::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
+    let draw = |sender: &std::sync::mpsc::Sender<RawInputEvent>| {
+        sender
+            .send(RawInputEvent::CandidateRedraw {
+                input: b"/mode".to_vec(),
+                hint: None,
+            })
+            .expect("queue redraw");
+    };
+
+    draw(&sender);
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("first draw");
+    let first_len = output.len();
+    assert!(first_len > 0);
+
+    draw(&sender);
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut candidate_echo,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("repeated draw");
+
+    assert_eq!(output.len(), first_len, "unchanged draft was redrawn");
 }
