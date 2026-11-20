@@ -465,7 +465,7 @@ fn shell_oversized_history_privacy_and_recovery_contracts() {
     let setup = format!(
         r#"set -o history
 export HISTFILE="{root}/home/.bash_history"
-HISTIGNORE='*'
+HISTIGNORE=''
 COLUMNS=1000000
 _COSH_SESSION_AI_ENABLED=1
 _COSH_CGROUP_DIR=none
@@ -501,45 +501,53 @@ PAD=${{PAD// /P}}
         );
     };
 
-    // [P1-2] An oversized entry cannot be fully secret-verified by the bounded
-    // window, so it is fail-closed omitted even when recovery state is set; an
-    // incomplete negative cannot exempt it from the prompt scrub.
+    // [tri-state] The bounded detector returns match / negative / incomplete by
+    // budget, independent of source. Asserted on the result variable: the
+    // `bash -i -c` harness truncates giant `history` display, so giant content
+    // preservation is witnessed by the real-PTY relay tests reading
+    // .bash_history (routing_c3_oversized_benign_* / imported_secret_*).
     assert_ok(
-        "oversized entry fail-closed omitted",
+        "bounded detector tri-state by budget",
         run(r#"
-{ builtin history -d "$HISTCMD" 2>/dev/null || true
-  READLINE_LINE="echo $PAD"
-  _cosh_guard_slash_submission true true
-  builtin history -s "$READLINE_LINE"
-  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"
-  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
-if builtin history | grep -q "echo $PAD"; then echo 'oversized entry kept despite incomplete secret check' >&2; exit 1; fi
+printf -v SMALL '%100s' ''
+SMALL=${SMALL// /P}
+_cosh_detect_secret_bounded "echo $SMALL"
+[[ "$_COSH_SECRET_RESULT" == negative ]] || { echo "small benign expected negative, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo sk-detector-witness-123456 $SMALL"
+[[ "$_COSH_SECRET_RESULT" == match ]] || { echo "small secret expected match, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo $PAD"
+[[ "$_COSH_SECRET_RESULT" == incomplete ]] || { echo "oversized benign expected incomplete, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo ${PAD:0:8000} sk-detector-witness-123456 $PAD"
+[[ "$_COSH_SECRET_RESULT" == match ]] || { echo "oversized head-window secret expected match, got $_COSH_SECRET_RESULT" >&2; exit 1; }
 "#),
     );
 
-    // [P2-2] An oversized entry imported with `history -r` is not the current
-    // submission. A later short command excluded by HISTIGNORE leaves the
-    // imported entry as history 1; PS0 must not record it for cleanup.
+    // [multi-line] A within-budget multi-line secret entry is removable: the
+    // scrub deletes by the leading history number, since the multi-line
+    // identifier (<number>\n<continuation>) is not a valid `history -d`
+    // position. Pre-merge this entry survived the scrub. The entry is captured
+    // into variables (HISTIGNORE is empty so `history -s` lands; the block's own
+    // auto-recorded entry is removed via `history -d "$HISTCMD"`), and asserted
+    // present before the scrub and absent after, so the test fails if the
+    // leading-number strip is reverted.
     assert_ok(
-        "imported oversized entry survives excluded submission",
+        "multiline secret entry scrubbed by leading number",
         run(r#"
 { builtin history -d "$HISTCMD" 2>/dev/null || true
-  builtin history -s "echo prior"
-  _COSH_SUBMITTED_LINE="echo prior"
-  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"
-  printf 'echo %s\n' "$PAD" > "$COSH_TEST_ROOT/import"
-  history -r "$COSH_TEST_ROOT/import"
-  _COSH_SUBMITTED_LINE="echo short-excluded"
-  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre2.out"
-  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
-builtin history | grep -q "echo $PAD" || { echo 'imported oversized entry deleted by scrub' >&2; exit 1; }
+  builtin history -s $'echo sk-multi-witness-123456\ncontinued'
+  hist_before="$(builtin history)"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"
+  hist_after="$(builtin history)"; }
+printf '%s' "$hist_before" | grep -q "sk-multi-witness-123456" || { echo 'multi-line entry did not land before scrub' >&2; exit 1; }
+if printf '%s' "$hist_after" | grep -q "sk-multi-witness-123456"; then echo 'multi-line secret entry retained by scrub' >&2; exit 1; fi
 "#),
     );
 
-    // [P1-degraded] The memory-overage path stays fail-closed: PS0 records no
-    // submission, so the scrub omits the oversized entry anyway (fork-free).
+    // [P1-degraded] Under memory overage the scrub still runs bounded tri-state
+    // detection (fork-free): a within-budget credential is removed, while
+    // benign history is preserved (no unconditional length-based deletion).
     assert_ok(
-        "degraded overage path scrubs fail-closed",
+        "degraded overage path removes secret, preserves benign",
         run(r#"
 { builtin history -d "$HISTCMD" 2>/dev/null || true
   mkdir -p "$COSH_TEST_ROOT/cg"
@@ -547,9 +555,10 @@ builtin history | grep -q "echo $PAD" || { echo 'imported oversized entry delete
   printf '100\n' > "$COSH_TEST_ROOT/cg/memory.high"
   _COSH_CGROUP_DIR="$COSH_TEST_ROOT/cg"
   builtin history -s "echo installed --api-key sk-degraded-witness-12345"
-  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"; }
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"
+  hist_after="$(builtin history)"; }
 grep -q '"e":"p"' "$COSH_TEST_ROOT/precmd.out" || { echo 'degraded path did not emit compact boundary' >&2; exit 1; }
-if builtin history | grep -q "sk-degraded-witness-12345"; then echo 'degraded overage path retained sensitive entry' >&2; exit 1; fi
+if printf '%s' "$hist_after" | grep -q "sk-degraded-witness-12345"; then echo 'degraded overage path retained sensitive entry' >&2; exit 1; fi
 "#),
     );
 

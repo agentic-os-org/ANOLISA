@@ -2119,9 +2119,9 @@ fn routing_c3_oversized_single_line_stays_shell_owned() {
 }
 
 #[test]
-fn routing_c3_oversized_command_omitted_from_native_history() {
+fn routing_c3_oversized_benign_command_preserved_in_history() {
     let root = std::env::temp_dir().join(format!(
-        "cosh-shell-c3-oversized-history-{}-{}",
+        "cosh-shell-c3-oversized-preserving-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
@@ -2170,8 +2170,8 @@ fn routing_c3_oversized_command_omitted_from_native_history() {
     );
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(
-        !history.contains("nonexist_10317"),
-        "oversized command retained in native history: {history}"
+        history.contains("nonexist_10317"),
+        "benign oversized command must be preserved (bounded detection, no length-based deletion): {history}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -2181,9 +2181,9 @@ fn routing_c3_oversized_command_omitted_from_native_history() {
 }
 
 #[test]
-fn routing_c3_oversized_command_omitted_under_memory_overage() {
+fn routing_c3_oversized_benign_preserved_under_overage() {
     let root = std::env::temp_dir().join(format!(
-        "cosh-shell-c3-oversized-overage-{}-{}",
+        "cosh-shell-c3-oversized-overage-preserving-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
@@ -2227,14 +2227,14 @@ fn routing_c3_oversized_command_omitted_under_memory_overage() {
     );
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(
-        !history.contains("nonexist_10317"),
-        "degraded overage path retained oversized command in native history: {history}"
+        history.contains("nonexist_10317"),
+        "degraded overage path must preserve benign imported/oversized history: {history}"
     );
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
-fn routing_c3_imported_oversized_midgap_secret_removed() {
+fn routing_c3_imported_secret_within_budget_removed() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-c3-imported-secret-{}-{}",
         std::process::id(),
@@ -2252,9 +2252,9 @@ fn routing_c3_imported_oversized_midgap_secret_removed() {
     .expect("bashrc");
     let secret = "sk-import-mid-1234567890";
     let mut entry = b"echo ".to_vec();
-    entry.extend(std::iter::repeat_n(b'A', 9000));
+    entry.extend(std::iter::repeat_n(b'A', 7000));
     entry.extend_from_slice(format!(" {secret} ").as_bytes());
-    entry.extend(std::iter::repeat_n(b'B', 9000));
+    entry.extend(std::iter::repeat_n(b'B', 7000));
     entry.push(b'\n');
     std::fs::write(home.join("import"), entry).expect("import file");
     let mut config = ShellHostConfig::new("c3-imported-secret", &work_dir)
@@ -2282,7 +2282,7 @@ fn routing_c3_imported_oversized_midgap_secret_removed() {
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(
         !history.contains(secret),
-        "imported oversized mid-gap secret retained in native history: {history}"
+        "imported within-budget mid-gap secret must be removed by the complete check: {history}"
     );
     std::fs::remove_dir_all(root).expect("cleanup");
 }
