@@ -263,6 +263,61 @@ fn fs_events_fixture_emits_proven_chain_findings() {
     assert_eq!(block.problem, "block-io|8:1");
 }
 
+library_tests! {
+#[test]
+fn ext4_forced_ro_banner_guides_readonly_diagnostics() {
+    use crate::ui::{guidance, RatatuiInlineRenderer};
+    use crate::Language;
+
+    let config = HealthConfig {
+        fs_event_notices: true,
+        ..HealthConfig::default()
+    };
+    let mut report = fixture_report("linux-fs-events", &config, &options());
+    let finding = report
+        .findings
+        .iter_mut()
+        .find(|finding| finding.id == "J24")
+        .unwrap();
+    finding
+        .detail_args
+        .insert("mount".into(), "/data/my 'disk'".into());
+    super::super::super::recommendation::apply_try_candidates(&mut report, &config);
+
+    for (language, remount, logs, mount_options, disk_usage) in [
+        (Language::EnUs, "read-only", "kernel logs", "mount options", "disk usage"),
+        (Language::ZhCn, "只读", "内核日志", "挂载选项", "磁盘占用"),
+    ] {
+        let renderer = RatatuiInlineRenderer::plain_with_width(40).with_language(language);
+        let invitation = guidance::health_candidate(&report, language).unwrap();
+        assert!(
+            invitation.text.starts_with("  cosh --ask "),
+            "{invitation:?}"
+        );
+        assert!(invitation.text.contains(logs), "{invitation:?}");
+        assert!(invitation.text.contains(mount_options), "{invitation:?}");
+        assert!(!invitation.text.contains(disk_usage), "{invitation:?}");
+        assert!(invitation.text.contains("sda1"), "{invitation:?}");
+        assert!(
+            invitation.text.contains(r"/data/my \'disk\'"),
+            "{invitation:?}"
+        );
+        let text = guidance::render_health(
+            &renderer,
+            &report,
+            true,
+            guidance::Target::Bash,
+            Some(&invitation),
+        )
+        .unwrap();
+        assert!(
+            text.split("cosh --ask").next().unwrap().contains(remount),
+            "{text}"
+        );
+    }
+}
+}
+
 #[test]
 fn host_events_fixture_emits_recent_records_only() {
     let config = HealthConfig {

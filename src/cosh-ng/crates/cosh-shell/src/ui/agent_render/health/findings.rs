@@ -273,6 +273,7 @@ pub(super) fn evidence_text(
     if matches!(
         finding.title_id,
         HealthMessageId::HealthFindingExt4Error
+            | HealthMessageId::HealthFindingExt4ReadonlyRemount
             | HealthMessageId::HealthFindingJournalError
             | HealthMessageId::HealthFindingXfsShutdown
             | HealthMessageId::HealthFindingBlockIoError

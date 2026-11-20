@@ -172,6 +172,9 @@ macro_rules! health_volume_ids {
             HealthInsightSoftLockup,
             HealthEvidenceHungTask,
             HealthEvidenceSoftLockup,
+            HealthFindingExt4ReadonlyRemount,
+            HealthTryInspectFilesystemEvent,
+            HealthPromptInspectFilesystemEvent,
         );
     };
 }
