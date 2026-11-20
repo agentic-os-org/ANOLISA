@@ -139,7 +139,6 @@ fn generic_unchecked_paths() {
     assert!(allowed("which -a gcc"));
     assert!(allowed("which /dev/null"));
     assert!(allowed("echo hello world"));
-    assert!(allowed("printenv PATH"));
 }
 
 #[test]
@@ -287,9 +286,52 @@ fn new_path_resolution_commands() {
 
 #[test]
 fn new_environment_commands() {
-    assert!(allowed("printenv PATH"));
+    assert!(!allowed("printenv PATH"));
     assert!(allowed("env"));
     assert!(!allowed("env FOO=bar cmd"));
+}
+
+// Lib-only so the exact lib/bin overlap ceiling stays unchanged.
+library_tests! {
+    #[test]
+    fn printenv_forms_are_not_readonly() {
+        for command in [
+            "printenv",
+            "printenv PATH",
+            "printenv SECRET_P38",
+            "printenv HOME SECRET_P38",
+            "printenv -0",
+            "printenv --null",
+            "printenv --null SECRET_P38",
+            "printenv -- SECRET_P38",
+            "printenv FOO=bar",
+            "printenv -x",
+        ] {
+            assert!(!allowed(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn printenv_runtime_override_still_applies() {
+        let config = RuntimeReadonlyConfig {
+            overrides: vec![RuntimeReadonlySpec {
+                command: "printenv".to_string(),
+                validator: RuntimeValidator::Generic(RuntimeGenericSpec {
+                    short_flags: "0".to_string(),
+                    long_flags: vec!["--null".to_string()],
+                    value_flags: Vec::new(),
+                    deny_flags: Vec::new(),
+                    path_mode: PathMode::Unchecked,
+                    bare_number_max: 0,
+                }),
+            }],
+            ..RuntimeReadonlyConfig::default()
+        };
+
+        assert!(allowed_with_config("printenv PATH", &config));
+        assert!(allowed_with_config("printenv --null SECRET_P38", &config));
+        assert!(!allowed("printenv PATH"));
+    }
 }
 
 #[test]

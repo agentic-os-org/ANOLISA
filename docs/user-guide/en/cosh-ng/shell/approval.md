@@ -45,6 +45,17 @@ and `GIT_*` variables are not passed through. Time-zone, locale, and Git
 results can therefore differ from the same command in that shell. Run commands
 that need the shell's current environment directly in the foreground shell.
 
+`printenv` is not on the built-in read-only allowlist. In the default `auto`
+mode it requires an approval card: the classifier cannot know which variable
+names hold secrets, and bare `printenv` prints the whole environment. This
+gate only removes the built-in read-only auto-approval for `printenv`.
+Explicit trust settings and runtime read-only configuration still apply: a
+request matching an explicit command trust key (`trusted_commands`) can still
+run without a card in `auto` mode, `trust` runs provider tool requests
+automatically after confirmation, and `shell.readonly` overrides and
+`shell.readonly_disabled` continue to control read-only eligibility (see
+[Configuration](../configuration.md)).
+
 Enable trust mode with a second confirmation:
 
 ```text

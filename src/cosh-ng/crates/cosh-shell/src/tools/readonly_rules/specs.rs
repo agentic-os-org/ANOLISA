@@ -79,7 +79,6 @@ pub static READONLY_SPECS: &[ReadonlySpec] = &[
     basic::WHICH,
     basic::DIRNAME,
     basic::BASENAME,
-    basic::PRINTENV,
     basic::ECHO,
     basic::TR,
     basic::PGREP,

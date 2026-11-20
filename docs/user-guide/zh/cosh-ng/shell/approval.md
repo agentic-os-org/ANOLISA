@@ -40,6 +40,13 @@ cosh 评估被包裹的只读命令，并执行包裹后的形态，
 相关结果可能与在该 shell 中执行相同命令不同。需要 shell 当前环境的命令，
 请直接在前台 shell 中执行。
 
+`printenv` 不在内置只读白名单中。默认 `auto` 模式下它需要审批卡片：分类器无法
+判断哪些变量名存有敏感值，而裸 `printenv` 会输出全部环境变量。该门禁只移除
+`printenv` 的内置只读自动批准；显式信任设置与运行时只读配置仍然生效：匹配显式
+命令信任键（`trusted_commands`）的请求在 `auto` 模式下仍可免卡执行，`trust` 在
+二次确认后自动执行 Provider 工具请求，`shell.readonly` 覆盖与
+`shell.readonly_disabled` 继续控制只读资格（见[配置](../configuration.md)）。
+
 使用下面的命令二次确认trust模式：
 
 ```text

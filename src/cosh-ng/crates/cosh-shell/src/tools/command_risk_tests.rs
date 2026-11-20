@@ -14,6 +14,45 @@ fn ask(command: &str) -> CommandAssessment {
     )
 }
 
+// Lib-only so the exact lib/bin overlap ceiling stays unchanged.
+library_tests! {
+    #[test]
+    fn command_risk_printenv_is_not_auto_approved() {
+        for command in [
+            "printenv",
+            "printenv SECRET_P38",
+            "printenv PATH",
+            "printenv HOME SECRET_P38",
+            "printenv --null SECRET_P38",
+        ] {
+            let assessment = auto(command);
+            assert_ne!(
+                assessment.execution,
+                ExecutionDecision::AutoAllow,
+                "{command}"
+            );
+            assert_eq!(assessment.auto_allow, None, "{command}");
+        }
+    }
+
+    #[test]
+    fn command_risk_printenv_forms_route_to_approval() {
+        for command in [
+            "printenv",
+            "printenv SECRET_P38",
+            "printenv HOME SECRET_P38",
+            "printenv --null SECRET_P38",
+        ] {
+            let assessment = auto(command);
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+        }
+    }
+}
+
 #[test]
 fn command_risk_assessment_direct_readonly_and_diagnostics() {
     for command in [
