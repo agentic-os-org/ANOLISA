@@ -693,8 +693,12 @@ impl GenAIBuilder {
                     let m = json
                         .get("model")
                         .and_then(|v| v.as_str())
-                        .or_else(|| json.get("modelVersion").and_then(|v| v.as_str()))
-                        .filter(|m| !m.is_empty());
+                        .filter(|m| !m.is_empty())
+                        .or_else(|| {
+                            json.get("modelVersion")
+                                .and_then(|v| v.as_str())
+                                .filter(|m| !m.is_empty())
+                        });
                     if let Some(m) = m {
                         model = Some(m.to_string());
                     }
@@ -732,9 +736,17 @@ impl GenAIBuilder {
                     let id = json
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .or_else(|| json.get("responseId").and_then(|v| v.as_str()))
-                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
-                        .filter(|id| !id.is_empty());
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| {
+                            json.get("responseId")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        })
+                        .or_else(|| {
+                            json.pointer("/message/id")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        });
                     if let Some(id) = id {
                         trace_id = Some(id.to_string());
                     }
@@ -1485,6 +1497,15 @@ mod tests {
         let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
         assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-flash"));
         assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_123"));
+
+        // Empty primary `model` / `id` strings must still fall back to `modelVersion` / `responseId`.
+        let empty_primary = vec![make_sse_event(
+            r#"{"model":"","id":"","candidates":[{"content":{"parts":[{"text":"partial answer"}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_gemini_456"}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&empty_primary)
+            .expect("enrichment with empty primary fields");
+        assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_456"));
     }
 
     #[test]
