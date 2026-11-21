@@ -14,10 +14,10 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 
 ## 1. 安装 AW
 
-从 [GitHub Releases](https://github.com/agentic-os-org/ANOLISA/releases?q=aw%2Fv)（例如 `aw/v0.2.0`）
-或目标提交对应的 AW Integration CI 运行中下载 `aw-core` 压缩包和匹配的 `SHA256SUMS`，
-按[安装指南](installation.md#获取安装包)校验并解压。
-进入解压后的 `aw-core` 目录，安装预编译 CLI：
+按适用发行渠道获取 `aw-core`（例如可用的 OS 软件包、发布或 CI 归档，或按
+[源码构建指南](../../../../contribute/zh/aw/building.md)自行构建），并按
+[安装指南](installation.md#获取安装包)校验产物完整性。
+使用解压后的 `aw-core` 归档安装预编译 CLI：
 
 ```bash
 export AW_PREFIX="$HOME/.local"

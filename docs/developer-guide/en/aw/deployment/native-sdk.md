@@ -20,9 +20,13 @@ requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
 ## Package layout (6 packages)
 
-AW `0.2.0` ships 2 framework-free core packages and 4 optional framework adapter
-packages (3 Python wheels + 3 npm tarballs in the `aw/v0.2.0` release assets).
-Each adapter package pins the matching `0.2.0` core package and is installed
+AW ships 2 framework-free core packages and 4 optional framework adapter packages
+(3 Python wheels and 3 npm tarballs). Obtain the core and dual-language SDK
+packages from your applicable distribution channel (such as OS packages when
+available, published release/CI archives, or a
+[source build](../../../../../contribute/en/aw/building.md)), and verify artifact
+integrity following the [installation guide](../../../../user-guide/en/aw/installation.md#get-a-package).
+Each adapter package pins the matching core package version and is installed
 only when your application uses that framework:
 
 | Language | Package | Role | Primary import | Descriptor profile |

@@ -14,10 +14,11 @@ Your Agent continues to manage its interface, model account and permissions.
 
 ## 1. Install AW
 
-Download the `aw-core` archive (for example `aw/v0.2.0`) and matching `SHA256SUMS` from
-[GitHub Releases](https://github.com/agentic-os-org/ANOLISA/releases?q=aw%2Fv) (or an AW Integration CI run),
-then verify and extract it using the [installation guide](installation.md#get-a-package).
-In the extracted `aw-core` directory, install the prebuilt CLI:
+Obtain `aw-core` from your applicable distribution channel (such as an OS package
+when available, a published release or CI archive, or a
+[source build](../../../../contribute/en/aw/building.md)), and verify artifact
+integrity following the [installation guide](installation.md#get-a-package).
+When installing from an extracted `aw-core` archive, run:
 
 ```bash
 export AW_PREFIX="$HOME/.local"

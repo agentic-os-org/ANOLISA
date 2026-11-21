@@ -12,9 +12,8 @@ Agents retain their models, interfaces and permissions. AW runs on Linux.
 
 ## 5-minute quickstart
 
-Install AW `0.2.0` core (and optional Provider extensions) from the [installation guide](../../docs/user-guide/en/aw/installation.md).
-AW currently ships as standalone release archives; `anolisa install aw` and RPM packages are not available yet.
-Install and sign in to your Agent first, then initialize, validate and launch with the `0.2.0` CLI.
+Install AW core (and optional Provider extensions) from your applicable distribution channel—such as OS packages when available, release/CI archives, or a source build—and verify integrity following the [installation guide](../../docs/user-guide/en/aw/installation.md).
+Install and sign in to your Agent first, then initialize, validate and launch with the AW CLI.
 
 The example below uses a signed-in Qoder CLI (`AW_PREFIX` is your AW installation prefix; `aw` and `qodercli` must be on `PATH`):
 
@@ -74,7 +73,7 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 
 ## Dual-language Runtime SDKs
 
-AW `0.2.0` ships 6 independent SDK packages (2 core packages + 4 optional framework adapter packages) so applications keep native startup, authentication and scheduling:
+AW ships 6 independent SDK packages (2 core packages + 4 optional framework adapter packages) so applications keep native startup, authentication and scheduling:
 
 | Language | Core package | Optional framework adapters |
 | --- | --- | --- |

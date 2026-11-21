@@ -12,9 +12,8 @@ Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 
 ## 5 分钟快速入门
 
-按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW `0.2.0` core 及可选 Provider 扩展。
-当前 AW 通过独立发布包交付，`anolisa install aw` 和 RPM 安装入口尚未提供。
-先安装并登录所选 Agent，再用 `0.2.0` CLI 生成配置、校验并启动。
+按适用发行渠道获取并安装 AW core 及可选 Provider 扩展（例如可用的 OS 软件包、发布或 CI 归档，或从源码构建），并按[安装指南](../../docs/user-guide/zh/aw/installation.md)校验完整性。
+先安装并登录所选 Agent，再用 AW CLI 生成配置、校验并启动。
 
 下面以已登录的 Qoder CLI 为例（`AW_PREFIX` 为 AW 安装前缀，`aw` 和 `qodercli` 需在 `PATH` 中）：
 
@@ -74,7 +73,7 @@ AW core 可独立使用；需要安全检查（`sec-core`）或输出压缩（`T
 
 ## 双语言 Runtime SDK
 
-AW `0.2.0` 提供 6 个独立 SDK 包（2 个核心包 + 4 个可选框架适配包），应用可保留原生启动方式、认证与任务调度：
+AW 提供 6 个独立 SDK 包（2 个核心包 + 4 个可选框架适配包），应用可保留原生启动方式、认证与任务调度：
 
 | 语言 | 核心包 | 可选框架适配包 |
 | --- | --- | --- |
