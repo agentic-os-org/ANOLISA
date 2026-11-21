@@ -29,6 +29,10 @@ mod hooks;
 mod redaction_boundary_tests;
 
 #[cfg(test)]
+#[path = "evidence/output_text_scanner_tests.rs"]
+mod output_text_scanner_tests;
+
+#[cfg(test)]
 #[path = "ui/card_kind_tests.rs"]
 mod card_kind_tests;
 #[cfg(test)]

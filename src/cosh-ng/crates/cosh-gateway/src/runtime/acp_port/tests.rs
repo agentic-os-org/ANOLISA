@@ -905,7 +905,7 @@ fn codex_command_permission_derives_a_visible_title() {
     assert!(summary.summary.as_str().contains(command));
     let mut expected_carrier = carrier;
     expected_carrier["title"] = json!(format!("Run cwd=\"/workspace\", command=\"{command}\""));
-    let canonical: agent_client_protocol::schema::v1::ToolCall =
+    let canonical: agent_client_protocol::v1::schema::ToolCall =
         serde_json::from_value(expected_carrier).unwrap();
     assert_eq!(
         request.input_digest,
@@ -1046,7 +1046,7 @@ fn codex_command_permission_refines_a_prior_read_projection() {
     assert_eq!(summary, refined.summary);
     let mut canonical = carrier;
     canonical["title"] = json!(expected_title);
-    let canonical: agent_client_protocol::schema::v1::ToolCall =
+    let canonical: agent_client_protocol::v1::schema::ToolCall =
         serde_json::from_value(canonical).unwrap();
     assert_eq!(
         request.input_digest,
@@ -1180,7 +1180,7 @@ fn codex_command_permission_escapes_controls_without_rewriting_input() {
     let mut expected_carrier = carrier;
     expected_carrier["title"] = json!(visible_title);
     assert_eq!(expected_carrier["rawInput"]["command"], command);
-    let canonical: agent_client_protocol::schema::v1::ToolCall =
+    let canonical: agent_client_protocol::v1::schema::ToolCall =
         serde_json::from_value(expected_carrier).unwrap();
     assert_eq!(
         request.input_digest,
@@ -1333,7 +1333,7 @@ fn codex_permissions_request_is_self_contained_without_a_tool_update() {
     assert_eq!(summary.name.as_str(), "agent_tool");
     assert_eq!(summary.summary.as_str(), "Read the requested file");
     assert_eq!(request.request_id, request_id);
-    let canonical: agent_client_protocol::schema::v1::ToolCall =
+    let canonical: agent_client_protocol::v1::schema::ToolCall =
         serde_json::from_value(carrier).unwrap();
     assert_eq!(
         request.input_digest,

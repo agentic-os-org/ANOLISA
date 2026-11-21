@@ -53,6 +53,18 @@ fn cosh_core_empty_success_emits_completion_without_text() {
 }
 
 #[test]
+fn cosh_core_cancelled_result_reports_cancellation_not_completion() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(r#"{"type":"result","subtype":"cancelled","is_error":false}"#);
+
+    assert!(
+        matches!(&events[..], [AgentEvent::AgentCancelled { .. }]),
+        "a cancelled turn terminal must not be presented as a completion: {events:?}"
+    );
+}
+
+#[test]
 fn claude_stream_parser_maps_thinking_delta_to_transient_status() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 

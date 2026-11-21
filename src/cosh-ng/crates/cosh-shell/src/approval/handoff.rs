@@ -49,6 +49,12 @@ pub(crate) fn queue_approved_shell_handoff(
     let Ok(command) = shell_handoff_command_from_request(request) else {
         return;
     };
+    if let Some(reason) = expected_cwd_conflict(state, request) {
+        let _ = crate::agent::approval_bridge::deny_policy_refused_shell_request(
+            state, request, &reason,
+        );
+        return;
+    }
     let exact_preview = shell_handoff_exact_preview(request, &command);
     let request_id = request
         .provider_shell_request_kind
@@ -95,6 +101,26 @@ fn approved_shell_handoff_source(
         ProviderShellRequestKind::ControlPermission => "approved_provider_shell_tool",
         ProviderShellRequestKind::StreamedToolCallFallback
         | ProviderShellRequestKind::LocalApproval => "approved_fallback",
+    }
+}
+
+/// The host-shell extension's optional directory assertion (`expectedCwd`).
+/// When an action names a required directory the shell must not run it
+/// somewhere else: the live directory comes from the shell's own reports and
+/// the comparison is literal, so a differing or unverifiable path refuses
+/// instead of silently retargeting. Requests without the assertion are
+/// untouched.
+fn expected_cwd_conflict(state: &InlineState, request: &RuntimeApprovalRequest) -> Option<String> {
+    let expected = request.tool_input.as_ref()?.get("expectedCwd")?.as_str()?;
+    match crate::agent::approval_bridge::live_shell_cwd(state) {
+        Some(live) if live == std::path::Path::new(expected) => None,
+        Some(live) => Some(format!(
+            "cosh-shell refused this action because it requires directory {expected} but the shell is in {}; nothing was executed",
+            live.display()
+        )),
+        None => Some(format!(
+            "cosh-shell refused this action because it requires directory {expected} but the shell has not reported a verifiable directory; nothing was executed"
+        )),
     }
 }
 

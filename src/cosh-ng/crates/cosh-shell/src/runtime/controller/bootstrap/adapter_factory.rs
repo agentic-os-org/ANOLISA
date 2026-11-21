@@ -15,8 +15,11 @@ pub(super) fn build_adapter(kind: AdapterKind) -> AdapterInstance {
         AdapterInstance::CoshCore(adapter) => {
             AdapterInstance::CoshCore(adapter.with_model_call(true))
         }
+        AdapterInstance::Acp(adapter) => AdapterInstance::Acp(adapter.with_model_call(true)),
         other => other,
     };
+    // Only cosh-core is a Cosh session asset; an ACP peer is an external Agent
+    // and must not inherit the pinned core executable trust.
     crate::adapter::admit_session_assets(match &adapter {
         AdapterInstance::CoshCore(core) => Some(&core.program),
         _ => None,

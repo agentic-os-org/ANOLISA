@@ -393,3 +393,28 @@ fn test_active_run() -> ActiveAgentRun {
         pending_hook_notifications: Vec::new(),
     }
 }
+
+#[test]
+fn direct_resume_on_acp_records_the_explicit_target_instead_of_unavailable() {
+    let adapter =
+        AdapterInstance::Acp(crate::adapter::AcpAgentAdapter::new("/must-not-be-started"));
+    let mut state = InlineState::default();
+    let mut output = Vec::new();
+
+    select_session_in_scope(SESSION_ID, SESSION_ID, &adapter, &mut state, &mut output)
+        .expect("render selected notice");
+
+    let rendered = String::from_utf8(output).expect("UTF-8 notice");
+    assert!(
+        !rendered.contains(SESSION_UNAVAILABLE),
+        "ACP resume must select, not report unavailable: {rendered}"
+    );
+    match adapter {
+        AdapterInstance::Acp(ref acp) => assert_eq!(
+            acp.pending_resume().as_deref(),
+            Some(SESSION_ID),
+            "the explicit target must be recorded for the next run"
+        ),
+        _ => unreachable!("test adapter is acp"),
+    }
+}

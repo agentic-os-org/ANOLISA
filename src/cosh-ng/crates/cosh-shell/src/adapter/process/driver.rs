@@ -246,6 +246,7 @@ pub(crate) fn start_cancellable_provider_process<S: ProviderDriverSpec>(
         )),
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,
+        ui_inflight: None,
     }
 }
 
@@ -603,5 +604,6 @@ pub(crate) fn start_control_protocol_provider_process<S: ProviderDriverSpec>(
         control_capabilities,
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,
+        ui_inflight: None,
     }
 }

@@ -89,8 +89,20 @@ health_matrix_ignored_count="$(
 if [[ "$health_matrix_ignored_count" -ne 1 ]]; then
   fail "expected exactly one provisioned health report matrix, found $health_matrix_ignored_count"
 fi
-ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count))
-echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix"
+# The official ACP SDK peer interop test needs an explicitly provisioned
+# external peer process (node plus the official TypeScript SDK), like the
+# foreign-UID fixture; it is not an ordinary default skip and does not consume
+# the ordinary skip budget. H2 runs it against the provisioned peer.
+sdk_peer_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "requires the official TypeScript SDK peer process"\]\n[ \t]*fn standard_session_with_the_official_typescript_sdk_peer\(' \
+    crates/cosh-shell/tests/protocol/acp_client.rs |
+  awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$sdk_peer_ignored_count" -ne 1 ]]; then
+  fail "expected exactly one provisioned official ACP SDK peer interop test, found $sdk_peer_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count - sdk_peer_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix, $sdk_peer_ignored_count provisioned SDK peer"
 if [[ "$ordinary_ignored_count" -gt 3 ]]; then
   fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi

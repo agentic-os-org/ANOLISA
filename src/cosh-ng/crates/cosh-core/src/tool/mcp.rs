@@ -1560,6 +1560,9 @@ mod tests {
     )]
     async fn lifecycle_commands_manage_server_state() {
         let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let _env_lock = crate::sls::tests::ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let states = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let _states_dir = EnvVarGuard::set("COSH_STATES_DIR", states.path());

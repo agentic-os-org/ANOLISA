@@ -10,11 +10,12 @@ use super::probe_outcome::{record_probe_outcome, ProbeStartOutcome};
 use super::{
     bootstrap_path_command, bootstrap_path_probe_plan, bootstrap_process_path_from_shell,
     extract_bootstrap_path, merge_bootstrap_paths, merge_path_additions_at_anchors,
-    merge_path_lists, plan_startup_for_render, prepare_startup_suggestions,
-    record_visible_personal_impressions, render_pending_recommendation_notice,
-    render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
-    startup_suggestion_mode, write_startup_suggestions, BootstrapPathProbeError,
-    BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    merge_path_lists, plan_startup_for_render, precompute_startup_suggestions,
+    prepare_startup_suggestions, record_visible_personal_impressions,
+    render_pending_recommendation_notice, render_pending_upgrade_notice, render_startup_banner,
+    run_bootstrap_path_probe, startup_suggestion_mode, write_startup_suggestions,
+    BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
+    BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -1802,4 +1803,441 @@ fn user_facing_startup_does_not_advertise_questions_when_ai_is_disabled() {
         !text.contains("ask questions in natural language"),
         "{text}"
     );
+}
+
+struct A38CacheRender {
+    banner: String,
+    binding_ids: Vec<String>,
+    ghost_after: Option<String>,
+    cache_present_before: bool,
+    cache_consumed_after: bool,
+    ghost_deferred_before: bool,
+    bindings_deferred_before: bool,
+}
+
+fn a38_render_with_fresh_home(
+    precompute_cwd: Option<&str>,
+    ready_cwd: &str,
+    report: &HealthScanReport,
+) -> A38CacheRender {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _home = ScopedEnvVar::set(
+        "HOME",
+        Some(home.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    state.startup_auth.resolved = Some(true);
+    state.startup_health.report = Some(report.clone());
+    if let Some(cwd) = precompute_cwd {
+        precompute_startup_suggestions(&mut state, cwd);
+    }
+    let cache_present_before = state.startup_suggestions_cache.is_some();
+    let ghost_deferred_before = state.pending_input_ghost.is_none();
+    let bindings_deferred_before = state.pending_prompt_suggestion_bindings.is_empty();
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    event.cwd = Some(ready_cwd.to_string());
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut output).unwrap();
+    let mut binding_ids: Vec<String> = state
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    binding_ids.sort();
+    A38CacheRender {
+        banner: String::from_utf8(output).unwrap(),
+        binding_ids,
+        ghost_after: state.pending_input_ghost.clone(),
+        cache_present_before,
+        cache_consumed_after: state.startup_suggestions_cache.is_none(),
+        ghost_deferred_before,
+        bindings_deferred_before,
+    }
+}
+
+#[test]
+fn a38_cache_consumption_is_gated_on_the_actual_shell_ready_cwd() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let _term = ScopedEnvVar::set("TERM", Some(OsStr::new("xterm-256color")));
+    let _isolated = ScopedEnvVar::set("COSH_SHELL_ISOLATED", None);
+    let _store = ScopedEnvVar::set("COSH_SHELL_HEALTH_SUPPRESSION_STORE", None);
+    let mut report = HealthScanReport::new("a38-cache-cwd", 1000);
+    report.overall_severity = HealthSeverity::Warning;
+    report.findings.push(HealthFinding {
+        id: "J06".to_string(),
+        severity: HealthSeverity::Warning,
+        category: HealthFindingCategory::RootCause,
+        title_id: HealthMessageId::HealthFindingMemoryAvailableLow,
+        detail_id: None,
+        detail_args: Default::default(),
+        evidence_fact_ids: vec![],
+        suggested_try_ids: vec!["worker-memory".to_string()],
+    });
+    report.try_items.push(HealthTryItem {
+        id: "worker-memory".to_string(),
+        label_id: HealthMessageId::HealthTryAnalyzeMemoryPressure,
+        label_args: Default::default(),
+        prompt_id: Some(HealthMessageId::HealthPromptAnalyzeMemoryPressure),
+        prompt_args: Default::default(),
+        kind: HealthTryKind::AskAgent,
+        command: None,
+        reason_id: HealthMessageId::HealthTryReasonMemoryLow,
+        reason_args: Default::default(),
+        score: 100,
+        finding_id: "J06".to_string(),
+    });
+
+    // Mismatch: precompute for /tmp, but the shell's first real cwd is elsewhere
+    // (init script changed directory). The cache must not be consumed; the
+    // fallback must reproduce the old actual-directory render exactly, and the
+    // precompute must not have claimed the health candidate ahead of time.
+    let mismatch = a38_render_with_fresh_home(Some("/tmp"), "/home/user/project", &report);
+    assert!(mismatch.cache_present_before);
+    assert!(
+        mismatch.ghost_deferred_before,
+        "precompute must defer ghost input to render"
+    );
+    assert!(
+        mismatch.bindings_deferred_before,
+        "precompute must defer prompt bindings to render"
+    );
+    let fresh_actual = a38_render_with_fresh_home(None, "/home/user/project", &report);
+    assert_eq!(
+        mismatch.banner, fresh_actual.banner,
+        "cwd mismatch must render identically to the fresh actual-directory path"
+    );
+    assert_eq!(mismatch.binding_ids, fresh_actual.binding_ids);
+    assert_eq!(mismatch.ghost_after, fresh_actual.ghost_after);
+    assert!(
+        mismatch.binding_ids.iter().any(|id| id == "worker-memory"),
+        "fallback health claim must survive (precompute must not pre-suppress it)"
+    );
+
+    // Match: precompute cwd equals the first real cwd. The cache is consumed and
+    // committed at render; output must equal a fresh render of the same cwd.
+    let matched = a38_render_with_fresh_home(Some("/tmp"), "/tmp", &report);
+    assert!(matched.cache_present_before);
+    assert!(
+        matched.cache_consumed_after,
+        "same-cwd render must take the cache"
+    );
+    assert!(matched.ghost_deferred_before);
+    assert!(
+        matched.ghost_after.is_some(),
+        "same-cwd render must commit the cached ghost input"
+    );
+    let fresh_same = a38_render_with_fresh_home(None, "/tmp", &report);
+    assert_eq!(
+        matched.banner, fresh_same.banner,
+        "same-cwd cache hit must render identically to a fresh render"
+    );
+    assert_eq!(matched.binding_ids, fresh_same.binding_ids);
+    assert!(matched.binding_ids.iter().any(|id| id == "worker-memory"));
+}
+
+#[test]
+fn a38_cache_does_not_freeze_a_not_ready_health_report() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let _term = ScopedEnvVar::set("TERM", Some(OsStr::new("xterm-256color")));
+    let _isolated = ScopedEnvVar::set("COSH_SHELL_ISOLATED", None);
+    let _store = ScopedEnvVar::set("COSH_SHELL_HEALTH_SUPPRESSION_STORE", None);
+    let mut report = HealthScanReport::new("a38-not-ready", 1000);
+    report.overall_severity = HealthSeverity::Warning;
+    report.findings.push(HealthFinding {
+        id: "J06".to_string(),
+        severity: HealthSeverity::Warning,
+        category: HealthFindingCategory::RootCause,
+        title_id: HealthMessageId::HealthFindingMemoryAvailableLow,
+        detail_id: None,
+        detail_args: Default::default(),
+        evidence_fact_ids: vec![],
+        suggested_try_ids: vec!["worker-memory".to_string()],
+    });
+    report.try_items.push(HealthTryItem {
+        id: "worker-memory".to_string(),
+        label_id: HealthMessageId::HealthTryAnalyzeMemoryPressure,
+        label_args: Default::default(),
+        prompt_id: Some(HealthMessageId::HealthPromptAnalyzeMemoryPressure),
+        prompt_args: Default::default(),
+        kind: HealthTryKind::AskAgent,
+        command: None,
+        reason_id: HealthMessageId::HealthTryReasonMemoryLow,
+        reason_args: Default::default(),
+        score: 100,
+        finding_id: "J06".to_string(),
+    });
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let ready_event = || {
+        let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+        event.kind = crate::types::ShellEventKind::ShellReady;
+        event.input = None;
+        event.cwd = Some("/tmp".to_string());
+        event
+    };
+    let fresh_home = || {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        home
+    };
+
+    // Precompute while the health report is still None: the transient Hidden/empty
+    // result must not be frozen into the cache. Fresh suppression store.
+    let home_a = fresh_home();
+    let _home_a = ScopedEnvVar::set(
+        "HOME",
+        Some(home_a.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut state_a = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    state_a.startup_auth.resolved = Some(true);
+    precompute_startup_suggestions(&mut state_a, "/tmp");
+    assert!(
+        state_a.startup_suggestions_cache.is_none(),
+        "a not-ready health report must not be cached as a transient Hidden result"
+    );
+    // The report becomes ready before the first ShellReady, cwd unchanged.
+    state_a.startup_health.report = Some(report.clone());
+    let mut out_a = Vec::new();
+    render_startup_banner(&[ready_event()], &adapter, "bash", &mut state_a, &mut out_a).unwrap();
+    let banner_a = String::from_utf8(out_a).unwrap();
+    let mut ids_a: Vec<String> = state_a
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    ids_a.sort();
+    drop(_home_a);
+
+    // Fresh path: report ready from the start, no precompute, independent store.
+    let home_b = fresh_home();
+    let _home_b = ScopedEnvVar::set(
+        "HOME",
+        Some(home_b.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut state_b = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    state_b.startup_auth.resolved = Some(true);
+    state_b.startup_health.report = Some(report);
+    let mut out_b = Vec::new();
+    render_startup_banner(&[ready_event()], &adapter, "bash", &mut state_b, &mut out_b).unwrap();
+    let banner_b = String::from_utf8(out_b).unwrap();
+    let mut ids_b: Vec<String> = state_b
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    ids_b.sort();
+
+    assert_eq!(
+        banner_a, banner_b,
+        "not-ready-at-precompute then ready-at-render must equal the fresh ready path"
+    );
+    assert_eq!(ids_a, ids_b);
+    assert!(
+        ids_a.iter().any(|id| id == "worker-memory"),
+        "the ready report's AskAgent candidate must survive, got {ids_a:?}"
+    );
+}
+
+#[test]
+fn a38_deferred_auth_probe_not_awaited_before_spawn_and_late_unconfigured_matches_fresh() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let _term = ScopedEnvVar::set("TERM", Some(OsStr::new("xterm-256color")));
+    let _isolated = ScopedEnvVar::set("COSH_SHELL_ISOLATED", None);
+    let _store = ScopedEnvVar::set("COSH_SHELL_HEALTH_SUPPRESSION_STORE", None);
+    let mut report = HealthScanReport::new("a38-deferred-auth", 1000);
+    report.overall_severity = HealthSeverity::Warning;
+    report.findings.push(HealthFinding {
+        id: "J06".to_string(),
+        severity: HealthSeverity::Warning,
+        category: HealthFindingCategory::RootCause,
+        title_id: HealthMessageId::HealthFindingMemoryAvailableLow,
+        detail_id: None,
+        detail_args: Default::default(),
+        evidence_fact_ids: vec![],
+        suggested_try_ids: vec!["worker-memory".to_string()],
+    });
+    report.try_items.push(HealthTryItem {
+        id: "worker-memory".to_string(),
+        label_id: HealthMessageId::HealthTryAnalyzeMemoryPressure,
+        label_args: Default::default(),
+        prompt_id: Some(HealthMessageId::HealthPromptAnalyzeMemoryPressure),
+        prompt_args: Default::default(),
+        kind: HealthTryKind::AskAgent,
+        command: None,
+        reason_id: HealthMessageId::HealthTryReasonMemoryLow,
+        reason_args: Default::default(),
+        score: 100,
+        finding_id: "J06".to_string(),
+    });
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let ready_event = || {
+        let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+        event.kind = crate::types::ShellEventKind::ShellReady;
+        event.input = None;
+        event.cwd = Some("/tmp".to_string());
+        event
+    };
+    let fresh_home = || {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        home
+    };
+
+    // Managed Bash login: the credential probe is deferred until the startup PATH
+    // observer fires after spawn. Health is ready but auth is still pending (the
+    // sender is held and has not fired). Precompute must not burn the auth hint
+    // window before the shell exists, nor freeze an auth-unknown cache.
+    let (auth_sender, auth_receiver) =
+        std::sync::mpsc::sync_channel::<Option<(bool, crate::adapter::StartupAuthHint)>>(1);
+    let home_a = fresh_home();
+    let _home_a = ScopedEnvVar::set(
+        "HOME",
+        Some(home_a.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut state_a = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    state_a.startup_health.report = Some(report.clone());
+    state_a.startup_auth.pending = Some(auth_receiver);
+    let started = Instant::now();
+    precompute_startup_suggestions(&mut state_a, "/tmp");
+    let elapsed = started.elapsed();
+    assert!(
+        state_a.startup_suggestions_cache.is_none(),
+        "a deferred (unresolved) auth probe must not be frozen into the cache"
+    );
+    assert!(
+        state_a.startup_auth.pending.is_some(),
+        "the deferred probe receiver must remain pending, not consumed before spawn"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "precompute must not wait the full auth hint window before spawn, waited {elapsed:?}"
+    );
+    drop(_home_a);
+
+    // The probe fires after spawn and reports unconfigured before ShellReady.
+    auth_sender
+        .send(Some((false, crate::adapter::StartupAuthHint::default())))
+        .unwrap();
+    let home_a2 = fresh_home();
+    let _home_a2 = ScopedEnvVar::set(
+        "HOME",
+        Some(home_a2.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut out_a = Vec::new();
+    render_startup_banner(&[ready_event()], &adapter, "bash", &mut state_a, &mut out_a).unwrap();
+    let banner_a = String::from_utf8(out_a).unwrap();
+    let mut ids_a: Vec<String> = state_a
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    ids_a.sort();
+    drop(_home_a2);
+
+    // Fresh path: auth unconfigured from the start, no precompute, same cwd.
+    let home_b = fresh_home();
+    let _home_b = ScopedEnvVar::set(
+        "HOME",
+        Some(home_b.path().canonicalize().unwrap().as_os_str()),
+    );
+    let mut state_b = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    state_b.startup_health.report = Some(report);
+    state_b.startup_auth.resolved = Some(false);
+    let mut out_b = Vec::new();
+    render_startup_banner(&[ready_event()], &adapter, "bash", &mut state_b, &mut out_b).unwrap();
+    let banner_b = String::from_utf8(out_b).unwrap();
+    let mut ids_b: Vec<String> = state_b
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    ids_b.sort();
+
+    assert_eq!(
+        banner_a, banner_b,
+        "same-cwd late unconfigured must render identically to the fresh unconfigured path"
+    );
+    assert_eq!(ids_a, ids_b);
+    assert!(
+        ids_a.is_empty(),
+        "unconfigured credentials must hide suggestions, got {ids_a:?}"
+    );
+}
+
+#[test]
+fn a38_precompute_consumes_a_finished_scan_without_deciding_an_unfinished_one() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let _term = ScopedEnvVar::set("TERM", Some(OsStr::new("xterm-256color")));
+    let _isolated = ScopedEnvVar::set("COSH_SHELL_ISOLATED", None);
+    let _store = ScopedEnvVar::set("COSH_SHELL_HEALTH_SUPPRESSION_STORE", None);
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _home = ScopedEnvVar::set(
+        "HOME",
+        Some(home.path().canonicalize().unwrap().as_os_str()),
+    );
+
+    // A scan that already finished is still consumed before the relay loop.
+    let mut finished = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    finished.startup_auth.resolved = Some(true);
+    finished.startup_health.pending = Some(HealthScanHandle::ready(HealthScanReport::new(
+        "a38-finished",
+        0,
+    )));
+    precompute_startup_suggestions(&mut finished, "/tmp");
+    assert!(finished.startup_health.pending.is_none());
+    assert_eq!(
+        finished.startup_health.report.as_ref().unwrap().scan_id,
+        "a38-finished"
+    );
+    assert!(finished.startup_suggestions_cache.is_some());
+
+    // A pending scan that cannot yield a report keeps its slot: precompute must
+    // not cancel it or mark the health row rendered, because the deadline and
+    // the final closure belong to ShellReady.
+    let mut pending = InlineState {
+        language: Language::EnUs,
+        ..Default::default()
+    };
+    pending.startup_auth.resolved = Some(true);
+    let mut handle = HealthScanHandle::ready(HealthScanReport::new("a38-pending", 0));
+    handle.cancel();
+    pending.startup_health.pending = Some(handle);
+    precompute_startup_suggestions(&mut pending, "/tmp");
+    assert!(
+        pending.startup_health.pending.is_some(),
+        "precompute must not take the pending slot"
+    );
+    assert!(pending.startup_health.report.is_none());
+    assert!(
+        !pending.startup_health.rendered,
+        "final closure stays with ShellReady"
+    );
+    assert!(pending.startup_suggestions_cache.is_none());
 }

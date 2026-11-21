@@ -31,6 +31,9 @@ SUBPROCESS_ENTRIES = (
 PROVISIONED_HEALTH_MATRIX = (
     'crates/cosh-shell/src/diagnostics/health/runtime/acceptance_tests.rs::live_report_matrix'
 )
+PROVISIONED_SDK_PEER_TESTS = (
+    'crates/cosh-shell/tests/protocol/acp_client.rs::standard_session_with_the_official_typescript_sdk_peer',
+)
 FIELDS = (
     "rule",
     "pattern",
@@ -201,11 +204,20 @@ def main(argv=None) -> int:
     )
     if health_matrix_count != 1:
         failures.append("the provisioned health report matrix must match its exact registry entry")
-    ordinary_ignored_count = ignored_count - provisioned_count - helper_count - health_matrix_count
-    if ordinary_ignored_count != 3 or heavy_count - provisioned_count != 3:
+    sdk_peer_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] in PROVISIONED_SDK_PEER_TESTS
+        and rule.data["disposition"] == "explicit-heavy"
+    )
+    if sdk_peer_count != len(PROVISIONED_SDK_PEER_TESTS):
+        failures.append("provisioned official ACP SDK peer interop test must match its exact registry set")
+    ordinary_ignored = ignored_count - provisioned_count - helper_count - health_matrix_count - sdk_peer_count
+    ordinary_heavy = heavy_count - provisioned_count - sdk_peer_count
+    if ordinary_ignored != 3 or ordinary_heavy != 3:
         failures.append(
-            f"ordinary ignored tests ({ordinary_ignored_count}) and explicit-heavy registry tests "
-            f"({heavy_count - provisioned_count}) must both remain 3"
+            f"ordinary ignored tests ({ordinary_ignored}) and explicit-heavy registry tests "
+            f"({ordinary_heavy}) must both remain 3"
         )
 
     for failure in failures:

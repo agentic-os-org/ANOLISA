@@ -707,6 +707,7 @@ impl CoshCore {
             // Audit decision counts
             "session.audit_decision_counts.approve": self.metrics.approval_allow,
             "session.audit_decision_counts.deny": self.metrics.approval_deny,
+            "session.audit_decision_counts.unknown": self.metrics.approval_unknown,
             "session.audit_decision_counts.modify": 0,  // Phase 2
 
             // Tool call counts

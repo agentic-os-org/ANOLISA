@@ -167,6 +167,11 @@ impl ClaudeStreamParser {
                     error_code: self.error_code.clone(),
                     max_turns: self.max_turns,
                 });
+            } else if value.get("subtype").and_then(|value| value.as_str()) == Some("cancelled") {
+                events.push(AgentEvent::AgentCancelled {
+                    run_id: self.run_id.clone(),
+                    reason: "user requested cancellation".to_string(),
+                });
             } else {
                 events.push(AgentEvent::AgentCompleted {
                     run_id: self.run_id.clone(),

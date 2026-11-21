@@ -5,23 +5,6 @@ fn validate_absolute(path: &Path) -> Result<(), AcpV1CodecError> {
     Ok(())
 }
 
-fn batch_entry_requires_response(entry: &TransportBatchEntry) -> bool {
-    match entry {
-        TransportBatchEntry::Message(RawJsonRpcMessage::Request(_)) => true,
-        TransportBatchEntry::Message(
-            RawJsonRpcMessage::Notification(_) | RawJsonRpcMessage::Response(_),
-        ) => false,
-        TransportBatchEntry::Malformed { raw, .. } => !is_response_only_shape(raw),
-    }
-}
-
-fn is_response_only_shape(value: &serde_json::Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        !object.contains_key("method")
-            && (object.contains_key("result") || object.contains_key("error"))
-    })
-}
-
 fn decode_params<T: serde::de::DeserializeOwned>(
     params: Option<RawJsonRpcParams>,
 ) -> Result<T, AcpV1CodecError> {
@@ -99,7 +82,8 @@ fn sha256_parts(parts: &[&[u8]]) -> Digest {
         .unwrap_or_else(|_| unreachable!("SHA-256 output must remain canonical"))
 }
 
-fn from_sdk_request_id(id: RequestId) -> Result<AcpV1RequestId, AcpV1CodecError> {
+fn from_sdk_request_id(id: RawJsonRpcId) -> Result<AcpV1RequestId, AcpV1CodecError> {
+    let id: RequestId = id.into();
     match id {
         RequestId::Null => Err(AcpV1CodecError::NullRequestId),
         RequestId::Number(value) => Ok(AcpV1RequestId::Number(value)),

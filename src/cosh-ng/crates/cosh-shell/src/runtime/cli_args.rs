@@ -241,6 +241,24 @@ mod tests {
     }
 
     #[test]
+    fn acp_entry_is_chosen_by_name_and_legacy_stays_the_default() {
+        use crate::adapter::AdapterKind;
+
+        let config = super::CoshConfig::default();
+        let (default_name, _, _) =
+            super::configured_raw_invocation(parse_raw_invocation(&[]), &config);
+        assert_eq!(default_name, "cosh-core");
+        assert_eq!(
+            AdapterKind::parse(&default_name),
+            Some(AdapterKind::CoshCore)
+        );
+
+        let (acp_name, _, _) =
+            super::configured_raw_invocation(parse_raw_invocation(&["acp".to_string()]), &config);
+        assert_eq!(AdapterKind::parse(&acp_name), Some(AdapterKind::Acp));
+    }
+
+    #[test]
     fn raw_shell_default_uses_config_before_auto() {
         assert_eq!(shell_from_default_or_auto("zsh"), RawShellKind::Zsh);
         assert_eq!(shell_from_default_or_auto("/bin/bash"), RawShellKind::Bash);

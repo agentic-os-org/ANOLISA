@@ -184,6 +184,7 @@ impl PersistentCoshCoreRuntime {
                 control_capabilities,
                 pending_provider_session: Some(pending_session),
                 cancellation_artifacts,
+                ui_inflight: None,
             };
         }
 
@@ -264,6 +265,7 @@ impl PersistentCoshCoreRuntime {
             control_capabilities,
             pending_provider_session: Some(pending_session),
             cancellation_artifacts,
+            ui_inflight: None,
         }
     }
 

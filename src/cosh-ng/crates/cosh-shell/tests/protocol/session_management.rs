@@ -8,6 +8,10 @@ use cosh_shell::adapter::{
 };
 
 fn assert_recorded_process_is_gone(pid_file: &Path) {
+    // The recorded pid may not be written yet under host load; wait for the
+    // file before reading so the gone/not-running assertion is not raced by
+    // the writer's startup. The assertion itself is unchanged.
+    wait_for_path(pid_file);
     let pid: i32 = fs::read_to_string(pid_file)
         .expect("read session-control pid")
         .trim()
@@ -24,6 +28,10 @@ fn assert_recorded_process_is_gone(pid_file: &Path) {
 }
 
 fn assert_recorded_process_is_not_running(pid_file: &Path) {
+    // The recorded pid may not be written yet under host load; wait for the
+    // file before reading so the gone/not-running assertion is not raced by
+    // the writer's startup. The assertion itself is unchanged.
+    wait_for_path(pid_file);
     let pid = fs::read_to_string(pid_file)
         .expect("read session-control pid")
         .trim()
@@ -41,6 +49,10 @@ fn assert_recorded_process_is_not_running(pid_file: &Path) {
 
 #[cfg(target_os = "linux")]
 fn terminate_recorded_process(pid_file: &Path) {
+    // The recorded pid may not be written yet under host load; wait for the
+    // file before reading so the gone/not-running assertion is not raced by
+    // the writer's startup. The assertion itself is unchanged.
+    wait_for_path(pid_file);
     let pid: i32 = fs::read_to_string(pid_file)
         .expect("read session-control pid")
         .trim()

@@ -1,5 +1,6 @@
 //! Run-local admission and cancellation for ECS identity model requests.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -22,6 +23,10 @@ use crate::provider::{
 };
 
 const ADMISSION_LIMIT: Duration = Duration::from_secs(600);
+/// A21: grace for a Shutdown to let the in-flight turn finish before the
+/// provider is cancelled, mirroring the connection CLOSE_GRACE so a hanging
+/// provider future still terminates instead of waiting forever.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const MAX_ATTEMPTS: usize = 70;
 const MAX_INPUT_MESSAGES: usize = 128;
 const MAX_INPUT_BYTES: usize = 256 * 1024;
@@ -721,6 +726,93 @@ pub(crate) async fn drive<F: Future, R: AsyncBufReadExt + Unpin, W: Write>(
                 while let Ok(state)=progress.try_recv(){if write_progress(writer,state).is_err(){access.request_stop(false);}}
                 return output;
             },
+        }
+    }
+}
+
+/// Legacy provider wait: keep the run cancellable while the model is in flight.
+///
+/// The provider step is polled first, so a result that is already available is
+/// taken without consuming input; the reader is pumped only while the step is
+/// genuinely pending. Input this wait does not act on is buffered in arrival
+/// order for the transport loop, which drains it before reading anything new.
+pub(crate) async fn drive_provider<F: Future, R: AsyncBufReadExt + Unpin>(
+    future: F,
+    reader: &mut Lines<R>,
+    // Sync keeps the turn future Send so a host task can own it.
+    cancel: &(dyn Fn() + Sync),
+    pending: &Mutex<VecDeque<String>>,
+    // A21: the absolute Shutdown grace deadline is owned by the turn and shared
+    // across every provider step (generate plus each stream event), so a later
+    // hanging step is cancelled at the first Shutdown's deadline rather than
+    // restarting the grace per step.
+    shutdown_deadline: &Mutex<Option<Instant>>,
+) -> F::Output {
+    tokio::pin!(future);
+    let mut input_open = true;
+    loop {
+        let deadline = *shutdown_deadline.lock().expect("shutdown deadline lock");
+        tokio::select! {
+            biased;
+            output = &mut future => return output,
+            _ = sleep_until(deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))), if deadline.is_some() => {
+                *shutdown_deadline.lock().expect("shutdown deadline lock") = None;
+                input_open = false;
+                cancel();
+            }
+            line = reader.next_line(), if input_open => {
+                let Ok(Some(line)) = line else {
+                    input_open = false;
+                    continue;
+                };
+                let mut queue = pending.lock().expect("input queue is never poisoned");
+                let queued_bytes: usize = queue.iter().map(String::len).sum();
+                let line_len = line.len();
+                // A21: Interrupt cancels the in-flight provider request;
+                // Shutdown buffers the line and starts a bounded grace so the
+                // active turn can finish before the process exits, while a
+                // hanging future is still cancelled at the grace deadline.
+                let parsed = serde_json::from_str::<InputMessage>(&line);
+                let is_interrupt = matches!(
+                    parsed,
+                    Ok(InputMessage::ControlRequest {
+                        request: ShellControlRequest::Interrupt,
+                        ..
+                    })
+                );
+                let is_shutdown = matches!(
+                    parsed,
+                    Ok(InputMessage::ControlRequest {
+                        request: ShellControlRequest::Shutdown,
+                        ..
+                    })
+                );
+                // Interrupt is consumed (not buffered); every other line is
+                // kept for the main loop, including the buffered Shutdown.
+                if !is_interrupt {
+                    queue.push_back(line);
+                }
+                // A line already read is always kept; the bound stops further
+                // reads so the rest stays in the transport instead of being
+                // dropped here. An over-full buffer still cancels the turn.
+                let over_bound = queue.len() >= MAX_INPUT_MESSAGES
+                    || queued_bytes.saturating_add(line_len) > MAX_INPUT_BYTES;
+                if is_interrupt || over_bound {
+                    drop(queue);
+                    input_open = false;
+                    *shutdown_deadline.lock().expect("shutdown deadline lock") = None;
+                    cancel();
+                } else if is_shutdown {
+                    // Grace drain: let the active turn finish, but keep reading
+                    // so a later Interrupt cancels early, and cancel a hanging
+                    // future at the grace deadline. The first Shutdown sets the
+                    // absolute deadline; later steps reuse it (no extension).
+                    let mut shared = shutdown_deadline.lock().expect("shutdown deadline lock");
+                    if shared.is_none() {
+                        *shared = Some(Instant::now() + SHUTDOWN_GRACE);
+                    }
+                }
+            }
         }
     }
 }

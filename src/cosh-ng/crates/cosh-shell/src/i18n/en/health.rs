@@ -218,7 +218,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "configure credentials for adapter '{adapter}' (env or config.toml) or run /auth"
         }
         MessageId::HealthRemediationUnknownAdapter => {
-            "'{adapter}' is not a supported adapter; set adapter_default to one of: fake, claude-code, qwen-cli, cosh-core"
+            "'{adapter}' is not a supported adapter; set adapter_default to one of: fake, claude-code, qwen-cli, cosh-core, acp"
         }
         MessageId::HealthRemediationConfig => {
             "set HOME so cosh-shell can resolve ~/.copilot-shell and load config"

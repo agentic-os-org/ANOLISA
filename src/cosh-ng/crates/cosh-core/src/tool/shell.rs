@@ -215,9 +215,13 @@ mod tests {
         let command = leak_script(&marker, &pid_file);
 
         let tool = ShellTool;
+        // The script must record its pids before the timeout kills the group.
+        // 300ms left no margin for shell startup under host load, so read_pids
+        // could never observe a writer that was already killed; 3000ms keeps
+        // the timeout path (sleep 30 outlives it) with startup margin.
         let result = tool
             .invoke(
-                serde_json::json!({"command": command, "timeout_ms": 300}),
+                serde_json::json!({"command": command, "timeout_ms": 3000}),
                 &test_ctx(),
             )
             .await

@@ -496,7 +496,7 @@ pub(super) enum ShellRequestPolicyDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellRequestPolicyHandling {
+pub(crate) enum ShellRequestPolicyHandling {
     Continue,
     Refused,
     AwaitingTerminalSweep,
@@ -802,6 +802,15 @@ fn readonly_compound_execution_cwd(
         let candidate = std::path::Path::new(&request.cwd);
         return candidate.is_dir().then(|| candidate.to_path_buf());
     }
+    live_shell_cwd(state)
+}
+
+/// Live working directory reported by the shell itself, or `None` when nothing
+/// trustworthy is available. Prefers the latest marker-tracked command block;
+/// with zero observed command activity it falls back to the shell's prompt-time
+/// report. There is no process-cwd guess: absent markers alone prove nothing
+/// about where the shell sits.
+pub(crate) fn live_shell_cwd(state: &InlineState) -> Option<std::path::PathBuf> {
     if let Some(block) = state.session_blocks.last() {
         let live = std::path::Path::new(&block.end_cwd);
         if !block.end_cwd.is_empty() && live.is_dir() {
@@ -955,7 +964,7 @@ fn respond_auto_approval_to_provider(
 /// pass cannot resurface it. If delivery is unavailable, the request remains
 /// unhomed for the active or detached terminal sweep. Streamed fallbacks have
 /// no provider response and are recorded as shell-local refusals.
-fn deny_policy_refused_shell_request(
+pub(crate) fn deny_policy_refused_shell_request(
     state: &mut InlineState,
     request: &RuntimeApprovalRequest,
     reason: &str,

@@ -27,6 +27,9 @@ pub struct TurnMetrics {
     // Approval statistics
     pub approval_allow: u32,
     pub approval_deny: u32,
+    /// Foreground executes the host reported as UNKNOWN: the action may still
+    /// have run, so this is neither an allow nor a denial.
+    pub approval_unknown: u32,
     pub approval_wait_ms: u64,
     /// Number of approval interactions (for computing avg wait).
     pub approval_count: u32,

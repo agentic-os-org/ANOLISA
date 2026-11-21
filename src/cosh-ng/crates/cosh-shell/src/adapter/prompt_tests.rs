@@ -2,7 +2,7 @@ use super::prompt::{
     prompt_from_request, prompt_from_request_with_evidence_access,
     prompt_from_request_with_evidence_policy, provider_prompt_contract,
     provider_prompt_contract_for_language, provider_prompt_contract_for_request,
-    provider_prompt_contract_with_evidence_access,
+    provider_prompt_contract_with_evidence_access, PreambleTools,
 };
 use crate::evidence::ShellEvidenceAccess;
 use crate::types::composer::{
@@ -370,6 +370,7 @@ fn bound_insight_in_recommend_mode_names_missing_evidence_without_requesting_too
         &request,
         ShellEvidenceAccess::ControlProtocolTool,
         false,
+        PreambleTools::ProviderBash,
     );
 
     assert!(

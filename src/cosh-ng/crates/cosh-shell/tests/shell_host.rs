@@ -71,6 +71,8 @@ fn bash_supports_prompt_command_array() -> bool {
 
 #[path = "shell_host/foreground.rs"]
 mod foreground;
+#[path = "shell_host/forged_precmd.rs"]
+mod forged_precmd;
 #[path = "shell_host/governance.rs"]
 mod governance;
 #[path = "shell_host/handoff.rs"]
@@ -79,6 +81,7 @@ mod handoff;
 mod heavy;
 #[path = "shell_host/input_intent.rs"]
 mod input_intent;
+
 #[path = "shell_host/marker.rs"]
 mod marker;
 #[path = "shell_host/native.rs"]

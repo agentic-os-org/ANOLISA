@@ -74,6 +74,9 @@ pub(crate) struct InlineState {
     pub(crate) canceled_blocks: HashSet<String>,
     pub(crate) evaluated_failed_command_insights: HashSet<String>,
     pub(crate) rendered_startup_banner: bool,
+    /// A38: startup suggestions precomputed before the relay loop so the first
+    /// prompt-boundary observe only renders cheaply under the input_mode lock.
+    pub(crate) startup_suggestions_cache: Option<crate::runtime::startup::ComputedStartup>,
     pub(crate) handled_intercepts: HashSet<String>,
     pub(crate) hooks: HookRuntimeState,
     pub(crate) insight_correlation: InsightCorrelationState,
