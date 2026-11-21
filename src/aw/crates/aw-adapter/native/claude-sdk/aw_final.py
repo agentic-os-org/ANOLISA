@@ -12,8 +12,11 @@ from urllib.parse import urlparse
 class FinalGate:
     def __init__(self, config):
         self.config = config
+        self.enforcing = config.get("final_enforcing") is not False
         self.root = Path(config["ready_path"]).parent
         self.records = {}
+        self.snapshot = None
+        self.closed = False
         self.prefixes = ()
 
     def options(self, options, bundled):
@@ -49,49 +52,94 @@ class FinalGate:
                    "messages_path": parsed.path + "/v1/messages",
                    "cwd": str(Path(options.cwd or os.getcwd()).resolve())}
         (self.root / "claude-final-runtime.json").write_text(json.dumps(runtime))
-        self._save()
+        self._publish(self.records)
         preload = self.root / "claude-final-preload.mjs"
         if any(character.isspace() for character in str(preload)):
             raise ValueError("AW final preload path must not contain whitespace")
-        hooks = {}
-        for event, matchers in (options.hooks or {}).items():
-            hooks[event] = []
-            for matcher in matchers:
-                callbacks = []
-                for callback in matcher.hooks:
-                    async def checked(payload, call, context, callback=callback):
-                        result = await callback(payload, call, context)
-                        specific = result.get("hookSpecificOutput", {})
-                        if specific.get("additionalContext") or result.get("systemMessage"):
-                            raise ValueError("AW final gate does not cover Hook context injection")
-                        return result
-                    callbacks.append(checked)
-                hooks[event].append(replace(matcher, hooks=callbacks))
-        return replace(options, hooks=hooks, env={**options.env,
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        if self.enforcing:
+            options = self._enforcing_options(options)
+        return replace(options, env={**options.env,
             "BUN_OPTIONS": f"--preload={preload}",
             "AW_CLAUDE_FINAL_CONFIG": str(self.root / "claude-final-runtime.json")})
 
+    def _enforcing_options(self, options):
+        def wrap(callback):
+            async def checked(payload, call, context):
+                result = await callback(payload, call, context)
+                specific = result.get("hookSpecificOutput", {})
+                if specific.get("additionalContext") or result.get("systemMessage"):
+                    raise ValueError("AW final gate does not cover Hook context injection")
+                return result
+            return checked
+
+        hooks = {event: [replace(matcher, hooks=[wrap(callback) for callback in matcher.hooks])
+                         for matcher in matchers]
+                 for event, matchers in (options.hooks or {}).items()}
+        return replace(options, hooks=hooks, env={**options.env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"})
+
     def supports_tool(self, payload):
         name = payload.get("tool_name", "")
-        return (name == "Bash" or name.startswith(self.prefixes)) and not payload.get(
-            "tool_input", {}).get("run_in_background")
+        tool_input = payload.get("tool_input", {})
+        return (isinstance(name, str) and (name == "Bash" or name.startswith(self.prefixes))
+                and isinstance(tool_input, dict) and not tool_input.get("run_in_background"))
 
     def record(self, payload):
         call = payload.get("tool_use_id")
-        if not isinstance(call, str) or not call or len(self.records) >= 1024:
-            raise ValueError("AW final gate native identity limit")
-        value = {key: payload.get(key) for key in
-                 ("session_id", "cwd", "tool_use_id", "tool_name", "tool_input")}
-        if call in self.records:
-            value["ambiguous"] = True
-        self.records[call] = json.loads(json.dumps(value))
-        self._save()
+        if not self.enforcing and not self.supports_tool(payload):
+            return
+        try:
+            if not isinstance(call, str) or not call:
+                raise ValueError("AW final gate native identity limit")
+            duplicate = call in self.records
+            if len(self.records) >= 1024 and not (self.enforcing and duplicate):
+                raise ValueError("AW final gate native identity limit")
+            if self.enforcing and duplicate:
+                value = {**self.records[call], "ambiguous": True}
+            else:
+                value = {key: payload.get(key) for key in
+                         ("session_id", "cwd", "tool_use_id", "tool_name", "tool_input")}
+                if duplicate:
+                    value["ambiguous"] = True
+                value = json.loads(json.dumps(value))
+            self._publish({**self.records, call: value})
+        except (OSError, ValueError, TypeError, RecursionError):
+            if self.enforcing:
+                raise
 
-    def _save(self):
+    def _publish(self, records):
+        if self.closed:
+            raise ValueError("AW final identity snapshot is closed")
         temporary = self.root / "claude-final-records.tmp"
-        temporary.write_text(json.dumps(self.records))
-        temporary.replace(self.root / "claude-final-records.json")
+        destination = self.root / "claude-final-records.json"
+        if self.enforcing:
+            self._revoke_snapshot()
+            self.records = records
+            snapshot = temporary.open("w", encoding="utf-8")
+            try:
+                json.dump({"pid": os.getpid(), "fd": snapshot.fileno(), "records": records}, snapshot)
+                snapshot.flush()
+                temporary.replace(destination)
+            except BaseException:
+                snapshot.close()
+                raise
+            self.snapshot = snapshot
+            return
+        try:
+            temporary.write_text(json.dumps(records))
+            temporary.replace(destination)
+        except OSError:
+            return
+        else:
+            self.records = records
+
+    def close(self):
+        self.closed = True
+        self._revoke_snapshot()
+
+    def _revoke_snapshot(self):
+        if self.snapshot is not None:
+            snapshot, self.snapshot = self.snapshot, None
+            snapshot.close()
 
     def ready(self):
         value = json.loads((self.root / "claude-final-ready.json").read_text())

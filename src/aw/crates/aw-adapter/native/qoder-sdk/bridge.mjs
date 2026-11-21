@@ -79,6 +79,7 @@ export async function createSdkMcpServer(options) {
 function compose(config, options) {
   const native = nativeConfiguration(config);
   const final = queryFinal(config);
+  const finalEnforcing = final?.enforcing;
   config.skillState ??= {};
   if (options.transport != null || (!native && (!Array.isArray(options.settingSources) || options.settingSources.length ||
       options.settings != null || !pluginsAdmitted(options.plugins) ||
@@ -93,9 +94,9 @@ function compose(config, options) {
   const hooks = Object.fromEntries(Object.entries(options.hooks ?? {}).map(([event, groups]) =>
     [event, groups.map((group) => ({ ...group, hooks: group.hooks.map((callback) =>
       async (payload, id, context) => {
-        if (final) await final.wait(event, id);
+        if (finalEnforcing) await final.wait(event, id);
         const result = await callback(copy(payload), id, context);
-        if (final && (result?.systemMessage || result?.hookSpecificOutput?.additionalContext))
+        if (finalEnforcing && (result?.systemMessage || result?.hookSpecificOutput?.additionalContext))
           throw new Error("AW Qoder final gate does not cover Hook context injection");
         if (!native && event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
           return deny("Tool argument rewriting is unsupported with AW");
@@ -110,11 +111,12 @@ function compose(config, options) {
     const sessionEvent = event === "session.start" || event === "session.end";
     if (final && (event === "input.submit" || sessionEvent)) continue;
     const routes = config.hooks.filter((hook) => hook.event === event);
-    if (!routes.length && !(native && event === "tool.before") && !final) continue;
+    if (!routes.length && !(native && event === "tool.before") && !finalEnforcing &&
+        !(final && event === "tool.after")) continue;
     const body = async (input, id, { signal }) => {
       const payload = copy(input);
       if (event === "session.start" && payload.source === "compact") return {};
-      if (final && !final.record(payload)) return deny("AW final gate does not cover this tool path");
+      if (final && !final.record(payload) && finalEnforcing) return deny("AW final gate does not cover this tool path");
       noteSkillRead(payload, config.skillState.query);
       if (event === "input.submit") payload.aw_turn_id = randomUUID();
       const verifySkill = routes.some(hook => hook.skill_check === true) ?
@@ -138,7 +140,7 @@ function compose(config, options) {
       }
       return {};
     };
-    const callback = final ? async (input, id, context) => {
+    const callback = finalEnforcing ? async (input, id, context) => {
       try { return await body(input, id, context); }
       finally { final.complete(input.hook_event_name, id); }
     } : body;
@@ -199,10 +201,12 @@ export async function createQuery({ prompt, options }, initialization = {}) {
   config.skillEnvironment = owner?.environment ?? { ...process.env, ...(options.env ?? {}) };
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
-  const query = sdk.query({ prompt: final ? final.input() : reload ? reload.input(prompt) : prompt,
-    options: reload ? reload.decorate(composed) : composed });
-  config.skillState.query = bindSkillQuery(query, config.hooks.some(hook => hook.skill_check === true));
+  let query;
   try {
+    final?.prepare();
+    query = sdk.query({ prompt: final ? final.input() : reload ? reload.input(prompt) : prompt,
+      options: reload ? reload.decorate(composed) : composed });
+    config.skillState.query = bindSkillQuery(query, config.hooks.some(hook => hook.skill_check === true));
     const result = await (initialization.initializeTimeoutMs === undefined ? query.initializationResult() :
       bounded(query.initializationResult(), initialization.initializeTimeoutMs));
     await verifyNativeSettings(config, query, bounded);
@@ -211,14 +215,14 @@ export async function createQuery({ prompt, options }, initialization = {}) {
     ready(config);
     final?.release();
     return final ? Object.freeze({ [Symbol.asyncIterator]: () => managed[Symbol.asyncIterator](),
-      close: () => managed.close() }) : managed;
+      close: () => { final.close(); return managed.close(); } }) : managed;
   } catch (error) {
     final?.cancel();
     initialization.discard?.();
     if (reload?.admitted) await reload.close();
     else {
       if (reload) { reload.closing = true; reload.initialized.resolve(); }
-      await query.return();
+      await query?.return();
     }
     throw error;
   }

@@ -15,7 +15,12 @@ pub(super) fn profile(
     cli: &str,
     cancelled: &AtomicBool,
 ) -> Result<Option<Value>> {
-    if input.document["spec"]["events"]["security.violation"]["enabled"] != true {
+    let requirements = aw_config::requirements::project_document(&input.document, &input.target)
+        .map_err(|_| "could not project native Hook requirements")?;
+    if !requirements
+        .iter()
+        .any(|route| route.event == "security.violation")
+    {
         return Ok(None);
     }
     let script = "import claude_agent_sdk, hashlib, json, platform; from pathlib import Path; root = Path(claude_agent_sdk.__file__).parent; print(json.dumps({'platform': platform.machine(), 'sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in ['_bundled/claude', '_internal/query.py', '_internal/transport/subprocess_cli.py', 'types.py']}}))";
@@ -39,18 +44,26 @@ fn select_profile(version: &str, cli: &str, actual: &Value) -> Result<Option<Val
     }))
 }
 
-pub(super) fn validate(steps: &[AdmittedStep]) -> Result<()> {
+pub(super) fn validate(document: &Value, steps: &[AdmittedStep]) -> Result<()> {
     for step in steps
         .iter()
         .filter(|step| step.event == "security.violation")
     {
-        if step.on_error != "block" || matches!(step.execution, StepExecution::Native) {
+        if matches!(step.execution, StepExecution::Native)
+            || (!aw_core::routes::is_shadow(document, step) && step.on_error != "block")
+        {
             return Err(
                 "Claude final gate requires a structured policy with on_error: block".into(),
             );
         }
     }
     Ok(())
+}
+
+pub(super) fn enforcing(hooks: &[Value]) -> bool {
+    hooks
+        .iter()
+        .any(|hook| hook["event"] == "security.violation" && hook["on_error"] == "block")
 }
 
 pub(super) fn configure(context: &LaunchContext<'_>) -> Result<()> {
@@ -67,6 +80,10 @@ pub(super) fn configure(context: &LaunchContext<'_>) -> Result<()> {
         (
             "claude-final-gate.mjs",
             include_bytes!("../../native/claude-sdk/final-gate.mjs").as_slice(),
+        ),
+        (
+            "final-records.mjs",
+            include_bytes!("../../native/shared/js-runtime/final-records.mjs").as_slice(),
         ),
         (
             "shared/js-runtime/fetch-gate.mjs",
@@ -123,6 +140,108 @@ mod tests {
                 let mut changed = profile.clone();
                 changed[field] = json!("changed");
                 assert!(select_profile(sdk, cli, &changed).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn claude_final_launch_validates_shadow_and_enforcing_failure_actions() {
+        use aw_exec::CommandSpec;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let profile = serde_json::from_str::<Vec<Value>>(include_str!(
+            "../../native/claude-sdk/final-profiles.json"
+        ))
+        .unwrap()
+        .remove(0);
+        let version = format!(
+            "{}:{}",
+            profile["sdk"].as_str().unwrap(),
+            profile["cli"].as_str().unwrap()
+        );
+        fs::write(root.path().join("version"), version).unwrap();
+        fs::write(root.path().join("profile.json"), profile.to_string()).unwrap();
+        let python = root.path().join("python");
+        fs::write(
+            &python,
+            r#"#!/bin/sh
+case "$2" in
+    *hashlib*) touch probed-final; cat profile.json ;;
+    *) cat version ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
+
+        for (mode, action, expected) in [
+            ("off", "block", None),
+            ("shadow", "block", Some("report")),
+            ("enforce", "block", Some("block")),
+            ("enforce", "report", Some("report")),
+        ] {
+            let document = crate::test_support::final_gate_document(
+                "claude-sdk",
+                json!([crate::test_support::final_gate_step(mode, action)]),
+            );
+            let config = aw_config::Validator::new()
+                .unwrap()
+                .parse(&serde_json::to_vec(&document).unwrap())
+                .unwrap();
+            let mut prepared = crate::select("claude-sdk")
+                .unwrap()
+                .prepare(
+                    LaunchInput {
+                        document,
+                        target: "sdk".into(),
+                        options: Default::default(),
+                        command: CommandSpec {
+                            program: python.clone(),
+                            args: vec!["worker.py".into()],
+                            cwd: root.path().into(),
+                            environment: Default::default(),
+                        },
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let capabilities = prepared.capabilities();
+            assert_eq!(
+                capabilities.events.contains_key("security.violation"),
+                expected.is_some()
+            );
+            assert_eq!(
+                root.path().join("probed-final").exists(),
+                expected.is_some()
+            );
+            let steps = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
+            assert_eq!(steps.first().map(|step| step.on_error.as_str()), expected);
+            if mode == "enforce" && action == "report" {
+                assert!(prepared
+                    .validate_steps(&steps)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("on_error: block"));
+            } else {
+                prepared.validate_steps(&steps).unwrap();
+                let launch = root.path().join(mode);
+                fs::create_dir(&launch).unwrap();
+                let files = crate::test_support::Artifacts(launch);
+                prepared
+                    .configure(&LaunchContext {
+                        files: &files,
+                        binding_path: &root.path().join("binding"),
+                        executable: &root.path().join("aw"),
+                        steps: &steps,
+                    })
+                    .unwrap();
+                let private: Value = serde_json::from_slice(
+                    &fs::read(files.0.join("claude-sdk-hooks.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(private["final_enforcing"], mode == "enforce");
+                assert_eq!(private["final_profile"].is_null(), mode == "off");
             }
         }
     }

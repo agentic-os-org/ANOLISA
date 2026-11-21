@@ -22,7 +22,7 @@ impl Runtime {
         state: &Mutex<State>,
         last: bool,
     ) -> Result<Option<Value>> {
-        if original["name"] != "tool.before" || !event.steps().next().is_some_and(|step| {
+        if original["name"] != "tool.before" || !event.callback_steps().first().is_some_and(|step| {
             matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input"))
         }) {
             return Ok(None);
@@ -92,7 +92,9 @@ impl Runtime {
                     }
                 }
             }
-            Err(_) => state.denied = true,
+            Err(_) if invocation.failure_action != Some(aw_host::FailureAction::Report) => {
+                state.denied = true;
+            }
             _ => {}
         }
         if !last || state.denied {

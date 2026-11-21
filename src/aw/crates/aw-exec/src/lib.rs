@@ -9,7 +9,7 @@ use std::{
     io,
     path::PathBuf,
     process::ExitStatus,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -120,6 +120,27 @@ pub enum Error {
     /// Execution is implemented only on Linux.
     #[error("bounded command execution requires Linux")]
     UnsupportedPlatform,
+}
+
+const CHILD_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const CHILD_CLEANUP_GRACE: Duration = Duration::from_secs(1);
+
+/// Maximum cooperative termination and group verification budget.
+pub const COOPERATIVE_CHILD_CLEANUP_GRACE: Duration =
+    CHILD_TERMINATE_GRACE.saturating_add(CHILD_CLEANUP_GRACE);
+
+/// Checks the shared execution limit before doing work or accepting a result.
+///
+/// # Errors
+/// Returns cancellation first, then deadline expiry.
+pub fn check_active(deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(Error::Cancelled)
+    } else if Instant::now() >= deadline {
+        Err(Error::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
 }
 
 /// Run one command with nonblocking pipes and a caller-owned absolute deadline.

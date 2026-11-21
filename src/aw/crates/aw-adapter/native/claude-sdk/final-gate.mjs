@@ -2,6 +2,27 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
+export function finalRoutes(hooks) {
+  const handlers = hooks.filter(hook => hook.event === 'security.violation');
+  const action = handlers[0]?.on_error;
+  // A report route is the neutral trigger for a shadow-only event. Rust omits
+  // shadow routes from the native callback path when enforcing steps exist.
+  if (!['block', 'report'].includes(action) || handlers.some(hook => hook.on_error !== action)) {
+    throw Error('AW final gate requires consistent final routes');
+  }
+  return { handlers, enforce: action === 'block' };
+}
+
+export function finalBody(gate, enforce) {
+  if (enforce) return gate;
+  return async (body, signal) => {
+    signal?.throwIfAborted();
+    try { await gate(body, signal); } catch { /* No supported observation. */ }
+    signal?.throwIfAborted();
+    return body;
+  };
+}
+
 export const WITHHELD = 'AW withheld the final tool result';
 const digest = value => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex');
 const cacheControl = value => value === undefined || (value?.type === 'ephemeral' &&

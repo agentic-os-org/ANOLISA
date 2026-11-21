@@ -99,9 +99,11 @@ pub fn snapshot(
             .any(|event| {
                 event["enabled"] == true
                     && event["steps"].as_array().is_some_and(|steps| {
-                        steps
-                            .iter()
-                            .any(|step| step["provider"] == *id && step["enabled"] != false)
+                        steps.iter().any(|step| {
+                            (aw_config::requirements::step_enabled(step) && step["provider"] == *id)
+                                || aw_config::requirements::active_obligation_routes(step)
+                                    .any(|(_, route)| route["provider"] == *id)
+                        })
                     })
             });
         let mut card = json!({"id":id,"implementation":provider["view"]["implementation"],"version":null,

@@ -161,6 +161,7 @@ fn submission_close_claims_are_bounded_with_a_managed_tool_ledger() {
             Lease {
                 lifecycle_key: None,
                 digest: [0; 32],
+                closed: false,
                 handle: None,
                 completion_digest: None,
                 cancelled: Arc::new(AtomicBool::new(false)),

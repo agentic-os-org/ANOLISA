@@ -193,7 +193,7 @@ impl PreparedLaunch for Prepared {
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         if self.final_profile.is_some() {
-            super::claude_final::validate(steps)
+            super::claude_final::validate(&self.input.document, steps)
                 .map_err(|_| "Qoder final gate requires structured fail-closed final steps")?;
             if steps
                 .iter()
@@ -248,6 +248,10 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "final-launch.mjs",
             include_bytes!("../../native/qoder-sdk/final-launch.mjs"),
+        )?;
+        context.files.write(
+            "final-records.mjs",
+            include_bytes!("../../native/shared/js-runtime/final-records.mjs"),
         )?;
         for (name, bytes) in [
             (
@@ -317,7 +321,7 @@ impl PreparedLaunch for Prepared {
                 "native_command_wrappers":self.policy.wrappers(), "native_policy":self.policy,
                 "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable && final_profile.is_none(),
                 "resident_policy_reload": !self.input.options.reloadable && final_profile.is_none(),
-                "final_profile": final_profile,
+                "final_profile": final_profile, "final_enforcing": super::claude_final::enforcing(&hooks),
                 "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;

@@ -17,7 +17,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        Self::with_directory(tempfile::tempdir().unwrap())
+    }
+
+    fn with_directory(directory: tempfile::TempDir) -> Self {
         let mut document = aw_config::Validator::new()
             .unwrap()
             .parse(include_bytes!(

@@ -364,12 +364,12 @@ fn final_legacy_gate_binds_plaintext_and_foreground_readiness() {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/qoder_sdk/post-evidence.test.mjs"),
     );
-    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(15));
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(45));
     let evidence = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.status.success(), "{evidence}");
-    assert!(evidence.contains("# pass 3"), "{evidence}");
+    assert!(evidence.contains("# pass 8"), "{evidence}");
 }

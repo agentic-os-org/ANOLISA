@@ -1,10 +1,12 @@
 /** Exercise the legacy dialect and foreground admission independently of hosted inference. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, copyFileSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, cpSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { checkCallbacks, fixture, nativeReply } from '../shared/final-bridge-test.mjs';
 
 const native = { session_id: 'session', tool_use_id: 'call', tool_name: 'Bash',
   cwd: '/work', tool_input: { command: 'echo safe' }, is_error: false };
@@ -16,6 +18,37 @@ const request = text => JSON.stringify({ session_id: 'session', session_type: 'q
     { role: 'tool', tool_call_id: 'call', content: text },
   ] });
 const result = value => JSON.parse(value).messages[3].content;
+
+test('Qoder final gate leaves native callbacks and ordinary policy intact in shadow', async t => {
+  const original = process.env.AW_QODER_SDK_CONFIG;
+  for (const mode of ['off', 'shadow', 'enforce']) {
+    await t.test(mode, async t => {
+      const root = mkdtempSync(join(tmpdir(), 'aw-qoder-final-callback-'));
+      t.after(() => {
+        if (original === undefined) delete process.env.AW_QODER_SDK_CONFIG;
+        else process.env.AW_QODER_SDK_CONFIG = original;
+        rmSync(root, { recursive: true, force: true });
+      });
+      const { file, entry, log } = fixture(root, 'qoder', mode);
+      process.env.AW_QODER_SDK_CONFIG = file;
+      // Each production final-launch module admits one Query.
+      cpSync(import.meta.dirname, join(root, 'qoder-sdk'), { recursive: true });
+      cpSync(join(import.meta.dirname, '../shared'), join(root, 'shared'), { recursive: true });
+      copyFileSync(join(import.meta.dirname, '../claude-sdk/final-gate.mjs'), join(root, 'qoder-sdk/claude-final-gate.mjs'));
+      const bridge = await import(pathToFileURL(join(root, 'qoder-sdk/bridge.mjs')));
+      const { createQoderGate } = await import(pathToFileURL(join(root, 'qoder-sdk/final-gate.mjs')));
+      const daemon = await bridge.startDaemon({});
+      t.after(() => daemon.stop());
+      const query = await bridge.createQuery({ prompt: 'text', options: {
+        daemon, cwd: root, settingSources: [], tools: ['Bash'], persistSession: false,
+        hooks: { PreToolUse: [{ hooks: [async () => nativeReply] }] },
+      } });
+      t.after(() => mode === 'off' ? query.return() : query.close());
+      const sdk = await import(pathToFileURL(entry));
+      await checkCallbacks(root, 'qoder', mode, sdk.options, log, createQoderGate);
+    });
+  }
+});
 
 test('legacy final requests bind identities, replays and failure to checked text', async t => {
   const root = mkdtempSync(join(tmpdir(), 'aw-qoder-final-'));
@@ -79,6 +112,76 @@ test('legacy final requests bind identities, replays and failure to checked text
   await assert.rejects(gate(request('SECRET'), controller.signal), /cancelled/);
 });
 
+test('legacy final preload preserves shadow bytes and withholds stale enforcing results', t => {
+  const root = mkdtempSync(join(tmpdir(), 'aw-qoder-final-shadow-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'shared/js-runtime'), { recursive: true });
+  for (const [source, dest] of [
+    ['final-preload.mjs', 'preload.mjs'],
+    ['final-gate.mjs', 'qoder-final-gate.mjs'],
+    ['../claude-sdk/final-gate.mjs', 'claude-final-gate.mjs'],
+    ['../shared/transport.mjs', 'shared/transport.mjs'],
+    ['../shared/js-runtime/module-patch.mjs', 'shared/js-runtime/module-patch.mjs'],
+    ['../shared/js-runtime/final-records.mjs', 'final-records.mjs'],
+  ]) {
+    copyFileSync(join(import.meta.dirname, source), join(root, dest));
+  }
+  const executable = join(root, 'aw');
+  writeFileSync(executable, `#!/bin/sh
+cat >/dev/null
+printf '%s\\n' "$*" >> calls
+for arg do
+    [ "$arg" = "--close-event" ] && exit 0
+done
+exit 2
+`, { mode: 0o700 });
+  writeFileSync(join(root, 'qoder-final-records.json'), JSON.stringify({ call: native }));
+  writeFileSync(join(root, 'config.json'), JSON.stringify({
+    executable, binding: '/fixture', ready_token: 'fixture',
+    hooks: [{ event: 'security.violation', step: 'shadow', on_error: 'report', budget_ms: 1000 }],
+    final_profile: { worker_sha256: 'a'.repeat(64), patches: [{ anchor: 'old', replacement: 'new' }] },
+  }));
+  writeFileSync(join(root, 'run.mjs'), `
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { finalRecords } from './final-records.mjs';
+const stale = process.env.MODE === 'stale';
+if (stale) {
+  const config = JSON.parse(readFileSync('config.json', 'utf8'));
+  config.hooks[0].on_error = 'block';
+  writeFileSync('config.json', JSON.stringify(config));
+  const snapshots = finalRecords('.', 'qoder', true);
+  snapshots.publish({ call: ${JSON.stringify(native)} });
+  snapshots.close();
+}
+const preload = new URL('./preload.mjs', import.meta.url);
+process.env.AW_QODER_FINAL_WORKER = '1';
+process.env.AW_QODER_FINAL_CONFIG = 'config.json';
+process.env.NODE_OPTIONS = '--import=' + preload.href;
+await import(preload);
+const body = ${JSON.stringify(request('SECRET') + '\n')};
+const gate = globalThis[Symbol.for('aw.qoder.final-result')];
+if (stale) {
+  assert.equal(JSON.parse(await gate(body)).messages.at(-1).content, 'AW withheld the final tool result');
+  assert.equal(existsSync('calls'), false);
+} else {
+assert.equal(await gate(body), body);
+assert.equal(await gate('{"unsupported":true}'), '{"unsupported":true}');
+const calls = readFileSync('calls', 'utf8').trim().split('\\n');
+assert.equal(calls.length, 2);
+assert(calls.every(call => call.includes('--step shadow --on-error report')));
+assert(calls[1].includes('--close-event'));
+}
+`);
+  for (const mode of ['shadow', 'stale']) {
+    const result = spawnSync(process.execPath, [join(root, 'run.mjs')], {
+      cwd: root, encoding: 'utf8', timeout: 5000, env: { ...process.env, MODE: mode },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    rmSync(join(root, 'calls'), { force: true });
+  }
+});
+
 test('foreground readiness precedes prompt release and unsupported options fail closed', async t => {
   const root = mkdtempSync(join(tmpdir(), 'aw-qoder-launch-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -91,6 +194,8 @@ test('foreground readiness precedes prompt release and unsupported options fail 
     { hooks: { UserPromptSubmit: [] } }])
     assert.throws(() => finalLaunch(config, 'prompt', { ...options, ...extra }));
   const launch = finalLaunch(config, 'prompt', options);
+  t.after(() => launch.close());
+  launch.prepare();
   const iterator = launch.input();
   let delivered = false;
   const pending = iterator.next().then(value => { delivered = true; return value; });
@@ -107,7 +212,7 @@ test('foreground readiness precedes prompt release and unsupported options fail 
   assert.equal(launch.record({ ...native, hook_event_name: 'PreToolUse', tool_input: { run_in_background: true } }), false);
   launch.record({ ...native, hook_event_name: 'PostToolUse' });
   launch.record({ ...native, hook_event_name: 'PostToolUse' });
-  assert.equal(JSON.parse(readFileSync(join(root, 'qoder-final-records.json'))).call.ambiguous, true);
+  assert.equal(JSON.parse(readFileSync(join(root, 'qoder-final-records.json'))).records.call.ambiguous, true);
   let callbackDone = false;
   const callback = launch.wait('PostToolUse', 'call').then(() => { callbackDone = true; });
   await new Promise(resolve => setImmediate(resolve));

@@ -5,7 +5,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installFetchGate } from './shared/js-runtime/fetch-gate.mjs';
-import { createToolGate } from './claude-final-gate.mjs';
+import { createToolGate, finalBody, finalRoutes } from './claude-final-gate.mjs';
+import { readFinalRecords } from './final-records.mjs';
 
 const config = JSON.parse(readFileSync(process.env.AW_CLAUDE_FINAL_CONFIG, 'utf8'));
 const root = dirname(fileURLToPath(import.meta.url));
@@ -17,10 +18,7 @@ if (process.env.BUN_OPTIONS !== `--preload=${fileURLToPath(import.meta.url)}` ||
 }
 delete process.env.BUN_OPTIONS;
 delete process.env.AW_CLAUDE_FINAL_CONFIG;
-const handlers = config.hooks.filter(hook => hook.event === 'security.violation');
-if (!handlers.length || handlers.some(hook => hook.on_error !== 'block')) {
-  throw Error('AW final gate requires fail-closed routes');
-}
+const { handlers, enforce } = finalRoutes(config.hooks);
 
 async function invoke(payload, signal) {
   const input = JSON.stringify(payload);
@@ -30,7 +28,7 @@ async function invoke(payload, signal) {
     let inputError = false;
     const child = execFile(config.executable, ['hook', '--adapter', 'claude-sdk',
       '--binding', config.binding, '--event', 'security.violation',
-      '--step', hook.step, '--on-error', 'block', ...(close ? ['--close-event', 'true'] : [])], {
+      '--step', hook.step, '--on-error', hook.on_error, ...(close ? ['--close-event', 'true'] : [])], {
       timeout: close ? 2500 : hook.budget_ms + 2500,
       maxBuffer: 1024 * 1024, signal: close ? undefined : signal, killSignal: 'SIGKILL',
     }, (error, stdout, stderr) => {
@@ -58,10 +56,14 @@ async function invoke(payload, signal) {
   }
 }
 
-const gate = createToolGate(() => JSON.parse(readFileSync(`${root}/claude-final-records.json`, 'utf8')), invoke);
+const gate = finalBody(createToolGate(
+  () => readFinalRecords(root, 'claude', enforce), invoke), enforce);
 installFetchGate((url, init, input) => {
   const target = new URL(url);
-  if (target.origin === config.origin && target.pathname === (config.messages_path ?? '/v1/messages')) return gate;
+  if (target.origin === config.origin && target.pathname === (config.messages_path ?? '/v1/messages')) {
+    return enforce || (!(input instanceof Request) && typeof init?.body === 'string') ? gate : undefined;
+  }
+  if (!enforce) return undefined;
   if (target.origin !== config.origin && init?.body == null &&
       !(input instanceof Request && input.body !== null)) return undefined;
   // Alternate routes and opaque bodies cannot carry an unchecked model request.

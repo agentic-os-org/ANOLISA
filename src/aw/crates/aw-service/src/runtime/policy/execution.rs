@@ -7,6 +7,16 @@ use aw_adapter::reload::ExecutionClaim;
 pub(in crate::runtime) struct Execution {
     claim: ExecutionClaim,
     generation: u64,
+    task: Option<(String, u64)>,
+}
+
+impl Execution {
+    pub(in crate::runtime) fn task_generation(&self) -> Option<u64> {
+        match self.claim {
+            ExecutionClaim::Tool(_) => self.task.as_ref().map(|(_, generation)| *generation),
+            _ => Some(self.generation),
+        }
+    }
 }
 
 impl Reload {
@@ -43,18 +53,50 @@ impl Runtime {
             value,
         )
         .map_err(|_| rejected("native_reservation_identity"))?;
-        let generation = instance
+        let reload = instance
             .reload
             .as_ref()
-            .ok_or_else(|| rejected("request_not_admitted"))?
-            .execution_generation(&claim)?;
-        Ok(Some(Execution { claim, generation }))
+            .ok_or_else(|| rejected("request_not_admitted"))?;
+        let generation = reload.execution_generation(&claim)?;
+        // Qoder has separate tool reservations. Its authenticated session
+        // selects the enclosing request that supplied the task version.
+        let task = match claim {
+            ExecutionClaim::Tool(_) => value["session_id"].as_str().and_then(|session| {
+                reload
+                    .requests
+                    .get(session)
+                    .map(|generation| (session.to_owned(), *generation))
+            }),
+            _ => None,
+        };
+        Ok(Some(Execution {
+            claim,
+            generation,
+            task,
+        }))
     }
 
     pub(in crate::runtime) fn check_execution_admission(
         &self,
         id: &str,
         execution: Option<&Execution>,
+    ) -> Result<()> {
+        self.check_admitted_execution(id, execution, false)
+    }
+
+    pub(in crate::runtime) fn check_provider_admission(
+        &self,
+        id: &str,
+        execution: Option<&Execution>,
+    ) -> Result<()> {
+        self.check_admitted_execution(id, execution, true)
+    }
+
+    fn check_admitted_execution(
+        &self,
+        id: &str,
+        execution: Option<&Execution>,
+        check_task: bool,
     ) -> Result<()> {
         let instances = self
             .instances
@@ -67,12 +109,20 @@ impl Runtime {
             .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
         self.execution_admission(instance, id)?;
         if let Some(execution) = execution {
-            let generation = instance
+            let reload = instance
                 .reload
                 .as_ref()
-                .ok_or_else(|| rejected("request_not_admitted"))?
-                .execution_generation(&execution.claim)?;
-            if generation != execution.generation {
+                .ok_or_else(|| rejected("request_not_admitted"))?;
+            let generation = reload.execution_generation(&execution.claim)?;
+            if generation != execution.generation
+                || (check_task
+                    && execution
+                        .task
+                        .as_ref()
+                        .is_some_and(|(session, generation)| {
+                            reload.requests.get(session) != Some(generation)
+                        }))
+            {
                 return Err(rejected("request_not_admitted"));
             }
         }

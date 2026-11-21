@@ -60,33 +60,30 @@ impl Adapter for Codex {
             .strip_prefix("codex-cli ")
             .ok_or_else(|| format!("unexpected Codex version output: {version:?}"))?;
         let version = crate::version::reported(version, "Codex CLI")?;
+        let requirements =
+            aw_config::requirements::project_document(&input.document, &input.target)
+                .map_err(|_| "could not project native Hook requirements")?;
+        let selected = |event: &str| requirements.iter().find(|route| route.event == event);
+        let observe = adapter::observation_enabled(&input.document, &input.target);
         let events: Vec<_> = EVENTS
             .iter()
             .copied()
             .filter(|event| {
-                (!crate::callback::lifecycle(event)
-                    && adapter::observation_enabled(&input.document, &input.target))
-                    || (input.document["spec"]["events"][*event]["enabled"] == true
-                        && input.document["spec"]["events"][*event]["steps"]
-                            .as_array()
-                            .is_some_and(|steps| !steps.is_empty()))
+                (observe && !crate::callback::lifecycle(event))
+                    || selected(event).is_some_and(|route| !route.steps.is_empty())
             })
             .collect();
-        let replacement = input.document["spec"]["events"]["tool.after"]["enabled"] == true
-            && input.document["spec"]["events"]["tool.after"]["steps"]
-                .as_array()
-                .is_some_and(|steps| {
-                    steps.iter().any(|step| {
-                        step["effects"].as_array().is_some_and(|effects| {
-                            effects.iter().any(|effect| effect == "replace_result")
-                        })
-                    })
-                });
+        let replacement = selected("tool.after").is_some_and(|route| {
+            route
+                .steps
+                .iter()
+                .any(|step| step.effects.contains(&"replace_result"))
+        });
         preflight::hooks(
             &input.command,
             &events,
             invocation.bypass_hook_trust,
-            input.document["spec"]["events"]["tool.before"]["required"] == true,
+            selected("tool.before").is_some_and(|route| route.required && !route.steps.is_empty()),
             replacement,
             cancelled,
         )?;
@@ -262,6 +259,7 @@ fn routes(
     let mut chains = json!({});
     for &event in EVENTS {
         let selected = adapter::native_steps(
+            &input.document,
             steps,
             event,
             !crate::callback::lifecycle(event)

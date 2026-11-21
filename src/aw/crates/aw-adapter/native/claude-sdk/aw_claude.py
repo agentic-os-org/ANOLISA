@@ -187,7 +187,8 @@ class Bridge:
             return _deny("AW tool identity mismatch") if event == "tool.before" else {}
         if self.final is not None and event == "tool.after":
             self.final.record(payload)
-        if self.final is not None and event == "tool.before" and not self.final.supports_tool(payload):
+        if (self.final is not None and self.final.enforcing and event == "tool.before"
+                and not self.final.supports_tool(payload)):
             return _deny("AW final gate does not cover this tool delivery path")
         for hook in self.config["hooks"]:
             if hook["event"] != event:
@@ -348,7 +349,8 @@ class Bridge:
                 "AW Claude SDK requires its bundled CLI; cli_path overrides unsupported"
             )
         hooks = {event: list(matchers) for event, matchers in (options.hooks or {}).items()}
-        before = self.final is not None or any(hook["event"] == "tool.before" for hook in self.config["hooks"])
+        final_enforcing = self.final is not None and self.final.enforcing
+        before = final_enforcing or any(hook["event"] == "tool.before" for hook in self.config["hooks"])
         if before:
             if options.permission_prompt_tool_name is not None:
                 raise ValueError("AW tool.before does not support permission_prompt_tool_name")
@@ -396,7 +398,7 @@ class Bridge:
             ("tool.after", ["PostToolUse", "PostToolUseFailure"]),
         ):
             selected = [hook for hook in self.config["hooks"] if hook["event"] == event]
-            if selected or self.final is not None:
+            if selected or final_enforcing or (event == "tool.after" and self.final is not None):
                 timeout = sum(hook["budget_ms"] + 3000 for hook in selected) / 1000 + 1
                 for native in native_events:
                     hooks.setdefault(native, []).append(
@@ -461,17 +463,21 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
     if _CLIENT_CREATED:
         raise RuntimeError("AW Claude SDK supports one client per foreground worker")
     bridge = Bridge()
-    composed = bridge.options(options)
-    _CLIENT_CREATED = True
-    if any(hook["event"] in {"session.start", "input.submit", "turn.stop", "session.end"}
-           for hook in bridge.config["hooks"]):
-        from aw_foreground import CheckedClient
-        client = CheckedClient(composed, bridge)
-    else:
-        client = ClaudeSDKClient(options=composed)
-    async with client:
-        bridge.ready()
-        yield client
+    try:
+        composed = bridge.options(options)
+        _CLIENT_CREATED = True
+        if any(hook["event"] in {"session.start", "input.submit", "turn.stop", "session.end"}
+               for hook in bridge.config["hooks"]):
+            from aw_foreground import CheckedClient
+            client = CheckedClient(composed, bridge)
+        else:
+            client = ClaudeSDKClient(options=composed)
+        async with client:
+            bridge.ready()
+            yield client
+    finally:
+        if bridge.final is not None:
+            bridge.final.close()
 
 
 def create_client(options: ClaudeAgentOptions) -> Any:

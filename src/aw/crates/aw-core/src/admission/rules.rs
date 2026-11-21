@@ -1,6 +1,7 @@
 //! Pure capability admission rules for structured Providers and native hook steps.
 
 use super::{AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution};
+use aw_config::requirements::{configured_step, step_enabled, StepRequirement};
 use aw_provider::{EventGate, MutationSlot};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -34,9 +35,8 @@ pub(super) fn admit_requirements(
     adapter: &str,
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<(), AdmissionError> {
-    let spec = &config.as_value()["spec"];
     for step in steps {
-        check_provider(spec, step, adapter, providers)?;
+        check_provider(config.as_value(), step, adapter, providers)?;
     }
     Ok(())
 }
@@ -109,7 +109,7 @@ pub fn preflight(
                         && event["steps"].as_array().is_some_and(|steps| {
                             steps
                                 .iter()
-                                .all(|step| step["enabled"] == false || step.get("match").is_none())
+                                .all(|step| !step_enabled(step) || step.get("match").is_none())
                         })),
                 "non-tool event does not support tool selectors",
             )?;
@@ -119,11 +119,7 @@ pub fn preflight(
     for requirement in aw_config::requirements::project(config, target)? {
         let event_name = requirement.event;
         let event = requirement.configuration();
-        let enabled: Vec<_> = requirement
-            .steps
-            .iter()
-            .map(aw_config::requirements::StepRequirement::configuration)
-            .collect();
+        let enabled = &requirement.steps;
         let gate = EventGate::for_event(event_name)
             .ok_or(AdmissionError::Rejected("enabled event is not supported"))?;
         let effects = capabilities
@@ -136,28 +132,29 @@ pub fn preflight(
             event.get("guard").is_none(),
             "event guards are not supported",
         )?;
-        if let Some(index) = enabled.iter().position(|step| {
-            step["effects"]
-                .as_array()
-                .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_result"))
-        }) {
+        let enforcing: Vec<_> = enabled
+            .iter()
+            .filter(|step| step.configuration()["mode"] != "shadow")
+            .collect();
+        if let Some(index) = enforcing
+            .iter()
+            .position(|step| step.effects.contains(&"replace_result"))
+        {
             require(
                 gate.mutation_slot() == Some(MutationSlot::PostToolResult)
-                    && index + 1 == enabled.len(),
+                    && index + 1 == enforcing.len(),
                 "result replacement must be the last applicable enabled event step",
             )?;
         }
-        for (index, step) in enabled.iter().enumerate() {
-            if step["effects"]
-                .as_array()
-                .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_input"))
+        for (index, step) in enforcing.iter().enumerate() {
+            if step.effects.contains(&"replace_input")
                 && effects.iter().any(|effect| effect == "replace_input")
             {
                 require(
                     gate.mutation_slot() == Some(MutationSlot::PreToolInput)
                         && index == 0
-                        && step["effects"] == serde_json::json!(["replace_input"])
-                        && enabled.iter().all(|step| step["on_error"] == "block"),
+                        && step.effects == ["replace_input"]
+                        && enforcing.iter().all(|step| step.on_error == "block"),
                     "input replacement requires a first sole-effect step and fail-closed before steps",
                 )?;
             }
@@ -172,12 +169,13 @@ pub fn preflight(
 fn preflight_step(
     spec: &Value,
     gate: EventGate,
-    step: &Value,
+    requirement: &StepRequirement<'_>,
     adapter_effects: &[String],
     capabilities: &AdapterCapabilities,
 ) -> Result<AdmittedStep, AdmissionError> {
     let event = gate.event();
-    let provider_name = string(&step["provider"])?;
+    let step = requirement.configuration();
+    let provider_name = requirement.provider;
     let provider = spec["providers"]
         .get(provider_name)
         .ok_or(AdmissionError::Rejected("unknown configured Provider"))?;
@@ -201,11 +199,7 @@ fn preflight_step(
         StepExecution::Native
     } else {
         let mut effects = Vec::new();
-        for effect in step["effects"]
-            .as_array()
-            .ok_or(AdmissionError::Rejected("step effects must be an array"))?
-        {
-            let effect = string(effect)?;
+        for &effect in &requirement.effects {
             require(
                 gate.allows_effect(effect)
                     && adapter_effects.iter().any(|supported| supported == effect),
@@ -231,7 +225,7 @@ fn preflight_step(
             }
         }
     };
-    let on_error = string(&step["on_error"])?;
+    let on_error = requirement.on_error;
     require(
         gate.allows_failure_action(on_error)
             && match on_error {
@@ -261,14 +255,14 @@ fn preflight_step(
 }
 
 fn check_provider(
-    spec: &Value,
+    document: &Value,
     step: &AdmittedStep,
     adapter: &str,
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<(), AdmissionError> {
     let StepExecution::Provider {
         operation: requested,
-        effects,
+        ..
     } = &step.execution
     else {
         return Ok(());
@@ -279,7 +273,8 @@ fn check_provider(
             "enabled step lacks Provider evidence",
         ))?;
     require(
-        evidence.configuration.as_value() == &spec["providers"][&step.provider]["config"],
+        evidence.configuration.as_value()
+            == &document["spec"]["providers"][&step.provider]["config"],
         "Provider validation evidence does not match its private configuration",
     )?;
     let operation = evidence.description.as_value()["operations"]
@@ -302,7 +297,19 @@ fn check_provider(
             "Provider operation does not support the target Adapter for this event",
         )?;
     }
-    for effect in effects {
+    let configured = configured_step(document, &step.event, &step.step_id).ok_or(
+        AdmissionError::Rejected("admitted step configuration is missing"),
+    )?;
+    require(
+        operation.get("obligation_kinds").is_none(),
+        "executor operations can only run through an obligation route",
+    )?;
+    require(
+        (configured["decision"] == true) == (operation["decision"] == true),
+        "Provider operation and step must agree on the decision contract",
+    )?;
+    for effect in configured["effects"].as_array().into_iter().flatten() {
+        let effect = string(effect)?;
         require(
             contains(&operation["effects"], effect),
             "requested effect is not supported by the Provider",
