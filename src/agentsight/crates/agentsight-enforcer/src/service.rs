@@ -1,5 +1,6 @@
 //! Unix-domain socket service for the enforcement protocol.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::BufReader;
 use std::os::fd::AsRawFd;
@@ -7,7 +8,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -46,10 +47,15 @@ pub struct EnforcerService<B: EnforcementBackend> {
 #[derive(Default)]
 struct RequiredSubscriptions {
     current: Mutex<Option<RequiredSubscription>>,
+    /// Tracks the latest active registration generation per `subscription_id`
+    /// so cleanup from a superseded connection never unsubscribes a replacement.
+    generations: Mutex<HashMap<Uuid, u64>>,
+    next_generation: AtomicU64,
 }
 
 struct RequiredSubscription {
     id: Uuid,
+    generation: u64,
     stream: UnixStream,
 }
 
@@ -163,26 +169,99 @@ fn prepare_socket_path(socket_path: &Path) -> Result<(), std::io::Error> {
 }
 
 impl RequiredSubscriptions {
+    fn begin<B: EnforcementBackend>(
+        &self,
+        backend: &B,
+        id: Uuid,
+        class: SubscriberClass,
+        stream: &UnixStream,
+    ) -> Result<
+        (
+            u64,
+            Receiver<agentsight_enforcement_protocol::ViolationEvent>,
+        ),
+        std::io::Error,
+    > {
+        let cloned_stream = if class == SubscriberClass::Required {
+            Some(stream.try_clone()?)
+        } else {
+            None
+        };
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut generations = self.generations();
+        generations.insert(id, generation);
+        let receiver = backend.subscribe(id, class);
+        if let Some(cloned_stream) = cloned_stream {
+            let previous = self.current().replace(RequiredSubscription {
+                id,
+                generation,
+                stream: cloned_stream,
+            });
+            if let Some(previous) = previous
+                && previous.id != id
+            {
+                if generations.get(&previous.id).copied() == Some(previous.generation) {
+                    generations.remove(&previous.id);
+                }
+                backend.unsubscribe(previous.id);
+            }
+        }
+        Ok((generation, receiver))
+    }
+
+    fn finish<B: EnforcementBackend>(
+        &self,
+        backend: &B,
+        id: Uuid,
+        generation: u64,
+        class: SubscriberClass,
+    ) {
+        {
+            let mut generations = self.generations();
+            if generations.get(&id).copied() == Some(generation) {
+                generations.remove(&id);
+                backend.unsubscribe(id);
+            }
+        }
+        if class == SubscriberClass::Required {
+            self.remove_if_current(id, generation);
+        }
+    }
+
+    fn remove_if_current(&self, id: Uuid, generation: u64) {
+        let mut current = self.current();
+        if current
+            .as_ref()
+            .is_some_and(|entry| entry.id == id && entry.generation == generation)
+        {
+            *current = None;
+        }
+    }
+
+    fn is_current(&self, id: Uuid, generation: u64) -> bool {
+        self.current()
+            .as_ref()
+            .is_some_and(|entry| entry.id == id && entry.generation == generation)
+    }
+
+    fn generations(&self) -> MutexGuard<'_, HashMap<Uuid, u64>> {
+        self.generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
     fn install(&self, id: Uuid, stream: &UnixStream) -> Result<Option<Uuid>, std::io::Error> {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let replacement = RequiredSubscription {
             id,
+            generation,
             stream: stream.try_clone()?,
         };
         Ok(self
             .current()
             .replace(replacement)
             .map(|previous| previous.id))
-    }
-
-    fn remove_if_current(&self, id: Uuid) {
-        let mut current = self.current();
-        if current.as_ref().is_some_and(|entry| entry.id == id) {
-            *current = None;
-        }
-    }
-
-    fn is_current(&self, id: Uuid) -> bool {
-        self.current().as_ref().is_some_and(|entry| entry.id == id)
     }
 
     fn with_current<T>(
@@ -457,21 +536,8 @@ fn serve_subscription<B: EnforcementBackend>(
     subscription_id: Uuid,
     class: SubscriberClass,
 ) -> Result<(), ProtocolError> {
-    let receiver = backend.subscribe(subscription_id, class);
-    if class == SubscriberClass::Required {
-        let previous = match required_subscriptions.install(subscription_id, &stream) {
-            Ok(previous) => previous,
-            Err(error) => {
-                backend.unsubscribe(subscription_id);
-                return Err(error.into());
-            }
-        };
-        if let Some(previous) = previous
-            && previous != subscription_id
-        {
-            backend.unsubscribe(previous);
-        }
-    }
+    let (generation, receiver) =
+        required_subscriptions.begin(&*backend, subscription_id, class, &stream)?;
 
     let result = stream_subscription(
         &mut stream,
@@ -479,17 +545,17 @@ fn serve_subscription<B: EnforcementBackend>(
         &required_subscriptions,
         request_id,
         subscription_id,
+        generation,
         class,
     );
-    backend.unsubscribe(subscription_id);
     if class == SubscriberClass::Required {
         let queued_events = receiver
             .try_iter()
             .fold(0_u64, |count, _| count.saturating_add(1));
         let failed_write = result.as_ref().copied().unwrap_or(0);
         backend.record_required_delivery_loss(queued_events.saturating_add(failed_write));
-        required_subscriptions.remove_if_current(subscription_id);
     }
+    required_subscriptions.finish(&*backend, subscription_id, generation, class);
     result.map(|_| ())
 }
 
@@ -499,6 +565,7 @@ fn stream_subscription(
     required_subscriptions: &RequiredSubscriptions,
     request_id: Uuid,
     subscription_id: Uuid,
+    generation: u64,
     class: SubscriberClass,
 ) -> Result<u64, ProtocolError> {
     write_frame(
@@ -506,7 +573,8 @@ fn stream_subscription(
         &success_response(request_id, ResponseBody::Subscribed),
     )?;
     loop {
-        if class == SubscriberClass::Required && !required_subscriptions.is_current(subscription_id)
+        if class == SubscriberClass::Required
+            && !required_subscriptions.is_current(subscription_id, generation)
         {
             return Ok(0);
         }
@@ -514,7 +582,7 @@ fn stream_subscription(
             Ok(event) => {
                 if !peer_is_connected(stream)?
                     || (class == SubscriberClass::Required
-                        && !required_subscriptions.is_current(subscription_id))
+                        && !required_subscriptions.is_current(subscription_id, generation))
                 {
                     return Ok(u64::from(class == SubscriberClass::Required));
                 }
