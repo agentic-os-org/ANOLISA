@@ -435,7 +435,16 @@ pub(crate) fn deliverable(
         if candidate.severity > episode.severity {
             return true;
         }
-        return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
+        if now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS {
+            return true;
+        }
+        // Admission covers every member the card lists: the key's active
+        // episode must not hide a companion member that has neither its own
+        // live delivery nor a recovery gate.
+        return candidate
+            .companion_keys
+            .iter()
+            .any(|key| !member_gated(ledger, key, now_ms));
     }
     if candidate.quota_branches.is_some() {
         if let Some(episode) = ledger.quota.get(&candidate.key) {
@@ -466,6 +475,18 @@ pub(crate) fn deliverable(
         }
     }
     true
+}
+
+/// Whether this capacity member's own delivery or recovery still gates a card
+/// within the state cooldown.
+fn member_gated(ledger: &EpisodeLedger, key: &str, now_ms: u64) -> bool {
+    let live = ledger.volume.get(key).is_some_and(|episode| {
+        now_ms.saturating_sub(episode.last_delivered_ms) < STATE_COOLDOWN_MS
+    });
+    let recovered = ledger.recoveries.get(key).is_some_and(|recovery| {
+        now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS
+    });
+    live || recovered
 }
 
 pub(crate) fn record_delivery(

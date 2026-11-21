@@ -1209,6 +1209,50 @@ fn live_sibling_episode_does_not_hide_a_new_member_entry() {
 }
 
 #[test]
+fn live_bytes_episode_does_not_hide_a_first_merged_inode_entry() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 2000));
+    record_delivery(&mut state, &merged, 2000);
+    assert!(!deliverable(&state, &merged, 2500));
+}
+
+#[test]
+fn live_inode_episode_keeps_the_merged_bytes_member_admissible() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_INODE, 4), 1000);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 2000));
+}
+
+#[test]
+fn delivered_companion_member_keeps_the_merged_card_within_cooldown() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    record_delivery(&mut state, &volume_candidate(MERGED_INODE, 4), 1500);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(!deliverable(&state, &merged, 2000));
+}
+
+#[test]
+fn recovered_companion_member_keeps_the_merged_card_within_cooldown() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    state.recoveries.insert(
+        MERGED_INODE.to_string(),
+        VolumeRecovery {
+            recovered_ms: 1500,
+            last_delivered_ms: 1400,
+            members: vec![MERGED_BYTES.to_string(), MERGED_INODE.to_string()],
+        },
+    );
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(!deliverable(&state, &merged, 2000));
+    assert!(deliverable(&state, &merged, 1400 + STATE_COOLDOWN_MS));
+}
+
+#[test]
 fn failed_delivery_records_nothing_and_the_retry_records_every_member() {
     let mut state = ledger();
     let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
