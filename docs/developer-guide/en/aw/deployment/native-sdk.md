@@ -18,6 +18,36 @@ Build AW from the same candidate revision as the language package. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
+## Package layout (6 packages)
+
+AW ships 2 framework-free core packages and 4 optional framework adapter packages
+(3 Python wheels and 3 npm tarballs). Obtain the core and dual-language SDK
+packages from your applicable distribution channel (such as OS packages when
+available, published release/CI archives, or a
+[source build](../../../../../contribute/en/aw/building.md)), and verify artifact
+integrity following the [installation guide](../../../../user-guide/en/aw/installation.md#get-a-package).
+Each adapter package pins the matching core package version and is installed
+only when your application uses that framework:
+
+| Language | Package | Role | Primary import | Descriptor profile |
+| --- | --- | --- | --- | --- |
+| Python (`>=3.11`) | `anolisa-aw-sdk` (core) | Transport, `Instance`/`Task`/`Admission`/`TaskScope`, Descriptor loader, cooperative control, `LanguageSource` | `aw_sdk`, `aw_sdk.sources` | — (`adapter: sdk`) |
+| Python (`>=3.11`) | `anolisa-aw-sdk-claude` (optional) | Resident Claude Agent SDK worker | `aw_sdk_claude` (`ResidentClaude`) | `claude-resident-hooks` |
+| Python (`>=3.11`) | `anolisa-aw-sdk-qwenpaw` (optional) | QwenPaw native plugin & deferred after-only plugin | `aw_sdk_qwenpaw` (`QwenPawPlugin`, `AfterOnlyPlugin`) | `qwenpaw-installed-native-hooks` |
+| TypeScript / Node (`>=22`) | `@anolisa/aw-sdk` (core) | Transport, `Instance`/`Task`/`Admission`/`TaskScope`, Descriptor loader, cooperative control, `LanguageSource` | `@anolisa/aw-sdk`, `@anolisa/aw-sdk/sources` | — (`adapter: sdk`) |
+| TypeScript / Node (`>=22`) | `@anolisa/aw-sdk-qoder` (optional) | Public-Hook Qoder Agent SDK bridge | `@anolisa/aw-sdk-qoder` (`createQoderBridge`) | `qoder-public-hooks` |
+| TypeScript / Node (`>=22.19`) | `@anolisa/aw-sdk-pi` (optional) | Resident Pi coding agent worker | `@anolisa/aw-sdk-pi` (`runPiWorker`) | `pi-worker-hooks` |
+
+Choose your integration path:
+
+- **Custom Python or Node.js Agent (zero Rust Adapter)**: Install only the core
+  package and instrument input/tool methods with `LanguageSource`
+  ([Framework-free integration](#framework-free-integration)).
+- **Resident framework application**: Install core + the matching optional
+  adapter package, compile startup hints with `aw config descriptor`, start the
+  application natively, and attach with `aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`
+  ([Deployment Descriptor](#deployment-descriptor)).
+
 ## Configuration-driven Qoder integration
 
 Install `@anolisa/aw-sdk` together with the optional `@anolisa/aw-sdk-qoder`
@@ -165,9 +195,11 @@ capability profiles. Automatic Source discovery and resolution remain planned.
 
 ## Deployment Descriptor
 
-Generate a Descriptor during deployment, using the same candidate AW build and
-exact configuration file that the application and Service will use. For a target
-named `sdk` with `adapter: qoder-sdk`, run:
+For resident framework applications, the cooperative attachment workflow has
+three steps:
+
+1. **Compile a config-bound Descriptor at deployment** (skips runtime YAML
+   parsing and `aw` subprocess startup):
 
 ```bash
 umask 077
@@ -175,9 +207,8 @@ aw config descriptor --config /absolute/aw.yaml --agent sdk \
   --profile qoder-public-hooks > /absolute/aw-sdk.json
 ```
 
-Check the command's exit status before publishing the output. Generate into a
-staging location and install the successful JSON together with its configuration
-before starting the application. Pass both absolute paths to the factory:
+2. **Start the application natively** with both absolute paths (`configFile` and
+   `descriptorFile`) so it installs native Hooks and publishes its SDK listener:
 
 ```javascript
 const aw = await createQoderBridge({
@@ -187,11 +218,30 @@ const aw = await createQoderBridge({
 });
 ```
 
-For QwenPaw, select `qwenpaw-installed-native-hooks` and its configured target;
-pass `descriptor_file` to [the Python factory](python-sdk.md#install-and-integrate).
-Cooperative Claude workers use `claude-resident-hooks` and Pi workers use
-`pi-worker-hooks`; both profiles require the Service. A profile version names
-the Hook contract and does not track the native package version.
+3. **Attach cooperatively by PID** under the same Linux user once the
+   application and any external Provider backends are ready:
+
+```bash
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+With `daemon.startup: on_demand`, `aw connect --sdk-pid` starts or reuses AW,
+waits for the process to publish its SDK listener and confirms Ready without
+launching the Agent or injecting into arbitrary PIDs.
+
+Generate the Descriptor using the same AW build and exact configuration file
+that the application and Service will use. Check the command's exit status
+before publishing the output; generate into a staging location and install the
+JSON together with `aw.yaml` before starting the application.
+
+| Target framework | `--profile` | SDK entrypoint |
+| --- | --- | --- |
+| Qoder SDK | `qoder-public-hooks` | `createQoderBridge(..., descriptorFile)` (`@anolisa/aw-sdk-qoder`) |
+| Pi SDK | `pi-worker-hooks` | `runPiWorker({ ..., descriptorFile })` (`@anolisa/aw-sdk-pi`) |
+| QwenPaw | `qwenpaw-installed-native-hooks` | `QwenPawPlugin.from_config(..., descriptor_file=...)` (`anolisa-aw-sdk-qwenpaw`) |
+| Claude SDK | `claude-resident-hooks` | `ResidentClaude.from_config(..., descriptor_file=...)` (`anolisa-aw-sdk-claude`) |
+
+A profile version names the Hook contract and does not track the native package version.
 Compilation applies the existing capability admission rules and records the
 target, profile, explicit socket, input boundary and availability. It starts no
 Service, Provider or native application. The QwenPaw profile requires service
@@ -228,12 +278,102 @@ restart with the corresponding AW executable available.
 ## Framework-free integration
 
 Configure a target named `app` with `adapter: sdk` and the application's ordinary
-`argv`. The application starts itself; `aw run` cannot launch this profile.
-Start AW separately with the complete configuration.
+`argv` (the application starts itself; `aw run` does not launch `adapter: sdk`):
 
-For declarative wrapping or method instrumentation on any Python or Node/JS agent
-without writing a dedicated Rust Adapter, use the language-level Source Runtime
-(`@anolisa/aw-sdk/sources` in Node/TypeScript or `aw_sdk.sources` in Python):
+```yaml
+agents:
+  app:
+    adapter: sdk
+    argv: [/usr/bin/env, python3, /absolute/path/to/agent.py]
+```
+
+Start the AW service with the complete `aw.yaml` and export its private socket
+as `AW_SOCKET`:
+
+```bash
+aw service serve --config /absolute/aw.yaml
+```
+
+For any custom Node.js/TypeScript or Python Agent, install only the core SDK
+package and use `LanguageSource` (`@anolisa/aw-sdk/sources` or `aw_sdk.sources`)
+to instrument input and tool methods with zero Rust Adapter code:
+
+**Node.js / TypeScript (`@anolisa/aw-sdk/sources`)**:
+
+```javascript
+import { LanguageSource, SourceDenied } from "@anolisa/aw-sdk/sources";
+
+class CustomAgent {
+  async ask(prompt) { return this.echo({ text: prompt }); }
+  async echo({ text }) { return `echo:${text}`; }
+}
+
+const agent = new CustomAgent();
+const source = LanguageSource.create({
+  endpoint: process.env.AW_SOCKET,
+  target: "app",
+  availability: "required",
+});
+
+try {
+  await source.connect();
+  await source.withSession({ sessionId: "example-js-agent" }, async (session) => {
+    session.instrument(agent, {
+      inputMethods: ["ask"],
+      toolMethods: { echo: "echo" },
+    });
+    try {
+      console.log(await agent.ask("hello"));
+    } catch (error) {
+      if (error instanceof SourceDenied) console.log(`AW denied ${error.event}`);
+      else throw error;
+    }
+  });
+} finally {
+  await source.close();
+}
+```
+
+**Python (`aw_sdk.sources`)**:
+
+```python
+import asyncio
+import os
+from aw_sdk.sources import LanguageSource, SourceDenied
+
+
+class CustomAgent:
+    async def ask(self, prompt: str) -> str:
+        return await self.echo(text=prompt)
+
+    async def echo(self, *, text: str) -> str:
+        return f"echo:{text}"
+
+
+async def main() -> None:
+    agent = CustomAgent()
+    async with LanguageSource.create(
+        endpoint=os.environ["AW_SOCKET"],
+        target="app",
+        availability="required",
+    ) as source:
+        async with source.session(session_id="example-python-agent") as session:
+            session.instrument(
+                agent,
+                input_methods=["ask"],
+                tool_methods={"echo": "echo"},
+            )
+            try:
+                print(await agent.ask("hello"))
+            except SourceDenied as denied:
+                print(f"AW denied {denied.event}")
+
+
+asyncio.run(main())
+```
+
+Behavioral contract of the language-level Source Runtime (`@anolisa/aw-sdk/sources`
+and `aw_sdk.sources`):
 
 - Create a source with `LanguageSource.create(...)` in either language, building
   canonical `aw-hook-source/v1` capabilities and route confirmation (`availability`

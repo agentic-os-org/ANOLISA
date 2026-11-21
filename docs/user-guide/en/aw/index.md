@@ -14,9 +14,11 @@ Your Agent continues to manage its interface, model account and permissions.
 
 ## 1. Install AW
 
-Download the `aw-core` archive and matching `SHA256SUMS` from the intended successful
-AW Integration run, then verify and extract it using the [installation guide](installation.md#get-a-package).
-In the extracted `aw-core` directory, install the prebuilt CLI:
+Obtain `aw-core` from your applicable distribution channel (such as an OS package
+when available, a published release or CI archive, or a
+[source build](../../../../contribute/en/aw/building.md)), and verify artifact
+integrity following the [installation guide](installation.md#get-a-package).
+When installing from an extracted `aw-core` archive, run:
 
 ```bash
 export AW_PREFIX="$HOME/.local"
@@ -101,4 +103,6 @@ Native permission checks remain in effect. AW's current Hook checks do not provi
 | Look up subcommands, parameters, defaults and examples | [CLI reference](cli-reference.md) |
 | Check status, stop, upgrade or troubleshoot | [Operations](operations.md) |
 | Compare Hook, MCP and policy-update support | [Capability support matrix](capabilities.md) |
-| Write Providers or integrate an SDK application | [Developer guide](../../../developer-guide/en/aw/index.md) |
+| Integrate Python or Node.js SDK applications | [Runtime SDKs](../../../developer-guide/en/aw/deployment/native-sdk.md) · [Python SDK](../../../developer-guide/en/aw/deployment/python-sdk.md) |
+| Build and connect an external Provider | [Provider development](../../../developer-guide/en/aw/providers/index.md) · [Protocol](../../../developer-guide/en/aw/providers/protocol.md) |
+| Browse all integration and deployment guides | [Developer guide](../../../developer-guide/en/aw/index.md) |

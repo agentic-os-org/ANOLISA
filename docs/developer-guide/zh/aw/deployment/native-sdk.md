@@ -13,6 +13,31 @@ AW 与 Provider 分别安装。当前交付源码构建候选，registry 发布�
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
 连接；协作式控制还要求 `aw-sdk-control/v1`。安装语言包不会升级 AW。
 
+## 6 包结构与选型
+
+AW 提供 2 个无框架耦合的核心包与 4 个可选框架适配包（3 个 Python wheel 与 3 个 npm tarball）。
+请按适用发行渠道获取 AW 核心包与双语言 SDK 产物（例如可用的 OS 软件包、发布或 CI 归档，或按
+[源码构建指南](../../../../../contribute/zh/aw/building.md)自行构建），并按
+[安装指南](../../../../user-guide/zh/aw/installation.md#获取安装包)校验完整性。
+各适配包严格锁定对应的核心包版本，按实际使用框架按需安装：
+
+| 语言 | 包名 | 角色 | 主要导入 | Descriptor Profile |
+| --- | --- | --- | --- | --- |
+| Python（`>=3.11`） | `anolisa-aw-sdk`（核心包） | 传输、`Instance`/`Task`/`Admission`/`TaskScope`、Descriptor 加载、协作控制、`LanguageSource` | `aw_sdk`、`aw_sdk.sources` | —（`adapter: sdk`） |
+| Python（`>=3.11`） | `anolisa-aw-sdk-claude`（可选） | 常驻 Claude Agent SDK Worker | `aw_sdk_claude`（`ResidentClaude`） | `claude-resident-hooks` |
+| Python（`>=3.11`） | `anolisa-aw-sdk-qwenpaw`（可选） | QwenPaw 原生插件与工具后延迟插件 | `aw_sdk_qwenpaw`（`QwenPawPlugin`、`AfterOnlyPlugin`） | `qwenpaw-installed-native-hooks` |
+| TypeScript / Node（`>=22`） | `@anolisa/aw-sdk`（核心包） | 传输、`Instance`/`Task`/`Admission`/`TaskScope`、Descriptor 加载、协作控制、`LanguageSource` | `@anolisa/aw-sdk`、`@anolisa/aw-sdk/sources` | —（`adapter: sdk`） |
+| TypeScript / Node（`>=22`） | `@anolisa/aw-sdk-qoder`（可选） | Qoder Agent SDK 公开 Hook 桥接 | `@anolisa/aw-sdk-qoder`（`createQoderBridge`） | `qoder-public-hooks` |
+| TypeScript / Node（`>=22.19`） | `@anolisa/aw-sdk-pi`（可选） | 常驻 Pi 编程 Agent Worker | `@anolisa/aw-sdk-pi`（`runPiWorker`） | `pi-worker-hooks` |
+
+按接入场景选择路径：
+
+- **自研 Python / Node.js Agent（零 Rust Adapter）**：仅安装核心包，使用 `LanguageSource`
+  插桩输入与工具方法（见[通用应用接入](#通用应用接入)）。
+- **常驻框架应用**：安装核心包 + 对应可选适配包，用 `aw config descriptor` 编译启动提示，
+  原生启动应用后通过 `aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID` 协作挂接
+  （见[部署 Descriptor](#部署-descriptor)）。
+
 ## 按配置接入 Qoder
 
 在应用中同时安装核心包 `@anolisa/aw-sdk` 与可选适配包 `@anolisa/aw-sdk-qoder`。
@@ -129,8 +154,9 @@ Qoder bridge 和[配置式 QwenPaw 插件](python-sdk.md#安装与接入)复用�
 
 ## 部署 Descriptor
 
-部署时使用与 SDK 对应的候选 AW 构建，读取应用与 Service 将使用的同一份配置。
-以下命令适用于名为 `sdk`、采用 `adapter: qoder-sdk` 的目标：
+常驻框架应用的协作式挂接分为三步：
+
+1. **部署阶段编译绑定配置的 Descriptor**（免去运行期 YAML 解析与 `aw` 子进程启动）：
 
 ```bash
 umask 077
@@ -138,8 +164,7 @@ aw config descriptor --config /absolute/aw.yaml --agent sdk \
   --profile qoder-public-hooks > /absolute/aw-sdk.json
 ```
 
-发布前检查命令退出状态。先生成到暂存位置，成功后将 JSON 与配置一同安装，再启动应用。
-向工厂传入两个绝对路径：
+2. **原生启动应用**，传入 `configFile` 与 `descriptorFile` 两个绝对路径，安装原生 Hook 并发布 SDK 监听：
 
 ```javascript
 const aw = await createQoderBridge({
@@ -149,10 +174,26 @@ const aw = await createQoderBridge({
 });
 ```
 
-QwenPaw 选择 `qwenpaw-installed-native-hooks` 及其配置目标，并向
-[Python 工厂](python-sdk.md#安装与接入)传入 `descriptor_file`。Claude 协作式 worker
-使用 `claude-resident-hooks`，Pi Worker 使用 `pi-worker-hooks`；两者的 Profile
-均要求服务可用。Profile 版本是 Hook 合同标识，不随原生包版本变化。
+3. **在应用与外部 Provider 后端就绪后按 PID 协作挂接**（同 Linux 用户）：
+
+```bash
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+配置 `daemon.startup: on_demand` 时，`aw connect --sdk-pid` 会按需启动或复用 AW，等待该进程发布
+SDK 监听并确认 Ready，不启动 Agent，也不会向任意 PID 注入。
+
+编译 Descriptor 时须使用与 SDK 匹配的 AW 构建及应用和 Service 共同使用的精确配置文件。发布前检查命令退出状态，
+先生成到暂存位置，成功后将 JSON 与 `aw.yaml` 一同安装再启动应用。
+
+| 目标框架 | `--profile` | SDK 入口 |
+| --- | --- | --- |
+| Qoder SDK | `qoder-public-hooks` | `createQoderBridge(..., descriptorFile)`（`@anolisa/aw-sdk-qoder`） |
+| Pi SDK | `pi-worker-hooks` | `runPiWorker({ ..., descriptorFile })`（`@anolisa/aw-sdk-pi`） |
+| QwenPaw | `qwenpaw-installed-native-hooks` | `QwenPawPlugin.from_config(..., descriptor_file=...)`（`anolisa-aw-sdk-qwenpaw`） |
+| Claude SDK | `claude-resident-hooks` | `ResidentClaude.from_config(..., descriptor_file=...)`（`anolisa-aw-sdk-claude`） |
+
+Profile 版本是 Hook 合同标识，不随原生包版本变化。
 编译复用现有能力准入，记录目标、Profile、明确的 socket、输入边界与可用性；
 不启动 Service、Provider 或原生应用。QwenPaw Profile 要求服务可用，Qoder 记录
 目标适用事件的保护要求。两条加载路径均保留 Qoder 调用方选择的可用性，默认仍为
@@ -179,14 +220,100 @@ Descriptor、配置及其父目录须由可信部署方控制。摘要用于发�
 
 ## 通用应用接入
 
-TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执行及审计合同。
-应用配置使用 `adapter: sdk`，能力声明使用 `version: aw-hook-source/v1`、
-`entrypoint: application`，按实际安装边界声明事件与效果。应用自行启动，AW Service
-和 Provider 独立部署；该 profile 不提供 `aw run` 启动器。
+在 `aw.yaml` 中配置名为 `app`、`adapter: sdk` 的目标并保留应用普通 `argv`（应用自行启动，`aw run` 不启动 `adapter: sdk`）：
 
-对任意新建 Python 或 Node/JS Agent，无需编写任何框架专属 Rust Adapter，只需安装核心 SDK
-并使用语言级 Source Runtime（Node/TypeScript 使用 `@anolisa/aw-sdk/sources`，Python 使用
-`aw_sdk.sources`）完成声明式包装与对象方法插桩：
+```yaml
+agents:
+  app:
+    adapter: sdk
+    argv: [/usr/bin/env, python3, /absolute/path/to/agent.py]
+```
+
+独立启动 AW Service，并将服务报告的私有 socket 设为 `AW_SOCKET`：
+
+```bash
+aw service serve --config /absolute/aw.yaml
+```
+
+对任意自研 Node.js/TypeScript 或 Python Agent，只需安装核心 SDK 包，即可用 `LanguageSource`
+（`@anolisa/aw-sdk/sources` 或 `aw_sdk.sources`）完成输入与工具方法插桩，无需编写任何 Rust Adapter：
+
+**Node.js / TypeScript（`@anolisa/aw-sdk/sources`）**：
+
+```javascript
+import { LanguageSource, SourceDenied } from "@anolisa/aw-sdk/sources";
+
+class CustomAgent {
+  async ask(prompt) { return this.echo({ text: prompt }); }
+  async echo({ text }) { return `echo:${text}`; }
+}
+
+const agent = new CustomAgent();
+const source = LanguageSource.create({
+  endpoint: process.env.AW_SOCKET,
+  target: "app",
+  availability: "required",
+});
+
+try {
+  await source.connect();
+  await source.withSession({ sessionId: "example-js-agent" }, async (session) => {
+    session.instrument(agent, {
+      inputMethods: ["ask"],
+      toolMethods: { echo: "echo" },
+    });
+    try {
+      console.log(await agent.ask("hello"));
+    } catch (error) {
+      if (error instanceof SourceDenied) console.log(`AW denied ${error.event}`);
+      else throw error;
+    }
+  });
+} finally {
+  await source.close();
+}
+```
+
+**Python（`aw_sdk.sources`）**：
+
+```python
+import asyncio
+import os
+from aw_sdk.sources import LanguageSource, SourceDenied
+
+
+class CustomAgent:
+    async def ask(self, prompt: str) -> str:
+        return await self.echo(text=prompt)
+
+    async def echo(self, *, text: str) -> str:
+        return f"echo:{text}"
+
+
+async def main() -> None:
+    agent = CustomAgent()
+    async with LanguageSource.create(
+        endpoint=os.environ["AW_SOCKET"],
+        target="app",
+        availability="required",
+    ) as source:
+        async with source.session(session_id="example-python-agent") as session:
+            session.instrument(
+                agent,
+                input_methods=["ask"],
+                tool_methods={"echo": "echo"},
+            )
+            try:
+                print(await agent.ask("hello"))
+            except SourceDenied as denied:
+                print(f"AW denied {denied.event}")
+
+
+asyncio.run(main())
+```
+
+TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执行及审计合同；
+语言级 Source Runtime（`@anolisa/aw-sdk/sources` 与 `aw_sdk.sources`）的行为约束如下：
 
 - 双语言均通过 `LanguageSource.create(...)` 创建带有标准 `aw-hook-source/v1` 能力声明与
   路由校验的 `Instance`（支持 `required` 与 `native_fallback`）。

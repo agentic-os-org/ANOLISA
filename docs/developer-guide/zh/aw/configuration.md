@@ -28,7 +28,7 @@ Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查�
 | `execution.guarantee` | 仅 `native_hook`，不提供 OS、final 或 protected 保证 |
 | `execution.default_event_budget_ms` | 必填正整数共享事件预算，各步骤不会获得重新开始的预算 |
 | `audit.enabled`、`audit.payload` | 本版本固定为 `true`、`metadata_only`；服务持久保存执行元数据 |
-| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk`、`codex` 或 `agentscope` |
+| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`deepseek-harness`、`hermes`、`pi`、`claude-sdk`、`codex`、`agentscope` 或 `sdk` |
 | `agents.<id>.shutdown_grace_ms` | 外部信号退出宽限，1..120000 ms，默认 2000；见[生命周期](deployment/lifecycle.md) |
 | `daemon.limits` | 常驻服务的并发上限，字段及默认值见[容量配置](deployment/lifecycle.md#服务并发预算) |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
