@@ -19,8 +19,9 @@ test-raw-package: ## Validate Linux and macOS raw package assembly
 # =============================================================================
 
 .PHONY: test-batch-analysis
-test-batch-analysis: ## Exercise batch discovery and execution without model calls
+test-batch-analysis: ## Exercise batch discovery, execution and source accounting
 	python3 -m unittest discover -s scripts/benchmark/tests -p test_batch_execution_regressions.py
+	python3 -m unittest discover -s scripts/benchmark/tests -p test_batch_source_accounting_regressions.py -v
 
 # Add the dependency separately from the shared native-test rule.
 test: test-batch-analysis
