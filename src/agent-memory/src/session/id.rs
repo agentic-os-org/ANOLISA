@@ -56,6 +56,9 @@ mod tests {
     fn from_string_accepts_normal() {
         assert!(SessionId::from_string("ses_x").is_ok());
         assert!(SessionId::from_string("smoke-1").is_ok());
+        // Dotted ids stay legal — only the bare "." is refused — so the
+        // reject-side tests above cannot silently become over-rejection.
+        assert!(SessionId::from_string("ses_01J8.example").is_ok());
     }
 
     #[test]
@@ -74,6 +77,17 @@ mod tests {
         ));
         assert!(matches!(
             SessionId::from_string(""),
+            Err(MemoryError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn from_string_rejects_bare_dot() {
+        // "." joins to the session base itself: mkdir_child would anchor
+        // the session tree on the base directory, and end(Discard) would
+        // then recursively delete every session in it.
+        assert!(matches!(
+            SessionId::from_string("."),
             Err(MemoryError::InvalidArgument(_))
         ));
     }
