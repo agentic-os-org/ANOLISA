@@ -111,7 +111,11 @@ _FALLBACK_SHELL_TOOLS = [
 def _load_tool_categories() -> dict:
     """Load tool categories from unified JSON file with validation."""
     try:
-        with open(_TOOL_CATEGORIES_PATH, "r") as f:
+        # The shipped file is UTF-8 and contains a non-ASCII em dash, so the
+        # read must not depend on the process locale: an ASCII locale raises
+        # UnicodeDecodeError, the fallback below swallows it, and the whole map
+        # silently degrades to the reduced hardcoded sets.
+        with open(_TOOL_CATEGORIES_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         # Validate required structure
