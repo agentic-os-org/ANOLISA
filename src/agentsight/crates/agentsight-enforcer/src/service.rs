@@ -199,10 +199,9 @@ impl RequiredSubscriptions {
             });
             if let Some(previous) = previous
                 && previous.id != id
+                && generations.get(&previous.id).copied() == Some(previous.generation)
             {
-                if generations.get(&previous.id).copied() == Some(previous.generation) {
-                    generations.remove(&previous.id);
-                }
+                generations.remove(&previous.id);
                 backend.unsubscribe(previous.id);
             }
         }
