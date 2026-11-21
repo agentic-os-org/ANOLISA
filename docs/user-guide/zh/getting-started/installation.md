@@ -301,6 +301,24 @@ anolisa update all
 
 ---
 
+## 容器健康检查
+
+通过 `distribution/docker/Dockerfile.alinux` 构建的镜像会在 30 秒启动宽限期后，每隔
+30 秒探测 AgentSight 的回环地址 `/health` 端点。连续三次失败将容器标记为
+unhealthy。探针在 Docker 健康日志中输出 JSON，状态为 `ready`、`degraded`
+或 `blocked`。
+
+AgentSight 默认可选：HTTP 服务不可用时报告 `degraded` 并成功退出，保证仅使用
+Shell 的容器仍可使用。设置 `ANOLISA_REQUIRE_AGENTSIGHT=1` 后，HTTP 服务成为
+必需项，不可用时健康检查失败。`ANOLISA_AGENTSIGHT_PORT` 指定探测端口（默认
+`7396`），必须与单独配置的服务端口一致。配置非法时总是失败。请求使用两秒
+Socket 超时、四秒总截止时间和 64 KiB 响应上限。
+
+在容器内运行 `python3 /usr/local/lib/anolisa/healthcheck.py` 可直接查看相同的
+JSON。此检查仅验证 HTTP 可用性，不证明 eBPF 已挂载或正在采集事件。它不会在
+主命令启动前等待，不重启服务，也不改变信号转发。可通过 Docker 的
+`--no-healthcheck` 禁用探针。
+
 ## 下一步
 
 - [anolisa CLI 参考](anolisa-cli.md)

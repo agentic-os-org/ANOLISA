@@ -332,7 +332,7 @@ another directory, its commands, package names, and release tags stay the same.
 |---|---|
 | [`src/`](src/) | Runtime components, including AW, cosh-ng, and components providing observability, security, memory, and sandbox capabilities. Each component keeps its own build and test entry points. |
 | [`providers/`](providers/README.md) | AW Provider collaboration space. Each Provider implementation has its own workspace, examples, and contract tests. |
-| [`distribution/`](distribution/) | Distribution tooling and images. `anolisa/` owns the installation CLI, component manifests, and packaging resources; `docker/` defines the integrated ANOLISA image. |
+| [`distribution/`](distribution/) | Distribution tooling and images. `anolisa/` owns the installation CLI, component manifests, and packaging resources; `docker/` defines the integrated ANOLISA image. [HTTP health policy](docs/user-guide/en/getting-started/installation.md#container-health). |
 | [`benchmark/`](benchmark/) | Cross-component evaluation runners: ClawEval, SWE, and Terminal Bench. Component-specific benchmarks stay with their components. |
 | [`deprecated/`](deprecated/) | Retained legacy implementations and their archived documentation. |
 | [`scripts/`](scripts/) | Repository-wide build, packaging, and validation scripts. |
