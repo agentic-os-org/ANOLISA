@@ -41,6 +41,29 @@ UNINSTALL_SH="$ADAPTER_DIR/opencode/scripts/uninstall.sh"
 PLUGIN_SOURCE="$ADAPTER_DIR/opencode/plugin.js"
 PLUGIN_LINK="$CONFIG_DIR/plugins/tokenless.js"
 
+if env -u HOME -u TOKENLESS_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG_DIR \
+        -u XDG_CONFIG_HOME ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        OPENCODE_BIN="$FAKE_BIN/opencode" PATH="$FAKE_BIN:$PATH" \
+        bash "$INSTALL_SH" >/dev/null 2>"$SANDBOX/install-no-home.err"; then
+    fail "installer wrote without a resolvable OpenCode config directory"
+else
+    pass "installer rejects an unresolved OpenCode config directory"
+fi
+if env -u HOME -u TOKENLESS_OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG_DIR \
+        -u XDG_CONFIG_HOME ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        OPENCODE_BIN="$FAKE_BIN/opencode" PATH="$FAKE_BIN:$PATH" \
+        bash "$UNINSTALL_SH" >/dev/null 2>"$SANDBOX/uninstall-no-home.err"; then
+    fail "uninstaller proceeded without a resolvable OpenCode config directory"
+else
+    pass "uninstaller rejects an unresolved OpenCode config directory"
+fi
+if grep -Fq "cannot resolve the OpenCode config directory" "$SANDBOX/install-no-home.err" &&
+        grep -Fq "cannot resolve the OpenCode config directory" "$SANDBOX/uninstall-no-home.err"; then
+    pass "no-home lifecycle errors explain how to provide a config root"
+else
+    fail "no-home lifecycle errors are not actionable"
+fi
+
 if bash "$DETECT_SH" >/dev/null 2>&1; then
     detect_rc=0
 else

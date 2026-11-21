@@ -20,6 +20,12 @@ if [ ! -f "$PLUGIN_SOURCE" ]; then
     exit 1
 fi
 
+if [ -z "${HOME:-}" ] && [ -z "${TOKENLESS_OPENCODE_CONFIG_DIR:-}" ] &&
+        [ -z "${OPENCODE_CONFIG_DIR:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the OpenCode config directory: HOME and all overrides are unset" >&2
+    exit 1
+fi
+
 CONFIG_HOME="${TOKENLESS_OPENCODE_CONFIG_DIR:-${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}}"
 PLUGIN_DIR="$CONFIG_HOME/plugins"
 PLUGIN_LINK="$PLUGIN_DIR/tokenless.js"
