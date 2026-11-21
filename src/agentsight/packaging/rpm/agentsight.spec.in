@@ -117,6 +117,16 @@ fi
 %{_datadir}/agentsight/adapters/dsh/
 
 %changelog
+* Sat Nov 21 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.17.0-1
+- Add prompt cache diagnosis through CLI, API and Dashboard
+- Protect directory-tree reads and report descendant enforcement coverage gaps
+- Expose workspace snapshots and explicitly confirmed guarded restore
+- Verify static SSL offsets before caching and pre-attach agent binaries at startup
+- Improve streamed tool results, token accounting, request framing and storage pacing
+- Correct HPACK static header names and preserve command aliases in cost action signatures
+- Keep cyclic audit process evidence visible and avoid counting replayed history as new calls
+- Replace the Rust AnalysisResult::Http variant with HttpContext; C FFI is unchanged
+
 * Fri Nov 13 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.2-1
 - Capture the first TLS call of warm agents such as Claude Code
 - Ship Claude Code static SSL offsets and reuse learned offsets across restarts

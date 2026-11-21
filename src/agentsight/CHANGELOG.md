@@ -1,10 +1,40 @@
 # Changelog
 
-## [Unreleased]
+## 0.17.0
+
+### Breaking changes
+- The Rust library removes `AnalysisResult::Http(HttpRecord)`. Match `AnalysisResult::HttpContext` and read `.http` instead. `HttpContext::new` remains available and fields stay public; C FFI signatures and event layouts are unchanged.
+
+### Features
+- Add prompt-cache diagnosis through `agentsight cache`, `GET /api/metrics/cache`, and the Dashboard: report token-weighted hit rates, field coverage, low-hit causes and baseline comparisons. Cost estimates require all four caller-supplied prices; one window covers at most the newest 20,000 calls.
+- Add directory-tree read protection through `POST /api/enforcement/file-read-bindings` with `kind: directory_tree`, covering regular files created, replaced or moved into the tree after Apply.
+- Show workspace snapshots at ATIF Steps and round boundaries, compare file changes, and offer explicitly confirmed guarded restore through authenticated workspace snapshot APIs. AgentSight invokes the local ws-ckpt CLI; restore is disabled by default and trajectories remain available when snapshot support is unavailable.
 
 ### Fixes
 - Self-verify scanned static SSL offsets before caching them and rotate response-only write candidates. Retain early request evidence across delayed process discovery without replaying it onto reused PIDs or new candidates, and reject changed or missing binaries before rotation.
 - Pre-attach Claude Code and Codex binaries found on `PATH` at startup to capture short-lived agents' first request. Preserve the shipped table's handshake probes, clear verification state when probes detach, and allow a late request to verify the final candidate after its warning.
+- Restore the RFC 7541 HPACK static table ordering, including `cookie`, so HTTP/2 captures that start mid-connection retain the encoded header names instead of shifting names such as `host` and `user-agent`.
+- Preserve command and file identities in cost-ledger action signatures for Codex `exec_command`, argv-form `local_shell_call`, `script` tools and `filePath` edits, avoiding false repeated-action reports for distinct operations.
+- Keep audit processes and their descendants visible when historical PID reuse creates parent cycles in the displayed process tree; raw audit evidence remains unchanged.
+- Treat copied request history as input rather than new agent executions in recorded analyses, so JSON-repair requests do not inflate call counts and independent requests do not accumulate each other's context.
+- Adopt existing host-visible descendants when installing enforcement bindings, retain surviving reparented children, and report `Degraded` when coverage is partial or cannot be confirmed.
+- Resolve child PID namespace targets, accept nsfs mount roots, and pin guarded ancestors through the target root for file guards such as systemd PrivateTmp.
+- Recover incomplete terminal Responses output and drained custom tool calls; preserve late tool results across conversation changes, declared batch outcomes, Gemini tool input and reasoning tokens, and null Anthropic SSE usage.
+- Deduplicate repeated Gemini function calls on live and drain paths, stop JSON at its document boundary, and honor chunked request framing even when a Content-Length is also present.
+- Restore token-burn and similarity loop detection without treating whitespace-only output as meaningful activity.
+- Keep preference turn cutoffs, complete system snapshots, nested optimization dimensions, cached usage and tool dispatch timing accurate; do not treat label decisions as fresh trajectory evidence.
+- Resolve trace IDs in the served database, return 413 for oversized JSON bodies, bound detail savings windows, and number turns past records without a call ID.
+- Accept BOM-marked ATIF input, validate embedded step IDs, follow changed ATIF URL targets, preserve settings changed during concurrent saves, and keep resolved interruptions hidden.
+- Tolerate unavailable causal history and report step-scan truncation only when another matching step exists.
+- Reduce repeated enforcer-absent diagnostics and stream calibration database rows instead of collecting them all in memory.
+
+### Performance
+- Reserve 1 KiB ring records for small TLS events without truncating larger records, and pace WAL checkpoints and capture scheduling while retaining capacity for deferred delivery and retries.
+
+### Upgrade notes
+- Directory-tree reads require `agent-file-guard`, BPF LSM and `directory_tree_read_protection: true`. Apply rejects existing file mappings, multiply-linked files and trees exceeding 100,000 entries. Directory listings, unbound processes' later hard links, and io_uring/AIO are outside the coverage guarantee.
+- Enforcer activation layout and pinned profile markers changed; upgrade the client and enforcer together and allow incompatible pinned engines to be reinstalled.
+- Workspace snapshots require a compatible local ws-ckpt CLI and daemon. Enable restore explicitly only when wanted; queries and restore require Dashboard authentication even over loopback.
 
 ## 0.16.2
 
