@@ -12,7 +12,10 @@ export function validateCronExpr(expr: string): boolean {
 }
 
 // Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
-const MARKER_RE_QUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+'([^']+)'/;
+// The quoted form may contain the writer's '\'' escapes (see
+// shellQuote), so the token is matched up to its closing quote and
+// unescaped afterwards (issue #10469).
+const MARKER_RE_QUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+'((?:[^']|'\\'')*)'(?=\s|$)/;
 const MARKER_RE_UNQUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+(\S+)/;
 
 function shellQuote(s: string): string {
@@ -103,7 +106,11 @@ async function writeCrontab(lines: string[]): Promise<boolean> {
 
 function extractWorkspace(line: string): string | null {
   let m = MARKER_RE_QUOTED.exec(line);
-  if (m) return m[1];
+  if (m) {
+    // Undo the writer's '\'' escaping so ownership matches the exact
+    // workspace that produced the line (issue #10469).
+    return m[1].replace(/'\\''/g, "'");
+  }
   m = MARKER_RE_UNQUOTED.exec(line);
   if (m) return m[1];
   return null;

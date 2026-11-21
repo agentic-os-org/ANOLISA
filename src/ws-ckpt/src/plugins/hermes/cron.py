@@ -15,7 +15,12 @@ _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
 
 # Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
 _CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
-_MARKER_RE = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+'([^']+)'")
+# The quoted form may contain the writer's '\'' escapes (see
+# _build_cron_line), so the token is matched up to its closing quote and
+# unescaped afterwards (issue #10469).
+_MARKER_RE = re.compile(
+    r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+'((?:[^']|'\\'')*)'(?=\s|$)"
+)
 _MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+(\S+)")
 
 
@@ -64,7 +69,9 @@ def _write_crontab(lines: List[str]) -> bool:
 def _extract_workspace(line: str) -> Optional[str]:
     m = _MARKER_RE.search(line)
     if m:
-        return m.group(1)
+        # Undo the writer's '\'' escaping so ownership matches the exact
+        # workspace that produced the line (issue #10469).
+        return m.group(1).replace("'\\''", "'")
     m = _MARKER_RE_UNQUOTED.search(line)
     if m:
         return m.group(1)
