@@ -268,7 +268,7 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     } else if passive {
         local_mounts()
     } else {
-        on_demand_mounts()
+        on_demand_mounts(&config.critical_mounts)
     };
     let (paths, scope_incomplete) = df_operand_paths(config, passive, root, mounts, &local)?;
     let mut args = vec!["-k", "-P"];
@@ -386,15 +386,16 @@ fn local_mounts() -> BTreeSet<String> {
 /// The default on-demand scan samples every mount `df` reports, not just the
 /// passive filesystem allowlist, so a boot- or user-created filesystem
 /// outside that allowlist is not dropped from the first scan.
-fn on_demand_mounts() -> BTreeSet<String> {
+fn on_demand_mounts(critical_mounts: &[String]) -> BTreeSet<String> {
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = critical_mounts;
         BTreeSet::new()
     }
     #[cfg(target_os = "linux")]
     {
         mountinfo_content()
-            .map(|content| on_demand_mounts_in(&content))
+            .map(|content| on_demand_mounts_in(&content, critical_mounts))
             .unwrap_or_default()
     }
 }
@@ -416,7 +417,7 @@ fn mountinfo_content() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn local_mounts_in(content: &str) -> BTreeSet<String> {
-    mount_points_in(content, |fs_type| {
+    mount_points_in(content, |fs_type, _| {
         matches!(
             fs_type,
             "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "f2fs" | "overlay"
@@ -424,13 +425,18 @@ fn local_mounts_in(content: &str) -> BTreeSet<String> {
     })
 }
 
+/// `parse_df_line` keeps a critical mount's ignored-filesystem row, so that
+/// mount must stay an operand; dropping it here would report `Ok` over a
+/// mount the user declared critical.
 #[cfg(target_os = "linux")]
-fn on_demand_mounts_in(content: &str) -> BTreeSet<String> {
-    mount_points_in(content, |fs_type| !df_skips_filesystem(fs_type))
+fn on_demand_mounts_in(content: &str, critical_mounts: &[String]) -> BTreeSet<String> {
+    mount_points_in(content, |fs_type, mount| {
+        !df_skips_filesystem(fs_type) || critical_mounts.iter().any(|item| item == mount)
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn mount_points_in(content: &str, keep: impl Fn(&str) -> bool) -> BTreeSet<String> {
+fn mount_points_in(content: &str, keep: impl Fn(&str, &str) -> bool) -> BTreeSet<String> {
     content
         .lines()
         .filter_map(|line| {
@@ -441,14 +447,16 @@ fn mount_points_in(content: &str, keep: impl Fn(&str) -> bool) -> BTreeSet<Strin
                 .replace("\\040", " ")
                 .replace("\\011", "\t")
                 .replace("\\134", "\\");
-            keep(right.split_whitespace().next()?).then_some(mount)
+            let fs_type = right.split_whitespace().next()?;
+            keep(fs_type, &mount).then_some(mount)
         })
         .collect()
 }
 
 /// Filesystems `df` omits by default, plus the ones this check drops after
 /// parsing; sampling one would spend a target slot without adding a reported
-/// row.
+/// row. A declared critical mount is the exception — `parse_df_line` keeps its
+/// ignored-filesystem row — so the on-demand operand set exempts it.
 #[cfg(target_os = "linux")]
 fn df_skips_filesystem(fs_type: &str) -> bool {
     is_ignored_filesystem(fs_type)

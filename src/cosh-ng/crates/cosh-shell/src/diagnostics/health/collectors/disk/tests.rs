@@ -138,7 +138,7 @@ fn default_on_demand_scan_keeps_mounts_outside_the_passive_allowlist() {
         ["/"].into_iter().map(str::to_string).collect::<BTreeSet<_>>(),
         "the passive allowlist keeps only ext/xfs-style filesystems"
     );
-    let on_demand = on_demand_mounts_in(content);
+    let on_demand = on_demand_mounts_in(content, &HealthConfig::default().critical_mounts);
     assert_eq!(
         on_demand,
         ["/", "/boot/efi"]
@@ -151,6 +151,43 @@ fn default_on_demand_scan_keeps_mounts_outside_the_passive_allowlist() {
         df_operand_paths(&HealthConfig::default(), false, true, true, &on_demand).unwrap();
     assert_eq!(paths.unwrap(), ["/", "/boot/efi"]);
     assert!(!incomplete);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn default_on_demand_scan_keeps_a_critical_mount_on_an_ignored_filesystem() {
+    let content = "\
+36 25 253:0 / / rw,relatime - ext4 /dev/vda1 rw
+37 25 259:1 / /boot/efi rw,relatime - vfat /dev/vda2 rw
+38 25 0:30 / /run rw,nosuid - tmpfs tmpfs rw
+39 25 0:31 / /proc rw - proc proc rw
+40 25 0:55 / /dev/shm rw,nosuid - tmpfs shm rw
+";
+    let config = HealthConfig {
+        critical_mounts: vec!["/".to_string(), "/dev/shm".to_string()],
+        ..HealthConfig::default()
+    };
+    let on_demand = on_demand_mounts_in(content, &config.critical_mounts);
+    assert_eq!(
+        on_demand,
+        ["/", "/boot/efi", "/dev/shm"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        "a declared critical mount stays an operand even on an ignored filesystem"
+    );
+    let (paths, incomplete) = df_operand_paths(&config, false, true, true, &on_demand).unwrap();
+    assert_eq!(paths.unwrap(), ["/", "/boot/efi", "/dev/shm"]);
+    assert!(!incomplete);
+    let output = "\
+Filesystem     Type 1024-blocks Used Available Capacity Mounted on
+/dev/shm      tmpfs      65536 1024     64512       2% /dev/shm
+";
+    let facts = parse_df_p(output, &config.critical_mounts).expect("critical row survives parsing");
+    assert!(
+        facts.mounts.iter().any(|row| row.mount == "/dev/shm"),
+        "the sampled critical row is reported, so the operand was not wasted"
+    );
 }
 
 #[test]
