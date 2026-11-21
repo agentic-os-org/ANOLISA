@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::private_state;
 
+mod admission;
 mod candidate;
 mod signals;
+pub(crate) use admission::deliverable;
 pub(crate) use candidate::candidate_for_finding;
 pub(crate) use signals::{counter_sample, signals_from_report};
 
@@ -419,116 +421,6 @@ fn prune(ledger: &mut EpisodeLedger, now_ms: u64) {
             ledger.counter_delivered = None;
         }
     }
-}
-
-pub(crate) fn deliverable(
-    ledger: &EpisodeLedger,
-    candidate: &CandidateEpisode,
-    now_ms: u64,
-) -> bool {
-    if candidate.event {
-        if ledger.events.contains_key(&candidate.key) {
-            return false;
-        }
-        if let Some(delivery) = &ledger.counter_delivered {
-            if let Some(epoch) = candidate.epoch {
-                if candidate.counter_window.is_none()
-                    && epoch >= delivery.window_start_epoch
-                    && epoch <= delivery.window_end_epoch
-                {
-                    return false;
-                }
-            }
-        }
-        if let Some(window) = candidate.counter_window {
-            let covered = ledger.events.iter().any(|(_, delivery)| {
-                delivery
-                    .epoch
-                    .is_some_and(|epoch| epoch >= window.0 && epoch <= window.1)
-            });
-            if covered {
-                return false;
-            }
-        }
-        if let Some(channel) = ledger.channels.get(&candidate.problem) {
-            if now_ms.saturating_sub(channel.last_delivered_ms) < EVENT_MERGE_MS {
-                return candidate.severity > channel.last_severity;
-            }
-        }
-        return true;
-    }
-    if let Some(episode) = ledger.volume.get(&candidate.key) {
-        if candidate.severity > episode.severity {
-            return true;
-        }
-        if now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS {
-            return true;
-        }
-        // Admission covers every member the card lists: the key's active
-        // episode must not hide a companion member that has neither its own
-        // live delivery nor a recovery gate.
-        return candidate
-            .companion_keys
-            .iter()
-            .any(|key| !member_gated(ledger, key, now_ms));
-    }
-    if candidate.quota_branches.is_some() {
-        if let Some(episode) = ledger.quota.get(&candidate.key) {
-            if candidate.severity > episode.severity {
-                return true;
-            }
-            return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
-        }
-    }
-    // This member's own recovery is the documented recurrence boundary, so it
-    // takes precedence over a sibling's delivery record.
-    if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
-        let cooldown = if card_still_alerting(ledger, recovery, &candidate.key) {
-            STATE_COOLDOWN_MS
-        } else {
-            RECURRENCE_GATE_MS
-        };
-        return now_ms.saturating_sub(recovery.last_delivered_ms) >= cooldown;
-    }
-    // A sibling's recovery gates this card only when the earlier delivery
-    // provably reported this member; a byte-only card's recovery must not
-    // hide a first inode exhaustion.
-    for sibling in &candidate.sibling_keys {
-        if let Some(recovery) = ledger.recoveries.get(sibling) {
-            if recovery
-                .members
-                .iter()
-                .any(|member| member == &candidate.key)
-                && now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS
-            {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Whether another member of the card this recovery belongs to still has a
-/// live episode, i.e. the card never fully recovered. Such a card keeps the
-/// state cooldown, so a member that bounces back cannot outrun a sibling that
-/// never recovered; the shorter recurrence gate follows a full recovery.
-fn card_still_alerting(ledger: &EpisodeLedger, recovery: &VolumeRecovery, key: &str) -> bool {
-    recovery
-        .members
-        .iter()
-        .any(|member| member != key && ledger.volume.contains_key(member))
-}
-
-/// Whether this capacity member's own delivery or recovery still gates a card
-/// within the state cooldown.
-fn member_gated(ledger: &EpisodeLedger, key: &str, now_ms: u64) -> bool {
-    let live = ledger.volume.get(key).is_some_and(|episode| {
-        now_ms.saturating_sub(episode.last_delivered_ms) < STATE_COOLDOWN_MS
-    });
-    let recovered = ledger.recoveries.get(key).is_some_and(|recovery| {
-        now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS
-    });
-    live || recovered
 }
 
 pub(crate) fn record_delivery(

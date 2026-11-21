@@ -1215,6 +1215,86 @@ fn merged_member_bounce_keeps_the_card_cooldown_in_both_directions() {
 }
 
 #[test]
+fn post_recovery_inode_redelivery_keeps_the_ten_minute_gate_for_bytes() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+
+    // The inode member recurs alone past the gate; its new episode supersedes
+    // the fully recovered card, so the bytes member is back to the gate.
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    let reentry = 1000 + RECURRENCE_GATE_MS;
+    assert!(deliverable(&state, &inode_only, reentry));
+    record_delivery(&mut state, &inode_only, reentry);
+
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged_again, reentry + 1000));
+}
+
+#[test]
+fn post_recovery_bytes_redelivery_keeps_the_ten_minute_gate_for_inode() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+
+    // The bytes member is delivered again first; its old recovery must not
+    // gate the inode companion once the merged card re-forms.
+    let bytes_only = merged_candidate(MERGED_BYTES, &[], &[MERGED_INODE], 4);
+    let reentry = 1000 + RECURRENCE_GATE_MS;
+    assert!(deliverable(&state, &bytes_only, reentry));
+    record_delivery(&mut state, &bytes_only, reentry);
+
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged_again, reentry + 1000));
+}
+
+#[test]
+fn byte_only_recovery_admits_only_a_first_time_inode_member() {
+    let byte_only = volume_candidate(MERGED_BYTES, 4);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+
+    let mut first_inode = ledger();
+    record_delivery(&mut first_inode, &byte_only, 1000);
+    sync(
+        &mut first_inode,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    assert!(first_inode.volume.is_empty());
+    // The first inode exhaustion is inside the bytes recurrence gate but has
+    // no delivery of its own, so the merged card is admitted.
+    assert!(deliverable(&first_inode, &merged, 5000));
+
+    let mut reported_inode = ledger();
+    record_delivery(&mut reported_inode, &byte_only, 1000);
+    sync(
+        &mut reported_inode,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    record_delivery(&mut reported_inode, &volume_candidate(MERGED_INODE, 4), 3000);
+    assert!(!deliverable(&reported_inode, &merged, 5000));
+}
+
+#[test]
 fn delivery_keeps_the_ledger_within_the_loader_entry_limit() {
     let mut state = ledger();
     for index in 0..MAX_ENTRIES - 1 {
