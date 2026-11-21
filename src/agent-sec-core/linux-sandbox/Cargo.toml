@@ -23,6 +23,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 asc-sandbox-types = { path = "../v2/crates/asc-sandbox-types" }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+landlock = "0.4.7"
 libc = "0.2.182"
 path-absolutize = "3.1.1"
 rustix = { version = "1.1", features = ["fs"] }

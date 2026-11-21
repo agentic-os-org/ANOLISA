@@ -17,6 +17,9 @@ pub use runtime::{
 /// Implementations must fail closed: a restriction they cannot install exactly
 /// is reported as [`PepError::Unsupported`], never approximated.
 pub trait SandboxBackend {
+    /// Identifies the backend configuration that will preflight and execute this invocation.
+    fn selection(&self) -> asc_sandbox_types::BackendSelection;
+
     /// Probes the restrictions this backend can install on the current host.
     ///
     /// # Errors
@@ -35,8 +38,7 @@ pub trait SandboxBackend {
     ///
     /// # Errors
     /// Rejects a plan this backend cannot install exactly.
-    fn preflight(&self, spec: &asc_sandbox_types::ExecutionSpec) -> Result<(), PepError> {
-        let _ = spec;
+    fn preflight(&self, _spec: &asc_sandbox_types::ExecutionSpec) -> Result<(), PepError> {
         Ok(())
     }
 }

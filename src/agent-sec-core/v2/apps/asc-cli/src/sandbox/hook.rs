@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use asc_daemon_protocol::authorization::{
-    AgentPrincipal, ClaimPhase, ClaimResponse, Decision, DecisionClaim, DecisionVerdict,
-    ExecutionSpec,
+    AgentPrincipal, BackendSelection, ClaimPhase, ClaimResponse, Decision, DecisionClaim,
+    DecisionVerdict, ExecutionPlan, LinuxSandboxOptions,
 };
 use asc_pep_runtime::{
     ApprovalHandler, DaemonAuthorizationClient, LinuxSandboxBackend, PepError, PepRuntime,
@@ -32,6 +32,9 @@ pub enum HookCommand {
         /// Optional Cedar runtime preset, combined before invocation and path validation.
         #[arg(long)]
         runtime_permissions: Option<PathBuf>,
+        /// Optional installation-owned Landlock mode file.
+        #[arg(long)]
+        landlock_config: Option<PathBuf>,
     },
     /// Consume a handoff after Cosh has approved the rewritten command.
     Execute {
@@ -76,14 +79,28 @@ impl HookCommand {
             Self::Prepare {
                 permissions,
                 runtime_permissions,
-            } => prepare(permissions, runtime_permissions.as_deref(), &client),
+                landlock_config,
+            } => {
+                let mode = landlock_config
+                    .as_deref()
+                    .map(template::landlock_mode)
+                    .transpose()?
+                    .unwrap_or_default();
+                prepare(permissions, runtime_permissions.as_deref(), mode, &client)
+            }
             Self::Execute { decision_id } => {
                 let accepted = claim(&client, decision_id, ClaimPhase::Execute, None, None)?
                     .authorization
                     .ok_or_else(|| {
                         SandboxError::Execution("authorization already consumed".into())
                     })?;
-                let mut runtime = PepRuntime::new(LinuxSandboxBackend::installed()?);
+                let BackendSelection::LinuxSandbox(options) = accepted.execution.backend else {
+                    let error = "Cosh execution requires the accepted Linux sandbox backend";
+                    PepRuntime::report_failure(&accepted.decision, &client, error.into())?;
+                    return Err(SandboxError::Execution(error.into()));
+                };
+                let mut runtime =
+                    PepRuntime::new(LinuxSandboxBackend::installed()?.with_options(options));
                 let outcome = runtime.resume(accepted, &client, Some(&mut HostApproved))?;
                 if let Some(error) = outcome.receipt_error {
                     return Err(SandboxError::Execution(format!(
@@ -104,7 +121,7 @@ fn claim(
     client: &DaemonAuthorizationClient,
     id: &str,
     phase: ClaimPhase,
-    execution: Option<ExecutionSpec>,
+    execution: Option<ExecutionPlan>,
     run_id: Option<String>,
 ) -> Result<ClaimResponse, SandboxError> {
     let response = asc_daemon_client::authorization_claim(
@@ -136,6 +153,7 @@ fn claim(
 fn prepare(
     permissions: &Path,
     runtime_permissions: Option<&Path>,
+    landlock: super::LandlockMode,
     client: &DaemonAuthorizationClient,
 ) -> Result<u8, SandboxError> {
     let mut bytes = Vec::new();
@@ -163,8 +181,7 @@ fn prepare(
         &input.cwd,
         super::target_environment()?,
     )?;
-    let is_template = permissions.extension() == Some(OsStr::new("template"));
-    let mut permissions = if is_template {
+    let mut permissions = if permissions.extension() == Some(OsStr::new("template")) {
         let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
         template::read(permissions, Path::new(&launch.cwd), tmpdir)?
     } else {
@@ -173,7 +190,9 @@ fn prepare(
     if let Some(preset) = runtime_permissions {
         permissions = permissions.with_runtime(read_permissions(preset)?)?;
     }
-    let mut runtime = PepRuntime::new(LinuxSandboxBackend::installed()?);
+    let mut runtime = PepRuntime::new(
+        LinuxSandboxBackend::installed()?.with_options(LinuxSandboxOptions { landlock }),
+    );
     let (request, decision) = runtime.authorize(
         &AgentPrincipal {
             agent_type: Some("cosh".into()),
@@ -202,7 +221,7 @@ fn prepare(
                 return Err(error.into());
             }
         };
-        let message = message::format(&request.request, &decision, &execution.path_facts);
+        let message = message::format(&request.request, &decision, &execution.spec.path_facts);
         let executable = std::env::current_exe()?
             .into_os_string()
             .into_string()

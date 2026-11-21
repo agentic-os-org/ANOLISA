@@ -5,7 +5,7 @@
 
 ## 1. 范围与架构
 
-目标是复用现有 `linux-sandbox`，根据输入权限启动命令或 Agent，并返回实施和执行结果。CLI 直接接收权限集合；接入 PDP 时，由上层 PEP 完成授权、审批和回执，复用同一执行后端。首期支持文件只读、读写和禁止访问，网络 off/full，并扩展挂载级 noexec。权限在一次运行期间固定；不引入 Landlock，不提供目录 POSIX X 配置。
+目标是复用现有 `linux-sandbox`，根据输入权限启动命令或 Agent，并返回实施和执行结果。CLI 直接接收权限集合；接入 PDP 时，由上层 PEP 完成授权、审批和回执，复用同一执行后端。支持文件只读、读写和禁止访问、网络 off/full 和挂载级 noexec。权限在一次运行期间固定。Linux helper 可叠加默认关闭的 Landlock ABI 3 写入限制。
 
 ![Sandbox 授权与执行流程](assets/linux-sandbox-policy-flow.svg)
 
@@ -366,7 +366,9 @@ RPC、PAP 当前版本读取和安全事件回执均已接入代码。本次拆�
 或故障处理，不能替代实际访问结果；安装成功、目标运行与回执写入分别验证。bubblewrap
 初始化中断的清理竞态仍保留为已知边界，不计为已通过。
 
-首期不包含 Landlock、完整文件 X 模型、目录 POSIX X 配置、意图识别算法、scanner 组合授权、AgentSight/Gateway PEP 实现、细粒度网络策略、运行中权限更新、后代进程逐次授权或任意 Cedar 策略的静态编译。
+Landlock 从最终挂载计划中取得可写对象，在内层 helper 内复核 device/inode 后以同一 FD 加规则。已有挂载承担只读例外，私有设备目录允许写；硬链接和已打开的 FD 仍遵循原有边界。探测通过后，规则安装错误阻断启动。
+
+首期不包含完整文件 X 模型、目录 POSIX X 配置、意图识别算法、scanner 组合授权、AgentSight/Gateway PEP 实现、细粒度网络策略、运行中权限更新、后代进程逐次授权或任意 Cedar 策略的静态编译。
 
 Cosh Hook 使用默认关闭的 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` 开关。开启 (`1/true`) 后，
 所有已接入的 `shell` / `run_shell_command` 原始命令（含 sudo）进入上层 PEP/PDP，明确

@@ -78,6 +78,12 @@ fn permissions(path: &std::path::Path) -> OsPermissionSet {
     .unwrap()
 }
 fn fixture() -> (tempfile::TempDir, PepRuntime, LaunchSpec, FixedPermissions) {
+    fixture_with_options(asc_sandbox_types::LinuxSandboxOptions::default())
+}
+
+fn fixture_with_options(
+    options: asc_sandbox_types::LinuxSandboxOptions,
+) -> (tempfile::TempDir, PepRuntime, LaunchSpec, FixedPermissions) {
     let directory = tempfile::tempdir().unwrap();
     let helper = directory.path().join("helper");
     std::fs::write(&helper, r#"#!/bin/bash
@@ -93,7 +99,7 @@ fi
     let provider = FixedPermissions(permissions(directory.path()));
     (
         directory,
-        PepRuntime::new(LinuxSandboxBackend::new(helper)),
+        PepRuntime::new(LinuxSandboxBackend::new(helper).with_options(options)),
         launch,
         provider,
     )
@@ -139,6 +145,120 @@ fn absent_or_declined_approval_never_starts_target() {
         assert_eq!(client.receipts.borrow().len(), 1);
         assert_eq!(client.receipts.borrow()[0].approval, approved);
     }
+}
+
+#[test]
+fn old_helper_cannot_accept_a_required_landlock_handoff() {
+    let (_directory, mut runtime, launch, permissions) =
+        fixture_with_options(asc_sandbox_types::LinuxSandboxOptions {
+            landlock: asc_sandbox_types::LandlockMode::Required,
+        });
+    let client = client(DecisionVerdict::StepUp);
+    let (request, decision) = runtime
+        .authorize(&principal(), launch, &permissions, &client)
+        .unwrap();
+    let outcome = runtime
+        .apply(&request, decision, &client, Some(&mut Approval(true)))
+        .unwrap();
+    assert!(!outcome.result.started);
+    assert!(
+        outcome
+            .result
+            .error
+            .unwrap()
+            .contains("Landlock required preflight failed")
+    );
+    assert_eq!(client.receipts.borrow()[0].approval, None);
+}
+
+#[test]
+fn required_preflight_accepts_only_a_successful_installation_only_handshake() {
+    use asc_sandbox_types::{LandlockMode, LinuxSandboxOptions};
+    let (directory, mut runtime, launch, permissions) = fixture_with_options(LinuxSandboxOptions {
+        landlock: LandlockMode::Required,
+    });
+    let helper = directory.path().join("helper");
+    std::fs::write(
+        &helper,
+        r#"#!/bin/sh
+case "$1" in
+    --capabilities) echo '{"strict_filesystem":true,"noexec":true,"network_off":true}' ;;
+    --check-landlock) echo landlock-write-v1 ;;
+    --preflight-landlock) cat "${0%/*}/frames" > "/proc/self/fd/$5"; exit "$(cat "${0%/*}/code")" ;;
+    *) exit 99 ;;
+esac
+"#,
+    )
+    .unwrap();
+    let client = client(DecisionVerdict::StepUp);
+    let (request, decision) = runtime
+        .authorize(&principal(), launch, &permissions, &client)
+        .unwrap();
+    let installed =
+        r#"{"stage":"installed_with_landlock","landlock":{"state":"enforced","abi":3}}"#;
+    for (frames, code, valid) in [
+        (format!("{installed}\n"), "0", true),
+        (String::new(), "0", false),
+        (format!("{installed}\n"), "2", false),
+        (
+            format!("{installed}\n{{\"stage\":\"started\"}}\n"),
+            "0",
+            false,
+        ),
+    ] {
+        std::fs::write(directory.path().join("frames"), frames).unwrap();
+        std::fs::write(directory.path().join("code"), code).unwrap();
+        let result = runtime.prepare_execution(&request, &decision);
+        if valid {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing successful installation-only handshake")
+            );
+        }
+    }
+}
+
+#[test]
+fn required_installation_failure_precedes_step_up_approval() {
+    let (directory, mut runtime, launch, permissions) =
+        fixture_with_options(asc_sandbox_types::LinuxSandboxOptions {
+            landlock: asc_sandbox_types::LandlockMode::Required,
+        });
+    std::fs::write(
+        directory.path().join("helper"),
+        r#"#!/bin/sh
+case "$1" in
+  --capabilities) echo '{"strict_filesystem":true,"noexec":true,"network_off":true}' ;;
+  --check-landlock) echo landlock-write-v1 ;;
+  --preflight-landlock)
+    echo '{"stage":"failed","message":"Landlock layer limit reached"}' > "/proc/self/fd/$5"
+    exit 125 ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    let client = client(DecisionVerdict::StepUp);
+    let (request, decision) = runtime
+        .authorize(&principal(), launch, &permissions, &client)
+        .unwrap();
+    let outcome = runtime
+        .apply(&request, decision, &client, Some(&mut Approval(true)))
+        .unwrap();
+    assert!(
+        outcome
+            .result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Landlock layer limit reached")
+    );
+    assert!(!outcome.result.started);
+    assert_eq!(client.receipts.borrow()[0].approval, None);
 }
 #[test]
 fn receipt_failure_preserves_completed_execution_without_replay() {
@@ -464,4 +584,43 @@ fn impossible_point_grant_fails_before_approval_and_is_reported() {
     assert!(!outcome.result.started);
     assert!(outcome.result.error.unwrap().contains("point-only"));
     assert_eq!(client.receipts.borrow()[0].approval, None);
+}
+
+#[test]
+fn resume_rejects_a_different_backend_or_downgraded_options_before_approval() {
+    use asc_daemon_protocol::authorization::{
+        AcceptedAuthorization, BackendSelection, LandlockMode, LinuxSandboxOptions,
+    };
+    for backend in [
+        BackendSelection::Docker {},
+        BackendSelection::LinuxSandbox(LinuxSandboxOptions {
+            landlock: LandlockMode::Required,
+        }),
+    ] {
+        let (_directory, mut runtime, launch, permissions) = fixture();
+        let client = client(DecisionVerdict::StepUp);
+        let (request, decision) = runtime
+            .authorize(&principal(), launch, &permissions, &client)
+            .unwrap();
+        let mut execution = runtime.prepare_execution(&request, &decision).unwrap();
+        execution.backend = backend;
+        let accepted = AcceptedAuthorization {
+            request: request.request,
+            decision,
+            execution,
+            accepted_at: now(),
+        };
+        let outcome = runtime
+            .resume(accepted, &client, Some(&mut Approval(true)))
+            .unwrap();
+        assert!(
+            outcome
+                .result
+                .error
+                .unwrap()
+                .contains("backend or options do not match")
+        );
+        assert!(!outcome.result.started);
+        assert_eq!(client.receipts.borrow()[0].approval, None);
+    }
 }

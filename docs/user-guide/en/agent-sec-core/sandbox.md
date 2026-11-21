@@ -18,6 +18,34 @@ execution; there is no host-execution fallback.
 
 ## Run a command
 
+On source builds with Landlock support, add `--landlock auto` or
+`--landlock required` before `--` on the Linux backend. The default `off`
+skips the probe. Both enabled modes add a kernel write ceiling to writable
+mounts and the sandbox's private devices. Read visibility, read-only subtrees
+(including protected Git metadata), noexec and network isolation still use
+the strict sandbox. Existing open descriptors retain their access.
+
+`auto` runs the original strict sandbox when the ABI query reports an
+unavailable syscall, a disabled LSM or ABI 1–2. The CLI prints the skip reason
+to stderr. `required` stops before starting the command in each case. With ABI
+3 or later, both modes require successful rule installation. Other probe errors,
+changed objects and setup failures stop execution.
+
+For Cosh all-shell authorization, put a single mode name in `landlock.conf`
+beside the installed `permissions.json.template`. A missing file selects
+`off` and keeps the previous CLI arguments, so an older CLI can still
+prepare the command. Use a root-owned regular file and root-owned parent
+directories without group or world write permission. Both fixed and
+command-derived permissions use this setting when preparing a new decision.
+Upgrade the hook, CLI, daemon and helper together before enabling it.
+
+Before requesting approval in `required` mode, the hook checks that the
+kernel will accept another Landlock layer, then installs the planned write
+rules in a disposable sandbox. It mounts all host paths read-only so that
+preparing mountpoints cannot modify the workspace before approval.
+After approval, execution checks the paths and installs the rules again in
+the target's sandbox.
+
 The following example permits host reads, writes only to `/tmp/asc-demo`, and
 blocks IP networking and direct execution from that directory. The root read
 grant is deliberately broad to include runtime dependencies; replace it with

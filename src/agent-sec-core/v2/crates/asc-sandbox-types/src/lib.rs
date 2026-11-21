@@ -2,7 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+mod execution_plan;
+mod linux;
 pub use asc_os_permission_types::*;
+pub use execution_plan::{BackendEvidence, BackendSelection, ExecutionPlan};
+pub use linux::{
+    BackendStatus, LandlockMode, LandlockStatus, LinuxExecutionSpec, LinuxSandboxOptions,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,7 +44,7 @@ pub struct PathFact {
     pub inode: u64,
 }
 
-/// Exact input to the isolated backend, independent of PDP communication.
+/// Launch permissions and path bindings shared by all execution backends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionSpec {
@@ -55,32 +61,13 @@ pub struct ExecutionSpec {
     pub mount_aliases: Vec<String>,
 }
 
-/// Setup handshake emitted by the trusted helper as JSON lines.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BackendStatus {
-    /// All requested restrictions are active.
-    Installed,
-    /// Target exec succeeded.
-    Started,
-    /// Target terminated; the namespace is being reaped.
-    Exited {
-        /// Normal exit status, if any.
-        exit_code: Option<i32>,
-        /// Terminating signal, if any.
-        signal: Option<i32>,
-    },
-    /// Setup or execution failed.
-    Failed {
-        /// Diagnostic without target environment contents.
-        message: String,
-    },
-}
-
 /// Installation and execution outcomes are reported independently.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionResult {
+    /// Backend-specific evidence from the installation handshake.
+    #[serde(flatten)]
+    pub evidence: BackendEvidence,
     /// Received a successful restriction-installation handshake.
     pub installed: bool,
     /// Target exec succeeded.

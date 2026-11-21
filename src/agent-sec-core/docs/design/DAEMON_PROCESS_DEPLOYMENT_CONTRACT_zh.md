@@ -437,6 +437,12 @@ RPC 或 PAP 发布入口。仅 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1/true` 选择�
 `tests/packaging/test-skillsec-install.sh` 和 Linux Host 集成测试验证；构建通过不代表
 真实 Cosh 验收通过。回退时恢复先前组件并关闭开关，保留管理员模板，不迁移 daemon 状态。
 
+Hook prepare 对固定和按命令生成的权限统一读取同目录下可选的 `landlock.conf`。
+文件缺失为 off，存在时采用与模板相同的所有者和权限要求。execute 只执行 daemon
+交接中固定的模式，配置修改影响后续 prepare。用 `tests/e2e/linux-sandbox/landlock_cli.sh`
+验证同一份 CLI 产物，第二个参数按内核环境选择 `enabled`（ABI 3 及以上）、
+`disabled`（LSM 未启用，EOPNOTSUPP）或 `no-syscall`（系统调用缺失，ENOSYS）。
+
 配套 Cosh NG 支持 Hook 元数据 `require_output_when_env`，将 sandbox-guard 的空输出
 检查绑定全 shell 开关。开启或非法值时空输出进入现有失败阻断流程；关闭时及未声明该
 字段的其他 extension 保持兼容。仅配置 `fail_open=false` 的旧 Cosh NG 仍将成功退出的

@@ -184,3 +184,15 @@ fn template_trust_and_input_limits_fail_closed() {
     fs::write(&source, [0xff]).unwrap();
     assert!(read_bounded(File::open(&source).unwrap()).is_err());
 }
+
+#[test]
+fn explicit_mode_file_must_exist_and_be_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("landlock.conf");
+    assert!(landlock_mode(&path).is_err());
+    fs::write(&path, "required\n").unwrap();
+    assert!(
+        landlock_mode(&path).is_err(),
+        "accepted a mode under a writable temporary directory"
+    );
+}

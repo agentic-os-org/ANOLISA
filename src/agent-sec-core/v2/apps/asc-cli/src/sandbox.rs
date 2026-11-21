@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::PathBuf;
 
-use asc_daemon_protocol::authorization::LaunchSpec;
+use asc_daemon_protocol::authorization::{
+    BackendEvidence, LandlockMode, LandlockStatus, LaunchSpec, LinuxSandboxOptions,
+};
 use asc_os_permission_types::OsPermissionSet;
 use asc_pep_runtime::PermissionInput;
 use asc_sandbox_docker::{DockerBackend, DockerConfig};
@@ -42,6 +44,9 @@ pub struct SandboxRun {
     /// Enforcement backend; docker requires an operator-pinned --image.
     #[arg(long, value_enum, default_value = "linux")]
     pub backend: BackendKind,
+    /// Extra Linux filesystem write protection: off (default), auto or required.
+    #[arg(long, default_value = "off")]
+    pub landlock: LandlockMode,
     /// Operator-pinned container image, preferably by digest (docker backend).
     #[arg(long, required_if_eq("backend", "docker"))]
     pub image: Option<String>,
@@ -104,9 +109,17 @@ impl SandboxCommand {
                     target_environment()?,
                 )?;
                 asc_pep_runtime::LinuxSandboxBackend::installed()?
+                    .with_options(LinuxSandboxOptions {
+                        landlock: options.landlock,
+                    })
                     .execute_with_provider(launch, &permissions)?
             }
             BackendKind::Docker => {
+                if !options.landlock.is_off() {
+                    return Err(SandboxError::Execution(
+                        "--landlock requires the linux backend".into(),
+                    ));
+                }
                 let permissions = read_docker_permissions(&options.permissions)?;
                 docker_execute(options, program, args, permissions)?
             }
@@ -162,6 +175,12 @@ fn target_environment() -> Result<BTreeMap<String, String>, SandboxError> {
 fn exit_status(
     result: asc_daemon_protocol::authorization::ExecutionResult,
 ) -> Result<u8, SandboxError> {
+    if let BackendEvidence::LinuxSandbox { landlock: status } = result.evidence {
+        match status {
+            LandlockStatus::Enforced { abi } => eprintln!("Landlock enforced (kernel ABI {abi})"),
+            LandlockStatus::Skipped { reason } => eprintln!("Landlock skipped: {reason}"),
+        }
+    }
     if let Some(error) = result.error {
         return Err(SandboxError::Execution(error));
     }

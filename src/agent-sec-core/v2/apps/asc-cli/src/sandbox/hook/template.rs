@@ -31,17 +31,7 @@ pub(super) fn read(
     tmpdir: Option<&str>,
 ) -> Result<PermissionInput, SandboxError> {
     let result = (|| {
-        check_location(path)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits())
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || !trusted(metadata.uid(), metadata.mode()) {
-            return Err(invalid(
-                "expected a root-owned regular file without group/other writes",
-            ));
-        }
+        let file = trusted_file(path)?;
         let text = read_bounded(file)?;
         let permissions = expand(&text, cwd, tmpdir)?;
         Ok(PermissionInput::parse(&serde_json::to_string(
@@ -49,6 +39,32 @@ pub(super) fn read(
         )?)?)
     })();
     result.map_err(|error: SandboxError| invalid(format!("{}: {error}", path.display())))
+}
+
+/// Both permission sources use the same installation-owned mode file.
+pub(super) fn landlock_mode(path: &Path) -> Result<super::super::LandlockMode, SandboxError> {
+    // The hook observed a configuration entry. A disappearance before open
+    // must fail just like an unreadable configuration.
+    let file = trusted_file(path)?;
+    read_bounded(file)?
+        .trim()
+        .parse()
+        .map_err(|e| invalid(format!("{}: {e}", path.display())))
+}
+
+fn trusted_file(path: &Path) -> Result<File, SandboxError> {
+    check_location(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || !trusted(metadata.uid(), metadata.mode()) {
+        return Err(invalid(
+            "expected a root-owned regular file without group/other writes",
+        ));
+    }
+    Ok(file)
 }
 
 fn invalid(message: impl Into<String>) -> SandboxError {

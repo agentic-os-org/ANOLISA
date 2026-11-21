@@ -132,11 +132,20 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-cli-') as root:
     helper = root / 'linux-sandbox'
     helper.write_text('''#!/usr/bin/python3
 import json, os, sys
+if sys.argv[1] == '--check-landlock':
+    print('landlock-write-v1')
+    sys.exit(0)
 with os.fdopen(int(sys.argv[2])) as source:
     spec = json.load(source)
 print(json.dumps(spec['permissions']))
+installed = {'stage':'installed'}
+if 'landlock' in spec:
+    with open(os.path.join(os.path.dirname(__file__), 'evidence.json')) as evidence:
+        mode, status = json.load(evidence)
+    assert spec['landlock'] == mode
+    installed = {'stage':'installed_with_landlock','landlock':status}
 with os.fdopen(int(sys.argv[4]), 'w') as status:
-    for event in [{'stage':'installed'}, {'stage':'started'}, {'stage':'exited','exit_code':23,'signal':None}]:
+    for event in [installed, {'stage':'started'}, {'stage':'exited','exit_code':23,'signal':None}]:
         status.write(json.dumps(event) + '\\n')
 ''')
     helper.chmod(0o700)
@@ -152,6 +161,28 @@ with os.fdopen(int(sys.argv[4]), 'w') as status:
             capture_output=True, text=True, timeout=20, cwd=root)
         assert result.returncode == 23, (result.stdout, result.stderr)
         assert json.loads(result.stdout) == expected, result.stdout
+    source.write_text(json.dumps(expected))
+    skipped = {'state':'skipped','reason':'LSM disabled'}
+    enforced = {'state':'enforced','abi':3}
+    for mode, evidence, code, diagnostic in [
+        ('auto', skipped, 23, 'Landlock skipped: LSM disabled'),
+        ('required', enforced, 23, 'Landlock enforced (kernel ABI 3)'),
+        ('required', skipped, None, 'invalid backend handshake'),
+        ('required', {'state':'enforced','abi':2}, None, 'invalid backend handshake'),
+    ]:
+        (root / 'evidence.json').write_text(json.dumps([mode, evidence]))
+        result = subprocess.run([str(cli), 'sandbox', 'run', '--landlock', mode,
+            '--permissions', str(source), '--', '/usr/bin/true'], cwd=root,
+            capture_output=True, text=True, timeout=20)
+        if code is None:
+            assert result.returncode not in (0, 23), result
+        else:
+            assert result.returncode == code, result
+        assert diagnostic in result.stderr, result
+    result = subprocess.run([str(cli), 'sandbox', 'run', '--backend', 'docker',
+        '--landlock', 'auto', '--image', 'unused:test', '--permissions', str(source),
+        '--', '/usr/bin/true'], cwd=root, capture_output=True, text=True, timeout=20)
+    assert result.returncode != 0 and '--landlock requires the linux backend' in result.stderr, result
     for text in [cedar, json.dumps({'language':'cedar','content':{'text':cedar}})]:
         source.write_text(text)
         result = subprocess.run([str(cli), 'sandbox', 'run', '--backend', 'docker',
