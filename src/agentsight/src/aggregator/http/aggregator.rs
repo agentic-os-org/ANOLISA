@@ -4124,7 +4124,6 @@ mod tests {
         headers.insert("content-length".to_string(), "0".to_string());
         headers.insert("transfer-encoding".to_string(), "chunked".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/chat".to_string(),
             version: 1,
@@ -4169,7 +4168,6 @@ mod tests {
         headers.insert("content-length".to_string(), "0".to_string());
         headers.insert("transfer-encoding".to_string(), "chunked".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/chat".to_string(),
             version: 1,
