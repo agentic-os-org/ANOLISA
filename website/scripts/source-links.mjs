@@ -39,7 +39,10 @@ export function markdownSourceLinks(markdown) {
   const tree = parser.parse(markdown);
   const definitions = new Map();
   visit(tree, (node) => {
-    if (node.type === 'definition') definitions.set(node.identifier, node.url);
+    // CommonMark resolves duplicate normalized labels to their first definition.
+    if (node.type === 'definition' && !definitions.has(node.identifier)) {
+      definitions.set(node.identifier, node.url);
+    }
   });
   const links = [];
   visit(tree, (node) => {
