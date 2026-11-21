@@ -11,9 +11,18 @@ set -euo pipefail
 AGENT="${ANOLISA_TARGET:-hermes}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value skips those probes rather than guessing a path
+# under /.
+HOME_DIR="${HOME:-}"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+HERMES_HOME="${HERMES_HOME:-${HOME_DIR:+$HOME_DIR/.hermes}}"
 HERMES_BIN="${HERMES_BIN:-}"
-export PATH="$HOME/.local/bin:${HERMES_HOME%/}/bin:/usr/local/bin:$PATH"
+export PATH="${USER_LOCAL_BIN}${HERMES_HOME:+${HERMES_HOME%/}/bin:}/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/hermes"
@@ -41,7 +50,7 @@ fi
 if [ -d "$HERMES_HOME" ]; then
     field "hermes home" "present (${HERMES_HOME})"
 else
-    field "hermes home" "not installed (${HERMES_HOME})"
+    field "hermes home" "not installed (${HERMES_HOME:-HOME is unset})"
     note_install_missing "hermes home"
 fi
 
@@ -60,11 +69,11 @@ else
     note_prereq_missing "plugin resource"
 fi
 
-plugin_dst="${HERMES_HOME%/}/plugins/${PLUGIN_ID}"
+plugin_dst="${HERMES_HOME:+${HERMES_HOME%/}/plugins/${PLUGIN_ID}}"
 if [ -d "$plugin_dst" ] || [ -L "$plugin_dst" ]; then
     field "${PLUGIN_ID} plugin" "installed (${plugin_dst})"
 else
-    field "${PLUGIN_ID} plugin" "missing (${plugin_dst})"
+    field "${PLUGIN_ID} plugin" "missing (${plugin_dst:-HOME is unset})"
     note_install_missing "${PLUGIN_ID} plugin"
 fi
 
