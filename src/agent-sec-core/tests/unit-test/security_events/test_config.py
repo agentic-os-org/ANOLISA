@@ -173,3 +173,18 @@ class TestStreamPaths:
     def test_stream_names_reject_path_traversal(self) -> None:
         with pytest.raises(ValueError):
             get_stream_log_path("../observability")
+
+    def test_stream_names_reject_trailing_newline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # '$' also matches just before a trailing newline, so "^...$" with
+        # .match() accepts "security-events\n" and produces a path with an
+        # embedded newline.  Stream names are a strict whitelist.
+        monkeypatch.setattr(
+            "agent_sec_cli.security_events.config._resolve_data_dir",
+            lambda: tmp_path,
+        )
+        with pytest.raises(ValueError):
+            get_stream_log_path("security-events\n")
+        with pytest.raises(ValueError):
+            get_stream_db_path("security-events\n")
