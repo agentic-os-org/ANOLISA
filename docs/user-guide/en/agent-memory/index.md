@@ -88,9 +88,37 @@ Build deps: Rust ≥ 1.85 (edition 2024; CI pins 1.89 to share the monorepo tool
 Runtime is Linux-only (depends on user_namespace, mount(2), cgroup v2, inotify, journald). On macOS / Windows use the remote flow:
 
 ```bash
-make remote-build   # push branch and ssh to a Linux host for cargo build
-make remote-test    # same + tests + clippy
+make remote-build   # push the memory branch and ssh to a Linux host for cargo build
+make remote-test    # same + adapter install test + cargo test --release + clippy
 ```
+
+The targets drive a dedicated Linux checkout over SSH. Defaults live in the
+component `Makefile` and can be overridden per invocation:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `REMOTE_REPO` | `shiloong` | Git remote name in your monorepo checkout |
+| `REMOTE_BRANCH` | `memory` | Branch pushed and checked out on the host |
+| `REMOTE_HOST` | `aos2` | SSH destination of the Linux host |
+| `REMOTE_PATH` | `/root/anolisa` | Dedicated monorepo checkout on the host |
+
+Prerequisites: a Git remote named `REMOTE_REPO` in your local monorepo
+checkout, the `REMOTE_BRANCH` branch present locally, SSH access to
+`REMOTE_HOST`, and that host holding a full monorepo checkout at
+`REMOTE_PATH` that fetches from the same `REMOTE_REPO` remote.
+
+Each target first pushes your local `REMOTE_BRANCH` to `REMOTE_REPO`
+(`remote-push`), then connects over SSH: the host fetches
+`REMOTE_REPO/REMOTE_BRANCH` and hard-resets `REMOTE_PATH` to it before running
+the build, or for `remote-test`, the adapter install test,
+`cargo test --release` and clippy with `-D warnings`. A dirty remote checkout
+refuses the reset so that `remote-test` cannot wipe uncommitted debugging
+work; set `REMOTE_FORCE=1` to override on a known-clean checkout. Because the
+reset is hard, keep the host checkout dedicated to this flow and commit local
+work before pushing.
+
+On Linux, build and test locally instead: `make build` and `make test` in
+`src/agent-memory` (see [Source build](#source-build-developers) above).
 
 ---
 
