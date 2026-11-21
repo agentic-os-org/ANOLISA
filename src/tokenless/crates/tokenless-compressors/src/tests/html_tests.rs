@@ -515,6 +515,7 @@ fn adjacent_link_code_spans_keep_both_boundaries() {
         ("<code>a</code><a href=\"/x\"><code>b</code>[</a>", "`a`<!-- -->`b`["),
         ("<span><a><code>a</code></a></span><a><span><code>b</code></span></a>", "`a`<!-- -->`b`"),
         ("<code>a</code><a> <code>b</code></a>", "`a` `b`"),
+        ("<a> <code>b</code></a><code>c</code>", "`b`<!-- -->`c`"),
         ("<a><code>a</code> </a><code>b</code>", "`a` `b`"),
         ("<code>a</code><a>`literal</a>", "`a``literal"),
         ("<code>a</code><a><code>b</code><br><code>c</code></a><code>d</code>", "`a`<!-- -->`b`\n`c`<!-- -->`d`"),
@@ -607,6 +608,14 @@ fn fallback_links_escape_only_the_new_part_of_a_split_run() {
         let (_, body) = body_of(&view).split_once("\n\n").unwrap();
         assert_inline_content(body, visible, &["y"]);
     }
+
+    let html = r"<code>a</code><a><marquee><a>\<code>y</code></a></marquee></a>";
+    let view = HtmlExtractor
+        .render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>")))
+        .unwrap();
+    let (_, body) = body_of(&view).split_once("\n\n").unwrap();
+    assert_eq!(body, r"`a`\\`y`");
+    assert_inline_content(body, r"a\y", &["a", "y"]);
 }
 
 #[test]

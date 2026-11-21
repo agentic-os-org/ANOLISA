@@ -154,11 +154,12 @@ delimiters from merging without adding a visible space. Raw-text consumers see t
 padding and comment markup; renderers with raw HTML disabled display the comment
 literally, although the code spans remain separate. Consumers can ignore this
 generated separator as markup. Literal backslashes immediately before a generated
-opening delimiter are doubled, including when the run starts outside a link
+opening code-span delimiter are doubled, including when the run starts outside a link
 and continues inside its fallback text. CommonMark then preserves both the
 backslashes and the code span. These rules also apply to HTML rendered as
 Markdown inside JSON string values. Literal backticks in ordinary text remain
-unescaped: text next to a code span can still disrupt Markdown parsing.
+unescaped. If they form an unintended code span, its contents can include the
+literal separator even when raw HTML is enabled.
 
 The emitted operation is `html_extraction` and recoverability is `retrievable`, not
 `lossless`: markup and the removed elements are not in the visible output. Follow the

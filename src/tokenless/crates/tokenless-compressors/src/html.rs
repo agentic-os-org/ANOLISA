@@ -889,10 +889,12 @@ impl InlineCodeBoundaries {
     // `prefix` is already-rendered text about to be appended before the fence
     // (empty for a new span). Its own trailing backslashes are already doubled.
     fn start_span(&mut self, out: &mut String, prefix: &str) {
+        // A nonempty prefix already separates the fences.
         if prefix.is_empty() && self.last_end == Some(out.len()) {
             out.push_str("<!-- -->");
         } else if out.ends_with('\\') && prefix.bytes().all(|b| b == b'\\') {
-            // Only the parent's literal run still needs one escape per slash.
+            // Only an all-backslash prefix lets the parent's run reach the fence.
+            // This includes an empty prefix for a new span; only the parent needs escaping.
             let backslashes = out.bytes().rev().take_while(|&b| b == b'\\').count();
             out.extend(std::iter::repeat_n('\\', backslashes));
         }
@@ -1665,7 +1667,8 @@ impl<'a> Renderer<'a> {
                     let from_start = text.trim_start();
                     let leading = text.len() - from_start.len();
                     let trimmed = from_start.trim_end();
-                    // Link-edge whitespace separates spans before adjacency is checked.
+                    // Preserve edge whitespace as `wrapped` does for emphasis:
+                    // it separates spans and must be present when checking adjacency.
                     if text.starts_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
