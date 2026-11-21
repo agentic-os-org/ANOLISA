@@ -263,14 +263,18 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     root: bool,
     mounts: bool,
 ) -> Result<DiskFacts, HealthUnavailableReason> {
-    let local = if !mounts || (!passive && config.scan_mounts.is_some()) {
-        BTreeSet::new()
+    let (local, inventory_unavailable) = if !mounts || (!passive && config.scan_mounts.is_some()) {
+        (BTreeSet::new(), false)
     } else if passive {
-        local_mounts()
+        (local_mounts(), false)
     } else {
-        on_demand_mounts(&config.critical_mounts)
+        match on_demand_mounts(&config.critical_mounts) {
+            Some(local) => (local, false),
+            None => (BTreeSet::new(), true),
+        }
     };
-    let (paths, scope_incomplete) = df_operand_paths(config, passive, root, mounts, &local)?;
+    let (paths, scope_incomplete) =
+        df_operand_paths(config, passive, root, mounts, &local, inventory_unavailable)?;
     let mut args = vec!["-k", "-P"];
     #[cfg(target_os = "linux")]
     args.push("-T");
@@ -313,6 +317,7 @@ fn df_operand_paths(
     root: bool,
     mounts: bool,
     local: &BTreeSet<String>,
+    inventory_unavailable: bool,
 ) -> Result<(Option<Vec<String>>, bool), HealthUnavailableReason> {
     if passive || config.scan_mounts.is_some() || !mounts {
         let (targets, _) = volume::declared_targets(config, root, mounts);
@@ -344,7 +349,10 @@ fn df_operand_paths(
         if root {
             paths.push("/".to_string());
         }
-        let mut scope_incomplete = false;
+        // A failed inventory read leaves `local` empty without proving that no
+        // mount exists, so the mounts check must report the gap instead of
+        // returning `Ok` over an unknown mount set.
+        let mut scope_incomplete = inventory_unavailable;
         for mount in local {
             if mount == "/" || paths.iter().any(|path| path == mount) {
                 continue;
@@ -365,7 +373,7 @@ fn df_operand_paths(
         // No mount inventory to bound the probe to, so df runs without
         // operands and the enabled-target retain below still drops rows for
         // disabled checks.
-        let _ = (root, local);
+        let _ = (root, local, inventory_unavailable);
         Ok((None, false))
     }
 }
@@ -385,24 +393,23 @@ fn local_mounts() -> BTreeSet<String> {
 
 /// The default on-demand scan samples every mount `df` reports, not just the
 /// passive filesystem allowlist, so a boot- or user-created filesystem
-/// outside that allowlist is not dropped from the first scan.
-fn on_demand_mounts(critical_mounts: &[String]) -> BTreeSet<String> {
+/// outside that allowlist is not dropped from the first scan. `None` means the
+/// inventory could not be read, which is not the same as an empty mount set.
+fn on_demand_mounts(critical_mounts: &[String]) -> Option<BTreeSet<String>> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = critical_mounts;
-        BTreeSet::new()
+        Some(BTreeSet::new())
     }
     #[cfg(target_os = "linux")]
     {
-        mountinfo_content()
-            .map(|content| on_demand_mounts_in(&content, critical_mounts))
-            .unwrap_or_default()
+        mountinfo_content().map(|content| on_demand_mounts_in(&content, critical_mounts))
     }
 }
 
 #[cfg(target_os = "linux")]
 fn mountinfo_content() -> Option<String> {
-    let file = std::fs::File::open("/proc/self/mountinfo").ok()?;
+    let file = std::fs::File::open(mountinfo_path()).ok()?;
     let mut content = String::new();
     if file
         .take(256 * 1024 + 1)
@@ -413,6 +420,42 @@ fn mountinfo_content() -> Option<String> {
         return None;
     }
     Some(content)
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_path() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(path) = MOUNTINFO_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+    std::path::PathBuf::from("/proc/self/mountinfo")
+}
+
+#[cfg(all(target_os = "linux", test))]
+thread_local! {
+    static MOUNTINFO_PATH: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: points the mount-inventory read at another path, restored on
+/// drop.
+#[cfg(all(target_os = "linux", test))]
+pub(super) struct MountinfoPathGuard(Option<std::path::PathBuf>);
+
+#[cfg(all(target_os = "linux", test))]
+impl MountinfoPathGuard {
+    pub(super) fn at(path: &std::path::Path) -> Self {
+        let previous = MOUNTINFO_PATH.with(|slot| slot.replace(Some(path.to_path_buf())));
+        Self(previous)
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+impl Drop for MountinfoPathGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        MOUNTINFO_PATH.with(|slot| *slot.borrow_mut() = previous);
+    }
 }
 
 #[cfg(target_os = "linux")]
