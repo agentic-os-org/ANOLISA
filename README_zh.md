@@ -315,6 +315,9 @@ aw inspect --config "$AW_HOME/anolisa.yaml" --json
 
 ## 8. 社区
 
+提交已声明的组件回归结果前，可通过[必需证据检查](docs/user-guide/zh/getting-started/testing.md#3-必需回归证据)
+拒绝缺失或跳过的必需套件。
+
 <div align="center">
 
 <img src="docs/images/readme/dingtalk-qr.png" alt="ANOLISA 钉钉社区二维码" width="180"/>
