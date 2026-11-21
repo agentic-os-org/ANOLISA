@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Iterable
+from itertools import pairwise
 from statistics import fmean
 from typing import Any
 
@@ -17,6 +19,15 @@ def numeric(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return result if math.isfinite(result) else None
+
+
+def counter_increase(values: Iterable[float]) -> float:
+    """Count increases after the first sample, including new counter epochs."""
+    total = 0.0
+    for previous, current in pairwise(values):
+        # A smaller value starts a new epoch whose observed count is included.
+        total += current if current < previous else current - previous
+    return total
 
 
 def percentile(values: list[float], fraction: float = 0.95) -> float | None:
