@@ -259,3 +259,22 @@ def test_run_sh_passes_metrics_args_to_validator() -> None:
     assert "--metrics-file" in block
     assert "--metrics-baseline" in block
     assert "internal-metrics-baseline.prom" in block
+
+
+@pytest.mark.parametrize(
+    ("times", "expected_times"),
+    [
+        ([0.0, 1.0, 1.0, 2.0, 3.0], [1.0, 1.0, 2.0]),
+        ([2.0, 3.0, 0.0, 1.0, 1.0], [2.0, 1.0, 1.0]),
+    ],
+)
+def test_rolling_rss_slope_keeps_both_window_boundaries(
+    times: list[float], expected_times: list[float]
+) -> None:
+    from plot_metrics import warmup_slope
+
+    values = [100.0 + 3.0 * time for time in times]
+    _, rolling_times, slopes = warmup_slope(times, values, 0.0, 1.0)
+
+    assert rolling_times == expected_times
+    assert slopes == pytest.approx([10800.0, 10800.0, 10800.0])
