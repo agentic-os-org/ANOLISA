@@ -41,6 +41,24 @@ function upgradeFtsUpdateTrigger(db: DatabaseSync): void {
 }
 
 export function runMigrations(db: DatabaseSync): void {
+  // Schema presence is the migration marker, so it must commit with its data.
+  // A savepoint also preserves transactions owned by the caller.
+  db.exec("SAVEPOINT selective_claw_migrate");
+  try {
+    migrate(db);
+    db.exec("RELEASE selective_claw_migrate");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK TO selective_claw_migrate");
+      db.exec("RELEASE selective_claw_migrate");
+    } catch (cleanupError) {
+      console.warn("[selective-claw] migration rollback failed", cleanupError);
+    }
+    throw error;
+  }
+}
+
+function migrate(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       message_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +80,7 @@ export function runMigrations(db: DatabaseSync): void {
   ).get();
 
   if (!ftsExists) {
+    db.exec("SAVEPOINT selective_claw_fts");
     try {
       db.exec(`
         CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -83,8 +102,12 @@ export function runMigrations(db: DatabaseSync): void {
 
         INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
       `);
+      db.exec("RELEASE selective_claw_fts");
     } catch {
-      // FTS5 not available in this SQLite build — full-text search will be unavailable
+      // Optional FTS may be unavailable. Remove every partial installation so
+      // table existence cannot prevent a complete retry on the next startup.
+      db.exec("ROLLBACK TO selective_claw_fts");
+      db.exec("RELEASE selective_claw_fts");
     }
   } else {
     upgradeFtsUpdateTrigger(db);
