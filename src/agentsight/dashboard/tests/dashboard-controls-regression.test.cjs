@@ -129,6 +129,56 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+for (const cached of [{ summary: 'older cached evaluation' }, null]) {
+  test(`a background evaluation lookup cannot replace a completed manual result (${cached ? 'cached' : 'empty'})`, async () => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs(['fetchTraces', 'fetchLatestEvaluation']);
+    const EvaluationPanel = () => null;
+    const dependencies = {
+      recharts: {},
+      'react-router-dom': { useNavigate: () => () => {}, useSearchParams: () => [new URLSearchParams(), () => {}] },
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': { ...stubs, conversationInterruptionKey: (s, c) => `${s}:${c}` },
+      '../utils/datetime': { formatNsPadded: () => 'time' },
+      '../utils/timeseriesBuckets': {},
+      '../components/EvaluationPanel': { EvaluationPanel },
+    };
+    for (const name of ['InterruptionBadge', 'InterruptionPanel', 'EvaluationBadge', 'DateTimePicker', 'CopyButton', 'SessionIdHelp', 'SessionResourceChart']) {
+      dependencies[`../components/${name}`] = componentStub(name);
+    }
+    const { TraceSubTable } = loadPageModule('src/pages/ConversationList.tsx', dependencies, driver,
+      '\nmodule.exports.TraceSubTable = TraceSubTable;');
+    const props = { sessionId: 'session', detailsId: 'details', conversationInterruptionCounts: new Map() };
+    let rendered = driver.render(TraceSubTable, props);
+    rendered.effects[0]();
+    calls.fetchTraces[0].resolve(['first', 'second'].map((conversation_id) => ({
+      conversation_id, call_count: 1, total_input_tokens: 10, total_output_tokens: 5,
+      start_ns: 1, end_ns: 2, user_query: 'question', model: 'model',
+    })));
+    await settle();
+    rendered = driver.render(TraceSubTable, props);
+    rendered.effects[1]();
+    assert.deepEqual(calls.fetchLatestEvaluation.map(call => call.args[0]), ['first', 'second']);
+    // Open the evaluation disclosure while its automatic cached lookup waits.
+    const buttons = collectElements(rendered.element, node => node.type === 'button');
+    const button = buttons.find(node => node.props.onClick?.toString().includes('setExpandedEvaluationPanel'));
+    assert.ok(button);
+    button.props.onClick({ stopPropagation() {} });
+    rendered = driver.render(TraceSubTable, props);
+    const panel = collectElements(rendered.element, node => node.type === EvaluationPanel)[0];
+    const fresh = { summary: 'fresh manual evaluation' };
+    panel.props.onResult(fresh);
+    calls.fetchLatestEvaluation[0].resolve(cached);
+    const other = { summary: 'other conversation evaluation' };
+    calls.fetchLatestEvaluation[1].resolve(other);
+    await settle();
+    rendered = driver.render(TraceSubTable, props);
+    assert.equal(collectElements(rendered.element, node => node.type === EvaluationPanel)[0].props.initialResult, fresh);
+    assert.equal(driver.slots[6].value.get('second'), other,
+      'protecting the manual result must still hydrate unrelated rows');
+  });
+}
+
 // Mirrors the shared helper's contract: the evidence link may only name a case
 // belonging to a visible (agent-filtered) violation row. The real derivation is
 // covered against the compiled module in apiClient-regression.
