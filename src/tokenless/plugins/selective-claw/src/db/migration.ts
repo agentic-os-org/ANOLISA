@@ -59,6 +59,8 @@ export function runMigrations(db: DatabaseSync): void {
   if (!columnExists(db, "messages", "turn_seq")) {
     db.exec(`ALTER TABLE messages ADD COLUMN turn_seq INTEGER`);
 
+    // A correlated lookup can rescan the window CTE for every archived row
+    // when update triggers are installed. Join the computed turns by row ID.
     db.exec(`
       WITH turn_ids AS (
         SELECT message_id,
@@ -69,10 +71,9 @@ export function runMigrations(db: DatabaseSync): void {
             IN ('user', 'system') THEN 0 ELSE 1 END AS turn_seq
         FROM messages
       )
-      UPDATE messages SET turn_seq = (
-        SELECT turn_ids.turn_seq FROM turn_ids
-        WHERE turn_ids.message_id = messages.message_id
-      )
+      UPDATE messages SET turn_seq = turn_ids.turn_seq
+      FROM turn_ids
+      WHERE turn_ids.message_id = messages.message_id
     `);
   }
 
