@@ -152,7 +152,6 @@ pub(crate) fn handle_config_event(
             );
         }
         SlsConfigAction::Activate { path } => {
-            crate::genai::logtail::set_explicit_logtail_registered(false);
             crate::genai::logtail::set_dynamic_logtail_path(path);
             let exporter = LogtailExporter::new_with_path(path, encryption_pem, trace_enabled);
             log::info!("Config watcher: LogtailExporter created (path={path}, uid={uid})");
@@ -185,18 +184,14 @@ pub(crate) fn handle_config_event(
 pub(crate) fn take_pending_logtail(
     pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
 ) -> Option<Box<dyn GenAIExporter>> {
-    let taken = match pending_logtail.try_lock() {
+    match pending_logtail.try_lock() {
         Ok(mut guard) => guard.take(),
         Err(std::sync::TryLockError::Poisoned(poisoned)) => {
             let mut guard = poisoned.into_inner();
             guard.take()
         }
         Err(std::sync::TryLockError::WouldBlock) => None,
-    };
-    if taken.is_some() {
-        crate::genai::logtail::set_explicit_logtail_registered(true);
     }
-    taken
 }
 
 pub(crate) fn start_config_watcher(
