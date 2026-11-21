@@ -361,10 +361,10 @@ for dependencies, migration, and the 1.2.5 native Bash / 1.3.2 workspace Shell b
 Inspect component logs or generate a diagnostic bundle:
 
 ```bash
-anolisa logs <component>
-anolisa logs <component> --limit 50
-anolisa logs <component> --severity warn
-anolisa logs <component> --since '2026-10-01T00:30:00Z'
+anolisa logs agentsight
+anolisa logs agentsight --limit 50
+anolisa logs agentsight --severity warn
+anolisa logs agentsight --since '2026-10-01T00:30:00Z'
 anolisa bug
 ```
 
