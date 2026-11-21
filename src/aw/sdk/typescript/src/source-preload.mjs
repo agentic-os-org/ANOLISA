@@ -7,20 +7,22 @@
  * performs no global patching.
  */
 import { readFileSync } from "node:fs";
-import * as moduleApi from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import {
+  DEFAULT_MAX_STREAM_BYTES,
   DEFAULT_MAX_STREAM_ITEMS,
   DEFAULT_SOURCE_EVENTS,
   LanguageSource,
 } from "./sources.mjs";
 import { isPlainObject, validateIdentity } from "./source-helpers.mjs";
+import { wrapFetch } from "./source-preload-fetch.mjs";
+import {
+  registerModuleHooks,
+  resolveCanonicalModuleUrl,
+} from "./source-preload-modules.mjs";
 import { AwError } from "./transport.mjs";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
-const REGISTRY_SYM = Symbol.for("aw.sdk.preload.registry");
-const PROXY_SCHEME = "aw-instrument:";
 const TOP_KEYS = new Set([
   "endpoint",
   "target",
@@ -32,6 +34,7 @@ const TOP_KEYS = new Set([
   "withholdResult",
   "timeoutMs",
   "cwd",
+  "baseDir",
   "targets",
 ]);
 const FETCH_KEYS = new Set(["kind", "name", "maxBodyBytes"]);
@@ -43,11 +46,12 @@ const MODULE_KEYS = new Set([
   "name",
   "bufferStream",
   "maxStreamItems",
+  "maxStreamBytes",
 ]);
 const SUPPORTED_EVENTS = new Set(["input.submit", "tool.before", "tool.after"]);
 const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
-export function validateAutoSpec(raw) {
+export function validateAutoSpec(raw, { baseDir } = {}) {
   if (!isPlainObject(raw)) throw new AwError("source_auto_config_invalid");
   for (const key of Object.keys(raw)) {
     if (!TOP_KEYS.has(key)) throw new AwError("source_auto_config_invalid");
@@ -77,9 +81,17 @@ export function validateAutoSpec(raw) {
   if (raw.sessionId !== undefined) validateIdentity(raw.sessionId);
   if (raw.cwd !== undefined && (typeof raw.cwd !== "string" || !raw.cwd.trim()))
     throw new AwError("source_auto_config_invalid");
+  if (
+    raw.baseDir !== undefined &&
+    (typeof raw.baseDir !== "string" || !raw.baseDir.trim())
+  )
+    throw new AwError("source_auto_config_invalid");
   if (!Array.isArray(raw.targets) || !raw.targets.length)
     throw new AwError("source_auto_config_invalid");
 
+  const resolvedBaseDir = path.resolve(
+    raw.baseDir ?? baseDir ?? raw.cwd ?? process.cwd(),
+  );
   const targets = [];
   let hasFetch = false;
   const seenMod = new Set();
@@ -114,32 +126,32 @@ export function validateAutoSpec(raw) {
         !["tool", "input"].includes(role)
       )
         throw new AwError("source_auto_config_invalid");
-      const resolvedUrl = mod.startsWith("file://")
-        ? mod
-        : path.isAbsolute(mod)
-          ? pathToFileURL(mod).href
-          : mod;
-      const key = `${resolvedUrl}#${exportName}`;
+      const matchUrl = resolveCanonicalModuleUrl(mod, resolvedBaseDir);
+      const key = `${matchUrl}#${exportName}`;
       if (seenMod.has(key)) throw new AwError("source_auto_config_invalid");
       seenMod.add(key);
       const name = validateIdentity(entry.name ?? exportName);
       const bufferStream = entry.bufferStream ?? false;
       const maxStreamItems = entry.maxStreamItems ?? DEFAULT_MAX_STREAM_ITEMS;
+      const maxStreamBytes = entry.maxStreamBytes ?? DEFAULT_MAX_STREAM_BYTES;
       if (
         typeof bufferStream !== "boolean" ||
         !Number.isInteger(maxStreamItems) ||
-        maxStreamItems < 1
+        maxStreamItems < 1 ||
+        !Number.isInteger(maxStreamBytes) ||
+        maxStreamBytes < 1
       )
         throw new AwError("source_auto_config_invalid");
       targets.push({
         kind: "module",
         module: mod,
-        matchUrl: resolvedUrl,
+        matchUrl,
         exportName,
         role,
         name,
         bufferStream,
         maxStreamItems,
+        maxStreamBytes,
       });
     } else {
       throw new AwError("source_auto_config_invalid");
@@ -156,220 +168,8 @@ export function validateAutoSpec(raw) {
     withholdResult: raw.withholdResult ?? false,
     timeoutMs,
     cwd: raw.cwd,
+    baseDir: resolvedBaseDir,
     targets,
-  };
-}
-
-function snapshotFetchArgs(input, init) {
-  let url;
-  let method = "GET";
-  const headers = {};
-  let body = null;
-  if (typeof input === "string" || input instanceof URL) {
-    url = String(input);
-  } else if (input && typeof input === "object" && typeof input.url === "string") {
-    url = input.url;
-    method = input.method ?? method;
-    if (input.headers && typeof input.headers.forEach === "function") {
-      input.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
-    }
-  } else {
-    throw new AwError("source_input_snapshot_required");
-  }
-  if (init && typeof init === "object") {
-    if (init.method !== undefined) method = String(init.method);
-    if (init.headers) {
-      const h = new Headers(init.headers);
-      h.forEach((value, key) => {
-        headers[key] = value;
-      });
-    }
-    if (typeof init.body === "string") body = init.body;
-    else if (init.body instanceof Uint8Array)
-      body = Buffer.from(init.body).toString("utf8");
-    else if (init.body !== undefined && init.body !== null)
-      throw new AwError("source_input_snapshot_required");
-  }
-  return { url, method: method.toUpperCase(), headers, body };
-}
-
-function rebuildFetchArgs(updated, originalInit) {
-  if (typeof updated.url !== "string" || !updated.url)
-    throw new AwError("source_input_replace_unsupported");
-  const nextInit = { ...(originalInit && typeof originalInit === "object" ? originalInit : {}) };
-  if (typeof updated.method === "string") nextInit.method = updated.method;
-  if (isPlainObject(updated.headers)) nextInit.headers = { ...updated.headers };
-  if (updated.body === null || updated.body === undefined) delete nextInit.body;
-  else if (typeof updated.body === "string") nextInit.body = updated.body;
-  else throw new AwError("source_input_replace_unsupported");
-  return [updated.url, nextInit];
-}
-
-async function readBoundedText(response, maxBodyBytes) {
-  const reader = response.body?.getReader?.();
-  if (!reader) {
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > maxBodyBytes)
-      throw new AwError("source_result_too_large");
-    return text;
-  }
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBodyBytes) {
-        await reader.cancel();
-        throw new AwError("source_result_too_large");
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, total).toString("utf8");
-}
-
-function wrapFetch(handle, targetSpec) {
-  const originalFetch = globalThis.fetch;
-  if (typeof originalFetch !== "function")
-    throw new AwError("source_attribute_missing");
-  const wrapped = async function awWrappedFetch(input, init) {
-    if (!handle.active) return originalFetch.call(this, input, init);
-    const session = await handle._getSession();
-    const snap = snapshotFetchArgs(input, init);
-    const { callId, input: effective, decision } = await session.beforeTool(
-      targetSpec.name,
-      snap,
-      { signal: init?.signal },
-    );
-    let callInput = input;
-    let callInit = init;
-    if (Object.hasOwn(decision, "updated_input")) {
-      [callInput, callInit] = rebuildFetchArgs(decision.updated_input, init);
-    }
-    const response = await originalFetch.call(this, callInput, callInit);
-    if (!session._observeAfter()) return response;
-    const text = await readBoundedText(response, targetSpec.maxBodyBytes);
-    const headerObj = {};
-    response.headers.forEach((value, key) => {
-      headerObj[key] = value;
-    });
-    const after = await session.afterTool(
-      targetSpec.name,
-      effective,
-      { status: response.status, ok: response.ok, headers: headerObj, text },
-      { callId, signal: init?.signal },
-    );
-    let outText = text;
-    if (Object.hasOwn(after, "replaced_result")) {
-      const rep = after.replaced_result;
-      if (typeof rep === "string") outText = rep;
-      else if (isPlainObject(rep) && typeof rep.text === "string")
-        outText = rep.text;
-      else throw new AwError("source_result_replace_unsupported");
-    }
-    const nextHeaders = new Headers(response.headers);
-    nextHeaders.delete("content-length");
-    return new Response(outText, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: nextHeaders,
-    });
-  };
-  globalThis.fetch = wrapped;
-  return () => {
-    if (globalThis.fetch === wrapped) globalThis.fetch = originalFetch;
-  };
-}
-
-function registerModuleHooks(handle, moduleTargets) {
-  if (typeof moduleApi.registerHooks !== "function")
-    throw new AwError("source_preload_module_hook_unavailable");
-  const registry = (globalThis[REGISTRY_SYM] ??= new Map());
-  const byUrl = new Map();
-  for (const item of moduleTargets) {
-    let list = byUrl.get(item.matchUrl);
-    if (!list) {
-      list = [];
-      byUrl.set(item.matchUrl, list);
-    }
-    list.push(item);
-  }
-  const hookId = `aw-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  registry.set(hookId, {
-    wrap(realUrl, exportName, originalFn) {
-      const targets = byUrl.get(realUrl) ?? [];
-      const spec = targets.find((t) => t.exportName === exportName);
-      if (!spec || typeof originalFn !== "function") return originalFn;
-      return async function awModuleWrapper(...args) {
-        if (!handle.active) return originalFn.apply(this, args);
-        const session = await handle._getSession();
-        const wrapped =
-          spec.role === "input"
-            ? session.wrapInput(originalFn)
-            : session.wrapTool(originalFn, {
-                name: spec.name,
-                bufferStream: spec.bufferStream,
-                maxStreamItems: spec.maxStreamItems,
-              });
-        return wrapped.apply(this, args);
-      };
-    },
-  });
-
-  const hooks = moduleApi.registerHooks({
-    resolve(specifier, context, nextResolve) {
-      if (specifier.includes("aw_original=1")) {
-        const clean = specifier.replace(/[?&]aw_original=1$/, "");
-        return nextResolve(clean, context);
-      }
-      const resolved = nextResolve(specifier, context);
-      if (!handle.active) return resolved;
-      const matched =
-        byUrl.has(resolved.url) || byUrl.has(specifier);
-      if (!matched) return resolved;
-      if (!byUrl.has(resolved.url) && byUrl.has(specifier)) {
-        byUrl.set(resolved.url, byUrl.get(specifier));
-      }
-      return {
-        url: `${PROXY_SCHEME}${resolved.url}`,
-        shortCircuit: true,
-      };
-    },
-    load(url, context, nextLoad) {
-      if (!url.startsWith(PROXY_SCHEME)) return nextLoad(url, context);
-      const realUrl = url.slice(PROXY_SCHEME.length);
-      const targets = byUrl.get(realUrl) ?? [];
-      const origSpecifier = `${realUrl}?aw_original=1`;
-      const lines = [
-        `import * as _orig from ${JSON.stringify(origSpecifier)};`,
-        `export * from ${JSON.stringify(origSpecifier)};`,
-        `const _reg = globalThis[Symbol.for("aw.sdk.preload.registry")].get(${JSON.stringify(hookId)});`,
-      ];
-      for (const spec of targets) {
-        const expr = `_reg ? _reg.wrap(${JSON.stringify(realUrl)}, ${JSON.stringify(spec.exportName)}, _orig[${JSON.stringify(spec.exportName)}]) : _orig[${JSON.stringify(spec.exportName)}]`;
-        if (spec.exportName === "default") {
-          lines.push(`export default ${expr};`);
-        } else {
-          lines.push(`export const ${spec.exportName} = ${expr};`);
-        }
-      }
-      return {
-        format: "module",
-        source: `${lines.join("\n")}\n`,
-        shortCircuit: true,
-      };
-    },
-  });
-
-  return () => {
-    hooks.deregister();
-    registry.delete(hookId);
   };
 }
 
@@ -394,8 +194,9 @@ export class AutoPreload {
   }
 
   async _getSession() {
+    if (!this.active) throw new AwError("source_closed");
     if (!this._sessionPromise) {
-      this._sessionPromise = (async () => {
+      const pending = (async () => {
         const source = LanguageSource.create({
           endpoint: this.spec.endpoint,
           target: this.spec.target,
@@ -406,13 +207,25 @@ export class AutoPreload {
           withholdResult: this.spec.withholdResult,
           cwd: this.spec.cwd,
         });
-        await source.connect();
-        this._source = source;
-        return source.session({
-          sessionId: this.spec.sessionId,
-          timeoutMs: this.spec.timeoutMs,
-        });
+        try {
+          await source.connect();
+          if (!this.active) {
+            await source.close();
+            throw new AwError("source_closed");
+          }
+          this._source = source;
+          return source.session({
+            sessionId: this.spec.sessionId,
+            timeoutMs: this.spec.timeoutMs,
+          });
+        } catch (error) {
+          if (this._sessionPromise === pending)
+            this._sessionPromise = undefined;
+          await source.close().catch(() => {});
+          throw error;
+        }
       })();
+      this._sessionPromise = pending;
     }
     return this._sessionPromise;
   }
@@ -446,11 +259,14 @@ export function loadSpecFromEnv(env = process.env) {
   } catch (error) {
     throw new AwError("source_auto_config_invalid", { cause: error });
   }
-  return validateAutoSpec(loaded);
+  const baseDir = configPath
+    ? path.dirname(path.resolve(configPath))
+    : undefined;
+  return validateAutoSpec(loaded, { baseDir });
 }
 
-export function installAutoInstrumentation(spec) {
-  return new AutoPreload(validateAutoSpec(spec));
+export function installAutoInstrumentation(spec, options) {
+  return new AutoPreload(validateAutoSpec(spec, options));
 }
 
 export function installFromEnv(env = process.env) {

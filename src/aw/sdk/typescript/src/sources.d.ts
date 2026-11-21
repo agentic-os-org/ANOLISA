@@ -13,6 +13,7 @@ export type SourceEvent = "input.submit" | "tool.before" | "tool.after";
 export const SOURCE_PROTOCOL: "aw-hook-source/v1";
 export const DEFAULT_SOURCE_EVENTS: readonly SourceEvent[];
 export const DEFAULT_MAX_STREAM_ITEMS: number;
+export const DEFAULT_MAX_STREAM_BYTES: number;
 
 export class SourceDenied extends AwError {
   readonly event: SourceEvent;
@@ -78,6 +79,8 @@ export interface WrapToolOptions<
   name?: string;
   /** Detach an argument with application-specific state for the checked call. */
   snapshotArg?: (value: Args[number]) => Args[number];
+  /** Detach a non-plain tool result for strict-after audit and delivery. */
+  snapshotResult?: (value: Result) => Result;
   extractInput?: (...args: Args) => Record<string, unknown>;
   applyInput?: (
     updatedInput: Record<string, unknown>,
@@ -89,6 +92,7 @@ export interface WrapToolOptions<
   extractSignal?: (...args: Args) => AbortSignal | undefined;
   stream?: boolean;
   maxStreamItems?: number;
+  maxStreamBytes?: number;
   bufferStream?: boolean;
 }
 

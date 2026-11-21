@@ -23,6 +23,7 @@ from aw_sdk._source_helpers import (
 )
 from aw_sdk._source_mutation import (
     DEFAULT_EVENTS,
+    DEFAULT_MAX_STREAM_BYTES,
     SOURCE_PROTOCOL,
     SUPPORTED_EVENTS,
     SourceDenied,
@@ -30,6 +31,7 @@ from aw_sdk._source_mutation import (
     apply_tool_input,
     apply_tool_result,
     confirm_source_routes,
+    deliver_strict_result,
     route_has_strict_after,
     run_tool_stream,
     source_capabilities,
@@ -43,6 +45,7 @@ _INSTRUMENTED_ATTR = "_aw_source_wrapped"
 
 __all__ = [
     "DEFAULT_EVENTS",
+    "DEFAULT_MAX_STREAM_BYTES",
     "DEFAULT_MAX_STREAM_ITEMS",
     "Instrumentation",
     "LanguageSource",
@@ -321,18 +324,26 @@ class SourceSession:
         extract_result: Callable[[Any], Any] | None = None,
         apply_result: Callable[[Any, Any], Any] | None = None,
         snapshot_arg: Callable[[Any], Any] | None = None,
+        snapshot_result: Callable[[Any], Any] | None = None,
         max_stream_items: int = DEFAULT_MAX_STREAM_ITEMS,
+        max_stream_bytes: int = DEFAULT_MAX_STREAM_BYTES,
         buffer_stream: bool = False,
     ) -> Callable[..., Any]:
         """Wrap a non-blocking sync/async tool or async generator behind tool.before/after."""
         if not callable(fn):
             raise AwError("source_callable_required")
-        if type(max_stream_items) is not int or max_stream_items < 1:
+        if (
+            type(max_stream_items) is not int
+            or max_stream_items < 1
+            or type(max_stream_bytes) is not int
+            or max_stream_bytes < 1
+        ):
             raise AwError("source_invalid_stream_limit")
         tool_name = validate_identity(getattr(fn, "__name__", "") if name is None else name)
         input_extractor = default_extract_input if extract_input is None else extract_input
         custom_extract_input = extract_input is not None
         custom_extract_result = extract_result is not None
+        is_sync_gen = inspect.isgeneratorfunction(fn)
 
         async def admit_call(args: tuple[Any, ...], kwargs: dict[str, Any]):
             call_args, call_kwargs = isolate_call_args(args, kwargs, snapshot_arg)
@@ -383,7 +394,9 @@ class SourceSession:
                     observe_result=observe_result,
                     extract_result=extract_result,
                     apply_result=apply_result,
+                    snapshot_result=snapshot_result,
                     max_stream_items=max_stream_items,
+                    max_stream_bytes=max_stream_bytes,
                     buffer_stream=buffer_stream,
                 )
                 try:
@@ -398,11 +411,26 @@ class SourceSession:
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
             resolved_call, snapshot, call_args, call_kwargs = await admit_call(args, kwargs)
+            if is_sync_gen and self._strict_after() and not buffer_stream:
+                raise AwError("source_stream_withhold_requires_buffering")
 
             async def invoke() -> Any:
                 result = fn(*call_args, **call_kwargs)
                 if inspect.isawaitable(result):
                     result = await result
+                if self._strict_after():
+                    return await deliver_strict_result(
+                        result,
+                        snapshot=snapshot,
+                        call_id=resolved_call,
+                        observe_result=observe_result,
+                        extract_result=extract_result,
+                        apply_result=apply_result,
+                        snapshot_result=snapshot_result,
+                        buffer_stream=buffer_stream,
+                        max_stream_items=max_stream_items,
+                        max_stream_bytes=max_stream_bytes,
+                    )
                 if self._observe_after():
                     decision = await observe_result(result, snapshot, resolved_call)
                     if "replaced_result" in decision:

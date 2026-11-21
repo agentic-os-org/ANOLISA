@@ -66,6 +66,7 @@ def assert_core_wheel_boundary(wheel: Path) -> None:
         "aw_sdk/control.py",
         "aw_sdk/sources.py",
         "aw_sdk/_source_mutation.py",
+        "aw_sdk/_auto_runtime.py",
         "aw_sdk/auto_instrument.py",
     ):
         assert required in names, f"core wheel missing {required}"

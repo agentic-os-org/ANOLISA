@@ -17,20 +17,24 @@ import {
   validateIdentity,
 } from "./source-helpers.mjs";
 import {
+  DEFAULT_MAX_STREAM_BYTES,
   DEFAULT_SOURCE_EVENTS,
   SOURCE_PROTOCOL,
   SourceDenied,
   SourceResultWithheld,
   applyToolInput,
-  applyToolResult,
   confirmSourceRoutes,
+  deliverToolResult,
+  isSyncGeneratorFunction,
   routeHasStrictAfter,
   runToolStream,
   sourceCapabilities,
+  validateStreamLimits,
 } from "./source-mutation.mjs";
 import { AwError } from "./transport.mjs";
 
 export {
+  DEFAULT_MAX_STREAM_BYTES,
   DEFAULT_SOURCE_EVENTS,
   SOURCE_PROTOCOL,
   SourceDenied,
@@ -328,18 +332,20 @@ export class SourceSession {
       applyResult,
       extractSignal,
       snapshotArg,
+      snapshotResult,
       stream: asStream,
       maxStreamItems = DEFAULT_MAX_STREAM_ITEMS,
+      maxStreamBytes = DEFAULT_MAX_STREAM_BYTES,
       bufferStream = false,
     } = {},
   ) {
     if (typeof fn !== "function") throw new AwError("source_callable_required");
-    if (!Number.isInteger(maxStreamItems) || maxStreamItems < 1)
-      throw new AwError("source_invalid_stream_limit");
+    validateStreamLimits(maxStreamItems, maxStreamBytes);
     const session = this;
     const toolName = validateIdentity(name ?? fn.name);
     const inputOf = extractInput ?? defaultExtractInput;
     const streaming = asStream === true || isAsyncGeneratorFunction(fn);
+    const syncGen = isSyncGeneratorFunction(fn);
 
     function requireCheckedInput(callArgs, snapshot) {
       if (!jsonEqual(snapshotToolInput(inputOf(...callArgs)), snapshot))
@@ -400,7 +406,9 @@ export class SourceSession {
           observeResult,
           extractResult,
           applyResult,
+          snapshotResult,
           maxStreamItems,
+          maxStreamBytes,
           bufferStream,
         });
       }
@@ -413,27 +421,14 @@ export class SourceSession {
       session._requireOpen();
       signal?.throwIfAborted();
       requireCheckedInput(callArgs, snapshot);
+      if (syncGen && session._strictAfter() && !bufferStream)
+        throw new AwError("source_stream_withhold_requires_buffering");
       return session._runAdmittedCall(async () => {
         const result = await fn.apply(this, callArgs);
-        if (session._observeAfter()) {
-          const decision = await observeResult(
-            result,
-            resolvedCall,
-            snapshot,
-            signal,
-          );
-          if (Object.hasOwn(decision, "replaced_result")) {
-            try {
-              return applyToolResult(result, decision.replaced_result, {
-                applyResult,
-                customExtract: Boolean(extractResult),
-              });
-            } catch (error) {
-              throw toolExecuted(error);
-            }
-          }
-        }
-        return result;
+        return deliverToolResult(session, result, {
+          observeResult, callId: resolvedCall, snapshot, signal, extractResult,
+          applyResult, snapshotResult, bufferStream, maxStreamItems, maxStreamBytes,
+        });
       });
     }
     wrapped[WRAPPED] = true;

@@ -54,6 +54,8 @@ def assert_core_tarball_boundary(artifact: Path) -> None:
         "package/dist/sources.mjs",
         "package/dist/sources.d.ts",
         "package/dist/source-mutation.mjs",
+        "package/dist/source-preload-fetch.mjs",
+        "package/dist/source-preload-modules.mjs",
         "package/dist/source-preload.mjs",
         "package/dist/source-preload.d.ts",
         "package/dist/native/shared/scope.mjs",

@@ -14,6 +14,8 @@ for (const file of [
   "control.mjs",
   "source-helpers.mjs",
   "source-mutation.mjs",
+  "source-preload-fetch.mjs",
+  "source-preload-modules.mjs",
   "source-preload.mjs",
   "sources.mjs",
   "index.d.ts",

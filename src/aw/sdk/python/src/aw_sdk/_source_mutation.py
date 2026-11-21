@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator as AsyncIteratorABC
+from collections.abc import Iterator as IteratorABC
 from copy import deepcopy
+import inspect
+import json
 from typing import Any, AsyncIterator, Callable, Iterable, Mapping
 
 from aw_sdk._source_helpers import (
@@ -17,6 +21,7 @@ from aw_sdk._source_helpers import (
 from aw_sdk.transport import AwError
 
 SOURCE_PROTOCOL = "aw-hook-source/v1"
+DEFAULT_MAX_STREAM_BYTES = 1024 * 1024
 SUPPORTED_EVENTS: dict[str, tuple[str, ...]] = {
     "input.submit": ("observe", "block"),
     "tool.before": ("observe", "block"),
@@ -139,6 +144,100 @@ def route_has_strict_after(routes: Mapping[str, Any] | None) -> bool:
     )
 
 
+def is_lazy_result(value: Any) -> bool:
+    """Return True when value is a lazy iterator, generator or async iterator."""
+    return (
+        inspect.isgenerator(value)
+        or inspect.isasyncgen(value)
+        or isinstance(value, (IteratorABC, AsyncIteratorABC))
+    )
+
+
+def close_lazy_result(value: Any) -> None:
+    """Best-effort close of a synchronous generator or iterator."""
+    closer = getattr(value, "close", None)
+    if callable(closer):
+        try:
+            closer()
+        except BaseException:
+            pass
+
+
+async def aclose_lazy_result(value: Any) -> None:
+    """Best-effort close of a sync or async lazy result."""
+    acloser = getattr(value, "aclose", None)
+    if callable(acloser):
+        try:
+            await acloser()
+            return
+        except BaseException:
+            return
+    close_lazy_result(value)
+
+
+def json_encoded_bytes(value: Any) -> int:
+    """Return exact UTF-8 JSON byte length of a normalized payload."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def isolate_strict_value(
+    value: Any,
+    *,
+    snapshot_result: Callable[[Any], Any] | None = None,
+    custom_extract: bool = False,
+) -> Any:
+    """Return an isolated copy suitable for strict-after audit and delivery."""
+    if is_lazy_result(value):
+        close_lazy_result(value)
+        raise AwError("source_stream_withhold_requires_buffering")
+    if is_plain_json(value):
+        return deepcopy(value)
+    if snapshot_result is not None:
+        copied = snapshot_result(value)
+        if copied is value:
+            raise AwError("source_result_isolation_required")
+        return copied
+    if custom_extract:
+        if type(value) in (bytes, complex):
+            return value
+        try:
+            copied = deepcopy(value)
+        except Exception as error:
+            raise AwError("source_result_isolation_required") from error
+        if copied is value:
+            raise AwError("source_result_isolation_required")
+        return copied
+    raise AwError("source_result_isolation_required")
+
+
+def buffer_sync_iterator(
+    iterator: Any,
+    *,
+    max_stream_items: int,
+    max_stream_bytes: int,
+    snapshot_result: Callable[[Any], Any] | None = None,
+    custom_extract: bool = False,
+) -> list[Any]:
+    """Consume a sync iterator/generator into bounded isolated snapshots."""
+    checked: list[Any] = []
+    buffered_bytes = 0
+    try:
+        for item in iterator:
+            if len(checked) >= max_stream_items:
+                raise AwError("source_stream_result_too_large")
+            isolated = isolate_strict_value(
+                item, snapshot_result=snapshot_result, custom_extract=custom_extract
+            )
+            encoded_source = normalize_json(isolated) if custom_extract else isolated
+            buffered_bytes += json_encoded_bytes(encoded_source)
+            if buffered_bytes > max_stream_bytes:
+                raise AwError("source_stream_result_too_large")
+            checked.append(isolated)
+    finally:
+        close_lazy_result(iterator)
+    return checked
+
+
 def apply_tool_input(
     updated_input: Mapping[str, Any],
     call_args: tuple[Any, ...],
@@ -223,6 +322,61 @@ def apply_stream_result(
     raise AwError("source_result_replace_unsupported")
 
 
+async def deliver_strict_result(
+    result: Any,
+    *,
+    snapshot: dict[str, Any],
+    call_id: str,
+    observe_result: Callable[[Any, dict[str, Any], str], Any],
+    extract_result: Callable[[Any], Any] | None,
+    apply_result: Callable[[Any, Any], Any] | None,
+    snapshot_result: Callable[[Any], Any] | None,
+    buffer_stream: bool,
+    max_stream_items: int,
+    max_stream_bytes: int,
+) -> Any:
+    """Isolate, audit and deliver a tool result on a strict-after route."""
+    custom_extract = extract_result is not None
+    with tool_executed():
+        if is_lazy_result(result):
+            if inspect.isasyncgen(result) or isinstance(result, AsyncIteratorABC):
+                await aclose_lazy_result(result)
+                raise AwError("source_stream_withhold_requires_buffering")
+            if not buffer_stream:
+                close_lazy_result(result)
+                raise AwError("source_stream_withhold_requires_buffering")
+            checked_items = buffer_sync_iterator(
+                result,
+                max_stream_items=max_stream_items,
+                max_stream_bytes=max_stream_bytes,
+                snapshot_result=snapshot_result,
+                custom_extract=custom_extract,
+            )
+            decision = await observe_result(checked_items, snapshot, call_id)
+            if "replaced_result" in decision:
+                deliver = apply_stream_result(
+                    checked_items,
+                    decision["replaced_result"],
+                    apply_result=apply_result,
+                    custom_extract=custom_extract,
+                )
+            else:
+                deliver = [deepcopy(item) if is_plain_json(item) else item for item in checked_items]
+            return iter(deliver)
+        isolated = isolate_strict_value(
+            result, snapshot_result=snapshot_result, custom_extract=custom_extract
+        )
+        decision = await observe_result(isolated, snapshot, call_id)
+        if "replaced_result" in decision:
+            return apply_tool_result(
+                isolated,
+                decision["replaced_result"],
+                apply_result=apply_result,
+                custom_extract=custom_extract,
+            )
+        return deepcopy(isolated) if is_plain_json(isolated) else isolated
+
+
 async def run_tool_stream(
     session: Any,
     fn: Callable[..., Any],
@@ -234,13 +388,16 @@ async def run_tool_stream(
     observe_result: Callable[[Any, dict[str, Any], str], Any],
     extract_result: Callable[[Any], Any] | None,
     apply_result: Callable[[list[Any], Any], Any] | None,
+    snapshot_result: Callable[[Any], Any] | None = None,
     max_stream_items: int,
+    max_stream_bytes: int = DEFAULT_MAX_STREAM_BYTES,
     buffer_stream: bool,
 ) -> AsyncIterator[Any]:
-    """Execute a streaming tool, enforcing buffering before strict replacement/withholding."""
+    """Execute a streaming tool, enforcing bounded isolated buffering on strict routes."""
     strict_after = session._strict_after()
     if strict_after and not buffer_stream:
         raise AwError("source_stream_withhold_requires_buffering")
+    custom_extract = extract_result is not None
     items: list[Any] | None = [] if session._observe_after() else None
     stream = ActiveStream(fn(*call_args, **call_kwargs))
     session._active_streams.add(stream)
@@ -254,7 +411,8 @@ async def run_tool_stream(
     with tool_executed():
         try:
             if strict_after:
-                raw_items: list[Any] = []
+                checked_items: list[Any] = []
+                buffered_bytes = 0
                 decision: dict[str, Any] | None = None
                 while True:
                     session._require_open()
@@ -263,27 +421,33 @@ async def run_tool_stream(
                     except StopAsyncIteration:
                         session._require_open()
                         decision = await session._run_admitted_call(
-                            lambda: finish(items if items is not None else [])
+                            lambda: finish(checked_items)
                         )
                         break
                     session._require_open()
-                    if len(raw_items) >= max_stream_items:
+                    if len(checked_items) >= max_stream_items:
                         raise AwError("source_stream_result_too_large")
-                    raw_items.append(item)
-                    assert items is not None
-                    items.append(
-                        normalize_json(item)
-                        if extract_result is None
-                        else snapshot_stream_chunk(item)
+                    isolated = isolate_strict_value(
+                        item,
+                        snapshot_result=snapshot_result,
+                        custom_extract=custom_extract,
                     )
-                deliver = raw_items
+                    encoded_source = normalize_json(isolated) if custom_extract else isolated
+                    buffered_bytes += json_encoded_bytes(encoded_source)
+                    if buffered_bytes > max_stream_bytes:
+                        raise AwError("source_stream_result_too_large")
+                    checked_items.append(isolated)
                 if decision is not None and "replaced_result" in decision:
                     deliver = apply_stream_result(
-                        raw_items,
+                        checked_items,
                         decision["replaced_result"],
                         apply_result=apply_result,
-                        custom_extract=extract_result is not None,
+                        custom_extract=custom_extract,
                     )
+                else:
+                    deliver = [
+                        deepcopy(out) if is_plain_json(out) else out for out in checked_items
+                    ]
                 for out in deliver:
                     session._require_open()
                     yield out
