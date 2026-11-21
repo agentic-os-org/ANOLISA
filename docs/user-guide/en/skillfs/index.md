@@ -911,6 +911,16 @@ Decision-command mode is mutually exclusive with activation file mode,
 `--notify-socket`, `--activation-events-log`, `--ledger-backing-root`, and
 `--control-socket`.
 
+## Hidden Working Directories
+
+In a flat mount, dot-prefixed working directories directly under the source
+root stay out of the live skill index and discovery listing. Their exact
+directory paths remain addressable subject to existing security checks; reserved lifecycle names
+remain inaccessible. Renaming a hidden working directory to a visible name
+publishes its loadable `SKILL.md` into the live index without a remount. This
+also applies when restoring a skill previously renamed to a hidden name.
+Existing manifest size limits, source ownership, and name-conflict rules apply.
+
 ## Install Protocols
 
 SkillFS supports installer-friendly lifecycle paths:

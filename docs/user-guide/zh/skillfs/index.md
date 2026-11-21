@@ -800,6 +800,14 @@ scan 和 resolve 决策。
 Decision-command mode 与 activation file mode、`--notify-socket`、
 `--activation-events-log`、`--ledger-backing-root` 和 `--control-socket` 互斥。
 
+## 隐藏工作目录
+
+flat 挂载中，直接位于 source 根目录下、以点号开头的工作目录不进入实时技能索引和发现列表。
+它们的精确目录路径仍可访问，但受现有安全检查约束；保留的生命周期名称仍不可访问。
+将隐藏工作目录改为可见名称时，可加载的 `SKILL.md` 会进入实时索引，无需重新挂载。
+此前改为隐藏名称的技能恢复为可见名称时也适用。现有的 manifest 大小限制、来源归属
+和重名冲突规则保持不变。
+
 ## Install 协议
 
 SkillFS 支持面向 installer 的生命周期路径：

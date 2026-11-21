@@ -48,6 +48,7 @@ struct StagingMountFixture {
     notify_controller: Arc<NotifyController>,
     #[allow(dead_code)]
     staging_controller: Arc<InstallerStagingController>,
+    store: SharedSkillStore,
 }
 
 impl StagingMountFixture {
@@ -88,7 +89,7 @@ impl StagingMountFixture {
         let handle = mount_background_configured(
             mountpoint.path(),
             source.path(),
-            shared,
+            shared.clone(),
             MountOptions::default(),
             false,
             config,
@@ -104,6 +105,7 @@ impl StagingMountFixture {
             notify_client,
             notify_controller: notify_ctrl,
             staging_controller: staging_ctrl,
+            store: shared,
         }
     }
 
@@ -449,6 +451,13 @@ fn fuse_e2e_staging_mkdir_write_rename_flow() {
         "no events should reference the staging name, got: {:?}",
         staging_name_events
     );
+
+    assert!(fixture.store.read().get("newskill").is_some());
+    assert!(common::list_dir_names(&skills_root).contains(&"newskill".to_string()));
+    let mut fresh = SkillStore::new();
+    fresh.load_from_directory(fixture.source.path(), &ParseConfig::default());
+    assert_eq!(fixture.store.read().list(), fresh.list());
+    std::thread::sleep(Duration::from_millis(1500));
 
     // Step 9: final skill directory should be accessible
     assert!(final_path.is_dir());
