@@ -27,6 +27,8 @@ fn volume_candidate(key: &str, severity: u8) -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: key.to_string(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J09:/".into(),
         severity,
         epoch: None,
@@ -39,6 +41,8 @@ fn event_candidate(key: &str, severity: u8, epoch: Option<u64>) -> CandidateEpis
     CandidateEpisode {
         event: true,
         key: key.to_string(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity,
         epoch,
@@ -311,6 +315,8 @@ fn log_event_inside_delivered_counter_window_only_supplements() {
     let counter = CandidateEpisode {
         event: true,
         key: "cgroup-counter-v1|counter:boot-a:1:2:1000:1200:2".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity: 4,
         epoch: Some(1200),
@@ -333,6 +339,8 @@ fn counter_candidate_covered_by_delivered_log_is_suppressed() {
     let counter = CandidateEpisode {
         event: true,
         key: "cgroup-counter-v1|counter:boot-a:1:2:1000:1200:2".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J11".into(),
         severity: 4,
         epoch: Some(1200),
@@ -369,6 +377,8 @@ fn quota_candidate(max_entry: bool, high_entry: bool) -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "cgroup|1:2|quota".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J19".into(),
         severity: 3,
         epoch: None,
@@ -707,6 +717,8 @@ fn psi_candidate() -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "host|psi_memory".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J20".into(),
         severity: 3,
         epoch: None,
@@ -837,6 +849,8 @@ fn conntrack_candidate() -> CandidateEpisode {
     CandidateEpisode {
         event: false,
         key: "host|conntrack".into(),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: "J23".into(),
         severity: 3,
         epoch: None,
@@ -972,6 +986,8 @@ fn fs_event_candidate(identity: &str, dev_t: &str, severity: u8) -> CandidateEpi
     CandidateEpisode {
         event: true,
         key: format!("fs-event-v1|boot-a|{identity}"),
+        companion_keys: Vec::new(),
+        sibling_keys: Vec::new(),
         problem: format!("block-io|{dev_t}"),
         severity,
         epoch: Some(1700000000),
@@ -1005,4 +1021,422 @@ fn fs_event_severity_escalation_passes_merge_window() {
         ..warning.clone()
     };
     assert!(deliverable(&state, &critical, 2000));
+}
+
+library_tests! {
+const MERGED_BYTES: &str = "/|bytes|253:0|1:2";
+const MERGED_INODE: &str = "/|inode|253:0|1:2";
+
+fn merged_candidate(
+    key: &str,
+    companions: &[&str],
+    siblings: &[&str],
+    severity: u8,
+) -> CandidateEpisode {
+    CandidateEpisode {
+        event: false,
+        key: key.to_string(),
+        companion_keys: companions.iter().map(|key| key.to_string()).collect(),
+        sibling_keys: siblings.iter().map(|key| key.to_string()).collect(),
+        problem: "J09:/".into(),
+        severity,
+        epoch: None,
+        counter_window: None,
+        quota_branches: None,
+    }
+}
+
+#[test]
+fn merged_card_records_every_member_and_clears_them_independently() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 1000));
+    record_delivery(&mut state, &merged, 1000);
+    assert!(state.volume.contains_key(MERGED_BYTES));
+    assert!(state.volume.contains_key(MERGED_INODE));
+
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, true, false, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.contains_key(MERGED_BYTES));
+    assert!(!state.volume.contains_key(MERGED_INODE));
+    assert_eq!(
+        state
+            .recoveries
+            .get(MERGED_INODE)
+            .map(|row| row.recovered_ms),
+        Some(2000)
+    );
+
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        3000,
+    );
+    assert!(state.volume.is_empty());
+    assert_eq!(
+        state
+            .recoveries
+            .get(MERGED_BYTES)
+            .map(|row| row.recovered_ms),
+        Some(3000)
+    );
+}
+
+#[test]
+fn single_member_recovery_does_not_repost_the_remaining_member() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, true, false, true),
+        ]),
+        2000,
+    );
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(!deliverable(&state, &inode_only, 2000));
+    assert!(!deliverable(
+        &state,
+        &inode_only,
+        1000 + STATE_COOLDOWN_MS - 1
+    ));
+    assert!(deliverable(&state, &inode_only, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn byte_only_recovery_does_not_gate_a_first_inode_entry() {
+    // A byte-only delivery (or a ledger written before per-member records)
+    // proves only the bytes member; its recovery must not suppress a
+    // first-time inode exhaustion for the full cooldown.
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    sync(
+        &mut state,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+    let recovery = state.recoveries.get(MERGED_BYTES).unwrap();
+    assert_eq!(recovery.members, [MERGED_BYTES]);
+
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(deliverable(&state, &inode_only, 2000));
+}
+
+#[test]
+fn merged_recovery_member_evidence_gates_the_sibling() {
+    let mut state = ledger();
+    state.recoveries.insert(
+        MERGED_BYTES.to_string(),
+        VolumeRecovery {
+            recovered_ms: 2000,
+            last_delivered_ms: 1000,
+            members: vec![MERGED_BYTES.to_string(), MERGED_INODE.to_string()],
+            superseded: false,
+        },
+    );
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(!deliverable(&state, &inode_only, 2000));
+    assert!(!deliverable(
+        &state,
+        &inode_only,
+        1000 + STATE_COOLDOWN_MS - 1
+    ));
+    assert!(deliverable(&state, &inode_only, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn recurrence_after_both_members_recovered_uses_the_ten_minute_gate() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(!deliverable(
+        &state,
+        &inode_only,
+        1000 + RECURRENCE_GATE_MS - 1
+    ));
+    assert!(deliverable(&state, &inode_only, 1000 + RECURRENCE_GATE_MS));
+}
+
+#[test]
+fn merged_member_bounce_keeps_the_card_cooldown_in_both_directions() {
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    let mut bytes_bounced = ledger();
+    record_delivery(&mut bytes_bounced, &merged, 1000);
+    sync(
+        &mut bytes_bounced,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, true, false, true),
+        ]),
+        2000,
+    );
+    assert!(bytes_bounced.volume.contains_key(MERGED_INODE));
+
+    let mut inode_bounced = ledger();
+    record_delivery(&mut inode_bounced, &merged, 1000);
+    sync(
+        &mut inode_bounced,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, true, false, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(inode_bounced.volume.contains_key(MERGED_BYTES));
+
+    // The sibling never recovered, so the card keeps the state cooldown
+    // whichever member recovers and re-exhausts.
+    for state in [&bytes_bounced, &inode_bounced] {
+        assert!(!deliverable(state, &merged, 1000 + RECURRENCE_GATE_MS));
+        assert!(!deliverable(state, &merged, 1000 + STATE_COOLDOWN_MS - 1));
+        assert!(deliverable(state, &merged, 1000 + STATE_COOLDOWN_MS));
+    }
+}
+
+#[test]
+fn post_recovery_inode_redelivery_keeps_the_ten_minute_gate_for_bytes() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+
+    // The inode member recurs alone past the gate; its new episode supersedes
+    // the fully recovered card, so the bytes member is back to the gate.
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    let reentry = 1000 + RECURRENCE_GATE_MS;
+    assert!(deliverable(&state, &inode_only, reentry));
+    record_delivery(&mut state, &inode_only, reentry);
+
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged_again, reentry + 1000));
+}
+
+#[test]
+fn post_recovery_bytes_redelivery_keeps_the_ten_minute_gate_for_inode() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(state.volume.is_empty());
+
+    // The bytes member is delivered again first; its old recovery must not
+    // gate the inode companion once the merged card re-forms.
+    let bytes_only = merged_candidate(MERGED_BYTES, &[], &[MERGED_INODE], 4);
+    let reentry = 1000 + RECURRENCE_GATE_MS;
+    assert!(deliverable(&state, &bytes_only, reentry));
+    record_delivery(&mut state, &bytes_only, reentry);
+
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged_again, reentry + 1000));
+}
+
+#[test]
+fn escalated_redelivery_keeps_the_card_cooldown_for_the_recovered_sibling() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![volume_signal(MERGED_INODE, false, true, true)]),
+        2000,
+    );
+
+    // The bytes episode never exited; the higher severity re-posts that same
+    // card instead of starting a new one.
+    let escalated = merged_candidate(MERGED_BYTES, &[], &[MERGED_INODE], 5);
+    assert!(deliverable(&state, &escalated, 3000));
+    record_delivery(&mut state, &escalated, 3000);
+
+    // The inode recurrence still waits for the card cooldown, not the
+    // ten-minute recurrence gate.
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 5);
+    assert!(!deliverable(&state, &merged_again, 1000 + RECURRENCE_GATE_MS));
+    assert!(!deliverable(&state, &merged_again, 1000 + STATE_COOLDOWN_MS - 1));
+    assert!(deliverable(&state, &merged_again, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn escalated_inode_redelivery_keeps_the_card_cooldown_for_the_recovered_bytes() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    record_delivery(&mut state, &merged, 1000);
+    sync(
+        &mut state,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+
+    let escalated = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 5);
+    assert!(deliverable(&state, &escalated, 3000));
+    record_delivery(&mut state, &escalated, 3000);
+
+    let merged_again = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 5);
+    assert!(!deliverable(&state, &merged_again, 1000 + RECURRENCE_GATE_MS));
+    assert!(!deliverable(&state, &merged_again, 1000 + STATE_COOLDOWN_MS - 1));
+    assert!(deliverable(&state, &merged_again, 1000 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn byte_only_recovery_admits_only_a_first_time_inode_member() {
+    let byte_only = volume_candidate(MERGED_BYTES, 4);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+
+    let mut first_inode = ledger();
+    record_delivery(&mut first_inode, &byte_only, 1000);
+    sync(
+        &mut first_inode,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    assert!(first_inode.volume.is_empty());
+    // The first inode exhaustion is inside the bytes recurrence gate but has
+    // no delivery of its own, so the merged card is admitted.
+    assert!(deliverable(&first_inode, &merged, 5000));
+
+    let mut reported_inode = ledger();
+    record_delivery(&mut reported_inode, &byte_only, 1000);
+    sync(
+        &mut reported_inode,
+        &signal(vec![volume_signal(MERGED_BYTES, false, true, true)]),
+        2000,
+    );
+    record_delivery(&mut reported_inode, &volume_candidate(MERGED_INODE, 4), 3000);
+    assert!(!deliverable(&reported_inode, &merged, 5000));
+}
+
+#[test]
+fn delivery_keeps_the_ledger_within_the_loader_entry_limit() {
+    let mut state = ledger();
+    for index in 0..MAX_ENTRIES - 1 {
+        state.volume.insert(
+            format!("/m{index}|bytes|253:0|1:2"),
+            VolumeEpisode {
+                severity: 3,
+                last_delivered_ms: 500,
+                members: Vec::new(),
+            },
+        );
+    }
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
+    record_delivery(&mut state, &merged, 1000);
+    let serialized = serde_json::to_vec(&state).unwrap();
+    let parsed = parse_ledger(&serialized).expect("written ledger stays loadable");
+    assert_eq!(entry_count(&parsed), MAX_ENTRIES);
+    assert!(parsed.volume.contains_key(MERGED_BYTES));
+    assert!(parsed.volume.contains_key(MERGED_INODE));
+}
+
+#[test]
+fn live_sibling_episode_does_not_hide_a_new_member_entry() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    let inode_only = merged_candidate(MERGED_INODE, &[], &[MERGED_BYTES], 4);
+    assert!(deliverable(&state, &inode_only, 2000));
+}
+
+#[test]
+fn live_bytes_episode_does_not_hide_a_first_merged_inode_entry() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 2000));
+    record_delivery(&mut state, &merged, 2000);
+    assert!(!deliverable(&state, &merged, 2500));
+}
+
+#[test]
+fn live_inode_episode_keeps_the_merged_bytes_member_admissible() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_INODE, 4), 1000);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(deliverable(&state, &merged, 2000));
+}
+
+#[test]
+fn delivered_companion_member_keeps_the_merged_card_within_cooldown() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    record_delivery(&mut state, &volume_candidate(MERGED_INODE, 4), 1500);
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(!deliverable(&state, &merged, 2000));
+}
+
+#[test]
+fn recovered_companion_member_keeps_the_merged_card_within_cooldown() {
+    let mut state = ledger();
+    record_delivery(&mut state, &volume_candidate(MERGED_BYTES, 4), 1000);
+    state.recoveries.insert(
+        MERGED_INODE.to_string(),
+        VolumeRecovery {
+            recovered_ms: 1500,
+            last_delivered_ms: 1400,
+            members: vec![MERGED_BYTES.to_string(), MERGED_INODE.to_string()],
+            superseded: false,
+        },
+    );
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    assert!(!deliverable(&state, &merged, 2000));
+    assert!(deliverable(&state, &merged, 1400 + STATE_COOLDOWN_MS));
+}
+
+#[test]
+fn failed_delivery_records_nothing_and_the_retry_records_every_member() {
+    let mut state = ledger();
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[], 4);
+    assert!(deliverable(&state, &merged, 1000));
+    assert!(state.volume.is_empty());
+    assert!(deliverable(&state, &merged, 2000));
+    record_delivery(&mut state, &merged, 2000);
+    assert_eq!(
+        state
+            .volume
+            .get(MERGED_BYTES)
+            .map(|row| row.last_delivered_ms),
+        Some(2000)
+    );
+    assert_eq!(
+        state
+            .volume
+            .get(MERGED_INODE)
+            .map(|row| row.last_delivered_ms),
+        Some(2000)
+    );
+}
 }

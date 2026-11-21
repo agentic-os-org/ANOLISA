@@ -204,23 +204,35 @@ pub(super) fn inode_volume_fs(fs_type: &str) -> bool {
     fs_type == "ext4"
 }
 
-pub(super) fn declared_targets(config: &HealthConfig) -> (Vec<String>, usize) {
-    let mut targets = vec!["/".to_string()];
-    for path in config.scan_mounts.as_deref().unwrap_or_default() {
-        if path == "/" || targets.iter().any(|existing| existing == path) {
-            continue;
+/// Targets sampled for the enabled disk checks only: `/` belongs to
+/// `filesystem.root`, declared mounts to `filesystem.mounts`. Sampling a
+/// disabled check's targets would statfs paths the scan no longer reports.
+pub(super) fn declared_targets(
+    config: &HealthConfig,
+    root: bool,
+    mounts: bool,
+) -> (Vec<String>, usize) {
+    let mut targets = Vec::new();
+    if root {
+        targets.push("/".to_string());
+    }
+    if mounts {
+        for path in config.scan_mounts.as_deref().unwrap_or_default() {
+            if path == "/" || targets.iter().any(|existing| existing == path) {
+                continue;
+            }
+            targets.push(path.clone());
         }
-        targets.push(path.clone());
     }
     let over_limit = targets.len().saturating_sub(MAX_DECLARED_TARGETS);
     targets.truncate(MAX_DECLARED_TARGETS);
     (targets, over_limit)
 }
 
-pub(crate) fn read_volume_sample(config: &HealthConfig) -> VolumeSample {
+pub(crate) fn read_volume_sample(config: &HealthConfig, root: bool, mounts: bool) -> VolumeSample {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = config;
+        let _ = (config, root, mounts);
         VolumeSample {
             volumes: Vec::new(),
             over_limit: 0,
@@ -229,7 +241,24 @@ pub(crate) fn read_volume_sample(config: &HealthConfig) -> VolumeSample {
         }
     }
     #[cfg(target_os = "linux")]
-    linux::read(config)
+    linux::read(config, root, mounts)
+}
+
+fn volume_selected(volume: &VolumeFacts, check_id: Option<&str>) -> bool {
+    match check_id {
+        Some("filesystem.root") => volume.mount == "/",
+        Some("filesystem.mounts") => volume.mount != "/",
+        _ => true,
+    }
+}
+
+/// Whether this check's own targets produced a proven volume; a df failure for
+/// one check must not be masked by another check's proven volumes.
+pub(crate) fn volume_proven_for_check(sample: &VolumeSample, check_id: &str) -> bool {
+    sample
+        .volumes
+        .iter()
+        .any(|volume| volume_selected(volume, Some(check_id)) && volume.proven())
 }
 
 pub(crate) fn record_volumes(
@@ -244,11 +273,7 @@ pub(crate) fn record_volumes(
     let rows = sample
         .volumes
         .iter()
-        .filter(|volume| match check_id {
-            Some("filesystem.root") => volume.mount == "/",
-            Some("filesystem.mounts") => volume.mount != "/",
-            _ => true,
-        })
+        .filter(|volume| volume_selected(volume, check_id))
         .collect::<Vec<_>>();
     for volume in rows {
         builder.set_scope(HealthFactScope::Path(volume.mount.clone()));
@@ -525,8 +550,8 @@ mod linux {
         }
     }
 
-    pub(super) fn read(config: &HealthConfig) -> VolumeSample {
-        let (targets, over_limit) = declared_targets(config);
+    pub(super) fn read(config: &HealthConfig, root: bool, mounts: bool) -> VolumeSample {
+        let (targets, over_limit) = declared_targets(config, root, mounts);
         let Some(entries) = read_mountinfo() else {
             return VolumeSample {
                 volumes: targets

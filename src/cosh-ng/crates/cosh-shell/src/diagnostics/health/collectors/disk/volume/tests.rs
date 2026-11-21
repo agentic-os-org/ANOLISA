@@ -118,12 +118,100 @@ fn declared_targets_cap_at_four_and_count_over_limit() {
         ]),
         ..HealthConfig::default()
     };
-    let (targets, over_limit) = declared_targets(&config);
+    let (targets, over_limit) = declared_targets(&config, true, true);
     assert_eq!(targets, vec!["/", "/a", "/b", "/c"]);
     assert_eq!(over_limit, 1);
-    let (targets, over_limit) = declared_targets(&HealthConfig::default());
+    let (targets, over_limit) = declared_targets(&HealthConfig::default(), true, true);
     assert_eq!(targets, vec!["/"]);
     assert_eq!(over_limit, 0);
+}
+
+library_tests! {
+#[test]
+fn declared_targets_follow_enabled_checks() {
+    let config = HealthConfig {
+        scan_mounts: Some(vec!["/data".into(), "/logs".into()]),
+        ..HealthConfig::default()
+    };
+    assert_eq!(
+        declared_targets(&config, true, true).0,
+        vec!["/", "/data", "/logs"]
+    );
+    assert_eq!(declared_targets(&config, true, false).0, vec!["/"]);
+    assert_eq!(
+        declared_targets(&config, false, true).0,
+        vec!["/data", "/logs"]
+    );
+    let (targets, over_limit) = declared_targets(&config, false, false);
+    assert!(targets.is_empty());
+    assert_eq!(over_limit, 0);
+}
+
+#[test]
+fn declared_target_cap_counts_only_enabled_targets() {
+    let config = HealthConfig {
+        scan_mounts: Some((0..5).map(|index| format!("/m{index}")).collect()),
+        ..HealthConfig::default()
+    };
+    let (targets, over_limit) = declared_targets(&config, true, false);
+    assert_eq!(targets, ["/"]);
+    assert_eq!(over_limit, 0);
+    let (targets, over_limit) = declared_targets(&config, true, true);
+    assert_eq!(targets, ["/", "/m0", "/m1", "/m2"]);
+    assert_eq!(over_limit, 2);
+    let (targets, over_limit) = declared_targets(&config, false, true);
+    assert_eq!(targets, ["/m0", "/m1", "/m2", "/m3"]);
+    assert_eq!(over_limit, 1);
+}
+
+#[test]
+fn read_volume_sample_root_only_skips_declared_mounts() {
+    let config = HealthConfig {
+        scan_mounts: Some(vec!["/cosh/no-such-mount".into()]),
+        ..HealthConfig::default()
+    };
+    let sample = read_volume_sample(&config, true, false);
+    assert!(sample.volumes.iter().all(|volume| volume.mount == "/"));
+}
+
+#[test]
+fn read_volume_sample_mounts_only_skips_root() {
+    let config = HealthConfig {
+        scan_mounts: Some(vec!["/cosh/no-such-mount".into()]),
+        ..HealthConfig::default()
+    };
+    let sample = read_volume_sample(&config, false, true);
+    assert!(!sample.volumes.iter().any(|volume| volume.mount == "/"));
+    if sample.supported {
+        assert_eq!(sample.volumes.len(), 1);
+        assert_eq!(
+            sample.volumes[0].unknown,
+            Some(VolumeUnknown::NotMountPoint)
+        );
+    }
+}
+
+#[test]
+fn volume_proven_for_check_uses_only_its_own_targets() {
+    let mut sample = VolumeSample {
+        volumes: vec![proven_root()],
+        over_limit: 0,
+        mnt_ns: None,
+        supported: true,
+    };
+    assert!(volume_proven_for_check(&sample, "filesystem.root"));
+    assert!(!volume_proven_for_check(&sample, "filesystem.mounts"));
+    sample
+        .volumes
+        .push(VolumeFacts::unknown("/data", VolumeUnknown::Autofs));
+    assert!(!volume_proven_for_check(&sample, "filesystem.mounts"));
+    sample.volumes.push(VolumeFacts {
+        mount: "/data".into(),
+        ..proven_root()
+    });
+    assert!(volume_proven_for_check(&sample, "filesystem.mounts"));
+    assert!(volume_proven_for_check(&sample, "filesystem.root"));
+}
 }
 
 fn sample_with(volume: VolumeFacts) -> VolumeSample {
@@ -282,6 +370,26 @@ fn root_check_does_not_record_other_mounts() {
         .facts
         .iter()
         .all(|fact| !fact.key.starts_with("filesystem.mount./data.")));
+}
+
+library_tests! {
+#[test]
+fn mounts_check_records_only_non_root_volumes() {
+    let mut sample = sample_with(proven_root());
+    sample.volumes.push(VolumeFacts {
+        mount: "/data".into(),
+        ..proven_root()
+    });
+    let report = record(&sample, "filesystem.mounts");
+    assert!(report
+        .facts
+        .iter()
+        .all(|fact| !fact.key.starts_with("filesystem.mount./.volume")));
+    assert!(report
+        .facts
+        .iter()
+        .any(|fact| fact.key == "filesystem.mount./data.volume_proven"));
+}
 }
 
 #[test]

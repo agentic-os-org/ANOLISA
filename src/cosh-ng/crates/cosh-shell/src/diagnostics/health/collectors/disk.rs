@@ -263,40 +263,18 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     root: bool,
     mounts: bool,
 ) -> Result<DiskFacts, HealthUnavailableReason> {
-    let local = if passive && mounts {
-        local_mounts()
+    let (local, inventory_unavailable) = if !mounts || (!passive && config.scan_mounts.is_some()) {
+        (BTreeSet::new(), false)
+    } else if passive {
+        (local_mounts(), false)
     } else {
-        BTreeSet::new()
+        match on_demand_mounts(&config.critical_mounts) {
+            Some(local) => (local, false),
+            None => (BTreeSet::new(), true),
+        }
     };
-    let mut scope_incomplete = false;
-    let paths = if passive || config.scan_mounts.is_some() || !mounts {
-        let mut paths = BTreeSet::new();
-        if root {
-            paths.insert("/".to_string());
-        }
-        if mounts {
-            for path in config.scan_mounts.as_deref().unwrap_or_default() {
-                if path == "/" {
-                    continue;
-                }
-                let absolute = std::path::Path::new(path).is_absolute()
-                    && !std::path::Path::new(path)
-                        .components()
-                        .any(|component| matches!(component, std::path::Component::ParentDir));
-                if absolute && (!passive || local.contains(path)) {
-                    paths.insert(path.clone());
-                } else {
-                    scope_incomplete = true;
-                }
-            }
-        }
-        if paths.is_empty() {
-            return Err(HealthUnavailableReason::Unsupported);
-        }
-        Some(paths.into_iter().collect::<Vec<_>>())
-    } else {
-        None
-    };
+    let (paths, scope_incomplete) =
+        df_operand_paths(config, passive, root, mounts, &local, inventory_unavailable)?;
     let mut args = vec!["-k", "-P"];
     #[cfg(target_os = "linux")]
     args.push("-T");
@@ -330,6 +308,76 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     Ok(facts)
 }
 
+/// Selects the `df` operands under the enabled-target policy shared with the
+/// statfs sample. Returns `None` operands only where no local inventory exists
+/// to bound the probe, so a disabled check's target is never sampled.
+fn df_operand_paths(
+    config: &HealthConfig,
+    passive: bool,
+    root: bool,
+    mounts: bool,
+    local: &BTreeSet<String>,
+    inventory_unavailable: bool,
+) -> Result<(Option<Vec<String>>, bool), HealthUnavailableReason> {
+    if passive || config.scan_mounts.is_some() || !mounts {
+        let (targets, _) = volume::declared_targets(config, root, mounts);
+        let mut scope_incomplete = false;
+        let mut paths = Vec::new();
+        for path in targets {
+            if path == "/" {
+                paths.push(path);
+                continue;
+            }
+            let absolute = std::path::Path::new(&path).is_absolute()
+                && !std::path::Path::new(&path)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir));
+            if absolute && (!passive || local.contains(&path)) {
+                paths.push(path);
+            } else {
+                scope_incomplete = true;
+            }
+        }
+        if paths.is_empty() {
+            return Err(HealthUnavailableReason::Unsupported);
+        }
+        return Ok((Some(paths), scope_incomplete));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut paths = Vec::new();
+        if root {
+            paths.push("/".to_string());
+        }
+        // A failed inventory read leaves `local` empty without proving that no
+        // mount exists, so the mounts check must report the gap instead of
+        // returning `Ok` over an unknown mount set.
+        let mut scope_incomplete = inventory_unavailable;
+        for mount in local {
+            if mount == "/" || paths.iter().any(|path| path == mount) {
+                continue;
+            }
+            if paths.len() >= volume::MAX_DECLARED_TARGETS {
+                scope_incomplete = true;
+                break;
+            }
+            paths.push(mount.clone());
+        }
+        if paths.is_empty() {
+            return Err(HealthUnavailableReason::Unsupported);
+        }
+        Ok((Some(paths), scope_incomplete))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No mount inventory to bound the probe to, so df runs without
+        // operands and the enabled-target retain below still drops rows for
+        // disabled checks.
+        let _ = (root, local, inventory_unavailable);
+        Ok((None, false))
+    }
+}
+
 fn local_mounts() -> BTreeSet<String> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -337,24 +385,101 @@ fn local_mounts() -> BTreeSet<String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let Ok(file) = std::fs::File::open("/proc/self/mountinfo") else {
-            return BTreeSet::new();
-        };
-        let mut content = String::new();
-        if file
-            .take(256 * 1024 + 1)
-            .read_to_string(&mut content)
-            .is_err()
-            || content.len() > 256 * 1024
-        {
-            return BTreeSet::new();
-        }
-        local_mounts_in(&content)
+        mountinfo_content()
+            .map(|content| local_mounts_in(&content))
+            .unwrap_or_default()
+    }
+}
+
+/// The default on-demand scan samples every mount `df` reports, not just the
+/// passive filesystem allowlist, so a boot- or user-created filesystem
+/// outside that allowlist is not dropped from the first scan. `None` means the
+/// inventory could not be read, which is not the same as an empty mount set.
+fn on_demand_mounts(critical_mounts: &[String]) -> Option<BTreeSet<String>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = critical_mounts;
+        Some(BTreeSet::new())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        mountinfo_content().map(|content| on_demand_mounts_in(&content, critical_mounts))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_content() -> Option<String> {
+    let file = std::fs::File::open(mountinfo_path()).ok()?;
+    let mut content = String::new();
+    if file
+        .take(256 * 1024 + 1)
+        .read_to_string(&mut content)
+        .is_err()
+        || content.len() > 256 * 1024
+    {
+        return None;
+    }
+    Some(content)
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_path() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(path) = MOUNTINFO_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+    std::path::PathBuf::from("/proc/self/mountinfo")
+}
+
+#[cfg(all(target_os = "linux", test))]
+thread_local! {
+    static MOUNTINFO_PATH: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: points the mount-inventory read at another path, restored on
+/// drop.
+#[cfg(all(target_os = "linux", test))]
+pub(super) struct MountinfoPathGuard(Option<std::path::PathBuf>);
+
+#[cfg(all(target_os = "linux", test))]
+impl MountinfoPathGuard {
+    pub(super) fn at(path: &std::path::Path) -> Self {
+        let previous = MOUNTINFO_PATH.with(|slot| slot.replace(Some(path.to_path_buf())));
+        Self(previous)
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+impl Drop for MountinfoPathGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        MOUNTINFO_PATH.with(|slot| *slot.borrow_mut() = previous);
     }
 }
 
 #[cfg(target_os = "linux")]
 fn local_mounts_in(content: &str) -> BTreeSet<String> {
+    mount_points_in(content, |fs_type, _| {
+        matches!(
+            fs_type,
+            "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "f2fs" | "overlay"
+        )
+    })
+}
+
+/// `parse_df_line` keeps a critical mount's ignored-filesystem row, so that
+/// mount must stay an operand; dropping it here would report `Ok` over a
+/// mount the user declared critical.
+#[cfg(target_os = "linux")]
+fn on_demand_mounts_in(content: &str, critical_mounts: &[String]) -> BTreeSet<String> {
+    mount_points_in(content, |fs_type, mount| {
+        !df_skips_filesystem(fs_type) || critical_mounts.iter().any(|item| item == mount)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn mount_points_in(content: &str, keep: impl Fn(&str, &str) -> bool) -> BTreeSet<String> {
     content
         .lines()
         .filter_map(|line| {
@@ -365,13 +490,40 @@ fn local_mounts_in(content: &str) -> BTreeSet<String> {
                 .replace("\\040", " ")
                 .replace("\\011", "\t")
                 .replace("\\134", "\\");
-            matches!(
-                right.split_whitespace().next()?,
-                "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "f2fs" | "overlay"
-            )
-            .then_some(mount)
+            let fs_type = right.split_whitespace().next()?;
+            keep(fs_type, &mount).then_some(mount)
         })
         .collect()
+}
+
+/// Filesystems `df` omits by default, plus the ones this check drops after
+/// parsing; sampling one would spend a target slot without adding a reported
+/// row. A declared critical mount is the exception — `parse_df_line` keeps its
+/// ignored-filesystem row — so the on-demand operand set exempts it.
+#[cfg(target_os = "linux")]
+fn df_skips_filesystem(fs_type: &str) -> bool {
+    is_ignored_filesystem(fs_type)
+        || matches!(
+            fs_type,
+            "autofs"
+                | "binfmt_misc"
+                | "bpf"
+                | "cgroup"
+                | "cgroup2"
+                | "configfs"
+                | "debugfs"
+                | "devpts"
+                | "fusectl"
+                | "hugetlbfs"
+                | "mqueue"
+                | "nsfs"
+                | "proc"
+                | "pstore"
+                | "ramfs"
+                | "securityfs"
+                | "sysfs"
+                | "tracefs"
+        )
 }
 
 pub(super) mod volume;

@@ -235,6 +235,7 @@ fn project_quota_view_does_not_enter_or_recover_capacity_members() {
             VolumeEpisode {
                 severity: 4,
                 last_delivered_ms: 1000,
+                members: Vec::new(),
             },
         );
     }
@@ -279,4 +280,160 @@ fn non_ext4_inode_member_is_not_applicable() {
 fn volume_active_detects_any_proven_flag() {
     assert!(!volume_active(&[]));
     assert!(volume_active(&volume_facts("/", false, 0, 0, 0, 0)));
+}
+
+library_tests! {
+fn report_with_volume(
+    mount: &str,
+    proven: bool,
+    used: u64,
+    bavail: u64,
+    files: u64,
+    favail: u64,
+) -> crate::diagnostics::health::HealthScanReport {
+    let mut report = crate::diagnostics::health::HealthScanReport::new("volume-proof", 1000);
+    report.facts = volume_facts(mount, proven, used, bavail, files, favail);
+    report.findings = volume_findings(&report.facts);
+    report
+}
+
+fn capacity_episodes(
+    now_ms: u64,
+) -> crate::diagnostics::health::suppression::episode::EpisodeLedger {
+    use crate::diagnostics::health::suppression::episode::{
+        volume_member_key, EpisodeLedger, VolumeEpisode,
+    };
+    let mut ledger = EpisodeLedger::default();
+    for member in ["bytes", "inode"] {
+        ledger.volume.insert(
+            volume_member_key("/data", member, "253:0", ""),
+            VolumeEpisode {
+                severity: 4,
+                last_delivered_ms: now_ms,
+                members: vec![volume_member_key("/data", member, "253:0", "")],
+            },
+        );
+    }
+    ledger
+}
+
+#[test]
+fn proven_rw_view_enters_and_recovers_both_capacity_members() {
+    use crate::diagnostics::health::suppression::episode::{
+        candidate_for_finding, deliverable, record_delivery, signals_from_report, sync,
+        volume_member_key, EpisodeLedger,
+    };
+
+    let report = report_with_volume("/data", true, 99 * GIB_U64, 0, 10000, 0);
+    assert_eq!(report.findings.len(), 1);
+    let signal = signals_from_report(&report);
+    for member in ["bytes", "inode"] {
+        let member_signal = signal
+            .volume
+            .iter()
+            .find(|signal| signal.key == volume_member_key("/data", member, "253:0", ""))
+            .expect("capacity member signal");
+        assert!(member_signal.entered, "{member}");
+        assert!(member_signal.valid, "{member}");
+    }
+    let candidate = candidate_for_finding(&report, "J09:/data", 4, "J09:/data")
+        .expect("proven rw volume maps to an episode candidate");
+    assert_eq!(
+        candidate.companion_keys,
+        [volume_member_key("/data", "inode", "253:0", "")]
+    );
+    let mut ledger = EpisodeLedger::default();
+    assert!(deliverable(&ledger, &candidate, 1000));
+    record_delivery(&mut ledger, &candidate, 1000);
+    for member in ["bytes", "inode"] {
+        assert!(
+            ledger
+                .volume
+                .contains_key(&volume_member_key("/data", member, "253:0", "")),
+            "{member}"
+        );
+    }
+
+    let healthy = report_with_volume("/data", true, GIB_U64, 50 * GIB_U64, 10000, 5000);
+    let healthy_signal = signals_from_report(&healthy);
+    for member in ["bytes", "inode"] {
+        let member_signal = healthy_signal
+            .volume
+            .iter()
+            .find(|signal| signal.key == volume_member_key("/data", member, "253:0", ""))
+            .expect("capacity member signal");
+        assert!(member_signal.exit, "{member}");
+    }
+    sync(&mut ledger, &healthy_signal, 2000);
+    assert!(ledger.volume.is_empty());
+    for member in ["bytes", "inode"] {
+        assert!(
+            ledger
+                .recoveries
+                .contains_key(&volume_member_key("/data", member, "253:0", "")),
+            "{member}"
+        );
+    }
+}
+
+#[test]
+fn read_only_view_between_rw_views_keeps_capacity_members() {
+    use crate::diagnostics::health::suppression::episode::{signals_from_report, sync};
+
+    let mut ledger = capacity_episodes(1000);
+    let delivered = ledger.clone();
+    let mut read_only = report_with_volume("/data", true, GIB_U64, 50 * GIB_U64, 10000, 5000);
+    for fact in &mut read_only.facts {
+        if fact.key == "filesystem.mount./data.volume_readonly" {
+            fact.value = HealthFactValue::Bool(true);
+        }
+    }
+    assert!(read_only.findings.is_empty());
+    sync(&mut ledger, &signals_from_report(&read_only), 2000);
+    assert_eq!(
+        ledger, delivered,
+        "a read-only view must not recover members"
+    );
+
+    let rw = report_with_volume("/data", true, GIB_U64, 50 * GIB_U64, 10000, 5000);
+    sync(&mut ledger, &signals_from_report(&rw), 3000);
+    assert!(ledger.volume.is_empty());
+}
+
+#[test]
+fn unconfirmed_volume_scope_never_enters_or_recovers_members() {
+    use crate::diagnostics::health::suppression::episode::{signals_from_report, sync};
+
+    let mut ledger = capacity_episodes(1000);
+    let delivered = ledger.clone();
+    let mut unproven = volume_facts("/data", false, 0, 0, 0, 0);
+    for (name, value) in [
+        ("volume_used_bytes", HealthFactValue::Unsigned(99 * GIB_U64)),
+        ("volume_bavail_bytes", HealthFactValue::Unsigned(0)),
+        ("volume_files", HealthFactValue::Unsigned(10000)),
+        ("volume_favail", HealthFactValue::Unsigned(0)),
+    ] {
+        unproven.push(fact(&format!("filesystem.mount./data.{name}"), value));
+    }
+    let mut report = crate::diagnostics::health::HealthScanReport::new("unproven", 2000);
+    report.facts = unproven;
+    report.findings = volume_findings(&report.facts);
+    assert!(report.findings.is_empty());
+    for judgement in evaluate_volumes(&report.facts) {
+        assert_eq!(judgement.bytes, MemberJudgement::UNKNOWN);
+        assert_eq!(judgement.inodes, MemberJudgement::UNKNOWN);
+    }
+    sync(&mut ledger, &signals_from_report(&report), 2000);
+    assert_eq!(ledger, delivered);
+}
+
+#[test]
+fn unconfirmed_rw_view_holds_members_without_entering() {
+    let mut facts = volume_facts("/data", true, 99 * GIB_U64, 0, 10000, 0);
+    facts.retain(|fact| !fact.key.ends_with("volume_readonly"));
+    let judgement = &evaluate_volumes(&facts)[0];
+    assert_eq!(judgement.bytes, MemberJudgement::inactive());
+    assert_eq!(judgement.inodes, MemberJudgement::inactive());
+    assert!(volume_findings(&facts).is_empty());
+}
 }
