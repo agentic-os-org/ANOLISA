@@ -1,0 +1,5 @@
+# Fixed direct dependencies for the synthetic SDK fixtures.
+claude-agent-sdk==0.2.88
+langchain-core==1.7.6
+langchain-openai==1.0.3
+mcp==1.26.0
