@@ -1353,6 +1353,7 @@ impl AgentSight {
             return None;
         }
 
+        self.check_pending_logtail();
         self.tick();
         let event = self.probes.try_recv()?;
         self.process_event(event)
@@ -4047,6 +4048,89 @@ mod tests {
             Box::new(RecordingExporter::new("logtail-file-dynamic")),
         );
         assert_eq!(exporters.len(), 1, "same name → replace");
+    }
+
+    #[test]
+    fn pending_logtail_activation_to_default_path_neither_drops_nor_duplicates_records() {
+        let _guard = crate::genai::logtail::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::genai::logtail::set_dynamic_logtail_path("");
+        crate::genai::logtail::set_explicit_logtail_registered(false);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_pending_logtail_handoff_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("agentsight.jsonl");
+        std::fs::write(&target, "").unwrap();
+
+        let default_exporter = LogtailExporter::new_with_path_dynamic(
+            target.to_str().unwrap(),
+            None,
+            true,
+            false,
+            true,
+        );
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(default_exporter)];
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let sls_activated = AtomicBool::new(false);
+
+        // Watcher activates dynamic path pointing at the same file (via a `..` alias)
+        // and deposits the new exporter into `mailbox` before the main loop drains it.
+        let sub = tmp.join("alias");
+        std::fs::create_dir_all(&sub).unwrap();
+        let alias_path = sub.join("..").join("agentsight.jsonl");
+        let cfg_json = serde_json::json!({
+            "runtime": { "sls_logtail_path": alias_path.to_str().unwrap() }
+        })
+        .to_string();
+        crate::background::handle_config_event(
+            &cfg_json,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+
+        // Event arriving before `register_pending_logtail` drains the mailbox must not be lost.
+        let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-pre-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event));
+        }
+        let pre_drain_lines = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count();
+        assert_eq!(
+            pre_drain_lines, 1,
+            "record exported before pending_logtail is drained must still be written by default exporter"
+        );
+
+        // Drain the mailbox and export a second event; it must be written once, not duplicated.
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+        let event_post = GenAISemanticEvent::LLMCall(make_test_llm_call("call-post-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event_post));
+        }
+        let post_drain_lines = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count();
+        assert_eq!(
+            post_drain_lines, 2,
+            "record exported after draining pending_logtail must be written once"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+        crate::genai::logtail::set_dynamic_logtail_path("");
+        crate::genai::logtail::set_explicit_logtail_registered(false);
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {
