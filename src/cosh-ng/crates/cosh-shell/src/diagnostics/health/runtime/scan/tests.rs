@@ -816,3 +816,32 @@ fn source_done(peer: &mut UnixStream, sequence: u64) {
     )
     .unwrap();
 }
+
+#[test]
+fn polling_a_pending_scan_keeps_its_deadline_and_consumes_the_late_report() {
+    let (mut handle, mut peer) = staged(Duration::from_secs(30));
+    assert!(
+        handle.poll_ready().is_none(),
+        "a scan without frames yet stays running"
+    );
+    {
+        let ScanState::Running(running) = &handle.state else {
+            panic!("polling must not seal a running scan");
+        };
+        assert!(
+            running.request.deadline.remaining().expect("clock") > Duration::from_secs(20),
+            "polling must not shorten the scan deadline"
+        );
+    }
+    send(&mut peer, 1, fact());
+    send(&mut peer, 2, completed());
+    source_done(&mut peer, 3);
+    let report = handle
+        .poll_ready()
+        .expect("the late report is still consumed");
+    assert_eq!(report.checks_done, ["cpu"]);
+    assert!(
+        report.unavailable.is_empty(),
+        "a late report must not carry a premature timeout gap"
+    );
+}
