@@ -460,11 +460,84 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
 
   assert.equal(
     driver.slots[19].value,
-    14,
-    "the offset must be clamped to the shortened list's last index",
+    0,
+    'shrinking from 25 to 15 rows (<= limit 20) must align offset back to page 1 (0), not row 14',
   );
-  assert.equal(violationRows(rendered.element).length, 1,
-    'the clamped page must not be empty: it must fall back to the remaining row');
+  assert.equal(
+    violationRows(rendered.element).length,
+    15,
+    'all 15 remaining violations must be visible once Pagination hides itself for total <= limit',
+  );
+
+  // Multi-page shrink: 45 violations on page 3 (offset 40) shrinking to 35
+  // must land on page 2 (offset 20, showing 15 rows), not an unaligned offset 34.
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[2].resolve(health);
+  calls.fetchEnforcementBindings[2].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[2].resolve({
+    violations: Array.from({ length: 45 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  driver.slots[19].setter(40);
+  rendered = driver.render(page);
+  assert.equal(violationRows(rendered.element).length, 5, 'sanity: offset 40 shows the last five of 45 rows');
+
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[3].resolve(health);
+  calls.fetchEnforcementBindings[3].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[3].resolve({
+    violations: Array.from({ length: 35 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(
+    driver.slots[19].value,
+    20,
+    'shrinking from 45 to 35 rows must align offset to the last full page start (20), not row 34',
+  );
+  assert.equal(
+    violationRows(rendered.element).length,
+    15,
+    'page 2 of 35 rows must render all 15 rows on that page',
+  );
+
+  // Boundary: exact single-page shrink (20 rows) and empty list (0 rows).
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[4].resolve(health);
+  calls.fetchEnforcementBindings[4].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[4].resolve({
+    violations: Array.from({ length: 20 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(driver.slots[19].value, 0, 'shrinking to exactly one page (20 rows) must reset offset to 0');
+  assert.equal(violationRows(rendered.element).length, 20, 'all 20 rows must render on page 1');
+
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[5].resolve(health);
+  calls.fetchEnforcementBindings[5].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[5].resolve({ violations: [] });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(driver.slots[19].value, 0, 'shrinking to an empty list must keep offset at 0');
+  assert.equal(violationRows(rendered.element).length, 0, 'empty list renders zero violation rows');
 });
 
 test('read-denial template is capability-gated and submits a file read binding', async () => {
