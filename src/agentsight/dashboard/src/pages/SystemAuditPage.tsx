@@ -364,15 +364,23 @@ export const SystemAuditPage: React.FC = () => {
     if (results[1].status === 'fulfilled') {
       setCases(results[1].value.data.items);
       setCaseTotal(results[1].value.data.total);
+    } else {
+      // These rows belong to the previous query, not the selected page/filter.
+      setCases([]);
     }
     if (results[2].status === 'fulfilled') {
       setSessions(results[2].value.data.items);
       setSessionTotal(results[2].value.data.total);
+    } else {
+      setSessions([]);
     }
     if (results[3].status === 'fulfilled') {
       setEvents(results[3].value.data.items);
       setEventTotal(results[3].value.data.total);
       setEventNextOffset(results[3].value.data.next_offset ?? null);
+    } else {
+      setEvents([]);
+      setEventNextOffset(null);
     }
     if (results[4].status === 'fulfilled') {
       setBindings(results[4].value.bindings);
