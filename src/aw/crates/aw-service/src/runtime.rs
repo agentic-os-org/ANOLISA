@@ -9,11 +9,11 @@ use aw_host::{Host, ProcessContext};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, SyncSender},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -22,6 +22,7 @@ use std::{
 
 mod binding;
 mod dispatch;
+mod event_loop;
 mod evidence;
 mod expired;
 pub(crate) mod facts;
@@ -32,6 +33,7 @@ mod limits;
 mod maintenance;
 mod policy;
 pub(crate) mod process;
+mod provider_binding;
 mod registration;
 mod scopes;
 mod sdk;
@@ -94,6 +96,7 @@ pub(crate) struct Runtime {
     workers: Mutex<Vec<JoinHandle<()>>>,
     next: AtomicU64,
     calls: AtomicU64,
+    shadow: Mutex<Option<event_loop::ShadowEvent>>,
     contexts: evidence::Contexts,
     owners: Mutex<BTreeMap<String, scopes::Owner>>,
     sdk_controls: sdk_control::Registry,
@@ -148,6 +151,7 @@ impl Runtime {
             workers: Mutex::new(Vec::new()),
             next: AtomicU64::new(1),
             calls: AtomicU64::new(0),
+            shadow: Mutex::new(None),
         }))
     }
 
@@ -302,12 +306,20 @@ impl Runtime {
             let candidate = value.clone();
             let ordered = automatic && ((value["name"] == "tool.before" && host.steps().iter().any(|step| step.event == "tool.before" && matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input")))) || aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
                 host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result())));
+            let binding_active = || runtime.check_provider_admission(&instance_id, execution.as_ref()).is_ok();
+            let obligation_audit = |update: aw_host::ObligationUpdate<'_>| runtime.audit.obligation(&thread_key, update).is_ok();
             let event = match native_input {
                 Some(input) => host.hook_event(value, input, deadline, &cancelled),
                 None => host.event(value, deadline, &cancelled),
-            }.map_err(|_| rejected("event_invalid"));
+            }.map_err(|_| rejected("event_invalid")).and_then(|event| {
+                match runtime.provider_binding(&host, &instance_id, &candidate, &association, execution.as_ref())? {
+                    Some(binding) => event.with_binding(binding, &binding_active).map_err(|_| rejected("event_invalid")),
+                    None => Ok(event),
+                }
+            });
             match event {
                 Ok(event) => {
+                    let event = event.with_obligation_audit(&obligation_audit);
                     let seed = runtime.contexts.seed(json!({
                         "generation":runtime.identity.generation,"config_revision":host.revision(),
                         "binding_id":host.target(),"instance_id":instance_id,"event_id":thread_key,
@@ -322,7 +334,7 @@ impl Runtime {
                             return;
                         }
                     };
-                    let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
+                    let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.callback_steps().into_iter().map(|step| step.step_id.clone()).collect(), candidate_revision };
                     let public_event = runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association);
                     let claimed = public_event.and_then(|public_event| {
                         let mut plan = json!({"kind": "event", "identity": runtime.identity,
@@ -345,7 +357,6 @@ impl Runtime {
                 }
                 Err(error) => { let _ = ready.send(Err(error)); }
             }
-            runtime.audit.release(&thread_key);
             context.close();
             if let Ok(mut events) = runtime.events.lock() { events.remove(&thread_key); }
         });
@@ -381,204 +392,6 @@ impl Runtime {
         Ok((entry.sender.clone(), Arc::clone(&entry.cancelled)))
     }
 
-    fn event_loop(
-        &self,
-        identity: (&str, &str, &Value),
-        event: &aw_host::Event<'_>,
-        lease: (&AtomicBool, &evidence::Cell, Option<&policy::Execution>),
-        receiver: Receiver<Job>,
-        automatic: bool,
-        ordered: bool,
-    ) {
-        let (key, instance_id, original) = identity;
-        let rewrite = Mutex::new(input::State::default());
-        let (cancelled, context, execution) = lease;
-        let mut close = None;
-        let mut claimed = BTreeSet::new();
-        let mut panicked = false;
-        let completed_steps = AtomicU64::new(0);
-        let completed_mask = AtomicU64::new(0);
-        let step_count = event.steps().count() as u64;
-        thread::scope(|scope| {
-            let mut children = Vec::new();
-            while Instant::now() < event.deadline()
-                && !self.stopped.load(Ordering::Acquire)
-                && !cancelled.load(Ordering::Acquire)
-            {
-                if automatic && completed_steps.load(Ordering::Acquire) == step_count {
-                    break;
-                }
-                let job = match receiver.recv_timeout(
-                    event
-                        .deadline()
-                        .saturating_duration_since(Instant::now())
-                        .min(std::time::Duration::from_millis(20)),
-                ) {
-                    Ok(job) => job,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                match job {
-                    Job::Completion {
-                        value,
-                        input,
-                        reply,
-                    } => {
-                        let result = event
-                            .completion_view(value, input)
-                            .map(|()| json!({}))
-                            .map_err(|_| rejected("native_completion_invalid"));
-                        let _ = reply.send(result);
-                    }
-                    Job::Close { reply } => {
-                        close = Some(reply);
-                        break;
-                    }
-                    Job::Invoke {
-                        step,
-                        native_environment,
-                        reply,
-                    } => {
-                        if cancelled.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire)
-                        {
-                            let _ = reply.send(Err(rejected("event_cancelled")));
-                            continue;
-                        }
-                        if let Err(error) = self.check_execution_admission(instance_id, execution) {
-                            let _ = reply.send(Err(error));
-                            continue;
-                        }
-                        let Some(index) = event
-                            .steps()
-                            .position(|candidate| candidate.step_id == step)
-                        else {
-                            let _ = reply.send(Err(rejected("step_unknown_or_claimed")));
-                            continue;
-                        };
-                        if !claimed.insert(step.clone()) {
-                            let _ = reply.send(Err(rejected("step_unknown_or_claimed")));
-                            continue;
-                        }
-                        // Admission caps events at 64 steps, so every step has a bit.
-                        let bit = 1u64 << index;
-                        if self
-                            .calls
-                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                                (n < self.limits.calls as u64).then_some(n + 1)
-                            })
-                            .is_err()
-                        {
-                            completed_steps.fetch_add(1, Ordering::Release);
-                            completed_mask.fetch_or(bit, Ordering::Release);
-                            let _ = reply.send(Err(self.overload("call_limit")));
-                            continue;
-                        }
-                        let completed_steps = &completed_steps;
-                        let completed_mask = &completed_mask;
-                        let rewrite = &rewrite;
-                        children.push(scope.spawn(move || {
-                            let _guard = CallGuard(&self.calls);
-                            let result = (|| {
-                                while ordered
-                                    && completed_mask.load(Ordering::Acquire) & (bit - 1) != bit - 1
-                                {
-                                    if Instant::now() >= event.deadline()
-                                        || cancelled.load(Ordering::Acquire)
-                                        || self.stopped.load(Ordering::Acquire)
-                                    {
-                                        return Err(rejected("event_cancelled_or_expired"));
-                                    }
-                                    thread::sleep(std::time::Duration::from_millis(2));
-                                }
-                                self.check_execution_admission(instance_id, execution)?;
-                                self.audit
-                                    .append(key, json!({"phase": "started", "step_id": step}))?;
-                                // Queueing and durable audit can outlive the admitted owner.
-                                self.check_execution_admission(instance_id, execution)?;
-                                let mut invocation = match native_environment {
-                                    Some(environment) => {
-                                        event.invoke_with_native_environment(&step, &environment)
-                                    }
-                                    None => event.invoke(&step),
-                                }
-                                .map_err(|_| rejected("step_rejected"))?;
-                                let replacement = match self.adopt_input(
-                                    instance_id,
-                                    event,
-                                    original,
-                                    &mut invocation,
-                                    rewrite,
-                                    index + 1 == step_count as usize,
-                                ) {
-                                    Ok(input) => input,
-                                    Err(_) => {
-                                        invocation.result = Err(aw_host::Failure::Protocol(
-                                            aw_provider::Error::Invalid(
-                                                "input replacement adoption failed",
-                                            ),
-                                        ));
-                                        invocation.failure_action =
-                                            Some(aw_host::FailureAction::Block);
-                                        None
-                                    }
-                                };
-                                let (record, mut result) = audit::invocation(invocation);
-                                if result["effects"].as_array().is_some_and(|effects| {
-                                    effects
-                                        .iter()
-                                        .any(|effect| effect["type"] == "replace_input")
-                                }) {
-                                    result["effects"] = serde_json::json!([]);
-                                }
-                                if let Some(input) = replacement {
-                                    result["input_replacement"] = input;
-                                }
-                                self.audit.append(key, record)?;
-                                Ok(result)
-                            })();
-                            completed_steps.fetch_add(1, Ordering::Release);
-                            completed_mask.fetch_or(bit, Ordering::Release);
-                            let _ = reply.send(result);
-                        }));
-                    }
-                }
-            }
-            cancelled.store(true, Ordering::Release);
-            for child in children {
-                panicked |= child.join().is_err();
-            }
-        });
-        context.close();
-        let status = if panicked {
-            "worker_failed"
-        } else if close.is_some() {
-            "closed"
-        } else if automatic && completed_steps.load(Ordering::Acquire) == step_count {
-            "completed"
-        } else if self.stopped.load(Ordering::Acquire) {
-            "stopped"
-        } else if Instant::now() >= event.deadline() {
-            "expired"
-        } else {
-            "cancelled"
-        };
-        let completed = self.retire_event(
-            (key, instance_id),
-            event,
-            &claimed,
-            status,
-            automatic,
-            execution,
-        );
-        if let Some(reply) = close {
-            let _ =
-                reply.send(completed.map(|evidence| json!({"closed": true, "evidence": evidence})));
-        }
-        if panicked {
-            self.stopped.store(true, Ordering::Release);
-        }
-    }
-
     pub(crate) fn maintain(&self, shutdown: bool) -> Result<()> {
         if !shutdown {
             self.maintain_scopes()?;
@@ -589,6 +402,7 @@ impl Runtime {
             for entry in events.values() {
                 entry.cancelled.store(true, Ordering::Release);
             }
+            self.cancel_shadow(|_| true)?;
             // Dropping registry senders wakes idle event workers; in-flight handlers are bounded.
             events.clear();
             self.expired
@@ -617,13 +431,6 @@ impl Runtime {
             return Err(rejected("event_worker_failed"));
         }
         Ok(())
-    }
-}
-
-struct CallGuard<'a>(&'a AtomicU64);
-impl Drop for CallGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

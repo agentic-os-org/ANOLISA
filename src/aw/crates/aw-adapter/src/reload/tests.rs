@@ -133,7 +133,7 @@ fn native_routes_use_only_the_targets_admitted_steps() {
         failure_actions: BTreeMap::new(),
     };
     let selected = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
-    let native = adapter::native_steps(&selected, "tool.after", false);
+    let native = adapter::native_steps(config.as_value(), &selected, "tool.after", false);
     assert_eq!(native.len(), 1);
     assert_eq!(native[0].step_id, "sdk");
     let dynamic = plan(config.as_value(), "sdk", &selected, "tool.after").unwrap();

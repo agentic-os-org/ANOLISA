@@ -3,15 +3,17 @@
 
 #![forbid(unsafe_code)]
 
+mod decision;
 mod event;
 mod report;
 mod transport;
 
 pub use aw_core::admission::AdapterCapabilities;
+pub use decision::BindingContext;
 pub use event::Event;
 pub use report::{
     CallFailure, CallRecord, Failure, FailureAction, Invocation, Method, NativeOutput,
-    PreparationFailure, ProcessOutput, StepOutput,
+    ObligationRecord, ObligationUpdate, PreparationFailure, ProcessOutput, StepOutput, StepTrace,
 };
 
 use aw_config::Configuration;
@@ -23,7 +25,7 @@ use aw_exec::{CommandSpec, Limits, PackageLeases};
 use aw_provider::{Protocol, Reply, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     path::PathBuf,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -192,13 +194,19 @@ impl Host {
             return Err(Error::Invalid("working directory must be absolute"));
         }
         let protocol = Protocol::new()?;
-        let mut providers = BTreeMap::new();
+        let document = candidate.configuration().as_value();
+        let mut needed = BTreeSet::new();
         for step in candidate.requirements() {
-            if !providers.contains_key(&step.provider) {
-                let value =
-                    &candidate.configuration().as_value()["spec"]["providers"][&step.provider];
-                providers.insert(step.provider.clone(), provider(value, &context)?);
-            }
+            needed.insert(step.provider.as_str());
+            let configured = decision::step_configuration(document, step)?;
+            needed.extend(decision::route_providers(configured));
+        }
+        let mut providers = BTreeMap::new();
+        for id in needed {
+            providers.insert(
+                id.to_owned(),
+                provider(&document["spec"]["providers"][id], &context)?,
+            );
         }
         let package_leases =
             PackageLeases::acquire(providers.values_mut().map(|provider| &mut provider.command))?;
@@ -247,6 +255,9 @@ impl Host {
             return Err(Error::Invalid(
                 "admitted policy does not match prepared Providers",
             ));
+        }
+        if let Err(cause) = decision::admit_routes(&policy, &prepared.evidence) {
+            return Err(prepared.into_failure(cause));
         }
         Ok(Self {
             policy,

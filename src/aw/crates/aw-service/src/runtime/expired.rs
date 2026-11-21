@@ -27,9 +27,13 @@ pub(super) fn replies(
     claimed: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, Value>> {
     event
-        .steps()
+        .callback_steps()
+        .into_iter()
         .filter(|step| !claimed.contains(&step.step_id))
         .map(|step| {
+            if event.is_shadow(step) {
+                return Ok((step.step_id.clone(), audit::shadow_reply()));
+            }
             let mut invocation = event
                 .invoke(&step.step_id)
                 .map_err(|_| rejected("expired_event_unavailable"))?;

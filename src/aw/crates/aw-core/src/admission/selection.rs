@@ -2,6 +2,7 @@
 
 use super::rules::{string, tool_selectors};
 use super::AdmissionError;
+use aw_config::requirements::{matches_tool_selector, step_enabled};
 
 /// An enabled step whose selectors cannot overlap for a configured target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +43,7 @@ pub fn projected_out_steps(
             .as_array()
             .ok_or(AdmissionError::Rejected("event steps must be an array"))?
         {
-            if step["enabled"] != false && !overlap(&event_tools, &tool_selectors(step)?, adapter) {
+            if step_enabled(step) && !overlap(&event_tools, &tool_selectors(step)?, adapter) {
                 excluded.push(ProjectedOutStep {
                     event: event_name.clone(),
                     step_id: string(&step["id"])?.to_owned(),
@@ -55,12 +56,6 @@ pub fn projected_out_steps(
 
 pub(super) use aw_config::requirements::selectors_overlap as overlap;
 
-fn native(selector: &str) -> Option<(&str, &str)> {
-    selector
-        .strip_prefix("native:")
-        .and_then(|value| value.split_once(':'))
-}
-
 /// Evaluates whether event-level and step-level selectors admit the given tool identity.
 pub fn matches_tool_selectors(
     event_tools: &[String],
@@ -70,15 +65,9 @@ pub fn matches_tool_selectors(
     native_name: Option<&str>,
 ) -> bool {
     let matches = |selectors: &[String]| {
-        selectors.iter().any(|selector| {
-            if selector == "*" {
-                return true;
-            }
-            if let Some((owner, name)) = native(selector) {
-                return adapter == Some(owner) && native_name == Some(name);
-            }
-            tool_name == Some(selector.as_str())
-        })
+        selectors
+            .iter()
+            .any(|selector| matches_tool_selector(selector, adapter, tool_name, native_name))
     };
     matches(event_tools) && matches(step_tools)
 }

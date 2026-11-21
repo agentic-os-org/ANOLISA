@@ -623,3 +623,6 @@ fn app_server_legacy_capacity_blocks_and_recovers_on_relaunch() {
     assert!(f.root.join("codex-tool-executed").exists());
     service.released(&f);
 }
+
+#[path = "codex/shadow.rs"]
+mod shadow;

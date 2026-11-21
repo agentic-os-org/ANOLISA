@@ -34,6 +34,7 @@ fn selectors_preserve_explicit_configuration_for_every_step_protocol() {
         for selectors in [
             json!(["*"]),
             json!(["bash", "file_read", "file_write"]),
+            json!(["native:pi:*"]),
             json!([
                 "native:pi:custom:name",
                 "native:claude-sdk:mcp__files__send"
@@ -155,4 +156,31 @@ fn invalid_selectors_are_rejected_even_on_disabled_steps() {
             );
         }
     }
+}
+
+#[test]
+fn native_wildcard_retains_its_owner_and_intersects_exact_native_names() {
+    use aw_config::requirements::{matches_tool_selector, selectors_overlap};
+    let wildcard = ["native:qoder:*".to_owned()];
+    let exact = ["native:qoder:Bash".to_owned()];
+    assert!(selectors_overlap(&wildcard, &exact, "qoder"));
+    assert!(!selectors_overlap(&wildcard, &exact, "pi"));
+    assert!(matches_tool_selector(
+        &wildcard[0],
+        Some("qoder"),
+        Some("bash"),
+        Some("Bash")
+    ));
+    assert!(!matches_tool_selector(
+        &wildcard[0],
+        Some("pi"),
+        Some("bash"),
+        Some("Bash")
+    ));
+    assert!(!matches_tool_selector(
+        &wildcard[0],
+        Some("qoder"),
+        Some("bash"),
+        None
+    ));
 }

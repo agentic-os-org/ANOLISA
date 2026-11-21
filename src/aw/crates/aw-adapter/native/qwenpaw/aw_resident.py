@@ -425,7 +425,7 @@ class ResidentMiddleware(MiddlewareBase):
 
     def selected(self, hook, call):
         def matches(selectors):
-            return any(value in ("*", call.name, "native:qwenpaw:" + call.name)
+            return any(value in ("*", call.name, "native:qwenpaw:*", "native:qwenpaw:" + call.name)
                        for value in selectors)
         return matches(hook.get("event_tools", ["*"])) and matches(hook.get("step_tools", ["*"]))
 

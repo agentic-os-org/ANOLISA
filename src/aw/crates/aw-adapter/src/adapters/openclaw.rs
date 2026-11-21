@@ -233,6 +233,7 @@ impl PreparedLaunch for Prepared {
         let mut events = BTreeMap::new();
         for name in ["tool.before", "tool.after", "security.violation"] {
             let selected = adapter::native_steps(
+                &self.input.document,
                 context.steps,
                 name,
                 name != "security.violation"

@@ -13,6 +13,9 @@ mod package_leases;
 #[path = "host/submission.rs"]
 mod submission;
 
+#[path = "host/decisions.rs"]
+mod decisions;
+
 #[path = "host/gates.rs"]
 mod gates;
 

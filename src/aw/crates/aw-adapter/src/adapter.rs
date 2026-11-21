@@ -291,10 +291,14 @@ pub(super) struct NativeStep {
     pub replaces_result: bool,
 }
 
-pub(super) fn native_steps(steps: &[AdmittedStep], event: &str, observe: bool) -> Vec<NativeStep> {
-    let mut selected: Vec<_> = steps
-        .iter()
-        .filter(|step| step.event == event)
+pub(super) fn native_steps(
+    document: &Value,
+    steps: &[AdmittedStep],
+    event: &str,
+    observe: bool,
+) -> Vec<NativeStep> {
+    let mut selected: Vec<_> = aw_core::routes::callback_steps(document, steps, event)
+        .into_iter()
         .map(|step| NativeStep {
             step_id: step.step_id.clone(),
             on_error: step.on_error.clone(),

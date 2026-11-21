@@ -488,6 +488,7 @@ impl PreparedLaunch for Prepared {
 impl Prepared {
     fn native_steps(&self, steps: &[AdmittedStep], event: &str) -> Vec<adapter::NativeStep> {
         adapter::native_steps(
+            &self.input.document,
             steps,
             event,
             event != "input.submit"
