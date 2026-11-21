@@ -19,18 +19,10 @@ import {
 } from "./source-helpers.mjs";
 import { AwError } from "./transport.mjs";
 
-export const SOURCE_PROTOCOL = "aw-hook-source/v1";
-export const DEFAULT_SOURCE_EVENTS = Object.freeze([
-  "input.submit",
-  "tool.before",
-  "tool.after",
-]);
+import { SOURCE_PROTOCOL, DEFAULT_SOURCE_EVENTS, sourceCapabilities, confirmSourceRoutes } from "./source-profile.mjs";
+export { SOURCE_PROTOCOL, DEFAULT_SOURCE_EVENTS, sourceCapabilities, confirmSourceRoutes } from "./source-profile.mjs";
+
 export const DEFAULT_MAX_STREAM_ITEMS = 1024;
-const SUPPORTED_EVENTS = Object.freeze({
-  "input.submit": ["observe", "block"],
-  "tool.before": ["observe", "block"],
-  "tool.after": ["observe"],
-});
 const WRAPPED = Symbol("aw.source.wrapped");
 
 export class SourceDenied extends AwError {
@@ -43,43 +35,6 @@ export class SourceDenied extends AwError {
     this.turnId = turnId;
     this.toolName = toolName;
   }
-}
-
-export function sourceCapabilities(events = DEFAULT_SOURCE_EVENTS) {
-  if (!Array.isArray(events)) throw new AwError("semantic_event_unavailable");
-  const selected = [...new Set(events)];
-  if (
-    !selected.length ||
-    selected.some(
-      (event) =>
-        typeof event !== "string" || !Object.hasOwn(SUPPORTED_EVENTS, event),
-    )
-  )
-    throw new AwError("semantic_event_unavailable");
-  return {
-    adapter: "sdk",
-    version: SOURCE_PROTOCOL,
-    entrypoint: "application",
-    events: Object.fromEntries(
-      selected.map((event) => [event, [...SUPPORTED_EVENTS[event]]]),
-    ),
-  };
-}
-
-export function confirmSourceRoutes(capabilities, routes) {
-  const events = capabilities?.events;
-  const hooks = routes?.hooks;
-  if (!events || typeof events !== "object" || !Array.isArray(hooks))
-    return false;
-  return hooks.every(
-    (hook) =>
-      hook &&
-      typeof hook === "object" &&
-      Object.hasOwn(events, hook.event) &&
-      !hook.replace_input &&
-      !hook.replace_result &&
-      !hook.skill_check,
-  );
 }
 
 export class SourceSession {
@@ -172,6 +127,30 @@ export class SourceSession {
     this._verifyRouteCoverage();
     this._requireOpen();
     signal?.throwIfAborted();
+  }
+
+  async _lifecycle(event, fields, signal) {
+    if (!this.events.includes(event))
+      throw new AwError("semantic_event_unavailable");
+    const combined = this._combineSignal(signal);
+    await this.prepare(combined);
+    return this._runAdmittedCall(() =>
+      this.task.emit(event, { session_id: this.sessionId, ...fields }, combined),
+    );
+  }
+
+  async sessionStart({ signal } = {}) {
+    return this._lifecycle("session.start", {}, signal);
+  }
+
+  async turnStop(turnId, reason, { attemptId, signal } = {}) {
+    const fields = { turn_id: validateIdentity(turnId), reason: validateIdentity(reason) };
+    if (attemptId !== undefined) fields.attempt_id = validateIdentity(attemptId);
+    return this._lifecycle("turn.stop", fields, signal);
+  }
+
+  async sessionEnd(reason, { signal } = {}) {
+    return this._lifecycle("session.end", { reason: validateIdentity(reason) }, signal);
   }
 
   async submit(text, { turnId, signal } = {}) {

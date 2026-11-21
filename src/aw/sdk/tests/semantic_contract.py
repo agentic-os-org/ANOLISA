@@ -41,16 +41,18 @@ from pathlib import Path
 r = json.load(sys.stdin)
 out = {'api_version':r['api_version'],'request_id':r['request_id'],'status':'ok'}
 if r['method'] == 'describe':
-    out['operations'] = [{'name':'check','events':['input.submit','tool.before'],'effects':['observe','block']}, {'name':'record','events':['tool.after'],'effects':['observe']}]
+    out['operations'] = [{'name':'check','events':['input.submit','tool.before','turn.stop'],'effects':['observe','block']}, {'name':'record','events':['tool.after','session.start','session.end'],'effects':['observe']}]
 elif r['method'] == 'invoke':
     event = r['event']
     with Path(r['config']['calls']).open('a') as f: f.write(event['name']+'\\n')
     deny = event.get('input', {}).get('text') == 'deny' or event.get('tool', {}).get('input', {}).get('command') == 'deny'
+    deny = deny or (event['name'] == 'turn.stop' and event['native']['reason'] == 'timeout')
     out['input_digest'] = r['input_digest']
     out['effects'] = [{'type':'block','reason_code':'policy_denied'}] if deny else []
 print(json.dumps(out))
 """)
     calls = root / "calls"
+    observations = {"tool.after", "session.start", "session.end"}
     config = {
         "apiVersion": "aw/v1alpha1",
         "kind": "AWConfiguration",
@@ -81,15 +83,15 @@ print(json.dumps(out))
                         {
                             "id": "check",
                             "provider": "policy",
-                            "operation": "record" if event == "tool.after" else "check",
+                            "operation": "record" if event in observations else "check",
                             "effects": (
-                                ["observe"] if event == "tool.after" else ["observe", "block"]
+                                ["observe"] if event in observations else ["observe", "block"]
                             ),
-                            "on_error": "report" if event == "tool.after" else "block",
+                            "on_error": "report" if event in observations else "block",
                         }
                     ],
                 }
-                for event in ["input.submit", "tool.before", "tool.after"]
+                for event in ["session.start", "input.submit", "tool.before", "tool.after", "turn.stop", "session.end"]
             },
         },
     }
@@ -126,12 +128,23 @@ print(json.dumps(out))
                 []
                 if empty
                 else [
+                    "session.start",
                     "input.submit",
                     "tool.before",
                     "tool.before",
                     "tool.after",
+                    "turn.stop",
+                    "session.end",
                 ]
             )
+            if not empty:
+                reasons = {}
+                for journal in state.rglob("*.jsonl"):
+                    first = journal.read_text().splitlines()[0]
+                    event = json.loads(first)["record"].get("plan", {}).get("event", {})
+                    if event.get("name") in {"turn.stop", "session.end"}:
+                        reasons[event["name"]] = event["reason"]
+                assert reasons == {"turn.stop": "timeout", "session.end": "cancelled"}, reasons
         finally:
             service.terminate()
             try:
@@ -161,7 +174,8 @@ def main() -> None:
             timeout=240,
         )
     (output / "result.json").write_text(
-        json.dumps({"status": "passed", "packages": 2, "protocol": "aw-hook-source/v1"})
+        json.dumps({"status": "passed", "packages": 2, "protocol": "aw-hook-source/v1",
+                    "lifecycle": ["session.start", "turn.stop", "session.end"]})
     )
 
 

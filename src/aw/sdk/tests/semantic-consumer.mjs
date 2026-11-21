@@ -5,6 +5,9 @@ const capabilities = {
   version: "aw-hook-source/v1",
   entrypoint: "application",
   events: {
+    "session.start": ["observe"],
+    "turn.stop": ["observe", "block"],
+    "session.end": ["observe"],
     "input.submit": ["observe", "block"],
     "tool.before": ["observe", "block"],
     "tool.after": ["observe"],
@@ -53,6 +56,8 @@ async function main() {
   try {
     assert.equal(await instance.connect(), true);
     task = await instance.task();
+    assert.deepEqual(await task.emit("session.start", { session_id: "session" }),
+      { decision: "continue", coverage: "checked" });
     assert.deepEqual(
       await task.emit("input.submit", {
         session_id: "session",
@@ -93,6 +98,12 @@ async function main() {
     await assert.rejects(task.emit("agent.end", {}), {
       code: "semantic_event_unavailable",
     });
+    assert.deepEqual(await task.emit("turn.stop", {
+      session_id: "session", turn_id: "turn", reason: "timeout",
+    }), { decision: "block", coverage: "checked" });
+    assert.deepEqual(await task.emit("session.end", {
+      session_id: "session", reason: "cancelled",
+    }), { decision: "continue", coverage: "checked" });
   } finally {
     await task?.close();
     await instance.close();

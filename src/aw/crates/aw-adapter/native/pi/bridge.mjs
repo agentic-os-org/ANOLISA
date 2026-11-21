@@ -18,7 +18,7 @@ export function validateRoutes(config) {
     throw new Error("AW hooks must be an array");
   for (const hook of config.hooks) {
     if (
-      !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
+      !["session.start", "input.submit", "tool.before", "tool.after", "turn.stop", "session.end"].includes(hook.event) ||
       typeof hook.step !== "string" ||
       !hook.step ||
       !["report", "block", "withhold_result"].includes(hook.on_error) ||
@@ -59,7 +59,11 @@ async function invoke(config, hook, payload, signal) {
   if (input.length > 1024 * 1024) throw new Error("native_input_limit");
   if (signal?.aborted) throw new Error("callback_aborted");
   const response = config.scope
-    ? await config.scope.invoke(hook, payload, signal)
+    ? (hook.event === "session.end"
+        ? await config.scope.command("invoke", {
+            scope: config.scope.handle, native_input: input.toString("utf8"),
+          }, hook.budget_ms + 3000, hook)
+        : await config.scope.invoke(hook, payload, signal))
     : await run(config.executable, ["hook", "--adapter", "pi", "--binding", config.binding,
         "--event", hook.event, "--step", hook.step, "--on-error", hook.on_error],
         input, hook.budget_ms + 3000, signal);
@@ -385,14 +389,56 @@ export function installSessionBridge(session, scope = null, policy = configurati
     });
   }
   agent[installed] = true;
+  const lifecycle = {
+    "session.start": config.hooks.filter(hook => hook.event === "session.start"),
+    "turn.stop": config.hooks.filter(hook => hook.event === "turn.stop"),
+    "session.end": config.hooks.filter(hook => hook.event === "session.end"),
+  };
+  const reportsLifecycle = Object.values(lifecycle).some(hooks => hooks.length);
+  const lifecycleSession = reportsLifecycle
+    ? identifier(session.sessionManager.getSessionId(), "session id")
+    : undefined;
+  const sessionEpoch = reportsLifecycle ? randomUUID() : undefined;
+  const pendingLifecycle = new Set();
+  let nativeTurn;
+  async function observeLifecycle(event, fields) {
+    const payload = { event, session_id: lifecycleSession, session_epoch: sessionEpoch, ...fields };
+    for (const hook of lifecycle[event]) {
+      try {
+        const directive = await invoke(config, hook, payload);
+        if (Object.keys(directive).length)
+          throw new Error("Lifecycle observation returned a directive");
+      } catch (error) {
+        process.stderr.write(`AW ${event}/${hook.step} failed: ${error.message}\n`);
+      }
+    }
+  }
   // Immediate abort and native errors may skip afterToolCall; the completion event still closes state.
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "tool_execution_end") {
       active.delete(event.toolCallId);
       producer?.retire(event.toolCallId);
     }
+    if (lifecycle["turn.stop"].length && event.type === "turn_start") nativeTurn = randomUUID();
+    if (event.type === "turn_end" && nativeTurn) {
+      const turnId = nativeTurn;
+      nativeTurn = undefined;
+      const reason = event.message?.stopReason;
+      if (typeof reason !== "string" || !reason.trim()) return;
+      const report = observeLifecycle("turn.stop", { turn_id: turnId, reason })
+        .finally(() => pendingLifecycle.delete(report));
+      pendingLifecycle.add(report);
+      return report;
+    }
   });
   return {
+    async sessionStart() {
+      await observeLifecycle("session.start", {});
+    },
+    async sessionEnd(reason) {
+      await Promise.allSettled(pendingLifecycle);
+      await observeLifecycle("session.end", { reason });
+    },
     async submit(text, turn, signal, skill) {
       const hooks = config.hooks.filter(hook => hook.event === "input.submit");
       if (!hooks.length) return;

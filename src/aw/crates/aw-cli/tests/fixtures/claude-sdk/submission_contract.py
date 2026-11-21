@@ -48,7 +48,7 @@ sys.modules["claude_agent_sdk._internal.transport.subprocess_cli"] = SimpleNames
 sys.modules["anyio"] = SimpleNamespace(CancelScope=lambda **kwargs: nullcontext())
 sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object)
 
-from aw_claude import CallbackFailure
+from aw_claude import Bridge as NativeBridge, CallbackFailure
 from aw_foreground import CheckedClient
 from aw_invocations import Invocations
 from aw_resident import ManagedClient
@@ -88,6 +88,9 @@ class Bridge:
         self.closing = asyncio.Event()
         self.close_response = (0, b"")
         self.cancel_close = False
+
+    def bind_stop_deliveries(self, query):
+        assert all(hook["event"] != "turn.stop" for hook in self.config["hooks"])
 
     async def next_submission(self):
         self.turn += 1
@@ -142,6 +145,61 @@ def client(resident):
 
 
 class Contracts(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_redelivery_reuses_the_native_delivery_decision(self):
+        bridge = NativeBridge({"hooks": [
+            {"event": "turn.stop", "step": "gate", "on_error": "block",
+             "replace_result": False, "budget_ms": 1000},
+        ]}, launch_bound=False)
+        bridge.turn_id = "turn"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def transport(hook, payload):
+            calls.append(payload)
+            entered.set()
+            await release.wait()
+            return (0, b"") if payload["stop_hook_active"] else (2, b'"continue"')
+
+        bridge._transport = transport
+
+        async def handle(frame):
+            return await bridge.stop_callback(frame["request"]["input"], None, {})
+
+        def frame(delivery, *, continuation=False):
+            return dict(request_id=delivery, request=dict(subtype="hook_callback", input={
+                "hook_event_name": "Stop", "session_id": "session", "stop_hook_active": continuation,
+            }))
+
+        query = SimpleNamespace(_handle_control_request=handle)
+        bridge.bind_stop_deliveries(query)
+        first = asyncio.create_task(query._handle_control_request(frame("first")))
+        await entered.wait()
+        duplicate = asyncio.create_task(query._handle_control_request(frame("first")))
+        await asyncio.sleep(0)
+        self.assertFalse(duplicate.done())
+        release.set()
+        veto = {"decision": "block", "reason": "continue"}
+        self.assertEqual(await first, veto)
+        self.assertEqual(await duplicate, veto)
+        self.assertEqual(await query._handle_control_request(frame("first")), veto)
+        self.assertEqual(await query._handle_control_request(frame("second", continuation=True)), {})
+        self.assertEqual(await query._handle_control_request(frame("second", continuation=True)), {})
+        self.assertEqual([call["attempt_id"] for call in calls], ["first", "second"])
+        self.assertEqual([call["delivery_id"] for call in calls], ["first", "second"])
+        self.assertEqual([call["turn_id"] for call in calls], ["turn", "turn"])
+
+        # The resident reader suppresses identical concurrent frames before SDK
+        # task registration, which is keyed by the same control request ID.
+        bridge.scope = SimpleNamespace(check=lambda: None, invocation_limit=1)
+        bridge.failure = None
+        resident = Invocations(bridge)
+        self.assertIsNotNone(resident.reserve("first", None, "hook:Stop", stop_fingerprint=b"one"))
+        self.assertIsNone(resident.reserve("first", None, "hook:Stop", stop_fingerprint=b"one"))
+        with self.assertRaises(CallbackFailure):
+            resident.reserve("first", None, "hook:Stop", stop_fingerprint=b"changed")
+        self.assertIsNotNone(resident.reserve("second", None, "hook:Stop", stop_fingerprint=b"one"))
+
     async def test_strings_and_async_text_keep_original_payload(self):
         for resident in (False, True):
             value = client(resident)

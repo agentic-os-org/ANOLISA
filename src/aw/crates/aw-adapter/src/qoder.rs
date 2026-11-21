@@ -90,7 +90,12 @@ impl Adapter for Qoder {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        capabilities(&self.native, &self.version)
+        let mut capabilities = capabilities(&self.native, &self.version);
+        if self.input.options.reloadable {
+            capabilities.events.remove("session.start");
+            capabilities.events.remove("session.end");
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -320,6 +325,8 @@ pub(super) fn check_sources(
 
 pub(super) fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "session.start" => Ok("SessionStart"),
+        "session.end" => Ok("SessionEnd"),
         "input.submit" => Ok("UserPromptSubmit"),
         "tool.before" => Ok("PreToolUse"),
         "tool.after" => Ok("PostToolUse"),
@@ -344,8 +351,15 @@ pub(super) fn generate(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or("Qoder hooks must be an object")?;
-    for name in ["input.submit", "tool.before", "tool.after"] {
-        let observe = name != "input.submit" && adapter::observation_enabled(document, target);
+    for name in [
+        "session.start",
+        "input.submit",
+        "tool.before",
+        "tool.after",
+        "session.end",
+    ] {
+        let observe = matches!(name, "tool.before" | "tool.after")
+            && adapter::observation_enabled(document, target);
         let selected = adapter::native_steps(steps, name, observe);
         if selected.is_empty() {
             continue;
@@ -371,7 +385,12 @@ pub(super) fn generate(
             })
             .collect();
         // Selector misses still require event validation and their configured failure audit.
-        let mut group = json!({"matcher": "*", "hooks": commands});
+        let mut group = json!({"hooks": commands});
+        if name == "session.start" {
+            group["matcher"] = json!("startup|resume|clear|new");
+        } else if name != "session.end" {
+            group["matcher"] = json!("*");
+        }
         if let Some(sequential) = spec["agents"][target]["qoder"].get("sequential") {
             group["sequential"] = sequential.clone();
         }
@@ -412,6 +431,12 @@ pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> 
         || native["cwd"].as_str() != binding.cwd.to_str()
     {
         return Err("Qoder callback event or working directory does not match the binding".into());
+    }
+    if matches!(name, "session.start" | "session.end") {
+        if name == "session.start" && native["source"] == "compact" {
+            return Err("Qoder compaction does not start a session".into());
+        }
+        return crate::adapters::lifecycle::normalize(binding, "qoder", name, native);
     }
     if name == "input.submit" {
         return crate::adapters::submission::normalize_turn(
@@ -457,6 +482,30 @@ pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_callbacks_keep_native_end_reason() {
+        let binding = NativeContext {
+            target: "qoder".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        let start = json!({"hook_event_name":"SessionStart","session_id":"native",
+            "source":"startup","cwd":"/work"});
+        assert_eq!(
+            normalize(&binding, "session.start", &start).unwrap()["session_id"],
+            "native"
+        );
+        let end = json!({"hook_event_name":"SessionEnd","session_id":"native",
+            "reason":"prompt_input_exit","cwd":"/work"});
+        assert_eq!(
+            normalize(&binding, "session.end", &end).unwrap()["native"]["reason"],
+            "prompt_input_exit"
+        );
+        let mut compact = start;
+        compact["source"] = json!("compact");
+        assert!(normalize(&binding, "session.start", &compact).is_err());
+    }
 
     #[test]
     fn failure_callbacks_preserve_result_identity_and_register_both_routes() {

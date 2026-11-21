@@ -24,7 +24,7 @@ export function apply(ctx) {
     !Array.isArray(config.hooks) ||
     config.hooks.some(
       (hook) =>
-        !["input.submit", "tool.before", "tool.after", "security.violation"].includes(hook.event) ||
+        !["session.start", "input.submit", "tool.before", "tool.after", "security.violation", "turn.stop"].includes(hook.event) ||
         !hook.step ||
         !["block", "report"].includes(hook.on_error) ||
         !Number.isInteger(hook.budget_ms) ||
@@ -69,6 +69,36 @@ export function apply(ctx) {
     }
     return {};
   };
+  const lifecycle = (event) => config.hooks.filter((hook) => hook.event === event);
+  const sessionStart = lifecycle("session.start");
+  const turnStop = lifecycle("turn.stop");
+  const observationTasks = new Set();
+  const enqueue = (routes, payload) => {
+    if (observationTasks.size >= 128) {
+      process.stderr.write("AW DeepSeek lifecycle observation capacity exceeded\n");
+      return;
+    }
+    const done = evaluate(routes, payload).finally(() => observationTasks.delete(done));
+    observationTasks.add(done);
+  };
+  if (sessionStart.length)
+    disposers.push(ctx.on("agent/created", async ({ agent, source, signal }) => {
+      if (source === "compact") return;
+      await evaluate(sessionStart, {
+        event: "session.start", seam: "agent/created", session_id: identity(agent.session.id, "session id"),
+        source,
+      }, signal);
+    }));
+  if (turnStop.length)
+    disposers.push(ctx.on("session/event", (session, event) => {
+      if (event.type !== "turn/end") return;
+      const { turn, reason } = event.data;
+      enqueue(turnStop, {
+        event: "turn.stop", seam: "turn/end", session_id: identity(session.id, "session id"),
+        turn_id: String(turn), reason: identity(reason.kind, "turn end reason"),
+        ...(typeof reason.reason === "string" ? { cancellation_reason: reason.reason } : {}),
+      });
+    }));
   if (submit.length)
     disposers.push(
       ctx.on(
@@ -213,12 +243,13 @@ export function apply(ctx) {
       }
     };
   }
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     for (const dispose of disposers.reverse()) dispose();
     active.clear();
     if (final.length) globalThis[finalGate] = async () => {
       throw Error("AW final result gate was disposed");
     };
+    await Promise.allSettled(observationTasks);
     callback.dispose();
   });
   const temporary = `${config.ready_path}.${process.pid}.tmp`;

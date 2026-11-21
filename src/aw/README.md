@@ -53,19 +53,19 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 ✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, Skill checks, MCP, policy updates and [verified baselines](../../docs/developer-guide/en/aw/native-agents.md).
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` | `session.end` / `observe` | `session.start` / `observe` | `turn.stop` / `observe` | `turn.stop` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × | × | ✓ | ✓ | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | ✓ | ✓ | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × | ✓ | ✓ | ✓ | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
 <a id="hook-support"></a>

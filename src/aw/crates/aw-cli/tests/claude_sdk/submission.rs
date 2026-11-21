@@ -14,7 +14,7 @@ fn submission_client_checks_and_cleanup_contracts() {
     let result = fixture.run(command);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        result.status.success() && stderr.contains("Ran 11 tests") && stderr.contains("\nOK\n"),
+        result.status.success() && stderr.contains("Ran 12 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }

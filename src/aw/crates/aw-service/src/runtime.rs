@@ -28,6 +28,7 @@ pub(crate) mod facts;
 mod hooks;
 mod input;
 mod invocations;
+mod lifecycle;
 mod limits;
 mod maintenance;
 mod policy;
@@ -244,7 +245,13 @@ impl Runtime {
             .filter(|instance| !instance.closing)
             .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
         let execution = self.event_execution(instance, &instance_id, &value)?;
+        let lifecycle = value["name"]
+            .as_str()
+            .is_some_and(aw_adapter::callback::lifecycle);
         if native_input.is_none() {
+            if lifecycle {
+                return Err(rejected("native_lifecycle_callback_required"));
+            }
             let mut state = instance
                 .invocations
                 .lock()
@@ -261,8 +268,20 @@ impl Runtime {
             return Err(rejected("event_instance_mismatch"));
         }
         let policy = host.configuration().as_value().clone();
-        let metadata = event_metadata(&value)?;
-        let key = self.identifier()?;
+        let metadata = if lifecycle {
+            self.lifecycle_metadata(instance, &instance_id, &value)?
+        } else {
+            event_metadata(&value)?
+        };
+        let key = if lifecycle {
+            let key = self.lifecycle_key(&instance_id, &hooks::event_correlation(&value)?)?;
+            if self.audit.lifecycle_claimed(&key)? {
+                return self.reopen_stop(&key, &value);
+            }
+            key
+        } else {
+            self.identifier()?
+        };
         let context = Arc::new(evidence::Cell::default());
         let (sender, receiver) = mpsc::sync_channel(MAX_STEPS + 1);
         let (ready, result) = mpsc::sync_channel(1);
@@ -273,14 +292,14 @@ impl Runtime {
             if cancelled.load(Ordering::Acquire) {
                 return Err(rejected("event_cancelled"));
             }
-            if events.len()
-                + self
-                    .expired
-                    .lock()
-                    .map_err(|_| rejected("state_poisoned"))?
-                    .len()
-                >= self.limits.events
-            {
+            let expired = self
+                .expired
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?;
+            if lifecycle && (events.contains_key(&key) || expired.contains_key(&key)) {
+                return Err(rejected("native_event_closed"));
+            }
+            if events.len() + expired.len() >= self.limits.events {
                 return Err(self.overload("event_limit"));
             }
             events.insert(
@@ -306,6 +325,7 @@ impl Runtime {
                 Some(input) => host.hook_event(value, input, deadline, &cancelled),
                 None => host.event(value, deadline, &cancelled),
             }.map_err(|_| rejected("event_invalid"));
+            let mut reserved = false;
             match event {
                 Ok(event) => {
                     let seed = runtime.contexts.seed(json!({
@@ -318,21 +338,31 @@ impl Runtime {
                         Err(error) => {
                             let _ = ready.send(Err(error));
                             context.close();
-                            if let Ok(mut events) = runtime.events.lock() { events.remove(&thread_key); }
+                            runtime.remove_live_event(&thread_key, &cancelled);
                             return;
                         }
                     };
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
-                    let public_event = runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association);
+                    let public_event = if lifecycle { Ok(None) } else {
+                        runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association)
+                    };
                     let claimed = public_event.and_then(|public_event| {
                         let mut plan = json!({"kind": "event", "identity": runtime.identity,
                             "instance_id": instance_id, "binding_id": host.target(), "policy_revision":host.revision(), "host_event_id": event.id(), "event": metadata});
                         if let Some(event) = public_event { plan["executionEvent"] = event; }
-                        else { plan["publicProjectionGap"] = json!("aw.native_metadata_unavailable"); }
-                        runtime.audit.claim(&thread_key, plan)
+                        else { plan["publicProjectionGap"] = json!(if lifecycle {
+                            "aw.lifecycle_projection_unavailable"
+                        } else { "aw.native_metadata_unavailable" }); }
+                        lifecycle::mark_stop_plan(&candidate, &handle, &mut plan)?;
+                        if lifecycle {
+                            runtime.audit.claim_lifecycle(&thread_key, plan)
+                        } else {
+                            runtime.audit.claim(&thread_key, plan)
+                        }
                     });
                     match claimed {
                         Ok(_) => {
+                            reserved = true;
                             if let Err(error) = context.seed().ok_or_else(|| rejected("context_not_ready")).and_then(|seed| runtime.observe_seed(&instance_id, seed)) {
                                 let _ = ready.send(Err(error));
                             } else {
@@ -345,9 +375,11 @@ impl Runtime {
                 }
                 Err(error) => { let _ = ready.send(Err(error)); }
             }
-            runtime.audit.release(&thread_key);
+            if reserved {
+                runtime.audit.release(&thread_key);
+            }
             context.close();
-            if let Ok(mut events) = runtime.events.lock() { events.remove(&thread_key); }
+            runtime.remove_live_event(&thread_key, &cancelled);
         });
         match worker {
             Ok(worker) => self
@@ -366,19 +398,6 @@ impl Runtime {
         result
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|_| rejected("event_open_timeout"))?
-    }
-
-    fn event_sender(
-        &self,
-        key: &str,
-        instance: &str,
-    ) -> Result<(SyncSender<Job>, Arc<AtomicBool>)> {
-        let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
-        let entry = events
-            .get(key)
-            .filter(|entry| entry.instance_id == instance)
-            .ok_or_else(|| rejected("unknown_event"))?;
-        Ok((entry.sender.clone(), Arc::clone(&entry.cancelled)))
     }
 
     fn event_loop(
@@ -522,7 +541,7 @@ impl Runtime {
                                         None
                                     }
                                 };
-                                let (record, mut result) = audit::invocation(invocation);
+                                let (mut record, mut result) = audit::invocation(invocation);
                                 if result["effects"].as_array().is_some_and(|effects| {
                                     effects
                                         .iter()
@@ -533,6 +552,14 @@ impl Runtime {
                                 if let Some(input) = replacement {
                                     result["input_replacement"] = input;
                                 }
+                                self.record_stop_reply(
+                                    key,
+                                    event,
+                                    original,
+                                    &step,
+                                    &mut record,
+                                    &result,
+                                )?;
                                 self.audit.append(key, record)?;
                                 Ok(result)
                             })();

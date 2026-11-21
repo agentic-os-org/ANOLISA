@@ -158,7 +158,7 @@ pub(super) fn hooks(
         if hook["enabled"] != true
             || hook["async"] != false
             || hook["matcher"]
-                != if *event == "input.submit" {
+                != if matches!(*event, "input.submit" | "turn.stop") {
                     Value::Null
                 } else {
                     json!(".*")

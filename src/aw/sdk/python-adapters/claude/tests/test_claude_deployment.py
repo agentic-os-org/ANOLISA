@@ -82,6 +82,7 @@ class ClaudeDeployment(unittest.TestCase):
                     {key: instance.capabilities[key] for key in PROFILE}, PROFILE
                 )
                 self.assertEqual("input.submit" in instance.capabilities["events"], enabled)
+                self.assertEqual(instance.capabilities["events"]["turn.stop"], ["observe", "block"])
                 self.assertEqual(
                     instance.capabilities["events"]["tool.before"],
                     ["observe", "block", "replace_input"],

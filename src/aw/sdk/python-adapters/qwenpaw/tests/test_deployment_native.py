@@ -75,6 +75,7 @@ class NativeDeployment(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(plugin.registered)
                 self.assertEqual(plugin.instance.target, "app")
                 self.assertEqual(plugin.instance.availability, "required")
+                self.assertEqual(plugin.instance.capabilities["events"]["turn.stop"], ["observe"])
                 await plugin.instance.close()
                 self.assertEqual(
                     {

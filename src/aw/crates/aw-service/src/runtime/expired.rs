@@ -150,6 +150,14 @@ impl Runtime {
             .map(|entry| json!({"closed":true,"evidence":entry.evidence})))
     }
 
+    fn retained_step(&self, key: &str, instance: &str, step: &str, missing: &str) -> Result<Value> {
+        if let Some(reply) = self.replay_stop_step(key, instance, step)? {
+            return Ok(reply);
+        }
+        self.expired_reply(key, instance, step)?
+            .ok_or_else(|| rejected(missing))
+    }
+
     pub(super) fn invoke_event_step(
         &self,
         key: &str,
@@ -162,9 +170,7 @@ impl Runtime {
         let (sender, cancelled) = match self.event_sender(key, instance) {
             Ok(entry) => entry,
             Err(crate::Error::Rejected(code)) if code == "unknown_event" => {
-                return self
-                    .expired_reply(key, instance, &step)?
-                    .ok_or_else(|| rejected("unknown_event"));
+                return self.retained_step(key, instance, &step, "unknown_event");
             }
             Err(error) => return Err(error),
         };
@@ -177,15 +183,19 @@ impl Runtime {
             })
             .is_err()
         {
-            return self
-                .expired_reply(key, instance, &step)?
-                .ok_or_else(|| rejected("event_busy_or_closed"));
+            return self.retained_step(key, instance, &step, "event_busy_or_closed");
         }
         match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Err(crate::Error::Rejected(code)))
+                if matches!(code.as_str(), "step_unknown_or_claimed" | "event_cancelled") =>
+            {
+                self.replay_stop_step(key, instance, &step)?
+                    .ok_or(crate::Error::Rejected(code))
+            }
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Disconnected) => self
-                .expired_reply(key, instance, &step)?
-                .ok_or_else(|| rejected("event_reply_unavailable")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.retained_step(key, instance, &step, "event_reply_unavailable")
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 cancelled.store(true, Ordering::Release);
                 Err(rejected("event_reply_unavailable"))

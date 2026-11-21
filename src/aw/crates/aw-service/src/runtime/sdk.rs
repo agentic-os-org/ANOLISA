@@ -91,18 +91,8 @@ impl Runtime {
             let session = normalized["session_id"]
                 .as_str()
                 .ok_or_else(|| rejected("sdk_input_invalid"))?;
-            let call = if event == "input.submit" {
-                &normalized["turn_id"]
-            } else {
-                &normalized["tool"]["call_id"]
-            };
-            self.close_hook(
-                id,
-                event,
-                session,
-                call.as_str().ok_or_else(|| rejected("sdk_input_invalid"))?,
-                deadline,
-            )?;
+            let call = super::hooks::callback_id(&normalized)?;
+            self.close_hook(id, event, session, &call, deadline)?;
             return Ok(json!({"code":0,"stdout":[],"stderr":[]}));
         }
         let mut diagnostics = Vec::new();
@@ -113,27 +103,30 @@ impl Runtime {
             let handle: EventHandle =
                 serde_json::from_value(self.open_hook(id.into(), normalized, input, deadline)?)
                     .map_err(|_| rejected("sdk_event_invalid"))?;
-            let result = self
-                .invoke_event_step(
-                    &handle.event_id,
-                    id,
-                    step.into(),
-                    Some(environment),
-                    deadline,
+            let invoked = self.invoke_event_step(
+                &handle.event_id,
+                id,
+                step.into(),
+                Some(environment),
+                deadline,
+            );
+            let replayed = invoked
+                .as_ref()
+                .is_ok_and(|value| value["stop_replay"] == true);
+            let result = invoked.and_then(|value| {
+                aw_adapter::callback::response(
+                    adapter,
+                    event,
+                    &on_error,
+                    value,
+                    &adapter_id,
+                    &native,
+                    &mut diagnostics,
                 )
-                .and_then(|value| {
-                    aw_adapter::callback::response(
-                        adapter,
-                        event,
-                        &on_error,
-                        value,
-                        &adapter_id,
-                        &native,
-                        &mut diagnostics,
-                    )
-                    .map_err(|_| rejected("sdk_step_failed"))
-                });
-            if matches!(event, "input.submit" | "tool.before")
+                .map_err(|_| rejected("sdk_step_failed"))
+            });
+            if !replayed
+                && matches!(event, "input.submit" | "tool.before" | "turn.stop")
                 && handle.steps.last().map(String::as_str) != Some(step)
                 && aw_adapter::callback::stops_before(&adapter_id, result.as_ref().ok(), &on_error)
             {

@@ -27,6 +27,9 @@ from aw_sdk.transport import AwError
 
 SOURCE_PROTOCOL = "aw-hook-source/v1"
 SUPPORTED_EVENTS: dict[str, tuple[str, ...]] = {
+    "session.start": ("observe",),
+    "turn.stop": ("observe", "block"),
+    "session.end": ("observe",),
     "input.submit": ("observe", "block"),
     "tool.before": ("observe", "block"),
     "tool.after": ("observe",),
@@ -180,6 +183,34 @@ class SourceSession:
         await self.admission.prepare()
         self._verify_route_coverage()
         self._require_open()
+
+    async def _lifecycle(self, event: str, **fields: str) -> dict[str, str]:
+        if event not in self.events:
+            raise AwError("semantic_event_unavailable")
+        await self.prepare()
+
+        async def emit() -> dict[str, str]:
+            assert self.task is not None
+            return await self.task.emit(event, {"session_id": self.session_id, **fields})
+
+        return await self._run_admitted_call(emit)
+
+    async def session_start(self) -> dict[str, str]:
+        """Observe native session admission before processing its first turn."""
+        return await self._lifecycle("session.start")
+
+    async def turn_stop(
+        self, turn_id: str, reason: str, *, attempt_id: str | None = None
+    ) -> dict[str, str]:
+        """Check a stop attempt; the caller adopts block at the native boundary."""
+        fields = {"turn_id": validate_identity(turn_id), "reason": validate_identity(reason)}
+        if attempt_id is not None:
+            fields["attempt_id"] = validate_identity(attempt_id)
+        return await self._lifecycle("turn.stop", **fields)
+
+    async def session_end(self, reason: str) -> dict[str, str]:
+        """Observe actual native session termination before releasing the Scope."""
+        return await self._lifecycle("session.end", reason=validate_identity(reason))
 
     async def submit(self, text: str, *, turn_id: str | None = None) -> dict[str, str]:
         """Emit input.submit and raise SourceDenied when AW blocks."""

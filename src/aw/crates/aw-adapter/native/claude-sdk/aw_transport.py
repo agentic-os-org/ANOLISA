@@ -11,10 +11,10 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 
 if __package__:
     from .aw_claude import CallbackFailure
-    from .aw_invocations import dispatch
+    from .aw_invocations import digest, dispatch
 else:
     from aw_claude import CallbackFailure
-    from aw_invocations import dispatch
+    from aw_invocations import digest, dispatch
 
 
 async def empty_input() -> AsyncIterator[dict[str, Any]]:
@@ -131,12 +131,15 @@ class ManagedTransport(Transport):
                         call_id = None
                         callback = kind
                         tracked = kind in {"hook_callback", "can_use_tool"}
+                        stop_fingerprint = None
                         if kind == "hook_callback":
                             callback = "hook:" + request["callback_id"]
                             payload = request.get("input", {})
                             # UserPromptSubmit carries a native input identifier in
                             # the callback envelope, outside the tool-call ledger.
-                            if payload.get("hook_event_name") != "UserPromptSubmit":
+                            if payload.get("hook_event_name") == "Stop":
+                                stop_fingerprint = digest(request)
+                            elif payload.get("hook_event_name") != "UserPromptSubmit":
                                 call_id = request.get("tool_use_id") or payload.get("tool_use_id")
                         elif kind == "can_use_tool":
                             call_id = request.get("tool_use_id")
@@ -155,10 +158,15 @@ class ManagedTransport(Transport):
                                     raise CallbackFailure(
                                         "AW managed MCP requires native tool-use identity"
                                     )
-                        if tracked:
+                        if tracked and stop_fingerprint is not None:
                             ticket = self.bridge.invocations.reserve(
-                                message["request_id"], call_id, callback
+                                message["request_id"], call_id, callback,
+                                stop_fingerprint=stop_fingerprint,
                             )
+                            if ticket is None:
+                                continue
+                        elif tracked:
+                            ticket = self.bridge.invocations.reserve(message["request_id"], call_id, callback)
                     elif message.get("type") == "control_cancel_request":
                         self.bridge.invocations.cancel(message.get("request_id"))
                 except Exception:

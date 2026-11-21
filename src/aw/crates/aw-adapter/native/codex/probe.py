@@ -79,7 +79,8 @@ def probe():
                     for name in ("code_mode", "hooks", "codex_hooks"):
                         if name in features and type(features[name]) is not bool:
                             raise ValueError("Codex feature switches must be booleans")
-                    events = {"input.submit": "userPromptSubmit",
+                    events = {"session.start": "sessionStart", "turn.stop": "stop",
+                              "input.submit": "userPromptSubmit",
                               "tool.before": "preToolUse", "tool.after": "postToolUse"}
                     hooks = {event: [h for h in rows[0]["hooks"]
                                     if h.get("command") == command and h["eventName"] == events[event]]

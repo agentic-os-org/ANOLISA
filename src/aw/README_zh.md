@@ -53,19 +53,19 @@ AW core 可独立使用；需要安全检查（`sec-core`）或输出压缩（`T
 ✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换限制、Skill 校验、MCP 与策略更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)，测试框架版本见[已验证基线](../../docs/developer-guide/zh/aw/native-agents.md)。
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` | `session.end` / `observe` | `session.start` / `observe` | `turn.stop` / `observe` | `turn.stop` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × | × | ✓ | ✓ | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | ✓ | ✓ | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × | ✓ | ✓ | ✓ | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
 <a id="hook-支持"></a>

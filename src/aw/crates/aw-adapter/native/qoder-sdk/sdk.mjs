@@ -13,6 +13,7 @@ export function qoderCapabilities(inputEnabled) {
   return {
     ...qoderProfile,
     events: {
+      "session.start": ["observe"],
       ...(inputEnabled ? { "input.submit": ["observe", "block"] } : {}),
       "tool.before": ["observe", "block"],
       "tool.after": ["observe"],
@@ -41,6 +42,7 @@ export function qoderOptions(task, options = {}) {
   const controller = { query: undefined, failure: undefined };
   const skill = task.routes.hooks.some((hook) => hook.skill_check);
   for (const [event, names] of [
+    ["session.start", ["SessionStart"]],
     ["input.submit", ["UserPromptSubmit"]],
     ["tool.before", ["PreToolUse"]],
     ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
@@ -58,9 +60,10 @@ export function qoderOptions(task, options = {}) {
         if (task.fallback) return {};
         routes = task.routes.hooks.filter((hook) => hook.event === event);
         payload = structuredClone(input);
+        if (event === "session.start" && payload.source === "compact") return {};
         if (
           id !== undefined &&
-          event !== "input.submit" &&
+          (event === "tool.before" || event === "tool.after") &&
           id !== payload.tool_use_id
         )
           throw new Error("native_tool_identity_mismatch");
@@ -85,6 +88,10 @@ export function qoderOptions(task, options = {}) {
       } catch (error) {
         if (started) await task.abortEvent(routes[0], payload);
         signal?.throwIfAborted();
+        if (event === "session.start") {
+          process.stderr.write(`AW session.start failed: ${error.message}\n`);
+          return {};
+        }
         controller.failure ??= error;
         if (event === "input.submit")
           return { decision: "block", reason: "AW input check failed" };

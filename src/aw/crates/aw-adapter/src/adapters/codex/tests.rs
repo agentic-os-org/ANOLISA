@@ -108,3 +108,31 @@ fn launch_entrypoints_cannot_dispatch_bare_prompts_as_hidden_commands() {
         preflight::arguments(&["--".into(), "--dangerously-bypass-hook-trust".into()]).unwrap();
     assert!(!literal.bypass_hook_trust);
 }
+
+#[test]
+fn native_lifecycle_uses_codex_session_and_turn_identity() {
+    let context = crate::NativeContext {
+        cwd: "/work".into(),
+        target: "codex".into(),
+        instance_id: "instance".into(),
+    };
+    let mut native = json!({"hook_event_name":"SessionStart","session_id":"session","cwd":"/work"});
+    assert_eq!(
+        super::Codex
+            .normalize(&context, "session.start", &native)
+            .unwrap()["session_id"],
+        "session"
+    );
+    native["hook_event_name"] = json!("Stop");
+    native["turn_id"] = json!("turn");
+    native["stop_hook_active"] = json!(false);
+    let turn = super::Codex
+        .normalize(&context, "turn.stop", &native)
+        .unwrap();
+    assert_eq!(turn["turn_id"], "turn");
+    assert_eq!(turn["native"]["reason"], "stop_requested");
+    native["stop_hook_active"] = json!(true);
+    assert!(super::Codex
+        .normalize(&context, "turn.stop", &native)
+        .is_err());
+}

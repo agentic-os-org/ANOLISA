@@ -6,18 +6,25 @@ import { renameSync, rmSync, writeFileSync } from 'node:fs';
 const MAX_OUTPUT_BYTES = 1024 * 1024 + 64 * 1024;
 
 function failure(api, handler, phase, error) {
-  api.logger?.warn?.(`AW ${phase} tool hook failed: ${error.message}`);
+  api.logger?.warn?.(`AW ${phase} hook failed: ${error.message}`);
   return phase !== 'after' && handler.onError === 'block'
     ? { block: true, blockReason: 'AW tool policy could not be evaluated' }
     : undefined;
 }
 
+const lifecycleHooks = {
+  'session.start': 'session_start',
+  'turn.stop': 'before_agent_finalize',
+  'session.end': 'session_end',
+};
+
 function invokeEvent(api, handler, phase, event, context, completion, signal, close = false) {
   const config = api.pluginConfig;
-  const awEvent = phase === 'final' ? 'security.violation' : `tool.${phase}`;
+  const lifecycle = lifecycleHooks[phase];
+  const awEvent = lifecycle ? phase : phase === 'final' ? 'security.violation' : `tool.${phase}`;
   let input;
   try {
-    input = JSON.stringify({
+    input = JSON.stringify(lifecycle ? { hook: lifecycle, ...event } : {
       hook: phase === 'before' ? 'before_tool_call' : phase === 'after' ? 'after_tool_call' : 'final_tool_result',
       event, context,
     });
@@ -377,6 +384,27 @@ export function register(api, sanitizeToolResult) {
       api.on(hook, (event, context) => invoke(api, handler, group === 'before', event, context));
       count += 1;
     }
+  }
+  for (const [event, native] of Object.entries(lifecycleHooks)) {
+    const handlers = config.hooks[event];
+    if (!handlers?.length) continue;
+    api.on(native, async (payload, context) => {
+      const sessionId = payload.sessionId ?? context.sessionId;
+      if (typeof sessionId !== 'string' || !sessionId ||
+          (payload.sessionId && context.sessionId && payload.sessionId !== context.sessionId)) return;
+      const report = { session_id: sessionId };
+      if (event === 'turn.stop') {
+        const turn = payload.turnId ?? payload.runId ?? context.runId;
+        if (typeof turn !== 'string' || !turn || payload.stopHookActive === true) return;
+        report.turn_id = turn;
+        report.reason = 'stop_requested';
+      } else if (event === 'session.end') {
+        report.reason = payload.reason ?? 'unknown';
+      }
+      for (const handler of handlers)
+        await invokeEvent(api, handler, event, report, undefined);
+    });
+    count += handlers.length;
   }
   registerFinalGate(api, config.hooks.final ?? []);
   count += config.hooks.final?.length ?? 0;

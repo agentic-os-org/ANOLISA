@@ -8,33 +8,33 @@
 
 应用自行持有的 Qoder Query 可通过 [TypeScript SDK](../../../developer-guide/zh/aw/deployment/native-sdk.md) 显式选择原生回退。公开 Hook 接线的覆盖与验收范围单独列出。
 
-常驻 Claude 和 Pi worker 可以原生启动并发布 SDK 监听。控制器按 worker PID 接入，准入后再放行受保护的任务。这两个入口始终要求 AW 可用，覆盖已配置的 `input.submit`、`tool.before`（含 `replace_input`）和 `tool.after`（含 `replace_result`），其他 Hook 在准入时拒绝。Claude worker 原生清理无法确认时，连同其进程组被终止。Pi 严格结果保护沿用托管入口的 0.84.2–1.5.2 版本区间。 [Claude Python 工厂](../../../developer-guide/zh/aw/agents/claude-sdk.md) · [Pi TypeScript 工厂](../../../developer-guide/zh/aw/deployment/native-sdk.md#pi-worker-接入)
+常驻 Claude 和 Pi worker 可以原生启动并发布 SDK 监听。控制器按 worker PID 接入，准入后再放行受保护的任务。这两个入口始终要求 AW 可用，覆盖已配置的 `input.submit`、`tool.before`（含 `replace_input`）和 `tool.after`（含 `replace_result`）。生命周期 Hook 的适用入口见下表。Claude worker 原生清理无法确认时，连同其进程组被终止。Pi 严格结果保护沿用托管入口的 0.84.2–1.5.2 版本区间。 [Claude Python 工厂](../../../developer-guide/zh/aw/agents/claude-sdk.md) · [Pi TypeScript 工厂](../../../developer-guide/zh/aw/deployment/native-sdk.md#pi-worker-接入)
 
 AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下能力由 Adapter 接入原生工具流程；具体版本和启动步骤见[Agent 接入索引](../../../developer-guide/zh/aw/native-agents.md)。
 
-两种语言包均可通过 `sdk/application` profile 接入无框架依赖的输入与工具回调，
-支持输入／工具前置观察和阻断、工具后置观察。应用负责安装真实边界并在执行前采用
-`block`。候选包测试覆盖两种语言；自动插桩和任意应用的最终结果防护仍需独立实现与
-验收。见 [通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)。
+Python 和 TypeScript 应用均可通过 `sdk/application` profile 接入通用输入、工具和生命周期
+Hook。创建 `LanguageSource` 时声明需要的生命周期事件，再从应用的原生边界调用对应的
+`SourceSession` 方法。应用在结束轮次前采用 `turn.stop` 返回的决策。
+[通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)
 
 ## Hook 支持矩阵
 
 ✓ 已声明且有契约测试覆盖，× 尚不支持。多数 Adapter 在获准文本槽中替换结果并保留原生回执与失败状态；Codex 的普通模型文本替换范围见下文。
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` | `session.end` / `observe` | `session.start` / `observe` | `turn.stop` / `observe` | `turn.stop` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × | × | ✓ | ✓ | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | ✓ | ✓ | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × | ✓ | ✓ | ✓ | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
@@ -69,13 +69,31 @@ Claude SDK 对精确匹配的 Python／TypeScript SDK／bundled CLI 构建开放
 
 Qoder SDK 1.0.57 / Worker 1.1.81 在 Linux arm64/x64 上支持单次前台 Bash Query 的必需最终结果检查，在原生请求编码前检查 Post Hook 后的文本；未覆盖的传输、额外上下文轮次和运行时构建均拒绝放行。参见[配置与范围](../../../developer-guide/zh/aw/agents/qoder-sdk.md#最终工具结果检查)。
 
+## 生命周期边界
+
+会话 Hook 观察原生的开始和结束。根据 Adapter 的接点，`turn.stop` 可以观察已经结束的轮次，
+也可以检查原生即将结束的一次请求。审计记录保留接点提供的停止或结束原因，并关联会话、
+轮次及已知的任务和进程身份。Service 分别记录策略步骤结果与原生停止原因。
+
+| 入口 | 生命周期接点 |
+| --- | --- |
+| Qoder CLI | 普通托管启动使用原生 `SessionStart` 和 `SessionEnd`。当前固定版本的 Stop 回调缺少轮次 ID。启动挂接与 reloadable 模式沿用原有就绪和清理协议。 |
+| Qoder SDK | 普通托管 Query 观察原生会话开始和结束。应用自行安装的公开 Hook bridge 观察会话开始。受限 reloadable 模式及精确最终结果 profile 暂不覆盖这些接点。 |
+| Claude SDK | Python 前台及常驻工厂在 SDK 活跃轮次的原生 `Stop` 接点执行检查。阻断时将 Provider 原因交给 Claude 请求继续。消费端收到带原生会话 ID 的 SDK `init` 消息时记录会话开始，确认断开后记录会话结束。这些接点适用于 Python SDK profile。同一原生控制请求 ID 的 Stop 重送复用当前轮次决策。阻断后收到新请求 ID 时重新执行策略。 |
+| QwenPaw、AgentScope | 普通回复观察原生 `ReplyEndEvent`，保留中断、迭代耗尽等原因。继续已挂起的回复沿用原生回复 ID。此处覆盖回复轮次。 |
+| Hermes | 普通本地 chat 使用 `on_session_start`、含轮次标识的 `on_session_end` 以及 `on_session_finalize`。Gateway 和 reloadable 模式另有原生边界。 |
+| Pi | 工厂创建和释放时报告会话，原生 Agent 的 `turn_end` 记录模型停止原因，包含错误和中断。 |
+| OpenClaw | 已验证构建的普通 Gateway 使用原生会话 Hook。首次 `before_agent_finalize` 以原生轮次或运行标识观察停止请求。 |
+| Codex | 经原生信任确认的命令观察 `SessionStart` 和首次 `Stop`。启用相应事件后用 `aw connect` 补装 Codex Hook，并在原生端确认信任。 |
+| DeepSeek Harness | 观察 Agent 创建及已提交的 `turn/end`，保留原生轮次结束原因。固定版本的 headless 入口在退出时缺少可确认的会话结束回执。 |
+
 ## 16 个通用 Hook
 
 下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。
 
 | Hook | 状态 |
 | --- | --- |
-| `session.start` | 规划中 |
+| `session.start` | 观察能力见生命周期接点 |
 | `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本、Claude SDK 前台/常驻文本工厂、Pi worker 文本输入、AgentScope 工厂文本回复、DeepSeek Harness headless 文本轮次及本地 Codex CLI已实现 |
 | `tool.before` | 已实现 |
 | `tool.after` | 已实现 |
@@ -84,8 +102,8 @@ Qoder SDK 1.0.57 / Worker 1.1.81 在 Linux arm64/x64 上支持单次前台 Bash 
 | `compact.after` | 规划中 |
 | `subagent.start` | 规划中 |
 | `subagent.stop` | 规划中 |
-| `turn.stop` | 规划中 |
-| `session.end` | 规划中 |
+| `turn.stop` | 观察能力见生命周期接点。Claude Python 和通用 SDK 支持阻断 |
+| `session.end` | 观察能力见生命周期接点 |
 | `model.before_request` | 规划中 |
 | `runtime.observed` | 规划中 |
 | `runtime.exited` | 规划中 |
@@ -161,7 +179,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 - AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
 - Pi 受管 tool.after 配置 `on_error: report` 时，Provider 或传输故障保留已检查的原始结果，同一会话可继续下一次 prompt；before 故障、tool.after 的 `block`/`withhold_result` 故障、取消、身份与清理失败仍停止任务。输入拒绝及 block 输入检查故障只拒绝该次 prompt，清理后允许继续提交。
 - Claude SDK resident 的 `tool.after` 配置 `on_error: report` 时，已审计且可恢复的 Provider 故障保留原始结果并继续模型调用。范围包括原生 HTTP MCP 的文本及 `structuredContent` 结果、Bash 等内置工具；受管 SDK MCP 保留既有恢复行为。回调排空后，同一客户端可继续下一轮任务。身份/scope 失效、取消、生命周期/清理失败、before-Hook 故障、非法原生响应、未知传输详情及审计失败仍停止任务。`on_error: block` 与原生安全拒绝保留阻断语义。可恢复类别见[常驻部署](../../../developer-guide/zh/aw/deployment/resident.md)。后置检查无法撤销已执行工具。
-- 当前公共 Provider 执行链支持 `input.submit`、`tool.before`、`tool.after` 和 `security.violation`，具体以所选 Adapter 的能力为准。其余 12 个事件名、通用审批、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放；输入替换仅在上表列出的 Adapter 与效果范围内可用。
+- 上方矩阵列出各 Adapter 支持的公共 Provider 事件和效果。配置会话与轮次事件时，按生命周期接点选择受支持的启动模式。
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。
 
 矩阵由[回归清单](../../../../src/aw/tests/regression-matrix.json)生成。[原生验收清单](../../../../src/aw/tests/native-matrix.json)记录固定版本及验证范围，操作方法见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。
