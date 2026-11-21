@@ -82,6 +82,16 @@ pub struct Task {
     pub context: String,
 }
 
+/// Clamp a caller-supplied progress percentage into the documented 0..=100 range.
+///
+/// The MCP layer receives the value as a `u32` (JSON numbers are unsigned
+/// there) while the task file stores a `u8`. Narrowing with a bare `as u8`
+/// wraps instead of saturating — `256` would become `0` and `300` would
+/// become `44` — so clamp before narrowing.
+pub(crate) fn clamp_progress(progress: u32) -> u8 {
+    progress.min(100) as u8
+}
+
 /// Summary of a task for list display (no context body).
 #[derive(Debug, Serialize)]
 pub struct TaskSummary {
@@ -256,7 +266,12 @@ fn parse_task(content: &str) -> Result<Task> {
                         _ => TaskStatus::InProgress,
                     };
                 }
-                "progress" => task.progress = value.parse().unwrap_or(0),
+                // `progress` is a percentage: clamp to the 0..=100 range the
+                // save path enforces, so a hand-edited (or model-written)
+                // frontmatter cannot resurrect an out-of-range value. Parse
+                // as `u32` first: `u8` would reject `300` outright and fall
+                // back to 0 instead of saturating at 100.
+                "progress" => task.progress = value.parse::<u32>().map(clamp_progress).unwrap_or(0),
                 "created_at" => task.created_at = value,
                 "updated_at" => task.updated_at = value,
                 _ => {}
@@ -871,5 +886,41 @@ mod tests {
 
         let resume = memory_task_resume(&svc, "custom-id-42").unwrap();
         assert!(resume.contains("Brand new task"));
+    }
+
+    /// `progress` is documented as a percentage, so every entry point has to
+    /// saturate at 100 instead of wrapping. The MCP layer receives a `u32`
+    /// and narrows it to the `u8` the task file stores; a bare `as u8`
+    /// would turn `256` into `0` and `300` into `44`.
+    #[test]
+    fn progress_is_clamped_instead_of_wrapping() {
+        assert_eq!(clamp_progress(0), 0);
+        assert_eq!(clamp_progress(50), 50);
+        assert_eq!(clamp_progress(100), 100);
+        assert_eq!(clamp_progress(101), 100);
+        // The wrapping cases: `256 as u8 == 0`, `300 as u8 == 44`.
+        assert_eq!(clamp_progress(256), 100);
+        assert_eq!(clamp_progress(300), 100);
+        assert_eq!(clamp_progress(u32::MAX), 100);
+    }
+
+    /// The frontmatter is written by the agent (and can be hand-edited), so
+    /// the parse path has to enforce the same range the save path does —
+    /// otherwise a stored `progress: 150` resurfaces as "150%".
+    #[test]
+    fn parse_task_clamps_an_out_of_range_progress() {
+        let md = "---\nid: t-range\ntitle: Range\nstatus: in-progress\nprogress: 150\ncreated_at: 2026-06-11T10:00:00Z\nupdated_at: 2026-06-11T12:00:00Z\n---\n\nbody\n";
+        let parsed = parse_task(md).unwrap();
+        assert_eq!(parsed.progress, 100);
+
+        // A value above the u8 range still saturates instead of failing over.
+        let md_big = "---\nid: t-range\ntitle: Range\nstatus: in-progress\nprogress: 300\ncreated_at: 2026-06-11T10:00:00Z\nupdated_at: 2026-06-11T12:00:00Z\n---\n\nbody\n";
+        let parsed_big = parse_task(md_big).unwrap();
+        assert_eq!(parsed_big.progress, 100);
+
+        // A value that is not a number at all falls back to 0, as before.
+        let md_nan = "---\nid: t-range\ntitle: Range\nstatus: in-progress\nprogress: abc\ncreated_at: 2026-06-11T10:00:00Z\nupdated_at: 2026-06-11T12:00:00Z\n---\n\nbody\n";
+        let parsed_nan = parse_task(md_nan).unwrap();
+        assert_eq!(parsed_nan.progress, 0);
     }
 }
