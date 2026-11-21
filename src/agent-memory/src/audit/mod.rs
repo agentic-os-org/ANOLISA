@@ -118,9 +118,14 @@ pub fn sanitized_query_path(mode: &str, query: &str) -> String {
     format!("{mode}:len={}", query.len())
 }
 
-/// True when `path` is a [`sanitized_query_path`] marker rather than a mount
-/// path or a recorded query: it is exactly `<mode>:len=<digits>` for one of the
-/// [`SANITIZED_QUERY_MODES`] the writer emits.
+/// The [`SANITIZED_QUERY_MODES`] entry a [`sanitized_query_path`] marker was
+/// built from, or `None` when `path` is not one — a mount path, or a legacy row
+/// that recorded a query.
+///
+/// One matcher answers both questions readers ask of the field: whether it is a
+/// marker ([`is_sanitized_query_path`]) and which mode it records
+/// ([`quotable_path`]). Sharing it is what keeps the two from drifting apart
+/// about the spelling, which is the failure mode this module exists to prevent.
 ///
 /// Requiring the mode prefix — instead of splitting on the last `:` and looking
 /// at the tail alone — is what keeps legacy rows readable. Rows written before
@@ -130,16 +135,21 @@ pub fn sanitized_query_path(mode: &str, query: &str) -> String {
 /// as one silently dropped historical queries from interest and profile
 /// synthesis. A path with no mode prefix at all (a bare `len=14`, a mount path)
 /// is not a marker either — the writer always prefixes one.
-pub fn is_sanitized_query_path(path: &str) -> bool {
-    SANITIZED_QUERY_MODES.iter().any(|mode| {
-        let Some(tail) = path
+pub fn sanitized_query_mode(path: &str) -> Option<&str> {
+    SANITIZED_QUERY_MODES.iter().find_map(|mode| {
+        let tail = path
             .strip_prefix(mode)
-            .and_then(|rest| rest.strip_prefix(':'))
-        else {
-            return false;
-        };
-        is_query_length_marker(tail)
+            .and_then(|rest| rest.strip_prefix(':'))?;
+        is_query_length_marker(tail).then_some(*mode)
     })
+}
+
+/// True when `path` is a [`sanitized_query_path`] marker rather than a mount
+/// path or a recorded query: it is exactly `<mode>:len=<digits>` for one of the
+/// [`SANITIZED_QUERY_MODES`] the writer emits. See [`sanitized_query_mode`] for
+/// why the mode prefix has to match and the tail alone is not enough.
+pub fn is_sanitized_query_path(path: &str) -> bool {
+    sanitized_query_mode(path).is_some()
 }
 
 /// True for the `len=<digits>` half of a marker. A bare `len=` carries no
@@ -150,6 +160,29 @@ fn is_query_length_marker(tail: &str) -> bool {
         None | Some("") => false,
         Some(digits) => digits.bytes().all(|b| b.is_ascii_digit()),
     }
+}
+
+/// The audit `path` in the form persisted memory may quote it.
+///
+/// Episode extraction copies a record's `path` into the facts it writes, and
+/// FactWriter puts those under `facts/` where the index picks them up: whatever
+/// is quoted becomes searchable memory content. For `memory_search` that field
+/// is a [`sanitized_query_path`] marker, and its `len=<N>` half describes the
+/// audit record rather than the call. Quoting it verbatim wrote `bm25:len=14`
+/// into an episodic fact at confidence 0.9 — above the 0.8 that
+/// `memory_session_context` injects into every later prompt. The mode does
+/// describe the call, so that is what survives here.
+///
+/// Every other record is quoted as it stands: `mem_grep`'s directory, a
+/// `mem_promote` pair and a legacy row that really does carry a query are the
+/// call's own input, not a marker. The mode comes from [`sanitized_query_mode`]
+/// — the matcher the writer and the consolidation rules already share — so this
+/// reader cannot drift from them, and cannot keep a mode the predicate refused.
+pub fn quotable_path<'a>(tool: &str, path: &'a str) -> &'a str {
+    if tool != "memory_search" {
+        return path;
+    }
+    sanitized_query_mode(path).unwrap_or(path)
 }
 
 /// Append-only JSONL logger with a held file handle.
@@ -323,6 +356,59 @@ mod tests {
             assert!(
                 is_sanitized_query_path(&path),
                 "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
+    }
+
+    #[test]
+    fn quotable_path_drops_the_marker_and_keeps_the_mode() {
+        // Every marker the writer can emit, built through the writer helper so
+        // this reader cannot stay green while the marker spelling moves.
+        for &mode in SANITIZED_QUERY_MODES {
+            let path = sanitized_query_path(mode, "rust ownership");
+            assert_eq!(
+                quotable_path("memory_search", &path),
+                mode,
+                "{path} must be quoted as its mode"
+            );
+        }
+        // A payload that is not a marker is the record's own text.
+        assert_eq!(
+            quotable_path("memory_search", "bm25:rust ownership rules"),
+            "bm25:rust ownership rules"
+        );
+        assert_eq!(
+            quotable_path("memory_search", "bm25:len= without a number"),
+            "bm25:len= without a number"
+        );
+        assert_eq!(quotable_path("memory_search", ""), "");
+    }
+
+    #[test]
+    fn quotable_path_leaves_every_other_record_alone() {
+        // A grep directory and a promote pair are the call's own input.
+        assert_eq!(quotable_path("mem_grep", "notes/kconfig"), "notes/kconfig");
+        assert_eq!(
+            quotable_path("mem_promote", "scratch/a.md -> notes/a.md"),
+            "scratch/a.md -> notes/a.md"
+        );
+        assert_eq!(quotable_path("mem_read", "notes/a.md"), "notes/a.md");
+    }
+
+    #[test]
+    fn quotable_path_keeps_legacy_queries_whose_tail_looks_like_a_marker() {
+        // The regression `is_sanitized_query_path` exists for: this row
+        // recorded the query `packet:len=14`, which is evidence worth quoting
+        // whole rather than a marker to trim down to its mode.
+        for path in [
+            "bm25:packet:len=14",
+            "hybrid:kernel:len=9",
+            "bm25(fallback from hybrid):packet:len=14",
+        ] {
+            assert_eq!(
+                quotable_path("memory_search", path),
+                path,
+                "{path} records a legacy query and must be quoted verbatim"
             );
         }
     }
