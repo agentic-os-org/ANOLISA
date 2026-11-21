@@ -230,6 +230,40 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 - 同一对象实例的同一方法同一时刻只能由一个活动 `SourceSession` 插桩（重复插桩报
   `source_already_instrumented`）；并发处理多会话时请按请求使用独立对象实例或按会话直接包装函数。
 
+### 参数／结果改写与故障扣留（`replace_input`、`replace_result`、`withhold_result`）
+
+按 `LanguageSource` 显式开启，保持既有仅观察／阻断调用方 100% 向后兼容：
+
+- 在 TypeScript 中向 `LanguageSource.create(...)` 传入 `replaceInput: true`、`replaceResult: true`
+  及／或 `withholdResult: true`（Python 为 `replace_input=True`、`replace_result=True`、`withhold_result=True`）。
+  路由确认会拒绝未声明对应效果或 `withhold_result` 失败动作的策略步骤。
+- **`replace_input`**：当 `tool.before` Provider 返回获准的替换参数时，`wrapTool`／`wrap_tool`
+  安全重建标准 JSON 对象参数（自定义参数形状提供 `applyInput`／`apply_input` 回调），并在原生执行前
+  再次核对投影一致。无法安全应用的形状显式报 `source_input_replace_unsupported`，绝不静默丢弃改写结果。
+- **`replace_result` 与 `withhold_result`**：当 `tool.after` 返回替换结果时，自动替换字符串或
+  标准结构化文本对象（自定义形状提供 `applyResult`／`apply_result`），不支持的形状显式报
+  `source_result_replace_unsupported`。当必需 `tool.after` 检查在 `on_error: withhold_result`
+  下失败时，SDK 抛出 `SourceResultWithheld`（携带 `toolExecuted`／`tool_executed = true`），绝不返回未检原文。
+- **流式诚实边界**：未缓冲的流式工具无法事后撤回已吐出的分块。当 `tool.after` 准入了 `replace_result`
+  或 `on_error: withhold_result` 时，未缓冲流在原生生成器启动前即失败并报
+  `source_stream_withhold_requires_buffering`。设置 `bufferStream: true`／`buffer_stream=True`
+  可先缓冲至 `maxStreamItems`／`max_stream_items` 上限，待 `tool.after` 校验通过或替换后再产出，故障时零泄露。
+
+### 无侵入自动插桩（零业务改码）
+
+两个核心包均提供基于显式白名单的无侵入插桩模块，不依赖 `PyFrame` 局部变量写回，也不绑定单一 CLI 摘要：
+
+- **Python（`aw_sdk.auto_instrument`）**：通过 `sys.meta_path` Import Hook（并兼容已导入模块）仅包裹白名单中
+  精确声明的 `{module, qualname, kind}` 目标（拒绝通配符和双下划线路径），同时支持同步 `def` 与异步 `async def`
+  函数／类方法，不吞异常，`uninstall()`／`aclose()` 干净恢复原属性。零改码运行方式：
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json python3 -m aw_sdk.auto_instrument app.py`，
+  或在私有 `sitecustomize.py` 中调用 `aw_sdk.auto_instrument.bootstrap()`。
+- **Node.js（`@anolisa/aw-sdk/sources/preload`）**：通过
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json node --import @anolisa/aw-sdk/sources/preload app.mjs`
+  加载。支持显式 `{ kind: "fetch" }`（带字节上限缓冲的 `globalThis.fetch` 边界）与
+  `{ kind: "module", module, exportName }`（基于 `module.registerHooks` 仅包裹指定导出，原样保留其余导出）。
+  未设 `AW_AUTO_INSTRUMENT=1` 时导入无任何副作用；`uninstall()` 恢复 `fetch`、注销模块 Hook 并关闭会话。
+
 完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
 

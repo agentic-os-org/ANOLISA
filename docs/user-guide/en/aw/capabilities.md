@@ -14,10 +14,12 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 
 The `sdk/application` profile accepts framework-free input and tool callbacks in
 both language packages. It supports input/tool-before observation and blocking,
-and tool-after observation. The application must install those boundaries and
-adopt `block` before execution. Candidate package tests cover both languages;
-this does not certify automatic instrumentation or final-result protection for
-arbitrary applications. See [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration).
+tool-after observation, and opt-in `replace_input`, `replace_result` and
+`withhold_result` (with buffered streaming required for strict delivery). Both
+packages also provide opt-in allowlist-based auto-instrumentation
+(`aw_sdk.auto_instrument` and `@anolisa/aw-sdk/sources/preload`) for declared
+module/HTTP boundaries without silent global hijacking. See
+[Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration).
 
 ## Hook support matrix
 
@@ -36,7 +38,7 @@ arbitrary applications. See [Runtime SDK integration](../../../developer-guide/e
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
