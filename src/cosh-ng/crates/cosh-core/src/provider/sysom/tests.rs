@@ -223,6 +223,7 @@ fn build_request_preserves_user_provided_secrets() {
         source: CredentialSource::Static,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
+        test_copilot_endpoint: None,
     };
     let secret = "short-provider-secret";
     let messages = vec![Message::user(&format!("api_key={secret}"))];
@@ -247,6 +248,7 @@ fn test_provider() -> SysomProvider {
         source: CredentialSource::Static,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
+        test_copilot_endpoint: None,
     }
 }
 

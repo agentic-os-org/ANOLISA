@@ -57,7 +57,11 @@ pub async fn run(
 
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
-    let mut session = match SessionRuntime::initialize(args, &config) {
+    let mut session = match SessionRuntime::initialize(
+        args,
+        &config,
+        crate::auth::oauth::current_generation(&config),
+    ) {
         Ok(session) => session,
         Err(error) => {
             emit_session_error(&mut writer, args.resume.as_deref(), &error);
@@ -1108,7 +1112,11 @@ impl Drop for SessionRuntime {
 }
 
 impl SessionRuntime {
-    fn initialize(args: &CliArgs, config: &CoreConfig) -> Result<Self, SessionError> {
+    fn initialize(
+        args: &CliArgs,
+        config: &CoreConfig,
+        auth_generation: Option<u64>,
+    ) -> Result<Self, SessionError> {
         let workspace = args.workspace_root();
         #[cfg(not(test))]
         let store_result = SessionStore::for_workspace(&config.session.persist_dir, &workspace);
@@ -1132,6 +1140,7 @@ impl SessionRuntime {
             .map(|store| store.workspace_scope().to_string())
             .unwrap_or_else(|| workspace.to_string_lossy().into_owned());
         let mut live_lease = None;
+        let mut resumed_flag = args.resume.is_some();
         let record = match (args.resume.as_deref(), store.as_ref()) {
             (Some(value), Some(store)) => {
                 let session_id = ProviderSessionId::parse(value)?;
@@ -1151,23 +1160,45 @@ impl SessionRuntime {
                         return Err(error);
                     }
                 };
-                // A resumed session is being interacted with right now, but its
-                // envelope still carries the clock of the last turn before the
-                // idle gap. Without a re-commit here, the task budget's
-                // least-recently-interacted ordering sees the oldest session of
-                // this user, so a sweep from any other process can reclaim it
-                // mid-turn; this turn's own commit then fails with Conflict and
-                // the work is lost.
-                //
-                // Best effort on purpose: refusing the resume when the stamp
-                // cannot be written would block the current interaction, which
-                // the budget contract forbids. The turn's own commit retries it.
-                if config.session.auto_persist {
-                    if let Err(error) = store.persist(&mut resumed) {
-                        tracing::warn!("resumed session clock not refreshed: {error}");
+                if !crate::auth::oauth::resume_allowed(resumed.auth_generation, auth_generation) {
+                    tracing::info!(
+                        code = "Cosh.OAuth.GenerationChanged",
+                        "resumed history belongs to a different login generation; starting a new session"
+                    );
+                    if let Some(lease) = live_lease.take() {
+                        if let Err(cleanup_error) = store.cleanup_failed_resume(&session_id, &lease)
+                        {
+                            tracing::warn!(
+                                "generation-mismatched resume cleanup failed: {cleanup_error}"
+                            );
+                        }
                     }
+                    resumed_flag = false;
+                    PersistedSession::new(
+                        ProviderSessionId::new(),
+                        workspace_scope.clone(),
+                        String::new(),
+                        Vec::new(),
+                    )
+                } else {
+                    // A resumed session is being interacted with right now, but its
+                    // envelope still carries the clock of the last turn before the
+                    // idle gap. Without a re-commit here, the task budget's
+                    // least-recently-interacted ordering sees the oldest session of
+                    // this user, so a sweep from any other process can reclaim it
+                    // mid-turn; this turn's own commit then fails with Conflict and
+                    // the work is lost.
+                    //
+                    // Best effort on purpose: refusing the resume when the stamp
+                    // cannot be written would block the current interaction, which
+                    // the budget contract forbids. The turn's own commit retries it.
+                    if config.session.auto_persist {
+                        if let Err(error) = store.persist(&mut resumed) {
+                            tracing::warn!("resumed session clock not refreshed: {error}");
+                        }
+                    }
+                    resumed
                 }
-                resumed
             }
             _ => PersistedSession::new(
                 ProviderSessionId::new(),
@@ -1182,7 +1213,7 @@ impl SessionRuntime {
             workspace_scope,
             record,
             auto_persist: config.session.auto_persist,
-            resumed: args.resume.is_some(),
+            resumed: resumed_flag,
             notice: PersistenceNotice::default(),
         })
     }
@@ -1219,6 +1250,9 @@ impl SessionRuntime {
         {
             return;
         }
+        if saved.auth_generation != engine.session_auth_generation() {
+            return;
+        }
         // Compare the durable redaction without changing live provider context.
         let mut persisted_messages = engine.messages.clone();
         crate::redaction::redact_messages(&mut persisted_messages);
@@ -1240,6 +1274,7 @@ impl SessionRuntime {
         }
         self.record.messages = engine.messages.clone();
         self.record.model = engine.model.clone();
+        self.record.auth_generation = engine.session_auth_generation();
         // Emergency in-run compaction updates the projection in memory; it
         // commits together with the transcript it belongs to.
         self.record.compaction = engine.compaction.state().cloned();
@@ -2077,7 +2112,7 @@ mod tests {
         .expect("parse resume args");
         let config = load_runtime_config(&args, &workspace);
 
-        SessionRuntime::initialize(&args, &config).expect("resume must succeed");
+        SessionRuntime::initialize(&args, &config, None).expect("resume must succeed");
 
         let store =
             SessionStore::for_test_workspace(sessions.to_str().expect("utf-8 root"), &workspace)
@@ -2088,5 +2123,59 @@ mod tests {
             age_ms < 60_000,
             "resume left the commit clock {age_ms} ms old, so a concurrent budget              sweep can still reclaim the session mid-turn"
         );
+    }
+
+    #[test]
+    fn resume_under_a_different_login_generation_starts_a_new_session() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path().join("workspace");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(workspace.join(".copilot-shell")).expect("create config dir");
+        fs::write(
+            workspace.join(".copilot-shell/config.toml"),
+            format!("[session]\npersist_dir = \"{}\"\n", sessions.display()),
+        )
+        .expect("write project config");
+        let store =
+            SessionStore::for_test_workspace(sessions.to_str().expect("utf-8 root"), &workspace)
+                .expect("build store");
+        let mut envelope = PersistedSession::new(
+            ProviderSessionId::new(),
+            store.workspace_scope().to_string(),
+            "auto".to_string(),
+            vec![crate::provider::Message::user("old-generation-canary")],
+        );
+        envelope.auth_generation = Some(1);
+        store
+            .persist(&mut envelope)
+            .expect("commit planted session");
+        let old_id = envelope.session_id.clone();
+        let old_bytes = fs::read(store.session_file(&old_id)).expect("read old envelope");
+
+        let args = CliArgs::try_parse_from([
+            "cosh-core",
+            "--headless",
+            "--workspace",
+            workspace.to_str().expect("utf-8 workspace"),
+            "--resume",
+            old_id.as_str(),
+        ])
+        .expect("parse resume args");
+        let config = load_runtime_config(&args, &workspace);
+
+        let mismatched = SessionRuntime::initialize(&args, &config, Some(2)).expect("initialize");
+        assert!(!mismatched.resumed);
+        assert!(mismatched.record.messages.is_empty());
+        assert_ne!(mismatched.record.session_id.as_str(), old_id.as_str());
+        assert_eq!(
+            fs::read(store.session_file(&old_id)).expect("old envelope intact"),
+            old_bytes,
+            "old-generation history must stay on disk untouched"
+        );
+
+        let matched = SessionRuntime::initialize(&args, &config, Some(1)).expect("initialize");
+        assert!(matched.resumed);
+        assert_eq!(matched.record.messages.len(), 1);
+        assert_eq!(matched.record.session_id.as_str(), old_id.as_str());
     }
 }

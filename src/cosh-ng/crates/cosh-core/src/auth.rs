@@ -5,6 +5,7 @@ use crate::config::{CoreConfig, ProviderConfig};
 use crate::protocol::{AuthField, AuthProvider};
 
 mod exchange;
+pub(crate) mod oauth;
 mod preflight;
 pub(crate) mod trial_policy;
 pub(crate) mod trial_preferences;

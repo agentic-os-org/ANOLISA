@@ -114,6 +114,11 @@ pub struct PersistedSession {
     /// a revision an earlier commit already published.
     #[serde(default)]
     pub compaction_revision: u64,
+    /// Login generation whose history this envelope carries. Absent for
+    /// legacy envelopes; older readers ignore it and newer readers refuse to
+    /// send it under a different generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_generation: Option<u64>,
     #[serde(skip)]
     pub(crate) was_loaded: bool,
 }
@@ -138,6 +143,7 @@ impl PersistedSession {
             messages,
             compaction: None,
             compaction_revision: 0,
+            auth_generation: None,
             was_loaded: false,
         }
     }

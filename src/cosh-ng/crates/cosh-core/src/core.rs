@@ -29,7 +29,7 @@ use crate::protocol::{
     ShellControlRequest,
 };
 use crate::provider::{
-    ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
+    ContentGenerator, GenerateConfig, GenerateEvent, GenerateStream, Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
 use crate::tool::{
@@ -78,6 +78,7 @@ pub struct CoshCore {
     pub compaction: CompactionRuntime,
     pub model: String,
     session_resumed: bool,
+    session_auth_generation: Option<u64>,
     pub shell_context: Option<ShellContext>,
     project_root: PathBuf,
     workspace: SessionWorkspace,
@@ -127,6 +128,10 @@ impl CoshCore {
 
     pub(crate) fn set_session_resumed(&mut self, resumed: bool) {
         self.session_resumed = resumed;
+    }
+
+    pub(crate) fn session_auth_generation(&self) -> Option<u64> {
+        self.session_auth_generation
     }
 
     pub(crate) fn use_one_shot_approval_timeout(&mut self) {
@@ -710,14 +715,45 @@ impl CoshCore {
             self.metrics.api_requests += 1;
             let api_start = Instant::now();
 
-            let stream_result = provider_access::drive(
-                trial_access.as_ref(),
-                self.provider
-                    .generate(&msgs_with_system, turn_tool_decls, &generate_config),
-                reader,
-                writer,
-            )
-            .await;
+            let provider_generation = self.provider.auth_generation();
+            let state_generation = crate::auth::oauth::current_generation(&self.config);
+            let current_auth_generation = match (provider_generation, state_generation) {
+                (Some(provider), Some(state)) if provider == state => Some(provider),
+                (None, None) => None,
+                _ => None,
+            };
+            let mut generation_failure = None;
+            match self.session_auth_generation {
+                Some(bound) if current_auth_generation != Some(bound) => {
+                    generation_failure = Some(crate::provider::ProviderFailure {
+                        code:
+                            crate::provider::sysom::oauth::contract::OAuthError::GenerationChanged
+                                .code()
+                                .into(),
+                        kind: crate::provider::ProviderFailureKind::Identity,
+                        dispatch: crate::provider::DispatchState::NotDispatched,
+                        request_id: None,
+                    });
+                }
+                None => self.session_auth_generation = current_auth_generation,
+                _ => {}
+            }
+            let request: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<GenerateStream, String>> + Send>,
+            > = match generation_failure {
+                Some(failure) => Box::pin(async move {
+                    Ok(Box::pin(futures::stream::once(async move {
+                        GenerateEvent::ProviderFailure(failure)
+                    })) as GenerateStream)
+                }),
+                None => Box::pin(self.provider.generate(
+                    &msgs_with_system,
+                    turn_tool_decls,
+                    &generate_config,
+                )),
+            };
+            let stream_result =
+                provider_access::drive(trial_access.as_ref(), request, reader, writer).await;
 
             let mut stream = match stream_result {
                 Ok(s) => s,

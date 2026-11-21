@@ -367,4 +367,9 @@ pub trait ContentGenerator: Send + Sync {
     ) -> Result<GenerateStream, String>;
 
     fn cancel(&self);
+
+    /// Login generation this provider's credential source is bound to, if any.
+    fn auth_generation(&self) -> Option<u64> {
+        None
+    }
 }

@@ -1229,6 +1229,7 @@ impl SessionStore {
                 messages,
                 compaction: None,
                 compaction_revision: 0,
+                auth_generation: None,
                 was_loaded: true,
             });
         }

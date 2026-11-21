@@ -1077,14 +1077,22 @@ impl CoreConfig {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
 
+        let explicit_model = self
+            .ai
+            .active_model
+            .clone()
+            .or_else(|| provider_cfg.and_then(|p| p.model.clone()));
         let model = if provider_cfg.is_some_and(ProviderConfig::is_ecs_identity) {
             crate::auth::trial_policy::MODEL.to_string()
+        } else if explicit_model.is_none()
+            && !matches!(
+                crate::auth::oauth::effective(self),
+                crate::auth::oauth::SourceState::NotSelected
+            )
+        {
+            "auto".to_string()
         } else {
-            self.ai
-                .active_model
-                .clone()
-                .or_else(|| provider_cfg.and_then(|p| p.model.clone()))
-                .unwrap_or_else(|| "qwen-max".to_string())
+            explicit_model.unwrap_or_else(|| "qwen-max".to_string())
         };
 
         let provider_type = provider_cfg

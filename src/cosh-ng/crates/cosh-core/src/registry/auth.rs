@@ -4,6 +4,7 @@ use super::*;
 use crate::provider::sysom::{CredentialStatus, ProbeError};
 
 mod ecs_trial;
+mod oauth;
 
 #[cfg(test)]
 #[path = "auth/trial_tests.rs"]
@@ -76,6 +77,7 @@ pub(super) async fn handle_auth(
         }
     };
     match action {
+        "oauth_logout" => oauth::logout(request_id, config).await,
         "state" => {
             let (trial_preferences, probe) = tokio::join!(
                 async {
@@ -170,6 +172,14 @@ pub(super) async fn handle_auth(
                     "active_provider": active_provider,
                     "effective_auth_required": effective_auth_required,
                     "config_write_guard": "v1",
+                    "oauth": match crate::auth::oauth::effective(config) {
+                        crate::auth::oauth::SourceState::Active { generation, client_id } =>
+                            serde_json::json!({"source": "oauth_active", "generation": generation, "client_id": client_id}),
+                        crate::auth::oauth::SourceState::NeedsLogin =>
+                            serde_json::json!({"source": "oauth_needs_login"}),
+                        crate::auth::oauth::SourceState::NotSelected =>
+                            serde_json::json!({"source": "not_selected"}),
+                    },
                 })),
                 error: None,
             }
@@ -240,6 +250,7 @@ pub(super) async fn handle_auth(
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
             *config = candidate;
+            oauth::on_explicit_provider_select(config);
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
