@@ -140,3 +140,121 @@ fn array_33_short_elements_may_expand() {
         );
     }
 }
+
+#[test]
+fn content_domains_cover_current_engines_and_preserve_controls() {
+    let report = tokenless_bench::domains::domain_metrics().unwrap();
+    assert_eq!(report["headline_tokenizer"], "o200k_base");
+    assert!(report["cost"].is_null());
+    let rows = report["rows"].as_array().unwrap();
+    // Frozen fixture/tokenizer bytes make these deterministic; intentional corpus
+    // or tokenizer upgrades must update the counts after independent verification.
+    let expected = [
+        ("json-pretty", 6142, 4545),
+        ("json-numeric-literals", 42, 33),
+        ("schema-canonical", 320, 169),
+        ("toon-rows", 1003, 706),
+        ("search-3", 42, 42),
+        ("paths-3", 27, 27),
+        ("search-64", 896, 469),
+        ("paths-64", 576, 364),
+        ("search-256", 3584, 1813),
+        ("paths-256", 2304, 1324),
+        ("csv-64", 774, 708),
+        ("tsv-64", 1034, 643),
+        ("build-log-no-recovery", 1426, 1426),
+        ("build-log-with-recovery", 1426, 116),
+        ("html-page", 1162, 61),
+        ("search-negative-control", 4, 4),
+    ];
+    assert_eq!(rows.len(), expected.len(), "fixture inventory changed");
+    for (id, before, after) in expected {
+        let row = rows
+            .iter()
+            .find(|row| row["sample_id"] == id)
+            .expect("pinned fixture exists");
+        assert_eq!(row["tokens_before"], before, "{id} input changed");
+        assert_eq!(row["tokens_after"], after, "{id} output changed");
+    }
+    for domain in [
+        "json",
+        "schema",
+        "toon",
+        "search-results",
+        "path-list",
+        "tabular",
+        "build-log",
+        "html",
+    ] {
+        assert!(
+            rows.iter().any(|row| row["domain"] == domain),
+            "missing domain {domain}"
+        );
+    }
+    for row in rows {
+        assert_eq!(row["tokenizer"], "o200k_base");
+        assert!(row["latency_ms"].as_f64().unwrap().is_finite());
+        let checks = &row["checks"];
+        let required: &[&str] = if row["sample_id"] == "search-negative-control" {
+            &["rejected"]
+        } else {
+            match row["domain"].as_str().unwrap() {
+                "json" => &["numeric_literals_retained"],
+                "search-results" => &["all_numbered_row_suffixes_retained"],
+                "path-list" => &["all_file_names_retained"],
+                "tabular" => &["all_messages_retained"],
+                "build-log" => &["diagnostic_retained", "all_omitted_blocks_retrievable"],
+                "html" => &["required_facts_retained"],
+                "schema" => &["output_is_object"],
+                "toon" => &[],
+                other => panic!("unregistered fixture domain {other}"),
+            }
+        };
+        for key in required {
+            assert_eq!(
+                checks[key].as_bool(),
+                Some(true),
+                "{} lacks or fails {key}",
+                row["sample_id"]
+            );
+        }
+        if row["sample_id"] == "search-negative-control" {
+            assert_eq!(row["tokens_before"], row["tokens_after"]);
+            assert_eq!(row["checks"]["rejected"], true);
+        }
+        if checks["omitted_lines"].as_u64().unwrap_or(0) > 0 {
+            assert_eq!(checks["all_omitted_blocks_retrievable"], true);
+            assert_eq!(checks["recovered_blocks"], checks["omitted_blocks"]);
+            assert_eq!(checks["recovered_lines"], checks["omitted_lines"]);
+        }
+    }
+}
+
+#[test]
+fn component_exports_cannot_dump_private_payloads_to_stdout() {
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_component_cases"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--output"));
+}
+
+#[test]
+fn repeated_payload_modes_do_not_inflate_independent_n() {
+    use std::collections::BTreeSet;
+    let report = tokenless_bench::domains::domain_metrics().unwrap();
+    let rows = report["rows"].as_array().unwrap();
+    let unique = rows
+        .iter()
+        .map(|row| row["payload_hash"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        report["independent_payloads"].as_u64().unwrap() as usize,
+        unique.len()
+    );
+    assert!(
+        unique.len() < rows.len(),
+        "same log in two recovery modes is one independent payload"
+    );
+}

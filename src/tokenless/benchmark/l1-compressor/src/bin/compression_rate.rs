@@ -23,8 +23,8 @@
 
 use tokenless_bench::metrics::full_report;
 
-fn main() {
-    let report = full_report();
+fn main() -> Result<(), tokenless_bench::domains::DomainError> {
+    let report = full_report()?;
 
     if std::env::args().any(|a| a == "--json") {
         // Pretty JSON is fine here: parsers ignore whitespace and humans can
@@ -33,13 +33,27 @@ fn main() {
             "{}",
             serde_json::to_string_pretty(&report).expect("report is valid JSON")
         );
-        return;
+        return Ok(());
     }
 
-    println!("=== Tokenless Compression Rate (in-process, canonical fixtures) ===\n");
+    println!("=== Tokenless component domains (o200k_base; offline, not billing) ===\n");
+    if let Some(rows) = report["component_domains"]["rows"].as_array() {
+        for row in rows {
+            println!(
+                "  {} [{}]: {} -> {} tokens; {} ms; checks={}",
+                row["sample_id"],
+                row["mode"],
+                row["tokens_before"],
+                row["tokens_after"],
+                row["latency_ms"],
+                row["checks"]
+            );
+        }
+    }
+    println!("\n=== Legacy byte estimates (auxiliary only) ===\n");
 
-    let resp = &report["canonical"]["response"];
-    let schema = &report["canonical"]["schema"];
+    let resp = &report["legacy_estimates"]["canonical"]["response"];
+    let schema = &report["legacy_estimates"]["canonical"]["schema"];
     println!("[canonical response]");
     println!(
         "  raw {} -> compressed {} tok ({}% saved), +TOON {} tok ({}% saved)",
@@ -61,9 +75,9 @@ fn main() {
 
     println!(
         "[stacking] baseline {} tokens",
-        report["stacking"]["baseline_tokens"]
+        report["legacy_estimates"]["stacking"]["baseline_tokens"]
     );
-    if let Some(configs) = report["stacking"]["configs"].as_array() {
+    if let Some(configs) = report["legacy_estimates"]["stacking"]["configs"].as_array() {
         for row in configs {
             println!(
                 "  {:<18} {:>7} tok {:>6}% saved",
@@ -105,39 +119,8 @@ fn main() {
         println!("\nRTK: not available in this environment");
     }
 
-    // Cost analysis section.
-    // Caveat: estimates use bytes/4 heuristic token counting, a single canonical
-    // fixture, and linear session-count projection. Real-world savings depend on
-    // actual payload distributions, tokenizer specifics, and session patterns.
-    let cost = &report["cost_analysis"];
-    let assumptions = &cost["assumptions"];
     println!(
-        "\n[cost analysis] (heuristic estimate: bytes/4 tokens, single canonical fixture, linear projection)"
+        "\n[cost] not measured; actual provider usage and deployment-region prices are required."
     );
-    println!("  note: order-of-magnitude guidance only; not a billing-grade prediction.");
-    println!(
-        "  assumptions: {}-round session, {} sessions/day, {} days/month",
-        assumptions["rounds_per_session"],
-        assumptions["sessions_per_day"],
-        assumptions["days_per_month"],
-    );
-    println!(
-        "  baseline: {} tok/session | tokenless: {} tok/session ({}% saved)",
-        cost["baseline_tokens"], cost["tokenless_tokens"], cost["token_savings_pct"],
-    );
-    println!(
-        "\n  {:<18} {:>14} {:>14} {:>12}",
-        "Model", "Baseline/mo", "Tokenless/mo", "Saved/mo"
-    );
-    if let Some(models) = cost["models"].as_array() {
-        for m in models {
-            println!(
-                "  {:<18} ${:>13.2} ${:>13.2} ${:>10.2}",
-                m["model"].as_str().unwrap_or("?"),
-                m["baseline_monthly_usd"].as_f64().unwrap_or(0.0),
-                m["tokenless_monthly_usd"].as_f64().unwrap_or(0.0),
-                m["monthly_savings_usd"].as_f64().unwrap_or(0.0),
-            );
-        }
-    }
+    Ok(())
 }

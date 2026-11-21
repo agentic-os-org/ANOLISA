@@ -157,7 +157,7 @@ anolisa adapter status tokenless
 进入 ANOLISA 源码中的 `src/tokenless/benchmark/l1-compressor` 后运行：
 
 ```bash
-cargo run --release --bin compression_rate -- --json
+cargo run --release --locked --bin compression_rate -- --json
 ```
 
 报告使用仓库内置的
@@ -172,14 +172,18 @@ canonical 响应做 TOON 编码的节省率从 17.0% 升到 17.6%，full_stack �
 19.5%。另一个压缩率回归用例将同一组值格式化后输入，验证真正的格式压缩且无遗漏；
 专项测试覆盖记录缩减以及字符串、数组和深度限制。
 
+当前源码报告的主指标位于 `component_domains`，使用 `o200k_base`。
+历史 bytes/4 快照只是 `legacy_estimates` 下的辅助估算；路径调整不会重新测量
+或将原快照数值重标为新口径。
+
 | JSON 字段 | 独立测试阶段与输入 | 节省率 |
 |---|---|---:|
-| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 0.0% |
-| `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
-| `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.6% |
-| `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
+| `legacy_estimates.canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 0.0% |
+| `legacy_estimates.canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
+| `legacy_estimates.canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.6% |
+| `legacy_estimates.canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
 
-同一份报告还会在两个 canonical fixture 上度量混合负载的叠加配置（`stacking.configs`），
+同一份报告还保留两个 canonical fixture 的叠加估算（`legacy_estimates.stacking.configs`），
 分母是二者合并后的基线（5,551 估算 Token），因此单项行会低于上面的独立节省率：
 
 | 配置 | 运行内容 | 节省率 |
@@ -201,8 +205,9 @@ Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结�
 目录运行 `./run-benchmarks.sh --quick`。
 
 这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、已经
-紧凑序列化的合成数据；报告只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
-估算 Token，而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
+紧凑序列化的合成数据。`legacy_estimates` 快照只使用一个响应和一个 Schema，
+以近似 `ceil(bytes / 4)` 规则估算；当前 `component_domains` 使用真实 Tokenizer
+覆盖多个内容域。两者都不认证 Adapter 行为以及工具数据在完整
 会话中的占比。因此，这组结果只用于确认同一源码版本的行为是否相近；评估真实工作
 负载时，应使用有代表性的自有 Payload，并执行下文的 dry-run 双跑。详细口径见
 [benchmark 方法与限制](../../../../src/tokenless/benchmark/l1-compressor/README.md#methodology)。
