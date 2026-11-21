@@ -70,6 +70,8 @@ pub mod aggregator;
 #[cfg(target_os = "linux")]
 pub mod analyzer;
 #[cfg(target_os = "linux")]
+pub mod aw_audit;
+#[cfg(target_os = "linux")]
 pub(crate) mod background;
 #[cfg(target_os = "linux")]
 pub mod container;

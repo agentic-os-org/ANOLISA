@@ -7,6 +7,8 @@
 #[cfg(target_os = "linux")]
 pub mod audit;
 #[cfg(target_os = "linux")]
+pub mod aw_audit;
+#[cfg(target_os = "linux")]
 pub mod cache;
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub mod dashboard;

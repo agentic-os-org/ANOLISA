@@ -59,11 +59,56 @@ pub(crate) fn open_private_connection(
     connection.execute_batch("PRAGMA journal_mode=WAL;")?;
     connection.busy_timeout(Duration::from_millis(500))?;
 
-    // SQLite derives new sidecar modes from the database, and this also repairs
-    // sidecars left by older versions before serving any request.
-    open_or_create_private_file(&database)?;
-    repair_existing_private_file(&wal)?;
-    repair_existing_private_file(&shm)?;
+    // SQLite derives new sidecar modes from the database. The checks above
+    // also repair retained files before SQLite holds its POSIX locks.
+    Ok(connection)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_private_connection(path: &Path) -> Result<Connection, PrivateSqliteError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| PrivateSqliteError::UnsafePath {
+            path: path.into(),
+            reason: "missing private state directory",
+        })?;
+    // A query may share this process with a writer. Closing descriptors to
+    // SQLite files can release process-wide POSIX locks, including WAL locks.
+    let check = |entry: &Path, mode, directory| {
+        let metadata = fs::symlink_metadata(entry)
+            .map_err(|source| io_error("inspect private path", entry, source))?;
+        let trusted = if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        };
+        // SAFETY: geteuid has no preconditions.
+        if !trusted
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != mode
+            || !directory && metadata.nlink() != 1
+        {
+            return Err(PrivateSqliteError::UnsafePath {
+                path: entry.into(),
+                reason: "private path has invalid type, owner, permissions, or links",
+            });
+        }
+        Ok(())
+    };
+    check(directory, 0o700, true)?;
+    check(path, 0o600, false)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match check(Path::new(&sidecar), 0o600, false) {
+            Err(PrivateSqliteError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(Duration::from_millis(500))?;
     Ok(connection)
 }
 

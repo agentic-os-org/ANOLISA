@@ -48,6 +48,9 @@ pub enum Command {
     /// Query audit events
     #[cfg(target_os = "linux")]
     Audit(AuditCommand),
+    /// Query the private projection of AW public execution audit
+    #[cfg(target_os = "linux")]
+    AwAudit(cli::aw_audit::AwAuditCommand),
     /// Discover running AI agents on the system
     #[cfg(target_os = "linux")]
     Discover(DiscoverCommand),
@@ -88,6 +91,13 @@ fn main() {
         Command::Trace(trace_cmd) => trace_cmd.execute(),
         #[cfg(target_os = "linux")]
         Command::Audit(audit_cmd) => audit_cmd.execute(),
+        #[cfg(target_os = "linux")]
+        Command::AwAudit(options) => {
+            if let Err(error) = options.execute() {
+                eprintln!("AW audit query failed: {error}");
+                std::process::exit(1);
+            }
+        }
         #[cfg(target_os = "linux")]
         Command::Discover(discover_cmd) => discover_cmd.execute(),
         #[cfg(target_os = "linux")]
