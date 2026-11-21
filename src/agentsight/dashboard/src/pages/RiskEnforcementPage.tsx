@@ -213,11 +213,20 @@ export const RiskEnforcementPage: React.FC = () => {
     .sort((left, right) => right.occurred_at_ns - left.occurred_at_ns);
   const paginatedViolations = newestViolations.slice(violationOffset, violationOffset + VIOLATION_LIMIT);
   // The list can shrink under the current offset (a refresh prunes expired
-  // bindings and their violations), leaving the slice empty; Pagination then
-  // hides itself once total <= limit, stranding the table with no control to
-  // go back. Clamp the offset to the newest list.
+  // bindings and their violations, or an agent filter narrows it). Clamping to
+  // `length - 1` leaves an unaligned tail offset (e.g. 14 for 15 rows) where
+  // Pagination hides itself (`total <= limit`) and strands the earlier rows,
+  // or leaves `<` disabled before reaching row 0 on multi-page lists. Align to
+  // the start of the last valid page, matching SystemAuditPage.
   useEffect(() => {
-    setViolationOffset((current) => Math.min(current, Math.max(0, newestViolations.length - 1)));
+    const lastPageOffset = Math.max(
+      0,
+      Math.floor(Math.max(0, newestViolations.length - 1) / VIOLATION_LIMIT) * VIOLATION_LIMIT,
+    );
+    setViolationOffset((current) => Math.min(
+      Math.floor(Math.max(0, current) / VIOLATION_LIMIT) * VIOLATION_LIMIT,
+      lastPageOffset,
+    ));
   }, [newestViolations.length]);
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
