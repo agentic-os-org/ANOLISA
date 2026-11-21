@@ -214,7 +214,16 @@ impl RatatuiInlineRenderer {
                 lines.push(format!("\u{2502}   {msg_line}"));
             }
         }
-        lines.push(model.preview.to_string());
+        // The preview is bounded to the same wrapped row budget the styled
+        // card renders (and the same control-byte sanitization), so the
+        // plain card cannot push an unbounded model-authored string onto
+        // the terminal or desync the erase-height accounting when the
+        // preview itself contains newlines.
+        lines.extend(wrapped_preview_rows(
+            model.preview,
+            self.content_width(),
+            max_preview_rows(model.expanded),
+        ));
         if let Some(next) = model.next_label {
             lines.push(format!(
                 "{}{next}",
@@ -896,10 +905,30 @@ fn command_preview_rows(command: &str, width: usize, max_rows: usize) -> Vec<Str
         .collect()
 }
 
+/// Makes model-authored preview text inert for terminal output.
+///
+/// The preview is provider output, not a validated identifier: a
+/// `\u001b` inside the tool-call JSON arrives here as a real ESC byte,
+/// and a C1 introducer, BEL, or lone CR is equally terminal-active.
+/// The name path has carried this contract since
+/// `display_tool_name` ("an ESC in the JSON arrives here as a real ESC
+/// byte and would reach the terminal as an escape sequence"); the
+/// preview — the command string the user reads to decide whether to
+/// approve — is the larger model-controlled surface and must not lag
+/// behind it. Only `\n` survives: the row builder treats it as the row
+/// separator it already handles, so multi-line commands keep their
+/// shape while every other control byte (and the LS/PS line separators
+/// ratatui cells would pass through) drops out as text.
+fn sanitize_preview_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch == '\n' || (!ch.is_control() && !matches!(ch, '\u{2028}' | '\u{2029}')))
+        .collect()
+}
+
 pub(super) fn wrapped_preview_rows(text: &str, width: usize, max_rows: usize) -> Vec<String> {
     let width = width.max(20);
     let mut rows = Vec::new();
-    for raw_line in text.lines() {
+    for raw_line in sanitize_preview_text(text).lines() {
         let mut current = String::new();
         let mut current_width = 0;
         for ch in raw_line.chars() {
