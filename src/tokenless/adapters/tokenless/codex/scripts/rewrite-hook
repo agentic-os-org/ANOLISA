@@ -74,17 +74,16 @@ def _pre_tool(tokenless_bin: str, request: dict) -> Optional[dict]:
     try:
         proc = subprocess.run(
             [tokenless_bin, "compress"],
-            input=json.dumps(request, ensure_ascii=False),
+            input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
             capture_output=True,
-            text=True,
             timeout=_PRE_TOOL_TIMEOUT,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
     if proc.returncode != 0:
         return None
     try:
-        response = json.loads(proc.stdout)
+        response = json.loads(proc.stdout.decode("utf-8"))
     except ValueError:
         return None
     # A version-skewed binary may speak another contract; never trust it.
@@ -104,7 +103,10 @@ def main() -> None:
         _skip()
 
     try:
-        raw = sys.stdin.read()
+        # Decode host JSON bytes independently of the interpreter's locale.
+        raw = getattr(sys.stdin, "buffer", sys.stdin).read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)
@@ -177,7 +179,7 @@ def main() -> None:
             "updatedInput": updated_input,
         }
     }
-    print(json.dumps(response, ensure_ascii=False))
+    print(json.dumps(response))
 
 
 if __name__ == "__main__":
