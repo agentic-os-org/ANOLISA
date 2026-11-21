@@ -128,6 +128,80 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
             .collect())
     }
 
+    /// List the installed packages that `package` directly `Requires`.
+    ///
+    /// Split packaging places a component's payload (binaries, systemd units)
+    /// in a subpackage while install records keep the compatibility meta
+    /// package name. Callers that need a component's full file inventory
+    /// (restart unit discovery) union this closure with the recorded
+    /// package's own files. Only capability names that resolve to an
+    /// installed package are returned; non-package capabilities (file paths,
+    /// `rpmlib(...)`, etc.) and unsatisfied requirements are skipped.
+    ///
+    /// # Errors
+    /// - [`PackageQueryError::CommandMissing`] when `rpm` is absent.
+    /// - [`PackageQueryError::QueryFailed`] when the recorded package itself
+    ///   cannot be queried (for example it is not installed). Individual
+    ///   dependency lookups never fail the call.
+    pub fn required_package_names(&self, package: &str) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", "--requires", package])
+            .map_err(|e| map_spawn_error(e, RPM))?;
+        if out.code != Some(0) {
+            let detail = if out.stderr.trim().is_empty() {
+                out.stdout.clone()
+            } else {
+                out.stderr.clone()
+            };
+            return Err(PackageQueryError::QueryFailed {
+                command: RPM.to_string(),
+                code: out.code,
+                stderr: detail,
+            });
+        }
+        let mut names = Vec::new();
+        for line in out.stdout.lines() {
+            let capability = line.split_whitespace().next().unwrap_or_default();
+            if !looks_like_package_capability(capability) {
+                continue;
+            }
+            // Resolve the capability to a canonical installed package name;
+            // rpm exits non-zero with "not installed" for unsatisfied ones.
+            if let Ok(resolved) = self.run_installed_name(capability)
+                && !names.contains(&resolved)
+            {
+                names.push(resolved);
+            }
+        }
+        Ok(names)
+    }
+
+    fn run_installed_name(&self, package: &str) -> Result<String, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", "--qf", "%{NAME}\\n", "--", package])
+            .map_err(|e| map_spawn_error(e, RPM))?;
+        if out.code != Some(0) {
+            return Err(PackageQueryError::QueryFailed {
+                command: RPM.to_string(),
+                code: out.code,
+                stderr: out.stderr,
+            });
+        }
+        out.stdout
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| PackageQueryError::QueryFailed {
+                command: RPM.to_string(),
+                code: out.code,
+                stderr: "rpm returned no package name".to_string(),
+            })
+    }
+
     fn snapshot(&self) -> Result<&RpmSnapshot, PackageQueryError> {
         if let Some(snapshot) = self.snapshot.get() {
             return Ok(snapshot);
@@ -417,6 +491,18 @@ fn dedup_nonempty_lines(stdout: &str) -> Vec<String> {
     values
 }
 
+/// Whether an RPM requirement capability names a package rather than a file,
+/// interpreter feature, or configuration complement.
+///
+/// `rpm -q --requires` mixes absolute file paths, `rpmlib(...)`,
+/// `config(...)` and plain package names; only the last kind is a package
+/// whose file inventory a component can inherit.
+fn looks_like_package_capability(capability: &str) -> bool {
+    !capability.is_empty()
+        && !capability.starts_with('/')
+        && !capability.contains('(')
+}
+
 /// Map a spawn-phase [`std::io::Error`] to a query error by [`std::io::ErrorKind`].
 ///
 /// Permission detection relies on the spawn-layer `PermissionDenied` rather
@@ -516,6 +602,7 @@ fn parse_release(s: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::command::CommandOutput;
+    use std::collections::BTreeMap;
     use std::io;
 
     /// Preset result for the fake runner: either a captured output or a
@@ -1269,5 +1356,113 @@ mod tests {
             err,
             PackageQueryError::CommandMissing { command } if command == RPM
         ));
+    }
+
+    /// Runner keyed by the full rpm argument vector, so a multi-call flow
+    /// (`--requires` then one `--qf` per capability) can replay per-call
+    /// outputs without real rpm.
+    struct KeyedRunner(BTreeMap<Vec<String>, CommandOutput>);
+
+    impl CommandRunner for KeyedRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            let key: Vec<String> = std::iter::once(program.to_string())
+                .chain(args.iter().map(|a| a.to_string()))
+                .collect();
+            self.0.get(&key).cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no fake preset for {key:?}"),
+                )
+            })
+        }
+    }
+
+    fn qf_output(name: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(0),
+            stdout: format!("{name}\n"),
+            stderr: String::new(),
+        }
+    }
+
+    fn not_installed(name: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: format!("package {name} is not installed\n"),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn required_package_names_resolves_installed_capability_names() {
+        // Split packaging: the meta package Requires its `-core` payload plus
+        // an rpmlib feature and a file dependency; only the package
+        // capability resolves to an installed package name.
+        let mut calls = BTreeMap::new();
+        calls.insert(
+            vec!["rpm", "-q", "--requires", "agentsight"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            CommandOutput {
+                code: Some(0),
+                stdout: "agentsight-core = 0.16.2-1.alnx4\n\
+                         rpmlib(VersionedDependencies) = 4.16\n\
+                         /usr/bin/sh\n\
+                         config(agentsight) = 0.16.2-1.alnx4\n"
+                    .to_string(),
+                stderr: String::new(),
+            },
+        );
+        calls.insert(
+            ["rpm", "-q", "--qf", "%{NAME}\\n", "--", "agentsight-core"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            qf_output("agentsight-core"),
+        );
+        // config(...) looks package-like but is not installed under that name.
+        calls.insert(
+            ["rpm", "-q", "--qf", "%{NAME}\\n", "--", "config(agentsight)"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            not_installed("config(agentsight)"),
+        );
+        let q = RpmPackageQuery::with_runner(KeyedRunner(calls));
+        assert_eq!(
+            q.required_package_names("agentsight").unwrap(),
+            vec!["agentsight-core".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_package_names_surfaces_query_failure_of_recorded_package() {
+        // An unqueryable recorded package (not installed) is caller-visible
+        // drift; individual dependency lookups never fail the call.
+        let mut calls = BTreeMap::new();
+        calls.insert(
+            vec!["rpm", "-q", "--requires", "ghost"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            CommandOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "package ghost is not installed\n".to_string(),
+            },
+        );
+        let q = RpmPackageQuery::with_runner(KeyedRunner(calls));
+        let err = q.required_package_names("ghost").unwrap_err();
+        assert!(matches!(err, PackageQueryError::QueryFailed { .. },), "{err:?}");
+    }
+
+    #[test]
+    fn looks_like_package_capability_rejects_paths_and_features() {
+        assert!(looks_like_package_capability("agentsight-core"));
+        assert!(!looks_like_package_capability("/usr/bin/sh"));
+        assert!(!looks_like_package_capability("rpmlib(VersionedDependencies)"));
+        assert!(!looks_like_package_capability("config(agentsight)"));
+        assert!(!looks_like_package_capability(""));
     }
 }

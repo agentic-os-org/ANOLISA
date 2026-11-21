@@ -362,6 +362,8 @@ fn render_human(payload: &RestartPayload, no_color: bool) {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
+
     use crate::commands::tier1::rpm_install;
     use crate::context::InstallMode;
     use anolisa_core::domain::{
@@ -484,22 +486,64 @@ mod tests {
         store.save(&state_path).expect("save state");
     }
 
-    /// Fake `CommandRunner` returning a canned `rpm -ql` listing (or a spawn
-    /// error), so the RPM discovery path is exercised without a real `rpm`.
+    /// Fake `CommandRunner` replaying per-package `rpm -ql` listings (or a
+    /// spawn error), so the RPM discovery path is exercised without a real
+    /// `rpm`.
+    ///
+    /// `listings` maps a package name to the manifest `rpm -q --list` should
+    /// replay for it; the recorded package's listing doubles as the default
+    /// for the dependency-free case. `requires_stdout` feeds the
+    /// `--requires` closure query; a dependency resolves as installed only
+    /// when it appears there, mirroring `rpm -q` exit codes.
     struct FakeRpm {
-        stdout: String,
+        listings: BTreeMap<String, String>,
+        default_listing: String,
         code: Option<i32>,
         spawn_err: Option<std::io::ErrorKind>,
+        requires_stdout: Option<String>,
     }
 
     impl CommandRunner for FakeRpm {
-        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<CommandOutput> {
+        fn run(&self, _program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
             if let Some(kind) = self.spawn_err {
                 return Err(std::io::Error::new(kind, "fake spawn failure"));
             }
+            if args.get(1) == Some(&"--requires") {
+                return Ok(CommandOutput {
+                    code: Some(0),
+                    stdout: self.requires_stdout.clone().unwrap_or_default(),
+                    stderr: String::new(),
+                });
+            }
+            if args.contains(&"--qf") {
+                // Dependency resolution: report the queried capability as an
+                // installed package only when the fake lists it as required.
+                let capability = args.last().copied().unwrap_or_default();
+                let installed = self
+                    .requires_stdout
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(capability));
+                return Ok(CommandOutput {
+                    code: if installed { Some(0) } else { Some(1) },
+                    stdout: if installed {
+                        format!("{capability}\n")
+                    } else {
+                        format!("package {capability} is not installed\n")
+                    },
+                    stderr: String::new(),
+                });
+            }
+            let package = args.last().copied().unwrap_or_default();
+            let stdout = self
+                .listings
+                .get(package)
+                .unwrap_or(&self.default_listing)
+                .clone();
             Ok(CommandOutput {
                 code: self.code,
-                stdout: self.stdout.clone(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -507,9 +551,11 @@ mod tests {
 
     fn fake_query(listing: &str) -> RpmPackageQuery<FakeRpm> {
         RpmPackageQuery::with_runner(FakeRpm {
-            stdout: listing.to_string(),
+            listings: BTreeMap::new(),
+            default_listing: listing.to_string(),
             code: Some(0),
             spawn_err: None,
+            requires_stdout: None,
         })
     }
 
@@ -799,13 +845,91 @@ mod tests {
     }
 
     #[test]
+    fn discover_rpm_units_unions_the_installed_dependency_closure() {
+        // Split packaging: the recorded meta package owns no files at all; the
+        // units live in the `-core` payload it Requires. Discovery must walk
+        // the closure and classify the payload units, not report "no units".
+        let query = RpmPackageQuery::with_runner(FakeRpm {
+            listings: BTreeMap::from([(
+                "agentsight-core".to_string(),
+                "/usr/lib/systemd/system/agentsight.service\n\
+                 /usr/lib/systemd/system/agentsight-enforcer.service\n"
+                    .to_string(),
+            )]),
+            default_listing: String::new(), // meta manifest is structurally empty
+            code: Some(0),
+            spawn_err: None,
+            requires_stdout: Some(
+                "agentsight-core = 0.16.2-1.alnx4\n\
+                 rpmlib(VersionedDependencies) = 4.16\n\
+                 /usr/bin/needed\n"
+                    .to_string(),
+            ),
+        });
+        let (units, notes) = discover_rpm_units(Some("agentsight"), "agentsight", &query)
+            .expect("split-package discovery ok");
+        assert_eq!(units.len(), 2, "both payload units expected: {units:?}");
+        assert!(units.iter().any(|u| u.unit == "agentsight.service"));
+        assert!(
+            units
+                .iter()
+                .any(|u| u.unit == "agentsight-enforcer.service")
+        );
+        assert!(
+            units.iter().all(|u| u.scope == ServiceScope::System),
+            "{units:?}"
+        );
+        assert!(units.iter().all(|u| u.component == "agentsight"));
+        assert!(
+            notes.is_empty(),
+            "no template guidance expected here: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn discover_rpm_units_skips_unresolved_dependencies_with_a_warning() {
+        // A dependency the host cannot query must degrade to a note so the
+        // resolvable part of the closure still restarts what it can. Here the
+        // `-core` payload resolves as installed but its `rpm -ql` fails (the
+        // canned code 1 the fake replays for --list).
+        let query = RpmPackageQuery::with_runner(FakeRpm {
+            listings: BTreeMap::new(),
+            default_listing: String::new(),
+            code: Some(1),
+            spawn_err: None,
+            requires_stdout: Some("ws-ckpt-core = 0.7.2-1.alnx4\n".to_string()),
+        });
+        let (units, notes) = discover_rpm_units(Some("ws-ckpt"), "ws-ckpt", &query)
+            .expect("partial closure must not fail the command");
+        assert!(units.is_empty(), "{units:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("ws-ckpt-core") && note.contains("could not list files")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn discover_rpm_units_meta_with_empty_closure_still_discovers_nothing() {
+        // No dependency closure and an empty manifest keeps the previous
+        // "no restartable units" contract — an empty discovery, not an error.
+        let (units, notes) =
+            discover_rpm_units(Some("agentsight"), "agentsight", &fake_query(""))
+                .expect("empty manifest without closure is a normal empty discovery");
+        assert!(units.is_empty() && notes.is_empty());
+    }
+
+    #[test]
     fn discover_rpm_units_tooling_missing_maps_to_actionable_error() {
         // `rpm` absent (spawn NotFound) → the uniform rpm/dnf-not-found message,
         // not a generic "command not found".
         let query = RpmPackageQuery::with_runner(FakeRpm {
-            stdout: String::new(),
+            listings: BTreeMap::new(),
+            default_listing: String::new(),
             code: None,
             spawn_err: Some(std::io::ErrorKind::NotFound),
+            requires_stdout: None,
         });
         let err = discover_rpm_units(Some("agent-memory"), "agent-memory", &query)
             .expect_err("missing rpm tooling must error");

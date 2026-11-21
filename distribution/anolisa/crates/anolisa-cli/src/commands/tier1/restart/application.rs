@@ -416,6 +416,13 @@ fn collect_restart_units(
 /// systemd unit directory. Template units cannot be expanded from package
 /// metadata, so they produce guidance instead of restart targets.
 ///
+/// Split packaging (for example a `agentsight` compatibility meta package
+/// whose payload lives in `agentsight-core`) leaves the recorded package's
+/// own manifest empty, so the discovery walks the package's installed RPM
+/// dependency closure and unions every manifest. Dependencies that cannot be
+/// listed degrade to a warning so a partially resolvable closure still
+/// restarts what it can.
+///
 /// # Errors
 ///
 /// Returns [`CliError::Runtime`] when the component records no package name,
@@ -433,21 +440,36 @@ pub(super) fn discover_rpm_units<R: CommandRunner>(
         ),
     })?;
 
-    let paths = match query.list_files(package) {
-        Ok(paths) => paths,
+    let mut packages = vec![package.to_string()];
+    match query.required_package_names(package) {
+        Ok(dependencies) => packages.extend(
+            dependencies
+                .into_iter()
+                .filter(|dependency| dependency != package),
+        ),
         Err(PackageQueryError::CommandMissing { .. }) => {
             return Err(rpm_tooling_missing_error(&command));
         }
-        Err(error) => {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!("could not list files for RPM package '{package}': {error}"),
-            });
+        Err(error) => return Err(package_query_error(command.clone(), package, error)),
+    }
+
+    let mut paths: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for pkg in &packages {
+        match query.list_files(pkg) {
+            Ok(mut files) => paths.append(&mut files),
+            Err(PackageQueryError::CommandMissing { .. }) => {
+                return Err(rpm_tooling_missing_error(&command));
+            }
+            Err(error) => {
+                notes.push(format!(
+                    "could not list files for RPM package '{pkg}': {error}"
+                ));
+            }
         }
-    };
+    }
 
     let mut units = Vec::new();
-    let mut notes = Vec::new();
     for (unit, scope) in classify_unit_files(&paths) {
         if is_template_unit(&unit) {
             notes.push(template_guidance(&unit, scope));
@@ -460,6 +482,14 @@ pub(super) fn discover_rpm_units<R: CommandRunner>(
         }
     }
     Ok((units, notes))
+}
+
+/// Render one package query failure with its package name attached.
+fn package_query_error(command: String, package: &str, error: PackageQueryError) -> CliError {
+    CliError::Runtime {
+        command,
+        reason: format!("could not query RPM package '{package}': {error}"),
+    }
 }
 
 /// Return the shared actionable error for missing RPM package tooling.
