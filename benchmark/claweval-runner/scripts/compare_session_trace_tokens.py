@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _iter_jsonl_records(path: Path) -> Iterator[Any]:
+def _iter_jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
     """Stream physical records without buffering the complete transcript."""
     with path.open(encoding="utf-8") as source:
         for line in source:
@@ -35,27 +35,48 @@ def _iter_jsonl_records(path: Path) -> Iterator[Any]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            yield record
+            if isinstance(record, dict):
+                yield record
+
+
+def _token_count(value: Any) -> int | None:
+    """Keep explicit integer counts, including zero, separate from missing values."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
 
 
 def session_totals(path: Path) -> dict:
     n_assist = 0
+    measured = 0
     in_sum = out_sum = total_sum = cache_r = cache_w = 0
     last_total = None
     for rec in _iter_jsonl_records(path):
         msg = rec.get("message")
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        u = msg.get("usage") or {}
         n_assist += 1
-        in_sum += int(u.get("input", 0) or 0)
-        out_sum += int(u.get("output", 0) or 0)
+        u = msg.get("usage")
+        if not isinstance(u, dict):
+            last_total = None
+            continue
+        input_tokens = _token_count(u.get("input"))
+        output_tokens = _token_count(u.get("output"))
+        if input_tokens is not None and output_tokens is not None:
+            measured += 1
+        in_sum += input_tokens or 0
+        out_sum += output_tokens or 0
         total_sum += int(u.get("totalTokens", 0) or 0)
         cache_r += int(u.get("cacheRead", 0) or 0)
         cache_w += int(u.get("cacheWrite", 0) or 0)
         last_total = u.get("totalTokens")
     return {
         "assistants": n_assist,
+        "has_usage_evidence": n_assist > 0 and measured == n_assist,
         "input": in_sum,
         "output": out_sum,
         "total": total_sum,
@@ -67,21 +88,29 @@ def session_totals(path: Path) -> dict:
 
 def trace_totals(path: Path) -> dict:
     n_assist = 0
+    measured = 0
     in_sum = out_sum = 0
     end = None
     for rec in _iter_jsonl_records(path):
         t = rec.get("type")
         if t == "message":
-            msg = rec.get("message") or {}
-            if msg.get("role") == "assistant":
-                u = rec.get("usage") or {}
+            msg = rec.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
                 n_assist += 1
-                in_sum += int(u.get("input_tokens", 0) or 0)
-                out_sum += int(u.get("output_tokens", 0) or 0)
+                u = rec.get("usage")
+                if not isinstance(u, dict):
+                    continue
+                input_tokens = _token_count(u.get("input_tokens"))
+                output_tokens = _token_count(u.get("output_tokens"))
+                if input_tokens is not None and output_tokens is not None:
+                    measured += 1
+                in_sum += input_tokens or 0
+                out_sum += output_tokens or 0
         elif t == "trace_end":
             end = rec
     out = {
         "assistants": n_assist,
+        "has_usage_evidence": n_assist > 0 and measured == n_assist,
         "input": in_sum,
         "output": out_sum,
         "end_input": None,
@@ -135,6 +164,7 @@ def main():
         "total_pairs": 0,
         "matched": 0,
         "missing_trace": 0,
+        "insufficient_evidence": 0,
         "input_mismatch": 0,
         "output_mismatch": 0,
         "assistants_mismatch": 0,
@@ -156,6 +186,10 @@ def main():
                 rows.append((run_dir.name, stem, srow, None, "missing_trace"))
                 continue
             trow = trace_totals(trace)
+            if not srow["has_usage_evidence"] or not trow["has_usage_evidence"]:
+                summary["insufficient_evidence"] += 1
+                rows.append((run_dir.name, stem, srow, trow, "insufficient_evidence"))
+                continue
 
             issues = []
             if srow["assistants"] != trow["assistants"]:
