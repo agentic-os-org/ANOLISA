@@ -1301,4 +1301,73 @@ mod tests {
         assert_eq!(remote.code, "unsupported_environment");
         assert!(remote.message.contains("pid-ns container"));
     }
+
+    #[test]
+    fn mixed_class_subscription_reuse_preserves_observer_when_next_required_replaces_stale_previous()
+     {
+        let backend = MockBackend::new();
+        let apply = replacement_policy().expected.request;
+        backend
+            .apply(apply.clone())
+            .expect("fixture policy should apply");
+        let subscriptions = RequiredSubscriptions::default();
+        let (stream_a, _peer_a) = UnixStream::pair().expect("fixture socket pair should open");
+        let (stream_b, _peer_b) = UnixStream::pair().expect("fixture socket pair should open");
+        let (stream_c, _peer_c) = UnixStream::pair().expect("fixture socket pair should open");
+
+        let shared_id = Uuid::new_v4();
+        let next_required_id = Uuid::new_v4();
+
+        // Required A registers `shared_id`, then BestEffort B reuses `shared_id`
+        // (advancing `generations[shared_id]` while `current` still holds A's
+        // stale entry until A's thread finishes), and Required C registers
+        // `next_required_id` before A runs `finish`.
+        let (gen_a, _rx_a) = subscriptions
+            .begin(&backend, shared_id, SubscriberClass::Required, &stream_a)
+            .expect("required A should begin");
+        let (_gen_b, rx_b) = subscriptions
+            .begin(&backend, shared_id, SubscriberClass::BestEffort, &stream_b)
+            .expect("best-effort B should begin");
+        let (gen_c, rx_c) = subscriptions
+            .begin(
+                &backend,
+                next_required_id,
+                SubscriberClass::Required,
+                &stream_c,
+            )
+            .expect("required C should begin");
+        subscriptions.finish(&backend, shared_id, gen_a, SubscriberClass::Required);
+
+        assert!(subscriptions.is_current(next_required_id, gen_c));
+        let violation = ViolationEvent {
+            event_id: Uuid::new_v4(),
+            binding_id: apply.binding_id,
+            agent_id: apply.agent_id,
+            session_id: apply.session_id,
+            policy_id: apply.policy_id,
+            policy_revision: apply.policy_revision,
+            pid: apply.root_pid,
+            ppid: Some(1),
+            process_start_time: apply.process_start_time,
+            operation: "open".into(),
+            target: "/tmp/secret".into(),
+            effect: agentsight_enforcement_protocol::Effect::Block,
+            blocked: true,
+            killed: false,
+            rule_id: Some("block-secret".into()),
+            reason: Some("fixture mixed-class subscription reuse".into()),
+            occurred_at_ns: 100,
+            observed_at_ns: 101,
+            actplane_revision: "mock".into(),
+        };
+        backend
+            .publish_violation(violation.clone())
+            .expect("violation should publish");
+        assert_eq!(rx_c.try_recv(), Ok(violation.clone()));
+        assert_eq!(
+            rx_b.try_recv(),
+            Ok(violation),
+            "evicting stale required A must not unsubscribe active best-effort B on the same id"
+        );
+    }
 }
