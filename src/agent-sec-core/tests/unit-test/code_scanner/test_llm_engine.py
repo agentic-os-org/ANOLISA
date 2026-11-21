@@ -219,6 +219,15 @@ class TestExtractVerdict:
         assert verdict == "DENY"
         assert reason == "malicious"
 
+    def test_json_reason_with_braces(self) -> None:
+        content = (
+            '```json\n{"verdict": "DENY", '
+            '"reason": "command contains {sensitive} data"}\n```'
+        )
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "DENY"
+        assert reason == "command contains {sensitive} data"
+
     def test_empty_string(self) -> None:
         verdict, reason = _extract_verdict("")
         assert verdict is None

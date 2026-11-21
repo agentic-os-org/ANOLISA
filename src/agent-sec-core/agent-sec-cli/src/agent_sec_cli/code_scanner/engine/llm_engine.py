@@ -6,9 +6,8 @@ Uses a local Ollama model to judge whether code is safe to execute.
 import json
 import logging
 import os
-import re
 import time
-from typing import List, Optional
+from typing import Optional
 
 from agent_sec_cli.code_scanner.errors import (
     ErrLlmUnavailable,
@@ -105,9 +104,6 @@ SYSTEM_PROMPT = (
 # Verdict extraction
 # ---------------------------------------------------------------------------
 
-_JSON_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
-
-
 def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     """Best-effort parse of model output -> (verdict, reason).
 
@@ -116,20 +112,27 @@ def _extract_verdict(content: str) -> tuple[Optional[str], str]:
     if not content:
         return None, ""
     text = content.strip()
-    # Try direct JSON first.
-    candidates: List[str] = []
-    if text.startswith("{") and text.endswith("}"):
-        candidates.append(text)
-    candidates.extend(_JSON_RE.findall(text))
-    for cand in candidates:
+    decoder = json.JSONDecoder()
+    search_from = 0
+    while True:
+        start = text.find("{", search_from)
+        if start < 0:
+            break
         try:
-            obj = json.loads(cand)
+            obj, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            search_from = start + 1
+            continue
+        search_from = start + 1
+        if not isinstance(obj, dict):
+            continue
+        try:
+            verdict = str(obj.get("verdict", "")).upper().strip()
+            reason = str(obj.get("reason", "")).strip()
+            if verdict in {"PASS", "DENY"}:
+                return verdict, reason
         except Exception:
             continue
-        verdict = str(obj.get("verdict", "")).upper().strip()
-        reason = str(obj.get("reason", "")).strip()
-        if verdict in {"PASS", "DENY"}:
-            return verdict, reason
     # Fallback: regex token search on the raw text.
     upper = text.upper()
     if "DENY" in upper and "PASS" not in upper:
