@@ -68,7 +68,7 @@ struct ProxyRoutePlan {
 }
 
 pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<String> {
-    let env: HashMap<String, String> = std::env::vars().collect();
+    let env = collect_utf8_environment();
     let plan = plan_proxy_routes(&env);
 
     if plan.routes.is_empty() {
@@ -195,6 +195,27 @@ fn plan_proxy_routes(env: &HashMap<String, String>) -> ProxyRoutePlan {
         routes,
         has_proxy_config,
     }
+}
+
+/// Snapshot the process environment as UTF-8 strings, skipping variables
+/// whose key or value is not valid Unicode.
+///
+/// `std::env::vars` panics when it meets such a variable, and it only takes
+/// one — inherited from a CI runner, a legacy locale, or a raw-bytes value
+/// like a mangled `LS_COLORS` — to abort every managed-proxy sandbox run
+/// inside `prepare_host_proxy_route_spec` before a clean error can be
+/// reported. Skipping unreadable variables keeps planning deterministic: a
+/// proxy variable that cannot be read cannot be routed, and when nothing
+/// parseable remains the caller fails closed with the usual
+/// "managed proxy mode requires proxy environment variables" error.
+fn collect_utf8_environment() -> HashMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            Some((key, value))
+        })
+        .collect()
 }
 
 fn is_proxy_env_key(key: &str) -> bool {
@@ -792,5 +813,60 @@ mod tests {
         assert_eq!(dead_dir.exists(), false);
         assert_eq!(alive_dir.exists(), true);
         assert_eq!(unrelated_dir.exists(), true);
+    }
+
+    /// `std::env::vars` panics on any non-UTF-8 variable, so a single
+    /// legacy raw-bytes variable in the inherited environment used to abort
+    /// managed-proxy route preparation with a panic instead of a clean
+    /// error. Route preparation must skip unreadable variables.
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_environment_variable_does_not_abort_route_preparation() {
+        use super::prepare_host_proxy_route_spec;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // Drop every proxy variable so planning takes the fail-closed early
+        // return below; the test must never spawn real bridge processes.
+        let saved_proxy_env: Vec<(String, String)> = std::env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+            .filter(|(key, _)| is_proxy_env_key(key))
+            .collect();
+        for (key, _) in &saved_proxy_env {
+            // Safety: test-only environment mutation of proxy keys; no other
+            // test in this binary reads these keys.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        // A variable with non-UTF-8 bytes that is unrelated to proxies:
+        // reading the environment must skip it, not panic inside
+        // `std::env::vars`.
+        let poison_key = "ANOLISA_TEST_NON_UTF8_ENV";
+        let poison_value = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
+        // Safety: same test-only mutation of a unique key.
+        unsafe { std::env::set_var(poison_key, &poison_value) };
+
+        let result = std::panic::catch_unwind(prepare_host_proxy_route_spec);
+
+        // Safety: restoring the test-only mutations.
+        unsafe { std::env::remove_var(poison_key) };
+        for (key, value) in &saved_proxy_env {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        assert!(
+            result.is_ok(),
+            "route preparation must not panic on a non-UTF-8 environment variable"
+        );
+        let error = result
+            .expect("route preparation must not panic")
+            .expect_err("no proxy variables remain, so planning must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("managed proxy mode requires proxy environment variables"),
+            "unexpected error: {error}"
+        );
     }
 }
