@@ -90,36 +90,58 @@ fn telemetry_disabled_at(sentinel: &std::path::Path) -> bool {
 /// 动态 Logtail 路径（由 config watcher 运行时设置）
 static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-/// Whether an explicit (`require_path_exists == false`) Logtail exporter has
-/// been registered into the active exporter list. While a first dynamic
-/// activation is still queued in `pending_logtail`, this stays `false` so the
-/// default exporter does not drop events before the mailbox is drained.
-static EXPLICIT_EXPORTER_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn set_explicit_logtail_registered(registered: bool) {
-    EXPLICIT_EXPORTER_REGISTERED.store(registered, std::sync::atomic::Ordering::SeqCst);
+#[derive(Clone, PartialEq, Eq)]
+struct BatchWriteKey {
+    ptr: usize,
+    len: usize,
+    first_id: Option<String>,
+    first_timestamp_ns: u64,
 }
 
-fn normalize_lexical_path(path: &std::path::Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push(comp.as_os_str());
-                }
-            }
-            other => out.push(other.as_os_str()),
+struct LastBatchWrite {
+    from_default_exporter: bool,
+    batch: BatchWriteKey,
+    path: PathBuf,
+}
+
+thread_local! {
+    /// Tracks the most recent batch written by either the default exporter
+    /// (`require_path_exists == true`) or an explicit/dynamic exporter
+    /// (`require_path_exists == false`) on the current thread so that when both
+    /// are registered and resolve to the same physical file, the second exporter
+    /// in the loop skips the duplicate write without requiring the default
+    /// exporter to guess in advance whether a dynamic exporter will write later.
+    static LAST_BATCH_WRITE: std::cell::RefCell<Option<LastBatchWrite>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn clear_last_batch_write() {
+    LAST_BATCH_WRITE.with(|cell| *cell.borrow_mut() = None);
+}
+
+fn batch_write_key(events: &[GenAISemanticEvent]) -> Option<BatchWriteKey> {
+    let first = events.first()?;
+    let (first_id, first_timestamp_ns) = match first {
+        GenAISemanticEvent::LLMCall(call) => (Some(call.call_id.clone()), call.start_timestamp_ns),
+        GenAISemanticEvent::ToolUse(tool) => (Some(tool.tool_use_id.clone()), tool.timestamp_ns),
+        GenAISemanticEvent::AgentInteraction(agent) => {
+            (Some(agent.interaction_id.clone()), agent.timestamp_ns)
         }
-    }
-    out
+        GenAISemanticEvent::StreamChunk(chunk) => {
+            (Some(chunk.stream_id.clone()), chunk.timestamp_ns)
+        }
+    };
+    Some(BatchWriteKey {
+        ptr: events.as_ptr() as usize,
+        len: events.len(),
+        first_id,
+        first_timestamp_ns,
+    })
 }
 
 fn paths_refer_to_same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
-    if a == b || normalize_lexical_path(a) == normalize_lexical_path(b) {
+    if a == b {
         return true;
     }
     #[cfg(unix)]
@@ -278,7 +300,6 @@ impl LogtailExporter {
         // reversibility contract (clearing the path pauses uploads, changing
         // it redirects them) cannot hold against a path frozen here.
         let dynamic = std::env::var(LOGTAIL_ENV_VAR).is_err();
-        set_explicit_logtail_registered(true);
         Some(LogtailExporter {
             path,
             encryptor,
@@ -320,7 +341,6 @@ impl LogtailExporter {
         encryption_pem: Option<&str>,
         trace_enabled: bool,
     ) -> Self {
-        set_explicit_logtail_registered(true);
         Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, false, false)
     }
 
@@ -389,41 +409,54 @@ impl LogtailExporter {
 
         // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
         // 首次跳过打一条 warn，避免"启用了却无数据"时无迹可查（后续静默）。
-        if self.require_path_exists {
-            // Defer to an already-registered explicit/dynamic exporter targeting the
-            // same physical file (including lexical `..` aliases and symlinks) so
-            // `AgentSight`'s default exporter does not duplicate JSONL records, while
-            // keeping default writes active before `pending_logtail` is drained.
-            if EXPLICIT_EXPORTER_REGISTERED.load(std::sync::atomic::Ordering::SeqCst)
-                && logtail_path().filter(|p| !p.is_empty()).is_some_and(|p| {
-                    paths_refer_to_same_file(std::path::Path::new(&p), &target_path)
-                })
-            {
-                return None;
-            }
-            if !target_path.exists() {
-                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-                WARN_ONCE.call_once(|| {
-                    log::warn!(
-                        "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
-                    );
-                });
-                return None;
-            }
+        if self.require_path_exists && !target_path.exists() {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                log::warn!(
+                    "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
+                );
+            });
+            return None;
         }
         Some(target_path)
     }
 
     fn write_batch(&self, events: &[GenAISemanticEvent]) {
-        if !self.require_path_exists {
-            set_explicit_logtail_registered(true);
-        }
+        let batch_key = batch_write_key(events);
         let Some(target_path) = self.output_path() else {
+            if let Some(key) = batch_key {
+                LAST_BATCH_WRITE.with(|cell| {
+                    let mut guard = cell.borrow_mut();
+                    if guard.as_ref().is_some_and(|prev| {
+                        prev.from_default_exporter != self.require_path_exists && prev.batch == key
+                    }) {
+                        *guard = None;
+                    }
+                });
+            }
             return;
         };
         if self.dynamic {
             if let Some(parent) = target_path.parent() {
                 std::fs::create_dir_all(parent).ok();
+            }
+        }
+        if let Some(ref key) = batch_key {
+            let should_skip = LAST_BATCH_WRITE.with(|cell| {
+                let mut guard = cell.borrow_mut();
+                if guard.as_ref().is_some_and(|prev| {
+                    prev.from_default_exporter != self.require_path_exists
+                        && prev.batch == *key
+                        && paths_refer_to_same_file(&prev.path, &target_path)
+                }) {
+                    *guard = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_skip {
+                return;
             }
         }
 
@@ -466,6 +499,16 @@ impl LogtailExporter {
 
         if let Err(e) = writer.flush() {
             log::warn!("Failed to flush logtail file: {e}");
+            return;
+        }
+        if let Some(key) = batch_key {
+            LAST_BATCH_WRITE.with(|cell| {
+                *cell.borrow_mut() = Some(LastBatchWrite {
+                    from_default_exporter: self.require_path_exists,
+                    batch: key,
+                    path: target_path,
+                });
+            });
         }
     }
 }
@@ -1171,7 +1214,7 @@ pub mod tests {
         // so no other test thread can observe a race.
         unsafe { std::env::remove_var(LOGTAIL_ENV_VAR) };
         set_dynamic_logtail_path("");
-        set_explicit_logtail_registered(false);
+        clear_last_batch_write();
     }
 
     /// A panic while the dynamic-path lock was held (the write guard is held
@@ -1771,25 +1814,25 @@ pub mod tests {
             .count();
         assert_eq!(resumed_count, 2);
 
-        // Before an explicit exporter is registered (e.g., `set_dynamic_logtail_path`
-        // ran on the watcher thread while the exporter is still queued in the mailbox),
-        // the default exporter must keep writing rather than dropping records.
-        set_explicit_logtail_registered(false);
+        // If the watcher deactivates the dynamic path *between* the default
+        // exporter call and the explicit exporter call for the same batch, the
+        // batch must still be present (default exporter already persisted it).
         set_dynamic_logtail_path(target.to_str().unwrap());
         default_exporter.export(std::slice::from_ref(&event));
-        let pre_drain_count = std::fs::read_to_string(&target)
+        set_dynamic_logtail_path("");
+        explicit_exporter.export(std::slice::from_ref(&event));
+        let mid_deactivate_count = std::fs::read_to_string(&target)
             .unwrap()
             .lines()
             .filter(|line| !line.is_empty())
             .count();
         assert_eq!(
-            pre_drain_count, 3,
-            "default exporter must keep writing while dynamic exporter is not yet registered"
+            mid_deactivate_count, 3,
+            "deactivation between default and explicit exporter calls must not drop the batch"
         );
 
-        // Lexical `..` aliases and symlinks to the same file must also deduplicate
-        // once the explicit exporter is registered.
-        set_explicit_logtail_registered(true);
+        // `..` aliases over real directories and symlinks to the same file must
+        // also deduplicate.
         let sub = tmp.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         let dotdot_alias = sub.join("..").join("agentsight.jsonl");
@@ -1821,6 +1864,38 @@ pub mod tests {
             assert_eq!(
                 symlink_count, 5,
                 "symlink path alias to the same file must not be written twice"
+            );
+
+            // A symlinked directory component followed by `..` (`tmp/dir_link/../agentsight.jsonl`
+            // where `dir_link -> other_dir/nested`) resolves in the kernel to
+            // `other_dir/agentsight.jsonl`, NOT `tmp/agentsight.jsonl`. Both files must receive
+            // the record.
+            let other_nested = tmp.join("other_dir").join("nested");
+            std::fs::create_dir_all(&other_nested).unwrap();
+            let dir_link = tmp.join("dir_link");
+            std::os::unix::fs::symlink(&other_nested, &dir_link).unwrap();
+            let symlink_dotdot = dir_link.join("..").join("agentsight.jsonl");
+            set_dynamic_logtail_path(symlink_dotdot.to_str().unwrap());
+            default_exporter.export(std::slice::from_ref(&event));
+            explicit_exporter.export(std::slice::from_ref(&event));
+            let default_after = std::fs::read_to_string(&target)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            let other_file = tmp.join("other_dir").join("agentsight.jsonl");
+            let other_after = std::fs::read_to_string(&other_file)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            assert_eq!(
+                default_after, 6,
+                "default file must still receive its record when symlink+dotdot resolves elsewhere"
+            );
+            assert_eq!(
+                other_after, 1,
+                "kernel-resolved symlink+dotdot target must also receive its record"
             );
         }
 
