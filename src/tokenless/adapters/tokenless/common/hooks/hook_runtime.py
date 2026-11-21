@@ -167,7 +167,7 @@ def post_tool(adapter: ModuleType, agent_id: str) -> None:
         payload = adapter.diagnostic_output(message)
     else:
         payload = adapter.response_output(data, result, output, message)
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps(payload))
 
 
 def run_hook(operation: str, adapter: ModuleType, agent_id: str) -> None:

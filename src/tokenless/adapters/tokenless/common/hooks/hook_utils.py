@@ -475,7 +475,13 @@ def skip_silent() -> None:
 
 
 def warn(msg: str) -> None:
-    print(f"[tokenless] WARNING: {msg}", file=sys.stderr)
+    # Harden host-replaced strict streams; CPython's stderr already escapes.
+    encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+    message = f"[tokenless] WARNING: {msg}"
+    message = message.encode(encoding, errors="backslashreplace").decode(
+        encoding, errors="backslashreplace"
+    )
+    print(message, file=sys.stderr)
 
 
 def try_parse_json(data: str) -> object | None:
@@ -621,6 +627,7 @@ def _run_in_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         start_new_session=True,
     ) as child:
         try:
@@ -642,7 +649,7 @@ def _run_in_group(
 def run(
     args: list[str], input_data: str, timeout: int = 3, *, isolated: bool = False
 ) -> subprocess.CompletedProcess | None:
-    """Run a subprocess with input data, returning None on failure."""
+    """Run a UTF-8 subprocess transport, returning None on failure."""
     try:
         if isolated:
             proc = _run_in_group(args, input_data, timeout)
@@ -652,8 +659,13 @@ def run(
                 input=input_data,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout,
             )
+        # Windows pipe-reader threads can leave a stream as None on a
+        # decoding error instead of raising in communicate(). Fail open.
+        if proc.stdout is None or proc.stderr is None:
+            return None
         forward_stderr(proc)
         return proc
     except Exception:
