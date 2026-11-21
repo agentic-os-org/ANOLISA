@@ -287,6 +287,28 @@ fn entities_unicode_and_backslashes_survive() {
 }
 
 #[test]
+fn inline_code_boundaries_preserve_fragment_text_and_spans() {
+    use super::super::tests::assert_inline_content;
+
+    for (html, expected, visible, spans) in [
+        ("<code>a</code><kbd>b</kbd>", "`a`<!-- -->`b`", "ab", &["a", "b"][..]),
+        (
+            "<a><samp>`a`</samp></a><a><code>b</code></a>",
+            "`` `a` ``<!-- -->`b`",
+            "`a`b",
+            &["`a`", "b"],
+        ),
+        (r"x\\<a>\<code>`y`</code></a>", r"x\\\\\\`` `y` ``", r"x\\\`y`", &["`y`"]),
+        // A literal backtick was not generated as a fence: no separator.
+        ("x`<code>b</code>", "x``b`", "x``b`", &[]),
+    ] {
+        let rendered = markdown(&format!("<p>{html}</p>"));
+        assert_eq!(rendered, expected, "{html}");
+        assert_inline_content(&rendered, visible, spans);
+    }
+}
+
+#[test]
 fn flattened_or_overly_deep_nesting_is_rejected() {
     // Past the renderer's depth the text would be flattened.
     let flattened = format!("{}text{}", "<div>".repeat(200), "</div>".repeat(200));
