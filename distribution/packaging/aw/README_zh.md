@@ -17,6 +17,15 @@ sha256sum -c SHA256SUMS
 
 `COMPONENTS` 接受空格分隔的 `core`、`sec-core`、`tokenless`，每个选择独立生成
 一个归档。`VERSION` 标记产物版本，不选择源码修订。装配过程检查工作树始终对应
+每个命令默认在 1200 秒后终止。双核主机上编译 `aw-cli` 可能超过该上限，可用
+`AW_BUILD_TIMEOUT`（单位：秒）放宽整次构建的上限；脚本中显式指定的单命令超时仍然优先于
+环境变量：
+
+```bash
+AW_BUILD_TIMEOUT=5400 make -C distribution aw-packages VERSION=0.1.0 \
+  COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
+```
+
 同一个未变更的 Git commit，并记录源码身份。
 
 ```text
