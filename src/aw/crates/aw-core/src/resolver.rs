@@ -3,6 +3,8 @@
 //! [`HookAuthority::Control`] owner, and auxiliary observers never duplicate step dispatch.
 
 mod configuration;
+#[cfg(test)]
+mod ordering_tests;
 
 pub use configuration::resolve_configuration;
 use configuration::{provider_protocol, validate_boolean_effects};
@@ -196,7 +198,13 @@ pub fn resolve(
             .collect();
         cands.sort_by_key(|(s, c)| (s.kind(), c.mode, s.source_id()));
 
-        if cands.is_empty() {
+        // An optional out-of-band observer cannot take over configured policy
+        // steps when the executable Source is absent.
+        let observation_only = !steps.is_empty()
+            && cands
+                .iter()
+                .all(|(source, _)| source.kind() == SourceKind::Sight);
+        if cands.is_empty() || observation_only {
             let fx: Vec<_> = need_fx.into_iter().collect();
             let act: Vec<_> = need_act.into_iter().filter(|a| a.is_control()).collect();
             let diag = (CoverageGapReason::UnsupportedEvent, fx, act);
@@ -213,7 +221,8 @@ pub fn resolve(
         }
 
         let primary = cands.iter().copied().find(|(s, c)| {
-            (!needs_native || s.kind() == SourceKind::Native)
+            (steps.is_empty() || s.kind() != SourceKind::Sight)
+                && (!needs_native || s.kind() == SourceKind::Native)
                 && (!needs_ctrl || c.mode == HookAuthority::Control)
                 && need_fx.iter().all(|e| c.supports_effect(*e))
                 && need_act.iter().all(|a| c.supports_failure_action(*a))
@@ -471,6 +480,7 @@ fn parse_steps(req: &HookRequirement<'_>) -> Result<Vec<ResolvedStepPlan>, Resol
             on_error,
             step_tools,
             native,
+            shadow: step.configuration()["mode"] == "shadow",
             dispatch_owner,
         });
     }
@@ -482,10 +492,12 @@ fn check_step_ordering(
     steps: &[ResolvedStepPlan],
     sources: &[SourceCapability],
 ) -> Result<(), ResolveError> {
-    if steps
-        .iter()
-        .position(|s| s.effects.contains(&HookEffect::ReplaceResult))
-        .is_some_and(|idx| idx + 1 != steps.len())
+    let enforcing = steps.iter().filter(|step| !step.shadow);
+    if enforcing
+        .clone()
+        .rev()
+        .skip(1)
+        .any(|step| step.effects.contains(&HookEffect::ReplaceResult))
     {
         return Err(BadReq(ERR_REPLACE_RES));
     }
@@ -493,12 +505,14 @@ fn check_step_ordering(
         s.hook(event)
             .is_some_and(|c| c.supports_effect(HookEffect::ReplaceInput))
     });
-    for (idx, step) in steps.iter().enumerate() {
+    for (idx, step) in enforcing.clone().enumerate() {
         if step.effects.contains(&HookEffect::ReplaceInput)
             && any_replace_input
             && !(idx == 0
                 && step.effects == [HookEffect::ReplaceInput]
-                && steps.iter().all(|c| c.on_error == FailureAction::Block))
+                && enforcing
+                    .clone()
+                    .all(|candidate| candidate.on_error == FailureAction::Block))
         {
             return Err(BadReq(ERR_REPLACE_IN));
         }

@@ -16,6 +16,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 aw-adapter = { workspace = true }
 aw-config = { workspace = true }
+aw-contracts = { workspace = true }
 aw-core = { workspace = true }
 aw-exec = { workspace = true }
 aw-host = { workspace = true }
@@ -29,5 +30,4 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
-aw-contracts = { workspace = true }
 serde_yaml_ng = { workspace = true }

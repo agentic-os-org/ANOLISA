@@ -2,6 +2,8 @@
 
 #[path = "resolver/configuration.rs"]
 mod configuration;
+#[path = "resolver/observation.rs"]
+mod observation;
 
 use aw_config::Validator;
 use aw_core::{

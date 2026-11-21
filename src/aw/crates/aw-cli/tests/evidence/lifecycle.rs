@@ -184,6 +184,98 @@ fn actions_reuse_callbacks_and_optional_failure_preserves_native_exit() {
 }
 
 #[test]
+fn resident_source_loss_and_recovery_are_fenced_from_policy_dispatch() {
+    let source_files = common::Fixture::new();
+    let source = launch_source(&source_files);
+    let fixture = launch::Fixture::new();
+    let mut document = configured(&source, &fixture);
+    fixture.provider(&mut document);
+    let service = launch::Service::start(&fixture, &document);
+    let mut process = launch::Process::spawn(
+        &fixture,
+        fixture.launch(&["--hold", "--run-id", "resident"], None),
+    );
+    wait::ready(&mut process, &fixture, "resident");
+    let reads = || {
+        source
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with("/api/trajectories/"))
+            .count()
+    };
+
+    wait::observation(&mut process, &service, "available", |state| {
+        state["observations"][0]["source_state"] == "available" && reads() == 2
+    });
+    let observed = service.status()["observations"][0].clone();
+    let key = observed["audit_key"].as_str().unwrap();
+    assert_eq!(observed["source"]["installed"], true);
+    assert_eq!(observed["source"]["state"], "ready");
+    assert_eq!(observed["source"]["proof"], "query_transport");
+    let reads_before = reads();
+    for (code, expected) in [(503, "lost"), (404, "unsupported"), (200, "recovered")] {
+        *source.auth_status.lock().unwrap() = code;
+        wait::observation(&mut process, &service, expected, |state| {
+            state["observations"][0]["source"]["state"] == expected
+        });
+        let state = service.status();
+        assert_eq!(state["bindings"], 1);
+        assert_eq!(state["audit_healthy"], true);
+        assert_eq!(state["observations"][0]["ebpf"], "unknown");
+        assert!(state["observations"][0]["source"]["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ebpf_coverage_unmeasured")));
+        assert!(state["observations"][0]["source_revision"].is_null());
+    }
+    assert_eq!(
+        reads(),
+        reads_before,
+        "recovery probed the endpoint without replaying trajectories"
+    );
+    fs::write(fixture.root.join("release-resident"), "exit").unwrap();
+    let output = process.finish();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["tool_executed"], true);
+    for event in report["events"].as_array().unwrap() {
+        assert_eq!(event["hooks"].as_array().unwrap().len(), 1);
+        assert_ne!(event["hooks"][0]["step"], "$aw.observe");
+        assert_eq!(event["hooks"][0]["status"], 0);
+    }
+    let audit = common::audit(&service.client, key);
+    let records: Vec<_> = audit["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| &row["record"])
+        .collect();
+    let transitions: Vec<_> = records
+        .iter()
+        .filter(|row| row["event"] == "coverage.changed")
+        .map(|row| row["source"]["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(transitions, ["ready", "lost", "unsupported", "recovered"]);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|row| row["event"] == "runtime.observed")
+            .count(),
+        2
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|row| row["event"] == "runtime.exited")
+            .count(),
+        1
+    );
+    assert_eq!(service.status()["bindings"], 0);
+}
+
+#[test]
 fn missing_service_store_and_source_errors_preserve_observation_lifecycle() {
     for scenario in ["service", "store", "error"] {
         let source_files = common::Fixture::new();
