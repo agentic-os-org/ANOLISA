@@ -253,6 +253,13 @@ test-claude-code-detect:
 # tests. It is unittest-shaped now and rides on this target beside the other
 # plain-python3 suites the Test tokenless job already runs, which is what
 # gives the raw packaging gate regression coverage in CI.
+# Run the env-fix CLI contract independently of Rust/plugin build targets.
+.PHONY: test-env-fix-normalization
+test-env-fix-normalization:
+	ENV_FIX_TEST_JQ="$${ENV_FIX_TEST_JQ:-$$(command -v jq)}" python3 tests/test_env_fix_normalization.py
+
+test-integration: test-env-fix-normalization
+
 # Keep the worker protocol suite as a prerequisite so test-integration and
 # its aggregate callers cannot omit it. It is stdlib-only: the subprocess
 # fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.

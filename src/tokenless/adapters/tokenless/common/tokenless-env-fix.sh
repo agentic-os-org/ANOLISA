@@ -85,30 +85,25 @@ classify_recent_failure() {
   fi
 }
 
-# --- Normalize a dep spec to object format ---
-# Input: string like "jq" → {binary:"jq",package:"jq",manager:"rpm"}
-# Input: object like {"binary":"jq",...} → pass through
-# Output: JSON object
+# --- Normalize an array of dependency entries ---
+# String entries split numeric >= constraints before the existing name validation.
+# Object entries retain their manager, package and fallback fields.
+# fix_tool_from_spec has a separate normalizer tracked by #9495.
 
-normalize_dep() {
-  local input="$1"
-  # If starts with {, it's already an object
-  if echo "$input" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "$input"
-    return
-  fi
-  # It's a string — convert to object with defaults
-  # Handle version constraints: "rtk>=0.35" → {binary:"rtk",version:">=0.35",...}
-  local base_name version_constraint
-  base_name=$(echo "$input" | sed 's/[>=<].*//')
-  version_constraint=$(echo "$input" | grep -oE '[>=<]+[0-9.]+' || echo "")
-  if [ -n "$version_constraint" ]; then
-    jq -n --arg bn "$base_name" --arg vc "$version_constraint" --arg pk "$base_name" --arg mgr "$PACKAGE_MANAGER" \
-      '{binary:$bn, version:$vc, package:$pk, manager:$mgr}'
-  else
-    jq -n --arg bn "$base_name" --arg pk "$base_name" --arg mgr "$PACKAGE_MANAGER" \
-      '{binary:$bn, package:$pk, manager:$mgr}'
-  fi
+normalize_deps() {
+  jq -c --arg mgr "$PACKAGE_MANAGER" '[.[] |
+    if type == "string" then
+      split(">=") as $parts |
+      if ($parts | length) == 1 then
+        {binary: ., package: ., manager: $mgr}
+      elif (($parts[1:] | join(">=")) |
+            test("\\A[0-9]+(\\.[0-9]+){0,2}\\z")) then
+        {binary: $parts[0], version: (">=" + ($parts[1:] | join(">="))),
+         package: $parts[0], manager: $mgr}
+      else
+        {binary: ., package: ., manager: $mgr}
+      end
+    else . end]'
 }
 
 # --- Input validation ---
@@ -668,7 +663,7 @@ case "${1:-}" in
       input=$(cat)
     fi
     # Normalize all entries
-    normalized=$(echo "$input" | jq -c --arg mgr "$PACKAGE_MANAGER" '[.[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' 2>/dev/null || echo '[]')
+    normalized=$(echo "$input" | normalize_deps 2>/dev/null || echo '[]')
     count=$(echo "$normalized" | jq 'length' 2>/dev/null || echo 0)
     for i in $(seq 0 $((count - 1))); do
       fix_dep "$(echo "$normalized" | jq -c ".[$i]")" || true
@@ -690,7 +685,7 @@ case "${1:-}" in
     fi
     echo "Auto-fixable dependencies (from spec):"
     # Collect all dep entries across all tools
-    all_deps=$(jq -c --arg mgr "$PACKAGE_MANAGER" '[del(."_comment") | to_entries[] | select(.key != "_meta") | .value | (.required // []) + (.recommended // []) | .[] | if type == "string" then {binary: ., package: ., manager: $mgr} else . end]' "$SPEC_FILE" 2>/dev/null || echo '[]')
+    all_deps=$(jq -c '[del(."_comment") | to_entries[] | select(.key != "_meta") | .value | (.required // []) + (.recommended // []) | .[]]' "$SPEC_FILE" 2>/dev/null | normalize_deps 2>/dev/null || echo '[]')
     count=$(echo "$all_deps" | jq 'length' 2>/dev/null || echo 0)
     dep_json="" binary="" package="" manager="" fb_count=""
     for i in $(seq 0 $((count - 1))); do
