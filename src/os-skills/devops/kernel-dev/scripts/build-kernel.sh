@@ -20,6 +20,7 @@ CONFIG_TYPE="${4:-defconfig}"
 OUTPUT_DIR="/root/rpmbuild"
 WORK_DIR="/root/upstream-kernel"
 LOG_FILE="/tmp/kernel-build.log"
+SRPM_LOG_FILE="/tmp/kernel-rpmbuild.log"  # srpm builds; the manual flow in examples/build-kernel.md tees here too
 
 # Color output functions
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -134,29 +135,43 @@ build_srpm() {
     # Prepare build
     info "Preparing build environment..."
     cd "$OUTPUT_DIR/SPECS"
-    rpmbuild -bp kernel.spec --define "_topdir $OUTPUT_DIR" 2>&1 | tee -a "$LOG_FILE"
+    # Kept deliberately as a fast-fail check: -bb below re-runs %prep from
+    # scratch anyway, so this only verifies BuildRequires and patch
+    # application up front, in the foreground, before the long build.
+    rpmbuild -bp kernel.spec --define "_topdir $OUTPUT_DIR" 2>&1 | tee -a "$SRPM_LOG_FILE"
     
     # Build kernel
     info "Starting kernel compilation (this may take 1-3 hours)..."
-    info "Build log: $LOG_FILE"
+    info "Build log: $SRPM_LOG_FILE (upstream method logs to $LOG_FILE)"
     
-    rpmbuild -bc kernel.spec \
+    # -bb, not -bc: -bc stops after %build and never writes the RPMs that
+    # the success message below and `install srpm` both expect under
+    # $OUTPUT_DIR/RPMS/$ARCH/.
+    rpmbuild -bb kernel.spec \
         --define "_topdir $OUTPUT_DIR" \
         --define "with_debug 0" \
         --define "with_doc 0" \
         --define "with_headers 1" \
         --define "with_perf 1" \
-        2>&1 | tee -a "$LOG_FILE" &
+        2>&1 | tee -a "$SRPM_LOG_FILE" &
     
     local build_pid=$!
     info "Build started in background (PID: $build_pid)"
-    info "Monitor progress: tail -f $LOG_FILE"
+    info "Monitor progress: tail -f $SRPM_LOG_FILE"
     
     # Wait for completion
     wait $build_pid
     
+    # $! above is the PID of the tee end of the pipeline, so wait returns
+    # tee's status and a failed rpmbuild is masked (#3632). Verify the
+    # outcome directly instead: -bb must have left kernel RPMs behind.
+    if ! ls "$OUTPUT_DIR/RPMS/$ARCH/"kernel-*.rpm > /dev/null 2>&1; then
+        error "No kernel RPMs found under $OUTPUT_DIR/RPMS/$ARCH/ - srpm build failed, see $SRPM_LOG_FILE"
+        exit 1
+    fi
+    
     success "SRPM build completed"
-    info "RPMs location: $OUTPUT_DIR/RPMS/x86_64/"
+    info "RPMs location: $OUTPUT_DIR/RPMS/$ARCH/"
 }
 
 # Build using Upstream method (kernel.org)
@@ -269,7 +284,7 @@ install_kernel() {
     
     if [ "$method" = "srpm" ]; then
         info "Installing RPM packages..."
-        $SUDO_CMD rpm -ivh "$OUTPUT_DIR/RPMS/x86_64/"kernel-*.rpm 2>&1 | tee -a "$LOG_FILE"
+        $SUDO_CMD rpm -ivh "$OUTPUT_DIR/RPMS/$ARCH/"kernel-*.rpm 2>&1 | tee -a "$LOG_FILE"
         
         info "Updating GRUB2 configuration..."
         $SUDO_CMD grub2-mkconfig -o /boot/grub2/grub.cfg 2>&1 | tee -a "$LOG_FILE"
@@ -302,8 +317,10 @@ show_status() {
     step "Build Status"
     
     info "SRPM Build Log:"
-    if [ -f "/tmp/kernel-rpmbuild.log" ]; then
-        tail -10 /tmp/kernel-rpmbuild.log
+    if [ -f "$SRPM_LOG_FILE" ]; then
+        # Both the manual flow from examples/build-kernel.md and this
+        # script's build_srpm tee rpmbuild output here.
+        tail -10 "$SRPM_LOG_FILE"
     else
         warn "SRPM build log not found"
     fi
@@ -345,9 +362,9 @@ Examples:
   $0 status                               # Show build progress
 
 Output:
-  SRPM builds:    $OUTPUT_DIR/RPMS/x86_64/
+  SRPM builds:    $OUTPUT_DIR/RPMS/$ARCH/
   Upstream builds: $WORK_DIR/linux-*/arch/*/boot/
-  Build logs:     $LOG_FILE
+  Build logs:     $LOG_FILE (upstream) / $SRPM_LOG_FILE (srpm)
 
 EOF
 }
