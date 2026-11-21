@@ -62,13 +62,20 @@ const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
       await saveStorageLimit(value);
       setLimitMb(value);
       setError(null);
-      const status = await fetchStorageStatus();
-      setTotalBytes(status.total_physical_bytes);
-      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       return false;
     }
+    // The POST already committed. A failed usage read cannot turn it into a
+    // failed save or leave the previous usage looking current.
+    try {
+      const status = await fetchStorageStatus();
+      setTotalBytes(status.total_physical_bytes);
+    } catch (cause) {
+      setTotalBytes(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+    return true;
   }, [input, loading, limitMb, t]);
 
   React.useImperativeHandle(ref, () => ({ save }));
