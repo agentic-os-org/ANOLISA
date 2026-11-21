@@ -17,6 +17,14 @@ use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep, Step
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
+const EVENTS: &[&str] = &[
+    "session.start",
+    "input.submit",
+    "tool.before",
+    "tool.after",
+    "turn.stop",
+];
+
 pub(crate) struct Codex;
 struct Prepared {
     input: LaunchInput,
@@ -52,10 +60,12 @@ impl Adapter for Codex {
             .strip_prefix("codex-cli ")
             .ok_or_else(|| format!("unexpected Codex version output: {version:?}"))?;
         let version = crate::version::reported(version, "Codex CLI")?;
-        let events: Vec<_> = ["input.submit", "tool.before", "tool.after"]
-            .into_iter()
+        let events: Vec<_> = EVENTS
+            .iter()
+            .copied()
             .filter(|event| {
-                adapter::observation_enabled(&input.document, &input.target)
+                (!crate::callback::lifecycle(event)
+                    && adapter::observation_enabled(&input.document, &input.target))
                     || (input.document["spec"]["events"][*event]["enabled"] == true
                         && input.document["spec"]["events"][*event]["steps"]
                             .as_array()
@@ -91,6 +101,16 @@ impl Adapter for Codex {
         let expected = native_event(event)?;
         if native["hook_event_name"] != expected || native["cwd"].as_str() != context.cwd.to_str() {
             return Err("Codex callback event or cwd does not match this launch".into());
+        }
+        if crate::callback::lifecycle(event) {
+            let mut native = native.clone();
+            if event == "turn.stop" {
+                if native["stop_hook_active"] != false {
+                    return Err("Codex requires an initial native Stop callback".into());
+                }
+                native["reason"] = json!("stop_requested");
+            }
+            return super::lifecycle::normalize(context, "codex", event, &native);
         }
         let identity = |key: &str| -> Result<&str> {
             native[key]
@@ -135,13 +155,13 @@ impl Adapter for Codex {
     fn install(
         &self,
         options: &InstallOptions,
-        _config: &aw_config::Configuration,
+        config: &aw_config::Configuration,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
         if options.profile.is_some() {
             return Err("Codex installation uses CODEX_HOME, not a native profile".into());
         }
-        installation::install(cancelled)
+        installation::install(config.as_value(), cancelled)
     }
 }
 
@@ -187,6 +207,18 @@ impl PreparedLaunch for Prepared {
         command
             .environment
             .insert("AW_CODEX_CONFIG".into(), config.into_os_string());
+        if events.keys().any(|event| crate::callback::lifecycle(event)) {
+            let path = context.files.write(
+                "codex-lifecycle.py",
+                include_bytes!("../../native/codex/lifecycle.py"),
+            )?;
+            command
+                .environment
+                .insert("AW_CODEX_LIFECYCLE".into(), path.into_os_string());
+            command
+                .environment
+                .insert("AW_CODEX_BINARY".into(), context.executable.into());
+        }
         let provider_environment = command.environment.clone();
         Ok(LaunchPlan {
             command,
@@ -199,6 +231,8 @@ impl PreparedLaunch for Prepared {
 
 pub(super) fn native_event(event: &str) -> Result<&'static str> {
     match event {
+        "session.start" => Ok("SessionStart"),
+        "turn.stop" => Ok("Stop"),
         "input.submit" => Ok("UserPromptSubmit"),
         "tool.before" => Ok("PreToolUse"),
         "tool.after" => Ok("PostToolUse"),
@@ -208,6 +242,11 @@ pub(super) fn native_event(event: &str) -> Result<&'static str> {
 
 pub(super) fn hook_command(executable: &Path, event: &str) -> Result<String> {
     native_event(event)?;
+    if crate::callback::lifecycle(event) {
+        return Ok(format!(
+            r#"if [ -n "$AW_CODEX_LIFECYCLE" ]; then exec python3 -B "$AW_CODEX_LIFECYCLE" {event}; fi"#
+        ));
+    }
     let executable = executable.to_str().ok_or("non-UTF-8 AW executable")?;
     Ok(format!(
         "'{}' codex-hook --event {event}",
@@ -221,11 +260,12 @@ fn routes(
 ) -> Result<(BTreeMap<String, HookEvent>, Value)> {
     let mut events = BTreeMap::new();
     let mut chains = json!({});
-    for event in ["input.submit", "tool.before", "tool.after"] {
+    for &event in EVENTS {
         let selected = adapter::native_steps(
             steps,
             event,
-            adapter::observation_enabled(&input.document, &input.target),
+            !crate::callback::lifecycle(event)
+                && adapter::observation_enabled(&input.document, &input.target),
         );
         if selected.is_empty() {
             continue;

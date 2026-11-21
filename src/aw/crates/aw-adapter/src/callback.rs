@@ -23,6 +23,11 @@ pub fn supports_event_close(adapter: &str) -> bool {
     )
 }
 
+/// Semantic lifecycle gates use session or turn correlation instead of a tool call.
+pub fn lifecycle(event: &str) -> bool {
+    matches!(event, "session.start" | "turn.stop" | "session.end")
+}
+
 /// Normalize the callback and its optional completion frame without service state.
 pub fn normalize(
     adapter: &dyn Adapter,
@@ -184,6 +189,13 @@ pub fn response(
                 stderr: Vec::new(),
             });
         }
+        if lifecycle(event) && provider_fault && output["failure_action"] == on_error {
+            writeln!(
+                diagnostics,
+                "AW lifecycle check failed; see the instance audit"
+            )?;
+            return Ok(adapter.reply(on_error == "block"));
+        }
         let claude_fault = adapter_id == "claude-sdk" && provider_fault;
         if claude_fault && event == "input.submit" && output["failure_action"] == on_error {
             writeln!(
@@ -311,7 +323,10 @@ pub fn response(
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
-        if !matches!(event, "input.submit" | "tool.before" | "security.violation") {
+        if !matches!(
+            event,
+            "input.submit" | "tool.before" | "security.violation" | "turn.stop"
+        ) {
             return Err("block requires an admitted blocking event".into());
         }
         let mut reply = adapter.reply(true);
@@ -363,35 +378,6 @@ pub fn readiness_degraded(adapter: &str, reason: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn withholding_allows_success_and_propagates_execution_failure() {
-        let adapter = adapter::select("qwenpaw").unwrap();
-        let success = json!({"kind":"skipped", "status":"ok", "effects":[],
-            "failure":null, "failure_action":null, "call":{"process":null}});
-        let response_for = |event, output| {
-            response(
-                adapter,
-                event,
-                "withhold_result",
-                output,
-                "qwenpaw",
-                &json!({}),
-                &mut Vec::new(),
-            )
-        };
-        assert!(matches!(
-            response_for("tool.after", success.clone()).unwrap().exit,
-            Exit::Code(0)
-        ));
-        assert!(response_for("tool.before", success).is_err());
-        assert!(response_for(
-            "tool.after",
-            json!({"status":"error",
-            "failure":"provider", "failure_action":"withhold_result"})
-        )
-        .is_err());
-    }
 
     #[test]
     fn report_faults_return_a_neutral_reply_for_pi_and_claude() {

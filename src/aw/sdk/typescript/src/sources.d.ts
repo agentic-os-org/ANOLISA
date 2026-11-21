@@ -9,7 +9,13 @@ import type {
 } from "./index.js";
 import { AwError } from "./index.js";
 
-export type SourceEvent = "input.submit" | "tool.before" | "tool.after";
+export type SourceEvent =
+  | "session.start"
+  | "input.submit"
+  | "tool.before"
+  | "tool.after"
+  | "turn.stop"
+  | "session.end";
 export const SOURCE_PROTOCOL: "aw-hook-source/v1";
 export const DEFAULT_SOURCE_EVENTS: readonly SourceEvent[];
 export const DEFAULT_MAX_STREAM_ITEMS: number;
@@ -120,6 +126,15 @@ export class SourceSession {
   /** Aborts on session close. Pass to cancellable native stream reads. */
   readonly signal: AbortSignal;
   prepare(signal?: AbortSignal): Promise<void>;
+  sessionStart(options?: { signal?: AbortSignal }): Promise<SemanticDecision>;
+  /** Return the stop decision for adoption at the app's native boundary. */
+  turnStop(
+    turnId: string,
+    reason: string,
+    options?: { attemptId?: string; signal?: AbortSignal },
+  ): Promise<SemanticDecision>;
+  /** Report actual native termination before releasing the Scope. */
+  sessionEnd(reason: string, options?: { signal?: AbortSignal }): Promise<SemanticDecision>;
   submit(
     text: string,
     options?: { turnId?: string; signal?: AbortSignal },

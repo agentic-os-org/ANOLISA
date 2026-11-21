@@ -46,6 +46,9 @@ export function strictOutputRelease({ version, coreVersion }) {
  */
 export function workerBinding({ worker, inputEnabled, strictOutput }) {
   const events = {
+    "session.start": ["observe"],
+    "turn.stop": ["observe"],
+    "session.end": ["observe"],
     "tool.before": ["observe", "block", "replace_input"],
     "tool.after": ["observe", "replace_result"],
   };

@@ -8,6 +8,7 @@ from dataclasses import replace
 import os
 import re
 from pathlib import Path
+from uuid import uuid4
 import runpy
 import signal
 import sys
@@ -140,6 +141,8 @@ class ResidentBridge(Bridge):
 class ManagedClient(ClaudeSDKClient):
     """A public SDK client retains its conversation across drained executions."""
 
+    _aw_observe_sessions = False
+
     def __init__(
         self,
         options: ClaudeAgentOptions,
@@ -199,6 +202,9 @@ class ManagedClient(ClaudeSDKClient):
         else:
             from aw_mcp import claim_servers
 
+        self._aw_observe_sessions = any(
+            hook["event"] in {"session.start", "session.end"} for hook in self._aw_bridge.config["hooks"]
+        )
         composed = self._aw_bridge.options(options)
         # Track caller hooks as well as AW hooks: SDK cancellation removes its
         # in-flight index before a callback's asynchronous finally has drained.
@@ -289,6 +295,7 @@ class ManagedClient(ClaudeSDKClient):
                     if reloadable:
                         await self._aw_bridge.scope.acknowledge()
                     await super().connect(None)
+                    self._aw_bridge.bind_stop_deliveries(getattr(self, "_query", None))
                     async with asyncio.timeout(5):
                         transport = self._custom_transport
                         environment = await transport.model_environment(self._query)
@@ -348,6 +355,7 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_task_started = True
         self._aw_input_task = asyncio.current_task()
         begun = False
+        turn_id = str(uuid4())
         try:
             hooks = [hook for hook in self._aw_bridge.config["hooks"]
                      if hook["event"] == "input.submit"]
@@ -361,7 +369,7 @@ class ManagedClient(ClaudeSDKClient):
                     prompt, session_id, self._aw_cwd, hooks[0]["budget_ms"],
                 )
                 try:
-                    await check(self._aw_bridge, payload)
+                    turn_id = await check(self._aw_bridge, payload)
                 except SubmissionDenied:
                     raise
                 except asyncio.CancelledError:
@@ -387,6 +395,7 @@ class ManagedClient(ClaudeSDKClient):
             self._aw_bridge.invocations.begin()
             begun = True
             self._aw_query_finished = False
+            self._aw_bridge.turn_id = turn_id
             await super().query(prompt, session_id)
         except BaseException:
             if begun:
@@ -415,6 +424,7 @@ class ManagedClient(ClaudeSDKClient):
                 raise
             self._aw_query_finished = True
             self._aw_task_started = False
+            self._aw_bridge.turn_id = None
 
     async def receive_messages(self) -> AsyncIterator[Any]:
         self._aw_check()
@@ -428,6 +438,8 @@ class ManagedClient(ClaudeSDKClient):
                     if self._aw_bridge.failure:
                         await self._aw_bridge.stop_task()
                         raise CallbackFailure(self._aw_bridge.failure)
+                    if self._aw_observe_sessions:
+                        await self._aw_bridge.session_initialized(message, self._aw_cwd)
                     if isinstance(message, ResultMessage):
                         await self._aw_complete()
                     yield message
@@ -474,9 +486,11 @@ class ManagedClient(ClaudeSDKClient):
                         producer.cancel()
                         async with asyncio.timeout(5):
                             await asyncio.gather(producer, return_exceptions=True)
+                    reason = "disconnected"
                     if self._aw_task_started and not self._aw_query_finished:
                         try:
                             await self._aw_bridge.stop_task()
+                            reason = "cancelled"
                         except BaseException:
                             fail_stop(self._aw_bridge.group)
                             raise
@@ -489,6 +503,8 @@ class ManagedClient(ClaudeSDKClient):
                                 await self._aw_relay.close()
                         finally:
                             await self._aw_bridge.invocations.drain()
+                    if self._aw_observe_sessions:
+                        await self._aw_bridge.session_disconnected(self._aw_cwd, reason)
                 finally:
                     try:
                         await self._aw_bridge.scope.close()

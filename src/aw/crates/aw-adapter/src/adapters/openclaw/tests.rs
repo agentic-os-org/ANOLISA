@@ -250,3 +250,27 @@ fn normalized_events_obey_provider_contract_and_scope_call_ids_to_runs() {
         .normalize(&binding, "tool.before", &native)
         .is_err());
 }
+
+#[test]
+fn lifecycle_callbacks_keep_session_and_end_reason() {
+    let binding = NativeContext {
+        target: "openclaw".into(),
+        instance_id: "instance".into(),
+        cwd: "/work".into(),
+    };
+    for (event, hook, reason) in [
+        ("session.start", "session_start", Value::Null),
+        (
+            "turn.stop",
+            "before_agent_finalize",
+            json!("stop_requested"),
+        ),
+        ("session.end", "session_end", json!("reset")),
+    ] {
+        let native = json!({"hook":hook,"session_id":"session","turn_id":"turn","reason":reason});
+        let value = OpenClaw.normalize(&binding, event, &native).unwrap();
+        assert_eq!(value["session_id"], "session");
+        assert_eq!(value["native"]["reason"], reason);
+        assert!(value.get("tool").is_none());
+    }
+}

@@ -213,6 +213,7 @@ impl PreparedLaunch for Prepared {
             super::super::adapter::catalog::QWENPAW.capabilities(&self.version, "app");
         if self.input.options.reloadable {
             capabilities.events.remove("input.submit");
+            capabilities.events.remove("turn.stop");
         }
         if !self.input.options.reloadable {
             capabilities
@@ -427,7 +428,7 @@ fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
 pub(crate) const fn route_options(observe: bool) -> aw_core::routes::RouteOptions<'static> {
     // After wrappers are outermost, so they also observe an inner before denial.
     aw_core::routes::RouteOptions {
-        events: &["tool.after", "tool.before", "input.submit"],
+        events: &["tool.after", "tool.before", "input.submit", "turn.stop"],
         observe_events: if observe {
             aw_core::routes::OBSERVED_TOOL_EVENTS
         } else {
@@ -471,6 +472,9 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 }
 
 fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+    if event == "turn.stop" && native["event"] == event {
+        return super::lifecycle::normalize(binding, "qwenpaw", event, native);
+    }
     if event == "input.submit" && native["event"] == event {
         return super::submission::normalize(binding, native, "qwenpaw", "input_text");
     }
@@ -514,6 +518,20 @@ mod tests {
     use super::*;
     use crate::adapter;
     use aw_core::admission::StepExecution;
+
+    #[test]
+    fn turn_stop_retains_native_reply_identity_and_reason() {
+        let binding = NativeContext {
+            target: "qwenpaw".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        let native = json!({"event":"turn.stop","session_id":"session","turn_id":"reply","reason":"interrupted"});
+        let normalized = normalize(&binding, "turn.stop", &native).unwrap();
+        assert_eq!(normalized["turn_id"], "reply");
+        assert_eq!(normalized["native"]["reason"], "interrupted");
+        assert!(normalized.get("tool").is_none());
+    }
 
     #[test]
     fn withholding_is_limited_to_the_ordinary_resident_launch() {

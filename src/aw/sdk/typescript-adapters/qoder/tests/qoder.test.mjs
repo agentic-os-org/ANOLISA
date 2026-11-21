@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { qoderOptions } from "../../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
+import { qoderCapabilities, qoderOptions } from "../../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
 
 const hook = {
   event: "tool.before",
@@ -124,4 +124,21 @@ test("native response errors drain the partial event before reporting denial", a
   assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(attached.failure.message, "unsupported_qoder_sdk_directive");
   assert.deepEqual(order, ["invoke", "drained"]);
+});
+
+
+test("native Qoder session starts are observed without changing native Hooks", async () => {
+  assert.deepEqual(qoderCapabilities(false).events["session.start"], ["observe"]);
+  const calls = [];
+  const task = scope(async (selected, event) => {
+    calls.push([selected.event, event.session_id]);
+    return { code: 0, stdout: Buffer.alloc(0) };
+  });
+  task.routes.hooks = [{ ...hook, event: "session.start", on_error: "report" }];
+  const attached = qoderOptions(task);
+  const run = attached.options.hooks.SessionStart[0].hooks[0];
+  await run({ hook_event_name: "SessionStart", session_id: "session", source: "compact" });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(await run({ hook_event_name: "SessionStart", session_id: "session", source: "startup" }), {});
+  assert.deepEqual(calls, [["session.start", "session"]]);
 });

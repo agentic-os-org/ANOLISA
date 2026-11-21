@@ -6,6 +6,7 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -297,6 +298,7 @@ class ResidentMiddleware(MiddlewareBase):
                 except StopAsyncIteration:
                     break
                 self.check()
+                await self.observe_turn_stop(value)
                 yield value
         except SubmissionDenied:
             raise
@@ -321,6 +323,28 @@ class ResidentMiddleware(MiddlewareBase):
                     raise
                 finally:
                     await settle(self.close_if_drained())
+
+    async def observe_turn_stop(self, value):
+        hooks = [hook for hook in self.config["hooks"] if hook["event"] == "turn.stop"]
+        if not hooks:
+            return
+        from agentscope.event import ReplyEndEvent
+
+        if not isinstance(value, ReplyEndEvent) or value.session_id != self.session:
+            return
+        payload = {"event": "turn.stop", "session_id": value.session_id,
+                   "turn_id": value.reply_id, "reason": str(value.finished_reason)}
+        for hook in hooks:
+            try:
+                middleware = self.evaluate(self.config, hook)
+                middleware.scope = self.scope
+                code, stdout, _stderr = await middleware._invoke(payload)
+                if code != 0 or stdout.strip():
+                    raise ResidentFailure("invalid_turn_stop_response")
+            except (OSError, TimeoutError, ValueError, RuntimeError) as error:
+                logging.getLogger(__name__).error(
+                    "AW turn.stop step %s failed: %s", hook["step"], type(error).__name__
+                )
 
     async def acquire_lease(self):
         # Keep the original acquisition owned when a cancelled caller stops

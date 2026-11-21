@@ -69,7 +69,12 @@ export class Task {
   readonly routes: Routes;
   /** Confirm a Task opened with deferAcknowledgement after native installation. */
   acknowledge(): Promise<void>;
-  /** Requires the sdk profile; the application must adopt block before native work. */
+  /** Requires the sdk profile; the application adopts the returned decision. */
+  emit<Event extends keyof SemanticLifecycle>(
+    event: Event,
+    payload: SemanticLifecycle[Event],
+    signal?: AbortSignal,
+  ): Promise<SemanticDecision>;
   emit(
     event: "input.submit",
     payload: { session_id: string; turn_id: string; text: string },
@@ -97,6 +102,12 @@ export class Task {
   /** Drain an interrupted native event; does not inherit an aborted task signal. */
   closeEvent(hook: Hook, payload: unknown): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface SemanticLifecycle {
+  "session.start": { session_id: string };
+  "turn.stop": { session_id: string; turn_id: string; reason: string; attempt_id?: string };
+  "session.end": { session_id: string; reason: string };
 }
 
 export interface SemanticTool {

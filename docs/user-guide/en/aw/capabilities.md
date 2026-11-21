@@ -8,35 +8,34 @@ Application-owned QwenPaw Apps can use the [Python SDK](../../../developer-guide
 
 Application-owned Qoder Queries can use the [TypeScript SDK](../../../developer-guide/en/aw/deployment/native-sdk.md) with explicit native fallback. Its public-Hook coverage and acceptance are listed separately from resident `aw run`.
 
-Application-owned resident Claude and Pi workers can also publish an SDK attach listener. The controller attaches each worker by PID before protected work begins. These entries always require AW and cover configured `input.submit`, `tool.before` (including `replace_input`) and `tool.after` (including `replace_result`); other Hooks are rejected at admission. A Claude worker whose native cleanup cannot be confirmed is terminated with its process group. Pi strict result protection follows the managed 0.84.2–1.5.2 release range. [Claude Python worker](../../../developer-guide/en/aw/agents/claude-sdk.md) · [Pi TypeScript worker](../../../developer-guide/en/aw/deployment/native-sdk.md#pi-worker-integration)
+Application-owned resident Claude and Pi workers can also publish an SDK attach listener. The controller attaches each worker by PID before protected work begins. These entries always require AW and cover configured `input.submit`, `tool.before` (including `replace_input`) and `tool.after` (including `replace_result`). Lifecycle support for each entry is listed below. A Claude worker whose native cleanup cannot be confirmed is terminated with its process group. Pi strict result protection follows the managed 0.84.2–1.5.2 release range. [Claude Python worker](../../../developer-guide/en/aw/agents/claude-sdk.md) · [Pi TypeScript worker](../../../developer-guide/en/aw/deployment/native-sdk.md#pi-worker-integration)
 
 AW shares tool checks, result processing and custom rules across Agents. Adapters connect these capabilities to native tool execution. See the [Agent index](../../../developer-guide/en/aw/native-agents.md) for versions and setup.
 
-The `sdk/application` profile accepts framework-free input and tool callbacks in
-both language packages. It supports input/tool-before observation and blocking,
-and tool-after observation. The application must install those boundaries and
-adopt `block` before execution. Candidate package tests cover both languages;
-this does not certify automatic instrumentation or final-result protection for
-arbitrary applications. See [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration).
+Use the `sdk/application` profile to install framework-free input, tool and lifecycle
+boundaries in Python or TypeScript. Select the lifecycle events when creating a
+`LanguageSource`, then call the corresponding `SourceSession` methods from the
+application's native boundaries. The application adopts the returned `turn.stop`
+decision before allowing the turn to end. [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration)
 
 ## Hook support matrix
 
 ✓ Declared with contract coverage; × unsupported. Most Adapters replace authorized text slots while preserving native envelopes and failure status. Codex has a narrower model-text contract described below.
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` | `session.end` / `observe` | `session.start` / `observe` | `turn.stop` / `observe` | `turn.stop` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × | × | ✓ | ✓ | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | ✓ | ✓ | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × | ✓ | ✓ | ✓ | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
@@ -81,13 +80,33 @@ Qoder SDK foreground `Read` text results support PII replacement of file content
 
 Qoder SDK 1.0.57 / Worker 1.1.81 also supports a required final result gate for one foreground Bash Query on Linux arm64/x64. It checks post-Hook text before native request encoding; unsupported transports, extra context turns and runtime builds fail closed. See [setup and scope](../../../developer-guide/en/aw/agents/qoder-sdk.md#final-tool-result-gate).
 
+## Lifecycle boundaries
+
+Session Hooks observe native boundaries. `turn.stop` can observe a terminal turn
+or check an attempt before native finalization, depending on the Adapter. The
+audit record keeps the stop or end reason supplied by the boundary alongside
+the session, turn and available task and process identities. The Service
+records the outcome of the policy step separately from the native result.
+
+| Entry | Lifecycle boundary |
+| --- | --- |
+| Qoder CLI | Ordinary managed launches use native `SessionStart` and `SessionEnd`. The pinned Stop payload lacks a turn ID. Startup attachment and reloadable mode use their existing readiness and drain protocol. |
+| Qoder SDK | Ordinary managed Queries observe native session start and end. The application-owned public-Hook bridge observes session starts. The restricted reloadable and final-result profiles exclude these routes. |
+| Claude SDK | Python foreground and resident factories check the native `Stop` callback for an active SDK turn. A block asks Claude to continue with the Provider's reason. The SDK `init` message and confirmed disconnect supply session boundaries when the consumer receives the native session ID. These entries cover the Python SDK profile. Repeated Stop deliveries with the same native control request ID share the turn’s decision. A new request ID, including a follow-up after a veto, runs the policy again. |
+| QwenPaw and AgentScope | Ordinary replies observe the native `ReplyEndEvent`, including interruption and iteration limits. A resumed reply uses the native reply ID. The boundary represents a reply, so session Hooks remain unavailable. |
+| Hermes | Ordinary local chat uses `on_session_start`, the turn-aware form of `on_session_end`, and `on_session_finalize`. Gateway and reloadable mode retain their separate boundaries. |
+| Pi | Factory creation and disposal report the session. The native Agent's `turn_end` reports the model's stop reason, including errors and cancellation. |
+| OpenClaw | Verified bundle, ordinary Gateway. Native session hooks report start and end. The initial `before_agent_finalize` observes a stop request with a turn or run ID. |
+| Codex | Native `SessionStart` and initial `Stop` are observed through trusted commands. Run `aw connect` after enabling either lifecycle event and review the new native Hook definitions. |
+| DeepSeek Harness | The Agent creation callback and committed `turn/end` record report native lifecycle with the committed turn reason. The pinned headless runtime provides no session-end receipt during shutdown. |
+
 ## 16 common Hooks
 
 Public Provider Hook status; see the matrix above for effects supported by each Adapter.
 
 | Hook | Status |
 | --- | --- |
-| `session.start` | Planned |
+| `session.start` | Observe in the lifecycle entries above |
 | `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input, AgentScope factory text replies DeepSeek Harness headless text turns and local Codex CLI |
 | `tool.before` | Implemented |
 | `tool.after` | Implemented |
@@ -96,8 +115,8 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `compact.after` | Planned |
 | `subagent.start` | Planned |
 | `subagent.stop` | Planned |
-| `turn.stop` | Planned |
-| `session.end` | Planned |
+| `turn.stop` | Observe in the lifecycle entries above. Block in Claude Python and explicit SDK integration |
+| `session.end` | Observe in the lifecycle entries above |
 | `model.before_request` | Planned |
 | `runtime.observed` | Planned |
 | `runtime.exited` | Planned |
@@ -193,7 +212,7 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
 - Pi managed tool.after steps with `on_error: report` keep the checked original result when a Provider or transport fault occurs, and the same session continues with its next prompt. Before-tool faults, post-tool `block`/`withhold_result` faults, cancellation, identity and cleanup failures still stop the task. Input refusal and blocking input-check faults reject that prompt and allow another prompt after cleanup.
 - Claude SDK resident `tool.after` steps with `on_error: report` keep the original result and continue model calls for audited, recoverable Provider failures. This covers native HTTP MCP text and `structuredContent` results and built-in tools such as Bash; managed SDK MCP retains its existing recovery. The same client accepts another task after callbacks drain. Identity/scope failures, cancellation, lifecycle/cleanup failures, before-Hook failures, invalid native responses, unknown transport details and audit failures remain fail-stop. `on_error: block` and native security denial retain their blocking semantics. See [resident deployment](../../../developer-guide/en/aw/deployment/resident.md) for the recoverable categories. Post checks cannot undo an executed tool.
-- Public Provider execution currently covers `input.submit`, `tool.before`, `tool.after` and `security.violation` where the selected Adapter supports them. The other 12 event names, common approval, guard, Schema/BeforeModel and Retrieve integration are not available; input replacement is limited to the Adapters and effects shown in the matrix above.
+- The Hook matrix lists the public Provider events and effects for each Adapter. Use the lifecycle boundaries above to select a supported launch mode for session and turn events.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 
 The matrix is generated from the [regression manifest](../../../../src/aw/tests/regression-matrix.json). The [native manifest](../../../../src/aw/tests/native-matrix.json) records pinned versions and coverage; see [contributing](../../../../src/aw/CONTRIBUTING.md) for validation.

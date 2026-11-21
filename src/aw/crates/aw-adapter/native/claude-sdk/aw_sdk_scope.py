@@ -15,6 +15,9 @@ PROFILE = {"adapter": "claude-sdk", "version": "resident-hooks/v1", "entrypoint"
 def capabilities(input_enabled: bool) -> dict:
     """Capability ceiling installed by the resident Bridge for this worker."""
     events = {
+        "session.start": ["observe"],
+        "turn.stop": ["observe", "block"],
+        "session.end": ["observe"],
         "tool.before": ["observe", "block", "replace_input"],
         "tool.after": ["observe", "replace_result"],
     }

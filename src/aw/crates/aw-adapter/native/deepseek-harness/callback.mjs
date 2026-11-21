@@ -27,7 +27,7 @@ export function transport(config) {
     async invoke(hook, payload, signal) {
       const input = Buffer.from(JSON.stringify(payload));
       if (input.length > 1024 * 1024) throw Error("native_input_limit");
-      if (signal.aborted) throw Error("callback_aborted");
+      if (signal?.aborted) throw Error("callback_aborted");
       return await new Promise((resolve, reject) => {
         const child = spawn(
           config.executable,
@@ -55,8 +55,8 @@ export function transport(config) {
           stop(child);
         };
         const abort = () => fail(Error("callback_aborted"));
-        signal.addEventListener("abort", abort, { once: true });
-        if (signal.aborted) abort();
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
         const timer = setTimeout(
           () => fail(Error("callback_timeout")),
           hook.budget_ms + 3000,
@@ -75,7 +75,7 @@ export function transport(config) {
         });
         child.on("close", (code) => {
           clearTimeout(timer);
-          signal.removeEventListener("abort", abort);
+          signal?.removeEventListener("abort", abort);
           children.delete(child);
           // Reap descendants even when the direct callback exits successfully.
           stop(child);

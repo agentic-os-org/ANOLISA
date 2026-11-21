@@ -12,6 +12,9 @@ async def main() -> None:
         "version": "aw-hook-source/v1",
         "entrypoint": "application",
         "events": {
+            "session.start": ["observe"],
+            "turn.stop": ["observe", "block"],
+            "session.end": ["observe"],
             "input.submit": ["observe", "block"],
             "tool.before": ["observe", "block"],
             "tool.after": ["observe"],
@@ -38,6 +41,9 @@ async def main() -> None:
                     ) == {"decision": "continue", "coverage": "checked"}
             return
         async with await instance.task() as task:
+            assert await task.emit("session.start", {"session_id": "session"}) == {
+                "decision": "continue", "coverage": "checked",
+            }
             assert await task.emit(
                 "input.submit", {"session_id": "session", "turn_id": "turn", "text": "deny"}
             ) == {"decision": "block", "coverage": "checked"}
@@ -78,6 +84,12 @@ async def main() -> None:
                     assert error.code == code
                 else:
                     raise AssertionError("invalid callback accepted")
+            assert await task.emit(
+                "turn.stop", {"session_id": "session", "turn_id": "turn", "reason": "timeout"}
+            ) == {"decision": "block", "coverage": "checked"}
+            assert await task.emit("session.end", {"session_id": "session", "reason": "cancelled"}) == {
+                "decision": "continue", "coverage": "checked",
+            }
     finally:
         await instance.close()
     capabilities["events"]["tool.after"].append("replace_result")

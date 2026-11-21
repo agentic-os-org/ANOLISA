@@ -8,7 +8,7 @@ use aw_core::{
     admission::{AdapterCapabilities, AdmittedStep},
     routes::{
         EventFilter, HookRoute, PreparedRoutes, RouteError, RouteOptions, SkillCheck,
-        DEFAULT_MAX_BUDGET_MS, OBSERVED_TOOL_EVENTS, STANDARD_EVENTS,
+        DEFAULT_MAX_BUDGET_MS, OBSERVED_TOOL_EVENTS,
     },
 };
 use serde_json::{json, Value};
@@ -34,7 +34,6 @@ const _: () = assert!(eq_bytes(
     aw_core::routes::OBSERVE_STEP.as_bytes()
 ));
 
-const SDK_EVENTS: &[&str] = &["input.submit", "tool.before", "tool.after"];
 const STANDARD_RESIDENT_ENTRYPOINTS: &[&str] = &["application", "sdk", "sdk-worker", "factory"];
 
 struct ResidentDialect {
@@ -54,7 +53,7 @@ const SDK_BUDGET_ERRORS: (&str, &str, &str) = (
 
 fn sdk_worker_observed(source_id: &str) -> RouteOptions<'_> {
     RouteOptions {
-        events: STANDARD_EVENTS,
+        events: super::lifecycle::QODER_SDK,
         observe_events: OBSERVED_TOOL_EVENTS,
         event_filter: EventFilter::All,
         max_budget_ms: DEFAULT_MAX_BUDGET_MS,
@@ -71,6 +70,7 @@ fn sdk_worker_observed(source_id: &str) -> RouteOptions<'_> {
 
 fn sdk_worker_explicit(source_id: &str) -> RouteOptions<'_> {
     RouteOptions {
+        events: super::lifecycle::CLAUDE_SDK,
         observe_events: &[],
         ..sdk_worker_observed(source_id)
     }
@@ -78,7 +78,7 @@ fn sdk_worker_explicit(source_id: &str) -> RouteOptions<'_> {
 
 fn semantic_sdk(source_id: &str) -> RouteOptions<'_> {
     RouteOptions {
-        events: SDK_EVENTS,
+        events: super::lifecycle::SEMANTIC_SDK,
         ..sdk_worker_observed(source_id)
     }
 }

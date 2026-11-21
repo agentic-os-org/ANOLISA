@@ -15,6 +15,9 @@ mod event_receipt;
 #[path = "claude_sdk/submission.rs"]
 mod submission;
 
+#[path = "claude_sdk/stop_replay.rs"]
+mod stop_replay;
+
 #[path = "claude_sdk/probe.rs"]
 mod probe;
 

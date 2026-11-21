@@ -1,4 +1,4 @@
-import type { Admission, Instance, Routes, Task } from "./index.js";
+import type { Admission, Instance, Routes, SemanticDecision, SemanticLifecycle, Task } from "./index.js";
 
 export class TaskScope {
   readonly instance: Instance;
@@ -12,5 +12,10 @@ export class TaskScope {
   check(): void;
   policy(): Promise<Routes>;
   acknowledge(): Promise<void>;
+  emit<Event extends keyof SemanticLifecycle>(
+    event: Event,
+    payload: SemanticLifecycle[Event],
+    signal?: AbortSignal,
+  ): Promise<SemanticDecision>;
   closeOwned(): Promise<void>;
 }

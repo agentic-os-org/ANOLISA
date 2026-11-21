@@ -127,6 +127,21 @@ class DeferredResident(ResidentMiddleware):
     def create_scope(self, config):
         return DeferredScope(self, config["deferred_plugin"])
 
+    async def observe_turn_stop(self, value):
+        # Tool-free replies can reach the terminal boundary before the lazy Scope opens.
+        if "turn.stop" in self.scope.plugin.instance.capabilities["events"]:
+            from agentscope.event import ReplyEndEvent
+
+            if isinstance(value, ReplyEndEvent) and self.scope.task is None:
+                try:
+                    await self.scope.ensure()
+                except (AwError, TimeoutError) as error:
+                    # The terminal event already exists. A report failure cannot
+                    # replace the framework's own terminal result.
+                    self.scope.plugin.instance.last_error = error
+                    return
+        await super().observe_turn_stop(value)
+
     async def on_acting(self, agent, input_kwargs, next_handler):
         await self.scope.ensure()
         stream = super().on_acting(agent, input_kwargs, next_handler)

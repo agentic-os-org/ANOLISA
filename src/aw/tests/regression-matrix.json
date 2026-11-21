@@ -1278,6 +1278,54 @@
     "semantic-sdk-normalization": {
       "target": "aw-adapter/lib/aw_adapter",
       "test": "adapters::sdk::tests::semantic_events_bind_server_identity_and_reject_private_fields"
+    },
+    "sdk-lifecycle-hooks": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::registration::tests::lifecycle::semantic_lifecycle_dispatch_retains_actual_reasons_and_scope_identity"
+    },
+    "qoder-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "qoder::tests::session_callbacks_keep_native_end_reason"
+    },
+    "qoder-sdk-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::qoder_sdk::lifecycle_tests::session_callbacks_preserve_the_native_session_end_reason"
+    },
+    "claude-sdk-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::claude_sdk::tests::stop_uses_native_session_and_the_active_sdk_turn"
+    },
+    "qwenpaw-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::qwenpaw::tests::turn_stop_retains_native_reply_identity_and_reason"
+    },
+    "agentscope-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::agentscope::tests::turn_stop_retains_native_reply_identity_and_reason"
+    },
+    "deepseek-harness-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::deepseek::tests::lifecycle_preserves_the_committed_turn_reason"
+    },
+    "hermes-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::hermes::tests::lifecycle::lifecycle_distinguishes_hermes_turn_end_from_session_finalization"
+    },
+    "pi-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::pi::tests::lifecycle_observes_the_native_turn_reason_without_a_tool"
+    },
+    "openclaw-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::openclaw::tests::lifecycle_callbacks_keep_session_and_end_reason"
+    },
+    "codex-lifecycle-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::codex::tests::native_lifecycle_uses_codex_session_and_turn_identity"
+    },
+    "claude-sdk-session-hooks": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::claude_sdk::tests::sdk_session_reports_require_initialized_session_and_disconnect_reason"
     }
   },
   "agents": {
@@ -1315,6 +1363,11 @@
             "submit-service",
             "submit-agentscope"
           ]
+        },
+        "turn.stop": {
+          "observe": [
+            "agentscope-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1328,7 +1381,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "agentscope-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1377,6 +1431,24 @@
             "claude-submission",
             "claude-submission-cleanup"
           ]
+        },
+        "turn.stop": {
+          "observe": [
+            "claude-sdk-lifecycle-hooks"
+          ],
+          "block": [
+            "claude-sdk-lifecycle-hooks"
+          ]
+        },
+        "session.start": {
+          "observe": [
+            "claude-sdk-session-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "claude-sdk-session-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1414,7 +1486,9 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "claude-sdk-lifecycle-hooks",
+        "claude-sdk-session-hooks"
       ],
       "security": [
         "security-retry",
@@ -1460,6 +1534,21 @@
           "block": [
             "hermes-submission"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "hermes-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "hermes-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "hermes-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1476,7 +1565,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "hermes-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1509,6 +1599,21 @@
           "replace_result": [
             "final-replacement"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "openclaw-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "openclaw-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "openclaw-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1527,7 +1632,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "openclaw-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1574,6 +1680,21 @@
             "pi-submission",
             "pi-submission-faults"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "pi-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "pi-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "pi-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1613,7 +1734,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "pi-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1662,6 +1784,16 @@
             "submit-qoder-cli",
             "qoder-instance-input"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "qoder-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "qoder-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1698,7 +1830,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "qoder-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1746,6 +1879,11 @@
             "submit-service",
             "submit-qwenpaw",
             "prompt-failure"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "qwenpaw-lifecycle-hooks"
           ]
         }
       },
@@ -1808,7 +1946,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "qwenpaw-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1880,6 +2019,16 @@
             "submit-qoder-sdk",
             "prompt-failure"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "qoder-sdk-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "qoder-sdk-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -1914,7 +2063,8 @@
         "service-expired-failure-actions",
         "service-expired-capacity",
         "service-expired-native-cleanup",
-        "service-expired-handoff"
+        "service-expired-handoff",
+        "qoder-sdk-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -1970,11 +2120,22 @@
           "block": [
             "deepseek-final-check"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "deepseek-harness-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "deepseek-harness-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
         "deepseek-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "deepseek-harness-lifecycle-hooks"
       ],
       "security": [
         "security-retry"
@@ -2012,6 +2173,16 @@
             "final-replacement",
             "codex-replacement"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "codex-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "codex-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
@@ -2019,7 +2190,8 @@
         "codex-admission",
         "codex-interruption",
         "codex-capacity",
-        "codex-submission"
+        "codex-submission",
+        "codex-lifecycle-hooks"
       ],
       "security": [
         "security-retry",
@@ -2064,11 +2236,30 @@
             "typescript-sdk-package",
             "python-sdk-package"
           ]
+        },
+        "session.start": {
+          "observe": [
+            "sdk-lifecycle-hooks"
+          ]
+        },
+        "turn.stop": {
+          "observe": [
+            "sdk-lifecycle-hooks"
+          ],
+          "block": [
+            "sdk-lifecycle-hooks"
+          ]
+        },
+        "session.end": {
+          "observe": [
+            "sdk-lifecycle-hooks"
+          ]
         }
       },
       "lifecycle": [
         "typescript-sdk-package",
-        "python-sdk-package"
+        "python-sdk-package",
+        "sdk-lifecycle-hooks"
       ],
       "security": [
         "security-retry",

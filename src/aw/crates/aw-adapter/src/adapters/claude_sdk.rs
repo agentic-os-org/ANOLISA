@@ -69,6 +69,27 @@ impl Adapter for ClaudeSdk {
         if event == "security.violation" {
             return super::claude_final::normalize(binding, native);
         }
+        if matches!(event, "session.start" | "session.end") {
+            let name = if event == "session.start" {
+                "AWSessionInit"
+            } else {
+                "AWSessionDisconnect"
+            };
+            if native["hook_event_name"] != name || native["cwd"].as_str() != binding.cwd.to_str() {
+                return Err("Claude lifecycle report differs from its SDK session or cwd".into());
+            }
+            return super::lifecycle::normalize(binding, "claude-sdk", event, native);
+        }
+        if event == "turn.stop" {
+            if native["hook_event_name"] != "Stop"
+                || native["cwd"].as_str() != binding.cwd.to_str()
+                || native["reason"] != "stop_requested"
+                || !native["stop_hook_active"].is_boolean()
+            {
+                return Err("Claude stop requires the native Stop event and bound cwd".into());
+            }
+            return super::lifecycle::normalize(binding, "claude-sdk", event, native);
+        }
         if event == "input.submit" {
             if native["hook_event_name"] != "AWInputSubmit"
                 || native["cwd"].as_str() != binding.cwd.to_str()
@@ -207,6 +228,61 @@ mod tests {
     fn native() -> Value {
         json!({"session_id":"native-session", "cwd":"/work", "tool_use_id":"native-call", "tool_name":"Bash", "tool_input":{"command":"exit 7"}, "hook_event_name":"PreToolUse"})
     }
+    #[test]
+    fn sdk_session_reports_require_initialized_session_and_disconnect_reason() {
+        let start =
+            json!({"hook_event_name":"AWSessionInit","session_id":"sdk-session","cwd":"/work"});
+        assert_eq!(
+            ClaudeSdk
+                .normalize(&binding(), "session.start", &start)
+                .unwrap()["session_id"],
+            "sdk-session"
+        );
+        let end = json!({"hook_event_name":"AWSessionDisconnect","session_id":"sdk-session","cwd":"/work","reason":"cancelled"});
+        assert_eq!(
+            ClaudeSdk
+                .normalize(&binding(), "session.end", &end)
+                .unwrap()["native"]["reason"],
+            "cancelled"
+        );
+        assert!(ClaudeSdk
+            .normalize(&binding(), "session.end", &start)
+            .is_err());
+    }
+
+    #[test]
+    fn stop_uses_native_session_and_the_active_sdk_turn() {
+        let native = json!({"hook_event_name":"Stop","session_id":"native-session","cwd":"/work",
+            "stop_hook_active":false,"turn_id":"turn","attempt_id":"attempt","reason":"stop_requested"});
+        let event = ClaudeSdk
+            .normalize(&binding(), "turn.stop", &native)
+            .unwrap();
+        assert_eq!(event["session_id"], "native-session");
+        assert_eq!(event["turn_id"], "turn");
+        assert_eq!(event["native"]["reason"], "stop_requested");
+        let output = json!({"status":"ok","kind":"provider","effects":[{"type":"block","text":"continue analysis"}]});
+        let reply = crate::callback::response(
+            &ClaudeSdk,
+            "turn.stop",
+            "block",
+            output,
+            "claude-sdk",
+            &native,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(reply.exit, Exit::Code(2)));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reply.stdout).unwrap(),
+            "continue analysis"
+        );
+        let mut invalid = native;
+        invalid["turn_id"] = Value::Null;
+        assert!(ClaudeSdk
+            .normalize(&binding(), "turn.stop", &invalid)
+            .is_err());
+    }
+
     #[test]
     fn submission_fault_recovery_retains_existing_terminal_classification() {
         for failure in [

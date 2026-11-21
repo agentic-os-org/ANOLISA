@@ -117,6 +117,9 @@ impl Adapter for Hermes {
                 "Hermes callback event or working directory differs from its binding".into(),
             );
         }
+        if crate::callback::lifecycle(event) {
+            return super::lifecycle::normalize(binding, "hermes", event, native);
+        }
         if event == "input.submit" {
             return super::submission::normalize(binding, native, "hermes", "input_text");
         }
@@ -331,6 +334,11 @@ impl PreparedLaunch for Prepared {
         if self.gateway {
             capabilities.events.remove("input.submit");
         }
+        if self.gateway || self.input.options.reloadable {
+            for event in ["session.start", "turn.stop", "session.end"] {
+                capabilities.events.remove(event);
+            }
+        }
         capabilities
     }
 
@@ -351,7 +359,13 @@ impl PreparedLaunch for Prepared {
         if !self.native_steps(steps, "input.submit").is_empty() {
             check_submission_args(&self.input.command.args)?;
         }
-        for event in ["tool.before", "tool.after"] {
+        for event in [
+            "session.start",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+        ] {
             if !self.native_steps(steps, event).is_empty() {
                 let budget = self.budget(event)?;
                 if self.callback_timeout > 0.0
@@ -368,7 +382,14 @@ impl PreparedLaunch for Prepared {
         let mut events = BTreeMap::new();
         let mut hooks = Vec::new();
         let mut submissions = Vec::new();
-        for event in ["input.submit", "tool.before", "tool.after"] {
+        for event in [
+            "session.start",
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+        ] {
             let selected = self.native_steps(context.steps, event);
             if selected.is_empty() {
                 continue;
@@ -490,7 +511,7 @@ impl Prepared {
         adapter::native_steps(
             steps,
             event,
-            event != "input.submit"
+            matches!(event, "tool.before" | "tool.after")
                 && adapter::observation_enabled(&self.input.document, &self.input.target),
         )
     }
@@ -521,6 +542,9 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 
 fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "session.start" => Ok("on_session_start"),
+        "turn.stop" => Ok("on_session_end"),
+        "session.end" => Ok("on_session_finalize"),
         "input.submit" => Ok("AWInputSubmit"),
         "tool.before" => Ok("pre_tool_call"),
         "tool.after" => Ok("post_tool_call"),

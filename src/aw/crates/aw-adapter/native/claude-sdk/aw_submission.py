@@ -85,10 +85,10 @@ async def prepare(prompt: Any, session: str, cwd: str, budget_ms: int) -> tuple[
     return native, payload
 
 
-async def check(bridge: Any, payload: dict[str, Any]) -> None:
+async def check(bridge: Any, payload: dict[str, Any]) -> str:
     hooks = [hook for hook in bridge.config["hooks"] if hook["event"] == "input.submit"]
     if not hooks:
-        return
+        return payload["aw_turn_id"]
     if hasattr(bridge, "scope"):
         payload = {**payload, "aw_turn_id": await bridge.scope.next_submission()}
     try:
@@ -126,3 +126,4 @@ async def check(bridge: Any, payload: dict[str, Any]) -> None:
             cleanup.result()
             if cancelled:
                 raise asyncio.CancelledError
+    return payload["aw_turn_id"]

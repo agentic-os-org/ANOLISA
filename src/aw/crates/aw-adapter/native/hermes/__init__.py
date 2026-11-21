@@ -11,7 +11,12 @@ import tempfile
 from typing import Any
 
 
-EVENTS = {"tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
+LIFECYCLE_EVENTS = {
+    "session.start": "on_session_start",
+    "turn.stop": "on_session_end",
+    "session.end": "on_session_finalize",
+}
+EVENTS = {**LIFECYCLE_EVENTS, "tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
 
 
 def _read_private_json(path: str) -> Any:
@@ -97,10 +102,14 @@ def register(ctx: Any) -> None:
                 or not 1 <= timeout <= 300 or (event, step) in seen):
             raise ValueError("invalid AW Hermes callback registration")
         seen.add((event, step))
-        command = shlex.join([
+        command_args = [
             launch["binary"], "hook", "--binding", launch["binding"],
             "--adapter", "hermes", "--event", event, "--step", step, "--on-error", action,
-        ])
+        ]
+        if event in LIFECYCLE_EVENTS:
+            callbacks.append((EVENTS[event], _lifecycle_callback(event, command_args, timeout)))
+            continue
+        command = shlex.join(command_args)
         if hook.get("replace_result"):
             if event != "tool.after":
                 raise ValueError("AW replacements require a completed tool")
@@ -134,6 +143,32 @@ def register(ctx: Any) -> None:
             # Native rediscovery replaces callbacks but retains this session's receipt.
             if _read_private_json(launch["ready_path"]) != receipt:
                 raise ValueError("AW Hermes readiness receipt belongs to another registration") from None
+
+
+def _lifecycle_callback(event: str, command: list[str], timeout: int) -> Any:
+    def callback(session_id: str = "", **native: Any) -> None:
+        if not session_id:
+            return
+        payload = {"hook_event_name": LIFECYCLE_EVENTS[event], "session_id": session_id,
+                   "cwd": os.getcwd()}
+        if event == "turn.stop":
+            turn = native.get("turn_id")
+            reason = native.get("turn_exit_reason")
+            # Legacy CLI shutdown also emits on_session_end, without a turn.
+            if not isinstance(turn, str) or not turn or not isinstance(reason, str):
+                return
+            payload["turn_id"] = turn
+            # Diagnostic suffixes may include application error text.
+            payload["reason"] = reason.partition("(")[0]
+        elif event == "session.end":
+            payload["reason"] = native.get("reason") or "unknown"
+        try:
+            subprocess.run(command, input=json.dumps(payload).encode(), stdout=subprocess.DEVNULL,
+                           timeout=timeout, check=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            sys.stderr.write(f"AW Hermes {event} observation failed: {type(error).__name__}\n")
+
+    return callback
 
 
 def _input_callback(spec: Any, session: Any) -> Any:

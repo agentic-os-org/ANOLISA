@@ -53,6 +53,12 @@ export class TaskScope extends Scope {
     await this.watch(await this.call("watch_scope", { pid: this.pid }));
   }
 
+  async emit(event, payload, signal) {
+    this.check();
+    await this.validate();
+    return this.task.emit(event, payload, signal);
+  }
+
   call(method, fields, signal, timeoutMs = 6000) {
     return this.task.call(
       { method, instance_id: this.handle.instance_id, ...fields },

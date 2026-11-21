@@ -159,6 +159,7 @@ fn submission_close_claims_are_bounded_with_a_managed_tool_ledger() {
         hooks.lock().unwrap().insert(
             index.to_string(),
             Lease {
+                lifecycle_key: None,
                 digest: [0; 32],
                 handle: None,
                 completion_digest: None,

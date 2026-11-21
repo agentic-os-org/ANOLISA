@@ -470,7 +470,7 @@ class Task:
         return result["code"], outputs[0], outputs[1]
 
     async def emit(self, event: str, payload: dict) -> dict[str, str]:
-        """Emit at an installed boundary; the caller adopts block before native work."""
+        """Emit at an installed boundary and return the decision for native adoption."""
         if self.closed or self._closing:
             raise AwError("task_closed")
         if self.instance.capabilities.get("adapter") != "sdk":

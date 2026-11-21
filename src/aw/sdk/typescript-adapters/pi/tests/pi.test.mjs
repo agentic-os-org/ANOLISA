@@ -44,9 +44,13 @@ test("worker capabilities follow the seams the loaded worker provides", () => {
   );
   assert.deepEqual(Object.keys(strict.capabilities.events).sort(), [
     "input.submit",
+    "session.end",
+    "session.start",
     "tool.after",
     "tool.before",
+    "turn.stop",
   ]);
+  assert.deepEqual(strict.capabilities.events["turn.stop"], ["observe"]);
   assert.deepEqual(strict.capabilities.failure_actions, {
     "tool.after": ["withhold_result"],
   });
