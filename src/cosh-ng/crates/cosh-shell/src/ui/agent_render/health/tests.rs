@@ -486,6 +486,181 @@ fn assert_plain_health_card_status_appears_once_at_compact_and_wide_widths() {
     }
 }
 
+library_tests! {
+fn matrix_abnormal_report() -> HealthScanReport {
+    let mut report = p6_resource_report(None);
+    report.findings.push(HealthFinding {
+        id: "service.failed:sshd".to_string(),
+        severity: HealthSeverity::Critical,
+        category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+        title_id: HealthMessageId::HealthFindingServiceFailed,
+        detail_id: None,
+        detail_args: [
+            ("service".to_string(), "sshd".to_string()),
+            ("observed".to_string(), "failed".to_string()),
+            ("expected".to_string(), "active".to_string()),
+        ]
+        .into(),
+        evidence_fact_ids: vec![],
+        suggested_try_ids: vec![],
+    });
+    report.recompute_overall_severity();
+    report
+}
+
+fn matrix_long_event_report() -> HealthScanReport {
+    let mut report = p6_resource_report(None);
+    for (key, value) in [
+        (
+            "kernel.oom_latest_age_seconds",
+            HealthFactValue::Float(180.0),
+        ),
+        (
+            "kernel.oom_killed_process",
+            HealthFactValue::String("python3".to_string()),
+        ),
+        ("kernel.oom_latest_pid", HealthFactValue::Float(49991.0)),
+        (
+            "kernel.oom_latest_constraint",
+            HealthFactValue::String("CONSTRAINT_MEMCG".to_string()),
+        ),
+        (
+            "kernel.oom_event_count_last_1h",
+            HealthFactValue::Float(12.0),
+        ),
+    ] {
+        report.facts.push(HealthFact {
+            id: key.to_string(),
+            key: key.to_string(),
+            category: HealthFactCategory::Kernel,
+            value,
+            unit: None,
+            source: HealthFactSource::Fixture,
+            elapsed_ms: 1,
+        });
+    }
+    report.findings.push(HealthFinding {
+        id: "kernel.oom".to_string(),
+        severity: HealthSeverity::Critical,
+        category: crate::diagnostics::health::HealthFindingCategory::Anomaly,
+        title_id: HealthMessageId::HealthFindingRecentOom,
+        detail_id: None,
+        detail_args: BTreeMap::new(),
+        evidence_fact_ids: vec![
+            "kernel.oom_latest_age_seconds".to_string(),
+            "kernel.oom_killed_process".to_string(),
+            "kernel.oom_latest_pid".to_string(),
+            "kernel.oom_latest_constraint".to_string(),
+            "kernel.oom_event_count_last_1h".to_string(),
+        ],
+        suggested_try_ids: vec![],
+    });
+    report.recompute_overall_severity();
+    report
+}
+
+#[test]
+fn health_acceptance_matrix_keeps_one_complete_status_across_terminal_modes() {
+    let scenarios = [
+        ("normal", p6_resource_report(None)),
+        (
+            "partial",
+            p6_resource_report(Some(HealthUnavailableReason::PermissionDenied)),
+        ),
+        ("abnormal", matrix_abnormal_report()),
+        ("long-event", matrix_long_event_report()),
+    ];
+    for (name, report) in &scenarios {
+        for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+            let i18n = crate::I18n::new(language);
+            let status = health_status_label(report, i18n);
+            let status_prefix = status.chars().take(5).collect::<String>();
+            for width in [40u16, 80, 120] {
+                for (mode, styled) in [("ansi", true), ("no-color", false)] {
+                    for guide in [false, true] {
+                        let mut renderer = RatatuiInlineRenderer::with_width(width);
+                        renderer.styled = styled;
+                        let mut model = HealthBannerModel::new(report);
+                        if guide {
+                            model = model.with_guide();
+                        }
+                        let mut output = Vec::new();
+                        renderer
+                            .with_language(language)
+                            .write_health_banner(&mut output, model)
+                            .unwrap();
+                        let raw = String::from_utf8(output).unwrap();
+                        let text = crate::ui::wrap::strip_ansi_escape(&raw);
+                        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let cell = format!("{name}/{language:?}/{width}px/{mode}/guide={guide}");
+
+                        assert_eq!(
+                            flat.matches(&status).count(),
+                            1,
+                            "{cell}: status {status:?} must appear exactly once:\n{text}"
+                        );
+                        let lines = text.lines().collect::<Vec<_>>();
+                        assert!(
+                            !lines[0].contains(&status_prefix) || lines[0].contains(&status),
+                            "{cell}: title truncates the status:\n{text}"
+                        );
+                        for line in &lines {
+                            assert!(
+                                display_width(line) <= width as usize,
+                                "{cell}: line wider than {width}:\n{text}"
+                            );
+                        }
+                        assert_eq!(
+                            raw.contains('\u{1b}'),
+                            styled,
+                            "{cell}: ANSI presence must follow the style mode:\n{raw:?}"
+                        );
+                        for quantity in ["25%", "16%", "6.0 GiB", "42.0 GiB"] {
+                            assert!(
+                                flat.contains(quantity),
+                                "{cell}: resource data {quantity} dropped:\n{text}"
+                            );
+                        }
+                        assert_eq!(
+                            flat.contains("cosh guide"),
+                            guide,
+                            "{cell}: guide lines must follow the Bash/Cosh entry:\n{text}"
+                        );
+                        match *name {
+                            "abnormal" => assert!(
+                                flat.contains("sshd"),
+                                "{cell}: finding content dropped:\n{text}"
+                            ),
+                            "long-event" => {
+                                assert!(
+                                    flat.contains("python3") && flat.contains("49991"),
+                                    "{cell}: long event evidence dropped:\n{text}"
+                                );
+                                if width == 40 {
+                                    let first = lines
+                                        .iter()
+                                        .position(|line| line.contains("python3"))
+                                        .expect("event subject row");
+                                    let continuation = lines
+                                        .iter()
+                                        .position(|line| line.contains("cgroup"))
+                                        .expect("event continuation row");
+                                    assert!(
+                                        continuation > first,
+                                        "{cell}: long event must wrap onto following rows:\n{text}"
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+}
+
 fn assert_health_card_keeps_status_for_findings_with_and_without_resource_facts() {
     let mut report = HealthScanReport::new("service-only", 1000);
     report.overall_severity = HealthSeverity::Warning;
