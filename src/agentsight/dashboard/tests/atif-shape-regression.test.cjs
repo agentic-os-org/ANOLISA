@@ -367,3 +367,59 @@ test('an embedded subagent with an empty id keeps its own key and row', () => {
     );
   }
 });
+
+test('external subagent ref with empty trajectory_id is preserved instead of silently dropped', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent',
+    session_id: 'parent-run',
+    steps: [{
+      step_id: 1,
+      source: 'agent',
+      message: 'spawned subagent',
+      observation: {
+        results: [{
+          subagent_trajectory_ref: [{ trajectory_id: '', session_id: 'ext-session-1' }],
+        }],
+      },
+    }],
+  }));
+  assert.ok(tree, 'tree must not be null when an external subagent ref has empty trajectory_id');
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0].externalSessionId, 'ext-session-1');
+  const found = findNodeByRef(tree, { trajectory_id: '', session_id: 'ext-session-1' });
+  assert.ok(found, 'findNodeByRef must resolve external subagent ref with empty trajectory_id');
+  assert.equal(found.externalSessionId, 'ext-session-1');
+});
+
+test('external subagent ref with explicit trajectory_id resolves via findNodeByRef', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent',
+    session_id: 'parent-run',
+    steps: [{
+      step_id: 1,
+      source: 'agent',
+      message: 'spawned two external trajectories in one session',
+      observation: {
+        results: [{
+          subagent_trajectory_ref: [
+            { trajectory_id: 'ext-traj-1', session_id: 'ext-session-2' },
+            { trajectory_id: 'ext-traj-2', session_id: 'ext-session-2' },
+          ],
+        }],
+      },
+    }],
+  }));
+  assert.ok(tree);
+  assert.equal(tree.children.length, 1, 'same external session must stay deduplicated to one node');
+  const found1 = findNodeByRef(tree, { trajectory_id: 'ext-traj-1', session_id: 'ext-session-2' });
+  const found2 = findNodeByRef(tree, { trajectory_id: 'ext-traj-2', session_id: 'ext-session-2' });
+  assert.ok(found1, 'first external trajectory_id must resolve to its external node');
+  assert.ok(found2, 'second external trajectory_id on the same session must also resolve');
+  assert.equal(found1.externalSessionId, 'ext-session-2');
+  assert.equal(found2.externalSessionId, 'ext-session-2');
+  assert.equal(
+    findNodeByRef(tree, { trajectory_id: 'unknown-traj', session_id: 'ext-session-2' }),
+    null,
+    'unreferenced trajectory_id must not falsely match an external node',
+  );
+});
