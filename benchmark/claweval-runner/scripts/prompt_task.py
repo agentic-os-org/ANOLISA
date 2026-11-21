@@ -59,7 +59,7 @@ def _parse_assistant_response(session_file: str) -> str:
     """Extract the final assistant text from an openclaw session JSONL file."""
     last_text = ""
     try:
-        with open(session_file) as f:
+        with open(session_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
