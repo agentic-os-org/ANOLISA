@@ -215,6 +215,7 @@ test-hook-scripts:
 	bash tests/test-run-hook-install-scope.sh
 	bash tests/test-tool-ready-readable-fixer.sh
 	bash tests/test-codex-install-home-unset.sh
+	bash tests/test-codex-uninstall-home-unset.sh
 
 test-hooks: test-hook-scripts
 	@echo "==> Testing copilot-shell hooks..."
