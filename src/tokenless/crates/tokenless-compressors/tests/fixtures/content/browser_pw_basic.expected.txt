@@ -1,0 +1,35 @@
+### Page
+- Page URL: https://news.example.com/
+- Page Title: Example News
+### Snapshot
+depth	role	name	ref	attrs	url	text
+0	table		e3			
+1	rowgroup		e4			
+2	row		e5			
+3	cell		e6			
+4	table		e7			
+5	rowgroup		e8			
+6	row		e9			
+7	cell		e10			
+8	link		e11		https://news.example.com	
+7	cell		e13			
+8	generic		e14			
+9	link	Example News	e16		news	
+9	link	new	e17		newest	
+9	text					"|"
+9	link	past	e18		front	
+9	text					"|"
+9	link	comments	e19		newcomments	
+9	text					"|"
+9	link	ask	e20		ask	
+9	text					"|"
+9	link	show	e21		show	
+9	text					"|"
+9	link	jobs	e22		jobs	
+9	text					"|"
+9	link	submit	e23		submit	
+7	cell		e24			
+8	link	login	e26		login?goto=news	
+2	row		e27			
+2	row		e28			
+3	cell		e29			

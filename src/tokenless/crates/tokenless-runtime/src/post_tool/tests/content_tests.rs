@@ -638,3 +638,81 @@ fn isolated_ctest_markers_and_quoted_examples_do_not_override_enclosing_document
         assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
     }
 }
+
+// ---- Browser accessibility snapshots ----
+
+const PW_SNAPSHOT: &str = "### Page\n- Page URL: https://example.com/\n- Page Title: Example\n### Snapshot\n```yaml\n- generic [ref=e1]:\n  - link \"Home\" [ref=e2] [cursor=pointer]:\n    - /url: https://example.com/\n  - button \"Go\" [ref=e3]\n```";
+
+const CDT_SNAPSHOT: &str = "## Latest page snapshot\nuid=1_0 RootWebArea \"Example\" url=\"https://example.com/\"\n  uid=1_1 link \"Home\" url=\"https://example.com/\"\n  uid=1_2 button \"Go\" focusable\n  uid=1_6 \" | \"";
+
+#[test]
+fn detects_browser_snapshots_in_both_subformats() {
+    assert_eq!(detect(PW_SNAPSHOT), ContentType::BrowserSnapshot);
+    assert_eq!(detect(CDT_SNAPSHOT), ContentType::BrowserSnapshot);
+    let bare_pw = "- generic [ref=e1]:\n  - link \"Home\" [ref=e2] [cursor=pointer]:\n    - /url: https://example.com/\n  - button \"Go\" [ref=e3]\n";
+    assert_eq!(detect(bare_pw), ContentType::BrowserSnapshot);
+    let bare_cdt = "uid=1_0 RootWebArea \"x\"\nuid=1_1 link \"a\"\nuid=1_2 link \"b\"\nuid=1_3 \" | \"";
+    assert_eq!(detect(bare_cdt), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn detects_cdt_action_responses_with_snapshot_attached() {
+    let input = format!(
+        "Successfully clicked on the element\nPage navigated to https://example.com/next.\n{CDT_SNAPSHOT}"
+    );
+    assert_eq!(detect(&input), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn detects_pw_snapshots_after_action_preambles() {
+    // Playwright's response builder can emit `### Open tabs` and
+    // `### Ran Playwright code` sections before `### Page`/`### Snapshot`, so
+    // the first line is not always `### Page`; anchor on the snapshot section.
+    let open_tabs = format!(
+        "### Open tabs\n- tab 0: (current) [Example](https://example.com/)\n{PW_SNAPSHOT}"
+    );
+    assert_eq!(detect(&open_tabs), ContentType::BrowserSnapshot);
+    let ran_code = format!(
+        "### Ran Playwright code\n```js\nawait page.getByRole('button').click();\n```\n{PW_SNAPSHOT}"
+    );
+    assert_eq!(detect(&ran_code), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn snapshot_quoting_diff_text_stays_a_snapshot() {
+    let input = PW_SNAPSHOT.replace(
+        "- button \"Go\" [ref=e3]",
+        "- paragraph [ref=e3]: diff --git a/x b/x",
+    );
+    assert_eq!(detect(&input), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn echoed_git_diff_with_snapshot_context_stays_diff() {
+    // A command preamble bypasses the head-anchored diff guard, and the hunk
+    // context carries `### Snapshot`, a YAML fence, and `[ref=]`. The heading
+    // is a diff context row (leading space), not a column-0 section heading,
+    // so the snapshot detector must decline and leave it on the Diff route.
+    let diff = "diff --git a/snapshot.md b/snapshot.md\n--- a/snapshot.md\n+++ b/snapshot.md\n@@ -1,6 +1,6 @@\n ### Page\n ### Snapshot\n ```yaml\n - link \"x\" [ref=e1]\n+- link \"y\" [ref=e2]\n - link \"z\" [ref=e3]\n ```\n";
+    let input = format!("$ git diff snapshot.md\n{diff}");
+    assert_eq!(detect(&input), ContentType::Diff);
+    assert_eq!(detect(diff), ContentType::Diff);
+}
+
+#[test]
+fn diffs_of_snapshot_files_stay_diffs() {
+    let diff = "diff --git a/snap.yml b/snap.yml\n--- a/snap.yml\n+++ b/snap.yml\n@@ -1,3 +1,3 @@\n - link \"x\" [ref=e1]\n+- link \"y\" [ref=e2]\n - link \"z\" [ref=e3]\n";
+    assert_eq!(detect(diff), ContentType::Diff);
+    let preamble = format!("$ git diff snap.yml\n{diff}");
+    assert_eq!(detect(&preamble), ContentType::Diff);
+    let cdt_diff = "diff --git a/snap.txt b/snap.txt\n--- a/snap.txt\n+++ b/snap.txt\n@@ -1,3 +1,3 @@\n uid=1_1 link \"x\"\n+uid=1_2 link \"y\"\n uid=1_3 link \"z\"\n";
+    assert_eq!(detect(cdt_diff), ContentType::Diff);
+}
+
+#[test]
+fn ci_logs_and_prose_mentioning_refs_do_not_become_snapshots() {
+    let ci = "running 3 tests\ntest tests::a PASSED\ntest tests::b PASSED\ntest result: ok. 3 passed\n";
+    assert_eq!(detect(ci), ContentType::BuildLog);
+    let prose = "See [ref=e1] and uid=1_2 in the documentation for details.\nThey are not snapshots.\n";
+    assert_eq!(detect(prose), ContentType::PlainText);
+}

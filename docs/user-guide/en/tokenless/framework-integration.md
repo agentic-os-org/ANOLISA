@@ -31,18 +31,18 @@ Schema compression is active in QwenPaw and the AgentScope SDK integration, whic
 ### Compression coverage and protocol limits
 
 Every replaceable text result reaches the same Core candidates: JSON/TOON, build logs, CSV/TSV,
-search paths, HTML, and Diff cropping. Content origin, lossless recovery, and savings gates
-still apply; this does not mean every result is compressed. QwenPaw and AgentScope inherit
-`TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_SEARCH_PATH_SHARING_ENABLED`,
-`TOKENLESS_HTML_EXTRACTION_ENABLED`, `TOKENLESS_DIFF_COMPRESSION_ENABLED`, and
-`TOKENLESS_MIXED_CONTENT_ENABLED` when their SDK configuration is constructed. Explicit SDK
-arguments override environment defaults. Diff is on by default; mixed-region compression is off
-by default. The global compression switch selects dry-run and does not disable RTK rewriting.
+search paths, HTML, Diff cropping, and browser-snapshot re-encoding. Content origin, lossless
+recovery, and savings gates still apply; this does not mean every result is compressed. QwenPaw
+and AgentScope inherit `TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_SEARCH_PATH_SHARING_ENABLED`,
+`TOKENLESS_HTML_EXTRACTION_ENABLED`, `TOKENLESS_DIFF_COMPRESSION_ENABLED`,
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED`, and `TOKENLESS_MIXED_CONTENT_ENABLED` when their SDK
+configuration is constructed. Explicit SDK arguments override environment defaults. Diff and
+browser-snapshot compression are on by default; mixed-region compression is off by default. The global compression switch selects dry-run and does not disable RTK rewriting.
 
 | Host or integration | Remaining boundary |
 |---------------------|--------------------|
-| Codex, Qwen Code | Current PostTool hooks cannot replace the original result. JSON/TOON, logs, tables, search, HTML, and Diff cannot reduce model input there; RTK command rewriting remains available. Neither integration has a usable model-tool-schema replacement event. |
-| Claude Code | Response replacement requires 2.1.121 or later. Structured outputs retain their types; only text slots can use TOON, table/search views, HTML pages, or Diff. HTML inside JSON string values can be rendered in either, because the result stays JSON. No model-tool-schema replacement hook is registered. |
+| Codex, Qwen Code | Current PostTool hooks cannot replace the original result. JSON/TOON, logs, tables, search, HTML, Diff, and browser snapshots cannot reduce model input there; RTK command rewriting remains available. Neither integration has a usable model-tool-schema replacement event. |
+| Claude Code | Response replacement requires 2.1.121 or later. Structured outputs retain their types; only text slots can use TOON, table/search views, HTML pages, Diff, or browser-snapshot views. HTML inside JSON string values can be rendered in either, because the result stays JSON. No model-tool-schema replacement hook is registered. |
 | OpenClaw | Static `tokenless_retrieve` enables recoverable PostTool compression when the tool factory receives a conversation UUID. Keep this tool allowed by the host tool policy. Without the tool API or UUID, only lossless candidates apply. Prompt hooks expose messages but cannot replace tool schemas. Multi-block and multimodal results pass through. |
 | Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
 | OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
@@ -82,6 +82,7 @@ disposition keeps the original. The hook currently routes:
 | Numbered API search records, recognized native shell searches, or pure path lists from non-file command/API results, when path sharing is enabled and the host can replace output with text | Lossless sharing of consecutive paths or a directory prefix; every received record is retained, without Stash or retrieval |
 | Git diffs from command output when the host can replace output with text (enabled by default; `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` disables it) | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
 | Complete HTML documents from command output or API responses (not file reads) when the host can replace output with text and Stash-backed recovery is available; enabled by default, `TOKENLESS_HTML_EXTRACTION_ENABLED=0` disables it | Main-content rendering as Markdown with removal counts in the view header; the complete original stays retrievable through Stash, and marginal candidates are rejected |
+| Playwright MCP / chrome-devtools-mcp accessibility snapshots from command output or API responses (not file reads) when the host can replace output with text and Stash-backed recovery is available; enabled by default, `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` disables it | Playwright snapshots: lossless TSV record-table re-encoding with interactive-role cursor pruning and net-benefit URL prefix sharing; wrappers, trailers, and every ref stay intact, unparseable input passes through whole, the complete original stays retrievable through Stash, and marginal candidates are rejected. chrome-devtools-mcp uid snapshots are recognized but passed through unchanged (raw-quote serialization has no explicit record boundaries) |
 | HTML fragments or documents inside JSON string values from command output or API responses (not file reads) when Stash-backed recovery is available; same switch as HTML pages | Each value is rendered whole as Markdown in place, with types, numbers and other fields unchanged; values whose view could drop visible text, targets, form state, or meaning carried by styles, attributes, line breaks, list numbers or table headers, or reveal text hidden on screen, pass through, and each original value stays retrievable through Stash. See [HTML inside JSON values](configuration-and-privacy.md#html-inside-json-values) |
 | Mixed tool outputs that no whole-content domain handles, when `TOKENLESS_MIXED_CONTENT_ENABLED` opts in (default off) and the host can replace output with text | Fenced `json`/`csv`/`tsv` blocks and bracket-balanced bare JSON documents compress per region with the same policy as their standalone routes; surrounding text stays byte-for-byte and a rejected region stays verbatim |
 | Long plain text, stack trace, source code, unknown | Passthrough until a matching domain compressor is connected |

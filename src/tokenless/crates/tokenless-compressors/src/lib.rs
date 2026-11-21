@@ -3,6 +3,7 @@
 //! Engines return complete, stateless outcomes. Runtime owns content routing,
 //! final arbitration, and Stash commit or rollback.
 
+mod browser_snapshot;
 mod build_log;
 mod html;
 mod json;
@@ -10,6 +11,7 @@ mod search_results;
 mod tabular;
 mod terminal_cleanup;
 
+pub use browser_snapshot::{BrowserSnapshotCompressor, is_cdt_listing};
 pub use build_log::{BuildLogCompressor, BuildLogMetrics, BuildLogOperation, BuildLogOutcome};
 pub use html::{HtmlExtractor, HtmlView};
 pub use json::{

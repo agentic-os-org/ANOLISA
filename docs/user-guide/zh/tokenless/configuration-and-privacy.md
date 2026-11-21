@@ -220,6 +220,30 @@ Markdown 时，整个值仍原样保留：
 统计数据可区分嵌入片段（`json`）与转写页面（`html`）。上述规则已用合成片段和文档验证；
 它们是防护手段，不能证明每个片段对模型都保持原意。
 
+## 浏览器快照重编码
+
+浏览器快照重编码默认开启。在 Tokenless 或其宿主 Agent 继承的环境中设置
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭。未设置或为空时保持开启，`1`、`true`、`yes`
+（不区分大小写）同样开启，其他非空值关闭。该开关独立于压缩总开关，不是 `config.json`
+字段。
+
+生命周期 `TokenlessConfig` 继承该环境默认值；显式
+`TokenlessConfig(browser_snapshot_enabled=False)` 参数优先。直接 `TokenlessRuntime` API
+保持显式构造配置：Rust 调用方设置 `RuntimeConfig.browser_snapshot_enabled` 为 `false`，
+Python 调用方传入同名原生关键字参数。
+
+压缩器处理作为成功命令输出或 API 响应收到的 Playwright MCP（`### Page` 包装加围栏
+YAML aria 树）无障碍快照，例如 MCP 浏览器工具返回的快照。需要文本替换槽、可用 Stash 和受支持的恢复方式。
+文件读取保存的快照文件原样透传。chrome-devtools-mcp uid 快照（`## Latest page snapshot` 列表）
+仅识别、原文直通：上游对 name 与属性值用裸双引号包裹且不转义内嵌引号与换行，记录边界字节歧义，
+无损不可分解。
+
+视图是 TSV 记录表，保留每个 ref、名称与 URL；包装与尾注逐字保留，
+仅对交互角色去除冗余 `cursor=pointer` 标注，重复 URL 前缀仅在字符与估算 Token 双降时
+经 legend 共享。无法解析的输入整体透传，节省不足 16 个估算 Token 的候选被拒绝。
+完整原文经 Stash 可取回，故管线整体无损。开关关闭时，快照内容标注为 `plain_text` 并透传，
+响应不携带新协议值。
+
 ## 可选混合内容区域压缩
 
 混合内容区域压缩默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
@@ -261,6 +285,7 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关，包括 JSON 值中的 HTML | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | 浏览器快照重编码开关（Playwright MCP 快照；chrome-devtools-mcp 快照仅识别并直通） | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量

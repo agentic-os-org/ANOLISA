@@ -1,0 +1,7 @@
+### Page
+- Page URL: https://x/
+### Snapshot
+```yaml
+- generic [ref=e1]:
+   - link "x" [ref=e2]
+```

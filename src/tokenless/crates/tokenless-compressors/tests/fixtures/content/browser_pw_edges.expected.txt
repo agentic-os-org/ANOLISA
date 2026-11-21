@@ -1,0 +1,26 @@
+### Page
+- Page URL: https://example.com/
+- Page Title: Edges
+### Snapshot
+U1=https://news.example.com/
+depth	role	name	ref	attrs	url	text
+0	generic		e1	active box=0,0,1280,720		
+1	link	Breaking: Example Story About Something	e40		U1/item?id=999	
+1	textbox	搜索	f2e38	active		
+1	paragraph	first second	e7			
+1	text					中文内容
+1	button	Go	e9			
+1	link	Story number 0 with a reasonably long title	e100		U1/item?id=0	
+1	link	Story number 1 with a reasonably long title	e101		U1/item?id=1	
+1	link	Story number 2 with a reasonably long title	e102		U1/item?id=2	
+1	link	Story number 3 with a reasonably long title	e103		U1/item?id=3	
+1	link	Story number 4 with a reasonably long title	e104		U1/item?id=4	
+1	link	Story number 5 with a reasonably long title	e105		U1/item?id=5	
+1	link	Story number 6 with a reasonably long title	e106		U1/item?id=6	
+1	link	Story number 7 with a reasonably long title	e107		U1/item?id=7	
+1	link	Story number 8 with a reasonably long title	e108		U1/item?id=8	
+1	link	Story number 9 with a reasonably long title	e109		U1/item?id=9	
+1	link	Story number 10 with a reasonably long title	e110		U1/item?id=10	
+1	link	Story number 11 with a reasonably long title	e111		U1/item?id=11	
+### Events
+- New console entries: console.log#L1-L2

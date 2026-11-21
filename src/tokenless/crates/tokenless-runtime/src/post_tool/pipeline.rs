@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
-    BuildLogCompressor, BuildLogOperation, HtmlExtractor, JsonCompressionConfig,
-    JsonCompressionContext, JsonCompressor, JsonError, JsonOperation, SearchResultsCompressor,
-    TabularCompressor, TabularOperation,
+    BrowserSnapshotCompressor, BuildLogCompressor, BuildLogOperation, HtmlExtractor,
+    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonOperation,
+    SearchResultsCompressor, TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
     AppliedOperation, BYTE_ESTIMATOR_ID, ContentOrigin, ContentType, Disposition, PostToolRequest,
@@ -31,6 +31,7 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) search_path_sharing_enabled: bool,
     pub(crate) diff_compression_enabled: bool,
     pub(crate) html_extraction_enabled: bool,
+    pub(crate) browser_snapshot_enabled: bool,
     pub(crate) stash_enabled: bool,
     pub(crate) require_reversibility: bool,
     pub(crate) force_json: bool,
@@ -72,7 +73,16 @@ impl PostToolPipeline {
             return run;
         }
         let before_tokens = estimate_tokens(&request.content) as u64;
-        let content_type = detect(&request.content);
+        let detected = detect(&request.content);
+        // The kill switch gates the wire label too: passthrough responses
+        // carry the detected type, and strict parsers without a fallback
+        // variant reject unknown values. Disabled means zero new wire values.
+        let content_type =
+            if !config.browser_snapshot_enabled && detected == ContentType::BrowserSnapshot {
+                ContentType::PlainText
+            } else {
+                detected
+            };
         if request.status == ToolResultStatus::Error {
             return passthrough(request, before_tokens, content_type);
         }
@@ -111,6 +121,11 @@ impl PostToolPipeline {
             && content_type == ContentType::Html
             && request.content_origin != ContentOrigin::FileRead
             && request.capabilities.replace_with_text;
+        let browser_snapshot_candidate = config.browser_snapshot_enabled
+            && !protect_search_output
+            && content_type == ContentType::BrowserSnapshot
+            && request.content_origin != ContentOrigin::FileRead
+            && request.capabilities.replace_with_text;
         let json_candidate = !protect_search_output
             && (config.force_json
                 || content_type == ContentType::Json
@@ -139,6 +154,7 @@ impl PostToolPipeline {
             && !protect_search_output
             && !diff_candidate
             && !html_candidate
+            && !browser_snapshot_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
@@ -146,6 +162,7 @@ impl PostToolPipeline {
             && request.capabilities.replace_with_text;
         if !diff_candidate
             && !html_candidate
+            && !browser_snapshot_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
@@ -241,6 +258,47 @@ impl PostToolPipeline {
                     DomainCandidate {
                         output: format!("{hint}\n{}", view.output),
                         operations: vec![AppliedOperation::HtmlExtraction],
+                        recoverability: tokenless_compressors::Recoverability::Retrievable,
+                        stash_writes: vec![write],
+                        stash_errors: 0,
+                        unrecoverable_truncations: None,
+                    }
+                }
+                None => DomainCandidate {
+                    output: request.content.clone(),
+                    operations: Vec::new(),
+                    recoverability: tokenless_compressors::Recoverability::Lossless,
+                    stash_writes: Vec::new(),
+                    stash_errors,
+                    unrecoverable_truncations: None,
+                },
+            }
+        } else if browser_snapshot_candidate {
+            // Same contract as the diff and HTML branches: the stash backend,
+            // not the compressor, owns the stash-failure degradation.
+            let mut stash_errors = 0;
+            let rendered = if let Some(store) = attached_store
+                && let Some(view) = BrowserSnapshotCompressor.compress(&request.content)
+            {
+                match store.stash(&request.content) {
+                    Ok(write) => Some((view, write)),
+                    Err(_) => {
+                        stash_errors = 1;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            match rendered {
+                Some((view, write)) => {
+                    let hint = tokenless_ccr::recovery_instruction(
+                        &write.key,
+                        &request.capabilities.recovery,
+                    );
+                    DomainCandidate {
+                        output: format!("{hint}\n{view}"),
+                        operations: vec![AppliedOperation::BrowserSnapshotReduction],
                         recoverability: tokenless_compressors::Recoverability::Retrievable,
                         stash_writes: vec![write],
                         stash_errors: 0,
@@ -377,8 +435,8 @@ impl PostToolPipeline {
             original: &request.content,
             candidate: &candidate.output,
             has_operations: !candidate.operations.is_empty(),
-            // Reject marginal Diff and HTML estimates after including wrapper and recovery text.
-            min_token_savings: if diff_candidate || html_candidate {
+            // Reject marginal Diff, HTML, and snapshot estimates after including wrapper and recovery text.
+            min_token_savings: if diff_candidate || html_candidate || browser_snapshot_candidate {
                 16
             } else {
                 1
@@ -545,6 +603,7 @@ mod tests {
     use super::*;
     include!("tests/tabular_pipeline_tests.rs");
     include!("tests/html_pipeline_tests.rs");
+    include!("tests/browser_snapshot_pipeline_tests.rs");
     include!("tests/path_list_pipeline_tests.rs");
     include!("tests/embedded_html_pipeline_tests.rs");
     use super::super::content::MAX_SCAN_BYTES;
@@ -908,6 +967,7 @@ mod tests {
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            browser_snapshot_enabled: false,
             stash_enabled: true,
             require_reversibility: false,
             force_json: true,

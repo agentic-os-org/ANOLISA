@@ -95,24 +95,35 @@ test_response_compression() {
 test_command_rewriting() {
     log_section "Test 3: Command Rewriting (RTK)"
 
-    log_info "Test 3.1: RTK availability"
-    if command -v rtk &> /dev/null; then
-        log_pass "RTK available: $(rtk --version)"
-    else log_fail "RTK not found"; fi
+    # RTK ships bundled as `tokenless rtk`; the suite already requires the
+    # tokenless binary on PATH, so no standalone rtk install is assumed.
+    log_info "Test 3.1: RTK availability (bundled)"
+    if tokenless rtk --help &>/dev/null; then
+        log_pass "RTK available via tokenless rtk"
+    else log_fail "bundled RTK (tokenless rtk) not available"; fi
 
-    log_info "Test 3.2: RTK rewrite"
-    local rewritten=$(rtk rewrite "ls -la" 2>/dev/null || echo "ls -la")
-    if [ -n "$rewritten" ]; then log_pass "RTK rewrite works: $rewritten"
-    else log_fail "RTK rewrite failed"; fi
+    log_info "Test 3.2: RTK proxy output"
+    local rtk_dir
+    rtk_dir=$(mktemp -d)
+    : > "$rtk_dir/alpha.txt"
+    : > "$rtk_dir/beta.txt"
+    local rtk_ls
+    rtk_ls=$(tokenless rtk ls "$rtk_dir" 2>/dev/null)
+    rm -rf "$rtk_dir"
+    assert_contains "$rtk_ls" "alpha.txt" "RTK ls proxies a directory listing with compact output"
 
     log_info "Test 3.3: Multiple commands"
-    local cmds=("git status" "cargo build" "npm install")
-    local ok=0
-    for cmd in "${cmds[@]}"; do
-        local r=$(rtk rewrite "$cmd" 2>/dev/null || echo "")
-        [ -n "$r" ] && ((ok++)) || true
-    done
-    log_pass "RTK processed $ok/${#cmds[@]} commands"
+    local rtk_multi
+    rtk_multi=$(mktemp -d)
+    : > "$rtk_multi/one.txt"
+    mkdir -p "$rtk_multi/sub"
+    : > "$rtk_multi/sub/two.txt"
+    local ok=0 r
+    r=$(tokenless rtk ls "$rtk_multi" 2>/dev/null); [ -n "$r" ] && ((ok++)) || true
+    r=$(tokenless rtk find "$rtk_multi" -name '*.txt' 2>/dev/null); [ -n "$r" ] && ((ok++)) || true
+    rm -rf "$rtk_multi"
+    if [ "$ok" -eq 2 ]; then log_pass "RTK processed $ok/2 commands"
+    else log_fail "RTK processed $ok/2 commands"; fi
 }
 
 test_stats_system() {
@@ -414,11 +425,25 @@ test_tool_ready() {
     assert_contains "$fix_tool" "already available" "env-fix fix-tool reports available deps"
 
     # ==========================================
-    # 6.16 env-fix script: fallback chain (rtk)
+    # 6.16 env-fix script: "already available" short-circuit (rtk)
     # ==========================================
-    log_info "Test 6.16: env-fix fallback chain (rtk already available)"
-    local fb_out=$(bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"tokenless","manager":"rpm","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/libexec/anolisa/tokenless/rtk"},{"method":"cargo","binary":"rtk","package":"rtk"}]}' 2>&1)
-    assert_contains "$fb_out" "already available" "env-fix fallback: rtk already available via rpm"
+    log_info "Test 6.16: env-fix already-available short-circuit (rtk)"
+    # Stage a version-reporting rtk shim so the short-circuit is exercised on
+    # any host: no ambient RPM-provided rtk assumption, no real install, and no
+    # host mutation. The declared fallback must NOT be walked when available.
+    local avail_dir
+    avail_dir=$(mktemp -d)
+    cat > "$avail_dir/rtk" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && echo "rtk 0.49.0"
+exit 0
+EOF
+    chmod 0755 "$avail_dir/rtk"
+    local fb_out
+    fb_out=$(PATH="$avail_dir:$PATH" bash "$FIX_SCRIPT" fix '{"binary":"rtk","version":">=0.35","package":"tokenless","manager":"rpm","fallback":[{"method":"symlink","binary":"rtk","source":"/usr/libexec/anolisa/tokenless/rtk"}]}' 2>&1)
+    rm -rf "$avail_dir"
+    assert_contains "$fb_out" "already available" "env-fix reports rtk already available when a satisfying version is present"
+    assert_not_contains "$fb_out" "trying fallback" "env-fix short-circuits before walking the fallback chain"
 
     # ==========================================
     # 6.17 env-fix script: docker fallback (docker-ce → docker)

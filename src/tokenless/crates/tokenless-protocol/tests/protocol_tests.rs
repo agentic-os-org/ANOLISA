@@ -170,6 +170,10 @@ fn content_operations_have_stable_wire_names() {
         (AppliedOperation::DiffReduction, "diff_reduction"),
         (AppliedOperation::HtmlExtraction, "html_extraction"),
         (
+            AppliedOperation::BrowserSnapshotReduction,
+            "browser_snapshot_reduction",
+        ),
+        (
             AppliedOperation::TabularRowReduction,
             "tabular_row_reduction",
         ),
@@ -182,6 +186,17 @@ fn content_operations_have_stable_wire_names() {
             operation
         );
     }
+}
+
+#[test]
+fn browser_snapshot_content_type_has_a_stable_wire_name() {
+    let serialized = serde_json::to_string(&ContentType::BrowserSnapshot).unwrap();
+    assert_eq!(serialized, "\"browser_snapshot\"");
+    assert_eq!(ContentType::BrowserSnapshot.wire_str(), "browser_snapshot");
+    assert_eq!(
+        serde_json::from_str::<ContentType>(&serialized).unwrap(),
+        ContentType::BrowserSnapshot
+    );
 }
 
 #[test]

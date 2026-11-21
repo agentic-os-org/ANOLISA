@@ -57,6 +57,7 @@ class TokenlessRuntime:
         diff_compression_enabled: bool = True,
         mixed_content_enabled: bool = False,
         html_extraction_enabled: bool = True,
+        browser_snapshot_enabled: bool = True,
         stats_enabled: bool = True,
         sls_enabled: bool = False,
     ) -> None: ...
