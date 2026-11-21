@@ -66,6 +66,62 @@ class DocsLinkCheckTests(unittest.TestCase):
         doc.unlink()
         self.assertEqual(self.check_links().returncode, 0)
 
+    def test_reference_links_to_missing_targets_are_errors(self):
+        (self.root / "docs" / "ref.md").write_text(
+            "See [the guide][guide] and ![logo][logo].\n"
+            "\n"
+            "[guide]: missing.md\n"
+            "[LOGO]: also-missing.png\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("missing.md", result.stdout)
+        self.assertIn("also-missing.png", result.stdout)
+
+    def test_reference_links_resolve_case_insensitively(self):
+        (self.root / "docs" / "target.md").write_text("# Target\n", encoding="utf-8")
+        (self.root / "docs" / "ref.md").write_text(
+            "See [the guide][The Guide] and ![pic][THE GUIDE].\n"
+            "\n"
+            "[the guide]: target.md\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_collapsed_reference_links_are_checked(self):
+        (self.root / "docs" / "ref.md").write_text(
+            "See [the guide][]\n"
+            "\n"
+            "[the guide]: missing.md\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("missing.md", result.stdout)
+
+    def test_undefined_reference_labels_are_not_errors(self):
+        (self.root / "docs" / "ref.md").write_text(
+            "See [undefined][nope] and [shortcut].\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_reference_definitions_in_fenced_code_are_ignored(self):
+        (self.root / "docs" / "exists.md").write_text("# Exists\n", encoding="utf-8")
+        (self.root / "docs" / "ref.md").write_text(
+            "```\n"
+            "[x]: missing.md\n"
+            "```\n"
+            "\n"
+            "See [ok](exists.md).\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
