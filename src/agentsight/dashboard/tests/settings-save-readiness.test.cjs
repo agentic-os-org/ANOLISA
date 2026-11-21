@@ -5,14 +5,14 @@ const test = require('node:test');
 
 // Exercise the compiled cards through the handles used by the page's Save
 // button. Delay only configuration I/O; keep state and effect dependencies.
-async function card(kind) {
+async function card(kind, { refreshStatus, persistLimit } = {}) {
   const states = [], effects = [], callbacks = [], pending = [], submitted = [];
   let stateIndex, effectIndex, callbackIndex, renderCard;
   let resolveLoad, rejectLoad;
   let reads = 0;
   const loaded = new Promise((resolve, reject) => { resolveLoad = resolve; rejectLoad = reject; });
   const ref = { current: null };
-  const t = (key) => key;
+  const t = (key, params) => key + (params ? JSON.stringify(params) : '');
   const react = {
     forwardRef(render) { renderCard = () => render({}, ref); return renderCard; },
     useImperativeHandle(handle, create) { handle.current = create(); },
@@ -45,9 +45,10 @@ async function card(kind) {
       if (name === '../i18n') return { useI18n: () => ({ t }) };
       if (name === '../components/OptimizationSettings') return { LlmConfigForm: () => null };
       if (name === '../utils/apiClient') return {
-        fetchStorageStatus: () => reads++ === 0 ? loaded : Promise.resolve({ total_physical_bytes: 1024 }),
+        fetchStorageStatus: () => reads++ === 0 ? loaded
+          : refreshStatus ? refreshStatus() : Promise.resolve({ total_physical_bytes: 1024 }),
         fetchOptimizeConfig: () => loaded,
-        async saveStorageLimit(value) { submitted.push(value); },
+        async saveStorageLimit(value) { submitted.push(value); if (persistLimit) await persistLimit(value); },
         async saveOptimizeConfig(value) { submitted.push(value); return value; },
       };
       throw new Error(`Unexpected card dependency: ${name}`);
@@ -123,4 +124,40 @@ test('storage: clearing the limit is invalid, but explicitly entering zero disab
   form.input('9');
   assert.equal(await form.save(), true);
   assert.deepEqual(form.submitted, [0, 9]);
+});
+
+test('storage: a failed usage refresh does not undo a confirmed limit save', async () => {
+  let unavailable = true;
+  const form = await card('storage', {
+    refreshStatus: async () => {
+      if (unavailable) throw new Error('usage unavailable');
+      return { total_physical_bytes: 2048 };
+    },
+  });
+  await form.load({ max_total_size_mb: 512, total_physical_bytes: 1024 });
+  assert.match(form.text(), /1\.00 KiB/, 'initial usage is visible');
+  form.input('128');
+  assert.equal(await form.save(), true, 'the configuration POST succeeded');
+  assert.deepEqual(form.submitted, [128]);
+  assert.match(form.text(), /128.0 MiB/, 'the confirmed limit remains visible');
+  assert.match(form.text(), /usage unavailable/);
+  assert.doesNotMatch(form.text(), /1\.00 KiB/, 'stale usage is not current usage');
+  assert.match(form.text(), /—/, 'failed refresh displays unknown usage');
+  unavailable = false;
+  assert.equal(await form.save(), true);
+  assert.doesNotMatch(form.text(), /usage unavailable/);
+  assert.match(form.text(), /2\.00 KiB/, 'retry displays fresh usage');
+});
+
+test('storage: a rejected configuration write remains a failed save', async () => {
+  let reads = 0;
+  const form = await card('storage', {
+    persistLimit: async () => { throw new Error('configuration read-only'); },
+    refreshStatus: async () => { reads += 1; return { total_physical_bytes: 2048 }; },
+  });
+  await form.load({ max_total_size_mb: 512, total_physical_bytes: 1024 });
+  form.input('128');
+  assert.equal(await form.save(), false);
+  assert.equal(reads, 0);
+  assert.match(form.text(), /configuration read-only/);
 });
