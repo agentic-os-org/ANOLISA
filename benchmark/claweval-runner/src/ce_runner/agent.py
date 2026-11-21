@@ -525,7 +525,7 @@ def _get_last_assistant_has_tool_calls(session_file: str) -> bool:
     """
     last_assistant_has_tools = False
     try:
-        with open(session_file) as f:
+        with open(session_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -558,7 +558,7 @@ def _build_conversation_for_user_agent(session_file: str) -> list:
     """
     messages = []
     try:
-        with open(session_file) as f:
+        with open(session_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

@@ -73,6 +73,37 @@ def phase_convert(session_file: str, task_yaml: str, output: str,
     return r.returncode == 0 and os.path.exists(output)
 
 
+def _read_grading_scores(trace_file: str) -> tuple[dict, bool]:
+    """Read scores from a trace file's grading_result event.
+
+    The trace JSONL is written by ``ce_runner.session_trace_converter`` as
+    UTF-8, so it is decoded explicitly; the process default would otherwise
+    raise under a legacy ANSI code page and silently report an all-zero
+    grading result.  Returns ``(scores, grading_result_seen)``.
+    """
+    scores = {
+        "completion": 0.0, "robustness": 0.0, "communication": 0.0,
+        "safety": 0.0, "task_score": 0.0, "passed": False,
+    }
+    grading_result_seen = False
+    try:
+        with open(trace_file, encoding="utf-8") as f:
+            for line in f:
+                event = json.loads(line)
+                if event.get("type") == "grading_result":
+                    s = event.get("scores", {})
+                    scores["completion"] = s.get("completion", 0.0)
+                    scores["robustness"] = s.get("robustness", 0.0)
+                    scores["communication"] = s.get("communication", 0.0)
+                    scores["safety"] = s.get("safety", 0.0)
+                    scores["task_score"] = event.get("task_score", 0.0)
+                    scores["passed"] = event.get("passed", False)
+                    grading_result_seen = True
+    except Exception:
+        pass
+    return scores, grading_result_seen
+
+
 def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
                 env_snapshot_path: str = None) -> dict:
     """Grade the converted trace. Returns scores from the trace's grading_result event.
@@ -131,26 +162,7 @@ def phase_grade(trace_file: str, task_yaml: str, judge_config: dict,
         pass
 
     # Read scores from trace file's grading_result event (authoritative source)
-    scores = {
-        "completion": 0.0, "robustness": 0.0, "communication": 0.0,
-        "safety": 0.0, "task_score": 0.0, "passed": False,
-    }
-    grading_result_seen = False
-    try:
-        with open(trace_file) as f:
-            for line in f:
-                event = json.loads(line)
-                if event.get("type") == "grading_result":
-                    s = event.get("scores", {})
-                    scores["completion"] = s.get("completion", 0.0)
-                    scores["robustness"] = s.get("robustness", 0.0)
-                    scores["communication"] = s.get("communication", 0.0)
-                    scores["safety"] = s.get("safety", 0.0)
-                    scores["task_score"] = event.get("task_score", 0.0)
-                    scores["passed"] = event.get("passed", False)
-                    grading_result_seen = True
-    except Exception:
-        pass
+    scores, grading_result_seen = _read_grading_scores(trace_file)
     # Distinguish a crash that never graded from a genuine zero score; a
     # teardown failure after the result was written must not override it.
     if rc != 0 and not grading_result_seen:
