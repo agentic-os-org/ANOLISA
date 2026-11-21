@@ -143,6 +143,14 @@ agentsight serve --db /backup/genai_events.db
 
 `serve` 要用和 `trace` 相同的用户运行，否则两者解析到的数据目录不一致。
 
+Linux 的 `serve` 同时指定 `--aw-audit-state-dir <ABS_DIR>` 和
+`--aw-binary <ABS_FILE>` 时，以服务的有效用户身份导入 AW 公共审计。
+
+## agentsight aw-audit
+
+按来源和 RFC 3339 时间范围查询已导入的执行对象，可用 `--instance-id` 筛选。
+参见 [AW 执行审计示例](integrations.md#aw-执行审计)。
+
 ## agentsight dashboard
 
 打印 Dashboard 地址与访问令牌，并尝试打开浏览器。在 ECS 实例上还会打印安全组配置链接。

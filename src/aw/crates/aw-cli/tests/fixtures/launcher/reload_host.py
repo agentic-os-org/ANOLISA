@@ -16,7 +16,8 @@ if sys.argv[1:] == ["--version"]:
     print(os.environ.get("FAKE_RELOAD_VERSION", "1.1.73" if adapter == "qoder" else "QwenPaw, version 2.2.2.post1"))
     raise SystemExit(0)
 root = Path(os.environ["FAKE_ROOT"])
-deadline = time.monotonic() + 10
+# The callback-limit test submits durable observations before the first command.
+deadline = time.monotonic() + int(os.environ.get("FAKE_HOLD_TIMEOUT_SECONDS", "10"))
 
 
 def publish(path, text):

@@ -206,6 +206,9 @@
         "native": {
           "type": "boolean"
         },
+        "shadow": {
+          "type": "boolean"
+        },
         "dispatch_owner": {
           "$ref": "#/$defs/identifier"
         }

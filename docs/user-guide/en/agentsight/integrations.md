@@ -5,6 +5,35 @@
 AgentSight observes Agents without being wired into them, and it shows data from the other ANOLISA
 components when they happen to be installed. Nothing on this page is required to use AgentSight.
 
+## AW execution audit
+
+On Linux, run AgentSight under the effective user that owns the AW state and
+use an absolute path to an installed AW executable. Set `AW_STATE` to the
+private AW service state directory and `SIGHT_DATA` to the AgentSight data
+directory. `SOURCE_ID` is the `source_id` in the AW audit export inventory.
+In a terminal, start the importer as part of `serve`:
+
+```bash
+agentsight serve --db "$SIGHT_DATA/genai_events.db" \
+  --aw-binary "$(command -v aw)" --aw-audit-state-dir "$AW_STATE"
+```
+
+In another terminal, use the same data directory and a UTC range covering the run:
+
+```bash
+agentsight aw-audit --storage-base "$SIGHT_DATA" --source-id "$SOURCE_ID" \
+  --from 2026-01-01T00:00:00Z --to 2026-01-02T00:00:00Z
+```
+
+The JSON timeline contains public execution objects, native association when
+available, and per-chain history gaps. `pending` counts chains without a
+confirmed terminal checkpoint. Restarting `serve` resumes pending chains from
+their persisted checkpoints. For a previously discovered source, `ingestion.state`
+reports the current attempt and `ingestion.last_success_at_ms` records the last
+successful check even when the source is unavailable. The importer works with
+eBPF disabled. Stop `serve` to stop the importer, or omit both import flags
+on restart.
+
 ## Supported Agents
 
 Any process matched by a discovery rule is traced. The shipped rule set (36 rules) covers:

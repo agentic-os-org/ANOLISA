@@ -155,6 +155,15 @@ agentsight serve --db /backup/genai_events.db
 
 Run `serve` as the same user as `trace`, otherwise the two resolve different data directories.
 
+With `--aw-audit-state-dir <ABS_DIR>` and `--aw-binary <ABS_FILE>`, Linux `serve`
+imports public AW audit under the effective user of the server.
+
+## agentsight aw-audit
+
+Query the imported execution objects by source and RFC 3339 time range.
+Use `--instance-id` to narrow the results. See the
+[AW execution audit example](integrations.md#aw-execution-audit).
+
 ## agentsight dashboard
 
 Prints the Dashboard URLs and the access token, then tries to open a browser. On ECS instances it

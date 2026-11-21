@@ -1,6 +1,8 @@
 //! Instance-owned optional reads outlive callbacks, but never outlive bounded release.
 
-use super::{association, contract, now_ms, projection, Seed};
+use super::{association, contract, now_ms, projection, Seed, Settings};
+
+mod coverage;
 use crate::{rejected, runtime::Runtime, Result, RunOutcome};
 use aw_contracts::canonical;
 use serde_json::{json, Value};
@@ -21,7 +23,7 @@ pub(in crate::runtime) struct Observation {
     key: String,
     closing: AtomicBool,
     starting: AtomicBool,
-    sender: SyncSender<Seed>,
+    sender: SyncSender<(u64, Seed)>,
     worker: Mutex<Option<JoinHandle<()>>>,
     state: Mutex<State>,
 }
@@ -31,6 +33,9 @@ struct State {
     latest: Option<Value>,
     callbacks: usize,
     closed: bool,
+    audit_available: bool,
+    source_epoch: u64,
+    coverage_transitions: usize,
 }
 
 struct Startup(Arc<Observation>);
@@ -50,6 +55,13 @@ impl Observation {
             .clone())
     }
 
+    fn record(&self, runtime: &Runtime, state: &mut State, record: Value) {
+        if state.audit_available && runtime.audit.append_observation(&self.key, record).is_err() {
+            state.audit_available = false;
+            state.metadata["audit_state"] = json!("unavailable");
+        }
+    }
+
     fn gap(&self, runtime: &Runtime, reason: &str) -> Result<()> {
         let mut state = self
             .state
@@ -60,10 +72,11 @@ impl Observation {
             .ok_or_else(|| rejected("observation_state"))?;
         if !gaps.iter().any(|gap| gap == reason) {
             gaps.push(json!(reason));
-            runtime.audit.append(
-                &self.key,
+            self.record(
+                runtime,
+                &mut state,
                 json!({"phase":"observation_gap", "reason":reason}),
-            )?;
+            );
         }
         Ok(())
     }
@@ -72,7 +85,7 @@ impl Observation {
         if self.closing.load(Ordering::Acquire) {
             return Err(rejected("instance_draining"));
         }
-        {
+        let source_epoch = {
             let mut state = self
                 .state
                 .lock()
@@ -84,12 +97,21 @@ impl Observation {
                 drop(state);
                 return self.gap(runtime, "observation_callback_limit");
             }
-            runtime.audit.append(&self.key, json!({"phase":"native_callback", "event_id":seed.subject["event_id"],
-                "candidate_revision":seed.candidate["digest"], "association":seed.association, "received_at_ms":seed.received_at_ms}))?;
+            self.record(
+                runtime,
+                &mut state,
+                json!({"phase":"native_callback", "event":"runtime.observed",
+                "event_id":seed.subject["event_id"], "candidate_revision":seed.candidate["digest"],
+                "association":seed.association, "received_at_ms":seed.received_at_ms}),
+            );
             state.callbacks += 1;
             state.metadata["callbacks"] = json!(state.callbacks);
             state.metadata["association"] = seed.association.clone();
-        }
+            if state.metadata["query_state"] != "ready" {
+                return Ok(());
+            }
+            state.source_epoch
+        };
         if seed.association["status"] != "verified" {
             return self.gap(runtime, "native_identity_unverified");
         }
@@ -107,7 +129,7 @@ impl Observation {
         {
             return self.gap(runtime, "observation_input_limit");
         }
-        match self.sender.try_send(seed.clone()) {
+        match self.sender.try_send((source_epoch, seed.clone())) {
             Ok(()) => Ok(()),
             Err(mpsc::TrySendError::Full(_)) => self.gap(runtime, "observation_queue_full"),
             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -116,12 +138,22 @@ impl Observation {
         }
     }
 
-    fn run(&self, runtime: &Runtime, receiver: Receiver<Seed>) -> Result<()> {
+    fn run(
+        &self,
+        runtime: &Runtime,
+        receiver: Receiver<(u64, Seed)>,
+        settings: &Settings,
+    ) -> Result<()> {
+        let mut next_probe = Instant::now() + coverage::PROBE_INTERVAL;
         loop {
             if runtime.stopped.load(Ordering::Acquire) {
                 break;
             }
-            let seed = if self.closing.load(Ordering::Acquire) {
+            if Instant::now() >= next_probe && !self.closing.load(Ordering::Acquire) {
+                self.probe(runtime, settings, Instant::now() + QUERY_BUDGET)?;
+                next_probe = Instant::now() + coverage::PROBE_INTERVAL;
+            }
+            let (source_epoch, seed) = if self.closing.load(Ordering::Acquire) {
                 match receiver.try_recv() {
                     Ok(seed) => seed,
                     Err(_) => break,
@@ -133,6 +165,15 @@ impl Observation {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             };
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| rejected("observation_state"))?;
+                if state.source_epoch != source_epoch || state.metadata["query_state"] != "ready" {
+                    continue;
+                }
+            }
             let budget = seed.settings.as_ref().map_or(QUERY_BUDGET, |settings| {
                 Duration::from_millis(settings.query_timeout_ms).min(QUERY_BUDGET)
             });
@@ -147,6 +188,10 @@ impl Observation {
                 .state
                 .lock()
                 .map_err(|_| rejected("observation_state"))?;
+            if status == "unavailable" && !matches!(gap, "source_deadline" | "source_limit") {
+                self.lose_source(runtime, &mut state, gap);
+                continue;
+            }
             state.metadata["source_state"] = json!(status);
             state.metadata["source_reason"] = json!(gap);
             state.metadata["observed_at_ms"] = json!(now_ms()?);
@@ -161,9 +206,9 @@ impl Observation {
                             .ok_or_else(|| rejected("context_encoding"))?,
                     )
                     .map_err(contract)?;
-                    runtime.audit.append(&self.key, json!({"phase":"evidence_observed", "event_id":seed.subject["event_id"],
+                    self.record(runtime, &mut state, json!({"phase":"evidence_observed", "event_id":seed.subject["event_id"],
                         "projection_revision":value["context_revision"], "source_revision":value["source_revision"],
-                        "source_state":status,"gaps":value["gaps"]}))?;
+                        "source_state":status,"gaps":value["gaps"]}));
                     state.metadata["projection_revision"] = value["context_revision"].clone();
                     state.metadata["source_revision"] = value["source_revision"].clone();
                     state.metadata["evidence_gaps"] = value["gaps"].clone();
@@ -181,6 +226,15 @@ impl Observation {
         Ok(())
     }
 
+    fn worker_failed(&self, runtime: &Runtime) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| rejected("observation_state"))?;
+        self.lose_source(runtime, &mut state, "observation_worker_unavailable");
+        Ok(())
+    }
+
     fn finish(&self, runtime: &Runtime) -> Result<bool> {
         self.closing.store(true, Ordering::Release);
         if self.starting.load(Ordering::Acquire) {
@@ -194,25 +248,21 @@ impl Observation {
             return Ok(false);
         }
         if let Some(worker) = worker.take() {
-            worker
-                .join()
-                .map_err(|_| rejected("observation_worker_failed"))?;
+            if worker.join().is_err() {
+                self.worker_failed(runtime)?;
+            }
         }
         let mut state = self
             .state
             .lock()
             .map_err(|_| rejected("observation_state"))?;
         if !state.closed {
-            let terminal = runtime.audit.append(&self.key, json!({"phase":"closed", "outcome":state.metadata["run"],
-                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"}));
+            let terminal = json!({"phase":"closed", "outcome":state.metadata["run"],
+                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"});
+            self.record(runtime, &mut state, terminal);
             runtime.audit.release(&self.key);
             state.latest = None;
             state.closed = true;
-            // Release still reports the poisoned audit after dropping the Host;
-            // broken storage must not retain Provider or observation ownership.
-            if runtime.audit.healthy() {
-                terminal?;
-            }
         }
         Ok(true)
     }
@@ -253,11 +303,14 @@ impl Runtime {
             }
             let key = self.identifier()?;
             let (sender, receiver) = mpsc::sync_channel(2);
-            self.audit.claim(
-                &key,
-                json!({"kind":"run", "identity":self.identity, "instance_id":instance_id,
+            let audit_available = self
+                .audit
+                .claim_observation(
+                    &key,
+                    json!({"kind":"run", "identity":self.identity, "instance_id":instance_id,
                 "binding_id":instance.host.target(),"phase":"launch_prepared"}),
-            )?;
+                )
+                .is_ok();
             let observation = Arc::new(Observation {
                 key: key.clone(),
                 closing: AtomicBool::new(false),
@@ -268,54 +321,55 @@ impl Runtime {
                     metadata: json!({"audit_key":key,"instance_id":instance_id,
                     "source_state":"unknown","query_state":"unknown","source_reason":"awaiting_native_identity",
                     "coverage":"unknown","ebpf":"unknown","collection":"unknown","callbacks":0,
+                    "audit_state":if audit_available {"ready"} else {"unavailable"},
+                    "source":{"id":settings.source_id,"kind":"sight","installed":true,"state":"unknown",
+                        "proof":"query_transport","reason":null,"changed_at_ms":null,
+                        "gaps":["collector_coverage_unmeasured","ebpf_coverage_unmeasured"]},
                     "gaps":["coverage_unknown","source_process_identity_unavailable"],"run":{"state":"launch_prepared"}}),
                     latest: None,
                     callbacks: 0,
                     closed: false,
+                    audit_available,
+                    source_epoch: 0,
+                    coverage_transitions: 0,
                 }),
             });
             instance.observation = Some(Arc::clone(&observation));
             (observation, receiver, settings)
         };
         let _startup = Startup(Arc::clone(&observation));
-        let deadline = deadline.min(
-            Instant::now() + QUERY_BUDGET.min(Duration::from_millis(settings.query_timeout_ms)),
-        );
-        let probe = settings
-            .client()
-            .and_then(|client| client.probe_until(deadline, settings.query_bytes));
+        observation.probe(self, &settings, deadline)?;
+        // The query is optional. Admission still depends on the critical
+        // execution audit, which may have failed during the probe.
+        if !self.audit.healthy() {
+            return Err(rejected("audit_unavailable"));
+        }
         {
             let mut state = observation
                 .state
                 .lock()
                 .map_err(|_| rejected("observation_state"))?;
-            state.metadata["query_state"] = json!(if probe.is_ok() {
-                "ready"
-            } else {
-                "unavailable"
-            });
-            if let Err(error) = probe {
-                state.metadata["source_reason"] = json!(super::source_failure(&error));
-            }
-            self.audit.append(
-                &observation.key,
-                json!({"phase":"observation_prepared","query_state":state.metadata["query_state"],
-                "source_reason":state.metadata["source_reason"],"coverage":"unknown"}),
-            )?;
+            let prepared = json!({"phase":"observation_prepared","query_state":state.metadata["query_state"],
+                "source_reason":state.metadata["source_reason"],"coverage":"unknown"});
+            observation.record(self, &mut state, prepared);
         }
         let runtime = Arc::clone(self);
         let owner = Arc::clone(&observation);
-        let worker = thread::Builder::new()
+        match thread::Builder::new()
             .name("aw-observation".into())
             .spawn(move || {
-                if owner.run(&runtime, receiver).is_err() {
-                    let _ = owner.gap(&runtime, "observation_worker_failed");
+                if owner.run(&runtime, receiver, &settings).is_err() {
+                    let _ = owner.worker_failed(&runtime);
                 }
-            })?;
-        *observation
-            .worker
-            .lock()
-            .map_err(|_| rejected("observation_state"))? = Some(worker);
+            }) {
+            Ok(worker) => {
+                *observation
+                    .worker
+                    .lock()
+                    .map_err(|_| rejected("observation_state"))? = Some(worker);
+            }
+            Err(_) => observation.worker_failed(self)?,
+        }
         observation.metadata()
     }
 
@@ -345,7 +399,9 @@ impl Runtime {
 
     pub(in crate::runtime) fn observe_seed(&self, instance_id: &str, seed: &Seed) -> Result<()> {
         if let Some(observation) = self.observation(instance_id)? {
-            observation.enqueue(self, seed)?;
+            if observation.enqueue(self, seed).is_err() {
+                let _ = observation.gap(self, "observation_callback_unavailable");
+            }
         }
         Ok(())
     }
@@ -488,10 +544,13 @@ impl Runtime {
         if !valid {
             return Err(rejected("run_transition_invalid"));
         }
-        self.audit.append(
-            &observation.key,
-            json!({"phase":"run_reported","outcome":outcome}),
-        )?;
+        let record = match outcome {
+            RunOutcome::Exited { .. } => {
+                json!({"phase":"run_reported","event":"runtime.exited","outcome":outcome})
+            }
+            _ => json!({"phase":"run_reported","outcome":outcome}),
+        };
+        observation.record(self, &mut state, record);
         state.metadata["run"] =
             serde_json::to_value(outcome).map_err(|_| rejected("observation_encoding"))?;
         Ok(json!({"recorded":true}))

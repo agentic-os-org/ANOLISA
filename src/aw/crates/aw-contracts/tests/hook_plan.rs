@@ -135,10 +135,65 @@ fn resolved_hook_plan_enforces_control_authority_and_step_ordering_rules() {
         .swap(0, 1);
     assert!(parse(&misordered_rewrite).is_err());
 
-    // Input replacement requires fail-closed on_error == "block" on all before steps.
+    // Input replacement requires fail-closed before steps, with a read-only shadow exception.
     let mut non_blocking_before = base;
     non_blocking_before["hooks"]["tool.before"]["steps"][1]["on_error"] = json!("report");
     assert!(parse(&non_blocking_before).is_err());
+
+    let mut shadow = non_blocking_before;
+    let step = &mut shadow["hooks"]["tool.before"]["steps"][1];
+    step["effects"] = json!(["observe"]);
+    step["shadow"] = json!(true);
+    shadow["coverage"]["satisfied"][1]["failure_actions"] = json!(["report", "block"]);
+    let plan = parse(&shadow).unwrap();
+    assert_eq!(serde_json::to_value(&plan).unwrap(), shadow);
+
+    shadow["hooks"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let plan = parse(&shadow).unwrap();
+    assert_eq!(serde_json::to_value(&plan).unwrap(), shadow);
+
+    shadow["hooks"]["tool.before"]["steps"][0]["effects"] = json!(["observe", "block"]);
+    assert!(parse(&shadow).is_err());
+}
+
+#[test]
+fn result_replacement_can_have_shadow_steps_on_either_side() {
+    let base = plan_document();
+    let mut hook = base["hooks"]["tool.before"].clone();
+    hook["event"] = json!("tool.after");
+    hook["observation_sources"] = json!([]);
+    hook["control_owner"]["effects"] = json!(["observe", "replace_result"]);
+    hook["steps"][0]["effects"] = json!(["replace_result"]);
+    hook["steps"][0]["on_error"] = json!("report");
+    hook["steps"][1]["effects"] = json!(["observe"]);
+    hook["steps"][1]["on_error"] = json!("report");
+    hook["steps"][1]["shadow"] = json!(true);
+    let mut document = json!({
+        "version": VERSION, "target": "qwenpaw", "adapter": "qwenpaw",
+        "hooks": {"tool.after": hook},
+        "coverage": {"satisfied": [{
+            "event": "tool.after", "required": true, "control_owner": "qwenpaw-native",
+            "observation_sources": [], "effects": ["observe", "replace_result"],
+            "failure_actions": ["report"]
+        }], "gaps": []}
+    });
+    let plan = parse(&document).unwrap();
+    assert_eq!(serde_json::to_value(&plan).unwrap(), document);
+
+    // Making the trailing observe step enforcing restores the last-step constraint.
+    document["hooks"]["tool.after"]["steps"][1]["shadow"] = json!(false);
+    assert!(parse(&document).is_err());
+
+    let steps = document["hooks"]["tool.after"]["steps"]
+        .as_array_mut()
+        .unwrap();
+    steps[1]["shadow"] = json!(true);
+    steps.swap(0, 1);
+    let plan = parse(&document).unwrap();
+    assert_eq!(serde_json::to_value(&plan).unwrap(), document);
 }
 
 #[test]

@@ -21,6 +21,16 @@ pub struct ServeCommand {
     #[structopt(long)]
     pub db: Option<String>,
 
+    /// Existing private AW service state directory to import (Linux only)
+    #[cfg(target_os = "linux")]
+    #[structopt(long, requires = "aw-binary", parse(from_os_str))]
+    pub aw_audit_state_dir: Option<std::path::PathBuf>,
+
+    /// Absolute path to the trusted AW executable that owns audit export (Linux only)
+    #[cfg(target_os = "linux")]
+    #[structopt(long, requires = "aw-audit-state-dir", parse(from_os_str))]
+    pub aw_binary: Option<std::path::PathBuf>,
+
     /// Path to JSON configuration file (Linux only)
     #[cfg(target_os = "linux")]
     #[structopt(long, default_value = super::DEFAULT_CONFIG_PATH)]
@@ -62,6 +72,22 @@ impl ServeCommand {
             // Initialize logging before warning: standalone `serve` does not
             // register a logger, so a `log::warn!` before this point is lost.
             server_config.apply_verbose();
+            let aw_audit = self
+                .aw_binary
+                .clone()
+                .zip(self.aw_audit_state_dir.clone())
+                .and_then(|(binary, state)| {
+                    use agentsight::aw_audit::{Export, Worker};
+                    match Export::new(binary, state)
+                        .and_then(|export| Worker::start(export, &server_config.storage.base_path))
+                    {
+                        Ok(worker) => Some(worker),
+                        Err(error) => {
+                            log::warn!("AW audit import disabled: {error}");
+                            None
+                        }
+                    }
+                });
             let auth_config = server_config.server_auth;
             let storage_config = server_config.storage;
             // The health checker discovers agents with the same rules the
@@ -75,8 +101,8 @@ impl ServeCommand {
             }
 
             let config_path = std::path::PathBuf::from(&self.config);
-            actix_web::rt::System::new().block_on(async move {
-                if let Err(e) = run_server(
+            let result = actix_web::rt::System::new().block_on(async move {
+                run_server(
                     &host,
                     port,
                     db_path,
@@ -87,11 +113,12 @@ impl ServeCommand {
                     Some(config_path),
                 )
                 .await
-                {
-                    eprintln!("Server error: {e}");
-                    std::process::exit(1);
-                }
             });
+            drop(aw_audit);
+            if let Err(error) = result {
+                eprintln!("Server error: {error}");
+                std::process::exit(1);
+            }
         }
 
         #[cfg(not(target_os = "linux"))]

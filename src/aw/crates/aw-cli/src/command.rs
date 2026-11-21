@@ -9,6 +9,7 @@ mod instance;
 mod inventory;
 mod management;
 mod package;
+mod plan;
 mod scope;
 #[cfg(test)]
 mod tests;
@@ -47,6 +48,8 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
+    /// Resolve declared Hook Sources and show their static coverage
+    Plan(plan::Options),
     /// Install a local Provider extension
     Install(Install),
     /// Remove selected packages or an entire installation, preserving unknown files

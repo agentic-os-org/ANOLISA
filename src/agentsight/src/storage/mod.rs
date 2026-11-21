@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod aw_audit;
 mod checkpoint;
 #[cfg(test)]
 mod checkpoint_tests;

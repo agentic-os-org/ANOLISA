@@ -64,10 +64,24 @@ aw run --config ./aw.yaml --agent qoder
 aw service status --config ./aw.yaml
 ```
 
-启动输出观测审计 key 和来源查询状态。status 展示活动观测、原生关联、来源结果与
-显式缺口。查询 `ready` 表示 auth-status 合同已响应，存储、采集、eBPF 和完整覆盖
-仍为 `unknown`。原生
-session 在可信回调到达后关联，没有回调的运行可以成功退出并保持未关联。
+启动输出观测审计 key 和来源查询状态。`aw service status` 的
+`configured_sources` 列出目标配置，`observations[].source` 展示活动实例已安装的
+连接器，状态包括 `unknown`、`ready`、`lost`、`unsupported` 和 `recovered`。
+`ready` 和 `recovered` 表示查询通道探测通过。采集和 eBPF 覆盖需要来源提供
+能力证据，当前显示 `unknown`。原生回调经校验后关联 session 和 call ID。
+
+对常驻实例，AW 通过有界后台探测识别查询通道失联与恢复。失联时清除当前投影，
+丢弃旧连接上仍在排队的来源读取，继续记录原生回调的本地元数据。恢复后读取新回调
+关联的观测。实例审计中包含 `runtime.observed`、`runtime.exited`、`coverage.changed`。
+
+离线查看时，将候选来源的 `SourceCapability` 声明保存到文件并执行：
+
+```bash
+aw plan --config ./aw.yaml --agent qoder --source ./native-source.json --source ./sight-source.json
+```
+
+计划根据声明展示 Hook 覆盖缺口和策略调度归属。Sight 来源可以为原生 Hook 补充证据。
+策略步骤由可执行来源负责，运行时就绪状态仍显示 `unknown`。
 
 事件没有动作步骤时，AW 注册纯观测回调；已有动作时复用其回调。纯观测返回原生
 无操作响应，后台来源读取不拖住 Hook 应答。必要的本地元数据仍在应答前完成写入。
@@ -91,8 +105,9 @@ session 在可信回调到达后关联，没有回调的运行可以成功退出
 `off`，再使用匹配配置重启所属 daemon。
 
 外部采集器支持该 Agent 时，无 eBPF 也可使用用户态轨迹。查询成功不能证明 eBPF
-就绪。AW 不安装组件、不提权，也不启停 AgentSight worker。完整能力要求与丢失/恢复
-策略由 #7623 补齐，公共增量审计和消费分别由 #7624、#7625 接续。
+就绪。AgentSight 采集进程由部署方管理。必需能力准入继续由 #7623 跟踪。
+Linux AgentSight 可以独立于 eBPF 消费 AW 公共执行对象，实例状态变更记录通过
+AW 服务审计查看。[AgentSight 导入说明](../../../user-guide/zh/agentsight/integrations.md#aw-执行审计)
 
 默认用户态轨迹采集器在扫描轮次间等待 30 秒。GET 读取已入库历史，立即再查不能
 保证新鲜数据。AW 将来源时间标记为未验证，Hook 应答不等待这些读取，也不使用
