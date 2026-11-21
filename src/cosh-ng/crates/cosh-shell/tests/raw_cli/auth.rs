@@ -54,6 +54,7 @@ fn raw_cli_auth_failure_keeps_panel_and_never_claims_success() {
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Select your AI provider:", b"\n".as_slice()),
             ("Enter Base URL", b"http://127.0.0.1:1/v1\n".as_slice()),
             ("Enter API Key", b"sk-rejected\n".as_slice()),
@@ -114,7 +115,7 @@ fn raw_cli_auth_dotted_provider_id_can_be_corrected() {
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("+ Add new provider", b"\x1b[C\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\x1b[C\n".as_slice()),
             ("Authentication Required", b"\n".as_slice()),
             ("Type answer | Enter send", b"qwen3.7-max\n".as_slice()),
             ("Provider ID allows letters", b"\x7f".as_slice()),
@@ -298,7 +299,8 @@ fn raw_cli_auth_ecs_offers_sysom_first_without_saved_providers() {
     assert!(compact.contains("Provider Management"), "{output}");
     // Selected by default: the panel marks the current row with '>'.
     assert!(compact.contains(&format!("> [1] {SYSOM_ROW}")), "{output}");
-    assert!(compact.contains("[2] + Add new provider"), "{output}");
+    assert!(compact.contains("[2] 阿里云账号登录"), "{output}");
+    assert!(compact.contains("[3] + Add new provider"), "{output}");
     // The template picker must not be what an ECS user sees first.
     assert!(!compact.contains("Authentication Required"), "{output}");
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
@@ -313,16 +315,17 @@ fn raw_cli_auth_ecs_keeps_saved_provider_reachable_below_sysom() {
         ECS_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("+ Add new provider", b"\x1b[C\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\x1b[C\n".as_slice()),
             ("\"qwen-prod\":", b"".as_slice()),
         ],
     );
 
     let compact = compact_terminal_words(&output);
     assert!(compact.contains(&format!("> [1] {SYSOM_ROW}")), "{output}");
-    assert!(compact.contains("[2] * [active] DashScope"), "{output}");
-    assert!(compact.contains("[3] + Add new provider"), "{output}");
-    // Row 2 opened the saved provider's action menu, not the SysOM shortcut.
+    assert!(compact.contains("[2] 阿里云账号登录"), "{output}");
+    assert!(compact.contains("[3] * [active] DashScope"), "{output}");
+    assert!(compact.contains("[4] + Add new provider"), "{output}");
+    // Row 3 opened the saved provider's action menu, not the SysOM shortcut.
     assert!(compact.contains("Edit configuration"), "{output}");
     assert!(compact.contains("Delete provider"), "{output}");
     assert!(!compact.contains("Enter Provider ID"), "{output}");
@@ -339,7 +342,7 @@ fn raw_cli_auth_ecs_promotes_configured_ram_role_provider() {
         ECS_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("+ Add new provider", b"\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("\"sysom-trial\":", b"".as_slice()),
         ],
     );
@@ -347,12 +350,12 @@ fn raw_cli_auth_ecs_promotes_configured_ram_role_provider() {
     let compact = compact_terminal_words(&output);
     // Row 1 is the saved provider wearing the SysOM label, and there is no extra row for it.
     assert!(
-        compact.contains(&format!("> [1] {SYSOM_ROW} - \"sysom-trial\"")),
+        compact.contains(&format!("> [2] {SYSOM_ROW} - \"sysom-trial\"")),
         "{output}"
     );
-    assert!(!compact.contains(&format!("[2] {SYSOM_ROW}")), "{output}");
-    assert!(compact.contains("[2] * [active] DashScope"), "{output}");
-    assert!(compact.contains("[3] + Add new provider"), "{output}");
+    assert!(!compact.contains(&format!("[1] {SYSOM_ROW}")), "{output}");
+    assert!(compact.contains("[3] * [active] DashScope"), "{output}");
+    assert!(compact.contains("[4] + Add new provider"), "{output}");
     // Selecting it opens the ordinary action menu instead of re-running the setup flow.
     assert!(compact.contains("Set as active provider"), "{output}");
     assert!(compact.contains("Edit configuration"), "{output}");
@@ -371,11 +374,15 @@ fn raw_cli_auth_non_ecs_without_saved_providers_shows_plan_entries() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Authentication Required", b"".as_slice()),
         ],
     );
 
     let compact = compact_terminal_words(&output);
+    assert!(compact.contains("Provider Management"), "{output}");
+    assert!(compact.contains("> [1] 阿里云账号登录"), "{output}");
+    assert!(compact.contains("[2] + Add new provider"), "{output}");
     assert!(compact.contains("> [1] Aliyun Authentication"), "{output}");
     assert!(compact.contains("[2] Coding Plan"), "{output}");
     assert!(compact.contains("[3] Token Plan"), "{output}");
@@ -391,7 +398,6 @@ fn raw_cli_auth_non_ecs_without_saved_providers_shows_plan_entries() {
         "{output}"
     );
     assert!(!compact.contains("SysOM"), "{output}");
-    assert!(!compact.contains("Provider Management"), "{output}");
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
 }
 
@@ -404,16 +410,16 @@ fn raw_cli_auth_non_ecs_keeps_saved_providers_then_add_new() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("+ Add new provider", b"\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Edit configuration", b"\n".as_slice()),
             ("Edit API Key", b"".as_slice()),
         ],
     );
 
     let compact = compact_terminal_words(&output);
-    assert!(compact.contains("> [1] * [active] DashScope"), "{output}");
-    assert!(compact.contains("[2] + Add new provider"), "{output}");
-    assert!(!compact.contains("[3] + Add new provider"), "{output}");
+    assert!(compact.contains("> [2] * [active] DashScope"), "{output}");
+    assert!(compact.contains("[3] + Add new provider"), "{output}");
+    assert!(!compact.contains("[4] + Add new provider"), "{output}");
     assert!(!compact.contains("SysOM"), "{output}");
     // Edit still pre-fills the masked API key and offers to keep it.
     assert!(compact.contains("Edit API Key"), "{output}");
@@ -429,7 +435,7 @@ fn raw_cli_auth_edits_coding_plan_with_its_original_template() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("coding-prod", b"\n".as_slice()),
+            ("coding-prod", b"\x1b[C\n".as_slice()),
             ("Edit configuration", b"\n".as_slice()),
             ("Edit API Key", b"".as_slice()),
         ],
@@ -534,8 +540,9 @@ fn raw_cli_auth_prepare_failure_falls_back_to_the_existing_menu() {
 
     let compact = compact_terminal_words(&output);
     assert!(compact.contains("Provider Management"), "{output}");
-    assert!(compact.contains("> [1] * [active] DashScope"), "{output}");
-    assert!(compact.contains("[2] + Add new provider"), "{output}");
+    assert!(compact.contains("> [1] 阿里云账号登录"), "{output}");
+    assert!(compact.contains("[2] * [active] DashScope"), "{output}");
+    assert!(compact.contains("[3] + Add new provider"), "{output}");
     assert!(!compact.contains("SysOM"), "{output}");
     assert!(!compact.contains("Auth unavailable"), "{output}");
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
@@ -551,6 +558,7 @@ fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             (
                 "Authentication Required",
                 b"\x1b[C\x1b[C\x1b[C\x1b[C\n".as_slice(),
@@ -594,6 +602,7 @@ fn raw_cli_auth_esc_preserves_picker_focus_for_the_next_arrow() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
             ("Enter API Key", b"\x1b".as_slice()),
             ("Authentication Required", b"\x1b[B".as_slice()),
@@ -619,6 +628,7 @@ fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             (
                 "Authentication Required",
                 b"\x1b[C\x1b[C\x1b[C\x1b[C\n".as_slice(),
@@ -650,7 +660,7 @@ fn raw_cli_auth_esc_on_an_edit_returns_to_the_provider_action_menu() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("+ Add new provider", b"\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Edit configuration", b"\n".as_slice()),
             // API Key is the first field an edit may change, so ESC leaves the form entirely.
             ("Edit API Key", b"\x1b".as_slice()),
@@ -682,6 +692,7 @@ fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\x1b[C\n".as_slice()),
             ("Authentication Required", b"\n".as_slice()),
             ("Enter Access Key ID", b"AK-TEST-VALUE\n".as_slice()),
             ("Enter Access Key Secret", b"".as_slice()),

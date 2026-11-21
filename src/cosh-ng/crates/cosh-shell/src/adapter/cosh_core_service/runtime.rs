@@ -549,6 +549,25 @@ mod provider_activation_tests {
     }
 
     #[test]
+    fn live_oauth_logout_keeps_its_registry_action() {
+        let adapter = crate::adapter::CoshCoreAdapter::new("unused", false);
+        adapter.runtime.live.store(true, Ordering::SeqCst);
+        let (sender, receiver) = mpsc::channel();
+        *adapter.runtime.command_tx.lock().unwrap() = Some(sender);
+        let worker =
+            std::thread::spawn(move || adapter.registry_query("auth", "oauth_logout", Value::Null));
+        let ServiceCommand::Registry(command) =
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("logout must enqueue a registry command");
+        };
+        let action = command.action.clone();
+        command.response_tx.send(Ok(Value::Null)).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(action, "oauth_logout");
+    }
+
+    #[test]
     fn failed_live_registry_enqueue_restores_admission_without_short_fallback() {
         let runtime = PersistentCoshCoreRuntime::default();
         runtime.live.store(true, Ordering::SeqCst);

@@ -82,17 +82,28 @@ impl CoshCoreAdapter {
         mut params: Value,
     ) -> Result<Value, RegistryQueryError> {
         params = guard_auth_params(params, domain == "auth" && self.guarded_auth_writes)?;
-        if domain == "auth" && matches!(action, "set_trial_preference" | "state") {
+        if domain == "auth"
+            && matches!(
+                action,
+                "set_trial_preference"
+                    | "state"
+                    | "oauth_state"
+                    | "oauth_login_start"
+                    | "oauth_login_cancel"
+            )
+        {
             return self
                 .runtime
                 .registry_idle_query(action, params.clone(), || {
                     self.registry_query_short(domain, action, params)
                 });
         }
-        if domain == "auth" && action == "activate" {
-            return self.runtime.registry_activation_query(params.clone(), || {
-                self.registry_query_short(domain, action, params)
-            });
+        if domain == "auth" && matches!(action, "activate" | "oauth_logout") {
+            return self
+                .runtime
+                .registry_idle_query(action, params.clone(), || {
+                    self.registry_query_short(domain, action, params)
+                });
         }
         if domain == "auth" && action == "activate_trial" {
             return self

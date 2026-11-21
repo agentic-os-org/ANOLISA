@@ -52,6 +52,9 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
             let mut question = i18n
                 .t(MessageId::AuthProviderManagementQuestion)
                 .to_string();
+            if let Some(status) = auth.error_message.as_deref() {
+                question = format!("{status}\n{question}");
+            }
             if !state.auth.blocked_writes.is_empty() {
                 question = format!(
                     "{}\n{question}",
@@ -436,6 +439,35 @@ pub(super) fn auth_presentation(
 mod tests {
     use super::*;
     use crate::config::Language;
+
+    #[test]
+    fn management_panel_shows_oauth_flow_status() {
+        let mut state = InlineState::default();
+        state.auth.state = Some(super::super::runtime::RuntimeAuthState {
+            id: "oauth-status-test".into(),
+            request_id: "oauth-status".into(),
+            phase: AuthPhase::ManagingProviders,
+            providers: Vec::new(),
+            selected_provider: 0,
+            current_field: 0,
+            collected_values: Default::default(),
+            field_input: String::new(),
+            field_error: None,
+            field_capture_revision: 0,
+            existing_providers: Vec::new(),
+            editing_provider_name: None,
+            default_provider_id: false,
+            from_sysom_shortcut: false,
+            error_message: Some("OAuth login completed".into()),
+            backend: super::super::runtime::AuthBackend::CoreRegistry,
+            sysom: Default::default(),
+        });
+        let mut output = Vec::new();
+        render_current_auth_panel(&mut state, &mut output).unwrap();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("OAuth login completed"));
+    }
 
     #[test]
     fn guide_subpage_presentations_name_navigation_and_keep_shell_defaults() {
