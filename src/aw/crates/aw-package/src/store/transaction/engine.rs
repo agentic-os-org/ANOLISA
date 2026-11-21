@@ -134,7 +134,13 @@ fn execute(
     prepare::recheck(changes)?;
     fs::mkdir(&entry.workspace(), 0o700)?;
     entry.workspace_identity = Some(fs::directory_identity(&entry.workspace())?);
+    // The journal records the nonce before the marker exists, so a crash in
+    // this window leaves an empty workspace that recovery can retire safely.
+    let nonce = fs::new_workspace_nonce()?;
+    entry.workspace_nonce = Some(fs::workspace_nonce_hash(&nonce));
     entry.write()?;
+    fs::write_workspace_marker(&entry.workspace(), &nonce)?;
+    journal::checkpoint("workspace-claimed");
     let locator = changes.marker_after.clone();
     let first_is_locator = locator.is_some() && locator != changes.marker_before;
     for index in 0..entry.actions.len() {
@@ -226,11 +232,15 @@ fn execute(
         journal::current_database(paths)? == entry.before_database,
         "package database changed before commit",
     )?;
-    let (database_file, identity) =
-        fs::write_bytes(&entry.directory(), &entry.after_database, 0o644)?;
-    entry.database_stage = Some(identity);
+    let staged = fs::write_bytes(
+        &entry.directory(),
+        &entry.transaction_id,
+        &entry.after_database,
+        0o644,
+    )?;
+    entry.database_stage = Some(staged.identity.clone());
     entry.write()?;
-    fs::publish(&database_file, &entry.directory().join("database.after"))?;
+    fs::publish(staged, &entry.directory().join("database.after"))?;
     journal::checkpoint("precommit");
     journal::check_cancel(cancel)?;
     require(

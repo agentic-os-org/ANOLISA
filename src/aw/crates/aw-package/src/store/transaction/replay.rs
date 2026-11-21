@@ -125,11 +125,23 @@ fn classify(directory: &Path) -> Result<PendingDirectory> {
     if !directory.file_name().is_some_and(journal::generated_id) || fs::owned(directory).is_err() {
         return Ok(PendingDirectory::Conflict);
     }
-    let identity = fs::directory_identity(directory)?;
+    let held = fs::directory(directory)?;
+    let identity = fs::identity_of(&held)?;
     if identity.mode != 0o700 {
         return Ok(PendingDirectory::Conflict);
     }
-    let entries = fs::entries(directory)?;
+    let Some(owner) = directory.file_name().and_then(|name| name.to_str()) else {
+        return Ok(PendingDirectory::Conflict);
+    };
+    let entries = fs::entries_in(&held, directory)?;
+    // A crash between named staging creation and publication leaves only
+    // staging files, and their names carry this transaction id; reclaim them
+    // before deciding, so recovery is not stranded on a synthetic conflict.
+    let entries = if entries.is_empty() || fs::remove_staging(&held, directory, owner)?.is_empty() {
+        entries
+    } else {
+        fs::entries_in(&held, directory)?
+    };
     if entries.is_empty() {
         // SIGKILL may interrupt mkdir→first journal or final unlink→rmdir. Empty reserved
         // directories contain no evidence to replay; retire only the observed empty inode.
@@ -253,13 +265,39 @@ pub(super) fn finish(
         return Ok(conflicts);
     }
     let workspace = entry.workspace();
+    // A reusable (dev, ino) cannot prove the workspace survived: a replacement
+    // created at the same path may reuse it. Reclaim only a directory whose
+    // marker hashes to the recorded nonce; anything else is a conflict.
     match fs::directory(&workspace) {
-        Ok(_) if !fs::rmdir(&workspace, entry.workspace_identity.as_ref())? => {
-            conflicts.push(workspace)
-        }
-        Ok(_) => {}
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => conflicts.push(workspace),
+        Ok(held) => {
+            let entries = fs::entries_in(&held, &workspace)?;
+            let claimed = if entries.is_empty() {
+                // Nothing to lose, including a directory created before its journal.
+                fs::rmdir(&workspace, Some(&fs::identity_of(&held)?))?
+            } else if fs::marker_temporaries(&entries) {
+                // The crash landed inside marker publication; only the temporary exists.
+                fs::clear_workspace(&held, &workspace, &entry.transaction_id)?
+            } else {
+                match (
+                    entry.workspace_nonce.as_deref(),
+                    fs::read_workspace_marker(&held, &workspace)?,
+                ) {
+                    (Some(recorded), Some(marker))
+                        if fs::workspace_nonce_matches(recorded, &marker) =>
+                    {
+                        #[cfg(test)]
+                        fs::check_workspace();
+                        fs::clear_workspace(&held, &workspace, &entry.transaction_id)?
+                    }
+                    _ => false,
+                }
+            };
+            if !claimed {
+                conflicts.push(workspace);
+            }
+        }
     }
     if !conflicts.is_empty() {
         return Ok(conflicts);
@@ -285,7 +323,9 @@ pub(super) fn finish(
         return Ok(conflicts);
     }
     let directory = entry.directory();
-    let extras = fs::entries(&directory)?
+    let held = fs::directory(&directory)?;
+    fs::remove_staging(&held, &directory, &entry.transaction_id)?;
+    let extras = fs::entries_in(&held, &directory)?
         .into_iter()
         .filter(|path| path != &entry.path())
         .collect::<Vec<_>>();
