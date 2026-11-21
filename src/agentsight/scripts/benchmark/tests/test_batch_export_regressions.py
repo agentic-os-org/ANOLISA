@@ -196,7 +196,7 @@ class BatchExportTests(unittest.TestCase):
     def test_bad_destination_is_reported_without_overwriting_it(self) -> None:
         self.output.write_text("keep", encoding="utf-8")
         result = self.export()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("cannot export ATIF", result.stderr)
         self.assertIn("Done: 0 exported, 0 skipped, 1 failed", result.stderr)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "keep")
