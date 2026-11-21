@@ -9,6 +9,10 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+### Changed
+
+- Plain path lists eligible for search path sharing now also render a directory-grouped view that shares each directory among consecutive entries. Core emits the smaller of the common-prefix and grouped candidates, and only when it restores the input byte for byte and reduces both bytes and estimated tokens; lists without directory locality keep the previous view or pass through. Eligibility, routing, the `search_path_sharing` switch, statistics, and recoverability are unchanged ([#9764](https://github.com/agentic-os-org/ANOLISA/pull/9764)).
+
 ## [0.9.6] - 2026-11-19
 
 ### Added
