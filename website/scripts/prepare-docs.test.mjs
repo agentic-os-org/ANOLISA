@@ -331,7 +331,7 @@ test('migrated developer, SDK, and design routes redirect directly with locale a
     const sourceRedirect = await readFile(path.join(root, locale,
       'docs/developer-guide/aw/architecture/index.html'), 'utf8');
     assert.ok(sourceRedirect.includes(design));
-    assert.ok(sourceRedirect.includes('if(location.hash)target.hash=location.hash'));
+    assert.ok(sourceRedirect.includes('if (location.hash) target.hash = location.hash'));
     assert.ok(!sourceRedirect.includes('{locale}'));
   }
 });
