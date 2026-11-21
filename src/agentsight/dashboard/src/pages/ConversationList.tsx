@@ -142,7 +142,9 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, detailsId, con
       setEvaluations((prev) => {
         const next = new Map(prev);
         for (const entry of entries) {
-          if (entry.ok && entry.result) {
+          // A manual evaluation may have completed while this cached read
+          // was in flight. Background lookups only hydrate missing results.
+          if (entry.ok && entry.result && !next.has(entry.conversationId)) {
             next.set(entry.conversationId, entry.result);
           }
         }
