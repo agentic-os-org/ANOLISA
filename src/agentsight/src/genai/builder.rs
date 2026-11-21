@@ -427,6 +427,22 @@ impl GenAIBuilder {
             match_body.as_deref(),
         );
 
+        // The Qoder CLI gateway encodes its request body with a substituted
+        // Base64 alphabet, so `json_body` cannot read it. The live analysis
+        // path decodes the wire body through `MessageParser`; the pending
+        // record has to read the same fields or a drained Qoder call loses
+        // its query, model, streaming flag and body session id. The match key
+        // above keeps the raw wire body. For Qoder the completing call hashes
+        // the decoded JSON (`context.request` via `pending_match_key_json`),
+        // so the two keys differ and an idle-drain row is not reconciled with
+        // a later normal completion. This gap predates this change and is left
+        // untouched here.
+        let decoded_wire_body = crate::analyzer::message::MessageParser::decode_request_body(
+            &request.path,
+            request.body(),
+        );
+        let body_for_fields = body.as_ref().or(decoded_wire_body.as_ref());
+
         // A SysOM POP request wraps the LLM parameters in a JSON string
         // (`llmParamString`). The match key above deliberately keeps the raw
         // outer body (the completing call builds the same key from it), but
@@ -434,12 +450,11 @@ impl GenAIBuilder {
         // decoded object: reading the wrapper left `stream`, `model`, the
         // messages and the conversation keys empty on every drained SysOM
         // call.
-        let decoded_llm_body = body
-            .as_ref()
+        let decoded_llm_body = body_for_fields
             .and_then(|value| value.get("llmParamString"))
             .and_then(|value| value.as_str())
             .and_then(|params| serde_json::from_str::<serde_json::Value>(params).ok());
-        let llm_body = decoded_llm_body.as_ref().or(body.as_ref());
+        let llm_body = decoded_llm_body.as_ref().or(body_for_fields);
 
         // Determine if streaming
         let is_sse = llm_body
@@ -531,11 +546,32 @@ impl GenAIBuilder {
         let call_kind =
             super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
 
-        // Extract model from request body JSON "model" field
+        // Extract model from the request body. A Qoder gateway request has no
+        // top-level `model`: it names the model under `model_config`, the same
+        // two fields `QoderCliParser::parse_request` reads. Filter each
+        // candidate for empty text before falling back, so a Qoder body with
+        // `model: ""` and a real `key` still resolves to `key` like the live
+        // parser does.
         let model = llm_body
-            .and_then(|v| v.get("model"))
-            .and_then(|m| m.as_str())
-            .filter(|s| !s.is_empty())
+            .and_then(|v| {
+                v.get("model")
+                    .and_then(|m| m.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        v.get("model_config").and_then(|config| {
+                            config
+                                .get("model")
+                                .and_then(|m| m.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    config
+                                        .get("key")
+                                        .and_then(|k| k.as_str())
+                                        .filter(|s| !s.is_empty())
+                                })
+                        })
+                    })
+            })
             .map(|s| s.to_string());
 
         // Extract provider from request path
@@ -563,6 +599,20 @@ impl GenAIBuilder {
                 body.as_ref()
                     .and_then(|b| b.get("metadata"))
                     .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            })
+            // Qoder names its session at the top level of the decoded gateway
+            // body. `call_builder.rs` already reads it from there for the live
+            // record, so the pending record must not fall back to the
+            // pid/query crash bucket while the real session is in the body.
+            .or_else(|| {
+                if !crate::parser::llm::is_qoder_path(&request.path) {
+                    return None;
+                }
+                llm_body
+                    .and_then(|b| b.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|session| !session.trim().is_empty())
+                    .map(str::to_owned)
             });
 
         // 双层兜底计算 session_id / conversation_id（详见上方注释）。
@@ -912,6 +962,40 @@ mod tests {
             source_event: ssl_event,
             reassembled_body: None,
         }
+    }
+
+    /// Encode a body the way the Qoder gateway does: standard Base64, a
+    /// substituted alphabet, `$` for padding, and swapped outer thirds.
+    fn qoder_encode(value: &serde_json::Value) -> String {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        const ALPHABET: &[u8; 64] =
+            b"_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!";
+        const STANDARD_ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes: Vec<u8> = STANDARD
+            .encode(value.to_string())
+            .bytes()
+            .map(|byte| {
+                if byte == b'=' {
+                    b'$'
+                } else {
+                    ALPHABET[STANDARD_ALPHABET
+                        .iter()
+                        .position(|candidate| *candidate == byte)
+                        .expect("standard Base64 alphabet")]
+                }
+            })
+            .collect();
+        let third = bytes.len() / 3;
+        String::from_utf8(
+            [
+                &bytes[bytes.len() - third..],
+                &bytes[third..bytes.len() - third],
+                &bytes[..third],
+            ]
+            .concat(),
+        )
+        .expect("the encoded body is ASCII")
     }
 
     /// Build a zero-copy `ParsedSseEvent` whose single `data:` line is `data`.
@@ -2054,6 +2138,97 @@ mod tests {
         assert!(pending.input_messages.is_none());
         assert!(pending.user_query.is_none());
         assert!(!pending.is_sse);
+    }
+
+    /// Qoder CLI encodes the gateway body with its own Base64 alphabet, so
+    /// `ParsedRequest::json_body()` cannot read it. The live analysis path
+    /// decodes the wire body through `MessageParser::decode_request_body`,
+    /// but the pending builder read only JSON: a drained Qoder call lost its
+    /// user query, model, streaming flag and body session id, and every
+    /// crash/idle record from one process collapsed into the same fallback
+    /// conversation bucket.
+    #[test]
+    fn test_build_pending_from_request_decodes_the_qoder_gateway_body() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "system": "Be concise",
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model_config": {"key": "fixture-model"},
+            "parameters": {"max_tokens": 32},
+            "stream": true
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.user_query.as_deref(), Some("Find the fixture"));
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
+        assert!(pending.is_sse, "stream:true lives inside the encoded body");
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert!(pending.input_messages.is_some());
+        assert!(pending.system_instructions.is_some());
+    }
+
+    /// Qoder gateway bodies carry `model_config: {"model": "", "key": ...}`
+    /// in real traffic (the live `QoderCliParser::parse_request` fixture uses
+    /// this shape). Each model candidate must be filtered for empty text
+    /// before the fallback, otherwise the empty `model` wins and the pending
+    /// record loses the model the live call would report.
+    #[test]
+    fn test_build_pending_from_request_qoder_empty_model_falls_back_to_key() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000002",
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model_config": {"model": "", "key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
+    }
+
+    /// An empty top-level `model` must not shadow the `model_config` fallback
+    /// either, matching `QoderCliParser::parse_request`.
+    #[test]
+    fn test_build_pending_from_request_empty_top_level_model_falls_back() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model": "",
+            "model_config": {"key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
     }
 
     #[test]
