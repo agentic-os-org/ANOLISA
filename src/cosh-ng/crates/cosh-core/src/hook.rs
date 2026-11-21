@@ -24,6 +24,7 @@ pub enum HookEventName {
 }
 
 impl HookEventName {
+    /// Returns the wire name of this hook kind.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PreToolUse => "PreToolUse",
@@ -306,6 +307,11 @@ struct HookExecution {
 }
 
 impl HookSystem {
+    /// Builds a hook registry from configuration.
+    ///
+    /// Invalid entries are reported through the returned diagnostics rather
+    /// than failing construction, so a partially-configured registry still
+    /// starts with the valid hooks.
     pub fn from_config(config: &HooksConfig) -> Self {
         let enabled = config.enabled;
 
@@ -378,6 +384,10 @@ impl HookSystem {
         }
     }
 
+    /// Builds a registry that never fires.
+    ///
+    /// Configuration is still parsed (so errors are visible) but no hook
+    /// process is ever spawned.
     pub fn new_disabled() -> Self {
         Self {
             enabled: false,
@@ -553,6 +563,13 @@ impl HookSystem {
 
     // ─── Fire methods ────────────────────────────────────────────────
 
+    /// Fires `PreToolUse` hooks registered for this tool.
+    ///
+    /// Returns a passthrough result with no failures when the hook system is
+    /// disabled, so callers need no separate enabled check. Each hook runs
+    /// under a per-hook deadline; a timed-out hook's process group is killed
+    /// and reported in `hook_failures` instead of aborting the tool call. A
+    /// non-zero `decision` from any hook short-circuits the remaining hooks.
     pub async fn fire_pre_tool_use(
         &self,
         session_id: &str,
@@ -600,6 +617,10 @@ impl HookSystem {
         self.aggregate_pre_tool_use(outputs, &defs)
     }
 
+    /// Fires `PostToolUse` hooks registered for this tool.
+    ///
+    /// Same disabled-passthrough and deadline semantics as
+    /// [`Self::fire_pre_tool_use`]; failures are reported, not raised.
     pub async fn fire_post_tool_use(
         &self,
         session_id: &str,
@@ -649,6 +670,7 @@ impl HookSystem {
         self.aggregate_post_tool_use(outputs, &defs)
     }
 
+    /// Fires `UserPromptSubmit` hooks for an incoming prompt.
     pub async fn fire_user_prompt_submit(
         &self,
         session_id: &str,
@@ -679,6 +701,7 @@ impl HookSystem {
         self.aggregate_user_prompt(outputs, &defs)
     }
 
+    /// Fires `SessionStart` hooks with the session and working directory.
     pub async fn fire_session_start(&self, session_id: &str, cwd: &str) -> SessionStartResult {
         if !self.enabled {
             return SessionStartResult {
@@ -702,6 +725,7 @@ impl HookSystem {
         self.aggregate_session_start(outputs, &defs)
     }
 
+    /// Fires `Stop` hooks with the session's last assistant message.
     pub async fn fire_stop(&self, session_id: &str, cwd: &str, last_message: &str) -> StopResult {
         if !self.enabled {
             return StopResult {
@@ -725,6 +749,7 @@ impl HookSystem {
         self.aggregate_stop(outputs, &defs)
     }
 
+    /// Fires `PostToolUse` hooks for a tool invocation that failed.
     pub async fn fire_post_tool_use_failure(
         &self,
         session_id: &str,
@@ -804,6 +829,7 @@ impl HookSystem {
         }
     }
 
+    /// Fires `BeforeModel` hooks before a model request is sent.
     pub async fn fire_before_model(
         &self,
         session_id: &str,
@@ -878,6 +904,7 @@ impl HookSystem {
         }
     }
 
+    /// Fires `AfterModel` hooks after a model response arrives.
     pub async fn fire_after_model(
         &self,
         session_id: &str,
