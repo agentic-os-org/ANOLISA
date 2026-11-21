@@ -467,7 +467,7 @@ def build_chart(
         y_max = ticks[-1]
         y_min = -y_max
 
-    valid_times = [time for time in chart_times if time is not None]
+    valid_times = [time for time in times if time is not None]
     x_min = min(valid_times) if valid_times else 0.0
     x_max = max(valid_times) if valid_times else 1.0
     if x_max <= x_min:
@@ -576,31 +576,27 @@ def build_chart(
             f"{html.escape(text)}</text>"
         )
 
-    if trend and len(reduced) == 1:
-        source_times = chart_times
-        source_values = reduced[0].values
-        if trend_from is not None:
-            subset = [
-                (time, value)
-                for time, value in zip(chart_times, reduced[0].values)
-                if time is not None and value is not None and time >= trend_from
-            ]
-            if len(subset) >= 2:
-                source_times = [time for time, _ in subset]
-                source_values = [value for _, value in subset]
-        fit = slope_per_hour(source_times, source_values)
-        first = first_value(source_values)
-        first_time = next((time for time in source_times if time is not None), None)
-        last_time = next((time for time in reversed(source_times) if time is not None), None)
-        if fit is not None and first is not None and first_time is not None and last_time is not None:
-            start_x = x_of(first_time)
-            end_x = x_of(last_time)
-            start_y = y_of(first)
-            end_y = y_of(first + fit * (last_time - first_time) / 3600.0)
-            parts.append(
-                f'<line class="trend" x1="{start_x:.1f}" y1="{start_y:.1f}" '
-                f'x2="{end_x:.1f}" y2="{end_y:.1f}"/>'
-            )
+    if trend and len(plots) == 1:
+        points = [
+            (time, value)
+            for time, value in zip(times, plots[0].values)
+            if time is not None
+            and value is not None
+            and (trend_from is None or time >= trend_from)
+        ]
+        if len(points) >= 2:
+            source_times, source_values = zip(*points)
+            fit = slope_per_hour(source_times, source_values)
+            if fit is not None:
+                first_time, start_value = points[0]
+                last_time = points[-1][0]
+                start_x, end_x = x_of(first_time), x_of(last_time)
+                start_y = y_of(start_value)
+                end_y = y_of(start_value + fit * (last_time - first_time) / 3600.0)
+                parts.append(
+                    f'<line class="trend" x1="{start_x:.1f}" y1="{start_y:.1f}" '
+                    f'x2="{end_x:.1f}" y2="{end_y:.1f}"/>'
+                )
 
     for index, plot in enumerate(reduced):
         parts.append(

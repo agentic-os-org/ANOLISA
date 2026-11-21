@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,38 @@ def test_warmup_slope_excludes_future_samples() -> None:
     _, rolling_times, rolling_values = warmup_slope(times, values, 0.0, 2.0)
     at_two = dict(zip(rolling_times, rolling_values))[2.0]
     assert at_two == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(("warmup", "has_trend"), [(3, True), (19, False)])
+def test_rss_trend_uses_full_post_warmup_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warmup: int, has_trend: bool
+) -> None:
+    import plot_metrics
+
+    rss = [
+        40, 20, 26, 26, 26, 26, 26, 23, 28, 26,
+        26, 26, 26, 26, 27, 26, 26, 50, 26, 26,
+    ]
+    metrics = tmp_path / "metrics.csv"
+    metrics.write_text(
+        "monotonic_timestamp,rss_mb\n"
+        + "".join(f"{time},{value}\n" for time, value in enumerate(rss)),
+        encoding="utf-8",
+    )
+    output = tmp_path / "metrics-report.html"
+    trends = []
+    for max_points in (2, len(rss)):
+        argv = [
+            "plot_metrics.py", str(metrics), "--output", str(output),
+            "--max-points", str(max_points), "--warmup-seconds", str(warmup),
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        plot_metrics.render(plot_metrics.parse_args())
+        html = output.read_text(encoding="utf-8")
+        trends.append(re.findall(r'<line class="trend"[^>]*>', html))
+
+    assert trends[0] == trends[1]
+    assert len(trends[0]) == int(has_trend)
 
 
 def test_align_series_handles_unequal_and_irregular_timelines() -> None:
