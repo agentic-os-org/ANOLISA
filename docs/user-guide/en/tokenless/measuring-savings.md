@@ -71,6 +71,21 @@ tokenless stats summary --limit 1000
 
 `--limit` must be a positive integer. `--limit 0` is rejected at parse time with a non-zero exit, matching `stats diff --limit`.
 
+The normal summary (`--compare` has a separate scope) reports gross savings
+over the successfully decoded rows in this window, excluding dry-run rows
+from the savings totals. Whole-history retrieval costs and net savings are
+included only when the window covers every stored compression row. Otherwise
+text output appends a `Summary window` notice, and JSON omits the optional
+retrieval/net fields rather than treating an unknown cost as zero.
+
+JSON adds `summary_scope`: `records_selected` counts successfully decoded
+rows before dry-run exclusion; `records_total` counts all stored compression
+rows in the same database snapshot; `complete` indicates equal counts.
+Unreadable rows skipped by the reader also make a window incomplete, even
+when the limit covers all stored rows. If all rows decode successfully, a
+`--limit` at least as large as `records_total` restores full-history coverage.
+Increasing the limit loads more records and their payloads into memory.
+
 ## Saving-rate field definitions
 
 Tokenless saving rates follow the “saved amount ÷ original uncompressed amount” definition; the fields differ only in aggregation scope and negative-value handling. Every percentage field emitted by `tokenless stats` is defined as follows:
