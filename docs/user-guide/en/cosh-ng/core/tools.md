@@ -19,6 +19,12 @@ allow-lists, and Hooks still decide whether a call runs.
 `--enable-shell-evidence-tool`. Connected MCP tools use names such as
 `mcp__<server>__<tool>`; Extensions may add their own external names.
 
+`edit` requires an exact match for `old_string`, including whitespace. By
+default the match must be unique: `aba` occurs twice in `ababa`, so `edit`
+leaves the file unchanged. Include more surrounding text to identify one
+occurrence. With `replace_all=true`, `edit` replaces non-overlapping matches
+from left to right: replacing `aba` with `X` in `ababa` produces `Xba`.
+
 ## Approval choices
 
 | Core mode | ReadOnly | FileEdit | Shell, network, MCP, external |
