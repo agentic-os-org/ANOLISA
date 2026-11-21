@@ -5,12 +5,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-from generate_release_notes import version_key
+from generate_release_notes import changelog_entry, version_key
 
 GITHUB = Path(__file__).resolve().parents[1]
 WORKFLOW = GITHUB / "workflows/release.yaml"
@@ -44,6 +45,106 @@ class VersionPrecedenceTest(unittest.TestCase):
         for version in ("1.0", "01.0.0", "1.0.0-01", "1.0.0-rc..1", "1.0.0+"):
             with self.subTest(version=version):
                 self.assertIsNone(version_key(version))
+
+
+class ReferenceDefinitionTest(unittest.TestCase):
+    def test_first_footer_definition_is_retained(self) -> None:
+        source = "## 1.2.3\n\n- Read [guide][ref].\n\n## 1.2.2\n\nOld.\n\n[ref]: first.md\n[REF]: later.md\n"
+        body = changelog_entry(source, "1.2.3")
+        self.assertIn("[ref]: first.md", body)
+        self.assertNotIn("later.md", body)
+
+    def test_definition_inside_selected_section_cannot_override_earlier_one(
+        self,
+    ) -> None:
+        source = (
+            "[ref]: first.md\n\n## 1.2.3\n\n- Read [guide][REF].\n\n[REF]: later.md\n"
+        )
+        body = changelog_entry(source, "1.2.3")
+        self.assertIn("[ref]: first.md", body)
+        self.assertNotIn("later.md", body)
+
+    def test_selected_definition_does_not_gain_a_later_duplicate(self) -> None:
+        source = "## 1.2.3\n\n- Read [guide][ref].\n\n[ref]: first.md\n\n## 1.2.2\n\nOld.\n\n[ref]: later.md\n"
+        body = changelog_entry(source, "1.2.3")
+        self.assertEqual(body.count("[ref]:"), 1)
+        self.assertNotIn("later.md", body)
+
+    def test_fenced_definitions_stay_literal_and_unused_labels_stay_out(self) -> None:
+        source = "```md\n[ref]: example.md\n```\n\n## 1.2.3\n\n- Read [guide][ref].\n\n```md\n[ref]: literal.md\n```\n\n## 1.2.2\n\nOld.\n\n[ref]: first.md\n[unused]: unrelated.md\n"
+        body = changelog_entry(source, "1.2.3")
+        self.assertIn("```md\n[ref]: literal.md\n```", body)
+        self.assertIn("[ref]: first.md", body)
+        self.assertNotIn("example.md", body)
+        self.assertNotIn("unrelated.md", body)
+
+    def test_cli_binds_the_first_destination_to_the_tagged_commit(self) -> None:
+        for definitions_before in (False, True):
+            with self.subTest(
+                definitions_before=definitions_before
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+
+                def git(*arguments: str) -> str:
+                    return subprocess.check_output(
+                        [
+                            "git",
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.invalid",
+                            "-c",
+                            "commit.gpgsign=false",
+                            "-c",
+                            f"core.hooksPath={root / 'no-hooks'}",
+                            *arguments,
+                        ],
+                        cwd=root,
+                        text=True,
+                        encoding="utf-8",
+                        timeout=15,
+                    ).strip()
+
+                git("init", "--quiet")
+                source = "## 1.2.3\n\n- Read [guide][ref].\n\n"
+                if definitions_before:
+                    source = "[ref]: first.md\n\n" + source + "[REF]: later.md\n"
+                else:
+                    source += "## 1.2.2\n\nOld.\n\n[ref]: first.md\n[REF]: later.md\n"
+                changelog = root / SEC_CHANGELOG
+                changelog.parent.mkdir(parents=True)
+                changelog.write_text(source, encoding="utf-8")
+                git("add", ".")
+                git("commit", "--quiet", "-m", "fixture")
+                git("tag", "sec-core/v1.2.3")
+                commit = git("rev-parse", "HEAD")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(GITHUB / "scripts/generate_release_notes.py"),
+                        "--tag",
+                        "sec-core/v1.2.3",
+                        "--prefix",
+                        "sec-core/v",
+                        "--repository",
+                        "example/anolisa",
+                        "--output",
+                        str(root / "notes.md"),
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=20,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                notes = (root / "notes.md").read_text(encoding="utf-8")
+                self.assertIn(
+                    f"https://github.com/example/anolisa/blob/{commit}/src/agent-sec-core/first.md",
+                    notes,
+                )
+                self.assertNotIn("later.md", notes)
+                self.assertIn("Full Changelog", notes)
 
 
 class ReleaseNotesTest(unittest.TestCase):

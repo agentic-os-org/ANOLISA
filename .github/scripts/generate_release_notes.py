@@ -89,12 +89,21 @@ def changelog_entry(text: str, version: str) -> str:
     if not visible.strip():
         raise ValueError(f"Empty CHANGELOG section for {version}")
     # Reference definitions can live after all version sections in Keep a Changelog.
-    definitions = dict(
-        (match[1].casefold(), match[0])
-        for line, literal in markdown_lines(text)
-        if not literal
-        if (match := re.match(r" {0,3}\[([^\]]+)\]:[ \t]*.+", line))
-    )
+    definition_re = re.compile(r" {0,3}\[([^\]]+)\]:[ \t]*.+")
+    definitions: dict[str, str] = {}
+    for line, literal in markdown_lines(text):
+        if not literal and (match := definition_re.match(line)):
+            definitions.setdefault(match[1].casefold(), match[0])
+    # Extraction must not let a later definition inside this section shadow
+    # the first definition elsewhere in the original changelog.
+    lines = []
+    for line, literal in markdown_lines(body):
+        if not literal and (match := definition_re.match(line)):
+            line = (
+                definitions.get(match[1].casefold(), match[0]) + line[len(match[0]) :]
+            )
+        lines.append(line)
+    body = "".join(lines)
     for match in re.finditer(r"\[([^\]]+)\](?:\[([^\]]*)\])?", body):
         label = (match[2] or match[1]).casefold()
         definition = definitions.get(label)
