@@ -252,6 +252,14 @@ pub(crate) fn validate_snapshot_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Publish a completed tar.gz snapshot followed by its metadata sidecar.
+///
+/// # Errors
+/// Returns errors for invalid ids, traversal, archive/finalization I/O, sync,
+/// publication or sidecar writes. On failure, cleanup attempts to remove the
+/// partial file or, after rename, the archive without a completed sidecar.
+/// Cleanup failures are logged without replacing the original error. Process
+/// crashes can still leave partial files or archives without sidecars.
 pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<SnapshotInfo> {
     validate_snapshot_id(id)?;
     let dir = snapshots_dir(mount);
@@ -296,10 +304,13 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
             tar.append_path_with_name(path, rel)
                 .map_err(|e| MemoryError::Other(format!("tar append {}: {e}", rel.display())))?;
         }
-        tar.finish()
+        let gz = tar
+            .into_inner()
             .map_err(|e| MemoryError::Other(format!("tar finish: {e}")))?;
-        // GzEncoder::finish runs in Drop; explicit shutdown via `into_inner`
-        // not necessary because Builder::finish already flushed payload.
+        // Drop discards gzip finalization errors. Finish explicitly before
+        // publishing an archive that callers may rely on for recovery.
+        gz.finish()
+            .map_err(|e| MemoryError::Other(format!("gzip finish: {e}")))?;
         Ok(())
     })();
 
