@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 
 contact_links:
-  - name: Community Roadmap / Discussions
+  - name: 🗺️ Community Roadmap / 社区路线图
     url: https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap
     about: Explore recommended contribution directions; bug reports, bug fixes, and other Issues and PRs are also welcome.
 
