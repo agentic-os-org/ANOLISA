@@ -60,10 +60,13 @@ fn ecs_builtin_state_probe_is_explicit_and_non_ecs_has_no_trial_row() {
     .unwrap();
     assert_eq!(request["params"]["probe_ecs_trial"], true);
     let auth = state.auth.state.as_ref().unwrap();
-    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
     assert_eq!(
         crate::auth::menu::management_entries(&auth.sysom, 0),
-        vec![AuthManagementEntry::AddNew]
+        vec![
+            AuthManagementEntry::AlibabaCloudLogin,
+            AuthManagementEntry::AddNew
+        ]
     );
 }
 
@@ -192,7 +195,7 @@ fn ecs_builtin_keeps_disabled_entry_when_own_provider_is_current() {
     assert!(options[0].contains("builtin-model"), "{options:?}");
     assert!(!options[0].contains("[active]"), "{options:?}");
     assert!(!options[0].contains("own-observed-model"), "{options:?}");
-    assert!(options[1].contains("[active]"), "{options:?}");
+    assert!(options[2].contains("[active]"), "{options:?}");
 }
 
 #[test]
@@ -212,6 +215,7 @@ fn ecs_builtin_non_ecs_preserves_retry_disable_without_trial_entry() {
         crate::auth::menu::management_entries(&auth.sysom, 0),
         vec![
             AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AlibabaCloudLogin,
             AuthManagementEntry::AddNew
         ]
     );
@@ -239,6 +243,7 @@ fn ecs_builtin_legacy_core_preferences_keep_existing_provider_and_old_prepare() 
     assert_eq!(
         crate::auth::menu::management_entries(&auth.sysom, auth.existing_providers.len()),
         vec![
+            AuthManagementEntry::AlibabaCloudLogin,
             AuthManagementEntry::Existing(0),
             AuthManagementEntry::AddNew
         ]
@@ -266,6 +271,7 @@ fn ecs_builtin_legacy_prepare_preserves_failed_disable_retry() {
         crate::auth::menu::management_entries(&auth.sysom, 0),
         vec![
             AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AlibabaCloudLogin,
             AuthManagementEntry::AddNew
         ]
     );
@@ -664,13 +670,13 @@ fn answer_selected_row(state: &mut InlineState) {
 #[test]
 fn menu_rows_below_the_shortcut_still_open_their_provider_action_menu() {
     let mut state = ecs_state_with_saved_dashscope();
-    // Row 2 of [SysOM, qwen-prod, + Add new provider].
+    // Row 3 of [SysOM, Alibaba Cloud login, qwen-prod, + Add new provider].
     state
         .auth
         .state
         .as_mut()
         .expect("auth state")
-        .selected_provider = 1;
+        .selected_provider = 2;
 
     answer_selected_row(&mut state);
 
@@ -686,7 +692,7 @@ fn the_last_menu_row_still_adds_a_new_provider() {
         .state
         .as_mut()
         .expect("auth state")
-        .selected_provider = 2;
+        .selected_provider = 3;
 
     answer_selected_row(&mut state);
 
@@ -724,8 +730,8 @@ fn cancelling_a_provider_action_returns_to_the_row_it_came_from() {
 
     let auth = state.auth.state.as_ref().expect("auth state");
     assert_eq!(auth.phase, AuthPhase::ManagingProviders);
-    // Row 2, not row 1: the SysOM shortcut occupies the first slot.
-    assert_eq!(auth.selected_provider, 1);
+    // Row 3: the SysOM shortcut and the Alibaba Cloud login row come first.
+    assert_eq!(auth.selected_provider, 2);
 }
 
 #[test]

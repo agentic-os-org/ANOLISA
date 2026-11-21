@@ -9,6 +9,7 @@ pub(crate) mod ecs_poll;
 pub(crate) mod host;
 mod menu;
 mod navigation;
+pub(crate) mod oauth_flow;
 mod prompt;
 pub(crate) mod provider_display;
 mod provider_management;

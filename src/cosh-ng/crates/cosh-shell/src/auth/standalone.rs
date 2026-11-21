@@ -121,6 +121,7 @@ fn run_loop<W: Write>(
                 // task would sit with no capture and drop every key.
                 if let Err(error) = crate::auth::ecs_poll::poll(adapter, &mut state, output)
                     .and_then(|()| crate::auth::trial::poll(adapter, &mut state, output))
+                    .and_then(|()| crate::auth::oauth_flow::poll(adapter, &mut state, output))
                 {
                     state.auth.outcome.reason = EndReason::Failed;
                     state.auth.outcome.error = Some(format!("auth task: {error}"));
@@ -165,6 +166,7 @@ fn run_loop<W: Write>(
         }
         if let Err(error) = crate::auth::ecs_poll::poll(adapter, &mut state, output)
             .and_then(|()| crate::auth::trial::poll(adapter, &mut state, output))
+            .and_then(|()| crate::auth::oauth_flow::poll(adapter, &mut state, output))
         {
             state.auth.outcome.reason = EndReason::Failed;
             state.auth.outcome.error = Some(format!("auth task: {error}"));
