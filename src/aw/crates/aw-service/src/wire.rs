@@ -96,6 +96,31 @@ pub struct EventHandle {
     pub candidate_revision: String,
 }
 
+/// Caller-reported terminal tool outcome for a manually opened event.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultStatus {
+    /// The tool completed successfully.
+    Success,
+    /// The tool failed.
+    Error,
+    /// The tool was interrupted before completion.
+    Interrupted,
+    /// Execution was denied.
+    Denied,
+}
+
+impl ResultStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Interrupted => "interrupted",
+            Self::Denied => "denied",
+        }
+    }
+}
+
 /// Same-user launcher report; a PID is descriptive data, never process authentication.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -361,11 +386,18 @@ pub enum Operation {
         instance_id: String,
     },
     /// Establish one shared event lifetime, without executing any step.
+    ///
+    /// Rust callers migrating existing constructors set `result_status: None`
+    /// to keep omitting this field from the serialized request.
     OpenEvent {
         /// Prepared service instance.
         instance_id: String,
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
+        /// Terminal tool outcome when no result projection supplies it.
+        /// Valid only for `tool.after`. Must agree with projection and native status.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_status: Option<ResultStatus>,
     },
     /// Lease one native submission or tool callback shared by all its step processes.
     ///

@@ -231,6 +231,7 @@ impl Runtime {
         instance_id: String,
         value: Value,
         native_input: Option<Vec<u8>>,
+        result_status: Option<crate::ResultStatus>,
         deadline: Instant,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Value> {
@@ -243,19 +244,28 @@ impl Runtime {
             .and_then(Option::as_ref)
             .filter(|instance| !instance.closing)
             .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
+        let result_status = if native_input.is_none() {
+            facts::reported_result_status(
+                &instance.host.capabilities().adapter,
+                &value,
+                result_status,
+            )?
+        } else {
+            None
+        };
         let execution = self.event_execution(instance, &instance_id, &value)?;
-        if native_input.is_none() {
-            let mut state = instance
+        let mut invocation_protocol = if native_input.is_none() {
+            let state = instance
                 .invocations
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
             if state.ledger.is_some() {
                 return Err(rejected("invocation_correlated_event_required"));
             }
-            // Enable and legacy admission share the protocol lock. Once used,
-            // even a completed legacy event cannot switch to managed identity.
-            state.legacy_used = true;
-        }
+            Some(state)
+        } else {
+            None
+        };
         let host = Arc::clone(&instance.host);
         if value["agent"]["instance_id"] != instance_id {
             return Err(rejected("event_instance_mismatch"));
@@ -263,6 +273,20 @@ impl Runtime {
         let policy = host.configuration().as_value().clone();
         let metadata = event_metadata(&value)?;
         let key = self.identifier()?;
+        let reported_event = result_status
+            .map(|status| {
+                let association = evidence::association(&host.capabilities().adapter, &value, None);
+                self.hook_fact(
+                    &key,
+                    &host,
+                    &instance_id,
+                    &value,
+                    &association,
+                    Some(status),
+                )?
+                .ok_or_else(|| rejected("public_event_invalid"))
+            })
+            .transpose()?;
         let context = Arc::new(evidence::Cell::default());
         let (sender, receiver) = mpsc::sync_channel(MAX_STEPS + 1);
         let (ready, result) = mpsc::sync_channel(1);
@@ -292,7 +316,12 @@ impl Runtime {
                     context: Arc::clone(&context),
                 },
             );
+            if let Some(state) = invocation_protocol.as_mut() {
+                // Commit protocol use with the reserved event slot.
+                state.legacy_used = true;
+            }
         }
+        drop(invocation_protocol);
         drop(instances);
         let runtime = Arc::clone(self);
         let thread_key = key.clone();
@@ -323,7 +352,10 @@ impl Runtime {
                         }
                     };
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
-                    let public_event = runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association);
+                    let public_event = match reported_event {
+                        Some(event) => Ok(Some(event)),
+                        None => runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association, None),
+                    };
                     let claimed = public_event.and_then(|public_event| {
                         let mut plan = json!({"kind": "event", "identity": runtime.identity,
                             "instance_id": instance_id, "binding_id": host.target(), "policy_revision":host.revision(), "host_event_id": event.id(), "event": metadata});

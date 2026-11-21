@@ -128,6 +128,7 @@ fn completed_uncorrelated_event_cannot_switch_protocol() {
             fixture.id.clone(),
             fixture.event(),
             None,
+            None,
             deadline(),
             Arc::new(AtomicBool::new(false)),
         )
@@ -320,6 +321,7 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
         .open(
             "fixture".into(),
             json!({}),
+            None,
             None,
             Instant::now() + Duration::from_secs(1),
             Arc::new(AtomicBool::new(false)),

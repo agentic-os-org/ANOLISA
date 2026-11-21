@@ -247,6 +247,7 @@ fn provider_result_never_claims_native_adoption() {
                 &fixture.id,
                 &event,
                 &association,
+                None,
             )
             .unwrap()
             .unwrap()

@@ -103,3 +103,116 @@ aw audit-export --state-dir "$AW_STATE" --request "$AW_QUERY"
 应用保持原生启动和进程归属。原有 `--pid` 选择器保留原生热加载限制。
 在 JSON 中查看应用确认。
 参见[协作式 SDK 控制](../deployment/native-sdk.md#协作式-attach-与-detach)。
+
+## 普通 RPC 完成事件审计
+
+同用户集成可以通过 `aw request` 上报工具完成事件。`open_event` 在有文本投影时
+使用已有的 `event.tool.result_projection.status`；结果没有文本投影时，可使用操作层
+的可选字段 `result_status`。两者均接受 `success`、`error`、`interrupted`、`denied`。
+同时提供时必须一致，并须与任何可识别的原生完成状态一致。`result_status` 仅适用于
+`tool.after`。服务在确认这类完成事件前校验事件结构及公共工具调用身份。
+
+Qoder、Qoder SDK 和 Claude SDK 事件在 native 中声明
+`hook_event_name: PostToolUse` 时，也可通过布尔值 `tool.result.isError: false`
+或 `tool.result.is_error: false` 表达成功，无需在 `native.tool_response` 中重复结果。
+显式失败或中断具有优先级。字段缺失、字符串 `"false"` 和任意业务字段均不能证明成功。
+该原生格式的映射同时适用于普通 RPC 与原生回调。
+
+这些状态属于调用者报告的事实，普通 RPC 的关联仍为 unverified。服务在打开事件时
+保存 `resultStatus` 和原始 `tool.result` 的摘要。Provider 成功或替换文本不会改变
+工具状态或结果摘要。`tool.result` 保留任意 JSON，包括 null；其中的 `status` 等
+业务字段不作为完成状态声明。操作层的显式字段不转发给 Provider。
+
+CLI 和 daemon 均需包含此 RPC 完成事件支持，旧 daemon 会拒绝新增操作字段。
+JSON 调用方可省略该字段。Rust 调用方构造 `aw_service::Operation::OpenEvent` 时，
+设为 `result_status: None` 即可省略它。省略该字段时，其他类型的事件沿用原有投影行为。
+缺少可识别原生状态和适用的结果投影时，仍可能返回 `projection_unavailable`。
+已有历史 gap 链保持原状。
+
+集成验证前，启动私有测试服务，配置目标及 `tool.after` Provider 步骤，例如
+[Provider 接入指南](../providers/tokenless.md)中的 Tokenless `post_tool`。
+以服务所属用户在任意目录执行，PATH 中须有 `aw`，并已安装 Python 3。
+将下列三个变量设为该服务的状态目录、目标名和适配器。示例上报合成完成事件来验证
+审计接口，不启动 Agent，也不执行事件所描述的命令。
+
+```bash
+export AW_STATE=/absolute/private/state
+export AW_TARGET=openclaw
+export AW_ADAPTER=openclaw
+python3 - <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import uuid
+
+state = Path(os.environ["AW_STATE"])
+target = os.environ["AW_TARGET"]
+adapter = os.environ["AW_ADAPTER"]
+
+def rpc(operation):
+    reply = subprocess.run(
+        ["aw", "request", "--socket", str(state / "aw.sock")],
+        input=json.dumps(operation), text=True, capture_output=True,
+        check=True, timeout=10,
+    )
+    return json.loads(reply.stdout)["result"]
+
+binding = rpc({
+    "method": "bind", "target": target, "cwd": str(Path.cwd()), "environment": {},
+    "capabilities": {
+        "adapter": adapter, "version": "audit-example", "entrypoint": "manual-rpc",
+        "events": {"tool.before": ["observe", "block"],
+                   "tool.after": ["observe", "replace_result"]},
+    },
+})
+instance = binding["instance_id"]
+try:
+    handle = rpc({
+        "method": "open_event", "instance_id": instance, "result_status": "success",
+        "event": {
+            "name": "tool.after",
+            "agent": {"adapter": adapter, "binding_id": target, "instance_id": instance},
+            "session_id": "audit-example",
+            "tool": {
+                "name": "exec", "native_name": "exec", "call_id": str(uuid.uuid4()),
+                "input": {"command": "printf AW_AUDIT_EXAMPLE"},
+                "result": {"stdout": "AW_AUDIT_EXAMPLE", "exitCode": 0},
+                "result_projection": {"text": "AW_AUDIT_EXAMPLE", "status": "success",
+                    "content_origin": "command_output", "command": "printf AW_AUDIT_EXAMPLE"},
+            },
+            "native": {},
+        },
+    })
+    try:
+        for step in handle["steps"]:
+            print(json.dumps(rpc({"method": "invoke_step", "instance_id": instance,
+                "event_id": handle["event_id"], "step_id": step})))
+    finally:
+        rpc({"method": "close_event", "instance_id": instance, "event_id": handle["event_id"]})
+    with tempfile.TemporaryDirectory() as directory:
+        request = Path(directory) / "read.json"
+        request.write_text(json.dumps({"api_version": "audit-export.aw/v1alpha1",
+            "operation": {"type": "read", "chain_id": handle["event_id"],
+                          "cursor": None, "limit": 64}}))
+        subprocess.run(["aw", "audit-export", "--state-dir", str(state),
+                        "--request", str(request)], check=True, timeout=10)
+finally:
+    rpc({"method": "release_instance", "instance_id": instance})
+PYTHON
+```
+
+读取结果应包含 `error: null`、带 `details.resultStatus: success` 和
+`details.resultDigest` 的 `ExecutionEvent`，以及每个已调用 Provider 的
+`provider.completed` 记录。以 `tokenless` 为 Provider ID 配置的 Tokenless 成功调用
+应包含 `providerId: tokenless`、`status: ok`。Provider 失败时仍可读取 `status: failed`，
+它与工具完成状态分别记录。若 `caught_up` 为 false，使用 `result.cursor` 继续读取。
+手动关闭事件不证明原生效果采用，`event.closed` 保持已有的 `incomplete` 结果。
+示例会释放绑定并删除临时请求文件，原有服务继续运行。
+
+非法枚举值在请求解码时被拒绝。`result_status_conflict` 表示声明、投影或可识别的
+原生状态冲突；`result_status_requires_tool_after` 表示声明用于其他事件类型。
+`event_invalid` 表示归一化事件或投影不合法；`public_event_invalid` 表示公共身份
+元数据缺失或不合法，例如工具调用 ID 为 null。这些拒绝不会创建事件 journal 链，
+也不会执行 Provider。修正上报元数据后再打开新事件。

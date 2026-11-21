@@ -3,7 +3,7 @@
 use super::Runtime;
 use crate::{
     public_projection::{digest, registry},
-    rejected, Result, RunOutcome,
+    rejected, Result, ResultStatus, RunOutcome,
 };
 use serde_json::{json, Value};
 use std::{
@@ -41,6 +41,40 @@ pub(crate) fn timestamp() -> Result<String> {
         time.tm_sec,
         duration.subsec_millis()
     ))
+}
+
+pub(super) fn reported_result_status(
+    adapter: &str,
+    event: &Value,
+    declared: Option<ResultStatus>,
+) -> Result<Option<ResultStatus>> {
+    if event["name"] != "tool.after" {
+        return match declared {
+            Some(_) => Err(rejected("result_status_requires_tool_after")),
+            None => Ok(None),
+        };
+    }
+    let projected = event["tool"].get("result_projection");
+    if declared.is_none() && projected.is_none() {
+        return Ok(None);
+    }
+    aw_provider::Protocol::new()
+        .and_then(|protocol| protocol.validate_event(event))
+        .map_err(|_| rejected("event_invalid"))?;
+    let projected = projected
+        .map(|projection| serde_json::from_value::<ResultStatus>(projection["status"].clone()))
+        .transpose()
+        .map_err(|_| rejected("event_invalid"))?;
+    let status = declared.or(projected);
+    if let Some(status) = status {
+        let native = aw_adapter::completion::result_status(adapter, event);
+        if projected.is_some_and(|projected| projected != status)
+            || native.is_some_and(|native| native != status.as_str())
+        {
+            return Err(rejected("result_status_conflict"));
+        }
+    }
+    Ok(status)
 }
 
 fn native_id(value: &Value) -> Value {
@@ -107,6 +141,7 @@ impl Runtime {
         instance: &str,
         event: &Value,
         association: &Value,
+        result_status: Option<ResultStatus>,
     ) -> Result<Option<Value>> {
         let Some(name) = event["name"].as_str() else {
             return Ok(None);
@@ -117,9 +152,9 @@ impl Runtime {
             let tool = &event["tool"];
             let mut details = json!({"name":tool["name"],"nativeName":tool.get("native_name").unwrap_or(&tool["name"]),"inputDigest":digest(&tool["input"])?});
             if matches!(name, "tool.after" | "security.violation") {
-                let Some(status) =
+                let Some(status) = result_status.map(ResultStatus::as_str).or_else(|| {
                     aw_adapter::completion::result_status(&host.capabilities().adapter, event)
-                else {
+                }) else {
                     return Ok(None);
                 };
                 details["resultDigest"] = digest(&tool["result"])?;

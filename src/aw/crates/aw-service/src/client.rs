@@ -319,6 +319,7 @@ mod tests {
         }
         for operation in [
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: "fixture".into(),
                 event: value.clone(),
             },

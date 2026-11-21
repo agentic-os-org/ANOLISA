@@ -73,11 +73,13 @@ pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
             Some("PostToolUse") if result["isError"] == true || result["is_error"] == true => {
                 Some("error")
             }
-            // Both SDKs and Qoder reserve this seam for a returned tool result.
+            // Normalized error flags can carry the outcome without a duplicate native result.
             Some("PostToolUse")
-                if event["native"]
-                    .get("tool_response")
-                    .is_some_and(|result| !result.is_null()) =>
+                if result["isError"] == false
+                    || result["is_error"] == false
+                    || event["native"]
+                        .get("tool_response")
+                        .is_some_and(|result| !result.is_null()) =>
             {
                 Some("success")
             }
@@ -299,6 +301,58 @@ mod tests {
             assert_eq!(result_status("openclaw", &event), expected);
             event["name"] = json!("tool.before");
             assert_eq!(result_status("openclaw", &event), None);
+        }
+    }
+
+    #[test]
+    fn minimal_posttool_flags_preserve_failures_and_unknown_outcomes() {
+        for adapter in ["qoder", "qoder-sdk", "claude-sdk"] {
+            for (result, expected) in [
+                (json!({"isError":false}), Some("success")),
+                (json!({"is_error":false}), Some("success")),
+                (json!({"isError":true,"is_error":false}), Some("error")),
+                (json!({"isError":false,"is_error":true}), Some("error")),
+                (
+                    json!({"isError":false,"interrupted":true}),
+                    Some("interrupted"),
+                ),
+                (json!({"isError":"false"}), None),
+                (json!({"is_error":0}), None),
+                (json!({"isError":null}), None),
+                (json!({"status":"success"}), None),
+                (json!({}), None),
+                (Value::Null, None),
+            ] {
+                let mut event = json!({"name":"tool.after","tool":{"result":result},
+                    "native":{"hook_event_name":"PostToolUse"}});
+                assert_eq!(
+                    result_status(adapter, &event),
+                    expected,
+                    "{adapter}: {event}"
+                );
+                event["native"]["tool_response"] = Value::Null;
+                assert_eq!(
+                    result_status(adapter, &event),
+                    expected,
+                    "{adapter}: {event}"
+                );
+                event["native"]["hook_event_name"] = json!("unknown");
+                assert_eq!(result_status(adapter, &event), None);
+                event["native"]["hook_event_name"] = json!("PostToolUseFailure");
+                assert_eq!(result_status(adapter, &event), Some("error"));
+                event["tool"]["result"] = json!({"isError":false,"is_interrupt":true});
+                assert_eq!(result_status(adapter, &event), Some("interrupted"));
+                event["name"] = json!("tool.before");
+                assert_eq!(result_status(adapter, &event), None);
+            }
+        }
+        for (result, expected) in [
+            (json!({"isError":false,"exitCode":1}), "error"),
+            (json!({"isError":false,"signal":"SIGTERM"}), "interrupted"),
+        ] {
+            let event = json!({"name":"tool.after","tool":{"result":result},
+                "native":{"hook_event_name":"PostToolUse"}});
+            assert_eq!(result_status("qoder", &event), Some(expected));
         }
     }
 
