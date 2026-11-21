@@ -41,7 +41,7 @@ async def rpc(
     writer = None
     deadline = time.monotonic_ns() + timeout_ms * 1_000_000
     try:
-        async with asyncio.timeout(timeout_ms / 1000):
+        async with asyncio.timeout(timeout_ms / 1000) as budget:
             parent = path.parent.lstat()
             metadata = path.lstat()
             if (
@@ -88,15 +88,26 @@ async def rpc(
                 raise AwError("invalid_response")
             if identity is not None and not same_identity(identity, received):
                 raise AwError("ECONNRESET", unavailable=True)
-            if response.get("error") is not None:
-                if not isinstance(response["error"], str) or response.get("result") is not None:
+            remote_error = response.get("error")
+            if remote_error is not None:
+                if not isinstance(remote_error, str) or response.get("result") is not None:
                     raise AwError("invalid_response")
-                raise AwError(response["error"])
-            if not isinstance(response.get("result"), dict):
+            elif not isinstance(response.get("result"), dict):
                 raise AwError("invalid_response")
-            if time.monotonic_ns() >= deadline:
+            elif time.monotonic_ns() >= deadline:
                 raise AwError("ETIMEDOUT", unavailable=True)
-            return response
+        # The peer releases its connection slot before closing its end.
+        try:
+            async with asyncio.timeout_at(budget.when()):
+                writer.write_eof()
+                if await reader.read(1):
+                    raise AwError("invalid_frame")
+        except OSError:
+            # A timeout or socket error during teardown preserves the validated reply.
+            pass
+        if remote_error is not None:
+            raise AwError(remote_error)
+        return response
     except TimeoutError as error:
         raise AwError("ETIMEDOUT", unavailable=True) from error
     except asyncio.IncompleteReadError as error:
