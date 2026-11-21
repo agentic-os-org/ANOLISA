@@ -4056,7 +4056,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::genai::logtail::set_dynamic_logtail_path("");
-        crate::genai::logtail::set_explicit_logtail_registered(false);
+        crate::genai::logtail::clear_last_batch_write();
 
         let tmp = std::env::temp_dir().join(format!(
             "agentsight_pending_logtail_handoff_{}_{:?}",
@@ -4096,16 +4096,20 @@ mod tests {
             &mailbox,
         );
 
+        let count_llm_records = |path: &std::path::Path| -> usize {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty() && !l.contains("gen_ai.interruption"))
+                .count()
+        };
+
         // Event arriving before `register_pending_logtail` drains the mailbox must not be lost.
         let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-pre-drain"));
         for exporter in &exporters {
             exporter.export(std::slice::from_ref(&event));
         }
-        let pre_drain_lines = std::fs::read_to_string(&target)
-            .unwrap()
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
+        let pre_drain_lines = count_llm_records(&target);
         assert_eq!(
             pre_drain_lines, 1,
             "record exported before pending_logtail is drained must still be written by default exporter"
@@ -4118,19 +4122,46 @@ mod tests {
         for exporter in &exporters {
             exporter.export(std::slice::from_ref(&event_post));
         }
-        let post_drain_lines = std::fs::read_to_string(&target)
-            .unwrap()
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
+        let post_drain_lines = count_llm_records(&target);
         assert_eq!(
             post_drain_lines, 2,
             "record exported after draining pending_logtail must be written once"
         );
 
+        // Deactivate and then re-activate while the previous dynamic exporter
+        // remains in `exporters` and the newly created replacement is still
+        // queued in `mailbox`: exporting in that window must still write once,
+        // not twice.
+        crate::background::handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":""}}"#,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+        crate::background::handle_config_event(
+            &cfg_json,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+        let event_reactivate_window =
+            GenAISemanticEvent::LLMCall(make_test_llm_call("call-reactivate-pre-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event_reactivate_window));
+        }
+        let reactivate_lines = count_llm_records(&target);
+        assert_eq!(
+            reactivate_lines, 3,
+            "exporting after reactivation before mailbox drain must write once, not duplicate"
+        );
+
         std::fs::remove_dir_all(&tmp).ok();
         crate::genai::logtail::set_dynamic_logtail_path("");
-        crate::genai::logtail::set_explicit_logtail_registered(false);
+        crate::genai::logtail::clear_last_batch_write();
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {
