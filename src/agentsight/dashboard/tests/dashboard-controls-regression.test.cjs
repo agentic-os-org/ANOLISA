@@ -783,3 +783,62 @@ test('conversation-list: session disclosure and time presets expose accessible s
   rendered = driver.render(page.ConversationList);
   assert.equal(collectElements(rendered.element, (node) => node.type?.name === 'TraceSubTable').length, 0);
 });
+
+
+for (const [tab, api, row] of [
+  ['cases', 'fetchSecurityCases', { case_id: 'old-case', agent_id: 'agent', summary: 'old evidence', severity: 'high', status: 'open', risk_score: 50, updated_at_ns: 1 }],
+  ['sessions', 'fetchAuditSessions', { session_id: 'old-session', security_event_count: 3 }],
+  ['events', 'fetchAuditEvents', { event_id: 'old-event', session_id: 'old-session', event_type: 'file_access' }],
+]) {
+  test(`system audit: failed ${tab} reload removes the previous page and recovers`, async () => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs([
+      'fetchAuditSummary', 'fetchSecurityCases', 'fetchAuditSessions',
+      'fetchAuditEvents', 'fetchEnforcementBindings',
+    ]);
+    const { SystemAuditPage } = loadPageModule('src/pages/SystemAuditPage.tsx', {
+      'react-router-dom': { useNavigate: () => () => {}, useSearchParams: () => [new URLSearchParams(), () => {}] },
+      '../i18n': { useI18n: () => ({ t: key => key, locale: 'en' }), useLocaleTag: () => 'en-US' },
+      '../components/ContainmentDialog': componentStub('ContainmentDialog'),
+      '../components/ContainmentLifecycleCard': componentStub('ContainmentLifecycleCard'),
+      '../components/Pagination': componentStub('Pagination'),
+      '../utils/enforcementMode': { effectiveBindingMode: () => 'audit' },
+      '../utils/ruleReason': { translateRuleReason: text => text },
+      '../utils/apiClient': stubs,
+    }, driver);
+    const answer = async (failed = false, items = [row]) => {
+      for (const name of Object.keys(calls)) {
+        const pending = calls[name].at(-1);
+        if (name === api && failed) pending.reject(new Error('database unavailable'));
+        else if (name === 'fetchAuditSummary') pending.resolve({ data: { total: 17 } });
+        else if (name === 'fetchEnforcementBindings') pending.resolve({ bindings: [] });
+        else pending.resolve({ data: { items: name === api ? items : [], total: name === api ? 80 : 0, next_offset: name === api ? 50 : null } });
+      }
+      await settle();
+    };
+    const rowKey = row.case_id || row.event_id || row.session_id;
+    const rows = rendered => collectElements(rendered.element, el => el.props?.key === rowKey);
+    let rendered = driver.render(SystemAuditPage);
+    rendered.effects[0]();
+    await answer();
+    rendered = driver.render(SystemAuditPage);
+    collectElements(rendered.element, el => el.type === 'button' && el.children.includes(`audit.tab.${tab}`))[0].props.onClick();
+    rendered = driver.render(SystemAuditPage);
+    assert.ok(rows(rendered).length, 'the initial row is visible');
+    const refresh = () => collectElements(driver.render(SystemAuditPage).element,
+      el => el.type === 'button' && el.children.includes('common.refresh'))[0].props.onClick();
+    refresh();
+    await answer(true);
+    rendered = driver.render(SystemAuditPage);
+    assert.equal(rows(rendered).length, 0, 'failed reload must not show an old row as current');
+    assert.ok(collectElements(rendered.element, el => el.children?.includes('database unavailable')).length);
+    assert.ok(collectElements(rendered.element, el => el.props?.labelKey === 'audit.stats.totalEvents.label' && el.props.value === 17).length,
+      'an independently successful summary remains available');
+    if (tab === 'events') assert.equal(collectElements(rendered.element, el => el.children?.includes('加载更多')).length, 0,
+      'a failed first page cannot retain its old continuation');
+    refresh();
+    await answer();
+    rendered = driver.render(SystemAuditPage);
+    assert.ok(rows(rendered).length, 'successful retry restores the row');
+  });
+}
