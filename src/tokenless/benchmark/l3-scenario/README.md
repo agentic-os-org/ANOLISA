@@ -87,27 +87,27 @@ compress prose either.
 
 ### tokenless
 
-`SchemaCompressor` over the tools array (its `BeforeModel` hook) and
-`ResponseCompressor` over each JSON tool response (its `PostToolUse` hook), both
-with default configuration — the same settings L1 and L2 measure. Its other two
-compressors are out of scope for these assets by construction: TOON is a
-pipeline step chained after `ResponseCompressor`, and rtk rewrites shell
-commands, which these conversations do not carry.
+The current production Runtime handles the tools array through `BeforeModel`
+and eligible tool results through `PostTool`. It resolves content origin, recovery
+capabilities, JSON/TOON and the final savings gate rather than substituting an
+isolated component candidate. `--recovery` attaches an in-memory original store
+and declares the static `fixture_retrieve` tool for BeforeModel schema recovery;
+PostTool keeps its shell-recovery capability. Exported originals let an offline
+retrieval fixture serve those keys; this does not certify a real host tool.
+Without recovery, lossy candidates cannot bypass production rules and the
+unavailable capability is reported as a gap, not failed compression.
+RTK command execution is outside this static-conversation layer.
 
-Consequence worth stating plainly, and measured rather than assumed: tokenless'
-four compressors all take **structured** input — tool schemas, JSON values,
-shell commands. Verified against the shipped binary, a tool message carrying
-raw Python or raw prose is rejected with `JSON parse error`, and the production
-hook takes the same path (it calls `skip()` when the payload does not parse as
-JSON). So `code`, `text` and `rag` points have no applicable tokenless entry
-point at all.
+Applicability follows the actual Runtime entry points, not only JSON parsing or
+message role. Authoritative file content and ordinary prose remain unchanged.
+Explicit search/build-log/HTML/tabular tool-origin overlays exercise current
+content domains; the original reference scenario organization stays intact.
 
 That is a **capability gap, not a compression failure**, and the two must not be
 reported as the same thing. The report states gaps prominently right after the
 summary rather than burying them: what each side cannot do is the primary output
 of this layer, since it feeds the L1 decision about which compressor to add
-next. Applicability is decided per point from the payload actually measured (can
-the tool message be parsed as JSON, is a tools array present) — never inferred
+next. Applicability is decided per point from the payload actually measured (which production entry accepts its content and source) — never inferred
 from the message role alone.
 
 ## Why the scenarios are committed as static assets
@@ -215,12 +215,28 @@ Linux only — tokenless is Linux-only, and the comparison side needs a Linux
 PyO3 build.
 
 ```bash
-HEADROOM_PYTHON=/path/to/headroom-venv/bin/python \
-DASHSCOPE_API_KEY=<key> \
-  cargo run --release --bin l3_compare -- --report-dir reports
+cargo test --locked --lib --tests
+cargo run --release --locked --bin l3_compare -- --tokenless-only --no-probe --report-dir reports/no-recovery
+cargo run --release --locked --bin l3_compare -- --tokenless-only --no-probe --recovery --report-dir reports/recovery
 ```
 
-`--no-probe` skips the semantic probe; a missing comparison worker degrades to a
+`--tokenless-only` starts neither the comparison worker nor a model probe, even
+with an API key. In comparison mode, `--no-probe` separately disables model calls;
+semantic/model task results stay unmeasured, not full scores.
+A separate run with HEADROOM_PYTHON configured may collect both reference
+pipelines. Only an explicitly approved model run may enable the semantic probe.
+`lifecycle.json` exports input/output and referenced originals under their keys;
+missing originals stay visible and are not invented as empty recovery evidence.
+The primary JSON and Markdown reports record `tokenless_mode`,
+`comparison_status` and the declared schema retrieval tool. Lifecycle evidence
+includes BeforeModel dispositions and each Runtime outcome's stash statistics.
+The source/asset revision remains attached to each result. Local scoring vectors
+under `tests/vectors/` have no dependency on an unsubmitted evaluator package;
+`evaluate` and `f1` are executed exhaustively by Rust, while
+`non_executed_boundary_examples` are documentation examples only.
+The offline worker evidence tests run through `make test-benchmark-l3-worker`.
+
+A missing comparison worker degrades to a
 one-sided run and the report records the degradation rather than aborting.
 
 `L3_NO_PROBE` and `L3_REPORT_DIR` are accepted as equivalents to `--no-probe` and

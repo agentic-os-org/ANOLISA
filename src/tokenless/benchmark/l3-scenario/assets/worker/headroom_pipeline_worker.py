@@ -27,7 +27,8 @@ Line-delimited JSON over stdin/stdout, one JSON object per line:
                          values retain the legacy pure_stage default.
   response:              {"ok": true, "messages": [...], "compress_ms": ...,
                           "tokens_before": N, "tokens_after": N,
-                          "transforms_applied": [...], "timing": {...}}
+                          "transforms_applied": [...], "timing": {...},
+                          "ccr": [{"key": "<hash>", "original": "..."}]}
                          {"ok": false, "error": "..."}
 
 Unexpected decode or result-metadata failures return an error for that request;
@@ -63,13 +64,22 @@ tokenless side's in-process timing and the two must not be compared directly.
 the reference writes advisory notices (e.g. CacheAligner's volatile-prefix warning)
 to stdout, which would corrupt the line-delimited protocol. stdout is therefore
 rebound to stderr for everything except the protocol writer below.
+
+`ccr` lists the originals behind the CCR markers in the compressed messages,
+read from the compression store backend after timing stops. `retrieve()` is
+avoided on purpose: it records access and feeds TOIN, which would change later
+compressions in this worker.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import re
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -78,11 +88,56 @@ from typing import Any
 # goes to stderr, which the parent forwards for diagnosis.
 _PROTOCOL_OUT = sys.stdout
 sys.stdout = sys.stderr
+os.environ["HEADROOM_BEACON"] = "off"
+os.environ["DO_NOT_TRACK"] = "1"
+# TOIN 默认写入 ~/.headroom/toin.json 并跨运行累积学习状态；每个 worker 进程从空 TOIN 开始，
+# 多轮测量才可逐 hash 比较。调用方显式设置 HEADROOM_TOIN_PATH 时保留其值。
+_TOIN_DIRECTORY = None
+if "HEADROOM_TOIN_PATH" not in os.environ:
+    _TOIN_DIRECTORY = tempfile.TemporaryDirectory(prefix="headroom-toin-")
+    atexit.register(_TOIN_DIRECTORY.cleanup)
+    os.environ["HEADROOM_TOIN_PATH"] = os.path.join(_TOIN_DIRECTORY.name, "toin.json")
 
 
 def _emit(obj: dict) -> None:
     _PROTOCOL_OUT.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
     _PROTOCOL_OUT.flush()
+
+
+# Marker forms Headroom emits (`headroom/cache/prefix_tracker.py` uses the same pattern).
+_CCR_HASH_RE = re.compile(
+    r"(?:Retrieve (?:more|original): hash=|<<ccr:)([0-9a-f]{12,24})(?![0-9a-f])(?=[.\], >]|$)"
+)
+
+
+def _ccr_entries(messages: list[Any]) -> list[dict]:
+    """Originals behind every CCR marker in the compressed conversation."""
+    text = json.dumps(messages, ensure_ascii=False, default=str)
+    keys = list(dict.fromkeys(_CCR_HASH_RE.findall(text)))
+    if not keys:
+        return []
+    from headroom.cache.compression_store import get_compression_store
+
+    backend = get_compression_store()._backend
+    entries = []
+    for key in keys:
+        entry = backend.get(key)
+        entries.append({"key": key, "original": None if entry is None else entry.original_content})
+    return entries
+
+
+def _ccr_evidence(messages: list[Any]) -> tuple[list[dict], list[str]]:
+    try:
+        entries = _ccr_entries(messages)
+        warnings = []
+        if any(entry["original"] is None for entry in entries):
+            warnings.append("CCR original availability is unverified; unavailable originals excluded from recovery evidence")
+        text = json.dumps(messages, ensure_ascii=False)
+        if ("<<ccr:" in text or "Retrieve original:" in text or "Retrieve more:" in text) and not _CCR_HASH_RE.search(text):
+            warnings.append("CCR marker syntax unrecognized; recovery evidence unavailable")
+        return [entry for entry in entries if entry["original"] is not None], warnings
+    except Exception as exc:
+        return [], [f"CCR evidence unavailable: {type(exc).__name__}"]
 
 
 def _provenance(module: Any) -> tuple[str | None, bool | None, int | None]:
@@ -277,6 +332,7 @@ def main() -> int:
                 _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
                 continue
 
+            ccr, ccr_warnings = _ccr_evidence(result.messages)
             _emit(
                 {
                     "ok": True,
@@ -287,7 +343,8 @@ def main() -> int:
                     "tokens_after": result.tokens_after,
                     "transforms_applied": list(result.transforms_applied),
                     "timing": dict(result.timing),
-                    "warnings": list(result.warnings),
+                    "warnings": list(result.warnings) + ccr_warnings,
+                    "ccr": ccr,
                 }
             )
         except Exception as exc:  # noqa: BLE001 - one failed request must not lose later lines

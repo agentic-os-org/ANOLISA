@@ -1,0 +1,17 @@
+{
+  "suite": "scenario",
+  "scenario": "tabular_runtime",
+  "display_name": "Tabular capability overlay",
+  "content_type": "text",
+  "size_label": "16 complete CSV rows",
+  "source": {"reference": "Tokenless current Tabular runtime capability overlay", "headroom_native": false, "headroom_revision": null, "headroom_dirty": null},
+  "model_limit": 200000,
+  "critical_facts": ["required_fact_alpha", "required_fact_middle", "required_fact_omega"],
+  "messages": [
+    {"role": "system", "content": "Use the complete exported table as evidence."},
+    {"role": "user", "content": "Read all rows, including the middle observation."},
+    {"role": "assistant", "content": null, "tool_calls": [{"id": "table-overlay-call", "type": "function", "function": {"name": "get_data", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "table-overlay-call", "content": "\"id\",\"message\",\"score\"\r\n\"row-00\",\"required_fact_alpha\",\"0.00\"\r\n\"row-01\",\"complete_value_01\",\"1.00\"\r\n\"row-02\",\"complete_value_02\",\"2.00\"\r\n\"row-03\",\"complete_value_03\",\"3.00\"\r\n\"row-04\",\"complete_value_04\",\"4.00\"\r\n\"row-05\",\"complete_value_05\",\"5.00\"\r\n\"row-06\",\"complete_value_06\",\"6.00\"\r\n\"row-07\",\"required_fact_middle\",\"7.00\"\r\n\"row-08\",\"complete_value_08\",\"8.00\"\r\n\"row-09\",\"complete_value_09\",\"9.00\"\r\n\"row-10\",\"complete_value_10\",\"10.00\"\r\n\"row-11\",\"complete_value_11\",\"11.00\"\r\n\"row-12\",\"complete_value_12\",\"12.00\"\r\n\"row-13\",\"complete_value_13\",\"13.00\"\r\n\"row-14\",\"complete_value_14\",\"14.00\"\r\n\"row-15\",\"required_fact_omega\",\"15.00\"\r\n"},
+    {"role": "user", "content": "State the first, middle and final observations."}
+  ]
+}
