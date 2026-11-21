@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from benchmark_stats import counter_increase
 from check_resource_limits import LIMITS
 
 MIB = 1024.0 * 1024.0
@@ -670,13 +671,10 @@ def kpi(
 
 
 def counter_delta(values: Sequence[float | None] | None) -> float | None:
-    if not values:
+    if values is None:
         return None
-    first = first_value(values)
-    last = last_value(values)
-    if first is None or last is None:
-        return None
-    return max(0.0, last - first)
+    observed = [value for value in values if value is not None]
+    return counter_increase(observed) if observed else None
 
 
 def read_text_file(path: Path) -> str:

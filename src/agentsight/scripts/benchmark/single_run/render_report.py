@@ -11,7 +11,13 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
-from benchmark_stats import linear_slope, numeric, rolling_max_increase, stats
+from benchmark_stats import (
+    counter_increase,
+    linear_slope,
+    numeric,
+    rolling_max_increase,
+    stats,
+)
 from h2load_stats import summarize_h2load
 from validate_results import json_lines
 
@@ -195,17 +201,7 @@ def _summarize_qps_resource_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 def counter_delta(values: list[float]) -> int:
     """Return the increase in a cumulative counter, tolerating counter resets."""
-    if len(values) < 2:
-        return 0
-    total = 0.0
-    for previous, current in pairwise(values):
-        if current < previous:
-            # Counter reset: the new epoch's accumulated count already
-            # happened, so its first observed sample counts in full.
-            total += current
-        else:
-            total += current - previous
-    return int(total)
+    return int(counter_increase(values))
 
 
 def summarize_drops(
