@@ -138,6 +138,13 @@ fn read_last_maintenance(marker_path: &Path) -> Option<f64> {
         .trim()
         .parse::<f64>()
         .ok()
+        // The parser accepts "NaN" and "inf", which are not usable as a
+        // timestamp. Every comparison against NaN is false, so such a marker
+        // would keep the gate closed forever; an infinite one makes the gate
+        // always due. Both degrade to "treat the marker as absent" like every
+        // other unparsable marker, so the next pass rewrites it with a
+        // finite value.
+        .filter(|last_run| last_run.is_finite())
 }
 
 /// Writes the marker atomically via a pid-suffixed temp file, as v1 does.
@@ -344,6 +351,42 @@ mod tests {
             Some(1000.0),
             always_ok
         ));
+    }
+
+    /// A marker that parses but is not a usable timestamp must not wedge the
+    /// gate.
+    ///
+    /// Rust's `f64` parser accepts "NaN" and "inf" (and v1's Python `float()`
+    /// accepted them too, so this hole was inherited), which the corrupt-marker
+    /// defense above could not see: "not a number" fails to parse and is
+    /// treated as absent, but "NaN" *parses* and then makes both gate
+    /// comparisons false — retention would never run again for that database,
+    /// while "inf" makes the gate due on every call. Both must degrade to
+    /// "treat as absent" and self-heal through the next pass.
+    #[test]
+    fn a_non_finite_marker_is_treated_as_absent_and_self_heals() {
+        for content in ["NaN", "nan", "inf", "-inf", "infinity"] {
+            let dir = TempDir::new().expect("temp dir");
+            let db = dir.path().join("events.db");
+            fs::write(maintenance_marker_path(&db), content).expect("seed");
+
+            let ran = Cell::new(false);
+            assert!(
+                run_sqlite_maintenance_if_due(&db, Some(3600.0), Some(1000.0), || {
+                    ran.set(true);
+                    Ok(())
+                }),
+                "a marker of {content} must not close the gate"
+            );
+            assert!(ran.get());
+
+            // The pass replaced the unusable marker with a finite timestamp,
+            // so the gate must resume its normal once-per-interval behavior.
+            assert!(
+                !run_sqlite_maintenance_if_due(&db, Some(3600.0), Some(1500.0), always_ok),
+                "the healed marker must keep the gate closed inside the interval"
+            );
+        }
     }
 
     #[test]
