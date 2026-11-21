@@ -335,14 +335,21 @@ impl LogtailExporter {
 
         // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
         // 首次跳过打一条 warn，避免"启用了却无数据"时无迹可查（后续静默）。
-        if self.require_path_exists && !target_path.exists() {
-            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-            WARN_ONCE.call_once(|| {
-                log::warn!(
-                    "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
-                );
-            });
-            return None;
+        if self.require_path_exists {
+            // Defer to an active explicit/dynamic exporter already targeting the same path
+            // so `AgentSight`'s default exporter does not duplicate every JSONL record.
+            if logtail_path().is_some_and(|p| std::path::Path::new(&p) == target_path) {
+                return None;
+            }
+            if !target_path.exists() {
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    log::warn!(
+                        "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
+                    );
+                });
+                return None;
+            }
         }
         Some(target_path)
     }
@@ -1649,5 +1656,58 @@ pub mod tests {
         assert!(!telemetry_disabled_at(&sentinel));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_default_and_explicit_exporter_do_not_duplicate_same_target() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_logtail_dedup_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("agentsight.jsonl");
+        std::fs::write(&target, "").unwrap();
+
+        let default_exporter = LogtailExporter {
+            path: target.clone(),
+            encryptor: None,
+            trace_enabled: true,
+            dynamic: false,
+            require_path_exists: true,
+        };
+        set_dynamic_logtail_path(target.to_str().unwrap());
+        let explicit_exporter = LogtailExporter::new(None, true).expect("explicit exporter");
+
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        default_exporter.export(std::slice::from_ref(&event));
+        explicit_exporter.export(std::slice::from_ref(&event));
+
+        let line_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(
+            line_count, 1,
+            "default and explicit exporters pointing at the same file must emit one record, not duplicates"
+        );
+
+        // Once the explicit dynamic path clears, the default exporter resumes writing.
+        set_dynamic_logtail_path("");
+        default_exporter.export(std::slice::from_ref(&event));
+        explicit_exporter.export(std::slice::from_ref(&event));
+        let resumed_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(resumed_count, 2);
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
     }
 }
