@@ -461,4 +461,40 @@ fn reusing_subscription_id_does_not_tear_down_replacement_connection() {
         streamed_obs.result,
         Ok(ResponseBody::Violation(violation_2))
     );
+
+    // Mixed-class sequence: required A uses X, best-effort B reuses X, then
+    // required C registers Y before A cleans up; C's eviction of previous
+    // required X must not unsubscribe B's active best-effort observer on X.
+    drop(reader_b);
+    drop(obs_b);
+    let mixed_id = Uuid::new_v4();
+    let req_a = subscribe(Command::SubscribeRequiredViolations {
+        subscription_id: mixed_id,
+    });
+    let mut best_effort_b = subscribe(Command::SubscribeViolations {
+        subscription_id: mixed_id,
+    });
+    let next_required_id = Uuid::new_v4();
+    let mut req_c = subscribe(Command::SubscribeRequiredViolations {
+        subscription_id: next_required_id,
+    });
+    drop(req_a);
+    thread::sleep(Duration::from_millis(120));
+
+    let violation_3 = fixture_violation(&apply);
+    fixture
+        .backend
+        .publish_violation(violation_3.clone())
+        .expect("third violation should publish");
+    let streamed_c: Response = read_frame(&mut req_c)
+        .expect("new required subscriber C should receive violation")
+        .expect("required C violation frame should exist");
+    assert_eq!(
+        streamed_c.result,
+        Ok(ResponseBody::Violation(violation_3.clone()))
+    );
+    let streamed_b: Response = read_frame(&mut best_effort_b)
+        .expect("best-effort observer B reusing X must not be unsubscribed by C replacing A")
+        .expect("observer B violation frame should exist");
+    assert_eq!(streamed_b.result, Ok(ResponseBody::Violation(violation_3)));
 }
