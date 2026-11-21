@@ -153,10 +153,12 @@ fn list_skips_symlinked_task_entries() {
 }
 
 #[test]
-fn close_refuses_traversal_task_id() {
-    // save_task derives the destination from task.id, parsed off disk and
-    // never re-validated: a traversal id is a write-out-of-sandbox primitive
-    // that needs no symlink at all.
+fn close_self_heals_a_planted_traversal_task_id() {
+    // save_task takes the caller-validated id and re-pins task.id to it before
+    // building the destination, so a planted traversal frontmatter id is
+    // rewritten instead of becoming a path component. close therefore
+    // self-heals the tampered file rather than erroring: nothing escapes the
+    // mount, and the caller's own task is the one that actually gets closed.
     let (_tmp, svc) = setup();
     let tasks = svc.mount.root.join("tasks");
     std::fs::create_dir_all(&tasks).unwrap();
@@ -167,16 +169,34 @@ fn close_refuses_traversal_task_id() {
     .unwrap();
     let marker = svc.mount.root.parent().unwrap().join("ESCAPED_MARKER.md");
 
-    let result = agent_memory::tools::memory_task_close(&svc, "planted", Some("done"));
+    let outcome = agent_memory::tools::memory_task_close(&svc, "planted", Some("done"))
+        .expect("close must self-heal a planted frontmatter id instead of failing");
     assert!(
-        result.is_err(),
-        "close must refuse a task id that traverses out of the mount, got: {:?}",
-        result.as_ref().map_err(|e| e.to_string())
+        outcome.contains("task planted closed"),
+        "close must report the caller-validated id, got: {outcome}"
+    );
+
+    let healed = std::fs::read_to_string(tasks.join("planted.md")).unwrap();
+    assert!(
+        healed.contains("id: planted"),
+        "frontmatter id must be re-pinned to the caller id: {healed}"
+    );
+    assert!(
+        healed.contains("status: done"),
+        "the caller's task must actually be closed: {healed}"
+    );
+    assert!(
+        healed.contains("progress: 100"),
+        "closing must set progress on the caller's task: {healed}"
     );
     assert!(
         !marker.exists(),
         "nothing may be written outside mount.root, found {:?}",
         marker
+    );
+    assert!(
+        !tasks.join("ESCAPED_MARKER.md").exists(),
+        "the planted traversal id must never become a file name inside tasks/"
     );
 }
 
