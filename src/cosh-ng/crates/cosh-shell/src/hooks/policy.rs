@@ -11,17 +11,15 @@ pub(crate) enum CommandIntent {
     Other,
 }
 
+/// Coarse per-program bucket used in suppression, entity, and feedback keys.
+///
+/// The key is derived from the actual program token (`first_program_token`
+/// already strips env assignments, `sudo`/`env` wrappers, and path
+/// prefixes). It must never be derived from a raw string prefix: `psql`,
+/// `ps2pdf`, or `topgrade` are distinct programs and must not land in the
+/// `ps`/`top` buckets just because their names start with those prefixes.
 pub(super) fn command_intent_key(command: &str) -> &str {
-    let trimmed = command.trim_start();
-    if trimmed.starts_with("top") {
-        "top"
-    } else if trimmed.starts_with("free") {
-        "free"
-    } else if trimmed.starts_with("ps") {
-        "ps"
-    } else {
-        first_program_token(command)
-    }
+    first_program_token(command)
 }
 
 pub(super) fn should_downgrade_success_finding(command: &str) -> bool {
@@ -517,4 +515,39 @@ fn is_env_assignment_token(token: &str) -> bool {
     let name = &token[..eq_pos];
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !name.bytes().next().unwrap_or(0).is_ascii_digit()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_key_maps_genuine_diagnostic_programs() {
+        assert_eq!(command_intent_key("ps aux"), "ps");
+        assert_eq!(command_intent_key("free -m"), "free");
+        assert_eq!(command_intent_key("top -b -n1"), "top");
+        // Wrappers, env prefixes, and absolute paths resolve to the program.
+        assert_eq!(command_intent_key("sudo ps aux"), "ps");
+        assert_eq!(command_intent_key("LANG=C free -m"), "free");
+        assert_eq!(command_intent_key("/usr/bin/ps aux"), "ps");
+        assert_eq!(command_intent_key("env top -b -n1"), "top");
+    }
+
+    #[test]
+    fn intent_key_does_not_share_prefix_buckets_with_other_programs() {
+        // These program names merely start with "ps"/"top"/"free"; they are
+        // unrelated tools and must keep their own intent keys, otherwise
+        // suppression and feedback keys collide with ps/top/free findings.
+        assert_eq!(command_intent_key("psql -c 'select 1'"), "psql");
+        assert_eq!(command_intent_key("ps2pdf in.pdf out.pdf"), "ps2pdf");
+        assert_eq!(command_intent_key("pscp data.txt host:"), "pscp");
+        assert_eq!(command_intent_key("topgrade"), "topgrade");
+        assert_eq!(command_intent_key("psql --version"), "psql");
+    }
+
+    #[test]
+    fn intent_key_empty_command_stays_empty() {
+        assert_eq!(command_intent_key(""), "");
+        assert_eq!(command_intent_key("   "), "");
+    }
 }
