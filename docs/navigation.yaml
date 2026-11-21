@@ -259,38 +259,50 @@ website:
       - id: overview
         label: {en: General Contribution Guide, zh: 通用贡献指南}
         doc: contribute/index
-      - id: aw
-        label: {en: AW, zh: AW}
-        doc: contribute/aw/index
+      - id: tracks
+        label: {en: Ways to Contribute, zh: 贡献方向与类目}
+        doc: contribute/tracks
+      - id: workflow
+        label: {en: "Issues, Roadmap & Claiming", zh: "Roadmap、Issue 与认领流程"}
+        doc: contribute/workflow
+      - id: governance
+        label: {en: Community Governance, zh: 社区治理}
+        doc: contribute/governance
+      - id: components
+        label: {en: Component Guides, zh: 分组件开发指南}
         items:
-          - id: building
-            label: {en: Building, zh: 构建}
-            doc: contribute/aw/building
-          - id: aw-testing
-            label: {en: Native and Release Acceptance, zh: 原生与发行验收}
-            doc: contribute/aw/testing
-      - id: cosh-ng
-        label: {en: cosh-ng, zh: cosh-ng}
-        doc: contribute/cosh-ng/index
-        items:
-          - id: getting-started
-            label: {en: Development Setup, zh: 开发入门}
-            doc: contribute/cosh-ng/getting-started
-          - id: adding-commands
-            label: {en: Adding Commands, zh: 添加命令}
-            doc: contribute/cosh-ng/adding-commands
-          - id: adding-distros
-            label: {en: Adding Distributions, zh: 添加发行版}
-            doc: contribute/cosh-ng/adding-distros
-          - id: testing
-            label: {en: Testing, zh: 测试}
-            doc: contribute/cosh-ng/testing
-      - id: ws-ckpt
-        label: {en: ws-ckpt, zh: ws-ckpt}
-        items:
-          - id: packaging
-            label: {en: Packaging, zh: 打包}
-            doc: contribute/ws-ckpt/packaging
+          - id: aw
+            label: {en: AW, zh: AW}
+            doc: contribute/aw/index
+            items:
+              - id: building
+                label: {en: Building, zh: 构建}
+                doc: contribute/aw/building
+              - id: aw-testing
+                label: {en: Native and Release Acceptance, zh: 原生与发行验收}
+                doc: contribute/aw/testing
+          - id: cosh-ng
+            label: {en: cosh-ng, zh: cosh-ng}
+            doc: contribute/cosh-ng/index
+            items:
+              - id: getting-started
+                label: {en: Development Setup, zh: 开发入门}
+                doc: contribute/cosh-ng/getting-started
+              - id: adding-commands
+                label: {en: Adding Commands, zh: 添加命令}
+                doc: contribute/cosh-ng/adding-commands
+              - id: adding-distros
+                label: {en: Adding Distributions, zh: 添加发行版}
+                doc: contribute/cosh-ng/adding-distros
+              - id: testing
+                label: {en: Testing, zh: 测试}
+                doc: contribute/cosh-ng/testing
+          - id: ws-ckpt
+            label: {en: ws-ckpt, zh: ws-ckpt}
+            items:
+              - id: packaging
+                label: {en: Packaging, zh: 打包}
+                doc: contribute/ws-ckpt/packaging
 
 # Website groups are independent of the flat component directories.
 groups:

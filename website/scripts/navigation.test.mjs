@@ -85,9 +85,16 @@ test('website navigation separates SDK, AW integration, and contributions using 
   assert.equal(sidebars.sdkGuide[0].items[0].link.id, 'developer-guide/sdk/tokenless/index');
   assert.equal(sidebars.sdkGuide[0].items[0].items[0].id, 'developer-guide/sdk/tokenless/agentscope');
   assert.equal(sidebars.contributeGuide[0].id, 'contribute/index');
-  assert.deepEqual(sidebars.contributeGuide.slice(1).map((item) => item.label), ['AW', 'cosh-ng', 'ws-ckpt']);
-  assert.equal(sidebars.contributeGuide[1].link.id, 'contribute/aw/index');
-  assert.equal(sidebars.contributeGuide[2].link.id, 'contribute/cosh-ng/index');
+  assert.deepEqual(sidebars.contributeGuide.slice(1).map((item) => item.label), [
+    'Ways to Contribute',
+    'Issues, Roadmap & Claiming',
+    'Community Governance',
+    'Component Guides',
+  ]);
+  assert.equal(sidebars.contributeGuide[3].id, 'contribute/governance');
+  assert.deepEqual(sidebars.contributeGuide[4].items.map((item) => item.label), ['AW', 'cosh-ng', 'ws-ckpt']);
+  assert.equal(sidebars.contributeGuide[4].items[0].link.id, 'contribute/aw/index');
+  assert.equal(sidebars.contributeGuide[4].items[1].link.id, 'contribute/cosh-ng/index');
   assert.equal(documentSidebar(navigation, 'developer-guide/sdk/tokenless/index.md'), 'sdkGuide');
   assert.equal(documentSidebar(navigation, 'developer-guide/aw/providers/protocol.md'), 'awGuide');
   assert.equal(documentSidebar(navigation, 'contribute/aw/index.md'), 'contributeGuide');
