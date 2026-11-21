@@ -220,11 +220,30 @@ impl FileSystemSandboxPolicy {
             }
         }
 
+        let read_only_paths: Vec<AbsolutePathBuf> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Read)
+            .filter_map(|entry| self.resolve_path(&entry.path, cwd))
+            .collect();
+
         roots
             .into_iter()
-            .map(|writable_root| WritableRoot {
-                read_only_subpaths: default_read_only_subpaths_for_writable_root(&writable_root),
-                root: writable_root,
+            .map(|root| {
+                let mut read_only_subpaths = default_read_only_subpaths_for_writable_root(&root);
+                // The writable bind covers any earlier bind of a read-only descendant.
+                for path in &read_only_paths {
+                    if path != &root
+                        && path.as_path().starts_with(root.as_path())
+                        && !read_only_subpaths.contains(path)
+                    {
+                        read_only_subpaths.push(path.clone());
+                    }
+                }
+                WritableRoot {
+                    root,
+                    read_only_subpaths,
+                }
             })
             .collect()
     }
