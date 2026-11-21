@@ -41,7 +41,19 @@ def archive_session_alongside_trace(session_file: str, trace_file: str) -> str:
         os.makedirs(sessions_dir, exist_ok=True)
         stem = Path(trace_file).stem
         dst = os.path.join(sessions_dir, f"{stem}.session.jsonl")
-        shutil.copy2(session_file, dst)
+        # Stage the copy and publish it with one rename: a copy that fails
+        # half way must not leave a truncated file under the archive name, nor
+        # replace a complete archive written by an earlier run.
+        staging = f"{dst}.{os.getpid()}.partial"
+        try:
+            shutil.copy2(session_file, staging)
+            os.replace(staging, dst)
+        finally:
+            if os.path.exists(staging):
+                try:
+                    os.unlink(staging)
+                except OSError:
+                    pass
         return dst
     except Exception as exc:
         log(f"  [WARNING] Failed to archive session {session_file}: {exc}")
