@@ -41,9 +41,7 @@ impl TaskCoordinator {
                 snapshot_id: request.snapshot_id.clone(),
                 workspace: list.workspace.clone(),
             })
-            .map_err(|error| {
-                GatewayDaemonError::Protocol(error.safe_message.as_str().to_owned())
-            })?;
+            .map_err(|error| provider_failure(&error))?;
         // Reserve half the frame for the envelope and bounded Task/workspace fields.
         // Count serialized bytes so escaped paths and details cannot exceed the budget.
         let mut bytes = 2;
@@ -93,10 +91,14 @@ impl TaskCoordinator {
             }
             return match (record.state.as_str(), record.result.as_ref()) {
                 ("succeeded", Some(result)) => Ok(result.clone()),
-                ("switch_started" | "unknown", _) => Err(GatewayDaemonError::Protocol(format!(
-                    "snapshot switch outcome is uncertain; do not retry; recovery snapshot is {}",
-                    record.recovery_snapshot_id.as_str()
-                ))),
+                ("switch_started" | "unknown", _) => Err(snapshot_failure(
+                    "task_snapshot_switch_uncertain",
+                    format!(
+                        "snapshot switch outcome is uncertain; do not retry; recovery snapshot is {}",
+                        record.recovery_snapshot_id.as_str()
+                    ),
+                    false,
+                )),
                 ("intent" | "recovery_created", _) => {
                     self.resume_snapshot_switch(actor_id, request, record, driver)
                 }
@@ -116,13 +118,17 @@ impl TaskCoordinator {
         )?;
         require_task_snapshot_terminal(preview.state)?;
         if preview.revision != request.expected_revision {
-            return Err(GatewayDaemonError::Protocol(
-                "Task revision changed after snapshot preview".to_owned(),
+            return Err(snapshot_failure(
+                "task_snapshot_revision_conflict",
+                "Task revision changed after snapshot preview",
+                true,
             ));
         }
         if preview.preview_digest != request.preview_digest {
-            return Err(GatewayDaemonError::Protocol(
-                "workspace changed after snapshot preview; preview again".to_owned(),
+            return Err(snapshot_failure(
+                "task_snapshot_preview_stale",
+                "workspace changed after snapshot preview; preview again",
+                true,
             ));
         }
         let recovery_snapshot_id = CheckpointId::new();
@@ -156,8 +162,10 @@ impl TaskCoordinator {
         authorize(&task, actor_id)?;
         require_task_snapshot_terminal(task.state())?;
         if task.revision() != request.expected_revision {
-            return Err(GatewayDaemonError::Protocol(
-                "Task revision changed before snapshot switch".to_owned(),
+            return Err(snapshot_failure(
+                "task_snapshot_revision_conflict",
+                "Task revision changed before snapshot switch",
+                true,
             ));
         }
         let (launch, _) = self.store.load_task_launch_spec(&request.task_id)?
@@ -170,9 +178,7 @@ impl TaskCoordinator {
         if matches!(record.state.as_str(), "intent" | "recovery_created") {
             let current = driver
                 .preview(&provider_request)
-                .map_err(|error| {
-                    GatewayDaemonError::Protocol(error.safe_message.as_str().to_owned())
-                })?;
+                .map_err(|error| provider_failure(&error))?;
             if current.preview_digest != record.preview_digest {
                 self.store.transition_task_snapshot_switch(
                     actor_id,
@@ -183,8 +189,10 @@ impl TaskCoordinator {
                     Some("workspace changed after snapshot preview"),
                     now_ms()?,
                 )?;
-                return Err(GatewayDaemonError::Protocol(
-                    "workspace changed after snapshot preview; preview again".to_owned(),
+                return Err(snapshot_failure(
+                    "task_snapshot_preview_stale",
+                    "workspace changed after snapshot preview; preview again",
+                    true,
                 ));
             }
         }
@@ -198,19 +206,22 @@ impl TaskCoordinator {
                     actor_id, &request.idempotency_key, "intent", "failed", None,
                     Some(error.safe_message.as_str()), now_ms()?,
                 )?;
-                return Err(GatewayDaemonError::Protocol(format!(
-                    "recovery snapshot could not be proven: {}",
-                    error.safe_message.as_str()
-                )));
+                return Err(provider_failure_with_context(
+                    &error,
+                    format!(
+                        "recovery snapshot could not be proven: {}",
+                        error.safe_message.as_str()
+                    ),
+                ));
             }
             self.store.transition_task_snapshot_switch(
                 actor_id, &request.idempotency_key, "intent", "recovery_created", None, None,
                 now_ms()?,
             )?;
         }
-        let current = driver.preview(&provider_request).map_err(|error| {
-            GatewayDaemonError::Protocol(error.safe_message.as_str().to_owned())
-        })?;
+        let current = driver
+            .preview(&provider_request)
+            .map_err(|error| provider_failure(&error))?;
         if current.preview_digest != record.preview_digest {
             self.store.transition_task_snapshot_switch(
                 actor_id,
@@ -221,9 +232,10 @@ impl TaskCoordinator {
                 Some("workspace changed after recovery snapshot creation"),
                 now_ms()?,
             )?;
-            return Err(GatewayDaemonError::Protocol(
-                "workspace changed while preparing the switch; recovery exists but switch was not attempted"
-                    .to_owned(),
+            return Err(snapshot_failure(
+                "task_snapshot_preview_stale",
+                "workspace changed while preparing the switch; recovery exists but switch was not attempted",
+                true,
             ));
         }
         self.store.transition_task_snapshot_switch(
@@ -237,21 +249,24 @@ impl TaskCoordinator {
             &record.command_digest,
         ) {
             Ok(TaskSnapshotProviderSwitchResult::Switched(switched)) => switched,
-            Ok(TaskSnapshotProviderSwitchResult::Rejected { reason }) => {
+            Ok(TaskSnapshotProviderSwitchResult::Rejected { error }) => {
                 self.store.transition_task_snapshot_switch(
                     actor_id,
                     &request.idempotency_key,
                     "switch_started",
                     "failed",
                     None,
-                    Some(reason.as_str()),
+                    Some(error.safe_message.as_str()),
                     now_ms()?,
                 )?;
-                return Err(GatewayDaemonError::Protocol(format!(
-                    "snapshot switch was rejected before changing the workspace; recovery snapshot is {}: {}",
-                    record.recovery_snapshot_id.as_str(),
-                    reason.as_str()
-                )));
+                return Err(provider_failure_with_context(
+                    &error,
+                    format!(
+                        "snapshot switch was rejected before changing the workspace; recovery snapshot is {}: {}",
+                        record.recovery_snapshot_id.as_str(),
+                        error.safe_message.as_str()
+                    ),
+                ));
             }
             Ok(TaskSnapshotProviderSwitchResult::PossiblyApplied { error }) => {
                 self.store.transition_task_snapshot_switch(
@@ -263,21 +278,29 @@ impl TaskCoordinator {
                     Some(error.safe_message.as_str()),
                     now_ms()?,
                 )?;
-                return Err(GatewayDaemonError::Protocol(format!(
-                    "snapshot switch outcome is uncertain; do not retry; recovery snapshot is {}: {}",
-                    record.recovery_snapshot_id.as_str(),
-                    error.safe_message.as_str()
-                )));
+                return Err(snapshot_failure(
+                    "task_snapshot_switch_uncertain",
+                    format!(
+                        "snapshot switch outcome is uncertain; do not retry; recovery snapshot is {}: {}",
+                        record.recovery_snapshot_id.as_str(),
+                        error.safe_message.as_str()
+                    ),
+                    false,
+                ));
             }
             Err(error) => {
                 self.store.transition_task_snapshot_switch(
                     actor_id, &request.idempotency_key, "switch_started", "failed", None,
                     Some(error.safe_message.as_str()), now_ms()?,
                 )?;
-                return Err(GatewayDaemonError::Protocol(format!(
-                    "snapshot switch was rejected before provider dispatch; recovery snapshot is {}: {}",
-                    record.recovery_snapshot_id.as_str(), error.safe_message.as_str()
-                )));
+                return Err(provider_failure_with_context(
+                    &error,
+                    format!(
+                        "snapshot switch was rejected before provider dispatch; recovery snapshot is {}: {}",
+                        record.recovery_snapshot_id.as_str(),
+                        error.safe_message.as_str()
+                    ),
+                ));
             }
         };
         let result = TaskSnapshotSwitchView {
@@ -292,5 +315,36 @@ impl TaskCoordinator {
             now_ms()?,
         )?;
         Ok(result)
+    }
+}
+
+fn provider_failure(error: &cosh_gateway_contracts::error::ContractError) -> GatewayDaemonError {
+    GatewayDaemonError::Contract {
+        code: error.code.as_str().to_owned(),
+        message: error.safe_message.as_str().to_owned(),
+        recoverable: error.retryable,
+    }
+}
+
+fn provider_failure_with_context(
+    error: &cosh_gateway_contracts::error::ContractError,
+    message: String,
+) -> GatewayDaemonError {
+    GatewayDaemonError::Contract {
+        code: error.code.as_str().to_owned(),
+        message,
+        recoverable: error.retryable,
+    }
+}
+
+fn snapshot_failure(
+    code: &str,
+    message: impl Into<String>,
+    recoverable: bool,
+) -> GatewayDaemonError {
+    GatewayDaemonError::Contract {
+        code: code.to_owned(),
+        message: message.into(),
+        recoverable,
     }
 }
