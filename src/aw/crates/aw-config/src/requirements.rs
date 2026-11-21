@@ -77,7 +77,18 @@ pub fn project<'a>(
     config: &'a Configuration,
     target: &str,
 ) -> Result<Vec<HookRequirement<'a>>, Error> {
-    let spec = &config.as_value()["spec"];
+    project_document(config.as_value(), target)
+}
+
+/// Projects a configuration snapshot already validated by the caller.
+///
+/// # Errors
+/// Rejects an unknown target or a missing field required by the projection.
+pub fn project_document<'a>(
+    document: &'a Value,
+    target: &str,
+) -> Result<Vec<HookRequirement<'a>>, Error> {
+    let spec = &document["spec"];
     let agent = spec["agents"].get(target).ok_or(Error::Invariant {
         path: "/spec/agents".into(),
         reason: "unknown configured Agent target",
@@ -96,7 +107,7 @@ pub fn project<'a>(
         let mut steps = Vec::new();
         let mut has_enabled_steps = false;
         for step in event["steps"].as_array().ok_or(Error::InvalidSchema)? {
-            if step["enabled"] == false {
+            if !step_enabled(step) {
                 continue;
             }
             has_enabled_steps = true;
@@ -116,11 +127,20 @@ pub fn project<'a>(
                 })
                 .transpose()?
                 .unwrap_or_default();
+            let effects = if step["mode"] == "shadow" {
+                vec!["observe"]
+            } else {
+                effects
+            };
             steps.push(StepRequirement {
                 step_id: string(&step["id"])?,
                 provider: string(&step["provider"])?,
                 effects,
-                on_error: string(&step["on_error"])?,
+                on_error: if step["mode"] == "shadow" {
+                    "report"
+                } else {
+                    string(&step["on_error"])?
+                },
                 step_tools,
                 configuration: step,
             });
@@ -138,6 +158,28 @@ pub fn project<'a>(
         });
     }
     Ok(requirements)
+}
+
+/// Finds the original configuration for a projected step.
+pub fn configured_step<'a>(document: &'a Value, event: &str, step_id: &str) -> Option<&'a Value> {
+    document["spec"]["events"][event]["steps"]
+        .as_array()?
+        .iter()
+        .find(|step| step["id"] == step_id)
+}
+
+/// Whether the step is enabled by its switch and execution mode.
+pub fn step_enabled(step: &Value) -> bool {
+    step["enabled"] != false && step["mode"] != "off"
+}
+
+/// Lists executor routes that can be applied by this configured step.
+pub fn active_obligation_routes(step: &Value) -> impl Iterator<Item = (&String, &Value)> {
+    step["obligations"]
+        .as_object()
+        .filter(|_| step_enabled(step) && step["mode"] != "shadow")
+        .into_iter()
+        .flatten()
 }
 
 /// Conservatively intersects selectors before an actual native tool is known.
@@ -160,12 +202,29 @@ pub fn selectors_overlap(outer: &[String], inner: &[String], adapter: &str) -> b
                 return true;
             }
             match (left_native, right_native) {
-                (Some((_, left)), Some((_, right))) => left == right,
+                (Some((_, left)), Some((_, right))) => left == "*" || right == "*" || left == right,
                 (None, None) => left == right,
                 _ => true,
             }
         })
     })
+}
+
+/// Evaluates one configured selector against a normalized tool and its native identity.
+pub fn matches_tool_selector(
+    selector: &str,
+    adapter: Option<&str>,
+    tool_name: Option<&str>,
+    native_name: Option<&str>,
+) -> bool {
+    if selector == "*" {
+        return true;
+    }
+    if let Some((owner, name)) = native(selector) {
+        return adapter == Some(owner)
+            && native_name.is_some_and(|native| name == "*" || native == name);
+    }
+    tool_name == Some(selector)
 }
 
 fn native(selector: &str) -> Option<(&str, &str)> {

@@ -346,7 +346,7 @@ pub(super) fn generate(
         .ok_or("Qoder hooks must be an object")?;
     for name in ["input.submit", "tool.before", "tool.after"] {
         let observe = name != "input.submit" && adapter::observation_enabled(document, target);
-        let selected = adapter::native_steps(steps, name, observe);
+        let selected = adapter::native_steps(document, steps, name, observe);
         if selected.is_empty() {
             continue;
         }

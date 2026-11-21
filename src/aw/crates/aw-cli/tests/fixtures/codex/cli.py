@@ -96,5 +96,11 @@ for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
     if blocked:
         break
     if event == "PreToolUse":
+        if os.environ.get("FAKE_CODEX_EXPECT_SHADOW") == "1":
+            deadline = time.monotonic() + 1
+            while "slow\n" not in (root / "policy-calls").read_text():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("slow shadow was not scheduled")
+                time.sleep(0.005)
         (root / "codex-tool-executed").write_text("yes")
 print(json.dumps({"results": results, "response": native.get("tool_response")}))

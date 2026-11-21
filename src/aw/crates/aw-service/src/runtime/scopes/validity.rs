@@ -121,15 +121,18 @@ impl Runtime {
     pub(in crate::runtime) fn maintain_validity(&self) -> Result<()> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
-        for event in events.values() {
-            if owners
-                .get(&event.instance_id)
+        let expired = |instance: &str| {
+            owners
+                .get(instance)
                 .and_then(|owner| owner.validity.as_ref())
                 .is_some_and(|validity| validity.check().is_err())
-            {
+        };
+        for event in events.values() {
+            if expired(&event.instance_id) {
                 event.cancelled.store(true, Ordering::Release);
             }
         }
+        self.cancel_shadow(expired)?;
         Ok(())
     }
 }

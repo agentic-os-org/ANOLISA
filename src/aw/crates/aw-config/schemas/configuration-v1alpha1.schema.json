@@ -419,6 +419,9 @@
         },
         "native_config": {
           "$ref": "#/$defs/nativeConfiguration"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/name"
         }
       }
     },
@@ -668,6 +671,49 @@
         },
         "match": {
           "$ref": "#/$defs/toolMatch"
+        },
+        "mode": {
+          "enum": [
+            "off",
+            "shadow",
+            "enforce"
+          ],
+          "default": "enforce"
+        },
+        "decision": {
+          "type": "boolean",
+          "default": false
+        },
+        "obligations": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "operation"
+            ],
+            "properties": {
+              "provider": {
+                "$ref": "#/$defs/name"
+              },
+              "order": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "default": 0,
+                "description": "Routes execute by ascending order, then by kind when orders match."
+              },
+              "operation": {
+                "$ref": "#/$defs/name"
+              }
+            }
+          }
         }
       },
       "oneOf": [

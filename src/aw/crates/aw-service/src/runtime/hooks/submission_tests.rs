@@ -160,6 +160,7 @@ fn submission_close_claims_are_bounded_with_a_managed_tool_ledger() {
             index.to_string(),
             Lease {
                 digest: [0; 32],
+                closed: false,
                 handle: None,
                 completion_digest: None,
                 cancelled: Arc::new(AtomicBool::new(false)),

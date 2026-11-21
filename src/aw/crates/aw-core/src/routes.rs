@@ -385,6 +385,30 @@ pub fn event_budget_ms(document: &Value, event: &str, max_ms: u64) -> Result<u64
         .ok_or(RouteError::BudgetOutOfRange { max_ms })
 }
 
+/// Whether this admitted step is an observation deferred by the event runtime.
+pub fn is_shadow(document: &Value, step: &AdmittedStep) -> bool {
+    aw_config::requirements::configured_step(document, &step.event, &step.step_id)
+        .is_some_and(|configured| configured["mode"] == "shadow")
+}
+
+/// Select the native callbacks for an event.
+///
+/// Enforcing steps own the callback path. A shadow-only event retains one
+/// neutral trigger so the Service can open the event and evaluate its shadows.
+pub fn callback_steps<'a>(
+    document: &Value,
+    steps: &'a [AdmittedStep],
+    event: &str,
+) -> Vec<&'a AdmittedStep> {
+    let mut selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
+    if selected.iter().any(|step| !is_shadow(document, step)) {
+        selected.retain(|step| !is_shadow(document, step));
+    } else {
+        selected.truncate(1);
+    }
+    selected
+}
+
 /// Compiles [`AdmittedStep`]s and event budgets into an immutable [`PreparedRoutes`].
 ///
 /// # Errors
@@ -401,7 +425,7 @@ pub fn compile(
         {
             continue;
         }
-        let selected: Vec<&AdmittedStep> = steps.iter().filter(|s| s.event == event).collect();
+        let selected = callback_steps(document, steps, event);
         let observe = options.observe_events.contains(&event);
         if selected.is_empty() && !observe {
             continue;
@@ -462,9 +486,13 @@ pub fn compile(
                     .then(|| step.execution.replaces_result()),
                 replace_input,
                 skill_check,
-                tool_selectors: options
-                    .include_tool_selectors
-                    .then(|| (step.event_tools.clone(), step.step_tools.clone())),
+                tool_selectors: options.include_tool_selectors.then(|| {
+                    if is_shadow(document, step) {
+                        (vec!["*".into()], vec!["*".into()])
+                    } else {
+                        (step.event_tools.clone(), step.step_tools.clone())
+                    }
+                }),
             });
         }
         if retained {
@@ -499,7 +527,7 @@ pub fn schedule_event(
     order: GroupOrder,
     skill_check: SkillCheck<'_>,
 ) -> Result<EventSchedule, RouteError> {
-    let selected: Vec<&AdmittedStep> = steps.iter().filter(|s| s.event == event).collect();
+    let selected = callback_steps(document, steps, event);
     let replacement = selected.iter().any(|s| s.execution.replaces_result());
     let budget_ms = event_budget_ms(document, event, max_budget_ms)?;
     if replacement && order == GroupOrder::Parallel {

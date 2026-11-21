@@ -13,9 +13,22 @@ impl Native {
     }
 
     fn gateway(adapter: &str) -> Self {
-        let mut fixture = Fixture::new();
+        Self::gateway_policy(adapter, |_| {}, false)
+    }
+
+    fn gateway_policy(adapter: &str, configure: impl FnOnce(&mut Value), enforce: bool) -> Self {
+        Self::gateway_fixture(Fixture::new(), adapter, configure, enforce)
+    }
+
+    fn gateway_fixture(
+        mut fixture: Fixture,
+        adapter: &str,
+        configure: impl FnOnce(&mut Value),
+        enforce: bool,
+    ) -> Self {
         let mut document: Value = serde_json::from_slice(&fixture.runtime.bytes).unwrap();
         document["spec"]["agents"]["target"]["adapter"] = json!(adapter);
+        configure(&mut document);
         fixture.runtime = Runtime::new(
             serde_json::to_vec(&document).unwrap(),
             &fixture.directory.path().join("native-audit"),
@@ -27,6 +40,9 @@ impl Native {
         command["capabilities"]["adapter"] = json!(adapter);
         command["capabilities"]["version"] = json!("2026.9.6");
         command["capabilities"]["entrypoint"] = json!("gateway");
+        if enforce {
+            command["capabilities"]["events"]["tool.before"] = json!(["observe", "block"]);
+        }
         let snapshot = fixture
             .call(serde_json::from_value(command).unwrap())
             .unwrap();
@@ -410,4 +426,201 @@ fn hermes_gateway_scopes_snapshot_policy_and_reclaim_without_registration() {
         })
         .unwrap();
     assert!(f.fixture.runtime.instances.lock().unwrap().is_empty());
+}
+
+fn decision_policy(document: &mut Value, scenario: &str) {
+    document["spec"]["agents"]["target"]["workspace_id"] = json!("configured-workspace");
+    let mut arbiter = document["spec"]["providers"]["policy"].clone();
+    let argv = arbiter["transport"]["argv"].as_array_mut().unwrap();
+    argv[2] =
+        json!(Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-host/tests/fixtures/provider.py"));
+    argv.extend([json!("arbiter"), json!("fixture")]);
+    arbiter["config"] = json!({"scenario":scenario});
+    let mut executor = arbiter.clone();
+    executor["transport"]["argv"][4] = json!("executor");
+    document["spec"]["providers"] = json!({"policy":arbiter,"checkpoint":executor});
+    document["spec"]["events"]["tool.before"]["steps"] = json!([{
+        "id":"observe","provider":"policy","operation":"evaluate",
+        "mode":"enforce","decision":true,"effects":["observe","block"],"on_error":"block",
+        "match":{"tools":["native:openclaw:*"]},
+        "obligations":{
+            "snapshot":{"provider":"checkpoint","operation":"checkpoint","order":10},
+            "audit":{"provider":"checkpoint","operation":"checkpoint","order":20}
+        },
+    }]);
+}
+
+#[test]
+fn admitted_request_supplies_provider_binding_and_audits_executor_confirmation() {
+    let f = Native::gateway_policy(
+        "openclaw",
+        |document| decision_policy(document, "snapshot-completed"),
+        true,
+    );
+    f.associate();
+    f.lifecycle(LifecyclePhase::Ready);
+    f.lifecycle(LifecyclePhase::RequestStart);
+    let legacy = f.open(false, "uncorroborated-call").unwrap();
+    let rejected = f.invoke(&legacy).unwrap();
+    assert_eq!(
+        rejected["failure_detail"],
+        "authoritative_binding_unavailable"
+    );
+    assert_eq!(rejected["failure_action"], "block");
+    assert!(!f
+        .fixture
+        .directory
+        .path()
+        .join("confirmed-snapshot")
+        .exists());
+    f.close(&legacy);
+
+    let event = f.open(true, "protected-call").unwrap();
+    let result = f.invoke(&event).unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["effects"], json!([]));
+    assert!(f
+        .fixture
+        .directory
+        .path()
+        .join("confirmed-snapshot")
+        .exists());
+    assert!(result.get("step_trace").is_none());
+
+    let audit = f
+        .fixture
+        .runtime
+        .audit
+        .read(event["event_id"].as_str().unwrap())
+        .unwrap();
+    let record = audit["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["record"])
+        .find(|entry| entry["phase"] == "completed")
+        .unwrap();
+    assert_eq!(record["step_trace"]["decision"], "allow");
+    let action = &record["step_trace"]["actions"][0];
+    assert_eq!(action["kind"], "snapshot");
+    assert_eq!(action["status"], "completed");
+    let journaled = audit["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["record"])
+        .filter(|entry| entry["phase"] == "obligation")
+        .map(|entry| {
+            (
+                entry["kind"].as_str().unwrap(),
+                entry["status"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        journaled,
+        [
+            ("snapshot", "pending"),
+            ("snapshot", "completed"),
+            ("audit", "pending"),
+            ("audit", "completed")
+        ]
+    );
+    let requests = [&result["call"], &action["call"]].map(|call| {
+        let name = format!("{}.json", call["request_id"].as_str().unwrap());
+        serde_json::from_slice::<Value>(&fs::read(f.fixture.directory.path().join(name)).unwrap())
+            .unwrap()
+    });
+    let binding = &requests[0]["request"]["binding"];
+    assert_eq!(binding["workspace_id"], "configured-workspace");
+    assert_eq!(binding["instance_id"], f.id());
+    assert_eq!(binding["config_revision"], f.snapshot["policy_revision"]);
+    assert!(binding["task_version"]
+        .as_str()
+        .unwrap()
+        .starts_with("request-"));
+    assert_ne!(binding["session_id"], "session");
+    assert_eq!(requests[1]["request"]["binding"], *binding);
+    assert!(!audit.to_string().contains("configured-workspace"));
+    assert!(!audit.to_string().contains("snapshot-completed"));
+    f.lifecycle(LifecyclePhase::RequestEnd);
+}
+
+#[test]
+fn protection_remains_pending_after_service_process_exit() {
+    const ROOT: &str = "AW_TEST_OBLIGATION_CRASH_DIRECTORY";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let fixture = Fixture::with_directory(tempfile::tempdir_in(&root).unwrap());
+        let f = Native::gateway_fixture(
+            fixture,
+            "openclaw",
+            |document| decision_policy(document, "snapshot-crash-window"),
+            true,
+        );
+        f.associate();
+        f.lifecycle(LifecyclePhase::Ready);
+        f.lifecycle(LifecyclePhase::RequestStart);
+        let event = f.open(true, "interrupted-snapshot").unwrap();
+        fs::write(
+            root.join("event.tmp"),
+            json!({
+                "event": event, "directory": f.fixture.directory.path()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::rename(root.join("event.tmp"), root.join("event.json")).unwrap();
+        let _ = f.invoke(&event);
+        panic!("test parent must stop the service process before receipt");
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            concat!(
+                module_path!(),
+                "::protection_remains_pending_after_service_process_exit"
+            )
+            .trim_start_matches("aw_service::"),
+        ])
+        .env(ROOT, root)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let interrupted = loop {
+        if let Ok(bytes) = fs::read(root.join("event.json")) {
+            let state: Value = serde_json::from_slice(&bytes).unwrap();
+            let work = Path::new(state["directory"].as_str().unwrap());
+            if work.join("confirmed-snapshot").exists() {
+                break Some(state);
+            }
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    let interrupted = interrupted.expect("executor must start before service exit");
+    assert!(!status.success());
+    let path = Path::new(interrupted["directory"].as_str().unwrap()).join("native-audit");
+    let event_key = interrupted["event"]["event_id"].as_str().unwrap();
+    let recovered = crate::audit::Audit::new(&path).unwrap();
+    let audit = recovered.read(event_key).unwrap();
+    assert_eq!(audit["terminal"], false);
+    let records = audit["records"].as_array().unwrap();
+    let pending = &records.last().unwrap()["record"];
+    assert_eq!(pending["phase"], "obligation");
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["call"]["provider"], "checkpoint");
+    assert_eq!(pending["kind"], "snapshot");
+    assert!(pending["call"]["request_id"].as_str().is_some());
+    assert!(
+        recovered.claim(event_key, json!({"kind":"event"})).is_err(),
+        "an interrupted event must not be replayed"
+    );
 }

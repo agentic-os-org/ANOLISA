@@ -1,5 +1,6 @@
 //! Bounded metadata chains using the existing durable journal storage contract.
 
+pub(crate) mod shadow;
 pub(crate) mod source;
 
 use aw_core::{journal::FileJournal, ports::Journal};
@@ -18,8 +19,11 @@ use std::{
 
 use crate::{rejected, Result};
 
+const MAX_AUDIT_QUERY_BYTES: u64 = 1024 * 1024;
+
 pub(crate) struct Audit {
     journal: Mutex<FileJournal>,
+    pub(crate) shadow: shadow::Journal,
     directory: PathBuf,
     pub(crate) source_id: String,
     failed: AtomicBool,
@@ -59,18 +63,11 @@ impl Audit {
     pub(crate) fn new(directory: &Path) -> Result<Self> {
         // Compile contracts before admission so schema setup cannot consume Hook budgets.
         crate::public_projection::registry()?;
-        if let Ok(metadata) = fs::symlink_metadata(directory) {
-            // SAFETY: geteuid has no pointer arguments or preconditions.
-            if !metadata.is_dir()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o7777 != 0o700
-            {
-                return Err(rejected("unsafe_audit_directory"));
-            }
-        }
+        check_directory(directory)?;
         let journal = FileJournal::new(directory).map_err(|_| rejected("audit_open"))?;
         Ok(Self {
             journal: Mutex::new(journal),
+            shadow: shadow::Journal::new(directory.join("shadow")),
             directory: directory.into(),
             source_id: source::initialize(directory)?,
             failed: AtomicBool::new(false),
@@ -115,6 +112,21 @@ impl Audit {
 
     pub(crate) fn claim(&self, key: &str, record: Value) -> Result<Value> {
         self.mutate(|journal| journal.claim(key, &record))
+    }
+
+    pub(crate) fn obligation(
+        &self,
+        key: &str,
+        update: aw_host::ObligationUpdate<'_>,
+    ) -> Result<Value> {
+        self.append(
+            key,
+            json!({
+                "phase":"obligation", "kind":update.kind, "operation":update.operation,
+                "candidate_id":update.candidate_id, "status":update.status,
+                "call":call(update.record),
+            }),
+        )
     }
 
     pub(crate) fn append(&self, key: &str, mut record: Value) -> Result<Value> {
@@ -198,7 +210,7 @@ impl Audit {
             }
             Err(error) => return Err(error.into()),
         };
-        if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        if !metadata.is_file() || metadata.len() > MAX_AUDIT_QUERY_BYTES {
             return Err(rejected("audit_query_limit"));
         }
         let records = self
@@ -210,8 +222,28 @@ impl Audit {
         let terminal = records
             .last()
             .is_some_and(|record| record["record"]["phase"] == "closed");
-        Ok(json!({"records": records, "terminal": terminal}))
+        let mut result = json!({"records": records, "terminal": terminal});
+        if let Some(records) = self
+            .shadow
+            .read(key, MAX_AUDIT_QUERY_BYTES - metadata.len())
+        {
+            result["shadow_records"] = json!(records);
+        }
+        Ok(result)
     }
+}
+
+fn check_directory(directory: &Path) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(directory) {
+        // SAFETY: geteuid has no pointer arguments or preconditions.
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(rejected("unsafe_audit_directory"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn call(record: &CallRecord) -> Value {
@@ -219,7 +251,7 @@ pub(crate) fn call(record: &CallRecord) -> Value {
     json!({
         "request_id": record.request_id,
         "provider": record.provider,
-        "method": match record.method { Method::Describe => "describe", Method::ValidateConfig => "validate_config", Method::Invoke => "invoke", Method::NativeHook => "native_hook" },
+        "method": match record.method { Method::Describe => "describe", Method::ValidateConfig => "validate_config", Method::Invoke => "invoke", Method::NativeHook => "native_hook", Method::ExecuteObligation => "execute_obligation" },
         "host_event_id": record.event_id,
         "step_id": record.step_id,
         "elapsed_ms": record.elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
@@ -228,6 +260,13 @@ pub(crate) fn call(record: &CallRecord) -> Value {
             "stdin_bytes": process.input_bytes_written, "stdout_bytes": process.stdout_bytes,
             "stderr_bytes": process.stderr.len(),
         })),
+    })
+}
+
+pub(crate) fn shadow_reply() -> Value {
+    json!({
+        "kind":"skipped", "status":"ok", "failure":null, "failure_action":null,
+        "effects":[], "call":{"process":null},
     })
 }
 
@@ -245,6 +284,7 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
             aw_exec::Error::Cleanup { .. } => "cleanup",
             _ => "other",
         }),
+        Err(Failure::Decision(code)) => Some(*code),
         _ => None,
     };
     let (status, effects, failure) = match value.result {
@@ -266,6 +306,7 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
                 Failure::IncompleteInput => "incomplete_input",
                 Failure::Provider { .. } => "provider",
                 Failure::Protocol(_) => "protocol",
+                Failure::Decision(_) => "decision",
             }),
         ),
     };
@@ -284,10 +325,30 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     } else {
         "provider"
     };
-    let record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
+    let mut record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
         "failure_detail": failure_detail, "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
+    let shadow = value.trace.as_ref().is_some_and(|trace| trace.shadow);
+    if let Some(trace) = value.trace {
+        record["step_trace"] = json!({
+            "mode": if trace.shadow { "shadow" } else { "enforce" },
+            "decision": trace.decision,
+            "effect_types": trace.effect_types,
+            "obligations": trace.obligations,
+            "actions": trace.actions.iter().map(|action| json!({
+                "kind":action.kind, "status":action.status, "call":call(&action.record)
+            })).collect::<Vec<_>>(),
+        });
+    }
     let mut result = json!({"kind": kind, "status": status, "failure": failure,
         "failure_detail": failure_detail, "failure_action": action, "call": metadata});
+    if shadow && status == "error" {
+        // Shadow failures remain available in the journal. An SDK callback
+        // interprets an error status as a failed invocation even in report mode.
+        result["status"] = json!("ok");
+        result["failure"] = Value::Null;
+        result["failure_detail"] = Value::Null;
+        result["failure_action"] = Value::Null;
+    }
     if native {
         result["native"] = native_output;
     } else {
@@ -355,6 +416,7 @@ mod tests {
                     process: None,
                 },
                 result: Err(Failure::Transport(error)),
+                trace: None,
                 failure_action: Some(FailureAction::Report),
             });
             for value in [record, response] {
@@ -364,6 +426,37 @@ mod tests {
                 assert_eq!(value["failure_action"], "report");
             }
         }
+    }
+
+    #[test]
+    fn shadow_failure_is_audited_and_returns_neutral_callback_effects() {
+        let (record, response) = invocation(Invocation {
+            record: CallRecord {
+                config_revision: "fixture".into(),
+                binding_id: "fixture".into(),
+                provider: "fixture".into(),
+                request_id: "fixture".into(),
+                method: Method::Invoke,
+                event_id: Some("fixture".into()),
+                step_id: Some("fixture".into()),
+                elapsed: Duration::ZERO,
+                process: None,
+            },
+            result: Err(Failure::Transport(aw_exec::Error::DeadlineExceeded)),
+            failure_action: Some(FailureAction::Report),
+            trace: Some(aw_host::StepTrace {
+                shadow: true,
+                ..Default::default()
+            }),
+        });
+        assert_eq!(record["status"], "error");
+        assert_eq!(record["failure_detail"], "deadline_exceeded");
+        assert_eq!(record["failure_action"], "report");
+        assert_eq!(record["step_trace"]["mode"], "shadow");
+        assert_eq!(response["status"], "ok");
+        assert!(response["failure"].is_null());
+        assert!(response["failure_action"].is_null());
+        assert_eq!(response["effects"], json!([]));
     }
 
     #[test]

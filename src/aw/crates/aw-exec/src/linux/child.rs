@@ -8,10 +8,9 @@ use std::{
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 const MAX_SCAN_ENTRIES: usize = 65_536;
 
 pub(super) struct OwnedChild {
@@ -136,7 +135,7 @@ impl OwnedChild {
 
     pub(super) fn terminate(&self) -> io::Result<()> {
         self.signal(libc::SIGTERM)?;
-        let deadline = Instant::now() + Duration::from_millis(250);
+        let deadline = Instant::now() + crate::CHILD_TERMINATE_GRACE;
         while !self.observe_exit()? && Instant::now() < deadline {
             thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
         }
@@ -144,7 +143,7 @@ impl OwnedChild {
     }
 
     pub(super) fn cleanup(&mut self) -> io::Result<ExitStatus> {
-        let deadline = Instant::now() + CLEANUP_GRACE;
+        let deadline = Instant::now() + crate::CHILD_CLEANUP_GRACE;
         self.signal_group()?;
         loop {
             if Instant::now() >= deadline {

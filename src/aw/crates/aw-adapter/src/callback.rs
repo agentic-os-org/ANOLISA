@@ -49,7 +49,7 @@ pub fn normalize(
     let mut normalized = adapter.normalize(context, event, &value)?;
     if event == "tool.after" && replacement {
         if let Some(projection) = crate::projection::project(adapter_id, &value) {
-            project_within_limit(&mut normalized, projection)?;
+            crate::projection::project_within_limit(&mut normalized, projection)?;
         }
     }
     if let Some(completion) = completion {
@@ -62,7 +62,7 @@ pub fn normalize(
         let snapshot: Value = serde_json::from_str(snapshot_input)?;
         let mut bound = adapter.normalize(context, event, &snapshot)?;
         if let Some(projection) = crate::projection::project(adapter_id, &snapshot) {
-            project_within_limit(&mut bound, projection)?;
+            crate::projection::project_within_limit(&mut bound, projection)?;
         }
         if completion["phase"] == "observation" {
             // Native completion uses policy aliases. Retain the original name
@@ -116,17 +116,6 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
         ) => on_error == "block",
         _ => false,
     }
-}
-
-fn project_within_limit(event: &mut Value, projection: Value) -> Result<()> {
-    event["tool"]["result_projection"] = projection;
-    if serde_json::to_vec(event)?.len() > aw_provider::MAX_MESSAGE_BYTES {
-        event["tool"]
-            .as_object_mut()
-            .ok_or("missing tool")?
-            .remove("result_projection");
-    }
-    Ok(())
 }
 
 /// Adopt a native or Provider response using the selected Agent dialect.

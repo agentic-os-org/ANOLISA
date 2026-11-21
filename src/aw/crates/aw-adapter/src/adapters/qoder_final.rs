@@ -12,11 +12,11 @@ pub(super) fn profile(
     entry: &Path,
     cancelled: &AtomicBool,
 ) -> Result<Option<Value>> {
-    if input.document["spec"]["events"]["security.violation"]["enabled"] != true
-        || !input.document["spec"]["events"]["security.violation"]["steps"]
-            .as_array()
-            .is_some_and(|steps| !steps.is_empty())
-    {
+    let required = aw_config::requirements::project_document(&input.document, &input.target)
+        .map_err(|_| "could not project native Hook requirements")?
+        .iter()
+        .any(|route| route.event == "security.violation" && !route.steps.is_empty());
+    if !required {
         return Ok(None);
     }
     if input.options.reloadable

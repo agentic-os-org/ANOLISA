@@ -194,3 +194,19 @@ fn empty_optional_final_policy_preserves_resident_mode() {
         .events
         .contains_key("security.violation"));
 }
+
+#[test]
+fn off_final_step_does_not_probe_or_reject_reloadable_qoder() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input(None, true);
+    input.document["spec"]["events"]["security.violation"] = json!({
+        "enabled":true,"steps":[{
+            "id":"off","provider":"policy","mode":"off","effects":["block"],"on_error":"block"
+        }]
+    });
+    let prepared = QoderSdk.prepare(input, &AtomicBool::new(false)).unwrap();
+    assert!(!prepared
+        .capabilities()
+        .events
+        .contains_key("security.violation"));
+}
