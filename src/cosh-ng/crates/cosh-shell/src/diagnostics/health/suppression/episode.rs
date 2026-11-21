@@ -55,6 +55,12 @@ pub(crate) struct VolumeRecovery {
     /// delivery so a sibling card can require proof of its own delivery.
     #[serde(default)]
     pub members: Vec<String>,
+    /// Set once a listed member re-entered after its own recovery: the card
+    /// fully recovered and a new cycle began, so this record can no longer
+    /// prove the card is still alerting. A severity re-post of a live episode
+    /// leaves it unset.
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -313,6 +319,7 @@ pub(crate) fn sync(
                         recovered_ms: now_ms,
                         last_delivered_ms: episode.last_delivered_ms,
                         members: episode.members,
+                        superseded: false,
                     },
                 );
             }
@@ -345,6 +352,7 @@ pub(crate) fn sync(
                         recovered_ms: now_ms,
                         last_delivered_ms: episode.last_delivered_ms,
                         members: Vec::new(),
+                        superseded: false,
                     },
                 );
             }
@@ -455,6 +463,7 @@ pub(crate) fn record_delivery(
             });
         }
     } else {
+        let reentered = ledger.recoveries.contains_key(&candidate.key);
         ledger.recoveries.remove(&candidate.key);
         if let Some((max_entry, high_entry)) = candidate.quota_branches {
             let episode = ledger
@@ -475,6 +484,22 @@ pub(crate) fn record_delivery(
             members.push(candidate.key.clone());
             members.extend(candidate.companion_keys.iter().cloned());
             protected.extend(members.iter().cloned());
+            // Only a member that had its own recovery exited and re-entered,
+            // which ends the old card; mark the recoveries of its siblings as
+            // superseded so they stop proving the card is still alerting. A
+            // severity re-post of a live episode has no such recovery and
+            // must keep the card cooldown for the recovered sibling.
+            if reentered {
+                for recovery in ledger.recoveries.values_mut() {
+                    if recovery
+                        .members
+                        .iter()
+                        .any(|member| member == &candidate.key)
+                    {
+                        recovery.superseded = true;
+                    }
+                }
+            }
             for key in &members {
                 ledger.recoveries.remove(key);
                 ledger.volume.insert(

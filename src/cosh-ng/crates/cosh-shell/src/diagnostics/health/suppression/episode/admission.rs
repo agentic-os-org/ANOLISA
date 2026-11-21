@@ -100,30 +100,16 @@ pub(crate) fn deliverable(
 }
 
 /// Whether another member of the card this recovery belongs to is still
-/// alerting from that card's delivery, i.e. the card never fully recovered.
-/// A sibling delivered again after the card recovered starts a new card and
-/// must not keep the state cooldown; a full recovery falls back to the shorter
-/// recurrence gate.
+/// alerting, i.e. the card never fully recovered. A member re-entering after
+/// its own recovery supersedes the record and starts a new card, which falls
+/// back to the shorter recurrence gate; a severity re-post of a live episode
+/// is not a re-entry and keeps the state cooldown.
 fn card_still_alerting(ledger: &EpisodeLedger, recovery: &VolumeRecovery, key: &str) -> bool {
-    recovery.members.iter().any(|member| {
-        member != key
-            && ledger
-                .volume
-                .get(member)
-                .is_some_and(|episode| episode.last_delivered_ms <= recovery.last_delivered_ms)
-    })
-}
-
-/// Whether a recovery was superseded by a later delivery of one of the card
-/// members it recorded: that card fully recovered and was re-reported, so the
-/// old recovery must not gate the other members for the state cooldown.
-fn recovery_superseded(ledger: &EpisodeLedger, recovery: &VolumeRecovery) -> bool {
-    recovery.members.iter().any(|member| {
-        ledger
-            .volume
-            .get(member)
-            .is_some_and(|episode| episode.last_delivered_ms > recovery.last_delivered_ms)
-    })
+    !recovery.superseded
+        && recovery
+            .members
+            .iter()
+            .any(|member| member != key && ledger.volume.contains_key(member))
 }
 
 /// Whether this capacity member's own delivery or recovery still gates a card
@@ -133,7 +119,7 @@ fn member_gated(ledger: &EpisodeLedger, key: &str, now_ms: u64) -> bool {
         now_ms.saturating_sub(episode.last_delivered_ms) < STATE_COOLDOWN_MS
     });
     let recovered = ledger.recoveries.get(key).is_some_and(|recovery| {
-        !recovery_superseded(ledger, recovery)
+        !recovery.superseded
             && now_ms.saturating_sub(recovery.last_delivered_ms) < STATE_COOLDOWN_MS
     });
     live || recovered
