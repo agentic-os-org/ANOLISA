@@ -1232,6 +1232,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         // The prompt gates the destructive clear below, so an
                         // undelivered one fails here instead of waiting on stdin.
                         write_prompt_raw("Are you sure you want to clear all statistics? [y/N] ")?;
+                        // A successful write can still have gone to a sink such as /dev/null.
+                        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+                            return Err((
+                                "Interactive confirmation requires terminal stdin and stdout; use --yes for automation."
+                                    .to_string(),
+                                1,
+                            ));
+                        }
                         let mut input = String::new();
                         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
                             write_stdout("Cancelled.")?;
