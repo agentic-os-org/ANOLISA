@@ -19,14 +19,17 @@ from test_batch_analyze import batch_analyze
         ("backup", None, 40),
     ],
 )
+@pytest.mark.parametrize("metadata_position", [0, 1, 2])
 def test_accounting_follows_declared_source(
-    tmp_path: Path, directory: str, entrypoint: str | None, expected: int
+    tmp_path: Path,
+    directory: str,
+    entrypoint: str | None,
+    expected: int,
+    metadata_position: int,
 ) -> None:
     path = tmp_path / directory / "session.jsonl"
     path.parent.mkdir()
     events = []
-    if entrypoint is not None:
-        events.append({"type": "runtime-config", "entrypoint": entrypoint})
     for text, prompt in [("part one", 100), ("part two", 40)]:
         events.append(
             {
@@ -38,11 +41,20 @@ def test_accounting_follows_declared_source(
                 },
             }
         )
-    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    if entrypoint is not None:
+        events.insert(
+            metadata_position, {"type": "runtime-config", "entrypoint": entrypoint}
+        )
+    path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
     trajectory = batch_analyze.jsonl_to_atif(path)
     assert [step["message"] for step in trajectory["steps"]] == ["part one", "part two"]
     assert (
-        sum(step.get("metrics", {}).get("prompt_tokens", 0) for step in trajectory["steps"])
+        sum(
+            step.get("metrics", {}).get("prompt_tokens", 0)
+            for step in trajectory["steps"]
+        )
         == expected
     )
     exported = batch_analyze.export_atif(trajectory, path, tmp_path / "export")
@@ -53,9 +65,14 @@ def test_anonymous_qoder_records_keep_independent_measurements(tmp_path: Path) -
     path = tmp_path / ".qoder" / "session.jsonl"
     path.parent.mkdir()
     events = [
-        {"type": "assistant", "message": {"content": "answer", "usage": {"input_tokens": value}}}
+        {
+            "type": "assistant",
+            "message": {"content": "answer", "usage": {"input_tokens": value}},
+        }
         for value in [100, 40]
     ]
-    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
     trajectory = batch_analyze.jsonl_to_atif(path)
     assert sum(step["metrics"]["prompt_tokens"] for step in trajectory["steps"]) == 140
