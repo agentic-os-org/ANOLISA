@@ -207,7 +207,33 @@ pub(crate) fn write(path: &Path, ledger: &EpisodeLedger) -> Result<(), private_s
     private_state::ensure_directory(parent)?;
     let bytes = serde_json::to_vec(ledger)
         .map_err(|_| private_state::Error::Io(std::io::ErrorKind::InvalidData))?;
-    private_state::atomic_write(path, &bytes, MAX_BYTES)
+    #[cfg(test)]
+    let fail_after_rename = take_failed_rename();
+    let result = private_state::atomic_write(path, &bytes, MAX_BYTES);
+    // Reproduces a failed directory sync after the rename landed: the file on
+    // disk is the new ledger, but the write still reports an error.
+    #[cfg(test)]
+    if fail_after_rename && result.is_ok() {
+        return Err(private_state::Error::Io(std::io::ErrorKind::Other));
+    }
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAILED_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: make the next ledger write report an error after the file was
+/// renamed into place.
+#[cfg(test)]
+pub(crate) fn fail_write_after_rename() {
+    FAILED_RENAME.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn take_failed_rename() -> bool {
+    FAILED_RENAME.with(|fail| fail.replace(false))
 }
 
 pub(crate) fn volume_member_key(mount: &str, member: &str, device: &str, fsid: &str) -> String {

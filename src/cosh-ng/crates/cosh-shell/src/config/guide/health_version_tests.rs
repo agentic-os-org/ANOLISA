@@ -362,6 +362,57 @@ fn actual_bash_candidates_keep_the_same_help_and_event_when_oom_ages() {
 }
 
 #[test]
+fn ledger_sync_failure_after_the_rename_keeps_the_delivery_recorded() {
+    use crate::diagnostics::health::suppression::episode::{
+        fail_write_after_rename, ledger_path, load, volume_member_key,
+    };
+
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let fixture = Fixture::new();
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var(
+        "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+        fixture.store.root().join("health-suppression"),
+    );
+    let path = ledger_path().expect("ledger path");
+
+    fail_write_after_rename();
+    let decision = fixture.try_claim_episode("renamed", 1000, merged_volume_episode());
+    assert!(
+        matches!(decision, Ok(ClaimDecision::Claimed(_))),
+        "a settled rename keeps the shown card claimed: {decision:?}"
+    );
+    let ledger = load(&path).expect("the renamed ledger stays readable");
+    for member in ["bytes", "inode"] {
+        assert!(
+            ledger
+                .volume
+                .contains_key(&volume_member_key("/", member, "253:0", "1:2")),
+            "{member}"
+        );
+    }
+    assert_eq!(fixture.store.read_claims().unwrap().entries.len(), 1);
+    assert_eq!(
+        health_exposure::read(fixture.store.root())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+
+    let retry = fixture.claim_episode("retry", 2000, merged_volume_episode());
+    assert!(
+        matches!(retry, ClaimDecision::Suppressed),
+        "the recorded delivery still gates the retry: {retry:?}"
+    );
+
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+}
+
+#[test]
 fn failed_episode_write_keeps_the_merged_card_deliverable() {
     use crate::diagnostics::health::suppression::episode::{ledger_path, load, volume_member_key};
 
