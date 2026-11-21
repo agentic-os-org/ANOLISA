@@ -165,27 +165,33 @@ const AgentActivitySection: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const hasDataRef = useRef(false);
+  const pollVersionRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const version = ++pollVersionRef.current;
     try {
       const data = await fetchAgentHealth();
+      if (version !== pollVersionRef.current) return;
       setAgents(Array.isArray(data?.agents) ? data.agents : []);
       setWarnings(Array.isArray(data?.warnings) ? data.warnings : []);
       setError(null);
       hasDataRef.current = true;
     } catch (requestError: unknown) {
-      if (!hasDataRef.current) {
+      if (version === pollVersionRef.current && !hasDataRef.current) {
         setError(requestError instanceof Error ? requestError.message : t('ah.requestFailed'));
       }
     } finally {
-      setLoading(false);
+      if (version === pollVersionRef.current) setLoading(false);
     }
   }, [t]);
 
   useEffect(() => {
     void refresh();
     const timer = setInterval(refresh, 30_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      pollVersionRef.current += 1;
+    };
   }, [refresh]);
 
   return (
