@@ -226,7 +226,9 @@ PID namespace、PID、start time、UID 和组；目标及已有后代快照逐�
 
 root `gateway key remove <pairid>` 全局退役该配对，撤销全部引用授权，不影响其他配对；
 使用新配对需要新的 fake、Policy/Scope 和 Agent 配置，不提供自动轮换或 key add 别名。
-tombstone 永久保留，使旧 fake 不会被降级为“未知值”而原样放行。fake 全局唯一，不得与
+tombstone 永久保留，使进入 HTTP 检查的旧 fake 不会被降级为“未知值”而原样放行。
+Active Scope 与 Binding 仍有效时，即使全部 pair 退役也保留原 host 的引流和 TLS 检查；
+退役不等于 Scope 撤销。未选中的 TLS 不检查加密 fake。fake 全局唯一，不得与
 real/tombstone 冲突；含 tombstone 的 fake 总数最多 4096，每 Scope 最多 64 个活跃 fake。
 Store、秘密快照和 plan 明确升级格式；发现旧 Gateway 数据明确拒绝，无迁移或覆盖。
 
@@ -263,16 +265,19 @@ plan 显式携带 pair ID、header、format/模板、response 指令和匹配条
 Rust/Python 双端严格校验版本、未知字段、重复键和完整来源关联；拒绝旧原生 plan。
 
 `auto` 只在指定 header 中接受一次完整 fake，保留周围文字；重复 fake、多个不同 fake、
-重复指定 header 拒绝。`basic` 解码密码位置的完整 fake，保留用户名再编码；畸形输入
-拒绝，不回退 auto。整值模板必须含唯一 `{fake}`，如 `Bearer {fake}` 或 `{fake}`，
-只接受完整 header 值匹配，无 customize 前缀、默认 header/格式或任意脚本。
+重复指定 header 拒绝。所有 header（含自定义 header）中的有效 Basic 均解码以识别托管
+fake 或 real，即使所有执行 Plan.rules 为空；retired fake 仍拒绝，不恢复授权。
+注入 Basic 密码仍须匹配显式 `basic` 规则，只接受密码位置的完整 fake，保留用户名再编码；
+显式 Basic header 的畸形输入拒绝，不回退 auto。未含托管凭据的 Basic 不因此被拒绝。
+整值模板必须含唯一 `{fake}`，如 `Bearer {fake}` 或 `{fake}`，只接受完整 header 值匹配，
+无 customize 前缀、默认 header/格式或任意脚本。
 
 Plan 的 `responseRewrite` 必填且严格为 JSON bool，由 pinned Cedar 注解精确降低；
 Decision 同样使用 bool。Rust 与 addon 均拒绝缺失、null、数字、字符串（含 `"true"`、
 `"false"` 和旧模式），不能把 Cedar 注解字符串直接保存为 Plan 字段或以 truthiness 判断。
 新 Plan 只能从 canonical 源码及可信 pair 关联生成，不接受旧原生凭据 plan。
 
-数据面先识别已知 live/retired fake 并完成安全检查，再收集有效注入候选，最后仅改写一次。
+进入 HTTP 检查的数据面先识别已知 live/retired fake 并完成安全检查，再收集有效注入候选，最后仅改写一次。
 同一有效 pair/header/format/response 指令去重，不同指令冲突拒绝；不按规则顺序选择或
 递归连锁替换。托管 fake 在未授权 host/header/格式中也不能降级为 no_credential。
 未携带托管凭据的请求通过安全检查后原样转发；命中规则但没有 fake 不主动注入 real。
@@ -288,10 +293,18 @@ plan 上限为 256 条规则、64 个配对。SDK 解析前限制源码 256 KiB�
 `save_stream_file`、非零 `flow_detail`；必须设置 runtime dir，防止绕过证书或记录秘密。
 
 addon 每 0.5 秒检查 active manifest，整体加载 generation、快照与 listener plan；使用
-`O_NOFOLLOW`，只接受普通文件。manifest、plan、快照上限分别为 64 KiB、1 MiB、8 MiB。
-listener 端口与 Scope 唯一，plan 的 `scopeId` 必须与 listener 相同，所引用凭据必须有
-所属 Scope fake。加载失败保留旧 generation，相同失败五秒内不重试；manifest 删除则清空
-状态，后续请求拒绝。
+`O_NOFOLLOW`，只接受普通文件。manifest、plan、快照上限分别为 528 KiB、1 MiB、8 MiB。
+manifest 的 producer 与 reader 共用同一字节预算：8 个生产 listener × 256 个 host ×
+256 字节（最长 253 字节 DNS 名及 JSON 定界符），另留 16 KiB 元数据余量；producer 在
+发布 active manifest 前检查完整序列化大小，超限拒绝并保留旧 active，不截断 host 列表。
+manifest 保持 version 1，每个 listener 必须含 `port/scopeId/hosts/plan`。`hosts` 从完整、
+已校验的 pinned Plan.rules.matcher.host 在凭据可用性过滤前提取，排序去重，最多 256 个
+精确小写 DNS 名；不重复编译、不读取 latest Policy 或全局 host 并集。执行 Plan 则仅保留
+可用 credentials/rules，Plan 与秘密快照格式不变。listener 端口与 Scope 唯一，plan 的
+`scopeId` 必须与 listener 相同，每条保留规则的 host 必须属于该 listener 的声明集合，
+所引用凭据必须有所属 Scope fake。hosts、Plan、秘密同代整体加载；字段缺失、无效 DNS、
+重复或乱序 host 及超限均拒绝。加载失败保留完整旧 generation，相同失败五秒内不重试；
+manifest 删除则清空状态，新 TLS 透传，已解包 HTTP 和明文请求拒绝。
 
 addon 原子写 `status/health.json` 的 `loadedGeneration/listeners/lastAttempt/caError`，并提供
 `status/ca-cert.pem`。unit 启动前和停止后删除 health，防止旧进程报告充当新进程 readiness。
@@ -315,7 +328,25 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 ### 4.2 请求判定与响应
 
-请求在 `requestheaders` 阶段完成授权与指定 header 的 fake→真实值注入，不等待正文；注入
+`tls_clienthello(ClientHelloData)` 先设置 `ignore_connection=true`，只按当前完整 snapshot
+中该 listener 的 `hosts` 选择。可见 SNI 小写并删除一个可选末尾点后须完全相等；不匹配
+子域/后缀、通配符、IP，不猜 Host 或反向 DNS。命中后仅规范化 context.client.sni 和
+已有 server.sni，再设置 `ignore_connection=false`，避免上游证书校验沿用末尾点。
+未命中不改 SNI、ClientHello 字节、原始目的 IP/port，由固定 mitmproxy 直接 TLS relay。
+缺 snapshot、未知 listener、无/无效 SNI、选择异常均透传。正常未选中 SNI 不记录日志；
+缺 snapshot、未知 listener 和选择异常共用一个单调时钟时间戳，每五秒最多一条固定安全诊断，
+不按 host 保存状态、不输出 host 或异常原文、不新增 TLS 关闭逻辑。畸形 ClientHello 在 hook 前解析失败仍按
+依赖原有行为关闭，不 fork、替换 parser 或尝试重新构造握手。
+
+选择层 fail-open 不授予凭据使用权：依赖 Agent 仅配置 fake 且无法取得 real 的前提，
+透传不注入 real，fake 可能被上游拒绝；§4.3 的响应泄漏限制仍须由操作者考虑。SNI 命中后
+上游证书校验保持启用，失败不得降级透传。被选中 host 的 pinning/mTLS 仍可能失败；
+共享 CA 无 Scope/域名约束。ECH 只按可见外层 SNI 选择，不能保证隐藏目标的凭据检查。
+host 集合更新只改变新连接，已透传连接不能追溯解密，也不全局断连；已 MITM 连接每请求
+使用最新完整 HTTP snapshot，Host/SNI 不符保留 421，不能中途转 relay。Scope A 到仅 B
+声明的 host 直接透传；不再承诺全域跨 Scope token 检查或加密 token 扫描。
+
+进入检查的请求在 `requestheaders` 阶段完成授权与指定 header 的 fake→真实值注入，不等待正文；注入
 独立于 `responseRewrite`，`true` / `false` 均须经过相同授权与请求安全校验。请求正文原样
 流式传输，不解压、不缓存、不检查或改写。URL（含 query 的原始
 及 URL 解码形式）、header 值以及解析后的 Basic 用户名/密码中既有真实凭据拒绝仍保留。
@@ -441,7 +472,12 @@ Scope 的过时请求恢复授权。准备与查询不需要进程存在，但�
 nft 独占 `inet agent_sec_gateway`，按实例 cgroup 路径分类，同 Scope 实例跳转到共享端口。
 仅已接管且 canonical 有效的实例被引流；cgroup 重建必须刷新 inode 解析。回环不引流；
 IPv4 TCP 80/443 引流，IPv6、UDP/443 与其他端口放行但不保护、不强制回退。已有 TCP
-连接不受追溯保护。所有被引流 HTTPS 均 MITM，即使不含 fake 也要求信任 CA。
+连接不受追溯保护。被引流 HTTPS 仅按本 listener 的原始声明 hosts 选择 MITM；
+未选中 TLS 保留端到端证书与字节，不解密、不注入、不检查加密 token。命中目标即使
+不含 fake 也要求信任 CA，但无 fake 仍沿用安全检查后转发语义，不按注册 host 一律拒绝。
+全部 credentials/rules 退役或不可用不能撤掉有声明 host 的 Active Scope 路由；仍经过
+原 Binding owner、完整成员和根 cgroup 核验。空声明集合不引流，Scope 删除/撤销、
+Binding 失效或成员检查失败仍按原流程撤流或拒绝。
 
 Scope 删除先永久关闭 admission 并撤销本 Scope 授权；仅最后 Active Scope 删除才全局退役
 共享 fake，再清理 Binding 和执行投影。其他 Active Scope 仍有效，清理失败保留责任
@@ -465,6 +501,11 @@ Scope 删除先永久关闭 admission 并撤销本 Scope 授权；仅最后 Acti
 前重试 `agent-sec-cli gateway disable`，否则磁盘中此前保存的 enabled 状态可能在重启后恢复。
 cgroup v2 预检失败发生在 enabled 状态改变之前。失败撤销同样删除整个 runtime。
 成功 disable 保留的 CA 位于 `/run`，主机重启仍丢失；直连 fake 不被替换，已有连接需重连。
+
+同为 version 1 的新 manifest 必需 `hosts`，producer、addon reader 和运行投影须成套部署。
+升级或回滚前先 disable 并确认撤流，停止旧代理并清理不匹配的运行计划/health，由匹配
+producer 重新发布，当前 generation ready 后再恢复引流；不手工改 manifest、不混装、
+不增加旧字段缺省或数据库迁移。回滚选择层须同时恢复原 addon 与原 manifest producer。
 
 ### 5.1 responseRewrite 的持久化兼容边界
 
@@ -513,7 +554,8 @@ raw 升级只更新文件，不因新增网关资产而启用或重启代理；�
 | --- | --- |
 | Policy 与 Plan | `asc-policy-types/tests/authoring.rs`、`asc-gateway-plan/src/tests.rs` |
 | Credential Store | `asc-credential-store/src/tests.rs` |
-| addon | `tests/v2/gateway/test_policy.py`、`test_addon_blackbox.py` |
+| addon 纯逻辑/契约 | `tests/v2/gateway/test_policy.py`、`test_addon_hooks.py`；stdlib，无网络或系统配置修改 |
+| addon 手工黑盒 | 显式 `MITMDUMP` 才运行 `test_addon_blackbox.py`；固定 standalone、回环 mock，不纳入 CI |
 | Runtime 与权限 | `asc-gateway-runtime/src/tests.rs`；部署契约 DPROC-GW-001～003 |
 | 安装态闭环 | `tests/v2/systemd/test_gateway.py`；DPROC-GW-004 |
 | 默认关闭 | `tests/v2/e2e/test_daemon_process_e2e.py::test_default_start_and_restart_do_not_activate_gateway` |

@@ -64,6 +64,41 @@ To revoke injection, execute the returned Scope deletion command, wait for clean
 then delete the Policy. See the [Gateway contract (Chinese)](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)
 for readiness, response-rewrite limits and partial-failure recovery.
 
+### HTTPS inspection boundary
+
+For new connections from a bound Agent, Gateway intercepts TLS only when the visible
+SNI exactly matches a host in that Scope's pinned Policy snapshots. Comparison ignores
+case and one terminal dot; subdomains, suffixes, IP literals and wildcard names do not
+match. Other targets keep their original certificate and end-to-end TLS, even if
+another Scope declares them. No SNI, an unknown listener, a missing snapshot or a
+selector exception also relays unchanged, with a fixed value-free diagnostic. Malformed
+ClientHello messages rejected before the hook retain mitmproxy's original failure.
+
+A match selects inspection, not credential permission. HTTP still checks the latest
+loaded rules, fake ownership, retirement, Host/SNI, method and path on every request;
+no fake still means no injection, not blanket denial. Upstream certificate verification
+remains enabled, and a matched MITM failure never falls back to relay. The Agent must
+trust the shared Gateway CA for matched hosts; pinning or mTLS there may fail. The CA
+itself is not restricted to one Scope or domain.
+
+Globally retiring a pair removes its injection authority, but an Active Scope with a
+valid Binding still routes and intercepts its originally declared hosts to reject old
+fakes. Scope deletion or Binding invalidation withdraws routing. Host-set changes affect
+new TLS connections only; existing relays cannot be decrypted retroactively, and
+HTTP/2 Host changes on intercepted connections retain the 421 boundary.
+
+Relayed TLS is not decrypted, scanned or rewritten. Configure the Agent with fake keys
+only and keep real keys inaccessible; selection faults can therefore send only the
+configured fake upstream, without injecting a real. Existing response-rewrite limits
+still apply after injection. ECH can hide the actual target: selection uses visible
+outer SNI only, so unselected hidden targets have no injection guarantee. IPv4 TCP
+80/443 routing remains unchanged; IPv6, QUIC and other ports are outside protection.
+
+Deploy or roll back daemon and addon together: `active.json` version 1 now requires
+sorted unique `hosts` on each listener, while Plan and secrets formats are unchanged.
+Disable and confirm withdrawal before replacing components, then let the matching
+daemon republish and enable the gateway. Do not hand-edit manifests or mix versions.
+
 ## Policy database location
 
 With no nonempty `AGENT_SEC_DATA_DIR`, the daemon checks two Policy database paths:

@@ -108,6 +108,16 @@ pub struct CaBundle {
     pub ca_bundle_path: PathBuf,
 }
 
+/// Canonical declaration and availability-filtered execution travel together.
+pub(crate) struct ActivePlan {
+    /// Canonical Scope used for every lifecycle revalidation.
+    pub(crate) scope: PreparedScope,
+    /// Execution Plan containing only credentials available in this generation.
+    pub(crate) plan: Plan,
+    /// Sorted unique hosts from the complete, validated pinned Plan, bounded by its rules.
+    pub(crate) hosts: Vec<String>,
+}
+
 pub(crate) struct Inner {
     pub(crate) state: State,
     store: Option<CredentialStore>,
@@ -709,7 +719,7 @@ impl GatewayService {
     pub(crate) fn active_plans(
         &self,
         inner: &mut Inner,
-    ) -> Result<BTreeMap<ScopeId, (PreparedScope, Plan)>, GatewayError> {
+    ) -> Result<BTreeMap<ScopeId, ActivePlan>, GatewayError> {
         let summaries = if self.config.store_dir.exists() {
             self.store(inner, false)?.list()
         } else {
@@ -734,6 +744,15 @@ impl GatewayService {
                     "canonical Scope owner changed",
                 ));
             }
+            // Retirement removes injection authority, not the Scope's TLS inspection targets.
+            // check_scope has already validated the DNS names and bounded the complete rules.
+            let hosts = plan
+                .rules
+                .iter()
+                .map(|rule| rule.matcher.host.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             let available: BTreeSet<_> = summaries
                 .iter()
                 .filter(|record| {
@@ -750,7 +769,7 @@ impl GatewayService {
             plan.rules
                 .retain(|rule| available.contains(&rule.matcher.credential_id));
             plan.validate()?;
-            plans.insert(id.clone(), (scope, plan));
+            plans.insert(id.clone(), ActivePlan { scope, plan, hosts });
         }
         Ok(plans)
     }
@@ -772,17 +791,18 @@ impl GatewayService {
         let mut credentials = BTreeSet::new();
         let published: Vec<_> = plans
             .iter()
-            .map(|(id, (_, plan))| {
-                credentials.extend(plan.credentials.iter().cloned());
+            .map(|(id, active)| {
+                credentials.extend(active.plan.credentials.iter().cloned());
                 PublishedScope {
                     scope_id: id,
                     port: inner.state.scopes[id].port,
-                    plan: plan.to_json(),
+                    hosts: &active.hosts,
+                    plan: active.plan.to_json(),
                 }
             })
             .collect();
-        for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+        for active in plans.values() {
+            self.canonical(&active.scope)?;
         }
         runtime.publish(
             self.store(inner, true)?,
@@ -790,13 +810,13 @@ impl GatewayService {
             &published,
             generation,
         )?;
-        for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+        for active in plans.values() {
+            self.canonical(&active.scope)?;
         }
         self.host.start_unit(&self.config.unit)?;
         runtime.await_generation(generation, self.config.load_timeout)?;
-        for (scope, _) in plans.values() {
-            self.canonical(scope)
+        for active in plans.values() {
+            self.canonical(&active.scope)
                 .map_err(|error| self.fail_closed(error))?;
         }
         runtime.publish_ca_bundle(&self.config.system_ca_bundles)?;
@@ -806,7 +826,7 @@ impl GatewayService {
     pub(crate) fn route(
         &self,
         inner: &Inner,
-        plans: &BTreeMap<ScopeId, (PreparedScope, Plan)>,
+        plans: &BTreeMap<ScopeId, ActivePlan>,
     ) -> Result<BTreeMap<ResourceId, GatewayError>, GatewayError> {
         let mut withheld = BTreeMap::new();
         if !inner.state.enabled {
@@ -815,11 +835,13 @@ impl GatewayService {
         let mut routes = BTreeMap::new();
         let mut denied = BTreeSet::new();
         let mut accepted = Vec::new();
-        for (id, (scope, plan)) in plans {
+        for (id, active) in plans {
+            let scope = &active.scope;
             let domain = &inner.state.scopes[id];
             // Publication waits may change owner permissions, but not the immutable compiled snapshot.
             self.check_owner(domain.uid, self.account()?)?;
-            if plan.credentials.is_empty() {
+            // A live Scope must still catch retired fakes at its original hosts.
+            if active.hosts.is_empty() {
                 continue;
             }
             for (binding_id, attachment) in &domain.bindings {
@@ -878,8 +900,8 @@ impl GatewayService {
                 );
             }
         }
-        for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+        for active in plans.values() {
+            self.canonical(&active.scope)?;
         }
         let redirects: Vec<_> = routes
             .iter()
@@ -890,8 +912,8 @@ impl GatewayService {
             })
             .collect();
         self.host.apply_nft(&nft::render(&redirects))?;
-        for (scope, _) in plans.values() {
-            self.canonical(scope)
+        for active in plans.values() {
+            self.canonical(&active.scope)
                 .map_err(|error| self.fail_closed(error))?;
         }
         Ok(withheld)

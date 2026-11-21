@@ -613,8 +613,12 @@ def published_snapshot():
         for entry in snapshot["entries"]
     )
     assert all(set(entry) == {"fake", "credential"} for entry in snapshot["retired"])
+    assert manifest["version"] == 1
     for listener in manifest["listeners"]:
+        assert set(listener) == {"scopeId", "port", "hosts", "plan"}
+        assert listener["hosts"] == ["api.github.com", "github.com"]
         plan = json.loads((RUNTIME / listener["plan"]).read_text())
+        assert all(rule["match"]["host"] in listener["hosts"] for rule in plan["rules"])
         assert plan["format"] == "agent-sec-gateway-plan/v2"
         assert plan["scopeId"] == listener["scopeId"]
         assert all(
@@ -1170,7 +1174,7 @@ def test_misused_credentials_are_rejected_before_the_upstream(host, upstream):
         fake = fake_of(agent)
         api = "https://api.github.com/user"
         cases = [
-            (curl(agent, "https://example.com/"), "credential_not_allowed"),
+            (curl(agent, f"https://github.com/{REPOSITORY}"), "credential_not_allowed"),
             (
                 curl(agent, f"https://github.com/{REPOSITORY}", method="DELETE"),
                 "credential_not_allowed",
@@ -1216,6 +1220,31 @@ def test_traffic_outside_the_domain_bypasses_the_gateway(host, upstream):
         # Unrouted, the fake reaches the upstream untouched and is useless there.
         assert json.loads(direct.stdout)["authorization"] == f"Bearer {fake}"
         assert seen[-1][4] == f"Bearer {fake}"
+
+        # The same cgroup is redirected, but an undeclared SNI keeps the origin
+        # certificate and original destination instead of using the Gateway CA.
+        relayed = agent.execute(
+            [
+                "curl",
+                "-q",
+                "--noproxy",
+                "*",
+                "-sS",
+                "-m",
+                "20",
+                "--cacert",
+                str(upstream["ca"]),
+                "--resolve",
+                f"example.com:443:{UPSTREAM}",
+                "-H",
+                f"Authorization: Bearer {fake}",
+                "https://example.com/relay",
+            ],
+            refresh=False,
+        )
+        assert relayed.returncode == 0, relayed.stderr
+        assert json.loads(relayed.stdout)["authorization"] == f"Bearer {fake}"
+        assert seen[-1] == ("https", "example.com", "GET", "/relay", f"Bearer {fake}")
 
         send = f"exec bash -c 'echo quic > /dev/udp/{UPSTREAM}/443'"
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
@@ -1335,8 +1364,33 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
             assert seen[-1][4] == f"Bearer {real}"
             assert gateway(cli, "key", "remove", identity) == {"pairid": identity}
             assert gateway(cli, "key", "list") == {"pairids": []}
-            for domain in domains.values():
-                # Retirement withdraws routing; retained fakes never become real values.
+            # The deleted Scope stays direct; the still-active one keeps intercepting.
+            for unit in (None, DAEMON_UNIT):
+                if unit is not None:
+                    command("systemctl", "restart", unit)
+                    wait_loaded(cli)
+                before = len(seen)
+                assert curl(survivor, "https://api.github.com/user") == {
+                    "error": "retired_credential",
+                    "source": "agent-sec-gateway",
+                }
+                assert len(seen) == before
+                published_snapshot()
+                manifest = json.loads((RUNTIME / "active.json").read_text())
+                [listener] = [
+                    entry
+                    for entry in manifest["listeners"]
+                    if entry["scopeId"] == survivor.scope_id
+                ]
+                rules = command("nft", "list", "table", "inet", TABLE).stdout
+                assert f"redirect to :{listener['port']}" in rules
+                bindings = cli_json(cli, "binding", "list", "--limit", "1000")["items"]
+                assert any(
+                    entry["spec"]["scope"]["scopeId"] == survivor.scope_id
+                    for entry in bindings
+                )
+            for domain in (agent,):
+                # Scope deletion, unlike pair retirement, withdraws the original route.
                 before = len(seen)
                 direct = domain.execute(
                     [

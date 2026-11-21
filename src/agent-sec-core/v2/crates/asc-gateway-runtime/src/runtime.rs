@@ -20,6 +20,9 @@ const HEALTH_NAME: &str = "health.json";
 const CA_NAME: &str = "ca-cert.pem";
 const MANIFEST_VERSION: u32 = 1;
 const SHARED_FILE_MODE: u32 = 0o640;
+// Eight listeners × 256 hosts × (253 DNS bytes + JSON framing), plus file metadata.
+// Keep this wire budget identical to the addon's MAX_MANIFEST_BYTES.
+const MAX_MANIFEST_BYTES: usize = 8 * 256 * 256 + 16 * 1024;
 const MAX_HEALTH_BYTES: u64 = 64 * 1024;
 const MAX_CA_BYTES: u64 = 64 * 1024;
 const MAX_SYSTEM_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
@@ -40,6 +43,7 @@ struct Manifest<'a> {
 struct Listener<'a> {
     port: u16,
     scope_id: &'a ScopeId,
+    hosts: &'a [String],
     plan: String,
 }
 
@@ -63,10 +67,11 @@ pub(crate) struct Attempt {
     pub(crate) error: Option<String>,
 }
 
-/// One listener of a generation: the Scope, its port and its plan JSON.
+/// One listener with declared TLS targets and an availability-filtered execution Plan.
 pub(crate) struct PublishedScope<'a> {
     pub(crate) scope_id: &'a ScopeId,
     pub(crate) port: u16,
+    pub(crate) hosts: &'a [String],
     pub(crate) plan: Vec<u8>,
 }
 
@@ -126,6 +131,7 @@ impl RuntimeDirectory {
             listeners.push(Listener {
                 port: published.port,
                 scope_id: published.scope_id,
+                hosts: published.hosts,
                 plan,
             });
         }
@@ -137,6 +143,11 @@ impl RuntimeDirectory {
         };
         let bytes = serde_json::to_vec(&manifest)
             .map_err(|_| GatewayError::internal("cannot encode the gateway manifest"))?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(GatewayError::internal(
+                "gateway manifest exceeds its size limit",
+            ));
+        }
         files::write_atomic(
             &self.root,
             MANIFEST_NAME,
