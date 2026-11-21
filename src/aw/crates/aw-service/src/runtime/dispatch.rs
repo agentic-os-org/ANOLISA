@@ -51,7 +51,7 @@ impl Runtime {
                 Ok(
                     json!({"sdk_control_protocol": crate::SDK_CONTROL_VERSION, "sdk_protocol": crate::SDK_VERSION, "registration_protocol": crate::REGISTRATION_VERSION, "pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
-                "resources": resources, "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
+                "resources": resources, "observations": observations, "configured_sources": self.contexts.configured_sources(), "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
                 )
             }
             Operation::EnableInvocations { instance_id } => self.enable_invocations(&instance_id),

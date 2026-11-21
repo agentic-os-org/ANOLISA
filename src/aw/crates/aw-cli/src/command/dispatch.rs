@@ -57,6 +57,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
             args.native = value.arguments;
             crate::runtime("run", &args)
         }
+        Command::Plan(value) => super::plan::run(value),
         Command::Install(value) => super::management::install(value),
         Command::Uninstall(value) => match super::confirmation::check(&value)? {
             Some(reason) => crate::output::unconfirmed(value.prefix.output, reason),
