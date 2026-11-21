@@ -21,6 +21,11 @@
       "import": "./dist/sources.mjs",
       "default": "./dist/sources.mjs"
     },
+    "./sources/preload": {
+      "types": "./dist/source-preload.d.ts",
+      "import": "./dist/source-preload.mjs",
+      "default": "./dist/source-preload.mjs"
+    },
     "./configuration": {
       "types": "./dist/configuration.d.ts",
       "import": "./dist/configuration.mjs",
