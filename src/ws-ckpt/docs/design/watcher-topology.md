@@ -156,7 +156,9 @@ pause:
   answered only after the pass — including its walks — finishes. That reply
   is the barrier that advances the covered sequence. A check refuses to start
   while `auto_add_covered < auto_add_seq`, and a new auto-add event during the
-  window voids the decision.
+  window voids the decision. A barrier whose thread cannot be spawned is
+  re-armed from the quiescence gate itself, so recovery never waits for
+  another directory event.
 - **The idle shortcut** (a full quiet window already elapsed ⇒ `Safe`) is
   disabled for 250 ms after any registration walk: events generated during
   the walk may still be queued when the check starts, and silence is not
