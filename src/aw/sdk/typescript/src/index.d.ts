@@ -11,6 +11,7 @@ export interface Hook {
   step: string;
   on_error: string;
   budget_ms: number;
+  replace_input?: boolean;
   replace_result?: boolean;
   skill_check?: boolean;
 }
@@ -106,8 +107,10 @@ export interface SemanticTool {
   input: Record<string, unknown>;
 }
 export interface SemanticDecision {
-  decision: "continue" | "block";
+  decision: "continue" | "block" | "withhold";
   coverage: "checked" | "unavailable" | "not_configured";
+  updated_input?: Record<string, unknown>;
+  replaced_result?: unknown;
 }
 
 /** Install Sources first; prepare before protected input or the first native tool. */

@@ -10,77 +10,36 @@ import {
   jsonEqual,
   readStream,
   snapshotInputArg,
-  snapshotStreamChunk,
   toolExecuted,
   normalizeJson,
   restoreEntries,
   snapshotToolInput,
   validateIdentity,
 } from "./source-helpers.mjs";
+import {
+  DEFAULT_SOURCE_EVENTS,
+  SOURCE_PROTOCOL,
+  SourceDenied,
+  SourceResultWithheld,
+  applyToolInput,
+  applyToolResult,
+  confirmSourceRoutes,
+  routeHasStrictAfter,
+  runToolStream,
+  sourceCapabilities,
+} from "./source-mutation.mjs";
 import { AwError } from "./transport.mjs";
 
-export const SOURCE_PROTOCOL = "aw-hook-source/v1";
-export const DEFAULT_SOURCE_EVENTS = Object.freeze([
-  "input.submit",
-  "tool.before",
-  "tool.after",
-]);
+export {
+  DEFAULT_SOURCE_EVENTS,
+  SOURCE_PROTOCOL,
+  SourceDenied,
+  SourceResultWithheld,
+  confirmSourceRoutes,
+  sourceCapabilities,
+};
 export const DEFAULT_MAX_STREAM_ITEMS = 1024;
-const SUPPORTED_EVENTS = Object.freeze({
-  "input.submit": ["observe", "block"],
-  "tool.before": ["observe", "block"],
-  "tool.after": ["observe"],
-});
 const WRAPPED = Symbol("aw.source.wrapped");
-
-export class SourceDenied extends AwError {
-  constructor(event, { sessionId, callId, turnId, toolName } = {}) {
-    super("source_denied", { transport: false });
-    this.name = "SourceDenied";
-    this.event = event;
-    this.sessionId = sessionId;
-    this.callId = callId;
-    this.turnId = turnId;
-    this.toolName = toolName;
-  }
-}
-
-export function sourceCapabilities(events = DEFAULT_SOURCE_EVENTS) {
-  if (!Array.isArray(events)) throw new AwError("semantic_event_unavailable");
-  const selected = [...new Set(events)];
-  if (
-    !selected.length ||
-    selected.some(
-      (event) =>
-        typeof event !== "string" || !Object.hasOwn(SUPPORTED_EVENTS, event),
-    )
-  )
-    throw new AwError("semantic_event_unavailable");
-  return {
-    adapter: "sdk",
-    version: SOURCE_PROTOCOL,
-    entrypoint: "application",
-    events: Object.fromEntries(
-      selected.map((event) => [event, [...SUPPORTED_EVENTS[event]]]),
-    ),
-  };
-}
-
-export function confirmSourceRoutes(capabilities, routes) {
-  const events = capabilities?.events;
-  const hooks = routes?.hooks;
-  if (!events || typeof events !== "object" || !Array.isArray(hooks))
-    return false;
-  return hooks.every(
-    (hook) =>
-      hook &&
-      typeof hook === "object" &&
-      Object.hasOwn(events, hook.event) &&
-      !hook.replace_input &&
-      !hook.replace_result &&
-      !hook.skill_check,
-  );
-}
 
 export class SourceSession {
   constructor(
@@ -133,6 +92,10 @@ export class SourceSession {
     );
   }
 
+  _strictAfter() {
+    return !this.fallback && routeHasStrictAfter(this.task?.routes);
+  }
+
   _requireOpen() {
     if (this.closed) throw new AwError("source_session_closed");
   }
@@ -152,10 +115,11 @@ export class SourceSession {
   _verifyRouteCoverage() {
     const task = this.admission.task;
     if (this.fallback || !task) return;
+    const caps = this._source.instance.options.capabilities;
     for (const hook of task.routes?.hooks ?? []) {
       if (!this.events.includes(hook.event))
         throw new AwError("source_route_coverage_incomplete");
-      if (hook.replace_input || hook.replace_result || hook.skill_check)
+      if (!confirmSourceRoutes(caps, { hooks: [hook] }))
         throw new AwError("source_route_effect_unsupported");
     }
   }
@@ -229,7 +193,17 @@ export class SourceSession {
           });
         this._requireOpen();
         signal?.throwIfAborted();
-        return { callId: resolvedCall, input: snapshot, decision };
+        let effective = snapshot;
+        let finalDecision = decision;
+        if (Object.hasOwn(decision, "updated_input")) {
+          effective = snapshotToolInput(decision.updated_input);
+          finalDecision = { ...decision, updated_input: effective };
+        }
+        return {
+          callId: resolvedCall,
+          input: effective,
+          decision: finalDecision,
+        };
       });
     }
     this._requireOpen();
@@ -266,7 +240,7 @@ export class SourceSession {
       const toolName = validateIdentity(name);
       const resolvedCall = validateIdentity(callId);
       const snapshot = snapshotToolInput(input);
-      return await this.task.emit(
+      const decision = await this.task.emit(
         "tool.after",
         {
           session_id: this.sessionId,
@@ -277,6 +251,13 @@ export class SourceSession {
         },
         signal,
       );
+      if (decision.decision === "withhold")
+        throw new SourceResultWithheld("tool.after", {
+          sessionId: this.sessionId,
+          callId: resolvedCall,
+          toolName,
+        });
+      return decision;
     } catch (error) {
       throw toolExecuted(error);
     }
@@ -341,12 +322,15 @@ export class SourceSession {
     {
       name,
       extractInput,
+      applyInput,
       extractCallId,
       extractResult,
+      applyResult,
       extractSignal,
       snapshotArg,
       stream: asStream,
       maxStreamItems = DEFAULT_MAX_STREAM_ITEMS,
+      bufferStream = false,
     } = {},
   ) {
     if (typeof fn !== "function") throw new AwError("source_callable_required");
@@ -364,21 +348,34 @@ export class SourceSession {
 
     async function admitCall(args) {
       const signal = extractSignal?.(...args);
-      const callArgs = args.map((arg) => snapshotInputArg(arg, snapshotArg));
+      let callArgs = args.map((arg) => snapshotInputArg(arg, snapshotArg));
       const rawInput = inputOf(...callArgs);
+      const originalSnapshot = snapshotToolInput(rawInput);
       const callId = extractCallId?.(...callArgs);
-      const { callId: resolvedCall, input: snapshot } =
-        await session.beforeTool(toolName, rawInput, { callId, signal });
+      const {
+        callId: resolvedCall,
+        input: snapshot,
+        decision,
+      } = await session.beforeTool(toolName, rawInput, { callId, signal });
       session._requireOpen();
       signal?.throwIfAborted();
-      requireCheckedInput(callArgs, snapshot);
+      requireCheckedInput(callArgs, originalSnapshot);
+      if (Object.hasOwn(decision, "updated_input")) {
+        callArgs = applyToolInput(decision.updated_input, callArgs, {
+          applyInput,
+          customExtract: Boolean(extractInput),
+          snapshotArg,
+        });
+        if (!jsonEqual(snapshotToolInput(inputOf(...callArgs)), snapshot))
+          throw new AwError("source_input_replace_mismatch");
+      }
       return { resolvedCall, snapshot, signal, callArgs };
     }
 
     async function observeResult(result, callId, snapshot, signal) {
       try {
         const payload = extractResult ? extractResult(result) : result;
-        await session._afterAdmittedTool(toolName, snapshot, payload, {
+        return await session._afterAdmittedTool(toolName, snapshot, payload, {
           callId,
           signal,
         });
@@ -391,41 +388,21 @@ export class SourceSession {
       async function* wrappedStream(...args) {
         const { resolvedCall, snapshot, signal, callArgs } =
           await admitCall(args);
-        const items = session._observeAfter() ? [] : null;
-        let dispatched = false;
-        // Transfer ownership before the native stream finishes closing.
-        function finish(close) {
-          return session._runAdmittedCall(async () => {
-            await close();
-            if (session._observeAfter())
-              await observeResult(items, resolvedCall, snapshot, signal);
-          });
-        }
-        const stream = readStream(
-          () => {
-            requireCheckedInput(callArgs, snapshot);
-            dispatched = true;
-            return fn.apply(this, callArgs);
-          },
-          session.signal,
+        yield* runToolStream({
+          session,
+          receiver: this,
+          fn,
+          callArgs,
+          snapshot,
+          callId: resolvedCall,
           signal,
-          session._activeStreams,
-          items ? finish : undefined,
-        );
-        try {
-          for await (const item of stream) {
-            if (items && session._observeAfter()) {
-              if (items.length >= maxStreamItems)
-                throw new AwError("source_stream_result_too_large");
-              items.push(
-                extractResult ? snapshotStreamChunk(item) : normalizeJson(item),
-              );
-            }
-            yield item;
-          }
-        } catch (error) {
-          throw dispatched ? toolExecuted(error) : error;
-        }
+          requireCheckedInput,
+          observeResult,
+          extractResult,
+          applyResult,
+          maxStreamItems,
+          bufferStream,
+        });
       }
       wrappedStream[WRAPPED] = true;
       return wrappedStream;
@@ -438,8 +415,24 @@ export class SourceSession {
       requireCheckedInput(callArgs, snapshot);
       return session._runAdmittedCall(async () => {
         const result = await fn.apply(this, callArgs);
-        if (session._observeAfter())
-          await observeResult(result, resolvedCall, snapshot, signal);
+        if (session._observeAfter()) {
+          const decision = await observeResult(
+            result,
+            resolvedCall,
+            snapshot,
+            signal,
+          );
+          if (Object.hasOwn(decision, "replaced_result")) {
+            try {
+              return applyToolResult(result, decision.replaced_result, {
+                applyResult,
+                customExtract: Boolean(extractResult),
+              });
+            } catch (error) {
+              throw toolExecuted(error);
+            }
+          }
+        }
         return result;
       });
     }
@@ -601,13 +594,20 @@ export class LanguageSource {
     target,
     availability = "required",
     events = DEFAULT_SOURCE_EVENTS,
+    replaceInput = false,
+    replaceResult = false,
+    withholdResult = false,
     cwd,
     environment,
     config,
     timeoutMs,
     reconnectMs,
   }) {
-    const capabilities = sourceCapabilities(events);
+    const capabilities = sourceCapabilities(events, {
+      replaceInput,
+      replaceResult,
+      withholdResult,
+    });
     const instance = new Instance({
       endpoint,
       target,
