@@ -255,31 +255,59 @@ impl Default for ConsentConfig {
     }
 }
 
+/// The state a present-but-uninterpretable consent file is already enforcing.
+///
+/// Both gates deny while the file cannot be interpreted, so repairing one scope
+/// must not grant the other by starting from default-allow. Only an absent file
+/// keeps the documented default-allow, through `Err(NotFound)` above.
+fn repairable_config(config: Option<ConsentConfig>) -> ConsentConfig {
+    config.unwrap_or(ConsentConfig {
+        auto_consolidation: ConsentAction::Deny,
+        auto_capture: ConsentAction::Deny,
+    })
+}
+
 /// Set or query memory consent preferences.
 pub fn memory_consent(
     svc: &MemoryService,
     action: Option<&str>,
     scope: Option<&str>,
 ) -> Result<String> {
-    let consent_path = svc.mount.meta_dir.join("consent.toml");
-
     // Load existing config
-    let mut config = if consent_path.exists() {
-        let content = fs::read_to_string(&consent_path)?;
-        toml::from_str::<ConsentConfig>(&content).unwrap_or_default()
-    } else {
-        ConsentConfig::default()
+    let consent_rel = std::path::Path::new(".anolisa/consent.toml");
+    let config = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), consent_rel) {
+        // `None` keeps "present but uninterpretable" distinct from "absent":
+        // a query must not report allow for a file it could not read, while a
+        // mutation can still repair one.
+        //
+        // The invariant is about a file that carries *no* content, not about a
+        // per-key default: each field is `#[serde(default)]` and defaults to
+        // allow, so a file that spells out one scope leaves the other at allow.
+        // Narrowing that to "an omitted key means deny" would change behaviour
+        // for every store that sets a single scope, so it is deliberately not
+        // part of this change.
+        Ok(content) if content.trim().is_empty() => None,
+        Ok(content) => toml::from_str::<ConsentConfig>(&content).ok(),
+        Err(MemoryError::NotFound(_)) => Some(ConsentConfig::default()),
+        Err(e) => return Err(e),
     };
 
     let action = action.unwrap_or("query");
 
     match action {
         "query" => {
-            let json = serde_json::to_string_pretty(&config)
+            let Some(config) = config.as_ref() else {
+                return Err(MemoryError::InvalidArgument(
+                    "cannot report consent: .anolisa/consent.toml is empty or not valid TOML"
+                        .into(),
+                ));
+            };
+            let json = serde_json::to_string_pretty(config)
                 .map_err(|e| MemoryError::Other(format!("serialize: {e}")))?;
             Ok(format!("Current consent settings:\n{json}"))
         }
         "allow" => {
+            let mut config = repairable_config(config);
             let scope = scope.unwrap_or("all");
             if !matches!(scope, "all" | "consolidation" | "capture") {
                 return Err(MemoryError::InvalidArgument(format!(
@@ -298,6 +326,9 @@ pub fn memory_consent(
             Ok(format!("Consent updated: {scope} = allow"))
         }
         "deny" => {
+            // A mutation may repair an uninterpretable file; only reporting it
+            // is refused.
+            let mut config = repairable_config(config);
             let scope = scope.unwrap_or("all");
             if !matches!(scope, "all" | "consolidation" | "capture") {
                 return Err(MemoryError::InvalidArgument(format!(
@@ -324,14 +355,29 @@ pub fn memory_consent(
 fn write_consent(config: &ConsentConfig, svc: &MemoryService) -> Result<()> {
     let content = toml::to_string_pretty(config)
         .map_err(|e| MemoryError::Other(format!("serialize consent: {e}")))?;
-    // Write via safe_fs (openat2 + RESOLVE_BENEATH) for sandbox consistency.
+    // Sandbox consistency (openat2 + RESOLVE_BENEATH) is not enough here:
+    // `safe_fs::write` truncates before it writes, and an empty file parses as
+    // `#[serde(default)]` allow, so a writer killed between truncate and write
+    // would turn a recorded deny into a permanent allow. Stage beside the
+    // destination and rename, so the file is either the old consent or the new
+    // one. A file that has to be created still fails closed if it tears.
     let rel = std::path::Path::new(".anolisa/consent.toml");
-    crate::safe_fs::write(svc.mount.root_fd.as_fd(), rel, content.as_bytes())?;
-
-    // Update cache
-    let mut cache = svc.consent_cache.lock().unwrap_or_else(|e| e.into_inner());
-    *cache = Some(config.clone());
-
+    let root_fd = svc.mount.root_fd.as_fd();
+    let meta_dir = std::path::Path::new(".anolisa");
+    // No `create_dir_all` here: `.anolisa` is created when the mount opens, and
+    // both helpers below open their parent through openat2 with
+    // RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS, so a symlinked `.anolisa` already
+    // fails there. An unsandboxed mkdir would be the only write syscall in this
+    // path that follows symlinks, and the probe that would guard it leaves a
+    // window between the probe and the call.
+    match crate::safe_fs::write_create_new(root_fd, rel, content.as_bytes()) {
+        Err(MemoryError::AlreadyExists(_)) => {
+            crate::safe_fs::write_atomic(root_fd, meta_dir, rel, content.as_bytes())?;
+        }
+        result => {
+            result?;
+        }
+    }
     Ok(())
 }
 
@@ -345,6 +391,17 @@ pub(super) fn capture_allowed(svc: &MemoryService) -> Result<bool> {
         Err(MemoryError::NotFound(_)) => return Ok(true),
         Err(e) => return Err(e),
     };
+    if content.trim().is_empty() {
+        // Checked before parsing, as `is_source_allowed` and `memory_consent`
+        // both do: an empty document parses fine, so the ordering is what keeps
+        // the rule visible to the next edit.
+        // A zero-length file is a truncating writer's intermediate state, not a
+        // decision. `#[serde(default)]` would read it as allow, which would
+        // turn a killed write into a revoked-consent bypass.
+        return Err(MemoryError::InvalidArgument(
+            "cannot read capture consent from .anolisa/consent.toml: file is empty".into(),
+        ));
+    }
     let config: ConsentConfig = toml::from_str(&content).map_err(|_| {
         // TOML diagnostics include source text, which must not reach the MCP caller.
         MemoryError::InvalidArgument(
@@ -355,36 +412,43 @@ pub(super) fn capture_allowed(svc: &MemoryService) -> Result<bool> {
 }
 
 /// Check whether a given source is allowed by consent config.
-/// Uses cached consent config from MemoryService for performance.
+///
+/// Reads the persisted file on every call instead of caching it. Consent is
+/// shared per user store, and another client can change it while this process
+/// keeps running; a cache would honour a revoked preference until restart, and
+/// would keep a revoked-then-restored one disabled for the same reason.
 pub fn is_source_allowed(svc: &MemoryService, source: &str) -> bool {
-    // Hold lock throughout to avoid TOCTOU: another thread could modify
-    // the consent file between our cache miss and our file read.
-    let config = {
-        let mut cache = svc.consent_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref cfg) = *cache {
-            cfg.clone()
-        } else {
-            // Not cached yet — load from disk while holding the lock.
-            let consent_path = svc.mount.meta_dir.join("consent.toml");
-            let config = if consent_path.exists() {
-                fs::read_to_string(&consent_path)
-                    .ok()
-                    .and_then(|c| toml::from_str::<ConsentConfig>(&c).ok())
-                    .unwrap_or_default()
-            } else {
-                ConsentConfig::default()
-            };
-            *cache = Some(config.clone());
-            config
+    // Manual sources never consult consent, so a preference file that cannot be
+    // interpreted must not start blocking them either.
+    if !matches!(source, "auto-consolidation" | "auto-capture") {
+        return true;
+    }
+    // An absent file is the documented default-allow. A file that is present
+    // but cannot be read or parsed is not an absent preference, so it denies.
+    // Read through the sandbox anchor like capture_allowed does: a consent.toml
+    // symlinked to a file outside the mount must fail closed here too, instead
+    // of authorising consolidation off a file the user never wrote.
+    let rel = std::path::Path::new(".anolisa/consent.toml");
+    let config = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), rel) {
+        Ok(content) => {
+            // Empty is not "no preference": this rejects a file with no content
+            // at all, not one that omits a key -- an omitted key falls back to
+            // `#[serde(default)]` = allow. See the note in `memory_consent`.
+            if content.trim().is_empty() {
+                return false;
+            }
+            match toml::from_str::<ConsentConfig>(&content) {
+                Ok(config) => config,
+                Err(_) => return false,
+            }
         }
+        Err(MemoryError::NotFound(_)) => ConsentConfig::default(),
+        Err(_) => return false,
     };
 
     match source {
         "auto-consolidation" => config.auto_consolidation.is_allowed(),
-        // Legacy cached inspection only. Actual capture writes must use
-        // capture_allowed, which reads fresh consent and fails closed.
-        "auto-capture" => config.auto_capture.is_allowed(),
-        _ => true, // Manual sources are always allowed
+        _ => config.auto_capture.is_allowed(),
     }
 }
 
@@ -432,6 +496,196 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: ConsentConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.auto_consolidation, ConsentAction::Deny);
+    }
+
+    /// A service whose consent cache is empty, rooted in a throwaway store.
+    fn service_in(dir: &std::path::Path) -> MemoryService {
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = dir.to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.session.base_dir = dir.join("sessions").to_string_lossy().to_string();
+        MemoryService::new(config).unwrap()
+    }
+
+    #[test]
+    fn unreadable_consent_denies_automatic_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        let consent_path = svc.mount.meta_dir.join("consent.toml");
+        fs::create_dir_all(&consent_path).unwrap();
+
+        // A directory in place of the file fails to read the same way a
+        // permission error does, and fails identically for root.
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(!is_source_allowed(&svc, "auto-capture"));
+        assert!(is_source_allowed(&svc, "manual-observe"));
+
+        // Repairing the file takes effect on the next call: the unreadable
+        // state is not cached.
+        fs::remove_dir_all(&consent_path).unwrap();
+        fs::write(&consent_path, "auto_consolidation = \"deny\"\n").unwrap();
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(is_source_allowed(&svc, "manual-observe"));
+    }
+
+    #[test]
+    fn an_empty_consent_file_denies_instead_of_allowing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        // Zero bytes is what a truncating writer leaves behind, and
+        // `#[serde(default)]` reads that as allow through every path.
+        fs::write(svc.mount.meta_dir.join("consent.toml"), "").unwrap();
+
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(!is_source_allowed(&svc, "auto-capture"));
+        assert!(capture_allowed(&svc).is_err());
+        assert!(memory_consent(&svc, Some("query"), None).is_err());
+        // A mutation may still repair the file.
+        assert!(memory_consent(&svc, Some("deny"), Some("all")).is_ok());
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+    }
+
+    #[test]
+    fn an_update_publishes_by_rename_not_truncation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        let path = svc.mount.meta_dir.join("consent.toml");
+
+        assert!(memory_consent(&svc, Some("allow"), Some("all")).is_ok());
+        let before = fs::metadata(&path).unwrap().ino();
+
+        assert!(memory_consent(&svc, Some("deny"), Some("all")).is_ok());
+        let after = fs::metadata(&path).unwrap().ino();
+
+        // A truncating write reuses the inode and leaves a window in which the
+        // file is empty; a staged rename swaps in a different inode and never
+        // exposes a partial body. This is what keeps a torn write from reading
+        // as consent.
+        assert_ne!(
+            before, after,
+            "an update replaced the contents in place; a reader can observe an empty file"
+        );
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+    }
+
+    #[test]
+    fn repairing_one_scope_does_not_grant_the_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        // Present but uninterpretable: both gates deny, and the repair path
+        // must start from that state rather than from default-allow.
+        fs::write(
+            svc.mount.meta_dir.join("consent.toml"),
+            "auto_consolidation = nope",
+        )
+        .unwrap();
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+
+        assert!(memory_consent(&svc, Some("deny"), Some("capture")).is_ok());
+
+        // The caller asked to turn capture off; consolidation was already off
+        // and must stay off, not be written back as an affirmative allow.
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(!is_source_allowed(&svc, "auto-capture"));
+    }
+
+    #[test]
+    fn a_single_scope_repair_of_an_empty_file_keeps_the_other_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        fs::write(svc.mount.meta_dir.join("consent.toml"), "").unwrap();
+
+        assert!(memory_consent(&svc, Some("allow"), Some("capture")).is_ok());
+
+        assert!(capture_allowed(&svc).is_ok());
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+    }
+
+    #[test]
+    fn symlinked_consent_file_is_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        // Anyone able to plant a link in the store can point the consent file
+        // at a permissive file of their own; reading through it would grant
+        // automatic consolidation and capture without the user's decision.
+        let outside = tmp.path().join("outside-consent.toml");
+        fs::write(
+            &outside,
+            "auto_consolidation = \"allow\"\nauto_capture = \"allow\"\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, svc.mount.meta_dir.join("consent.toml")).unwrap();
+
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(!is_source_allowed(&svc, "auto-capture"));
+        assert!(is_source_allowed(&svc, "manual-observe"));
+        assert!(matches!(
+            memory_consent(&svc, Some("query"), Some("consolidation")),
+            Err(MemoryError::PathOutsideMount(_))
+        ));
+        assert!(capture_allowed(&svc).is_err());
+    }
+
+    #[test]
+    fn invalid_consent_toml_denies_consolidation_until_repaired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        let consent_path = svc.mount.meta_dir.join("consent.toml");
+        fs::write(&consent_path, "auto_consolidation = nope\n").unwrap();
+
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(is_source_allowed(&svc, "manual-observe"));
+
+        fs::write(&consent_path, "auto_consolidation = \"allow\"\n").unwrap();
+        assert!(is_source_allowed(&svc, "auto-consolidation"));
+    }
+
+    #[test]
+    fn healthy_consent_is_honoured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = service_in(tmp.path());
+        fs::create_dir_all(&svc.mount.meta_dir).unwrap();
+        fs::write(
+            svc.mount.meta_dir.join("consent.toml"),
+            "auto_consolidation = \"deny\"\nauto_capture = \"allow\"\n",
+        )
+        .unwrap();
+
+        assert!(!is_source_allowed(&svc, "auto-consolidation"));
+        assert!(is_source_allowed(&svc, "auto-capture"));
+    }
+
+    #[test]
+    fn another_client_consent_change_is_honoured() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two services over one store, as two clients of the same user would be.
+        let first = service_in(tmp.path());
+        let second = service_in(tmp.path());
+
+        // Healthy control: consent granted through one is visible to the other.
+        memory_consent(&first, Some("allow"), Some("consolidation")).unwrap();
+        assert!(is_source_allowed(&second, "auto-consolidation"));
+
+        // The reported defect: a revocation written by the second client stayed
+        // invisible to the first, which kept writing automatic facts.
+        memory_consent(&second, Some("deny"), Some("consolidation")).unwrap();
+        assert!(
+            !is_source_allowed(&first, "auto-consolidation"),
+            "a revocation written by another client must be honoured"
+        );
+
+        // The reverse transition used to leave consolidation disabled for good.
+        memory_consent(&second, Some("allow"), Some("consolidation")).unwrap();
+        assert!(is_source_allowed(&first, "auto-consolidation"));
     }
 
     #[test]
