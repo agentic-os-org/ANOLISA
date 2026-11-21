@@ -14,9 +14,11 @@ import { runMigrations } from "./db/migration.js";
 import { MessageStore } from "./store/message-store.js";
 import type { MessageRecord } from "./store/message-store.js";
 import { Assembler } from "./assembler.js";
+import { TokenBudgetExceededError } from "./budget-error.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
+const DEFAULT_TOKEN_BUDGET = 128_000;
 
 type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
 
@@ -187,9 +189,11 @@ export class SelectiveContextEngine implements ContextEngine {
     }
 
     const tokenBudget =
-      typeof params.tokenBudget === "number" && params.tokenBudget > 0
+      typeof params.tokenBudget === "number" &&
+      Number.isFinite(params.tokenBudget) &&
+      params.tokenBudget > 0
         ? params.tokenBudget
-        : 128_000;
+        : DEFAULT_TOKEN_BUDGET;
 
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
@@ -197,16 +201,25 @@ export class SelectiveContextEngine implements ContextEngine {
     const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
     const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
-    const result = this.assembler.assemble({
-      messages,
-      summaries,
-      tokenBudget,
-      freshTailTurns: this.config.freshTailTurns,
-    });
-
-    if (result.estimatedTokens > tokenBudget) {
+    let result: ReturnType<Assembler["assemble"]>;
+    try {
+      result = this.assembler.assemble({
+        messages,
+        summaries,
+        tokenBudget,
+        freshTailTurns: this.config.freshTailTurns,
+      });
+    } catch (error) {
+      if (error instanceof TokenBudgetExceededError) {
+        console.warn(
+          `[selective-claw] context assembly refused: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    if (result.stats.omittedTurns > 0) {
       console.warn(
-        `[selective-claw] assembled context (${result.estimatedTokens} tokens) exceeds budget (${tokenBudget})`
+        `[selective-claw] omitted turns 1-${result.stats.omittedTurns} to fit token budget ${tokenBudget}; original messages remain archived`,
       );
     }
 
