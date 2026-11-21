@@ -1273,6 +1273,18 @@ fn ffi_background_thread(
     sight.shutdown();
 }
 
+impl AgentsightHandle {
+    fn stop_threads(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(th) = self.thread.take() {
+            let _ = th.join();
+        }
+        if let Some(th) = self.security_thread.take() {
+            let _ = th.join();
+        }
+    }
+}
+
 /// Stop the background pipeline thread.  Returns 0 on success.
 ///
 /// # Safety
@@ -1285,16 +1297,7 @@ pub unsafe extern "C" fn agentsight_stop(h: *mut AgentsightHandle) -> c_int {
         set_last_error("NULL handle");
         return -1;
     }
-    let handle = unsafe { &mut *h };
-    handle.running.store(false, Ordering::SeqCst);
-
-    // Wait for background thread to finish.
-    if let Some(th) = handle.thread.take() {
-        let _ = th.join();
-    }
-    if let Some(th) = handle.security_thread.take() {
-        let _ = th.join();
-    }
+    unsafe { &mut *h }.stop_threads();
     0
 }
 
@@ -1314,19 +1317,12 @@ pub unsafe extern "C" fn agentsight_free(h: *mut AgentsightHandle) {
 
 impl Drop for AgentsightHandle {
     fn drop(&mut self) {
-        // Close the eventfd managed by this handle.
+        // Stop and join worker threads before closing eventfd so shutdown
+        // flushes cannot write to a closed or reused file descriptor.
+        self.stop_threads();
         if self.eventfd >= 0 {
             unsafe { libc::close(self.eventfd) };
             self.eventfd = -1;
-        }
-        // Join the background thread if still running.
-        if let Some(th) = self.thread.take() {
-            self.running.store(false, Ordering::SeqCst);
-            let _ = th.join();
-        }
-        if let Some(th) = self.security_thread.take() {
-            self.running.store(false, Ordering::SeqCst);
-            let _ = th.join();
         }
     }
 }
@@ -2603,6 +2599,57 @@ mod tests {
         assert!(
             reason.is_some(),
             "a NULL handle must leave a reason readable, not just -1"
+        );
+    }
+
+    #[test]
+    fn drop_joins_worker_threads_before_closing_eventfd() {
+        let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(efd >= 0, "eventfd allocation failed");
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = Arc::clone(&running);
+        let (stopped_saw_open_tx, stopped_saw_open_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while worker_running.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            let fd_open = unsafe { libc::fcntl(efd, libc::F_GETFD) } != -1;
+            let val: u64 = 1;
+            let wrote = unsafe { libc::write(efd, (&val as *const u64).cast(), 8) };
+            let _ = stopped_saw_open_tx.send((fd_open, wrote));
+        });
+
+        let handle = Box::new(AgentsightHandle {
+            rx,
+            budget: QueueBudget::new(0),
+            tx: Some(tx),
+            eventfd: efd,
+            running,
+            security_drops: Arc::new(SecurityDropState::default()),
+            thread: Some(worker),
+            security_thread: None,
+            config: None,
+            probe_cmd_tx: None,
+        });
+        drop(handle);
+
+        let (fd_open, wrote) = stopped_saw_open_rx
+            .recv()
+            .expect("worker thread should have finished during drop");
+        assert!(
+            fd_open,
+            "eventfd must remain open until worker threads stop and join"
+        );
+        assert_eq!(
+            wrote, 8,
+            "shutdown write to eventfd must succeed before close"
+        );
+        assert_eq!(
+            unsafe { libc::fcntl(efd, libc::F_GETFD) },
+            -1,
+            "eventfd must be closed after drop finishes"
         );
     }
 }
