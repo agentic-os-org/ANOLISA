@@ -83,6 +83,8 @@ const DEGRADED_EMPTY_AGENT_RATIO: f64 = 0.8;
 /// Compute cost statistics from an ATIF trajectory (pure computation, no LLM).
 pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
     if trajectory.steps.is_empty() {
+        let (total_real_input_tok, total_real_output_tok, total_real_cached_tok) =
+            session_usage_totals(trajectory, &[]);
         return Ok(CostStats {
             total_events: 0,
             total_chars: 0,
@@ -93,21 +95,9 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             model: String::new(),
             token_ratio_version: String::new(),
             usage_steps: 0,
-            total_real_input_tok: trajectory
-                .final_metrics
-                .as_ref()
-                .and_then(|metrics| metrics.total_prompt_tokens)
-                .unwrap_or(0),
-            total_real_output_tok: trajectory
-                .final_metrics
-                .as_ref()
-                .and_then(|metrics| metrics.total_completion_tokens)
-                .unwrap_or(0),
-            total_real_cached_tok: trajectory
-                .final_metrics
-                .as_ref()
-                .and_then(|metrics| metrics.total_cached_tokens)
-                .unwrap_or(0),
+            total_real_input_tok,
+            total_real_output_tok,
+            total_real_cached_tok,
             headroom: CostHeadroom::default(),
         });
     }
@@ -286,6 +276,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         compute_headroom(&calls)
     };
 
+    let (total_real_input_tok, total_real_output_tok, total_real_cached_tok) =
+        session_usage_totals(trajectory, &calls);
     Ok(CostStats {
         total_events,
         total_chars,
@@ -296,21 +288,9 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             .iter()
             .filter(|c| c.real_prompt_tokens.is_some())
             .count(),
-        total_real_input_tok: trajectory
-            .final_metrics
-            .as_ref()
-            .and_then(|metrics| metrics.total_prompt_tokens)
-            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_prompt_tokens).sum()),
-        total_real_output_tok: trajectory
-            .final_metrics
-            .as_ref()
-            .and_then(|metrics| metrics.total_completion_tokens)
-            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_completion_tokens).sum()),
-        total_real_cached_tok: trajectory
-            .final_metrics
-            .as_ref()
-            .and_then(|metrics| metrics.total_cached_tokens)
-            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_cached_tokens).sum()),
+        total_real_input_tok,
+        total_real_output_tok,
+        total_real_cached_tok,
         calls,
         model,
         token_ratio_version: TOKEN_RATIO_VERSION.to_string(),
@@ -361,6 +341,33 @@ pub(crate) struct UsageBlock {
     cached: Option<u64>,
 }
 
+fn normalize_prompt_total(prompt: u64, cached: Option<u64>) -> u64 {
+    match cached {
+        Some(c) if c > prompt => prompt.saturating_add(c),
+        _ => prompt,
+    }
+}
+
+/// Resolve session-level `(input, output, cached)` totals, preferring ATIF
+/// `final_metrics` and normalizing Anthropic-style exclusive `cached > prompt`.
+fn session_usage_totals(trajectory: &AtifTrajectory, calls: &[LlmCall]) -> (u64, u64, u64) {
+    let final_metrics = trajectory.final_metrics.as_ref();
+    let total_cached = final_metrics
+        .and_then(|metrics| metrics.total_cached_tokens)
+        .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_cached_tokens).sum());
+    let cached_hint = final_metrics
+        .and_then(|metrics| metrics.total_cached_tokens)
+        .or(Some(total_cached).filter(|&c| c > 0));
+    let total_input = final_metrics
+        .and_then(|metrics| metrics.total_prompt_tokens)
+        .map(|prompt| normalize_prompt_total(prompt, cached_hint))
+        .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_prompt_tokens).sum());
+    let total_output = final_metrics
+        .and_then(|metrics| metrics.total_completion_tokens)
+        .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_completion_tokens).sum());
+    (total_input, total_output, total_cached)
+}
+
 fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
     if step.is_copied_context == Some(true) {
         return None;
@@ -372,10 +379,7 @@ fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
     if prompt.is_none() && completion.is_none() {
         return None;
     }
-    let prompt_total = prompt.map(|p| match cached {
-        Some(c) if c > p => p + c,
-        _ => p,
-    });
+    let prompt_total = prompt.map(|p| normalize_prompt_total(p, cached));
     Some(UsageBlock {
         prompt_total,
         completion,
@@ -2656,5 +2660,40 @@ mod tests {
             "the branch-move row must carry the BACKTRACK flag: {:?}",
             set.ledger
         );
+    }
+
+    #[test]
+    fn final_metrics_normalize_exclusive_cached_prompt_tokens() {
+        let mut with_steps = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "metrics":{"prompt_tokens":100,"completion_tokens":50,"cached_tokens":8000},
+             "message":"a"},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z",
+             "metrics":{"prompt_tokens":200,"completion_tokens":30,"cached_tokens":8000},
+             "message":"b"}
+        ]"#,
+        );
+        with_steps.final_metrics = Some(crate::atif::AtifFinalMetrics {
+            total_prompt_tokens: Some(300),
+            total_completion_tokens: Some(80),
+            total_cached_tokens: Some(16_000),
+            total_steps: None,
+            extra: None,
+        });
+
+        let cost = compute_cost(&with_steps).expect("compute_cost");
+        assert_eq!(cost.total_real_input_tok, 16_300);
+        assert_eq!(cost.total_real_cached_tok, 16_000);
+        let metrics = compute_ratio_metrics(&cost);
+        let m3 = metrics.m3_cache_hit_rate.expect("m3");
+        assert!(m3 <= 1.0, "m3_cache_hit_rate must stay in [0, 1], got {m3}");
+
+        let mut empty_steps = traj("[]");
+        empty_steps.final_metrics = with_steps.final_metrics.clone();
+        let empty_cost = compute_cost(&empty_steps).expect("empty compute_cost");
+        assert_eq!(empty_cost.total_real_input_tok, 16_300);
+        assert_eq!(empty_cost.total_real_cached_tok, 16_000);
     }
 }
