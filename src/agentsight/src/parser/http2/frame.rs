@@ -691,6 +691,110 @@ mod tests {
         assert!(!out.starts_with("<huffman:"));
     }
 
+    /// RFC 7541 Appendix A defines 61 static entries and index 32 is `cookie`.
+    /// Omitting it shifted every later name one entry early (`date` at 32,
+    /// `www-authenticate` at 60) and invented `x-forwarded-for` at 61, so
+    /// trace headers and the stateless fallback mislabelled every name from
+    /// index 32 onwards.
+    #[test]
+    fn stateless_static_table_matches_rfc7541_appendix_a() {
+        let expected = [
+            ":authority",
+            ":method",
+            ":method",
+            ":path",
+            ":path",
+            ":scheme",
+            ":scheme",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            "accept-charset",
+            "accept-encoding",
+            "accept-language",
+            "accept-ranges",
+            "accept",
+            "access-control-allow-origin",
+            "age",
+            "allow",
+            "authorization",
+            "cache-control",
+            "content-disposition",
+            "content-encoding",
+            "content-language",
+            "content-length",
+            "content-location",
+            "content-range",
+            "content-type",
+            "cookie",
+            "date",
+            "etag",
+            "expect",
+            "expires",
+            "from",
+            "host",
+            "if-match",
+            "if-modified-since",
+            "if-none-match",
+            "if-range",
+            "if-unmodified-since",
+            "last-modified",
+            "link",
+            "location",
+            "max-forwards",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "range",
+            "referer",
+            "refresh",
+            "retry-after",
+            "server",
+            "set-cookie",
+            "strict-transport-security",
+            "transfer-encoding",
+            "user-agent",
+            "vary",
+            "via",
+            "www-authenticate",
+        ];
+        assert_eq!(expected.len(), 61, "RFC 7541 Appendix A has 61 entries");
+        for (offset, name) in expected.iter().enumerate() {
+            let index = offset + 1;
+            let (actual, _) = ParsedHttp2Frame::get_static_table_entry(index)
+                .unwrap_or_else(|| panic!("static index {index} must be defined"));
+            assert_eq!(actual, *name, "static index {index} must name {name}");
+        }
+        assert_eq!(
+            ParsedHttp2Frame::get_static_table_entry(32),
+            Some(("cookie", "")),
+            "static index 32 must name cookie"
+        );
+        assert!(
+            ParsedHttp2Frame::get_static_table_entry(62).is_none(),
+            "the static table ends at 61; index 62 is the first dynamic slot"
+        );
+
+        // An indexed field past the table is dynamic state this stateless
+        // walk cannot resolve, so it must not borrow a static name.
+        assert_eq!(
+            headers_frame(vec![0x80 | 62]).decode_headers_stateless(),
+            vec![("<dynamic:62>".to_string(), None)]
+        );
+
+        // A literal header whose name references static index 58 must decode
+        // as `user-agent`; the shifted table called it `vary`.
+        let mut payload = vec![0x0F, 58 - 15, 1];
+        payload.push(b'*');
+        assert_eq!(
+            headers_frame(payload).decode_headers_stateless(),
+            vec![("user-agent".to_string(), Some("*".to_string()))]
+        );
+    }
+
     fn data_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
         let len = payload.len();
         ParsedHttp2Frame {
