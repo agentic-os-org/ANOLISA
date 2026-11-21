@@ -263,10 +263,12 @@ pub(in crate::diagnostics::health) fn read_disk_sample(
     root: bool,
     mounts: bool,
 ) -> Result<DiskFacts, HealthUnavailableReason> {
-    let local = if mounts && (passive || config.scan_mounts.is_none()) {
+    let local = if !mounts || (!passive && config.scan_mounts.is_some()) {
+        BTreeSet::new()
+    } else if passive {
         local_mounts()
     } else {
-        BTreeSet::new()
+        on_demand_mounts()
     };
     let (paths, scope_incomplete) = df_operand_paths(config, passive, root, mounts, &local)?;
     let mut args = vec!["-k", "-P"];
@@ -375,24 +377,60 @@ fn local_mounts() -> BTreeSet<String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let Ok(file) = std::fs::File::open("/proc/self/mountinfo") else {
-            return BTreeSet::new();
-        };
-        let mut content = String::new();
-        if file
-            .take(256 * 1024 + 1)
-            .read_to_string(&mut content)
-            .is_err()
-            || content.len() > 256 * 1024
-        {
-            return BTreeSet::new();
-        }
-        local_mounts_in(&content)
+        mountinfo_content()
+            .map(|content| local_mounts_in(&content))
+            .unwrap_or_default()
+    }
+}
+
+/// The default on-demand scan samples every mount `df` reports, not just the
+/// passive filesystem allowlist, so a boot- or user-created filesystem
+/// outside that allowlist is not dropped from the first scan.
+fn on_demand_mounts() -> BTreeSet<String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        BTreeSet::new()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        mountinfo_content()
+            .map(|content| on_demand_mounts_in(&content))
+            .unwrap_or_default()
     }
 }
 
 #[cfg(target_os = "linux")]
+fn mountinfo_content() -> Option<String> {
+    let file = std::fs::File::open("/proc/self/mountinfo").ok()?;
+    let mut content = String::new();
+    if file
+        .take(256 * 1024 + 1)
+        .read_to_string(&mut content)
+        .is_err()
+        || content.len() > 256 * 1024
+    {
+        return None;
+    }
+    Some(content)
+}
+
+#[cfg(target_os = "linux")]
 fn local_mounts_in(content: &str) -> BTreeSet<String> {
+    mount_points_in(content, |fs_type| {
+        matches!(
+            fs_type,
+            "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "f2fs" | "overlay"
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn on_demand_mounts_in(content: &str) -> BTreeSet<String> {
+    mount_points_in(content, |fs_type| !df_skips_filesystem(fs_type))
+}
+
+#[cfg(target_os = "linux")]
+fn mount_points_in(content: &str, keep: impl Fn(&str) -> bool) -> BTreeSet<String> {
     content
         .lines()
         .filter_map(|line| {
@@ -403,13 +441,38 @@ fn local_mounts_in(content: &str) -> BTreeSet<String> {
                 .replace("\\040", " ")
                 .replace("\\011", "\t")
                 .replace("\\134", "\\");
-            matches!(
-                right.split_whitespace().next()?,
-                "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "f2fs" | "overlay"
-            )
-            .then_some(mount)
+            keep(right.split_whitespace().next()?).then_some(mount)
         })
         .collect()
+}
+
+/// Filesystems `df` omits by default, plus the ones this check drops after
+/// parsing; sampling one would spend a target slot without adding a reported
+/// row.
+#[cfg(target_os = "linux")]
+fn df_skips_filesystem(fs_type: &str) -> bool {
+    is_ignored_filesystem(fs_type)
+        || matches!(
+            fs_type,
+            "autofs"
+                | "binfmt_misc"
+                | "bpf"
+                | "cgroup"
+                | "cgroup2"
+                | "configfs"
+                | "debugfs"
+                | "devpts"
+                | "fusectl"
+                | "hugetlbfs"
+                | "mqueue"
+                | "nsfs"
+                | "proc"
+                | "pstore"
+                | "ramfs"
+                | "securityfs"
+                | "sysfs"
+                | "tracefs"
+        )
 }
 
 pub(super) mod volume;

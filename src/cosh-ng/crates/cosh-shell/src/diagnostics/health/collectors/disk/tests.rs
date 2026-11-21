@@ -124,6 +124,35 @@ fn df_operands_on_an_on_demand_scan_stay_within_the_target_cap() {
     assert!(incomplete);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn default_on_demand_scan_keeps_mounts_outside_the_passive_allowlist() {
+    let content = "\
+36 25 253:0 / / rw,relatime - ext4 /dev/vda1 rw
+37 25 259:1 / /boot/efi rw,relatime - vfat /dev/vda2 rw
+38 25 0:30 / /run rw,nosuid - tmpfs tmpfs rw
+39 25 0:31 / /proc rw - proc proc rw
+";
+    assert_eq!(
+        local_mounts_in(content),
+        ["/"].into_iter().map(str::to_string).collect::<BTreeSet<_>>(),
+        "the passive allowlist keeps only ext/xfs-style filesystems"
+    );
+    let on_demand = on_demand_mounts_in(content);
+    assert_eq!(
+        on_demand,
+        ["/", "/boot/efi"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        "the default scan keeps the vfat ESP and skips pseudo filesystems"
+    );
+    let (paths, incomplete) =
+        df_operand_paths(&HealthConfig::default(), false, true, true, &on_demand).unwrap();
+    assert_eq!(paths.unwrap(), ["/", "/boot/efi"]);
+    assert!(!incomplete);
+}
+
 #[test]
 fn disk_without_enabled_checks_is_unsupported() {
     let _guard = crate::diagnostics::test_env::env_guard();
