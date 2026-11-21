@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, ktuner, anolisa, cosh-ng
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, ktuner, anolisa, cosh-ng, aw
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -33,6 +33,7 @@ MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
 KTUNER_DIR="${ROOT_DIR}/src/ktuner"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
+AW_DIR="${ROOT_DIR}/src/aw"
 SANDBOX_PKG_DIR="${ROOT_DIR}/distribution/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
@@ -1380,6 +1381,90 @@ fi
 
 setup_rpmbuild
 
+build_aw() {
+    log "=========================================="
+    log "Building RPM: aw"
+    log "=========================================="
+
+    local spec_in="${AW_DIR}/packaging/rpm/aw.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version = ' "${AW_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${AW_DIR}/crates/aw-cli/Cargo.toml" | sed 's/.*"\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine aw version. Set VERSION env or ensure Cargo.toml exists."
+        return 1
+    fi
+
+    local pkg_name="aw"
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    log "Step 1/4: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "${pkg_dir}/src/aw" "${pkg_dir}/providers/agent-sec-core" "${pkg_dir}/providers/tokenless"
+
+    tar -cf - -C "$AW_DIR" --exclude='target' --exclude='vendor' --exclude='.cargo' . \
+        | tar -xf - -C "${pkg_dir}/src/aw"
+    tar -cf - -C "${ROOT_DIR}/providers/agent-sec-core" --exclude='target' --exclude='vendor' --exclude='.cargo' . \
+        | tar -xf - -C "${pkg_dir}/providers/agent-sec-core"
+    tar -cf - -C "${ROOT_DIR}/providers/tokenless" --exclude='target' --exclude='vendor' --exclude='.cargo' . \
+        | tar -xf - -C "${pkg_dir}/providers/tokenless"
+    cp -p "${ROOT_DIR}/LICENSE" "${pkg_dir}/LICENSE"
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/4: Vendoring crates for the three workspaces..."
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    local workspace src_dir
+    for workspace in src/aw providers/agent-sec-core providers/tokenless; do
+        case "$workspace" in
+            src/aw) src_dir="$AW_DIR" ;;
+            *)  src_dir="${ROOT_DIR}/${workspace}" ;;
+        esac
+        mkdir -p "${vendor_tmp}/${workspace}/.cargo"
+        (
+            cd "$src_dir"
+            cargo vendor --locked "${vendor_tmp}/${workspace}/vendor" >/dev/null
+        )
+        cat > "${vendor_tmp}/${workspace}/.cargo/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+    done
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" .
+    rm -rf "$vendor_tmp"
+
+    log "Step 3/4: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    log "Step 4/4: Verifying produced packages..."
+    ls -1 "${BUILD_DIR}/RPMS/"*/aw-*.rpm >/dev/null 2>&1 || {
+        err "aw RPMs not produced"
+        return 1
+    }
+
+    ok "aw RPMs built successfully"
+}
 case "$TARGET" in
     copilot-shell)
         build_copilot_shell
@@ -1416,6 +1501,9 @@ case "$TARGET" in
         ;;
     cosh-ng)
         build_cosh_ng
+        ;;
+    aw)
+        build_aw
         ;;
     gvisor-runsc)
         build_gvisor_runsc

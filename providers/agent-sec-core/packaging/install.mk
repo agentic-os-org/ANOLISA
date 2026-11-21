@@ -23,7 +23,7 @@ check-install-inputs:
 	case "$$root" in ''|/*) ;; *) echo 'DESTDIR must be empty or absolute' >&2; exit 1;; esac; \
 	case "/$$root/" in */../*|*/./*) echo 'DESTDIR must not contain dot segments' >&2; exit 1;; esac; \
 	test -f $(call packaging_quote,$(BINARY)) && test -x $(call packaging_quote,$(BINARY)) || { echo 'Missing prebuilt Provider executable; run make build first or set BINARY' >&2; exit 1; }; \
-	for file in $(call packaging_quote,$(LICENSE_FILE)) $(call packaging_quote,$(COMPONENT_ROOT)/README.md) $(call packaging_quote,$(COMPONENT_ROOT)/README_zh.md) $(call packaging_quote,$(COMPONENT_ROOT)/schemas/health-v1alpha1.schema.json) $(call packaging_quote,$(COMPONENT_ROOT)/examples/aw.yaml); do \
+	for file in $(call packaging_quote,$(LICENSE_FILE)) $(call packaging_quote,$(COMPONENT_ROOT)/README.md) $(call packaging_quote,$(COMPONENT_ROOT)/README_zh.md) $(call packaging_quote,$(COMPONENT_ROOT)/schemas/health-v1alpha1.schema.json) $(foreach file,$(wildcard $(COMPONENT_ROOT)/examples/*.yaml),$(call packaging_quote,$(file))); do \
 		test -f "$$file" || { echo "Missing installation input: $$file" >&2; exit 1; }; \
 	done
 
@@ -32,6 +32,6 @@ install: check-install-inputs
 	install -d $(call packaging_quote,$(DESTDIR)$(LIBEXECDIR)) $(call packaging_quote,$(DESTDIR)$(DATADIR)/schemas) $(call packaging_quote,$(DESTDIR)$(DATADIR)/examples) $(call packaging_quote,$(DESTDIR)$(DOCDIR))
 	install -m 0755 $(call packaging_quote,$(BINARY)) $(call packaging_quote,$(DESTDIR)$(LIBEXECDIR)/aw-provider-sec-core)
 	install -m 0644 $(call packaging_quote,$(COMPONENT_ROOT)/schemas/health-v1alpha1.schema.json) $(call packaging_quote,$(DESTDIR)$(DATADIR)/schemas/)
-	install -m 0644 $(call packaging_quote,$(COMPONENT_ROOT)/examples/aw.yaml) $(call packaging_quote,$(DESTDIR)$(DATADIR)/examples/)
+	install -m 0644 $(foreach file,$(wildcard $(COMPONENT_ROOT)/examples/*.yaml),$(call packaging_quote,$(file))) $(call packaging_quote,$(DESTDIR)$(DATADIR)/examples/)
 	install -m 0644 $(call packaging_quote,$(LICENSE_FILE)) $(call packaging_quote,$(DESTDIR)$(DOCDIR)/LICENSE)
 	install -m 0644 $(call packaging_quote,$(COMPONENT_ROOT)/README.md) $(call packaging_quote,$(COMPONENT_ROOT)/README_zh.md) $(call packaging_quote,$(DESTDIR)$(DOCDIR)/)
