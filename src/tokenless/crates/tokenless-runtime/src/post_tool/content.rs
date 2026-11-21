@@ -11,6 +11,7 @@
 //! unsupported domains to passthrough until their compressor is deliberately
 //! connected.
 
+mod browser_snapshot;
 mod build_log;
 mod diff;
 mod html;
@@ -51,6 +52,12 @@ pub fn detect(content: &str) -> ContentType {
     }
     if !mostly_text(scan) {
         return ContentType::Unknown;
+    }
+    // Snapshots can embed diff/test/source markers that later detectors would
+    // claim; their ref/uid anchors are the most distinctive shape, so they run
+    // first. Real diffs keep ownership via the detector's diff guard.
+    if browser_snapshot::is_browser_snapshot(scan) {
+        return ContentType::BrowserSnapshot;
     }
     if diff::is_diff(scan) {
         return ContentType::Diff;

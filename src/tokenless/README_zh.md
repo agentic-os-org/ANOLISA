@@ -33,6 +33,7 @@ Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输�
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
 | 混合内容区域压缩 | 取决于工作负载 | 通过 `TOKENLESS_MIXED_CONTENT_ENABLED=1` 显式开启：对既非完整结构化文档、也无法被其他领域处理的工具输出，识别显式定界的 typed region——标注 `json`/`csv`/`tsv` 的 fenced code block 与括号平衡的裸 JSON 文档——并用与独立文档相同的压缩器和策略逐段压缩。周围文本逐字节保留，压缩器拒绝的区域逐字节保留，选择 TOON 的 JSON 区域同步更新 fence label。默认关闭 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 就地将受支持的富文本子树转写为混合 Markdown，同时原地保留行内 `<svg>`、JSON 数据 `<script>` 载荷、`data-*`/`aria-*` 属性、表单状态等局部 HTML 语义并保持外层 JSON 结构，对含屏幕隐藏/不可读文字或可执行脚本等全局风险的值保持原样；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
+| 浏览器快照重编码 | 取决于工作负载 | 默认开启：把命令或 API 返回的 Playwright MCP 无障碍快照无损重编码为 TSV 记录表，仅对交互角色去除冗余 `cursor=pointer`，重复 URL 前缀仅在字符与估算 Token 双降时经 legend 共享；包装、尾注与全部 ref 原样保留，无法解析的输入整体透传，完整原文经 Stash 可取回。chrome-devtools-mcp uid 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）；通过 `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 或 SDK `browser_snapshot_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
@@ -127,7 +128,7 @@ OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_cal
 结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
 Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
-RTK 回退仅接受无损候选。其他结果可通过静态 `tokenless_retrieve` 工具恢复 HTML、Diff、
+RTK 回退仅接受无损候选。其他结果可通过静态 `tokenless_retrieve` 工具恢复 HTML、Diff、浏览器快照、
 日志缩减和 JSON 截断的原文；宿主工具策略需允许该工具。缺少工具注册 API 或会话 UUID 时
 只接受无损候选。提交 prompt 时从当前历史刷新 Marker 授权；compaction 撤销旧授权，直到
 下次提交 prompt 时根据保留历史重建。新压缩结果仍可立即恢复。会话结束清空授权，新会话不能沿用其他会话的

@@ -32,17 +32,18 @@ QwenPaw 和 AgentScope SDK 集成提供静态恢复工具及当前模型调用�
 ### 压缩覆盖与协议限制
 
 可替换的文本结果统一进入 Core 的候选路由：JSON/TOON、构建日志、CSV/TSV、搜索路径、
-HTML 和 Diff 裁剪。内容来源、可恢复性和收益门禁仍然生效，不代表每个结果
+HTML、Diff 裁剪和浏览器快照重编码。内容来源、可恢复性和收益门禁仍然生效，不代表每个结果
 都会被压缩。QwenPaw 与 AgentScope 在构造 SDK 配置时继承
 `TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_SEARCH_PATH_SHARING_ENABLED`、
-`TOKENLESS_HTML_EXTRACTION_ENABLED`、`TOKENLESS_DIFF_COMPRESSION_ENABLED` 和
-`TOKENLESS_MIXED_CONTENT_ENABLED`。显式 SDK 参数优先于环境默认值。Diff 默认开启，
-混合区域压缩默认关闭；压缩总开关控制 dry-run，不会关闭 RTK 改写。
+`TOKENLESS_HTML_EXTRACTION_ENABLED`、`TOKENLESS_DIFF_COMPRESSION_ENABLED`、
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED` 和
+`TOKENLESS_MIXED_CONTENT_ENABLED`。显式 SDK 参数优先于环境默认值。Diff 与浏览器快照压缩
+默认开启，混合区域压缩默认关闭；压缩总开关控制 dry-run，不会关闭 RTK 改写。
 
 | 宿主或集成 | 剩余边界 |
 |------------|----------|
-| Codex、Qwen Code | 当前 PostTool Hook 不能替换原始结果，JSON/TOON、日志、表格、搜索、HTML 和 Diff 无法由此减少模型输入；仍可使用 RTK 命令改写。两个集成都没有可用的模型工具 Schema 替换事件。 |
-| Claude Code | 响应替换要求 2.1.121 及以上版本。结构化输出保留原类型，只有文本槽才能使用 TOON、表格／搜索视图、HTML 页面或 Diff。JSON 字符串值中的 HTML 在两种槽位中都可转写，因为结果仍是 JSON。未注册模型工具 Schema 替换 Hook。 |
+| Codex、Qwen Code | 当前 PostTool Hook 不能替换原始结果，JSON/TOON、日志、表格、搜索、HTML、Diff 和浏览器快照无法由此减少模型输入；仍可使用 RTK 命令改写。两个集成都没有可用的模型工具 Schema 替换事件。 |
+| Claude Code | 响应替换要求 2.1.121 及以上版本。结构化输出保留原类型，只有文本槽才能使用 TOON、表格／搜索视图、HTML 页面、Diff 或浏览器快照视图。JSON 字符串值中的 HTML 在两种槽位中都可转写，因为结果仍是 JSON。未注册模型工具 Schema 替换 Hook。 |
 | OpenClaw | 工具工厂收到会话 UUID 时，静态 `tokenless_retrieve` 支持可恢复的 PostTool 压缩。宿主工具策略须允许该工具。缺少工具注册 API 或 UUID 时只接受无损候选。Prompt Hook 能读取消息，但不能替换工具 Schema。多块和多模态结果透传。 |
 | Cosh-NG／旧版 Copilot Shell | Cosh-NG 能替换受支持的结果，但 Common BeforeModel Hook 无法发布可执行的静态恢复工具。旧版 Copilot Shell 不能替换 PostTool 结果。 |
 | OpenCode V1 插件 | `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义，因此 Schema 保持原样。OpenCode V2 插件 API 需要单独迁移，当前 V1 Adapter 不支持；这不表示 V2 协议无法支持 Schema 压缩。 |
@@ -77,6 +78,7 @@ Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode 各自的 PostTool 适
 | 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录、已识别的原生 Shell 搜索，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
 | 宿主支持文本替换时，来自命令输出的 Git Diff（默认开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭） | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的 Playwright MCP／chrome-devtools-mcp 无障碍快照；默认开启，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 | PW 快照无损重编码为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀；包装、尾注与全部 ref 原样保留，无法解析的输入整体透传，完整原文经 Stash 可取回，收益过小的候选会被拒绝。chrome-devtools-mcp uid 快照仅识别、原文直通（裸引号序列化无显式记录边界） |
 | Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的 JSON 字符串值中的 HTML 片段或文档；与 HTML 页面共用开关 | 每个值就地完整转写为 Markdown，类型、数字和其他字段不变；视图可能丢失可见文字、目标地址、表单状态以及样式、属性、换行、列表编号或表头所承载含义，或暴露屏幕上被隐藏文字的值原样保留，每个原始值经 Stash 可取回。详见 [JSON 值中的 HTML](configuration-and-privacy.md#json-值中的-html) |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启（默认关闭）且宿主支持文本替换时，任何整内容领域都无法处理的混合工具输出 | fenced `json`/`csv`/`tsv` 块与括号平衡的裸 JSON 文档按区域用与独立路由相同的策略压缩；周围文本逐字节保留，被拒绝的区域逐字节保留 |
 | 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |

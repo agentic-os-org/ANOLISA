@@ -307,6 +307,7 @@ config = TokenlessConfig(
 | `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
 | `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
+| `browser_snapshot_enabled` | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | `True` |
 
 显式构造参数优先于环境变量。未设置或空值采用默认值；`1`、`true`、`yes` 忽略大小写后
 启用，其他值关闭。`compression_enabled=False` 保留原始输出并记录符合条件的压缩候选

@@ -131,6 +131,11 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             AppliedOperation("build_log_reduction"),
             AppliedOperation.BUILD_LOG_REDUCTION,
         )
+        self.assertEqual(
+            AppliedOperation("browser_snapshot_reduction"),
+            AppliedOperation.BROWSER_SNAPSHOT_REDUCTION,
+        )
+        self.assertEqual(ContentType("browser_snapshot"), ContentType.BROWSER_SNAPSHOT)
         with self.assertRaises(ValueError):
             AppliedOperation("unknown_operation")
 
@@ -245,6 +250,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "mixed_content_enabled",
                 "html_extraction_enabled",
                 "compression_enabled",
+                "browser_snapshot_enabled",
             },
         )
 

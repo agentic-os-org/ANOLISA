@@ -321,6 +321,7 @@ The lifecycle SDK reads these environment defaults when constructing `TokenlessC
 | `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
 | `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
+| `browser_snapshot_enabled` | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | `True` |
 
 Explicit constructor arguments override the environment. Unset or empty values use the default;
 `1`, `true`, and `yes` enable the flag case-insensitively, and other values disable it.

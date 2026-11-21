@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享与 HTML 页面转写默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
 候选全部未命中时，按显式定界的 typed region 逐段压缩混合输出（见「三、递归处理顺序」
 之后的「Mixed Content 领域」一节）。
 
@@ -118,10 +118,59 @@ HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误
 缩减的宿主可能暂时原样接收这些命令的输出。`pnpm install` 不在本轮新增原生命令豁免范围，
 仍可能被 RTK 改写；pnpm 能力只处理按既有归属规则实际进入 PostTool 的原始内容。
 
+### Browser Snapshot 领域
+
+`BrowserSnapshotCompressor` 处理 Playwright MCP 的无障碍快照（a11y snapshot），
+重编码为 TSV 记录表（视图保留每个 ref、name 与 URL；完整原文经 Stash 可恢复，管线整体无损）：
+
+- **Playwright MCP（PW）**：`### Page` markdown 包装（Page URL/Title）加 ```yaml 围栏内的
+  aria YAML 快照，记录形如 `- role "name" [ref=eN] [cursor=pointer]:`，含 `- /url:` 子行、
+  `- text:` 文本节点与单引号整行包裹形态；无包装的裸 YAML 树同样识别。
+
+**chrome-devtools-mcp（CDT）仅识别、不压缩**：CDT 快照（`## Latest page snapshot` 头下的扁平
+uid 列表，记录形如 `uid=N_M role "name" url="…"`，容忍 `Successfully clicked…`/`Page navigated to…`
+动作前缀）会被检测器识别并标注为 `browser_snapshot`，但压缩器一律整体直通原文。原因：上游对 name
+与属性值都用裸双引号包裹，且**不转义**内嵌引号与原始换行，故「name 后跟带引号属性值」「name 本身含
+内嵌引号」「name 的多行续行」与合法记录字节同形——`"Draft" description="Ready"` 既是 name=`Draft`
++description=`Ready`，也是单一 name=`Draft" description="Ready`；续行还可能长得像 `uid=…` 记录或
+role 节点。任何解析器都无法确立这些记录边界，启发式守卫只会不断留下新口子。为守住 ref/uid 动作空间
+不容混合权威的硬约束，CDT 快照在无损前提下不可分解，故原文直通（fail-open），绝不产出可能绑错
+uid/name 的压缩视图。PW 的 YAML 双引号转义内嵌引号、边界显式，可安全压缩，不受此限。若上游将来对
+name/属性加转义提供显式边界，可再引入 CDT 压缩。
+
+检测位于域链最前（二进制门之后、Diff 之前）：ref/uid 锚点是最独特的形状，快照内嵌的
+diff/测试/源码标记会被后续检测器误抢；真 diff 以首非空行的 `diff --git`/`---`/`+++`/`@@`
+头锚定，不被抢占。检测只在 64 KiB / 200 行窗口内判形状，解析权威在压缩器；任何解析失败
+整体透传原文（fail-open）——ref/uid 动作空间不容混合权威。
+
+视图变换（v1 不做有损折叠或去 URL）：
+
+| 变换 | 内容 | 约束 |
+|---|---|---|
+| TSV 重编码 | PW 列 `depth role name ref attrs url text`；转义 `\\` `\t` `\n`，单遍还原 | 包装头与尾注逐字保留；PW 多行 name 按 YAML 双引号折叠语义合并为一个空格 |
+| 冗余 cursor 去除 | 仅对 17 种交互角色（link/button/textbox 等）去除 `cursor=pointer` | generic 容器上保留（可点击信号） |
+| URL 前缀共享 | 出现 ≥2 次的前缀（取至最后一个 `/`，不短于 scheme://host/ 根）入 `U1=…` legend，表内 URL 编码为 `U1/后缀`，空后缀编码为裸 `U1` | 任一原始 URL 形如 `U<数字>` 或 `U<数字>/…` 时整体禁用（碰撞守卫）；仅当字符与估算 Token 双降且优于不共享候选时启用 |
+
+保真双层自检：① 解析记录按原始字节重建输入（包装、围栏、续行、尾注逐字保留）；
+② encode→decode 记录级自检（含 legend 还原与转义单遍还原），按序逐字段比对，
+不一致即返回原文。最终输出还须整体同时减少字符与估算 Token。原文写入 Stash，
+响应为 `retrievable`，恢复指令前置于输出；仲裁门槛与 Diff/HTML 对齐为 16 个估算 Token，
+轻页面自然直通。
+
+来源 `file_read` 不进入该域（`cat page-*.yml` 打印的快照文件视为可编辑源码保持原样）；
+MCP 工具结果通常为 `api_response` 来源，不要求 shell 输出。
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0`（SDK：`browser_snapshot_enabled=False`）关闭整个域；
+关闭时检测结果在标注前重映射为 `plain_text`，直通响应不携带新 wire 值，旧严格解析器完全安全。
+
+离线参考实测（o200k tokenizer，真实公开页面捕获，仅无损变换）：PW 组合变换
+HN 约 32% / GitHub 约 21% / 百度约 13%。CDT 快照一律原文直通、不参与压缩，故无 CDT 收益数字
+（早期原型曾测得 HN 约 19%，但那是把不可无损分解的格式强行压缩的上界，已废弃）。这些数字
+不是任意页面的保证值；运行时仲裁使用内置 heuristic-v1 估算器，实际节省取决于页面结构与 URL 重复度。
+
 ### Mixed Content 领域（默认关闭）
 
 通过 `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启。开启后，当一段工具输出既不是完整的
-结构化文档、也不是任何整内容候选（JSON、Build Log、Tabular、Search Results、Diff、HTML）
+结构化文档、也不是任何整内容候选（JSON、Build Log、Tabular、Search Results、Diff、HTML、Browser Snapshot）
 能处理时，Pipeline 把它按 **typed region** 拆分处理：识别输出中显式定界的结构化片段并逐段
 压缩，周围的 prose、日志与分隔符逐字节保留。该路由只做结构性识别，不需要宿主提供任何
 语义提示，也不会从受保护的代码块中提取内容。
@@ -203,7 +252,7 @@ Runtime 执行门禁、内容检测和静态派发
    ↓
 JSON → `JsonCompressor`；Build Log → `BuildLogCompressor`；Tabular → `TabularCompressor`；
 Search Results → `SearchResultsCompressor`；Diff → Runtime Diff 裁剪（默认开启）；
-HTML → `HtmlExtractor`（默认启用，可关闭）；其他 → Passthrough
+HTML → `HtmlExtractor`（默认启用，可关闭）；Browser Snapshot → `BrowserSnapshotCompressor`（默认启用，可关闭）；其他 → Passthrough
    ↓
 Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
    ↓
@@ -229,6 +278,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
+| `browser_snapshot` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `BrowserSnapshotCompressor`：PW 快照无损重编码为 TSV 记录表，交互角色去冗余 cursor，URL 前缀按净收益共享；包装与尾注逐字保留，解析失败整体透传。CDT 快照仅识别、原文直通（裸引号无显式边界，无损不可分解） | 启用，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 |
 
 **JSON 值中的嵌入内容**：`json/embedded.rs` 按节点路由字符串值，判断只看值本身，不看字段
 名。目前识别的唯一内容域是 HTML：值至少 256 个字符，以受支持的 HTML5 或 SVG 标签、注释或
@@ -275,9 +325,9 @@ block 中）；`<svg>`（保留 `xlink:href` 等前缀属性，去除根上纯�
 `html_extraction`，内容类型为 `json`。新增内容域时扩展 `EmbeddedKind` 并复用相应领域压缩
 器，不新增路由流水线。
 
-Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。Diff 与 HTML
-没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在 Shell `PATH` 中）时，即使已开启
-环境变量也原文透传。
+Diff、HTML 与 Browser Snapshot 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。
+Diff、HTML 与 Browser Snapshot 没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在
+Shell `PATH` 中）时，即使已开启环境变量也原文透传。
 纯路径列表至少包含三条 POSIX 路径，统一使用 LF 或 CRLF。固定英文说明后接紧凑 JSON，
 字段为 `base`、`paths`、`line_ending`、`trailing_newline`；将 `base` 与每个解码后的路径项
 拼接，按 `line_ending` 连接，仅当 `trailing_newline` 为 true 时追加该行尾，即可逐字节还原。
@@ -581,6 +631,8 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | Tabular 领域压缩器（TabularCompressor） | `crates/tokenless-compressors/src/tabular.rs` |
 | Search Results 领域压缩器（SearchResultsCompressor） | `crates/tokenless-compressors/src/search_results.rs` |
 | HTML 领域转写器（HtmlExtractor） | `crates/tokenless-compressors/src/html.rs` |
+| Browser Snapshot 领域压缩器（BrowserSnapshotCompressor） | `crates/tokenless-compressors/src/browser_snapshot.rs`、`crates/tokenless-compressors/src/browser_snapshot/` |
+| Browser Snapshot 内容检测 | `crates/tokenless-runtime/src/post_tool/content/browser_snapshot.rs` |
 | Diff 上下文裁剪 | `crates/tokenless-runtime/src/post_tool/diff.rs` |
 | Mixed Content typed-region 识别与重建 | `crates/tokenless-runtime/src/post_tool/mixed.rs` |
 | PostTool Pipeline 与最终仲裁 | `crates/tokenless-runtime/src/post_tool/` |
@@ -600,6 +652,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.7.0（TOON spec v4.4） |
 | JSON 压缩测试 | `crates/tokenless-compressors/src/tests/json_tests.rs` |
 | Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/build_log_tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
+| Browser Snapshot 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/browser_snapshot_tests.rs`、`crates/tokenless-runtime/src/post_tool/tests/browser_snapshot_pipeline_tests.rs`、`crates/tokenless-compressors/tests/fixtures/content/browser_*` |
 | PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
 | TOON spec v4.4 回归测试 | `benchmark/l1-compressor/tests/l1_toon_spec_v44.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |

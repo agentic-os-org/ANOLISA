@@ -129,6 +129,7 @@ class ContentType(StrEnum):
     STACK_TRACE = "stack_trace"
     DIFF = "diff"
     HTML = "html"
+    BROWSER_SNAPSHOT = "browser_snapshot"
     TABULAR = "tabular"
     SOURCE_CODE = "source_code"
     PLAIN_TEXT = "plain_text"
@@ -147,6 +148,7 @@ class AppliedOperation(StrEnum):
     SEARCH_PATH_SHARING = "search_path_sharing"
     DIFF_REDUCTION = "diff_reduction"
     HTML_EXTRACTION = "html_extraction"
+    BROWSER_SNAPSHOT_REDUCTION = "browser_snapshot_reduction"
     JSON_CLEANUP = "json_cleanup"
     JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"
@@ -203,6 +205,9 @@ class TokenlessConfig:
     # Append options so existing positional arguments retain their meaning.
     mixed_content_enabled: bool = field(
         default_factory=lambda: _env_flag("TOKENLESS_MIXED_CONTENT_ENABLED", False)
+    )
+    browser_snapshot_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_BROWSER_SNAPSHOT_ENABLED", True)
     )
 
     def __post_init__(self) -> None:
@@ -367,6 +372,7 @@ class TokenlessSdk:
             diff_compression_enabled=self.config.diff_compression_enabled,
             mixed_content_enabled=self.config.mixed_content_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
+            browser_snapshot_enabled=self.config.browser_snapshot_enabled,
         )
         self._rtk_launcher = self._resolve_launcher() if self.config.rtk_enabled else None
         self._rewrite_failure_reported = False

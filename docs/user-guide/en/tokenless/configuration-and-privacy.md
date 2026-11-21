@@ -277,6 +277,38 @@ The response reports `html_extraction` with content type `json` and recoverabili
 pages (`html`). These rules have been verified with synthetic fragments and documents;
 they are guards, not proof that every fragment keeps its meaning for a model.
 
+## Browser snapshot re-encoding
+
+Browser snapshot re-encoding is enabled by default. Set
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` in the environment inherited by Tokenless or its
+host agent to disable it. When unset or empty it stays enabled; `1`, `true`, and `yes`
+also enable it (case-insensitively), and any other value disables it. This option is
+independent of the general compression switch and is not a `config.json` field.
+
+The lifecycle `TokenlessConfig` inherits this environment default; an explicit
+`TokenlessConfig(browser_snapshot_enabled=False)` argument overrides it. The direct
+`TokenlessRuntime` API keeps its explicit constructor configuration: Rust callers set
+`RuntimeConfig.browser_snapshot_enabled` to `false`, and Python callers pass the native
+keyword of the same name.
+
+The compressor handles accessibility snapshots from Playwright MCP (a `### Page`
+wrapper around a fenced YAML aria tree) received as successful command output or API
+responses, for example snapshots returned by MCP browser tools. It requires a text
+replacement slot, an available Stash, and a supported recovery method. File reads of
+saved snapshot files pass through unchanged. chrome-devtools-mcp uid snapshots (a
+`## Latest page snapshot` listing) are recognized but passed through unchanged: upstream
+wraps names and attribute values in raw quotes without escaping embedded quotes or
+newlines, so record boundaries are byte-ambiguous and cannot be decomposed losslessly.
+
+The view is a TSV record table retaining every ref, name, and URL; wrappers and
+trailers stay verbatim, redundant `cursor=pointer` annotations are removed only on
+interactive roles, and repeated URL prefixes are shared behind a legend only when that
+reduces both characters and estimated tokens. Unparseable input passes through whole,
+and candidates saving fewer than 16 estimated tokens are rejected. The complete
+original stays retrievable through Stash, so the pipeline is lossless. With the switch
+disabled, snapshot content is labeled `plain_text` and passes through, so responses
+carry no new protocol values.
+
 ## Optional mixed-content region compression
 
 Mixed-content region compression is disabled by default. Set
@@ -329,6 +361,7 @@ Local region compression and reconstruction have been verified on finite samples
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering, including HTML inside JSON values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | Switch browser-snapshot re-encoding (Playwright MCP snapshots; chrome-devtools-mcp snapshots are recognized and passed through) | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | Enable mixed-content region compression | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 
 ### Adapter and diagnostic variables

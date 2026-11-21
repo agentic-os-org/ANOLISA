@@ -384,7 +384,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm、Maven、Gradle 和 CTest 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm、Maven、Gradle 和 CTest 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；HTML 页面、Git Diff 与浏览器无障碍快照由各自领域处理，完整原文经 Stash 可取回；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
@@ -446,7 +446,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 2. Read/Glob/LSP/NotebookRead 等文件内容工具及别名保留原文。Claude Code 原生 `Grep` 的无上下文 content 模式结果可以使用无损搜索路径共享。非文件来源的命令和 API 结果也可按内容共享纯路径列表，不扩大文件读取的适用范围（见[控制搜索路径共享](#控制搜索路径共享)）。
 3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
 4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
-   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及恢复通道可用时默认开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 200 字符，Cosh-NG 结构化对象信封仍为 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
+   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及恢复通道可用时默认开启的 Git Diff 上下文裁剪和浏览器快照重编码），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 200 字符，Cosh-NG 结构化对象信封仍为 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
    - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
    - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
 
