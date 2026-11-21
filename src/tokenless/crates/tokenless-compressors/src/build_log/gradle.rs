@@ -173,11 +173,6 @@ fn parse_task_header(line: &str) -> Option<(&str, &'static str, bool)> {
     valid_task_path(path).then_some((path, suffix, is_failed))
 }
 
-/// Prevents Gradle task headers (including `FAILED`) from entering Generic progress rules.
-pub(super) fn is_task_line(line: &str) -> bool {
-    parse_task_header(line).is_some()
-}
-
 fn parse_task(line: &str) -> Option<(&str, &'static str)> {
     let (path, suffix, is_failed) = parse_task_header(line)?;
     (!is_failed).then_some((path, suffix))
