@@ -15,14 +15,27 @@
 # Tokenless Benchmark Suite — L2 module-comparison layer (standalone Cargo
 # workspace).
 #
-# Split out of the L1 compressor workspace so the L2-only deps (tiktoken-rs,
-# reqwest, ...) do not leak into the L1 `cargo test` cycle, and so each layer
+# L1 and L2 use real tokenizers independently. L2's HTTP/probe dependencies
+# (reqwest, ...) do not leak into the L1 `cargo test` cycle, and each layer
 # can evolve independently. Kept OUT of the main tokenless workspace (see the
 # l1-compressor Cargo.toml for the same rationale).
 #
 # Depends on the tokenless crates by path so it always benchmarks the exact
 # working-tree sources next to it.
 [workspace]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiktoken-rs = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+sha2 = "0.10"
+rand = "0.8"
+thiserror = "2"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+tempfile = "3"
 
 [package]
 name = "tokenless-l2-bench"
@@ -36,21 +49,26 @@ description = "L2 module-level comparison benchmark harness (tokenless vs headro
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokenless-compressors = { path = "../../crates/tokenless-compressors" }
+# Production entry: L2 的终态口径与 L3 相同，经 PreTool/PostTool 分派、仲裁与 Stash。
+tokenless-runtime = { path = "../../crates/tokenless-runtime" }
+tokenless-protocol = { path = "../../crates/tokenless-protocol" }
+tokenless-ccr = { path = "../../crates/tokenless-ccr" }
 # tiktoken-rs gives real o200k_base/cl100k_base counts — the L2 headline
-# metric — instead of the bytes/4 heuristic used by the L0/L1 suite.
-tiktoken-rs = "0.11"
+# metric — instead of the bytes/4 auxiliary estimates retained by L1.
+tiktoken-rs = { workspace = true }
 # blocking + rustls keeps the probe client free of tokio and OpenSSL; L2
 # concurrency needs are tiny (<=10 threads) so an async runtime is overkill.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-sha2 = "0.10"
-rand = "0.8"
-thiserror = "2"
-regex = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-anyhow = "1"
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
 
 # No criterion benches at the L2 layer; quality/adversarial coverage is the
 # `l2_`-prefixed integration tests under tests/.

@@ -1,0 +1,5 @@
+[package]
+name = "dep08"
+version = "0.1.8"
+edition = "2021"
+publish = false

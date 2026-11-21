@@ -1,0 +1,15 @@
+{
+  "category": "buildlog",
+  "samples": [
+    {
+      "id": "cargo-diagnostics-no-recovery",
+      "content_lines": ["   Compiling dependency_01 v1.0.0", "   Compiling dependency_02 v1.0.0", "   Compiling dependency_03 v1.0.0", "   Compiling dependency_04 v1.0.0", "   Compiling dependency_05 v1.0.0", "   Compiling dependency_06 v1.0.0", "   Compiling dependency_07 v1.0.0", "   Compiling dependency_08 v1.0.0", "   Compiling dependency_09 v1.0.0", "   Compiling dependency_10 v1.0.0", "\u001b[31merror[E0308]: mismatched types\u001b[0m", " --> src/fixture.rs:12:4", "expected bool, found String"],
+      "ground_truth": ["error[E0308]", "src/fixture.rs", "expected bool, found String", "dependency_01", "dependency_10"]
+    },
+    {
+      "id": "buildlog-unsupported-control",
+      "content_lines": ["Unknown diagnostic vocabulary must remain complete", "critical_fact = unchanged"],
+      "ground_truth": ["Unknown diagnostic vocabulary", "critical_fact = unchanged"]
+    }
+  ]
+}

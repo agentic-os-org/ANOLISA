@@ -20,27 +20,37 @@
 //! (recorded in the report) instead of aborting, so a partial environment
 //! still yields a labelled, honest report.
 //!
+//! The tokenless side is the production entry under `--mode`: static payloads
+//! go through PostTool, commands through PreTool → execution → PostTool.
+//!
 //! Usage:
 //!
 //! ```text
-//! l2_compare [--categories all|json,command,grep,code,diff]
+//! l2_compare [--categories all|json,command,grep,code,diff,...]
+//!            [--mode default|no-stash|diff-opt-in]
 //!            [--n auto|<int>] [--no-probe] [--model <id>]
 //!            [--report-dir <dir>]
 //! ```
 
 use anyhow::{Context, Result, bail};
-use std::collections::{HashMap, HashSet};
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use tokenless_l2_bench::l2::report::{
     CategoryComparison, GapStats, Report, RunSummary, SideAggregate, TaskComparison,
 };
+use tokenless_l2_bench::l2::runtime_side::{self, Mode, RawCapture};
 use tokenless_l2_bench::l2::samples::{self, CommandSpec, ProbeQuestion};
 use tokenless_l2_bench::l2::task_sim::{self, SampleSideStats, SideLookup};
 use tokenless_l2_bench::l2::{
     Category, GroundTruth, L2Error, SampleRecord, headroom_side, probe, retention, rtk_side, stats,
-    tokenizer, tokenless_side,
+    tokenizer,
 };
 
 /// Parsed CLI options.
@@ -49,8 +59,11 @@ struct Options {
     /// `None` = auto (pilot-inferred N); `Some(n)` = fixed repetition count.
     n: Option<usize>,
     no_probe: bool,
+    tokenless_only: bool,
     model: Option<String>,
     report_dir: Option<PathBuf>,
+    /// Runtime configuration the tokenless side runs under.
+    mode: Mode,
 }
 
 fn parse_args() -> Result<Options> {
@@ -58,8 +71,10 @@ fn parse_args() -> Result<Options> {
         categories: Category::ALL.to_vec(),
         n: None,
         no_probe: false,
+        tokenless_only: false,
         model: None,
         report_dir: None,
+        mode: Mode::Default,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -94,7 +109,13 @@ fn parse_args() -> Result<Options> {
                 }
             }
             "--no-probe" => opts.no_probe = true,
+            "--tokenless-only" => opts.tokenless_only = true,
             "--model" => opts.model = Some(args.next().context("--model requires a value")?),
+            "--mode" => {
+                let value = args.next().context("--mode requires a value")?;
+                opts.mode =
+                    Mode::parse(&value).with_context(|| format!("unknown --mode {value:?}"))?;
+            }
             "--report-dir" => {
                 opts.report_dir = Some(PathBuf::from(
                     args.next().context("--report-dir requires a value")?,
@@ -107,6 +128,7 @@ fn parse_args() -> Result<Options> {
 }
 
 /// One collected measurement row: one side of one sample repetition.
+#[derive(serde::Serialize)]
 struct Measure {
     sample_id: String,
     /// Repetition index the row was collected in — the pairing key that
@@ -121,12 +143,28 @@ struct Measure {
     /// deterministic-in-practice command (`git log`, `git diff`) from inflating
     /// N just because its category is nominally "dynamic".
     payload_hash: String,
+    output_hash: String,
+    rejected_unrecoverable: bool,
+    input: String,
+    output: String,
+    ground_truth: Vec<GroundTruth>,
     compression_rate: f64,
     /// Side-report rate under cl100k_base (tokenizer-sensitivity check;
     /// never gated, o200k stays the headline metric).
     compression_rate_cl100k: f64,
     latency_s: f64,
     latency_basis: &'static str,
+    /// Runtime mode on the tokenless side; the comparator pipeline on headroom.
+    mode: &'static str,
+    /// Which entry produced the row (PostTool, PreTool path, explicit RTK, comparator).
+    entry_kind: &'static str,
+    /// 生产入口的处置、恢复形态、算子与 Stash 原文；仅 tokenless 侧。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<runtime_side::EntryEvidence>,
+    /// Headroom CCR 卸载条目（hash → 原文）；仅 headroom 侧。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    headroom_ccr: Vec<headroom_side::CcrEntry>,
+    headroom_warnings: Vec<String>,
     tokens_before: usize,
     tokens_after: usize,
     /// headroom's self-reported token counts, kept as cross-check evidence
@@ -209,18 +247,22 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("reports"));
 
-    let mut degradations: Vec<String> = Vec::new();
+    let mut degradations = opts.mode.configuration_notes();
 
     // --- toolchain discovery -------------------------------------------
-    let mut worker = match spawn_worker(&l2_dir) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            eprintln!("[l2] headroom degraded: {e}");
-            degradations.push(format!("headroom side skipped: {e}"));
-            None
+    let mut worker = if opts.tokenless_only {
+        None
+    } else {
+        match spawn_worker(&l2_dir) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("[l2] headroom degraded: {e}");
+                degradations.push(format!("headroom side skipped: {e}"));
+                None
+            }
         }
     };
-    let tokenless_bin = match rtk_side::locate_tokenless() {
+    let rtk_bin = match rtk_side::locate_tokenless() {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("[l2] rtk degraded: {e}");
@@ -228,8 +270,15 @@ fn main() -> Result<()> {
             None
         }
     };
-    let probe_client = if opts.no_probe {
-        degradations.push("semantic probe disabled by --no-probe".to_string());
+    let probe_client = if opts.tokenless_only || opts.no_probe {
+        degradations.push(
+            if opts.tokenless_only {
+                "semantic probe disabled by --tokenless-only"
+            } else {
+                "semantic probe disabled by --no-probe"
+            }
+            .to_string(),
+        );
         None
     } else {
         match probe::ProbeClient::new(&l2_dir, opts.model.as_deref()) {
@@ -245,17 +294,28 @@ fn main() -> Result<()> {
 
     // --- per-category collection ----------------------------------------
     let command_specs = samples::load_command_specs(&l2_dir)?;
+    // RTK keeps its rewrite receipts here; one directory per run keeps runs apart.
+    let rtk_data_dir = tempfile::Builder::new()
+        .prefix("l2-rtk-data-")
+        .tempdir()
+        .context("cannot create private RTK receipt directory")?;
     let mut collected: Vec<CategoryData> = Vec::new();
     for &category in &opts.categories {
-        eprintln!("[l2] collecting category {category}");
+        eprintln!(
+            "[l2] collecting category {category} (mode {})",
+            opts.mode.name()
+        );
         let data = if category.is_dynamic() {
             collect_dynamic(
                 category,
                 &command_specs,
                 &repo_root,
-                tokenless_bin.as_deref(),
+                rtk_bin.as_deref().map(|bin| (bin, rtk_data_dir.path())),
                 worker.as_mut(),
-                opts.n,
+                Collection {
+                    fixed_n: opts.n,
+                    mode: opts.mode,
+                },
                 &mut degradations,
             )?
         } else {
@@ -263,7 +323,10 @@ fn main() -> Result<()> {
                 category,
                 &l2_dir,
                 worker.as_mut(),
-                opts.n,
+                Collection {
+                    fixed_n: opts.n,
+                    mode: opts.mode,
+                },
                 &mut degradations,
             )?
         };
@@ -301,15 +364,9 @@ fn main() -> Result<()> {
             category: data.category,
             // Withhold the gap outright when the sides were fed different
             // bytes: a number here would be read as a head-to-head result.
-            compression_gap: if data.category.has_symmetric_inputs() {
-                compression_gap(&data.tokenless, &data.headroom)
-            } else {
-                None
-            },
-            input_asymmetry: data
-                .category
-                .input_asymmetry_reason()
-                .map(|s| s.to_string()),
+            compression_gap: compression_gap(&data.tokenless, &data.headroom),
+            input_asymmetry: data.tokenless.measures.iter().any(is_explicit_entry).then(||
+                "explicit RTK entry measurements are excluded from headline aggregates and paired gaps; their actual inputs and entry conditions remain in measurements.json".to_owned()),
             tokenless,
             headroom,
         });
@@ -329,7 +386,11 @@ fn main() -> Result<()> {
             let mut asymmetric: Vec<String> = task
                 .steps
                 .iter()
-                .filter(|s| !s.category.has_symmetric_inputs())
+                .filter(|step| {
+                    categories.iter().any(|category| {
+                        category.category == step.category && category.input_asymmetry.is_some()
+                    })
+                })
                 .map(|s| s.category.name().to_string())
                 .collect();
             asymmetric.sort();
@@ -352,14 +413,16 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|w| w.provenance().clone())
         .unwrap_or_default();
-    // rtk provenance: tokenless lives at <root>/target/release/tokenless and
-    // links the RTK checkout at <root>/third_party/rtk. Recorded because that
-    // tree is a pinned clone kept out of version control — without it a run
-    // reads no rtk revision at all.
-    let (rtk_revision, rtk_dirty) = match tokenless_bin.as_deref() {
+    // rtk provenance: the binary lives at <rtk>/target/release/rtk, so its
+    // source tree is three levels up. Recorded because that tree is a pinned
+    // clone kept out of version control — without it a run reads no rtk revision
+    // at all.
+    let (rtk_revision, rtk_dirty) = match rtk_bin.as_deref() {
         Some(bin) => rtk_provenance(bin),
         None => (None, None),
     };
+    degradations.sort();
+    degradations.dedup();
     let report = Report {
         summary: RunSummary {
             date: chrono::Utc::now().to_rfc3339(),
@@ -372,19 +435,117 @@ fn main() -> Result<()> {
             rtk_revision,
             rtk_dirty,
             platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+            mode: opts.mode,
+            resolved_entry_options: opts
+                .mode
+                .resolved_options(rtk_bin.as_deref().map(|bin| (bin, rtk_data_dir.path()))),
             headroom_available: worker.is_some(),
-            rtk_available: tokenless_bin.is_some(),
+            rtk_available: rtk_bin.is_some(),
             probe_model: probe_client.as_ref().map(|c| c.model().to_string()),
             degradations,
         },
         categories,
         tasks,
     };
-    report.write(&report_dir)?;
+    std::fs::create_dir_all(&report_dir)?;
+    write_measurements(
+        &report_dir.join("measurements.json"),
+        &collected,
+        &report.summary.resolved_entry_options,
+    )?;
+    if opts.tokenless_only {
+        report.write_tokenless(&report_dir)?;
+    } else {
+        report.write(&report_dir)?;
+    }
     println!("report written to {}", report_dir.display());
     for finding in report.quality_gate() {
         println!("quality-gate: {finding}");
     }
+    Ok(())
+}
+
+struct MeasurementRows<'a>(&'a [CategoryData]);
+
+impl Serialize for MeasurementRows<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(None)?;
+        for data in self.0 {
+            for (side, series) in [("tokenless", &data.tokenless), ("headroom", &data.headroom)] {
+                for measure in &series.measures {
+                    let mut row =
+                        serde_json::to_value(measure).map_err(serde::ser::Error::custom)?;
+                    let object = row.as_object_mut().ok_or_else(|| {
+                        serde::ser::Error::custom("measurement must serialize as an object")
+                    })?;
+                    object.remove("input");
+                    object.remove("output");
+                    object.insert("input_ref".into(), measure.payload_hash.clone().into());
+                    object.insert("output_ref".into(), measure.output_hash.clone().into());
+                    if let Some(stash) = row
+                        .pointer_mut("/entry/stash")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for entry in stash {
+                            if let Some(object) = entry.as_object_mut()
+                                && let Some(original) = object.remove("original")
+                                && let Some(text) = original.as_str()
+                            {
+                                object.insert("original_ref".into(), payload_hash(text).into());
+                            }
+                        }
+                    }
+                    let status = if measure.tokens_before == 0 {
+                        "empty-input/control-excluded-from-efficacy"
+                    } else if measure.retention_total == 0 {
+                        "retention-not-measured"
+                    } else {
+                        "measured"
+                    };
+                    sequence.serialize_element(&serde_json::json!({
+                        "category": data.category, "side": side, "mode": measure.mode,
+                        "entry_kind": measure.entry_kind, "headline_tokenizer": "o200k_base",
+                        "billing_tokens": null, "runtime_final_acceptance_measured": side == "tokenless",
+                        "measurement_status": status, "row": row,
+                    }))?;
+                }
+            }
+        }
+        sequence.end()
+    }
+}
+
+fn write_measurements(
+    path: &Path,
+    collected: &[CategoryData],
+    options: &serde_json::Value,
+) -> Result<()> {
+    let mut texts = BTreeMap::new();
+    for data in collected {
+        for series in [&data.tokenless, &data.headroom] {
+            for measure in &series.measures {
+                texts.insert(measure.payload_hash.clone(), measure.input.as_str());
+                texts.insert(measure.output_hash.clone(), measure.output.as_str());
+                if let Some(entry) = &measure.entry {
+                    for stash in &entry.stash {
+                        texts.insert(payload_hash(&stash.original), stash.original.as_str());
+                    }
+                }
+            }
+        }
+    }
+    let mut writer = BufWriter::new(File::create(path)?);
+    {
+        let mut serializer = serde_json::Serializer::pretty(&mut writer);
+        let mut object = serializer.serialize_map(Some(5))?;
+        object.serialize_entry("schema_version", &2)?;
+        object.serialize_entry("hash_algorithm", "sha256")?;
+        object.serialize_entry("resolved_entry_options", options)?;
+        object.serialize_entry("text_store", &texts)?;
+        object.serialize_entry("rows", &MeasurementRows(collected))?;
+        SerializeMap::end(object)?;
+    }
+    writer.flush()?;
     Ok(())
 }
 
@@ -394,19 +555,29 @@ fn spawn_worker(l2_dir: &Path) -> Result<headroom_side::HeadroomWorker, L2Error>
     headroom_side::HeadroomWorker::spawn(&python, &script)
 }
 
-/// Static categories (json/code): both sides compress the committed sample
-/// text; repetitions re-measure latency while compression output stays
-/// deterministic.
+/// Collection settings shared by the static and dynamic paths.
+#[derive(Clone, Copy)]
+struct Collection {
+    fixed_n: Option<usize>,
+    mode: Mode,
+}
+
+/// Static categories: both sides compress the committed sample text;
+/// repetitions re-measure latency while compression output stays deterministic.
 fn collect_static(
     category: Category,
     l2_dir: &Path,
     mut worker: Option<&mut headroom_side::HeadroomWorker>,
-    fixed_n: Option<usize>,
+    settings: Collection,
     degradations: &mut Vec<String>,
 ) -> Result<CategoryData> {
+    let fixed_n = settings.fixed_n;
     let records = match category {
         Category::Json => samples::load_json_samples(l2_dir)?,
         Category::Code => samples::load_code_samples(l2_dir)?,
+        Category::BuildLog | Category::Tabular | Category::Search | Category::Html => {
+            samples::load_domain_samples(l2_dir, category)?
+        }
         // collect_static is only dispatched for static categories.
         _ => unreachable!("collect_static called with dynamic category {category}"),
     };
@@ -423,11 +594,14 @@ fn collect_static(
     while rep < target {
         let mut rep_latency = Vec::new();
         for record in &records {
-            match measure_tokenless(record) {
-                Ok((mut m, original, compressed)) => {
+            match measure_tokenless(record, settings.mode) {
+                Ok(mut m) => {
                     m.rep = rep;
                     rep_latency.push(m.latency_s);
-                    data.tokenless.record(m, &original, &compressed);
+                    let output = m.output.clone();
+                    data.tokenless.record(m, &record.content, &output);
+                    data.tokenless
+                        .record_probe_ground_truth(&record.id, &record.ground_truth);
                 }
                 Err(e) => {
                     degradations.push(format!("tokenless {category}/{} rep {rep}: {e}", record.id))
@@ -443,7 +617,10 @@ fn collect_static(
                 ) {
                     Ok((mut m, original, compressed)) => {
                         m.rep = rep;
+                        degradations.extend(m.headroom_warnings.iter().cloned());
                         data.headroom.record(m, &original, &compressed);
+                        data.headroom
+                            .record_probe_ground_truth(&record.id, &record.ground_truth);
                     }
                     Err(e) => degradations
                         .push(format!("headroom {category}/{} rep {rep}: {e}", record.id)),
@@ -465,18 +642,19 @@ fn collect_static(
     Ok(data)
 }
 
-/// Dynamic categories (command/grep/diff): each repetition executes the
-/// paired raw + rtk-wrapped command; ground truth is extracted per rep from
-/// the raw output of that very run.
+/// Dynamic categories (command/grep/diff): each repetition executes the raw
+/// command (the baseline and headroom input) and then the production path for
+/// the same command; ground truth is extracted per rep from that raw output.
 fn collect_dynamic(
     category: Category,
     specs: &[CommandSpec],
     repo_root: &Path,
-    tokenless_bin: Option<&Path>,
+    rtk: Option<(&Path, &Path)>,
     mut worker: Option<&mut headroom_side::HeadroomWorker>,
-    fixed_n: Option<usize>,
+    settings: Collection,
     degradations: &mut Vec<String>,
 ) -> Result<CategoryData> {
+    let fixed_n = settings.fixed_n;
     let specs: Vec<&CommandSpec> = specs
         .iter()
         .filter(|s| s.category == category.name())
@@ -491,6 +669,11 @@ fn collect_dynamic(
         degradations.push(format!("no command specs found for category {category}"));
         return Ok(data);
     }
+    if rtk.is_none() {
+        degradations.push(format!(
+            "{category}: tokenless production path skipped (PreTool needs rtk)"
+        ));
+    }
 
     let mut rep = 0usize;
     let mut target = fixed_n.unwrap_or(stats::PILOT_N);
@@ -498,28 +681,32 @@ fn collect_dynamic(
     while rep < target {
         let mut rep_latency = Vec::new();
         for spec in &specs {
-            let cwd = repo_root.join(&spec.cwd_rel);
-            let (raw_text, rtk_result) = match tokenless_bin {
-                Some(bin) => {
-                    match rtk_side::run_paired(bin, &spec.argv, spec.rtk_invocation(), &cwd) {
-                        Ok(pair) => (pair.raw_text.clone(), Some(pair)),
-                        Err(e) => {
-                            degradations.push(format!("{category}/{} rep {rep}: {e}", spec.id));
-                            continue;
-                        }
-                    }
+            if let Some(reason) = &spec.unavailable {
+                if rep == 0 {
+                    degradations.push(format!("{category}/{} skipped: {reason}", spec.id));
                 }
-                // Without rtk the raw command still runs so the headroom
-                // side keeps its full sample set.
-                None => match run_raw(&spec.argv, &cwd) {
-                    Ok(text) => (text, None),
-                    Err(e) => {
-                        degradations.push(format!("{category}/{} rep {rep}: {e}", spec.id));
-                        continue;
-                    }
-                },
+                continue;
+            }
+            let cwd = repo_root.join(&spec.cwd_rel);
+            let prepared = match prepare_fresh_dir(spec) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    degradations.push(format!("{category}/{} rep {rep}: {error}", spec.id));
+                    continue;
+                }
             };
-            let ground_truth = samples::extract_dynamic_ground_truth(category, &raw_text)?;
+            let spec = &prepared.spec;
+            let raw = match run_capture(&spec.argv, &cwd, spec.expect_failure) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    degradations.push(format!("{category}/{} rep {rep}: {e}", spec.id));
+                    continue;
+                }
+            };
+            let ground_truth = samples::extract_dynamic_ground_truth(category, &raw.text)?;
+            if ground_truth.is_empty() && rep == 0 {
+                degradations.push(format!("{category}/{}: no extractable retention facts; retention is not measured, not 100%", spec.id));
+            }
             // For diff, register each sample's own content facts so the probe
             // asks about what THIS sample changed. The facts come from the raw
             // (uncompressed) output, so a sample that loses everything under
@@ -533,22 +720,35 @@ fn collect_dynamic(
                     .record_probe_ground_truth(&spec.id, &ground_truth);
             }
 
-            if let Some(pair) = rtk_result {
-                match measure_rtk(&spec.id, &pair, &ground_truth) {
+            if let Some(rtk) = rtk {
+                match measure_command(
+                    category,
+                    spec,
+                    &raw,
+                    &cwd,
+                    rtk,
+                    settings.mode,
+                    rep,
+                    &ground_truth,
+                ) {
                     Ok(mut m) => {
                         m.rep = rep;
                         rep_latency.push(m.latency_s);
-                        data.tokenless.record(m, &pair.raw_text, &pair.rtk_text);
+                        let output = m.output.clone();
+                        data.tokenless.record(m, &raw.text, &output);
                     }
-                    Err(e) => {
-                        degradations.push(format!("rtk {category}/{} rep {rep}: {e}", spec.id))
-                    }
+                    Err(e) => degradations
+                        .push(format!("tokenless {category}/{} rep {rep}: {e}", spec.id)),
                 }
             }
             if let Some(w) = worker.as_deref_mut() {
-                match measure_headroom(w, category, &spec.id, &raw_text, &ground_truth) {
+                match measure_headroom(w, category, &spec.id, &raw.text, &ground_truth) {
                     Ok((mut m, original, compressed)) => {
                         m.rep = rep;
+                        if spec.is_explicit_rtk() {
+                            m.entry_kind = "explicit RTK comparator input";
+                        }
+                        degradations.extend(m.headroom_warnings.iter().cloned());
                         data.headroom.record(m, &original, &compressed);
                     }
                     Err(e) => {
@@ -569,41 +769,187 @@ fn collect_dynamic(
     Ok(data)
 }
 
-fn run_raw(argv: &[String], cwd: &Path) -> Result<String, L2Error> {
+struct PreparedCommand {
+    spec: CommandSpec,
+    _directory: Option<tempfile::TempDir>,
+}
+
+fn prepare_fresh_dir(spec: &CommandSpec) -> Result<PreparedCommand, L2Error> {
+    let mut prepared = PreparedCommand {
+        spec: spec.clone(),
+        _directory: None,
+    };
+    let Some(leaf) = spec.fresh_dir.as_deref() else {
+        if spec.argv.iter().any(|word| word.contains("{{fresh_dir}}")) {
+            return Err(L2Error::InvalidSample(format!(
+                "{}: fresh_dir placeholder without a leaf",
+                spec.id
+            )));
+        }
+        return Ok(prepared);
+    };
+    samples::validate_fresh_leaf(leaf)?;
+    if !spec.argv.iter().any(|word| word == "{{fresh_dir}}") {
+        return Err(L2Error::InvalidSample(format!(
+            "{}: fresh_dir requires an argv placeholder",
+            spec.id
+        )));
+    }
+    let directory = tempfile::Builder::new().prefix("l2-fixture-").tempdir()?;
+    let path = directory.path().join(leaf);
+    std::fs::create_dir(&path)?;
+    for word in prepared
+        .spec
+        .argv
+        .iter_mut()
+        .chain(prepared.spec.rtk_argv.iter_mut().flatten())
+    {
+        if word == "{{fresh_dir}}" {
+            *word = path.to_string_lossy().into_owned();
+        }
+    }
+    prepared._directory = Some(directory);
+    Ok(prepared)
+}
+
+/// Runs `argv` without a shell, capturing stdout then stderr as the agent sees them.
+fn run_capture(argv: &[String], cwd: &Path, expect_failure: bool) -> Result<RawCapture, L2Error> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| L2Error::Command("empty argv".to_string()))?;
+    let start = Instant::now();
     let out = Command::new(program)
         .args(args)
         .current_dir(cwd)
         .output()
         .map_err(|e| L2Error::Command(format!("spawn {program:?} failed: {e}")))?;
-    if !out.status.success() {
+    let wall_s = start.elapsed().as_secs_f64();
+    if out.status.success() == expect_failure {
         return Err(L2Error::Command(format!(
-            "raw command {argv:?} exited with {}",
-            out.status
+            "raw command {argv:?} exited with {} (expect_failure={expect_failure}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    // Same merge as the rtk-wrapped path: a missing newline between stdout and
-    // stderr would fuse two lines and defeat the line-anchored ground-truth
-    // regexes, making this degraded path disagree with the paired path.
-    Ok(rtk_side::merge_streams(&out.stdout, &out.stderr))
+    // Same merge as every other capture path: a missing newline between stdout
+    // and stderr would fuse two lines and defeat the line-anchored regexes.
+    Ok(RawCapture {
+        text: rtk_side::merge_streams(&out.stdout, &out.stderr),
+        wall_s,
+        success: out.status.success(),
+    })
 }
 
-fn measure_tokenless(record: &SampleRecord) -> Result<(Measure, String, String), L2Error> {
-    let before_wire = tokenless_side::wire_before(record.category, &record.content)?;
-    let output = tokenless_side::compress(record.category, &record.content)?;
-    let before = tokenizer::count(&before_wire)?;
-    let after = tokenizer::count(&output.compressed)?;
-    let ret = retention::check(&record.ground_truth, &output.retention_text)?;
-    let measure = Measure {
-        sample_id: record.id.clone(),
+/// Runs a host command line through `sh -c`, as an agent's shell tool would.
+fn run_shell(command: &str, cwd: &Path) -> Result<RawCapture, L2Error> {
+    let start = Instant::now();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| L2Error::Command(format!("spawn sh -c {command:?} failed: {e}")))?;
+    Ok(RawCapture {
+        text: rtk_side::merge_streams(&out.stdout, &out.stderr),
+        wall_s: start.elapsed().as_secs_f64(),
+        success: out.status.success(),
+    })
+}
+
+/// One command through the production entry. An explicit RTK entry is the
+/// command the host actually runs, so its own output — not the unfiltered
+/// baseline — is what PreTool would leave in place.
+#[allow(clippy::too_many_arguments)]
+fn measure_command(
+    category: Category,
+    spec: &CommandSpec,
+    raw: &RawCapture,
+    cwd: &Path,
+    rtk: (&Path, &Path),
+    mode: Mode,
+    rep: usize,
+    ground_truth: &[GroundTruth],
+) -> Result<Measure, L2Error> {
+    let host_command = spec.host_command(rtk.0);
+    let (native, explicit_overhead_s, entry_kind) = if spec.is_explicit_rtk() {
+        let explicit = run_shell(&host_command, cwd)?;
+        let overhead = (explicit.wall_s - raw.wall_s).max(0.0);
+        (
+            explicit,
+            overhead,
+            "explicit RTK entry → production PostTool",
+        )
+    } else {
+        (
+            raw.clone(),
+            0.0,
+            "production PreTool → execution → PostTool",
+        )
+    };
+    let call_id = format!("{}-{rep}-{}", spec.id, mode.name());
+    let run = runtime_side::run_command(&host_command, &native, cwd, rtk, mode, &call_id)?;
+    let latency_s = run.latency_s + explicit_overhead_s;
+    entry_measure(
+        category,
+        &spec.id,
+        &raw.text,
+        run,
+        ground_truth,
+        latency_s,
+        entry_kind,
+    )
+}
+
+fn measure_tokenless(record: &SampleRecord, mode: Mode) -> Result<Measure, L2Error> {
+    let run = runtime_side::post_tool_static(record.category, &record.content, mode)?;
+    let latency_s = run.latency_s;
+    entry_measure(
+        record.category,
+        &record.id,
+        &record.content,
+        run,
+        &record.ground_truth,
+        latency_s,
+        "production PostTool",
+    )
+}
+
+/// Builds the tokenless row from one production-entry run; token counts and
+/// retention are taken on everything the model receives.
+fn entry_measure(
+    category: Category,
+    sample_id: &str,
+    input: &str,
+    run: runtime_side::EntryRun,
+    ground_truth: &[GroundTruth],
+    latency_s: f64,
+    entry_kind: &'static str,
+) -> Result<Measure, L2Error> {
+    let before = tokenizer::count(input)?;
+    let after = tokenizer::count(&run.model_visible)?;
+    let ret = if category == Category::Grep {
+        retention::check_search(ground_truth, &run.model_visible)?
+    } else {
+        retention::check(ground_truth, &run.model_visible)?
+    };
+    Ok(Measure {
+        sample_id: sample_id.to_string(),
         rep: 0,
-        payload_hash: payload_hash(&before_wire),
+        payload_hash: payload_hash(input),
+        output_hash: payload_hash(&run.model_visible),
+        rejected_unrecoverable: run.rejected_unrecoverable(),
+        input: input.to_owned(),
+        output: run.model_visible.clone(),
+        ground_truth: ground_truth.to_vec(),
         compression_rate: compression_rate(before.o200k, after.o200k),
         compression_rate_cl100k: compression_rate(before.cl100k, after.cl100k),
-        latency_s: output.latency_s,
-        latency_basis: tokenless_side::LATENCY_BASIS,
+        latency_s,
+        latency_basis: runtime_side::LATENCY_BASIS,
+        mode: run.evidence.mode.name(),
+        entry_kind,
+        entry: Some(run.evidence),
+        headroom_ccr: Vec::new(),
+        headroom_warnings: Vec::new(),
         tokens_before: before.o200k,
         tokens_after: after.o200k,
         hr_tokens_before: None,
@@ -611,13 +957,12 @@ fn measure_tokenless(record: &SampleRecord) -> Result<(Measure, String, String),
         retention_passed: ret.passed,
         retention_total: ret.total,
         retention_failures: ret.failures,
-    };
-    Ok((measure, before_wire, output.compressed))
+    })
 }
 
 fn measure_headroom(
     worker: &mut headroom_side::HeadroomWorker,
-    _category: Category,
+    category: Category,
     sample_id: &str,
     content: &str,
     ground_truth: &[GroundTruth],
@@ -627,15 +972,29 @@ fn measure_headroom(
     let compressed = resp.compressed.unwrap_or_default();
     let before = tokenizer::count(content)?;
     let after = tokenizer::count(&compressed)?;
-    let ret = retention::check(ground_truth, &compressed)?;
+    let ret = if category == Category::Grep {
+        retention::check_search(ground_truth, &compressed)?
+    } else {
+        retention::check(ground_truth, &compressed)?
+    };
     let measure = Measure {
         sample_id: sample_id.to_string(),
         rep: 0,
         payload_hash: payload_hash(content),
+        output_hash: payload_hash(&compressed),
+        rejected_unrecoverable: false,
+        input: content.to_owned(),
+        output: compressed.clone(),
+        ground_truth: ground_truth.to_vec(),
         compression_rate: compression_rate(before.o200k, after.o200k),
         compression_rate_cl100k: compression_rate(before.cl100k, after.cl100k),
         latency_s: resp.wall_time_s.unwrap_or(0.0),
         latency_basis: headroom_side::LATENCY_BASIS,
+        mode: "headroom ContentRouter worker",
+        entry_kind: "headroom ContentRouter worker",
+        entry: None,
+        headroom_ccr: resp.ccr.clone(),
+        headroom_warnings: resp.warnings.clone(),
         tokens_before: before.o200k,
         tokens_after: after.o200k,
         hr_tokens_before: resp.hr_tokens_before,
@@ -645,32 +1004,6 @@ fn measure_headroom(
         retention_failures: ret.failures,
     };
     Ok((measure, content.to_string(), compressed))
-}
-
-fn measure_rtk(
-    sample_id: &str,
-    pair: &rtk_side::PairedRun,
-    ground_truth: &[GroundTruth],
-) -> Result<Measure, L2Error> {
-    let before = tokenizer::count(&pair.raw_text)?;
-    let after = tokenizer::count(&pair.rtk_text)?;
-    let ret = retention::check(ground_truth, &pair.rtk_text)?;
-    Ok(Measure {
-        sample_id: sample_id.to_string(),
-        rep: 0,
-        payload_hash: payload_hash(&pair.raw_text),
-        compression_rate: compression_rate(before.o200k, after.o200k),
-        compression_rate_cl100k: compression_rate(before.cl100k, after.cl100k),
-        latency_s: pair.rtk_overhead_s(),
-        latency_basis: rtk_side::LATENCY_BASIS,
-        tokens_before: before.o200k,
-        tokens_after: after.o200k,
-        hr_tokens_before: None,
-        hr_tokens_after: None,
-        retention_passed: ret.passed,
-        retention_total: ret.total,
-        retention_failures: ret.failures,
-    })
 }
 
 /// Hex SHA-256 of a payload, used as the independence key for statistics.
@@ -697,11 +1030,16 @@ fn payload_hash(payload: &str) -> String {
 /// Latency deliberately does **not** go through this filter — it varies
 /// run-to-run even when the payload does not, which is the whole reason the
 /// repetitions exist.
+fn is_explicit_entry(measure: &Measure) -> bool {
+    measure.entry_kind.starts_with("explicit RTK")
+}
+
 fn independent_measures(series: &SideSeries) -> Vec<&Measure> {
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
     series
         .measures
         .iter()
+        .filter(|m| m.tokens_before > 0 && !is_explicit_entry(m))
         .filter(|m| seen.insert((m.sample_id.as_str(), m.payload_hash.as_str())))
         .collect()
 }
@@ -716,11 +1054,15 @@ fn aggregate_side(
         return None;
     }
     let obs = independent_measures(series);
+    if obs.is_empty() {
+        return None;
+    }
     let rates: Vec<f64> = obs.iter().map(|m| m.compression_rate).collect();
     let rates_cl100k: Vec<f64> = obs.iter().map(|m| m.compression_rate_cl100k).collect();
     let latencies_ms: Vec<f64> = series
         .measures
         .iter()
+        .filter(|measure| !is_explicit_entry(measure))
         .map(|m| m.latency_s * 1000.0)
         .collect();
     let retention_passed: usize = obs.iter().map(|m| m.retention_passed).sum();
@@ -738,47 +1080,53 @@ fn aggregate_side(
     // cannot be offset by a question that compression made answerable.
     let mut probed_samples = 0usize;
     let mut unprobed_samples = 0usize;
-    let semantic_score = match probe_client {
-        Some(client) => {
-            let mut correct_unc = 0usize;
-            let mut retained = 0usize;
-            let mut asked_any = false;
-            for (sample_id, (original, compressed)) in &series.probe_texts {
-                // Per-sample questions where the sample carries its own content
-                // facts (diff); otherwise the category-global asset questions.
-                // Building diff questions per sample is what stops a sample that
-                // lost everything from being dropped for lacking another
-                // sample's facts.
-                let per_sample = series
-                    .probe_ground_truth
-                    .get(sample_id)
-                    .map(|gt| samples::diff_probe_questions(gt));
-                let qs: &[ProbeQuestion] = match (&per_sample, questions) {
-                    (Some(q), _) => q,
-                    (None, Some(q)) => q,
-                    (None, None) => {
+    let semantic_score =
+        match probe_client {
+            Some(client) => {
+                let mut correct_unc = 0usize;
+                let mut retained = 0usize;
+                let mut asked_any = false;
+                for (sample_id, (original, compressed)) in &series.probe_texts {
+                    if series.measures.iter().any(|measure| {
+                        measure.sample_id == *sample_id && is_explicit_entry(measure)
+                    }) {
+                        continue;
+                    }
+                    // Per-sample questions where the sample carries its own content
+                    // facts (diff); otherwise the category-global asset questions.
+                    // Building diff questions per sample is what stops a sample that
+                    // lost everything from being dropped for lacking another
+                    // sample's facts.
+                    let per_sample = series
+                        .probe_ground_truth
+                        .get(sample_id)
+                        .map(|gt| samples::diff_probe_questions(gt));
+                    let qs: &[ProbeQuestion] = match (&per_sample, questions) {
+                        (Some(q), _) => q,
+                        (None, Some(q)) => q,
+                        (None, None) => {
+                            unprobed_samples += 1;
+                            continue;
+                        }
+                    };
+                    if qs.is_empty() {
                         unprobed_samples += 1;
                         continue;
                     }
-                };
-                if qs.is_empty() {
-                    unprobed_samples += 1;
-                    continue;
+                    asked_any = true;
+                    probed_samples += 1;
+                    let score = client.score(qs, original, compressed);
+                    correct_unc += score.correct_uncompressed;
+                    retained += score.retained;
                 }
-                asked_any = true;
-                probed_samples += 1;
-                let score = client.score(qs, original, compressed);
-                correct_unc += score.correct_uncompressed;
-                retained += score.retained;
+                if !asked_any || correct_unc == 0 {
+                    None
+                } else {
+                    Some(retained as f64 / correct_unc as f64)
+                }
             }
-            if !asked_any || correct_unc == 0 {
-                None
-            } else {
-                Some(retained as f64 / correct_unc as f64)
-            }
-        }
-        None => None,
-    };
+            None => None,
+        };
 
     // headroom self-reported counts, averaged as cross-check evidence for
     // the tiktoken headline numbers (None on sides that never report them).
@@ -857,6 +1205,13 @@ fn compression_gap(tokenless: &SideSeries, headroom: &SideSeries) -> Option<GapS
         let Some(tl) = tl_by_rep.get(&(hr.sample_id.as_str(), hr.rep)) else {
             continue;
         };
+        if tl.tokens_before == 0
+            || hr.tokens_before == 0
+            || is_explicit_entry(tl)
+            || tl.payload_hash != hr.payload_hash
+        {
+            continue;
+        }
         let key = (
             hr.sample_id.as_str(),
             tl.payload_hash.as_str(),
@@ -887,7 +1242,7 @@ where
         let series = pick(data);
         // Per-sample means over all repetitions.
         let mut sums: HashMap<&str, (f64, f64, f64, usize)> = HashMap::new();
-        for m in &series.measures {
+        for m in series.measures.iter().filter(|m| !is_explicit_entry(m)) {
             let entry = sums
                 .entry(m.sample_id.as_str())
                 .or_insert((0.0, 0.0, 0.0, 0));
@@ -986,23 +1341,18 @@ fn untracked_build_inputs(repo_root: &Path) -> Option<usize> {
     )
 }
 
-/// Revision and tracked-dirty state of the RTK checkout a `tokenless` binary
-/// links, or `(None, None)` when it cannot be resolved.
+/// 只归属 Tokenless 源码构建旁的内嵌 RTK checkout；安装版无法证明来源时保持未知。
 ///
-/// Resolves `<root>/target/release/tokenless` back to `<root>` (three parents)
-/// and queries git in `<root>/third_party/rtk`. A tokenless outside a Tokenless
-/// build tree, such as one on `PATH`, yields `None` rather than a wrong
-/// attribution. `safe.directory` is passed per-invocation because the tree is
-/// rsynced in and owned by another uid.
-fn rtk_provenance(tokenless_bin: &Path) -> (Option<String>, Option<bool>) {
-    let Some(root) = tokenless_bin
+/// RTK 是路径依赖，不能把 Tokenless 主仓库的 revision 当作 RTK revision。
+fn rtk_provenance(rtk_bin: &Path) -> (Option<String>, Option<bool>) {
+    let Some(src) = rtk_bin
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
     else {
         return (None, None);
     };
-    let src = root.join("third_party/rtk");
+    let src = src.join("third_party/rtk");
     if !src.join(".git").exists() {
         return (None, None);
     }
@@ -1036,10 +1386,20 @@ mod tests {
             sample_id: sample_id.to_string(),
             rep,
             payload_hash: payload_hash(payload),
+            output_hash: payload_hash("test-output"),
+            rejected_unrecoverable: false,
+            input: payload.to_owned(),
+            output: "test-output".into(),
+            ground_truth: Vec::new(),
             compression_rate: rate,
             compression_rate_cl100k: rate,
             latency_s: 0.001,
             latency_basis: "in-process",
+            mode: "default",
+            entry_kind: "production PostTool",
+            entry: None,
+            headroom_ccr: Vec::new(),
+            headroom_warnings: Vec::new(),
             tokens_before: 100,
             tokens_after: 50,
             hr_tokens_before: None,
@@ -1048,6 +1408,22 @@ mod tests {
             retention_total: 11,
             retention_failures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn empty_input_is_a_control_not_an_efficacy_observation() {
+        let mut series = SideSeries::default();
+        let mut row = measure("empty", 0, 0.0);
+        row.tokens_before = 0;
+        row.tokens_after = 0;
+        row.retention_passed = 0;
+        row.retention_total = 0;
+        series.record(row, "", "");
+        assert!(independent_measures(&series).is_empty());
+        assert!(aggregate_side(&series, 1, None, None).is_none());
+        let mut other = SideSeries::default();
+        other.record(measure("empty", 0, 0.5), "not-empty", "output");
+        assert!(compression_gap(&series, &other).is_none());
     }
 
     /// Two samples repeated five times each with identical payloads. Only the 2
@@ -1098,21 +1474,41 @@ mod tests {
         assert_eq!(independent_measures(&series).len(), 5);
     }
 
-    /// Only the non-JSON static category is input-asymmetric: tokenless needs a
-    /// JSON envelope there while headroom sees raw text.
     #[test]
-    fn only_code_is_input_asymmetric() {
-        assert!(!Category::Code.has_symmetric_inputs());
-        assert!(Category::Code.input_asymmetry_reason().is_some());
-        for c in [
-            Category::Json,
-            Category::Command,
-            Category::Grep,
-            Category::Diff,
-        ] {
-            assert!(c.has_symmetric_inputs(), "{c} should be comparable");
-            assert!(c.input_asymmetry_reason().is_none());
+    fn explicit_entries_do_not_pollute_default_aggregates_or_pairs() {
+        let mut tl = SideSeries::default();
+        let mut hr = SideSeries::default();
+        let mut explicit = measure("manual", 0, 0.99);
+        explicit.entry_kind = "explicit RTK entry → production PostTool";
+        tl.record(explicit, "input", "output");
+        hr.record(measure("manual", 0, 0.1), "input", "output");
+        assert!(independent_measures(&tl).is_empty());
+        assert!(aggregate_side(&tl, 1, None, None).is_none());
+        assert!(compression_gap(&tl, &hr).is_none());
+    }
+
+    #[test]
+    fn fresh_directory_refuses_paths_and_keeps_cleanup_owned() {
+        for leaf in ["/tmp/fixture", "../project", ".", "..", "a/b", "a\\b", ""] {
+            assert!(
+                samples::validate_fresh_leaf(leaf).is_err(),
+                "accepted {leaf:?}"
+            );
         }
+        let mut spec: CommandSpec = serde_json::from_value(serde_json::json!({
+            "id": "fixture", "category": "command", "argv": ["echo", "{{fresh_dir}}"],
+            "cwd_rel": ".", "ground_truth_source": "dynamic", "fresh_dir": "fixture"
+        }))
+        .unwrap();
+        let first = prepare_fresh_dir(&spec).unwrap();
+        let second = prepare_fresh_dir(&spec).unwrap();
+        let path = PathBuf::from(&first.spec.argv[1]);
+        assert!(path.is_dir());
+        assert_ne!(first.spec.argv[1], second.spec.argv[1]);
+        drop(first);
+        assert!(!path.exists());
+        spec.fresh_dir = Some("/tmp/l2/../../project".into());
+        assert!(prepare_fresh_dir(&spec).is_err());
     }
 
     /// An intermittent one-side failure must not wipe the whole category gap.
@@ -1126,12 +1522,12 @@ mod tests {
         // sample "a": headroom's rep 0 failed, only rep 1 landed.
         tl.record(measure_with_payload("a", 0, 0.5, "Pa"), "o", "c");
         tl.record(measure_with_payload("a", 1, 0.5, "Pa"), "o", "c");
-        hr.record(measure_with_payload("a", 1, 0.2, "Qa"), "o", "c");
+        hr.record(measure_with_payload("a", 1, 0.2, "Pa"), "o", "c");
         // sample "b": both reps landed on both sides.
         tl.record(measure_with_payload("b", 0, 0.6, "Pb"), "o", "c");
         tl.record(measure_with_payload("b", 1, 0.6, "Pb"), "o", "c");
-        hr.record(measure_with_payload("b", 0, 0.1, "Qb"), "o", "c");
-        hr.record(measure_with_payload("b", 1, 0.1, "Qb"), "o", "c");
+        hr.record(measure_with_payload("b", 0, 0.1, "Pb"), "o", "c");
+        hr.record(measure_with_payload("b", 1, 0.1, "Pb"), "o", "c");
 
         let gap = compression_gap(&tl, &hr).expect("both samples must still pair");
         // One pair per sample after payload-pair dedup: a (rep 1) and b.

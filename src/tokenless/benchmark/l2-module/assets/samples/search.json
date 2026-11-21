@@ -1,0 +1,20 @@
+{
+  "category": "search",
+  "samples": [
+    {
+      "id": "numbered-search-full",
+      "content_lines": ["fixtures/long_repeated_directory/src/service.rs:1:critical_fact_01", "fixtures/long_repeated_directory/src/service.rs:2:critical_fact_02", "fixtures/long_repeated_directory/src/service.rs:3:critical_fact_03", "fixtures/long_repeated_directory/src/service.rs:4:critical_fact_04", "fixtures/long_repeated_directory/src/service.rs:5:critical_fact_05", "fixtures/long_repeated_directory/src/service.rs:6:critical_fact_06", "fixtures/long_repeated_directory/src/service.rs:7:critical_fact_07", "fixtures/long_repeated_directory/src/service.rs:8:critical_fact_08"],
+      "ground_truth": ["critical_fact_01", "critical_fact_08", "critical_fact_05", "service.rs"]
+    },
+    {
+      "id": "path-list-full",
+      "content_lines": ["fixtures/long_repeated_directory/src/service_01.rs", "fixtures/long_repeated_directory/src/service_02.rs", "fixtures/long_repeated_directory/src/service_03.rs", "fixtures/long_repeated_directory/src/service_04.rs", "fixtures/long_repeated_directory/src/service_05.rs", "fixtures/long_repeated_directory/src/service_06.rs", "fixtures/long_repeated_directory/src/service_07.rs", "fixtures/long_repeated_directory/src/service_08.rs"],
+      "ground_truth": ["service_01.rs", "service_08.rs", "service_05.rs"]
+    },
+    {
+      "id": "search-unsupported-control",
+      "content_lines": ["ordinary prose is not a numbered search result"],
+      "ground_truth": ["ordinary prose is not a numbered search result"]
+    }
+  ]
+}
