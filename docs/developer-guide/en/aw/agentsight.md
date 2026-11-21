@@ -73,11 +73,30 @@ aw run --config ./aw.yaml --agent qoder
 aw service status --config ./aw.yaml
 ```
 
-Startup reports an observation audit key and source query state. Status exposes
-active observations, native association, source results and explicit gaps. Query
-`ready` means the auth-status contract responded; storage, collection, eBPF and complete coverage remain
-`unknown`. Native session IDs become associated when corroborated callbacks arrive.
-A run with no callbacks can exit successfully with no associated session.
+Startup reports an observation audit key and source query state. In
+`aw service status`, `configured_sources` lists target declarations and
+`observations[].source` describes the connector installed for an active instance.
+Its states are `unknown`, `ready`, `lost`, `unsupported` and `recovered`.
+`ready` and `recovered` report the query transport check. Collection and eBPF
+coverage remain `unknown` until the source supplies capability evidence.
+Native session and call IDs become associated when corroborated callbacks arrive.
+
+For a resident instance, a bounded background probe detects query transport
+loss and recovery. AW discards queued source reads from the lost connection
+and clears the last projection. Fresh native callbacks continue to record
+local metadata, and recovery accepts fresh observations. The instance audit
+contains `runtime.observed`, `runtime.exited` and `coverage.changed` entries.
+
+For an offline view, save each candidate's `SourceCapability` declaration
+to a file and run:
+
+```bash
+aw plan --config ./aw.yaml --agent qoder --source ./native-source.json --source ./sight-source.json
+```
+
+The plan reports Hook coverage gaps and dispatch owners from those declarations.
+A Sight Source can add evidence to a native Hook. Provider steps require an
+executable Source. The plan leaves live readiness unknown.
 
 AW registers pure observation callbacks when an event has no action steps. Where
 actions already exist, their callbacks are reused. Pure observation returns the
@@ -111,8 +130,10 @@ owned daemon with matching configuration to disable observation.
 User-space trajectories can be available without eBPF when the independent
 collector supports the Agent. Query success cannot prove eBPF readiness. AW does
 not install packages, elevate privileges or start/stop AgentSight workers.
-Full capability requirements and loss/recovery policy follow in #7623; public
-incremental audit and consumption follow in #7624 and #7625.
+Mandatory capability admission remains tracked in #7623. Linux AgentSight can
+consume AW's existing public export independently of eBPF. The import uses
+public execution objects, while the instance transition entries are available
+through the AW service audit. [AgentSight import instructions](../../../user-guide/en/agentsight/integrations.md#aw-execution-audit)
 
 The default user-space trajectory collector waits 30 seconds between scans. GET
 reads stored history; querying again immediately does not guarantee fresh data.

@@ -158,6 +158,12 @@ impl Contexts {
         })
     }
 
+    pub(super) fn configured_sources(&self) -> Vec<Value> {
+        self.sources.iter().map(|(target, settings)| {
+            json!({"target":target,"id":settings.source_id,"kind":"sight","mode":settings.mode})
+        }).collect()
+    }
+
     pub(super) fn activate(&self, instance: &str) -> Result<()> {
         self.sessions
             .lock()

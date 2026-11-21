@@ -178,7 +178,10 @@ impl Client {
     }
 
     fn probe_shared(&self, deadline: Instant, remaining: &mut usize) -> Result<Source, Error> {
-        let (_, auth) = self.get(&["api", "auth", "status"], deadline, remaining)?;
+        let (status, auth) = self.get(&["api", "auth", "status"], deadline, remaining)?;
+        if status == 404 {
+            return Err(Error::UnsupportedVersion);
+        }
         match auth.get("auth_enabled").and_then(Value::as_bool) {
             Some(true) => {}
             Some(false) => return Err(Error::Authentication),

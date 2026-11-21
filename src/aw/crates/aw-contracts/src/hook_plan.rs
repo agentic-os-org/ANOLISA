@@ -78,6 +78,9 @@ pub struct ResolvedStepPlan {
     pub step_tools: Vec<String>,
     /// Whether this step uses `native-hook/v1alpha1`.
     pub native: bool,
+    /// Whether the configured step only observes and reports its outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadow: bool,
     /// Unique `source_id` responsible for dispatching this policy step once.
     pub dispatch_owner: String,
 }
@@ -185,6 +188,13 @@ impl ResolvedHookPoint {
             "resolved Hook point has no dispatch owner",
         ))?;
         let dispatch_capability = dispatch_owner.as_capability();
+        let enforcing = self
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| !step.shadow);
+        let first = enforcing.clone().next().map(|(index, _)| index);
+        let last = enforcing.clone().next_back().map(|(index, _)| index);
         let mut seen_steps = BTreeSet::new();
         for (index, step) in self.steps.iter().enumerate() {
             require(
@@ -199,6 +209,14 @@ impl ResolvedHookPoint {
                 step.dispatch_owner == dispatch_owner.source_id,
                 "resolved step dispatch owner does not match the Hook point dispatch owner",
             )?;
+            if step.shadow {
+                require(
+                    !step.native
+                        && step.effects == [HookEffect::Observe]
+                        && step.on_error == FailureAction::Report,
+                    "shadow step requires observe and report",
+                )?;
+            }
             if step.native {
                 require(
                     matches!(self.event.as_str(), "tool.before" | "tool.after"),
@@ -254,19 +272,18 @@ impl ResolvedHookPoint {
             }
             if step.effects.contains(&HookEffect::ReplaceResult) {
                 require(
-                    self.event == "tool.after" && index + 1 == self.steps.len(),
+                    self.event == "tool.after" && Some(index) == last,
                     "result replacement must be the last applicable enabled event step",
                 )?;
             }
             if step.effects.contains(&HookEffect::ReplaceInput) {
                 require(
                     self.event == "tool.before"
-                        && index == 0
+                        && Some(index) == first
                         && step.effects == [HookEffect::ReplaceInput]
-                        && self
-                            .steps
-                            .iter()
-                            .all(|candidate| candidate.on_error == FailureAction::Block),
+                        && enforcing
+                            .clone()
+                            .all(|(_, step)| step.on_error == FailureAction::Block),
                     "input replacement requires a first sole-effect step and fail-closed before steps",
                 )?;
             }

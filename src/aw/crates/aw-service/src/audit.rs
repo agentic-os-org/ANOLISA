@@ -149,6 +149,24 @@ impl Audit {
         )
     }
 
+    // Optional chains can fail independently of the synchronous execution journal.
+    pub(crate) fn claim_observation(&self, key: &str, record: Value) -> Result<Value> {
+        self.journal
+            .lock()
+            .map_err(|_| rejected("observation_audit_unavailable"))?
+            .claim(key, &record)
+            .map_err(|_| rejected("observation_audit_unavailable"))
+    }
+
+    pub(crate) fn append_observation(&self, key: &str, mut record: Value) -> Result<Value> {
+        record["createdAt"] = json!(crate::runtime::facts::timestamp()?);
+        self.journal
+            .lock()
+            .map_err(|_| rejected("observation_audit_unavailable"))?
+            .append(key, &record)
+            .map_err(|_| rejected("observation_audit_unavailable"))
+    }
+
     pub(crate) fn append(&self, key: &str, mut record: Value) -> Result<Value> {
         #[cfg(test)]
         if record["phase"] == "started" {

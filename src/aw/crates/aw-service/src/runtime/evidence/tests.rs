@@ -255,3 +255,128 @@ fn evidence_limits_accept_schema_integer_spellings_without_rewriting_config() {
         }
     }
 }
+
+#[test]
+fn observation_audit_failure_keeps_enforcing_admission_and_primary_audit_healthy() {
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/evidence-unit-tests");
+    std::fs::create_dir_all(&parent).unwrap();
+    let directory = tempfile::tempdir_in(parent).unwrap();
+    let journal_dir = directory.path().join("journal");
+    let parked_dir = directory.path().join("journal-parked");
+    let mut document = aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    document["spec"]["agents"]["qoder"]["evidence"] = json!({
+        "source_id": "fixture",
+        "endpoint": "http://127.0.0.1:1",
+        "query_timeout_ms": 200,
+        "query_bytes": 4096,
+        "max_items": 4,
+        "max_bytes": 4096,
+    });
+    let runtime = Runtime::new(
+        serde_json::to_vec(&document).unwrap(),
+        &journal_dir,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    struct Cleanup(Arc<Runtime>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            self.0.maintain(true).unwrap();
+        }
+    }
+    let _cleanup = Cleanup(runtime.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let cancelled = AtomicBool::new(false);
+    let binding = runtime
+        .handle(
+            Operation::Bind {
+                target: "qoder".into(),
+                capabilities: Capabilities {
+                    failure_actions: Default::default(),
+                    adapter: "qoder".into(),
+                    version: "fixture".into(),
+                    entrypoint: "fixture".into(),
+                    events: BTreeMap::from([
+                        ("tool.before".into(), vec!["observe".into(), "block".into()]),
+                        ("tool.after".into(), vec!["observe".into()]),
+                    ]),
+                },
+                cwd: directory.path().to_str().unwrap().into(),
+                environment: BTreeMap::new(),
+            },
+            deadline,
+            &cancelled,
+        )
+        .unwrap();
+    let instance = binding["instance_id"].as_str().unwrap();
+
+    // Force claim_observation to fail with an I/O error without disturbing primary writes.
+    std::fs::rename(&journal_dir, &parked_dir).unwrap();
+    let started = runtime.handle(
+        Operation::StartObservation {
+            instance_id: instance.into(),
+        },
+        deadline,
+        &cancelled,
+    );
+    std::fs::rename(&parked_dir, &journal_dir).unwrap();
+    let started = started.unwrap();
+    assert_eq!(started["audit_state"], "unavailable");
+    assert!(runtime.audit.healthy());
+    assert!(runtime
+        .audit
+        .claim_observation("invalid", Value::Null)
+        .is_err());
+    assert!(runtime
+        .audit
+        .append_observation("invalid", json!({}))
+        .is_err());
+    assert!(runtime.audit.healthy());
+
+    let status = runtime
+        .handle(Operation::Status, deadline, &cancelled)
+        .unwrap();
+    assert_eq!(status["audit_healthy"], true);
+    assert_eq!(status["observations"][0]["audit_state"], "unavailable");
+
+    // Primary enforcing events and durable audit must remain unaffected.
+    let handle = runtime
+        .handle(
+            Operation::OpenEvent {
+                result_status: None,
+                instance_id: instance.into(),
+                event: json!({
+                    "name": "tool.after",
+                    "agent": {"adapter": "qoder", "binding_id": "qoder", "instance_id": instance},
+                    "tool": {"input": {}, "result": "ok"},
+                    "native": {}
+                }),
+            },
+            deadline,
+            &cancelled,
+        )
+        .unwrap();
+    let event_id = handle["event_id"].as_str().unwrap().to_owned();
+    runtime
+        .handle(
+            Operation::CloseEvent {
+                event_id: event_id.clone(),
+                instance_id: instance.into(),
+            },
+            deadline,
+            &cancelled,
+        )
+        .unwrap();
+    let audit = runtime
+        .handle(Operation::Audit { key: event_id }, deadline, &cancelled)
+        .unwrap();
+    assert_eq!(audit["terminal"], true);
+    assert!(runtime.audit.healthy());
+}
