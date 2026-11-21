@@ -199,11 +199,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --from-local)
       [ $# -ge 2 ] || { err "--from-local requires a path"; exit 2; }
+      [ -n "$2" ] || { err "--from-local requires a non-empty path"; exit 2; }
       FROM_LOCAL="$2"
       shift 2
       ;;
     --from-local=*)
       FROM_LOCAL="${1#--from-local=}"
+      [ -n "$FROM_LOCAL" ] || { err "--from-local requires a non-empty path"; exit 2; }
       shift
       ;;
     --dry-run)
