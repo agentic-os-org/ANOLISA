@@ -39,7 +39,7 @@ use SegmentConnector::{And, Or, Seq};
 
 #[test]
 fn build_plan_keeps_connector_sequence() {
-    let plan = plan("pwd && df -h; git status --short || pwd");
+    let plan = plan("pwd && df -h; git remote -v || pwd");
     assert_eq!(plan.steps.len(), 4);
     let connectors: Vec<SegmentConnector> = plan.steps.iter().map(|step| step.connector).collect();
     assert_eq!(

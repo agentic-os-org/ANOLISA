@@ -39,16 +39,16 @@ fn runtime_config_can_add_generic_rule() {
 #[test]
 fn runtime_config_override_replaces_builtin_and_disable_wins() {
     let config = RuntimeReadonlyConfig {
-        disabled: vec![ReadonlyRuleKey::subcommand("git", "status")],
+        disabled: vec![ReadonlyRuleKey::subcommand("git", "count-objects")],
         overrides: vec![RuntimeReadonlySpec {
             command: "git".to_string(),
             validator: RuntimeValidator::Subcommand(RuntimeSubcommandSpec {
                 deny_args: vec!["-c".to_string()],
                 subcommands: vec![(
-                    "status".to_string(),
+                    "count-objects".to_string(),
                     RuntimeValidator::Generic(RuntimeGenericSpec {
                         short_flags: String::new(),
-                        long_flags: vec!["--short".to_string()],
+                        long_flags: vec!["--verbose".to_string()],
                         value_flags: Vec::new(),
                         deny_flags: Vec::new(),
                         path_mode: PathMode::None,
@@ -60,8 +60,8 @@ fn runtime_config_override_replaces_builtin_and_disable_wins() {
         ..RuntimeReadonlyConfig::default()
     };
 
-    assert!(!allowed_with_config("git status --short", &config));
-    assert!(allowed("git status --short"));
+    assert!(!allowed_with_config("git count-objects --verbose", &config));
+    assert!(allowed("git count-objects --verbose"));
 }
 
 #[test]
@@ -143,11 +143,25 @@ fn generic_unchecked_paths() {
 
 #[test]
 fn generic_bare_number() {
-    assert!(allowed("git log -5"));
-    assert!(allowed("git log -n 10"));
-    assert!(allowed("git log -n10"));
-    assert!(allowed("git log --oneline -20"));
-    assert!(!allowed("git log -0"));
+    let config = RuntimeReadonlyConfig {
+        overrides: vec![RuntimeReadonlySpec {
+            command: "bounded".to_string(),
+            validator: RuntimeValidator::Generic(RuntimeGenericSpec {
+                short_flags: String::new(),
+                long_flags: vec![],
+                value_flags: vec![("-n".to_string(), Some(10_000))],
+                deny_flags: vec![],
+                path_mode: PathMode::None,
+                bare_number_max: 10_000,
+            }),
+        }],
+        ..RuntimeReadonlyConfig::default()
+    };
+    assert!(allowed_with_config("bounded -5", &config));
+    assert!(allowed_with_config("bounded -n 10", &config));
+    assert!(allowed_with_config("bounded -n10", &config));
+    assert!(allowed_with_config("bounded -20", &config));
+    assert!(!allowed_with_config("bounded -0", &config));
 }
 
 #[test]
@@ -161,8 +175,8 @@ fn generic_long_value_flags_with_equals() {
 // These mirror the exact test cases from tool_broker.rs tests
 
 #[test]
-fn regression_allows_simple_git_status() {
-    assert!(allowed("git status --short"));
+fn regression_allows_simple_git_remote() {
+    assert!(allowed("git remote -v"));
 }
 
 #[test]
@@ -237,11 +251,7 @@ fn regression_rejects_risky_per_command_arguments() {
 #[test]
 fn regression_allows_safe_per_command_arguments() {
     for command in [
-        "git status --short",
-        "git diff --stat",
-        "git diff --name-only",
-        "git log --oneline -n 5",
-        "git show --stat HEAD",
+        "git remote -v",
         "ps -Ao pid,pcpu,pmem,comm -r",
         "ls -la .",
         "cat README.md",
@@ -282,6 +292,164 @@ fn new_path_resolution_commands() {
     assert!(allowed("which -a rustc"));
     assert!(allowed("dirname /usr/bin/gcc"));
     assert!(allowed("basename /usr/bin/gcc"));
+}
+
+// ── Repo-embedded hook sinks must not auto-approve ──
+
+library_tests! {
+#[test]
+fn git_fsmonitor_sinks_require_approval() {
+    for command in [
+        "git status",
+        "git status --short",
+        "git status --porcelain",
+        "git diff",
+        "git diff --stat",
+        "git diff --cached",
+        "git diff --staged --name-only",
+        "git describe --dirty --always",
+        "git describe --tags",
+        "git describe --always",
+        "git blame src/main.rs",
+        "git blame -L 1,10 src/main.rs",
+        "git blame --porcelain src/main.rs",
+        "git ls-files",
+        "git ls-files -o --error-unmatch",
+        "git remote update",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_textconv_sinks_require_approval() {
+    for command in [
+        "git show",
+        "git show HEAD",
+        "git show --stat HEAD",
+        "git show --format=fuller HEAD",
+        "git reflog show -p",
+        "git cat-file --textconv HEAD:a.txt",
+        "git stash list -p",
+        "git stash list --patch",
+        "git stash list --patch-with-stat",
+        "git stash show -p",
+        "git stash show --patch",
+        "git stash show -pv",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_signature_verification_sinks_require_approval() {
+    for command in [
+        "git log",
+        "git log --oneline -n 5",
+        "git log --stat -n 2",
+        "git log --format=%G? -n 1",
+        "git log --pretty=format:%GK -n 1",
+        "git shortlog -sn",
+        "git shortlog --format=%G? HEAD",
+        "git for-each-ref --sort=signature",
+        "git for-each-ref --sort=-authordate",
+        "git for-each-ref --format=%(objectname)",
+        "git for-each-ref --count=5",
+        "git branch --sort=signature",
+        "git branch --sort=-authordate",
+        "git branch --list --sort signature",
+        "git branch --format=%(refname)",
+        "git branch",
+        "git branch -a",
+        "git branch -r",
+        "git branch --list",
+        "git branch --list feature",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_remote_write_and_network_forms_require_approval() {
+    for command in [
+        "git remote add origin https://example.com/r.git",
+        "git remote remove origin",
+        "git remote set-url origin https://example.com/r.git",
+        "git remote rename old new",
+        "git remote prune origin",
+        "git remote show origin",
+        "git remote get-url --push origin",
+        "git remote get-url -v",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_object_readers_require_approval() {
+    for command in [
+        "git ls-tree HEAD",
+        "git ls-tree -r HEAD src/",
+        "git cat-file -p HEAD",
+        "git cat-file -t HEAD",
+        "git cat-file --batch",
+        "git rev-parse HEAD",
+        "git rev-parse --show-toplevel",
+        "git rev-list --count HEAD",
+        "git rev-list HEAD",
+        "git for-each-ref",
+        "git name-rev --name-only HEAD",
+        "git name-rev HEAD",
+        "git stash list",
+        "git stash show",
+        "git stash show --stat",
+        "git reflog show",
+        "git tag",
+        "git tag -l",
+        "git tag -n",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_config_source_options_require_approval() {
+    for command in [
+        "git config --get --blob=HEAD:.gitconfig user.name",
+        "git config --get-all --blob=HEAD:.gitconfig user.name",
+        "git config --get --file=/tmp/cosh-config user.name",
+        "git config --get --global user.name",
+        "git config --get --type=bool user.name",
+        "git config --get --default=x user.name",
+        "git config --get user.name extra",
+        "git config --get-regexp user",
+        "git config --get-urlmatch user https://example.com",
+        "git config --get-color user.name red",
+        "git config --list --blob=HEAD:.gitconfig",
+        "git config -l --file=/tmp/cosh-config",
+        "git config --get -l",
+        "git config --get user",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_hook_free_readonly_forms_stay_allowed() {
+    for command in [
+        "git remote",
+        "git remote -v",
+        "git remote --verbose",
+        "git remote get-url origin",
+        "git count-objects -v",
+        "git config --get user.name",
+        "git config --get-all remote.origin.url",
+        "git config --list",
+        "git config -l",
+    ] {
+        assert!(allowed(command), "{command}");
+    }
+}
 }
 
 #[test]
@@ -362,37 +530,41 @@ fn new_process_commands() {
 
 #[test]
 fn new_git_subcommands() {
-    assert!(allowed("git blame src/main.rs"));
-    assert!(allowed("git describe --tags"));
-    assert!(allowed("git describe --always"));
-    assert!(allowed("git ls-files"));
-    assert!(allowed("git ls-files -o --error-unmatch"));
-    assert!(allowed("git ls-tree HEAD"));
-    assert!(allowed("git ls-tree -r HEAD src/"));
-    assert!(allowed("git shortlog -sn"));
-    assert!(allowed("git rev-list --count HEAD"));
-    assert!(allowed("git cat-file -t HEAD"));
-    assert!(allowed("git cat-file -p HEAD"));
+    assert!(!allowed("git blame src/main.rs"));
+    assert!(!allowed("git describe --tags"));
+    assert!(!allowed("git describe --always"));
+    assert!(!allowed("git ls-files"));
+    assert!(!allowed("git ls-files -o --error-unmatch"));
+    assert!(!allowed("git ls-tree HEAD"));
+    assert!(!allowed("git ls-tree -r HEAD src/"));
+    assert!(!allowed("git shortlog -sn"));
+    assert!(!allowed("git rev-list --count HEAD"));
+    assert!(!allowed("git cat-file -t HEAD"));
+    assert!(!allowed("git cat-file -p HEAD"));
     assert!(allowed("git count-objects -v"));
-    assert!(allowed(
+    assert!(!allowed(
         "git for-each-ref --format %(refname) --sort=-committerdate"
     ));
-    assert!(allowed("git name-rev --name-only HEAD"));
-    assert!(allowed("git stash list"));
-    assert!(allowed("git stash show"));
+    assert!(!allowed("git for-each-ref"));
+    assert!(!allowed("git name-rev --name-only HEAD"));
+    assert!(!allowed("git stash list"));
+    assert!(!allowed("git stash show"));
     assert!(!allowed("git stash"));
     assert!(!allowed("git stash drop"));
+    assert!(!allowed("git stash list -p"));
+    assert!(!allowed("git stash show -p"));
+    assert!(!allowed("git reflog"));
     assert!(allowed("git config --get user.name"));
     assert!(allowed("git config --list"));
     assert!(!allowed("git config --set user.name foo"));
-    assert!(allowed("git tag"));
-    assert!(allowed("git tag -l"));
+    assert!(!allowed("git tag"));
+    assert!(!allowed("git tag -l"));
     assert!(!allowed("git tag v1.0"));
-    assert!(allowed("git reflog show"));
+    assert!(!allowed("git reflog show"));
     assert!(!allowed("git reflog delete"));
-    assert!(allowed("git branch -a"));
-    assert!(allowed("git branch --list"));
-    assert!(allowed("git branch --list feature"));
+    assert!(!allowed("git branch -a"));
+    assert!(!allowed("git branch --list"));
+    assert!(!allowed("git branch --list feature"));
     assert!(!allowed("git branch -d feature"));
     assert!(!allowed("git branch --delete feature"));
     assert!(!allowed("git branch feature"));

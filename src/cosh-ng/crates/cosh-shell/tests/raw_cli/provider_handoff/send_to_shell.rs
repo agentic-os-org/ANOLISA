@@ -39,7 +39,7 @@ fn raw_cli_provider_tool_interactive_escape_hatch_requires_explicit_send() {
     );
     assert!(output.contains("sudo: a terminal is required"), "{output}");
     assert!(output.contains("Sending to shell"), "{output}");
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains("Activity details handoff-1"), "{output}");
     assert!(
         output.contains("evidence: ShellCommandCompleted"),
@@ -98,7 +98,7 @@ fn raw_cli_provider_tool_send_to_shell_uses_zh_language_env() {
         output.contains("handoff-1 将在前台 shell 中运行。"),
         "{output}"
     );
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains("after-zh-handoff"), "{output}");
     assert!(!output.contains("Sending to shell"), "{output}");
     assert!(
@@ -576,7 +576,7 @@ fn raw_cli_send_to_shell_command_triggers_trusted_project_hook() {
     fs::create_dir_all(&hooks_dir).unwrap();
     write_executable(
         &hooks_dir.join("project-guard.sh"),
-        "#!/bin/sh\n# cosh-hook: project-guard\n# match-commands: git\nprintf '{\"hook_id\":\"project-guard\",\"severity\":\"warning\",\"title\":\"PROJECT GUARD SEND TO SHELL\",\"description\":\"project hook fired\",\"suggestion\":\"review against project policy\"}'\n",
+        "#!/bin/sh\n# cosh-hook: project-guard\n# match-commands: pwd\nprintf '{\"hook_id\":\"project-guard\",\"severity\":\"warning\",\"title\":\"PROJECT GUARD SEND TO SHELL\",\"description\":\"project hook fired\",\"suggestion\":\"review against project policy\"}'\n",
     );
     // Consent goes through the real `/hooks trust-project` flow rather than a
     // hand-written store line: trust is bound to a fingerprint of the hook
@@ -614,7 +614,7 @@ fn raw_cli_send_to_shell_command_triggers_trusted_project_hook() {
     );
 
     assert!(output.contains("Sending to shell"), "{output}");
-    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains("PROJECT GUARD SEND TO SHELL"), "{output}");
 
     // The real consent flow must have persisted a fingerprint, not a bare path:

@@ -104,10 +104,10 @@ fn mid_token_equals_is_not_shell_expansion() {
     // Review regression (#3436): assignments carry unquoted `=`, which
     // the parser once flagged as expansion, silently rejecting the
     // anchored template before the (host-dependent) plan probe ever
-    // ran. zsh equals-expansion is word-start-only; `git log
-    // --format=%h` exercises the same flag through the stderr-sink
+    // ran. zsh equals-expansion is word-start-only; `du
+    // --max-depth=3` exercises the same flag through the stderr-sink
     // path without needing rtk installed.
-    assert!(build_readonly_compound_plan("git log --format=%h 2>/dev/null").is_some());
+    assert!(build_readonly_compound_plan("du --max-depth=3 . 2>/dev/null").is_some());
     // Word-start `=` (zsh equals-expansion) keeps the manual path.
     assert!(build_readonly_compound_plan("cat =bash 2>/dev/null").is_none());
 }

@@ -447,6 +447,36 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
+            if input.contains("safe shell tool") {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "routing".to_string(),
+                        message: "matching safe shell fake tool workflow".to_string(),
+                    },
+                    AgentEvent::ToolCall {
+                        run_id: run_id.clone(),
+                        tool_id: None,
+                        name: "shell".to_string(),
+                        input: "pwd".to_string(),
+                    },
+                    AgentEvent::ToolOutputDelta {
+                        run_id: run_id.clone(),
+                        tool_id: "tool-1".to_string(),
+                        stream: "stdout".to_string(),
+                        text: fake_long_tool_output(),
+                    },
+                    AgentEvent::ToolCompleted {
+                        run_id: run_id.clone(),
+                        tool_id: "tool-1".to_string(),
+                        status: "completed".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "safe shell fake tool completed".to_string(),
+                    },
+                ]);
+            }
             if input.contains("unsafe tool") {
                 return Ok(vec![
                     AgentEvent::StatusChanged {
@@ -565,7 +595,7 @@ impl AgentAdapter for FakeAgentAdapter {
                         run_id: run_id.clone(),
                         tool_id: Some("toolu-tty".to_string()),
                         name: "run_shell_command".to_string(),
-                        input: r#"{"command":"git status"}"#.to_string(),
+                        input: r#"{"command":"pwd"}"#.to_string(),
                     },
                     AgentEvent::ToolOutputDelta {
                         run_id: run_id.clone(),

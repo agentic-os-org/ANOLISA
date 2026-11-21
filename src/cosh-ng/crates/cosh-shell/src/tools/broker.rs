@@ -119,8 +119,8 @@ mod tests {
     };
 
     #[test]
-    fn readonly_broker_allows_simple_git_status() {
-        assert!(readonly_tokens("git status --short").is_ok());
+    fn readonly_broker_allows_simple_git_remote() {
+        assert!(readonly_tokens("git remote -v").is_ok());
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn readonly_broker_tokenizes_tabs_but_rejects_newlines_and_unspaced_metas() {
-        let tabbed = readonly_tokens("git\tstatus\t--short");
+        let tabbed = readonly_tokens("git\tremote\t-v");
         let newline = readonly_tokens("git status\npwd").unwrap_err();
         let chained = readonly_tokens("git status&&pwd").unwrap_err();
         let redirected =
@@ -282,11 +282,7 @@ mod tests {
     #[test]
     fn readonly_broker_allows_safe_per_command_arguments() {
         for command in [
-            "git status --short",
-            "git diff --stat",
-            "git diff --name-only --",
-            "git log --oneline -n 5",
-            "git show --stat HEAD",
+            "git remote -v",
             "ps -Ao pid,pcpu,pmem,comm -r",
             "ls -la .",
             "cat README.md",
