@@ -480,10 +480,15 @@ pub(crate) fn deliverable(
             return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
         }
     }
-    // This member's own recovery is the documented ten-minute recurrence
-    // boundary, so it takes precedence over a sibling's delivery record.
+    // This member's own recovery is the documented recurrence boundary, so it
+    // takes precedence over a sibling's delivery record.
     if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
-        return now_ms.saturating_sub(recovery.last_delivered_ms) >= RECURRENCE_GATE_MS;
+        let cooldown = if card_still_alerting(ledger, recovery, &candidate.key) {
+            STATE_COOLDOWN_MS
+        } else {
+            RECURRENCE_GATE_MS
+        };
+        return now_ms.saturating_sub(recovery.last_delivered_ms) >= cooldown;
     }
     // A sibling's recovery gates this card only when the earlier delivery
     // provably reported this member; a byte-only card's recovery must not
@@ -501,6 +506,17 @@ pub(crate) fn deliverable(
         }
     }
     true
+}
+
+/// Whether another member of the card this recovery belongs to still has a
+/// live episode, i.e. the card never fully recovered. Such a card keeps the
+/// state cooldown, so a member that bounces back cannot outrun a sibling that
+/// never recovered; the shorter recurrence gate follows a full recovery.
+fn card_still_alerting(ledger: &EpisodeLedger, recovery: &VolumeRecovery, key: &str) -> bool {
+    recovery
+        .members
+        .iter()
+        .any(|member| member != key && ledger.volume.contains_key(member))
 }
 
 /// Whether this capacity member's own delivery or recovery still gates a card

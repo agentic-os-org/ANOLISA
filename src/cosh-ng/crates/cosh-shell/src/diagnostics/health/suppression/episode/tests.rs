@@ -1179,6 +1179,42 @@ fn recurrence_after_both_members_recovered_uses_the_ten_minute_gate() {
 }
 
 #[test]
+fn merged_member_bounce_keeps_the_card_cooldown_in_both_directions() {
+    let merged = merged_candidate(MERGED_BYTES, &[MERGED_INODE], &[MERGED_INODE], 4);
+    let mut bytes_bounced = ledger();
+    record_delivery(&mut bytes_bounced, &merged, 1000);
+    sync(
+        &mut bytes_bounced,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, false, true, true),
+            volume_signal(MERGED_INODE, true, false, true),
+        ]),
+        2000,
+    );
+    assert!(bytes_bounced.volume.contains_key(MERGED_INODE));
+
+    let mut inode_bounced = ledger();
+    record_delivery(&mut inode_bounced, &merged, 1000);
+    sync(
+        &mut inode_bounced,
+        &signal(vec![
+            volume_signal(MERGED_BYTES, true, false, true),
+            volume_signal(MERGED_INODE, false, true, true),
+        ]),
+        2000,
+    );
+    assert!(inode_bounced.volume.contains_key(MERGED_BYTES));
+
+    // The sibling never recovered, so the card keeps the state cooldown
+    // whichever member recovers and re-exhausts.
+    for state in [&bytes_bounced, &inode_bounced] {
+        assert!(!deliverable(state, &merged, 1000 + RECURRENCE_GATE_MS));
+        assert!(!deliverable(state, &merged, 1000 + STATE_COOLDOWN_MS - 1));
+        assert!(deliverable(state, &merged, 1000 + STATE_COOLDOWN_MS));
+    }
+}
+
+#[test]
 fn delivery_keeps_the_ledger_within_the_loader_entry_limit() {
     let mut state = ledger();
     for index in 0..MAX_ENTRIES - 1 {
