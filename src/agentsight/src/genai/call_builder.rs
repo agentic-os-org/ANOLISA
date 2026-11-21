@@ -77,20 +77,13 @@ impl GenAIBuilder {
 
         let internal_id = self.generate_id();
 
-        // Build request from parsed message or HTTP record
-        let cached_request = if parsed_message.is_none() {
-            context
-                .and_then(|context| context.request.as_ref())
-                .and_then(Self::parse_request_value)
-                .map(|mut request| {
-                    request.raw_body = copy_raw.then(|| http.request_body.clone()).flatten();
-                    request
-                })
-        } else {
-            None
-        };
-        let request =
-            cached_request.unwrap_or_else(|| self.build_request(&parsed_message, http, copy_raw));
+        // Build request from parsed message, cached request JSON value, or HTTP record
+        let request = self.build_request(
+            &parsed_message,
+            context.and_then(|context| context.request.as_ref()),
+            http,
+            copy_raw,
+        );
         // Build response from parsed message or HTTP record. A context without
         // parsed response JSON (the legacy raw path) must still allow the SSE
         // body fallback below.
@@ -638,10 +631,11 @@ impl GenAIBuilder {
         }
     }
 
-    /// Build LLMRequest from parsed message or HTTP record
+    /// Build LLMRequest from parsed message, cached request JSON, or HTTP record
     fn build_request(
         &self,
         message: &Option<&ParsedApiMessage>,
+        cached_request: Option<&serde_json::Value>,
         http: &HttpRecord,
         copy_raw: bool,
     ) -> LLMRequest {
@@ -820,7 +814,11 @@ impl GenAIBuilder {
             _ => {}
         }
 
-        // Fallback: no parsed message — parse request_body directly
+        // Fallback: no structured request on ParsedApiMessage — parse cached JSON or request_body
+        if let Some(mut req) = cached_request.and_then(Self::parse_request_value) {
+            req.raw_body = raw_body();
+            return req;
+        }
         if let Some(ref body) = http.request_body {
             let parsed = if copy_raw {
                 Self::parse_request_body(body)
@@ -1944,7 +1942,7 @@ mod tests {
         };
         let parsed = Some(&message);
 
-        let request = builder.build_request(&parsed, &http, false);
+        let request = builder.build_request(&parsed, None, &http, false);
         let response = builder.build_response(&parsed, &http, &None, true, false);
 
         assert_eq!(request.messages.len(), 2);
@@ -2164,7 +2162,7 @@ mod tests {
         };
         let parsed = Some(&message);
 
-        let built = builder.build_request(&parsed, &http, false);
+        let built = builder.build_request(&parsed, None, &http, false);
         assert_eq!(built.messages.len(), 2);
         assert_eq!(built.messages[0].role, "assistant");
         assert_eq!(built.messages[0].parts.len(), 2);
@@ -3495,5 +3493,53 @@ mod tests {
             MessagePart::ToolCall { name, .. } => assert_eq!(name, ""),
             _ => panic!("expected ToolCall"),
         }
+    }
+
+    #[test]
+    fn test_compact_delivery_keeps_request_when_message_has_response_only() {
+        let req_val: serde_json::Value = serde_json::from_str(
+            r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"compact-check"}]}"#,
+        )
+        .unwrap();
+        let resp_val: serde_json::Value = serde_json::from_str(
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet-4-5","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#,
+        )
+        .unwrap();
+        let message = crate::analyzer::message::MessageParser::new()
+            .parse_by_path("/v1/messages", Some(&req_val), Some(&resp_val))
+            .expect("response-only ParsedApiMessage");
+        assert!(matches!(
+            message,
+            ParsedApiMessage::AnthropicMessage {
+                request: None,
+                response: Some(_)
+            }
+        ));
+
+        let http = make_http("/v1/messages", None, None);
+        let results = vec![
+            AnalysisResult::HttpContext(crate::analyzer::HttpContext {
+                http,
+                request: Some(req_val),
+                response: Some(resp_val),
+                retain_raw: false,
+            }),
+            AnalysisResult::Message(message),
+        ];
+
+        let mapper = ResponseSessionMapper::default();
+        let pid_cache = std::collections::HashMap::new();
+        let (output, _) =
+            GenAIBuilder::new().build_for_owned_delivery(&results, &mapper, &pid_cache, false);
+        let call = output
+            .events
+            .iter()
+            .find_map(|event| match event {
+                crate::genai::GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("LLMCall should be built");
+
+        assert_eq!(call.request.messages.len(), 1);
     }
 }
