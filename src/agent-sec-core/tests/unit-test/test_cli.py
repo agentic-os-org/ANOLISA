@@ -20,6 +20,9 @@ from agent_sec_cli.correlation_context import (
     clear_process_trace_context,
     get_current_trace_context,
 )
+from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
+from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
 from agent_sec_cli.security_middleware.result import ActionResult
 from click import unstyle
 from typer.testing import CliRunner
@@ -567,6 +570,57 @@ def test_events_summary_forwards_session_and_run_filters():
     assert result.output == "No security events recorded.\n\n"
     assert reader.query.call_args.kwargs["session_id"] == "session-abc"
     assert reader.query.call_args.kwargs["run_id"] == "run-abc"
+
+
+def _summary_event(result: str = "succeeded") -> SecurityEvent:
+    return SecurityEvent(event_type="code_scan", category="code_scan", details={}, result=result)
+
+
+def test_events_summary_pages_through_every_matching_event(monkeypatch):
+    """A full first page must not cap the summary at the page size."""
+    monkeypatch.setattr("agent_sec_cli.cli._SUMMARY_PAGE_SIZE", 2)
+    reader = Mock()
+    reader.query.side_effect = [
+        [_summary_event("failed"), _summary_event()],
+        [_summary_event()],
+    ]
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(app, ["events", "--summary"])
+
+    assert result.exit_code == 0
+    output = unstyle(result.output)
+    assert "Total events: 3" in output
+    assert "Failed: 1" in output
+    assert [call.kwargs["offset"] for call in reader.query.call_args_list] == [0, 2]
+    assert [call.kwargs["limit"] for call in reader.query.call_args_list] == [2, 2]
+
+
+def test_events_summary_counts_events_past_the_first_page(tmp_path):
+    """A real store holding more events than one page reports all of them."""
+    db_path = str(tmp_path / "events.db")
+    reader = SqliteEventReader(path=db_path)
+    writer = SqliteEventWriter(path=db_path, max_age_days=None)
+    try:
+        # ``write`` is fire-and-forget and drops an event when SQLite reports
+        # the store busy, so top the store up until it genuinely holds more
+        # than one page instead of assuming every write landed.
+        for _ in range(40):
+            for _ in range(1000):
+                writer.write(_summary_event())
+            if reader.count() > 10000:
+                break
+        else:
+            raise AssertionError("could not grow the store past one summary page")
+        total = reader.count()
+    finally:
+        writer.close()
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(app, ["events", "--summary"])
+
+    assert result.exit_code == 0
+    assert f"Total events: {total}" in unstyle(result.output)
 
 
 def test_events_help_lists_session_and_run_filters():
