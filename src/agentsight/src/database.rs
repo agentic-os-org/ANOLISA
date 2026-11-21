@@ -29,6 +29,8 @@ pub enum DatabaseId {
     Optimization,
     /// Security audit events and risk cases.
     SecurityAudit,
+    /// Private derived AW execution audit.
+    AwAudit,
     /// Enforcement control state and history.
     Enforcement,
     /// Trajectory reuse labels and decisions.
@@ -41,13 +43,14 @@ pub enum DatabaseId {
 
 impl DatabaseId {
     /// Complete inventory of SQLite databases visible to AgentSight.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Primary,
         Self::GenAi,
         Self::Interruptions,
         Self::Trajectories,
         Self::Optimization,
         Self::SecurityAudit,
+        Self::AwAudit,
         Self::Enforcement,
         Self::Reuse,
         Self::Causal,
@@ -63,6 +66,7 @@ impl DatabaseId {
             Self::Trajectories => "trajectories",
             Self::Optimization => "optimization",
             Self::SecurityAudit => "security_audit",
+            Self::AwAudit => "aw_audit",
             Self::Enforcement => "enforcement",
             Self::Reuse => "reuse",
             Self::Causal => "causal",

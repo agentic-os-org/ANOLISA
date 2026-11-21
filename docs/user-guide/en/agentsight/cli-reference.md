@@ -25,6 +25,7 @@ AI Agent observability tool - trace processes, SSL traffic, and LLM API calls vi
 
 SUBCOMMANDS:
     audit            Query audit events
+    aw-audit         Query the private projection of AW public execution audit
     dashboard        Display dashboard URL and ECS console access guide
     discover         Discover running AI agents on the system
     interruption     Query and manage session interruption events detected during agent conversations
@@ -136,10 +137,12 @@ Serves the HTTP API and the embedded Dashboard from the same databases the trace
 
 ```
 OPTIONS:
-        --config <config>    Path to JSON configuration file (Linux only) [default: /etc/agentsight/config.json]
-        --db <db>            Custom database path (Linux only)
-        --host <host>        Host to bind to [default: 127.0.0.1]
-        --port <port>        Port to bind to [default: 7396]
+        --aw-audit-state-dir <aw-audit-state-dir>    Existing private AW service state directory to import (Linux only)
+        --aw-binary <aw-binary>                      Absolute path to the trusted AW executable that owns audit export (Linux only)
+        --config <config>                            Path to JSON configuration file (Linux only) [default: /etc/agentsight/config.json]
+        --db <db>                                    Custom database path (Linux only)
+        --host <host>                                Host to bind to [default: 127.0.0.1]
+        --port <port>                                Port to bind to [default: 7396]
 ```
 
 ```bash
@@ -154,6 +157,15 @@ agentsight serve --db /backup/genai_events.db
 ```
 
 Run `serve` as the same user as `trace`, otherwise the two resolve different data directories.
+
+With `--aw-audit-state-dir <ABS_DIR>` and `--aw-binary <ABS_FILE>`, Linux `serve`
+imports public AW audit under the effective user of the server.
+
+## agentsight aw-audit
+
+Query the imported execution objects by source and RFC 3339 time range.
+Use `--instance-id` to narrow the results. See the
+[AW execution audit example](integrations.md#aw-execution-audit).
 
 ## agentsight dashboard
 

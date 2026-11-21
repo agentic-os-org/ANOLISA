@@ -40,9 +40,17 @@ pub(crate) fn open_private_connection(
     database_name: &str,
 ) -> Result<Connection, PrivateSqliteError> {
     validate_database_name(database_name)?;
-    create_private_directory(state_dir)?;
-    let state_dir = fs::canonicalize(state_dir)
-        .map_err(|source| io_error("resolve private directory", state_dir, source))?;
+    reject_shared_directory(state_dir)?;
+    let (storage_root, _) = split_private_directory(state_dir)?;
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(storage_root)
+        .map_err(|source| io_error("create storage root", storage_root, source))?;
+    // Canonicalize only the user-supplied storage root so the protected state
+    // directory name itself stays literal for O_NOFOLLOW and SQLITE_OPEN_NOFOLLOW.
+    let state_dir = resolve_private_directory(state_dir)?;
+    create_private_directory(&state_dir)?;
 
     let database = state_dir.join(database_name);
     let wal = state_dir.join(format!("{database_name}-wal"));
@@ -59,12 +67,97 @@ pub(crate) fn open_private_connection(
     connection.execute_batch("PRAGMA journal_mode=WAL;")?;
     connection.busy_timeout(Duration::from_millis(500))?;
 
-    // SQLite derives new sidecar modes from the database, and this also repairs
-    // sidecars left by older versions before serving any request.
-    open_or_create_private_file(&database)?;
-    repair_existing_private_file(&wal)?;
-    repair_existing_private_file(&shm)?;
+    // SQLite derives new sidecar modes from the database. The checks above
+    // also repair retained files before SQLite holds its POSIX locks.
     Ok(connection)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_private_connection(path: &Path) -> Result<Connection, PrivateSqliteError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| PrivateSqliteError::UnsafePath {
+            path: path.into(),
+            reason: "missing private state directory",
+        })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| PrivateSqliteError::UnsafePath {
+            path: path.into(),
+            reason: "missing private database file name",
+        })?;
+    // Resolve only the caller's storage root; never canonicalize the protected
+    // private subdirectory itself so SQLITE_OPEN_NOFOLLOW still rejects a
+    // symlink swapped into place after symlink_metadata.
+    let directory = resolve_private_directory(directory)?;
+    let database = directory.join(file_name);
+    // A query may share this process with a writer. Closing descriptors to
+    // SQLite files can release process-wide POSIX locks, including WAL locks.
+    let check = |entry: &Path, mode, directory| {
+        let metadata = fs::symlink_metadata(entry)
+            .map_err(|source| io_error("inspect private path", entry, source))?;
+        let trusted = if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        };
+        // SAFETY: geteuid has no preconditions.
+        if !trusted
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != mode
+            || !directory && metadata.nlink() != 1
+        {
+            return Err(PrivateSqliteError::UnsafePath {
+                path: entry.into(),
+                reason: "private path has invalid type, owner, permissions, or links",
+            });
+        }
+        Ok(())
+    };
+    check(&directory, 0o700, true)?;
+    check(&database, 0o600, false)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = database.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match check(Path::new(&sidecar), 0o600, false) {
+            Err(PrivateSqliteError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(&database, flags)?;
+    connection.busy_timeout(Duration::from_millis(500))?;
+    Ok(connection)
+}
+
+fn split_private_directory(
+    directory: &Path,
+) -> Result<(&Path, &std::ffi::OsStr), PrivateSqliteError> {
+    let storage_root = match directory.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => {
+            return Err(PrivateSqliteError::UnsafePath {
+                path: directory.into(),
+                reason: "missing storage root for private state directory",
+            });
+        }
+    };
+    let dir_name = directory
+        .file_name()
+        .ok_or_else(|| PrivateSqliteError::UnsafePath {
+            path: directory.into(),
+            reason: "missing private state directory name",
+        })?;
+    Ok((storage_root, dir_name))
+}
+
+fn resolve_private_directory(directory: &Path) -> Result<PathBuf, PrivateSqliteError> {
+    let (storage_root, dir_name) = split_private_directory(directory)?;
+    let canonical_root = fs::canonicalize(storage_root)
+        .map_err(|source| io_error("resolve storage root", storage_root, source))?;
+    Ok(canonical_root.join(dir_name))
 }
 
 fn validate_database_name(database_name: &str) -> Result<(), PrivateSqliteError> {
@@ -294,5 +387,148 @@ mod tests {
             0o1777
         );
         fs::remove_dir(state).expect("fixture directory should be removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_private_connection_supports_symlinked_storage_root_and_rejects_state_symlinks() {
+        use super::{PrivateSqliteError, read_private_connection};
+
+        let root = std::env::temp_dir().join(format!(
+            "agentsight-private-read-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let real_base = root.join("real-storage");
+        fs::create_dir_all(&real_base).expect("real storage root should exist");
+        let alias_base = root.join("storage-alias");
+        symlink(&real_base, &alias_base).expect("storage root alias should exist");
+
+        let alias_state = alias_base.join("aw-audit");
+        let writer = open_private_connection(&alias_state, "audit.db")
+            .expect("writer should open through symlinked storage root");
+        writer
+            .execute_batch("CREATE TABLE fixture (value INTEGER); INSERT INTO fixture VALUES (42);")
+            .expect("writer should persist row");
+
+        let alias_db = alias_state.join("audit.db");
+        let reader = read_private_connection(&alias_db)
+            .expect("reader should open through the same symlinked storage root");
+        let value: i64 = reader
+            .query_row("SELECT value FROM fixture", [], |row| row.get(0))
+            .expect("reader should query persisted row");
+        assert_eq!(value, 42);
+        drop(reader);
+        drop(writer);
+
+        // Symlinked sidecars (-wal / -shm / -journal) must be rejected.
+        let decoy = root.join("decoy");
+        fs::write(&decoy, []).expect("decoy file should exist");
+        fs::set_permissions(&decoy, fs::Permissions::from_mode(0o600)).expect("decoy mode");
+        let real_state = real_base.join("aw-audit");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = real_state.join(format!("audit.db{suffix}"));
+            let _ = fs::remove_file(&sidecar);
+            symlink(&decoy, &sidecar).expect("sidecar symlink should exist");
+            let err =
+                read_private_connection(&alias_db).expect_err("symlinked sidecar must be rejected");
+            assert!(
+                matches!(err, PrivateSqliteError::UnsafePath { .. }),
+                "expected UnsafePath for {suffix}, got {err}"
+            );
+            fs::remove_file(&sidecar).expect("sidecar symlink should be removed");
+        }
+
+        // Symlinked database file must be rejected.
+        let real_db = real_state.join("audit.db");
+        let moved_db = root.join("moved.db");
+        fs::rename(&real_db, &moved_db).expect("database file should move");
+        symlink(&moved_db, &real_db).expect("database symlink should exist");
+        let err = read_private_connection(&alias_db)
+            .expect_err("symlinked database file must be rejected");
+        assert!(matches!(err, PrivateSqliteError::UnsafePath { .. }));
+        fs::remove_file(&real_db).expect("database symlink should be removed");
+        fs::rename(&moved_db, &real_db).expect("database file should restore");
+
+        // Symlinked aw-audit directory itself must be rejected even when target is 0700.
+        let moved_state = root.join("moved-state");
+        fs::rename(&real_state, &moved_state).expect("state dir should move");
+        symlink(&moved_state, &real_state).expect("state dir symlink should exist");
+        let err = read_private_connection(&alias_db)
+            .expect_err("symlinked private directory must be rejected");
+        assert!(matches!(err, PrivateSqliteError::UnsafePath { .. }));
+
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_private_directory_only_canonicalizes_storage_root_and_preserves_nofollow_on_swap() {
+        use super::{PrivateSqliteError, read_private_connection, resolve_private_directory};
+        use rusqlite::{Connection, OpenFlags};
+
+        let root = std::env::temp_dir().join(format!(
+            "agentsight-private-root-only-canon-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let real_base = root.join("real-storage");
+        fs::create_dir_all(&real_base).expect("real storage root should exist");
+        let alias_base = root.join("storage-alias");
+        symlink(&real_base, &alias_base).expect("storage root alias should exist");
+
+        let alias_state = alias_base.join("aw-audit");
+        let writer = open_private_connection(&alias_state, "audit.db")
+            .expect("writer should initialize real aw-audit under symlinked root");
+        writer
+            .execute_batch("CREATE TABLE fixture (value INTEGER); INSERT INTO fixture VALUES (7);")
+            .expect("writer should persist row");
+        drop(writer);
+
+        let canonical_base = fs::canonicalize(&real_base).expect("canonical base");
+        let resolved_before_swap =
+            resolve_private_directory(&alias_state).expect("resolve should succeed");
+        assert_eq!(resolved_before_swap, canonical_base.join("aw-audit"));
+
+        // Simulate a TOCTOU directory swap after validation: replace aw-audit with a
+        // symlink to a valid 0700 directory containing the valid 0600 audit.db.
+        let real_state = real_base.join("aw-audit");
+        let swapped_target = root.join("swapped-target");
+        fs::rename(&real_state, &swapped_target).expect("move aw-audit");
+        symlink(&swapped_target, &real_state).expect("replace aw-audit with symlink");
+
+        // resolve_private_directory must still return <canonical_root>/aw-audit without
+        // following the symlink at aw-audit itself.
+        let resolved_after_swap =
+            resolve_private_directory(&alias_state).expect("resolve should keep literal dir name");
+        assert_eq!(resolved_after_swap, canonical_base.join("aw-audit"));
+        assert!(
+            fs::symlink_metadata(&resolved_after_swap)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "protected aw-audit directory name must remain un-canonicalized"
+        );
+
+        // Because the literal aw-audit component is preserved, SQLite NOFOLLOW still
+        // rejects opening the database even if the swap happened after metadata checks.
+        let nofollow_err = Connection::open_with_flags(
+            resolved_before_swap.join("audit.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .expect_err("SQLITE_OPEN_NOFOLLOW must reject a swapped aw-audit symlink");
+        assert!(
+            !nofollow_err.to_string().is_empty(),
+            "expected SQLite error on swapped directory symlink"
+        );
+
+        // Both read and write entrypoints reject the swapped aw-audit symlink.
+        let read_err = read_private_connection(&alias_state.join("audit.db"))
+            .expect_err("read_private_connection must reject swapped aw-audit symlink");
+        assert!(matches!(read_err, PrivateSqliteError::UnsafePath { .. }));
+        assert!(
+            open_private_connection(&alias_state, "audit.db").is_err(),
+            "open_private_connection must reject swapped aw-audit symlink"
+        );
+
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 }

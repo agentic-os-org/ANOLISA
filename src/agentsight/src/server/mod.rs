@@ -989,7 +989,10 @@ fn server_maintenance_jobs(
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 }))
             }
-            DatabaseId::Primary | DatabaseId::Trajectories | DatabaseId::Tokenless => None,
+            DatabaseId::Primary
+            | DatabaseId::Trajectories
+            | DatabaseId::Tokenless
+            | DatabaseId::AwAudit => None,
         };
         if let Some(job) = job {
             jobs.push(job?);
