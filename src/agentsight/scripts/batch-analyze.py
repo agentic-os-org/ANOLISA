@@ -227,8 +227,6 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             entrypoint = entry.get("entrypoint")
             if not agent_name:
                 agent_name = _nonempty_str(entrypoint)
-            if entrypoint in ("qoder", "qoderwork", "claude-code"):
-                partial_usage = entrypoint != "claude-code"
             continue
 
         # Message-level identity (Claude transcripts tag user/assistant
@@ -341,21 +339,33 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # doubles the cost input.
             if metrics:
                 message_id = msg.get("id")
-                if partial_usage or not isinstance(message_id, str) or not message_id:
+                if not isinstance(message_id, str) or not message_id:
                     message_id = None
                 usage_records.append((step, message_id, metrics))
 
             steps.append(step)
 
+    # Use the same first nonempty declaration as the exported agent identity.
+    # Unknown sources retain path-based accounting; later conflicting metadata
+    # must not select a different accounting mode from the exported identity.
+    if agent_name in ("qoder", "qoderwork", "claude-code"):
+        partial_usage = agent_name != "claude-code"
+
     # One message id may span several records; the last snapshot is the most
     # complete usable measurement. Empty/invalid tails must not erase it.
     # Records without an id keep their own usage, as before.
+    # Runtime metadata can follow messages in copied transcripts. Apply its
+    # final source convention to every record, including the earlier ones.
     last_usage_index = {}
     for index, (_, message_id, _) in enumerate(usage_records):
         if message_id is not None:
             last_usage_index[message_id] = index
     for index, (step, message_id, metrics) in enumerate(usage_records):
-        if message_id is not None and last_usage_index[message_id] != index:
+        if (
+            not partial_usage
+            and message_id is not None
+            and last_usage_index[message_id] != index
+        ):
             continue
         step["metrics"] = metrics
 
