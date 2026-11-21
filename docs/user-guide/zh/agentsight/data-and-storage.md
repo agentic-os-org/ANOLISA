@@ -39,6 +39,11 @@ SQLite 为唯一活跃输出时会立即保存已经完成的调用。默认 Log
 的 session ID 与完整事件 JSON。FFI callback 和活跃的外部 exporter 仍在投递前等待 session 解析。
 每次调用都会检查输出门控，因此启用或恢复 Logtail 后，后续调用会恢复该等待。
 
+可选的 [AW 审计导入](integrations.md#aw-执行审计)将公共执行对象和链游标保存在
+`aw-audit/audit.db`。数据库文件由导入用户私有，主文件上限为 64 MiB，随库保留
+SQLite WAL 文件。达到上限时保留已有游标并报告写入失败，常规保留策略不会清理
+该投影。
+
 ## 保留与容量上限
 
 `trajectories.db` 通过 `source_session_states` 保存 Hermes 扫描指纹，按采集会话 ID、来源和

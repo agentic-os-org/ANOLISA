@@ -5,6 +5,31 @@
 AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上恰好装了其他 ANOLISA 组件时，它会把这些
 组件的数据一并展示出来。本页内容都不是使用 AgentSight 的必要条件。
 
+## AW 执行审计
+
+在 Linux 上，以 AW 状态目录的所有者身份运行 AgentSight，并使用已安装 AW
+可执行文件的绝对路径。将 `AW_STATE` 设为 AW 服务私有状态目录，将
+`SIGHT_DATA` 设为 AgentSight 数据目录。`SOURCE_ID` 取自 AW 审计导出
+清单响应的 `source_id`。在一个终端随 `serve` 启动导入：
+
+```bash
+agentsight serve --db "$SIGHT_DATA/genai_events.db" \
+  --aw-binary "$(command -v aw)" --aw-audit-state-dir "$AW_STATE"
+```
+
+在另一个终端使用相同的数据目录，以及覆盖本次运行的 UTC 时间范围：
+
+```bash
+agentsight aw-audit --storage-base "$SIGHT_DATA" --source-id "$SOURCE_ID" \
+  --from 2026-01-01T00:00:00Z --to 2026-01-02T00:00:00Z
+```
+
+JSON 时间线包含公共执行对象、可用的原生关联和各审计链的历史缺口。
+`pending` 统计尚无已确认终态游标的链。重启 `serve` 后，待处理的链从持久化游标
+继续读取。对于已发现的来源，`ingestion.state` 表示本次检查状态，来源不可用时
+仍可通过 `ingestion.last_success_at_ms` 查看上次成功时间。eBPF 停用时仍可导入。
+停止 `serve` 即停止导入，重新启动时也可省略两个导入参数。
+
 ## 支持的 Agent
 
 只要被发现规则命中的进程都会被追踪。随包发布的规则集（36 条）覆盖：

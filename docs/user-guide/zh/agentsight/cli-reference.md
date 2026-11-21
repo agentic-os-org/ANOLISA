@@ -24,6 +24,7 @@ AI Agent observability tool - trace processes, SSL traffic, and LLM API calls vi
 
 SUBCOMMANDS:
     audit            Query audit events
+    aw-audit         Query the private projection of AW public execution audit
     dashboard        Display dashboard URL and ECS console access guide
     discover         Discover running AI agents on the system
     interruption     Query and manage session interruption events detected during agent conversations
@@ -124,10 +125,12 @@ JSONL 默认扫描 `/root` 和 `/home/*`，并识别 AgentSight 进程继承的 
 
 ```
 OPTIONS:
-        --config <config>    Path to JSON configuration file (Linux only) [default: /etc/agentsight/config.json]
-        --db <db>            Custom database path (Linux only)
-        --host <host>        Host to bind to [default: 127.0.0.1]
-        --port <port>        Port to bind to [default: 7396]
+        --aw-audit-state-dir <aw-audit-state-dir>    Existing private AW service state directory to import (Linux only)
+        --aw-binary <aw-binary>                      Absolute path to the trusted AW executable that owns audit export (Linux only)
+        --config <config>                            Path to JSON configuration file (Linux only) [default: /etc/agentsight/config.json]
+        --db <db>                                    Custom database path (Linux only)
+        --host <host>                                Host to bind to [default: 127.0.0.1]
+        --port <port>                                Port to bind to [default: 7396]
 ```
 
 ```bash
@@ -142,6 +145,14 @@ agentsight serve --db /backup/genai_events.db
 ```
 
 `serve` 要用和 `trace` 相同的用户运行，否则两者解析到的数据目录不一致。
+
+Linux 的 `serve` 同时指定 `--aw-audit-state-dir <ABS_DIR>` 和
+`--aw-binary <ABS_FILE>` 时，以服务的有效用户身份导入 AW 公共审计。
+
+## agentsight aw-audit
+
+按来源和 RFC 3339 时间范围查询已导入的执行对象，可用 `--instance-id` 筛选。
+参见 [AW 执行审计示例](integrations.md#aw-执行审计)。
 
 ## agentsight dashboard
 

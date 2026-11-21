@@ -47,6 +47,12 @@ active external exporters keep the existing session-resolution wait before deliv
 Output gates are checked for each call, so enabling or resuming Logtail restores that wait for
 subsequent calls.
 
+The optional [AW audit importer](integrations.md#aw-execution-audit) keeps public
+execution objects and chain checkpoints in `aw-audit/audit.db`. Its database
+file is private to the importing user and capped at 64 MiB, with SQLite WAL
+sidecars. At capacity the importer retains existing checkpoints and reports
+write failures. The normal retention sweep leaves this projection intact.
+
 ## Retention and size limits
 
 `trajectories.db` keeps Hermes scan fingerprints in `source_session_states`, keyed by collected
