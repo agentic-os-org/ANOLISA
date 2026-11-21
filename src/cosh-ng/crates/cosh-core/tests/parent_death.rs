@@ -7,7 +7,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::IntoRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -24,8 +26,13 @@ const INIT: &str =
 const USER: &str = r#"{"type":"user","message":{"role":"user","content":"write a long essay about mountains"},"parent_tool_use_id":null}"#;
 // The wrapper backgrounds core keeping the test's stdin pipe on fd 3 (sh
 // would otherwise redirect background stdin to /dev/null) and exits only
-// once the test drops the trigger file, i.e. after a witnessed in-flight turn.
-const WRAPPER: &str = "exec 3<&0; core=\"$1\"; pidfile=\"$2\"; trigger=\"$3\"; shift 3; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; while [ ! -f \"$trigger\" ]; do sleep 0.1; done; sleep 0.5; exit 0";
+// once the test releases the trigger FIFO, i.e. after a witnessed in-flight
+// turn. The release path must not exec anything: earlier versions polled with
+// an external `sleep`, and an exec intercepted by a host security agent can
+// stall for seconds inside fork/vfork, which pushed the wrapper past the exit
+// deadline under load (#10360). Blocking builtin `read` and an immediate exit
+// keep the path exec-free.
+const WRAPPER: &str = "exec 3<&0; core=\"$1\"; pidfile=\"$2\"; trigger=\"$3\"; shift 3; \"$core\" \"$@\" <&3 & echo $! > \"$pidfile\"; read -r _ < \"$trigger\"; exit 0";
 
 fn configure(home: &Path, address: SocketAddr) {
     let directory = home.join(".copilot-shell");
@@ -141,6 +148,11 @@ fn spawn_wrapper(
 ) -> (std::process::Child, PathBuf, PathBuf) {
     let pidfile = home.join("core.pid");
     let trigger = home.join("kill-now");
+    nix::unistd::mkfifo(
+        &trigger,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
     let mut wrapper = Command::new("sh");
     wrapper
         .arg("-c")
@@ -186,30 +198,45 @@ fn core_pid(pidfile: &Path) -> i32 {
     fs::read_to_string(pidfile).unwrap().trim().parse().unwrap()
 }
 
-fn release_fifo(path: &Path) {
+fn release_fifo(path: &Path) -> bool {
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
     use std::os::unix::io::FromRawFd;
-    if let Ok(fd) = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
-        let mut file = unsafe { fs::File::from_raw_fd(fd) };
-        let _ = file.write_all(b"release\n");
+    let Ok(fd) = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) else {
+        return false;
+    };
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(b"release\n").is_ok()
+}
+
+fn release_trigger(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !release_fifo(path) {
+        assert!(Instant::now() < deadline, "trigger FIFO has no reader");
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 #[test]
 fn parent_death_midturn_cancels_turn() {
+    // Linux adopts the orphaned core so its own exit code is observable;
+    // macOS has no subreaper and falls back to the pre-existing observation.
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_child_subreaper(true).unwrap();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let stderr_log = home.path().join("core.stderr.log");
     let (address, started_rx, server) = slow_model_server(60, Duration::from_millis(200));
     configure(home.path(), address);
-    let (mut wrapper, _pidfile, trigger) =
+    let (mut wrapper, pidfile, trigger) =
         spawn_wrapper(home.path(), workspace.path(), None, None, Some(&stderr_log));
+    #[cfg(not(target_os = "linux"))]
+    let _ = &pidfile;
     send_lines(&mut wrapper, &[INIT, USER]);
     started_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("provider request started");
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -217,21 +244,33 @@ fn parent_death_midturn_cancels_turn() {
             .is_some(),
         "wrapper parent did not exit"
     );
-    let orphaned_at = Instant::now();
-    let stdout = wrapper.stdout.take().unwrap();
-    let (eof_tx, eof_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut stdout = stdout;
-        let mut sink = Vec::new();
-        let _ = stdout.read_to_end(&mut sink);
-        let _ = eof_tx.send(());
-    });
-    let exited = eof_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-    assert!(
-        exited,
-        "cosh-core orphan kept stdout open >5s after parent death (elapsed {:?})",
-        orphaned_at.elapsed()
-    );
+    #[cfg(target_os = "linux")]
+    {
+        // Observe the core's own exit rather than EOF on the shell's stdout
+        // pipe: a sibling test thread forking in this harness can inherit that
+        // write end across its fork->exec window, and the EOF would then not
+        // arrive until the sibling's child exits, unrelated to parent death
+        // (#10360).
+        let exit_code = reap_exit(core_pid(&pidfile), Instant::now() + Duration::from_secs(10));
+        assert_eq!(exit_code, 75, "expected EXIT_PARENT_LOST");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The orphan is not our child on macOS, so its exit code cannot be
+        // reaped; keep the pre-change observation: the core's exit closes the
+        // inherited stdout pipe and the read here reaches EOF.
+        let mut stdout = wrapper.stdout.take().expect("wrapper stdout");
+        let (eof_tx, eof_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = stdout.read_to_end(&mut sink);
+            let _ = eof_tx.send(());
+        });
+        assert!(
+            eof_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "cosh-core orphan kept stdout open after parent death"
+        );
+    }
     let stderr = fs::read_to_string(&stderr_log).unwrap_or_default();
     assert!(
         stderr.contains("parent process lost"),
@@ -253,13 +292,27 @@ fn stdout_epipe_exits_transport_failure() {
         .local_addr()
         .unwrap();
     configure(home.path(), address);
-    let mut child = core_command(home.path(), workspace.path())
+    let mut command = core_command(home.path(), workspace.path());
+    command
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()))
-        .spawn()
-        .unwrap();
-    drop(child.stdout.take().unwrap());
+        .stderr(Stdio::from(fs::File::create(&stderr_log).unwrap()));
+    // Build the pipe in the forked child that becomes core and close the read
+    // end there before exec. The read end then never exists in the shared
+    // libtest process, so a sibling test thread forking in its own fork->exec
+    // window has nothing to inherit; creating the pipe here instead would keep
+    // the #10360 window open between `pipe()` and the close.
+    unsafe {
+        command.pre_exec(|| {
+            let (read_end, write_end) = nix::unistd::pipe()?;
+            let read_fd = read_end.into_raw_fd();
+            let write_fd = write_end.into_raw_fd();
+            nix::unistd::close(read_fd)?;
+            nix::unistd::dup2(write_fd, 1)?; // 1 is STDOUT_FILENO.
+            nix::unistd::close(write_fd)?;
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
     send_lines(&mut child, &[INIT, USER]);
     let status = child
         .wait_timeout(Duration::from_secs(10))
@@ -334,7 +387,7 @@ fn parent_death_closed_pipes_exit_75_and_audit_cancel() {
     // panic on stderr EPIPE and must still finalize the audit lifecycle.
     drop(wrapper.stdout.take().unwrap());
     drop(wrapper.stderr.take().unwrap());
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -459,7 +512,7 @@ name = "slow-hook"
             .exists()),
         "second turn hook did not start"
     );
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -497,7 +550,7 @@ name = "slow-hook"
         failed_turns.is_empty(),
         "no turn may receive a terminal after completion: {events}"
     );
-    release_fifo(&hook_fifo);
+    let _ = release_fifo(&hook_fifo);
     server.join().unwrap();
 }
 
@@ -595,7 +648,7 @@ name = "slow-hook"
             .exists()),
         "second turn hook did not start"
     );
-    fs::write(&trigger, b"1").unwrap();
+    release_trigger(&trigger);
     assert!(
         wrapper
             .wait_timeout(Duration::from_secs(5))
@@ -628,6 +681,6 @@ name = "slow-hook"
         events.contains("session.ended"),
         "session.ended missing: {events}"
     );
-    release_fifo(&hook_fifo);
+    let _ = release_fifo(&hook_fifo);
     std::mem::forget(server);
 }
