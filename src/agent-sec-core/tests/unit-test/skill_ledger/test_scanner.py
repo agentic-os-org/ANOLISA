@@ -782,6 +782,21 @@ class TestCiscoStaticScanner(unittest.TestCase):
             self.assertEqual(result.version, "cisco-static-only-0.1.1")
             self.assertEqual(result.findings, [])
 
+    def test_invalid_max_file_bytes_option_uses_default(self):
+        with TemporaryDirectory() as tmp:
+            skill = self._make_skill(
+                Path(tmp),
+                {
+                    "SKILL.md": "---\nname: clean\ndescription: Clean test skill\n---\n",
+                },
+            )
+            for value in ("not-a-number", 0, -1, True):
+                with self.subTest(value=value):
+                    findings = scan_cisco_static_skill(
+                        skill, options={"maxFileBytes": value}
+                    )
+                    self.assertEqual(findings, [])
+
     def test_skipped_dirs_are_not_scanned(self):
         with TemporaryDirectory() as tmp:
             skill = self._make_skill(

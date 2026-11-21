@@ -144,7 +144,7 @@ def scan_skill(
     """Scan a Skill directory and return ``NormalizedFinding`` dictionaries."""
     root = Path(skill_dir).resolve()
     opts = options or {}
-    max_file_bytes = int(opts.get("maxFileBytes", _DEFAULT_MAX_FILE_BYTES))
+    max_file_bytes = _normalize_max_file_bytes(opts.get("maxFileBytes"))
     rules = _load_rules()
     findings: list[dict[str, Any]] = []
 
@@ -197,6 +197,17 @@ def scan_skill(
 
     _scan_undeclared_network(front_matter, text_files, findings)
     return findings
+
+
+def _normalize_max_file_bytes(value: Any) -> int:
+    """Return a usable positive file-size limit for scanner options."""
+    if value is None or isinstance(value, bool):
+        return _DEFAULT_MAX_FILE_BYTES
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return _DEFAULT_MAX_FILE_BYTES
+    return normalized if normalized > 0 else _DEFAULT_MAX_FILE_BYTES
 
 
 @lru_cache(maxsize=1)
