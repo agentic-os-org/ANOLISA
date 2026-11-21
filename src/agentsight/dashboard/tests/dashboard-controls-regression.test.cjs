@@ -906,3 +906,41 @@ test('conversation-list: session disclosure and time presets expose accessible s
   rendered = driver.render(page.ConversationList);
   assert.equal(collectElements(rendered.element, (node) => node.type?.name === 'TraceSubTable').length, 0);
 });
+
+
+for (const outcome of ['success', 'failure', 'unmount']) {
+  test(`agent activity: superseded poll ${outcome} cannot change the displayed snapshot`, async t => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs(['fetchAgentHealth']);
+    const { AgentActivitySection } = loadPageModule('src/pages/AgentHealthPage.tsx', {
+      '../utils/apiClient': stubs,
+      '../i18n': { useI18n: () => ({ t: (key, args) => key + (args ? JSON.stringify(args) : '') }), useLocaleTag: () => 'en-US', INTERRUPTION_TYPES: [] },
+      '../utils/datetime': { formatNs: String },
+      '../constants/policyIds': {},
+      '../components/CacheDiagnosisPanel': componentStub('CacheDiagnosisPanel'),
+    }, driver, '\nexports.AgentActivitySection = AgentActivitySection;');
+    const previousInterval = global.setInterval, previousClear = global.clearInterval;
+    let poll;
+    global.setInterval = fn => { poll = fn; return 1; };
+    global.clearInterval = () => {};
+    t.after(() => { global.setInterval = previousInterval; global.clearInterval = previousClear; });
+    const fixture = name => ({ agents: [{ agent_name: name, source: 'trajectories', trajectory_steps: 9, trajectory_tokens: 100, last_seen_ns: 0 }], warnings: [name] });
+    const cleanup = driver.render(AgentActivitySection).effects[0]();
+    poll();
+    calls.fetchAgentHealth[1].resolve(fixture('new-agent'));
+    await settle();
+    const snapshot = () => JSON.stringify(driver.render(AgentActivitySection).element);
+    const expected = snapshot();
+    assert.ok(expected.includes('new-agent'));
+    if (outcome === 'unmount') {
+      poll();
+      cleanup();
+      calls.fetchAgentHealth[2].resolve(fixture('after-unmount'));
+    }
+    if (outcome === 'failure') calls.fetchAgentHealth[0].reject(new Error('obsolete failure'));
+    else calls.fetchAgentHealth[0].resolve(fixture('old-agent'));
+    await settle();
+    assert.equal(snapshot(), expected, 'metrics and source warnings belong to the newest live poll');
+    cleanup();
+  });
+}
