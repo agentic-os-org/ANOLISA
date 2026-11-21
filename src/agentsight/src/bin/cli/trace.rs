@@ -98,21 +98,42 @@ impl TraceCommand {
         }
     }
 
+    /// Resolve relative CLI paths against `cwd` before `daemonize` switches working directory to `/tmp`.
+    fn with_resolved_daemon_paths(&self, cwd: Option<&std::path::Path>) -> Self {
+        let absolutize = |raw: &str| {
+            let path = std::path::Path::new(raw);
+            if path.is_absolute() {
+                raw.to_string()
+            } else if let Some(dir) = cwd {
+                dir.join(path).to_string_lossy().into_owned()
+            } else {
+                raw.to_string()
+            }
+        };
+        let mut resolved = self.clone();
+        resolved.config = absolutize(&self.config);
+        resolved.pid_file = absolutize(&self.pid_file);
+        resolved
+    }
+
     /// Run as daemon process
     fn run_as_daemon(&self) {
         use daemonize::Daemonize;
 
+        let cwd = std::env::current_dir().ok();
+        let resolved = self.with_resolved_daemon_paths(cwd.as_deref());
+
         println!("Starting agentsight in daemon mode...");
-        println!("PID file: {}", self.pid_file);
+        println!("PID file: {}", resolved.pid_file);
 
         let daemonize = Daemonize::new()
-            .pid_file(&self.pid_file)
+            .pid_file(&resolved.pid_file)
             .chown_pid_file(true)
             .working_directory("/tmp");
 
         match daemonize.start() {
             Ok(_) => {
-                self.run_selected_mode();
+                resolved.run_selected_mode();
             }
             Err(e) => {
                 eprintln!("Failed to daemonize: {e}");
