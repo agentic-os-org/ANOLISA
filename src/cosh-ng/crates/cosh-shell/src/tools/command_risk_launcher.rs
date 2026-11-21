@@ -561,6 +561,16 @@ fn tokens_carry_inline_code_flag(tokens: &[String], spec: &LauncherSpec) -> bool
 /// high-risk program nor a known launcher — the caller's existing path
 /// applies unchanged.
 pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
+    walk_launcher_chain_inner(tokens).map(|(walk, _)| walk)
+}
+
+/// Payload program offset for classification-only disclosure; `None` when the
+/// chain ends in a carried command, query form, or unresolved step.
+pub(super) fn launcher_payload_offset(tokens: &[String]) -> Option<usize> {
+    walk_launcher_chain_inner(tokens).and_then(|(_, offset)| offset)
+}
+
+fn walk_launcher_chain_inner(tokens: &[String]) -> Option<(LauncherWalk, Option<usize>)> {
     let start = tokens.iter().position(|token| !is_env_assignment(token))?;
     let mut index = start;
     let mut escalated = false;
@@ -575,7 +585,7 @@ pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
             // Whole-machine systemctl invocations outrank the generic
             // service-control entry from `high_risk_program` (#2064).
             if systemctl_targets_machine(program, &tokens[index + 1..]) {
-                return Some(LauncherWalk::SystemControl { escalated });
+                return Some((LauncherWalk::SystemControl { escalated }, Some(index)));
             }
             let high = high_risk_program(program);
             // Only a zero-link chain (direct high-risk program) or a
@@ -584,12 +594,15 @@ pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
             if index == start && high.is_none() {
                 return None;
             }
-            return Some(match high {
-                Some(high) if high.0 == SideEffectClass::SystemControl => {
-                    LauncherWalk::SystemControl { escalated }
-                }
-                high => LauncherWalk::Other { escalated, high },
-            });
+            return Some((
+                match high {
+                    Some(high) if high.0 == SideEffectClass::SystemControl => {
+                        LauncherWalk::SystemControl { escalated }
+                    }
+                    high => LauncherWalk::Other { escalated, high },
+                },
+                Some(index),
+            ));
         };
         if SHELL_CARRIER_PROGRAMS.contains(&program)
             && !tokens_carry_inline_code_flag(&tokens[index + 1..], spec)
@@ -601,10 +614,13 @@ pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
             return if index == start {
                 None
             } else {
-                Some(LauncherWalk::Other {
-                    escalated,
-                    high: None,
-                })
+                Some((
+                    LauncherWalk::Other {
+                        escalated,
+                        high: None,
+                    },
+                    None,
+                ))
             };
         }
         escalated |= spec.escalates;
@@ -616,21 +632,24 @@ pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
                 // verdict cannot drop below the wrapper's own high-risk
                 // level (I1/I3).
                 if command.split_whitespace().next().is_none() {
-                    return Some(LauncherWalk::Unresolved { escalated });
+                    return Some((LauncherWalk::Unresolved { escalated }, None));
                 }
                 // Judge the whole carried command — compound segments,
                 // pipeline stages, and nested launchers — not just its
                 // first word, which would let `sh -c 'echo ok; reboot'`
                 // hide the payload behind a benign prefix (#2064).
-                return Some(classify_carried_command(&command, escalated));
+                return Some((classify_carried_command(&command, escalated), None));
             }
             ChainStep::Query => {
-                return Some(LauncherWalk::Other {
-                    escalated,
-                    high: None,
-                });
+                return Some((
+                    LauncherWalk::Other {
+                        escalated,
+                        high: None,
+                    },
+                    None,
+                ));
             }
-            ChainStep::Unresolved => return Some(LauncherWalk::Unresolved { escalated }),
+            ChainStep::Unresolved => return Some((LauncherWalk::Unresolved { escalated }, None)),
         }
     }
 }

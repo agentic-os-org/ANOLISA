@@ -44,6 +44,7 @@ fn phrase_message_id(code: &str) -> Option<crate::MessageId> {
         "command-substitution" => ApprovalRiskPhraseCommandSubstitution,
         "redirection-write" => ApprovalRiskPhraseRedirectionWrite,
         "awk-shell-execution" => ApprovalRiskPhraseAwkShellExecution,
+        "git-repo-config-execution" => ApprovalRiskPhraseGitRepoConfigExecution,
         _ => return None,
     })
 }

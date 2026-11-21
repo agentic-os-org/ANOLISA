@@ -439,7 +439,11 @@ mod tests {
             MessageId::HealthFindingExt4ReadonlyRemount as usize
         );
         assert_eq!(
-            MessageId::HealthPromptInspectFilesystemEvent as usize,
+            MessageId::HealthPromptInspectFilesystemEvent as usize + 1,
+            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize,
             MessageId::ALL.len() - 1
         );
     }

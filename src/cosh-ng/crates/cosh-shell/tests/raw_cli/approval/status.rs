@@ -10,7 +10,7 @@ fn raw_cli_zsh_approval_card_capture_does_not_leak_to_shell() {
         &["--shell", "zsh"],
         &[
             ("cosh-osc$", b"?? stream tool approval\n"),
-            ("Approval req-1", b"\x1b[C\x1b[C\n"),
+            ("Approval req-1", b"\x1b[C\n"),
             (
                 "Command was not executed for req-1",
                 b"echo after-zsh-approval\n",
@@ -45,7 +45,8 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
     assert_approval_prompt_visible(&output);
     // V6a slim card: metadata row replaces kind/risk/queue lines; a single
     // pending card renders no queue info at all (ARP-R8).
-    assert!(output.contains("Bash · medium risk"), "{output}");
+    assert!(output.contains("Bash · high risk"), "{output}");
+    assert!(output.contains("may run repo-embedded scripts"), "{output}");
     assert!(output.contains("$ git status"));
     assert!(
         !output.contains("Queue: 1/1 pending") && !output.contains("Queue: 1 of 1 pending"),
@@ -102,13 +103,14 @@ fn raw_cli_approval_card_uses_zh_language_env() {
 
     assert_zh_approval_prompt_visible(&output);
     // V6a slim card: single metadata row, no Subject/Tool-input label lines.
-    assert!(output.contains("Bash · 中风险"), "{output}");
+    assert!(output.contains("Bash · 高风险"), "{output}");
+    assert!(output.contains("可能执行仓库内嵌脚本"), "{output}");
     assert!(!output.contains("对象: Bash"), "{output}");
     assert!(!output.contains("Tool 输入:"), "{output}");
     assert!(!output.contains("风险 medium"), "{output}");
     assert!(output.contains("$ git status --short"), "{output}");
     assert!(output.contains("允许一次"), "{output}");
-    assert!(output.contains("始终信任"), "{output}");
+    assert!(!output.contains("始终信任"), "{output}");
     assert!(output.contains("拒绝"), "{output}");
     assert!(output.contains("已批准 req-1"), "{output}");
     assert!(output.contains("已发送到 shell"), "{output}");
