@@ -10,6 +10,43 @@ const neutral = () => ({
   stdout: Buffer.alloc(0),
   stderr: Buffer.alloc(0),
 });
+const UNSET = Symbol("unset");
+
+function isPlainRecord(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function parseSdkDirective(event, stdout) {
+  const text = stdout.toString("utf8").trim();
+  if (!text) return ["none", undefined];
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new AwError("invalid_callback_response", { cause: error });
+  }
+  if (!isPlainRecord(parsed)) throw new AwError("invalid_callback_response");
+  const keys = Object.keys(parsed);
+  if (
+    event === "tool.before" &&
+    keys.length === 1 &&
+    keys[0] === "aw_updated_input"
+  ) {
+    if (!isPlainRecord(parsed.aw_updated_input))
+      throw new AwError("invalid_callback_response");
+    return ["replace_input", parsed.aw_updated_input];
+  }
+  if (event === "tool.after" && keys.length === 1) {
+    if (keys[0] === "aw_withheld" && parsed.aw_withheld === true)
+      return ["withhold", undefined];
+    if (keys[0] === "aw_replacement")
+      return ["replace_result", parsed.aw_replacement];
+  }
+  throw new AwError("invalid_callback_response");
+}
 
 export class Instance {
   constructor(options) {
@@ -431,7 +468,7 @@ export class Task {
       stderr: Buffer.from(result.stderr),
     };
   }
-  /** Emit from an installed semantic boundary and adopt block before native work. */
+  /** Emit from an installed semantic boundary and adopt block, rewrites and withholding. */
   async emit(event, payload, signal = this.signal) {
     signal?.throwIfAborted();
     if (this.closed || this.closing) throw new AwError("task_closed");
@@ -445,13 +482,22 @@ export class Task {
       event,
     };
     const hooks = this.routes.hooks.filter((hook) => hook.event === event);
+    let updatedInput;
+    let replacedResult = UNSET;
     for (const hook of hooks) {
       const response = await this.invoke(hook, native, signal);
       if (response.code === 2)
         return { decision: "block", coverage: "checked" };
       if (this.fallback) break;
+      if (response.stdout.length > 0) {
+        const [kind, value] = parseSdkDirective(event, response.stdout);
+        if (kind === "withhold")
+          return { decision: "withhold", coverage: "checked" };
+        if (kind === "replace_input") updatedInput = value;
+        else if (kind === "replace_result") replacedResult = value;
+      }
     }
-    return {
+    const reply = {
       decision: "continue",
       coverage: this.fallback
         ? "unavailable"
@@ -459,6 +505,9 @@ export class Task {
           ? "checked"
           : "not_configured",
     };
+    if (updatedInput !== undefined) reply.updated_input = updatedInput;
+    if (replacedResult !== UNSET) reply.replaced_result = replacedResult;
+    return reply;
   }
   async close() {
     if (this.closing) return this.closing;

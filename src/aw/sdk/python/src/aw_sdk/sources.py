@@ -21,82 +21,41 @@ from aw_sdk._source_helpers import (
     tool_executed,
     validate_identity,
 )
+from aw_sdk._source_mutation import (
+    DEFAULT_EVENTS,
+    DEFAULT_MAX_STREAM_BYTES,
+    SOURCE_PROTOCOL,
+    SUPPORTED_EVENTS,
+    SourceDenied,
+    SourceResultWithheld,
+    apply_tool_input,
+    apply_tool_result,
+    confirm_source_routes,
+    deliver_strict_result,
+    route_has_strict_after,
+    run_tool_stream,
+    source_capabilities,
+)
 from aw_sdk.admission import Admission
 from aw_sdk.client import Instance, Task
 from aw_sdk.transport import AwError
 
-SOURCE_PROTOCOL = "aw-hook-source/v1"
-SUPPORTED_EVENTS: dict[str, tuple[str, ...]] = {
-    "input.submit": ("observe", "block"),
-    "tool.before": ("observe", "block"),
-    "tool.after": ("observe",),
-}
-DEFAULT_EVENTS: tuple[str, ...] = ("input.submit", "tool.before", "tool.after")
 DEFAULT_MAX_STREAM_ITEMS = 1024
 _INSTRUMENTED_ATTR = "_aw_source_wrapped"
 
 __all__ = [
     "DEFAULT_EVENTS",
+    "DEFAULT_MAX_STREAM_BYTES",
     "DEFAULT_MAX_STREAM_ITEMS",
     "Instrumentation",
     "LanguageSource",
     "SOURCE_PROTOCOL",
     "SourceDenied",
+    "SourceResultWithheld",
     "SourceSession",
     "confirm_source_routes",
     "source_capabilities",
 ]
-
-
-class SourceDenied(AwError):
-    """Raised when AW returns a block decision before native work starts."""
-
-    def __init__(
-        self,
-        event: str,
-        *,
-        session_id: str,
-        call_id: str | None = None,
-        turn_id: str | None = None,
-        tool_name: str | None = None,
-    ) -> None:
-        super().__init__("source_denied", unavailable=False)
-        self.event = event
-        self.session_id = session_id
-        self.call_id = call_id
-        self.turn_id = turn_id
-        self.tool_name = tool_name
-
-
-def source_capabilities(events: Iterable[str] = DEFAULT_EVENTS) -> dict[str, Any]:
-    """Build canonical aw-hook-source/v1 capabilities for the selected events."""
-    selected = list(dict.fromkeys(events))
-    if not selected or any(
-        not isinstance(event, str) or event not in SUPPORTED_EVENTS for event in selected
-    ):
-        raise AwError("semantic_event_unavailable")
-    return {
-        "adapter": "sdk",
-        "version": SOURCE_PROTOCOL,
-        "entrypoint": "application",
-        "events": {event: list(SUPPORTED_EVENTS[event]) for event in selected},
-    }
-
-
-def confirm_source_routes(capabilities: Mapping[str, Any], routes: Mapping[str, Any]) -> bool:
-    """Confirm that every route matches declared semantic events without unsupported effects."""
-    events = capabilities.get("events")
-    hooks = routes.get("hooks") if isinstance(routes, Mapping) else None
-    if not isinstance(events, Mapping) or not isinstance(hooks, list):
-        return False
-    return all(
-        isinstance(hook, Mapping)
-        and hook.get("event") in events
-        and not hook.get("replace_input")
-        and not hook.get("replace_result")
-        and not hook.get("skill_check")
-        for hook in hooks
-    )
 
 
 class SourceSession:
@@ -149,6 +108,9 @@ class SourceSession:
             return False
         return any(hook["event"] == "tool.after" for hook in self.task.routes["hooks"])
 
+    def _strict_after(self) -> bool:
+        return not self.fallback and self.task is not None and route_has_strict_after(self.task.routes)
+
     def _require_open(self) -> None:
         if self.closed:
             raise AwError("source_session_closed")
@@ -169,10 +131,11 @@ class SourceSession:
         task = self.admission.task
         if self.fallback or task is None:
             return
+        caps = self._source.instance.capabilities
         for hook in task.routes.get("hooks", []):
             if hook.get("event") not in self.events:
                 raise AwError("source_route_coverage_incomplete")
-            if hook.get("replace_input") or hook.get("replace_result") or hook.get("skill_check"):
+            if not confirm_source_routes(caps, {"hooks": [hook]}):
                 raise AwError("source_route_effect_unsupported")
 
     async def prepare(self) -> None:
@@ -206,7 +169,7 @@ class SourceSession:
 
     async def before_tool(
         self, name: str, tool_input: Mapping[str, Any], *, call_id: str | None = None
-    ) -> tuple[str, dict[str, Any], dict[str, str]]:
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Emit tool.before and raise SourceDenied before native tool execution."""
         self._require_open()
         tool_name = validate_identity(name)
@@ -215,7 +178,7 @@ class SourceSession:
         await self.prepare()
         if "tool.before" in self.events:
 
-            async def emit() -> tuple[str, dict[str, Any], dict[str, str]]:
+            async def emit() -> tuple[str, dict[str, Any], dict[str, Any]]:
                 assert self.task is not None
                 decision = await self.task.emit(
                     "tool.before",
@@ -234,7 +197,11 @@ class SourceSession:
                         tool_name=tool_name,
                     )
                 self._require_open()
-                return resolved_call, snapshot, decision
+                effective = snapshot
+                if "updated_input" in decision:
+                    effective = snapshot_tool_input(decision["updated_input"])
+                    decision = {**decision, "updated_input": effective}
+                return resolved_call, effective, decision
 
             return await self._run_admitted_call(emit)
         self._require_open()
@@ -242,8 +209,8 @@ class SourceSession:
 
     async def after_tool(
         self, name: str, tool_input: Mapping[str, Any], result: Any, *, call_id: str
-    ) -> dict[str, str]:
-        """Emit tool.after observation with the original call snapshot and normalized result."""
+    ) -> dict[str, Any]:
+        """Emit tool.after with original snapshot and normalized result; enforce withholding."""
         with tool_executed():
             self._require_open()
             if "tool.after" not in self.events:
@@ -255,7 +222,7 @@ class SourceSession:
 
     async def _after_admitted_tool(
         self, name: str, tool_input: Mapping[str, Any], result: Any, *, call_id: str
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         with tool_executed():
             if self._task_closed:
                 raise AwError("source_session_closed")
@@ -266,7 +233,7 @@ class SourceSession:
             tool_name = validate_identity(name)
             resolved_call = validate_identity(call_id)
             snapshot = snapshot_tool_input(tool_input)
-            return await task.emit(
+            decision = await task.emit(
                 "tool.after",
                 {
                     "session_id": self.session_id,
@@ -276,6 +243,14 @@ class SourceSession:
                     "result": normalize_json(result),
                 },
             )
+            if decision["decision"] == "withhold":
+                raise SourceResultWithheld(
+                    "tool.after",
+                    session_id=self.session_id,
+                    call_id=resolved_call,
+                    tool_name=tool_name,
+                )
+            return decision
 
     def wrap_input(
         self,
@@ -344,38 +319,64 @@ class SourceSession:
         *,
         name: str | None = None,
         extract_input: Callable[..., Mapping[str, Any]] | None = None,
+        apply_input: Callable[[dict[str, Any], tuple[Any, ...], dict[str, Any]], Any] | None = None,
         extract_call_id: Callable[..., str | None] | None = None,
         extract_result: Callable[[Any], Any] | None = None,
+        apply_result: Callable[[Any, Any], Any] | None = None,
         snapshot_arg: Callable[[Any], Any] | None = None,
+        snapshot_result: Callable[[Any], Any] | None = None,
         max_stream_items: int = DEFAULT_MAX_STREAM_ITEMS,
+        max_stream_bytes: int = DEFAULT_MAX_STREAM_BYTES,
+        buffer_stream: bool = False,
     ) -> Callable[..., Any]:
         """Wrap a non-blocking sync/async tool or async generator behind tool.before/after."""
         if not callable(fn):
             raise AwError("source_callable_required")
-        if type(max_stream_items) is not int or max_stream_items < 1:
+        if (
+            type(max_stream_items) is not int
+            or max_stream_items < 1
+            or type(max_stream_bytes) is not int
+            or max_stream_bytes < 1
+        ):
             raise AwError("source_invalid_stream_limit")
         tool_name = validate_identity(getattr(fn, "__name__", "") if name is None else name)
         input_extractor = default_extract_input if extract_input is None else extract_input
+        custom_extract_input = extract_input is not None
+        custom_extract_result = extract_result is not None
+        is_sync_gen = inspect.isgeneratorfunction(fn)
 
         async def admit_call(args: tuple[Any, ...], kwargs: dict[str, Any]):
             call_args, call_kwargs = isolate_call_args(args, kwargs, snapshot_arg)
             raw_input = input_extractor(*call_args, **call_kwargs)
+            original_snapshot = snapshot_tool_input(raw_input)
             call_id = (
                 extract_call_id(*call_args, **call_kwargs) if extract_call_id is not None else None
             )
-            resolved_call, snapshot, _ = await self.before_tool(
+            resolved_call, snapshot, decision = await self.before_tool(
                 tool_name, raw_input, call_id=call_id
             )
             self._require_open()
-            post_snapshot = snapshot_tool_input(input_extractor(*call_args, **call_kwargs))
-            if post_snapshot != snapshot:
+            if snapshot_tool_input(input_extractor(*call_args, **call_kwargs)) != original_snapshot:
                 raise AwError("source_input_mutated")
+            if "updated_input" in decision:
+                call_args, call_kwargs = apply_tool_input(
+                    decision["updated_input"],
+                    call_args,
+                    call_kwargs,
+                    apply_input=apply_input,
+                    custom_extract=custom_extract_input,
+                    snapshot_arg=snapshot_arg,
+                )
+                if snapshot_tool_input(input_extractor(*call_args, **call_kwargs)) != snapshot:
+                    raise AwError("source_input_replace_mismatch")
             return resolved_call, snapshot, call_args, call_kwargs
 
-        async def observe_result(result: Any, snapshot: dict[str, Any], call_id: str) -> None:
+        async def observe_result(
+            result: Any, snapshot: dict[str, Any], call_id: str
+        ) -> dict[str, Any]:
             with tool_executed():
                 payload = result if extract_result is None else extract_result(result)
-                await self._after_admitted_tool(tool_name, snapshot, payload, call_id=call_id)
+                return await self._after_admitted_tool(tool_name, snapshot, payload, call_id=call_id)
 
         if inspect.isasyncgenfunction(fn):
 
@@ -383,43 +384,26 @@ class SourceSession:
             async def wrapped_stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
                 resolved_call, snapshot, call_args, call_kwargs = await admit_call(args, kwargs)
                 self._require_open()
-                items: list[Any] | None = [] if self._observe_after() else None
-                stream = ActiveStream(fn(*call_args, **call_kwargs))
-                self._active_streams.add(stream)
-
-                async def finish() -> None:
-                    await stream.close()
-                    if self._observe_after():
-                        await observe_result(items, snapshot, resolved_call)
-
-                with tool_executed():
-                    try:
-                        while True:
-                            self._require_open()
-                            try:
-                                item = await stream.read()
-                            except StopAsyncIteration:
-                                self._require_open()
-                                # Keep the Task through native close and result observation.
-                                if items is not None:
-                                    await self._run_admitted_call(finish)
-                                break
-                            self._require_open()
-                            if items is not None and self._observe_after():
-                                if len(items) >= max_stream_items:
-                                    raise AwError("source_stream_result_too_large")
-                                items.append(
-                                    normalize_json(item)
-                                    if extract_result is None
-                                    else snapshot_stream_chunk(item)
-                                )
-                            yield item
-                    finally:
-                        try:
-                            await stream.close()
-                        finally:
-                            if stream.closing is not None and stream.closing.done():
-                                self._active_streams.discard(stream)
+                inner = run_tool_stream(
+                    self,
+                    fn,
+                    call_args,
+                    call_kwargs,
+                    snapshot=snapshot,
+                    call_id=resolved_call,
+                    observe_result=observe_result,
+                    extract_result=extract_result,
+                    apply_result=apply_result,
+                    snapshot_result=snapshot_result,
+                    max_stream_items=max_stream_items,
+                    max_stream_bytes=max_stream_bytes,
+                    buffer_stream=buffer_stream,
+                )
+                try:
+                    async for item in inner:
+                        yield item
+                finally:
+                    await inner.aclose()
 
             setattr(wrapped_stream, _INSTRUMENTED_ATTR, True)
             return wrapped_stream
@@ -427,13 +411,36 @@ class SourceSession:
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
             resolved_call, snapshot, call_args, call_kwargs = await admit_call(args, kwargs)
+            if is_sync_gen and self._strict_after() and not buffer_stream:
+                raise AwError("source_stream_withhold_requires_buffering")
 
             async def invoke() -> Any:
                 result = fn(*call_args, **call_kwargs)
                 if inspect.isawaitable(result):
                     result = await result
+                if self._strict_after():
+                    return await deliver_strict_result(
+                        result,
+                        snapshot=snapshot,
+                        call_id=resolved_call,
+                        observe_result=observe_result,
+                        extract_result=extract_result,
+                        apply_result=apply_result,
+                        snapshot_result=snapshot_result,
+                        buffer_stream=buffer_stream,
+                        max_stream_items=max_stream_items,
+                        max_stream_bytes=max_stream_bytes,
+                    )
                 if self._observe_after():
-                    await observe_result(result, snapshot, resolved_call)
+                    decision = await observe_result(result, snapshot, resolved_call)
+                    if "replaced_result" in decision:
+                        with tool_executed():
+                            return apply_tool_result(
+                                result,
+                                decision["replaced_result"],
+                                apply_result=apply_result,
+                                custom_extract=custom_extract_result,
+                            )
                 return result
 
             return await self._run_admitted_call(invoke)
@@ -566,6 +573,9 @@ class LanguageSource:
         target: str,
         availability: str = "required",
         events: Iterable[str] = DEFAULT_EVENTS,
+        replace_input: bool = False,
+        replace_result: bool = False,
+        withhold_result: bool = False,
         cwd: str | None = None,
         environment: dict[str, str] | None = None,
         config: str | None = None,
@@ -573,7 +583,12 @@ class LanguageSource:
         reconnect_ms: int = 1000,
     ) -> "LanguageSource":
         """Create an owned sdk/application Instance with canonical route confirmation."""
-        capabilities = source_capabilities(events)
+        capabilities = source_capabilities(
+            events,
+            replace_input=replace_input,
+            replace_result=replace_result,
+            withhold_result=withhold_result,
+        )
         instance = Instance(
             endpoint=endpoint,
             target=target,

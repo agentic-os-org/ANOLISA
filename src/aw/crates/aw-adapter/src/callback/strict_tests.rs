@@ -93,3 +93,37 @@ fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
     )
     .is_err());
 }
+
+#[test]
+fn sdk_withholding_requires_an_audited_provider_fault() {
+    let adapter = adapter::select("sdk").unwrap();
+    let fault = json!({"kind":"provider", "status":"error", "effects":[],
+        "failure":"provider", "failure_action":"withhold_result"});
+    let reply = |event, action, value| {
+        response(
+            adapter,
+            event,
+            action,
+            value,
+            "sdk",
+            &json!({}),
+            &mut Vec::new(),
+        )
+    };
+    let result = reply("tool.after", "withhold_result", fault.clone()).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({"aw_withheld": true})
+    );
+    for (key, value) in [
+        ("kind", json!("native")),
+        ("failure", json!("cancelled")),
+        ("failure", json!("transport")),
+        ("failure_action", json!("report")),
+    ] {
+        let mut invalid = fault.clone();
+        invalid[key] = value;
+        assert!(reply("tool.after", "withhold_result", invalid).is_err());
+    }
+    assert!(reply("tool.before", "withhold_result", fault).is_err());
+}

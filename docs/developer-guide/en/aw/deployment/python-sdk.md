@@ -17,9 +17,10 @@ Build AW from the same candidate revision as the language packages. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
-For framework-free declarative instrumentation (`aw_sdk.sources`) and direct
-semantic callbacks (`task.emit`), see
-[Runtime SDK integration](native-sdk.md#framework-free-integration).
+For framework-free declarative instrumentation (`aw_sdk.sources`), opt-in
+`replace_input` / `replace_result` / `withhold_result`, non-invasive
+`aw_sdk.auto_instrument` import hooks and direct semantic callbacks (`task.emit`),
+see [Runtime SDK integration](native-sdk.md#framework-free-integration).
 For wrapped tools that take class instances, that guide describes how to
 provide `snapshot_arg` to preserve the checked input through stream iteration.
 

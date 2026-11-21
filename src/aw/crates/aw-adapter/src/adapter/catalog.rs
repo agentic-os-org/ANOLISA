@@ -40,8 +40,8 @@ pub(crate) const SDK: Profile = Profile {
     adapter: &super::super::adapters::sdk::Sdk,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
-        ("tool.after", &["observe"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
     ],
 };
 

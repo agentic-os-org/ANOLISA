@@ -230,6 +230,50 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 - 同一对象实例的同一方法同一时刻只能由一个活动 `SourceSession` 插桩（重复插桩报
   `source_already_instrumented`）；并发处理多会话时请按请求使用独立对象实例或按会话直接包装函数。
 
+### 参数／结果改写与故障扣留（`replace_input`、`replace_result`、`withhold_result`）
+
+按 `LanguageSource` 显式开启，保持既有仅观察／阻断调用方 100% 向后兼容：
+
+- 在 TypeScript 中向 `LanguageSource.create(...)` 传入 `replaceInput: true`、`replaceResult: true`
+  及／或 `withholdResult: true`（Python 为 `replace_input=True`、`replace_result=True`、`withhold_result=True`）。
+  路由确认会拒绝未声明对应效果或 `withhold_result` 失败动作的策略步骤。
+- **`replace_input`**：当 `tool.before` Provider 返回获准的替换参数时，`wrapTool`／`wrap_tool`
+  安全重建标准 JSON 对象参数（自定义参数形状提供 `applyInput`／`apply_input` 回调），并在原生执行前
+  再次核对投影一致。无法安全应用的形状显式报 `source_input_replace_unsupported`，绝不静默丢弃改写结果。
+- **`replace_result`、`withhold_result` 与严格输出隔离**：当 `tool.after` 返回替换结果时，自动替换字符串或
+  标准结构化文本对象（自定义形状提供 `applyResult`／`apply_result`），不支持的形状显式报
+  `source_result_replace_unsupported`。在严格工具后路由（`replace_result` 或 `on_error: withhold_result`）下，
+  SDK 会隔离并交付经审核值的副本（不可隔离的不透明对象报 `source_result_isolation_required`，
+  未缓冲的惰性迭代器／生成器报 `source_stream_withhold_requires_buffering`）。当必需 `tool.after`
+  检查在 `on_error: withhold_result` 下失败时，SDK 抛出 `SourceResultWithheld`
+  （携带 `toolExecuted`／`tool_executed = true`），绝不返回未检原文。
+- **流式诚实边界**：未缓冲的流式工具无法事后撤回已吐出的分块。当 `tool.after` 准入了 `replace_result`
+  或 `on_error: withhold_result` 时，未缓冲流在原生生成器启动前即失败并报
+  `source_stream_withhold_requires_buffering`。设置 `bufferStream: true`／`buffer_stream=True`
+  可按 `maxStreamItems`／`max_stream_items` 条数上限与 `maxStreamBytes`／`max_stream_bytes`
+  累计 UTF-8 JSON 字节预算先缓冲隔离快照，待 `tool.after` 校验通过或替换后再产出，超限或故障时消费者收到零项。
+
+### 无侵入自动插桩（零业务改码）
+
+两个核心包均提供基于显式白名单的无侵入插桩模块，不依赖 `PyFrame` 局部变量写回，也不绑定单一 CLI 摘要：
+
+- **Python（`aw_sdk.auto_instrument`）**：通过 `sys.meta_path` Import Hook（并兼容已导入模块）仅包裹白名单中
+  精确声明的 `{module, qualname, kind}` 目标（通配符、双下划线路径、缺失目标及不支持的加载器或描述符均
+  fail-closed 拒绝，并在中途失败时回滚已安装补丁与 finder）。支持同步／异步函数、同步／异步生成器、普通／继承方法、
+  `classmethod` 与 `staticmethod`；每个 event loop 共享单次建连，`uninstall()`／`aclose()` 在各自所属
+  loop 上释放资源。对于 `availability: "required"`，优先使用失败即中止的 CLI 入口
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json python3 -m aw_sdk.auto_instrument app.py`
+  （脚本模式对齐原生 `sys.path[0]`）；或在私有 `sitecustomize.py` 中调用 `aw_sdk.auto_instrument.bootstrap()`
+  （required 启动失败时抛出 `SystemExit(1)`，避免被 CPython `site` 模块吞掉）。延迟导入目标在首次导入时确认，
+  也可配置 `eager_import: true` 或调用 `handle.assert_installed()` 提前确认。
+- **Node.js（`@anolisa/aw-sdk/sources/preload`）**：通过
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json node --import @anolisa/aw-sdk/sources/preload app.mjs`
+  加载。支持显式 `{ kind: "fetch" }`（按 Fetch 语义构建独立有效 `Request` 与有界无损快照，改写后复核投影再发送，
+  观察／放行保留 204、二进制字节与响应元数据）与 `{ kind: "module", module, exportName }`
+  （相对于确定 `baseDir` 解析为规范 URL、使用代理作用域内部委派令牌、在卸载重装后对已缓存 ESM 模块动态分发新策略、
+  保留 `default` 与未选导出及 `async function`／`async function*` 协议，并在加载时显式拒绝缺失、非函数或同步导出）。
+  未设 `AW_AUTO_INSTRUMENT=1` 时导入无任何副作用；`uninstall()` 恢复 `fetch`、注销模块 Hook 并关闭会话。
+
 完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
 

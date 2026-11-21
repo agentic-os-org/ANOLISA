@@ -172,7 +172,7 @@ pub fn response(
                 Some("exit" | "incomplete_input" | "provider" | "protocol")
             ) || (output["failure"] == "transport"
                 && output["failure_detail"] == "deadline_exceeded"));
-        if matches!(adapter_id, "pi" | "deepseek-harness")
+        if matches!(adapter_id, "pi" | "deepseek-harness" | "sdk")
             && provider_fault
             && event == "tool.after"
             && on_error == "withhold_result"

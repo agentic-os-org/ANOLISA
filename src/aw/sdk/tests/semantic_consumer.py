@@ -80,7 +80,7 @@ async def main() -> None:
                     raise AssertionError("invalid callback accepted")
     finally:
         await instance.close()
-    capabilities["events"]["tool.after"].append("replace_result")
+    capabilities["events"]["tool.after"].append("block")
     inflated = Instance(
         endpoint=sys.argv[1],
         target="app",

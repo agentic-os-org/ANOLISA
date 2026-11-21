@@ -298,6 +298,77 @@ without writing a dedicated Rust Adapter, use the language-level Source Runtime
   `SourceSession` at a time (`source_already_instrumented`); create per-request
   object instances or wrap functions directly when serving concurrent sessions.
 
+### Rewrites and fault withholding (`replace_input`, `replace_result`, `withhold_result`)
+
+Opt in per `LanguageSource` to keep existing observe/block callers unchanged:
+
+- Pass `replaceInput: true`, `replaceResult: true`, and/or `withholdResult: true`
+  to `LanguageSource.create(...)` in TypeScript (or `replace_input=True`,
+  `replace_result=True`, `withhold_result=True` in Python). Route confirmation
+  rejects any policy step whose effect or `withhold_result` failure action was
+  not declared.
+- **`replace_input`**: When a `tool.before` Provider returns approved revised
+  arguments, `wrapTool` / `wrap_tool` rebuilds plain JSON dict/object arguments
+  safely (or calls optional `applyInput` / `apply_input` for custom argument
+  shapes) and re-verifies the projected input before native execution. Shapes
+  that cannot be rebuilt safely fail closed with `source_input_replace_unsupported`
+  rather than silently discarding the rewrite.
+- **`replace_result`, `withhold_result` and strict output isolation**: When
+  `tool.after` returns a replacement, `wrapTool` / `wrap_tool` replaces string
+  or plain structured text envelopes (or calls optional `applyResult` /
+  `apply_result`); unsupported shapes fail with `source_result_replace_unsupported`.
+  On strict-after routes (`replace_result` or `on_error: withhold_result`), the
+  SDK isolates and delivers a copy of the exact audited value (rejecting opaque
+  non-isolatable objects with `source_result_isolation_required` and rejecting
+  unbuffered lazy iterators/generators with `source_stream_withhold_requires_buffering`).
+  When a required `tool.after` check fails under `on_error: withhold_result`,
+  the SDK raises `SourceResultWithheld` (`toolExecuted` / `tool_executed = true`)
+  and never returns unchecked output.
+- **Honest streaming boundary**: Unbuffered streaming tools cannot recall chunks
+  already yielded to callers. When `tool.after` admits `replace_result` or
+  `on_error: withhold_result`, an unbuffered stream fails before starting the
+  native generator with `source_stream_withhold_requires_buffering`. Set
+  `bufferStream: true` / `buffer_stream=True` to buffer isolated snapshots up to
+  both `maxStreamItems` / `max_stream_items` and `maxStreamBytes` /
+  `max_stream_bytes` (cumulative UTF-8 JSON bytes), evaluate `tool.after`, and
+  yield only after approval or replacement (yielding zero chunks on overflow or
+  withholding).
+
+### Non-invasive auto-instrumentation (zero code changes)
+
+Both core packages provide an opt-in, allowlist-only instrumentation layer that
+attaches `LanguageSource` without editing business code, without `PyFrame`
+locals rewriting, and without pinning a single CLI binary hash:
+
+- **Python (`aw_sdk.auto_instrument`)**: Uses a `sys.meta_path` import hook (and
+  wraps already-loaded modules) strictly for exact allowlisted `{module, qualname, kind}`
+  entries (wildcards, dunder paths, missing targets, and unsupported loaders or
+  descriptors fail closed and roll back partial patches). Supports sync/async
+  functions, sync/async generators, regular/inherited methods, `classmethod`,
+  and `staticmethod`; shares one single-flight connection per event loop and
+  closes each resource on its owning loop during `uninstall()` / `aclose()`.
+  For `availability: "required"`, prefer the fail-fast CLI launcher
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json python3 -m aw_sdk.auto_instrument app.py`
+  (which aligns `sys.path[0]` with native `python app.py`), or call
+  `aw_sdk.auto_instrument.bootstrap()` from a private `sitecustomize.py`
+  (required startup failures raise `SystemExit(1)` so CPython's `site` module
+  cannot swallow them). Deferred-import targets are confirmed on first import;
+  set `eager_import: true` or call `handle.assert_installed()` to confirm all
+  targets eagerly.
+- **Node.js (`@anolisa/aw-sdk/sources/preload`)**: Loads via
+  `AW_AUTO_INSTRUMENT=1 AW_AUTO_INSTRUMENT_CONFIG=/abs/spec.json node --import @anolisa/aw-sdk/sources/preload app.mjs`.
+  Supports explicit `{ kind: "fetch" }` (constructing an independent Fetch
+  `Request` with bounded lossless body snapshots, re-verifying `replace_input`
+  projections before sending, and preserving `204`, binary bytes and response
+  metadata on observe/allow) and `{ kind: "module", module, exportName }`
+  (resolving targets against a deterministic `baseDir` to canonical URLs, using
+  proxy-scoped delegation tokens, dynamically dispatching across
+  uninstall/reinstall on cached ESM modules, preserving `default` and untouched
+  exports plus `async function` / `async function*` protocols, and failing at
+  load time on missing, non-function or synchronous exports). Importing without
+  `AW_AUTO_INSTRUMENT=1` performs no patching; `uninstall()` restores `fetch`,
+  deregisters module hooks, and closes owned sessions.
+
 See the [TypeScript Source example](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 and [Python Source example](../../../../../src/aw/sdk/python/examples/language_source.py).
 
