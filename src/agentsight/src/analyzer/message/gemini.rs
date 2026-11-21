@@ -474,7 +474,9 @@ impl GeminiParser {
                             None => continue,
                         }
                     }
-                    None => position,
+                    // Earlier skipped out-of-range candidates leave `merged.candidates`
+                    // shorter than `position`; clamp so an unindexed follower appends contiguously.
+                    None => position.min(merged.candidates.len()),
                 };
                 if index == merged.candidates.len() {
                     merged.candidates.push(GeminiCandidate::default());
@@ -915,6 +917,29 @@ mod tests {
             .filter_map(|part| part.text.as_deref())
             .collect();
         assert_eq!(text, "a");
+    }
+
+    #[test]
+    fn unindexed_candidate_after_skipped_index_does_not_panic() {
+        let chunks = serde_json::json!([
+            {"candidates": [
+                {"content": {"parts": [{"text": "skip"}]}, "index": 5},
+                {"content": {"parts": [{"text": "kept"}]}}
+            ]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+
+        assert_eq!(response.candidates.len(), 1);
+        let text: String = response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "kept");
     }
 
     #[test]
