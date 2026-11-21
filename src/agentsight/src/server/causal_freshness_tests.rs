@@ -119,6 +119,62 @@ async fn durable_cache_tracks_the_current_latest_round() {
 }
 
 #[actix_web::test]
+async fn durable_restore_normalizes_legacy_alternative_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = format!("legacy-attribs-{}", uuid::Uuid::new_v4());
+    let store =
+        Arc::new(TrajectoryStore::new_with_path(&dir.path().join("trajectories.db")).unwrap());
+    save(&store, &session, false);
+    let state = state(dir.path(), store);
+    let app = awtest::init_service(
+        App::new()
+            .app_data(state.clone())
+            .service(run_causal_attribution),
+    )
+    .await;
+    let request = || {
+        awtest::TestRequest::post()
+            .uri("/causal-attribution")
+            .set_json(json!({"session_id":session,"complaint":"请核对结果"}))
+            .to_request()
+    };
+    let initial: Value = awtest::call_and_read_body_json(&app, request()).await;
+    assert_eq!(initial["cached"], false, "{initial}");
+
+    let session_key = format!("sess:{session}");
+    let key = causal_store::CaseKey {
+        session_key: &session_key,
+        round: None,
+        complaint: "请核对结果",
+    };
+    let store = state.causal_store.as_ref().unwrap();
+    let mut stored: Value = serde_json::from_str(&store.get(key).unwrap().unwrap()).unwrap();
+    assert_eq!(stored["_agentsight_causal_source"]["version"], 1);
+    stored["attrib"] = json!("prompt");
+    stored["alternative_attribs"] = json!([
+        {"attrib":" Model ","confidence":87.0,"rationale":"model","fix":"model"},
+        {"attrib":"environment","confidence":0.95,"rationale":"unknown","fix":"unknown"},
+        {"attrib":"PROMPT","confidence":0.9,"rationale":"primary","fix":"primary"},
+        {"attrib":"agent","confidence":-3.0,"rationale":"agent","fix":"agent"},
+        {"attrib":"skill","confidence":0.5,"rationale":"skill","fix":"skill"}
+    ]);
+    store.put(key, &stored.to_string()).unwrap();
+    causal_cache().lock().unwrap().remove(&(session_key, None));
+
+    let restored: Value = awtest::call_and_read_body_json(&app, request()).await;
+    assert_eq!(restored["cached"], true, "{restored}");
+    assert_eq!(
+        restored["case"]["alternative_attribs"],
+        json!([
+            {"attrib":"model","confidence":1.0,"rationale":"model","fix":"model"},
+            {"attrib":"skill","confidence":0.5,"rationale":"skill","fix":"skill"},
+            {"attrib":"agent","confidence":0.0,"rationale":"agent","fix":"agent"}
+        ])
+    );
+    assert!(restored["case"].get("_agentsight_causal_source").is_none());
+}
+
+#[actix_web::test]
 async fn retained_cases_survive_missing_sources_in_memory_and_on_disk() {
     for durable in [false, true] {
         let dir = tempfile::tempdir().unwrap();

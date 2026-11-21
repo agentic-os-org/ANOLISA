@@ -440,7 +440,9 @@ pub async fn run_causal_attribution(
                                 case_value,
                                 source_hash.as_deref(),
                                 source_available,
-                            ) {
+                            )
+                            .and_then(normalize_restored_case)
+                            {
                                 log::info!(
                                     "Causal attribution: restored case for {} round={:?} from causal.db",
                                     resolved_session_id,
@@ -2086,6 +2088,8 @@ fn build_case(
         .filter(|single_turn| !single_turn && outcome == "fail")
         .map(|_| "错误结论直接交付给了用户".to_string());
 
+    let primary_attrib = normalize_attrib(attr.attrib.as_deref());
+
     Ok(CausalCase {
         id: format!(
             "case_{}",
@@ -2111,18 +2115,16 @@ fn build_case(
         outcome,
         outcome_note: attr.outcome_note.clone(),
         turn_issue: turn_issue_str,
-        attrib: normalize_attrib(attr.attrib.as_deref()),
+        attrib: primary_attrib.clone(),
         fix: attr
             .fix
             .clone()
             .filter(|f| !f.is_empty())
             .unwrap_or_else(|| "暂无建议".into()),
-        alternative_attribs: attr
-            .alternative_attribs
-            .iter()
-            .filter(|a| !a.attrib.is_empty())
-            .cloned()
-            .collect(),
+        alternative_attribs: normalize_alternative_attribs(
+            &attr.alternative_attribs,
+            &primary_attrib,
+        ),
         timeline: Some(timeline),
         nodes,
         edges,
@@ -2294,6 +2296,58 @@ fn normalize_outcome(value: Option<&str>) -> String {
         "fail" | "failed" | "failure" | "失败" => "fail".to_string(),
         _ => "success".to_string(),
     }
+}
+
+// Older durable rows missed build_case normalization; replay must enforce the
+// same response contract without discarding a paid analysis.
+fn normalize_restored_case(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let object = value.as_object_mut()?;
+    let primary = normalize_attrib(object.get("attrib").and_then(serde_json::Value::as_str));
+    let alternatives = object
+        .get("alternative_attribs")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let alternatives: Vec<AlternativeAttrib> = serde_json::from_value(alternatives).ok()?;
+    let normalized = normalize_alternative_attribs(&alternatives, &primary);
+    if normalized.is_empty() {
+        object.remove("alternative_attribs");
+    } else {
+        object.insert(
+            "alternative_attribs".into(),
+            serde_json::to_value(normalized).ok()?,
+        );
+    }
+    Some(value)
+}
+
+fn normalize_alternative_attribs(
+    alternatives: &[AlternativeAttrib],
+    primary: &str,
+) -> Vec<AlternativeAttrib> {
+    let mut kept: Vec<AlternativeAttrib> = alternatives
+        .iter()
+        .filter_map(|candidate| {
+            let attrib = candidate.attrib.trim().to_ascii_lowercase();
+            if attrib.is_empty() {
+                return None;
+            }
+            if !matches!(attrib.as_str(), "model" | "skill" | "prompt" | "agent") {
+                log::warn!(
+                    "causal-attribution: dropping alternative attrib {attrib:?} — not a canonical category"
+                );
+                return None;
+            }
+            if attrib == primary {
+                return None;
+            }
+            let mut normalized = candidate.clone();
+            normalized.attrib = attrib;
+            normalized.confidence = normalized.confidence.clamp(0.0, 1.0);
+            Some(normalized)
+        })
+        .collect();
+    kept.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    kept
 }
 
 #[cfg(test)]
