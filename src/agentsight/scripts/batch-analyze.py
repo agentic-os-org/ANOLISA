@@ -504,27 +504,26 @@ def analyze_file(
         f"  Session: {atif['session_id']} | Agent: {atif['agent']['name']} | Steps: {n_steps}",
         file=diagnostics,
     )
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
-    ) as tmp:
-        json.dump(atif, tmp, ensure_ascii=False)
-        temporary = tmp.name
+    temporary = None
     output = None
     status = "failed"
+    operation = "prepare temporary input"
     try:
-        try:
-            result = subprocess.run(
-                command + [temporary, "--dim", dim],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=300,
-            )
-        except OSError as error:
-            print(f"  FAIL: cannot run analyzer: {error}", file=diagnostics)
-            return status, None, diagnostics.getvalue()
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
+        ) as tmp:
+            temporary = tmp.name
+            json.dump(atif, tmp, ensure_ascii=False)
+        operation = "run analyzer"
+        result = subprocess.run(
+            command + [temporary, "--dim", dim],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
         if result.returncode != 0:
             print(f"  FAIL: {result.stderr.strip()[:200]}", file=diagnostics)
         else:
@@ -534,16 +533,28 @@ def analyze_file(
             else:
                 output = decoded
                 output.update(
-                    _source_file=str(filepath), _session_id=atif["session_id"], _steps=n_steps
+                    _source_file=str(filepath),
+                    _session_id=atif["session_id"],
+                    _steps=n_steps,
                 )
                 print(f"  OK ({dim})", file=diagnostics)
                 status = "analyzed"
+    except OSError as error:
+        print(f"  FAIL: cannot {operation}: {error}", file=diagnostics)
     except subprocess.TimeoutExpired:
         print("  TIMEOUT (300s)", file=diagnostics)
     except json.JSONDecodeError:
         print("  FAIL: invalid JSON output", file=diagnostics)
     finally:
-        os.unlink(temporary)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                print(
+                    f"  WARN: cannot remove temporary input: {error}", file=diagnostics
+                )
     return status, output, diagnostics.getvalue()
 
 
