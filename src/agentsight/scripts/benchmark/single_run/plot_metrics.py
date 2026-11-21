@@ -14,7 +14,9 @@ import html
 import json
 import math
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -960,16 +962,24 @@ def warmup_slope(
     ]
     if len(pairs) < 2:
         return None, [], []
-    post_slope = slope_per_hour([time for time, _ in pairs], [value for _, value in pairs])
+    sample_times, sample_values = zip(*pairs)
+    post_slope = slope_per_hour(sample_times, sample_values)
+    chronological = all(left <= right for left, right in pairwise(sample_times))
     rolling_times: list[float] = []
     rolling_values: list[float] = []
-    for time, _ in pairs:
+    for time in sample_times:
         if time < warmup + window:
             continue
-        subset = [(a, b) for a, b in pairs if time - window <= a <= time]
+        if chronological:
+            first = bisect_left(sample_times, time - window)
+            stop = bisect_right(sample_times, time)
+            subset = pairs[first:stop]
+        else:
+            subset = [(a, b) for a, b in pairs if time - window <= a <= time]
         if len(subset) < 3:
             continue
-        value = slope_per_hour([a for a, _ in subset], [b for _, b in subset])
+        window_times, window_values = zip(*subset)
+        value = slope_per_hour(window_times, window_values)
         if value is not None:
             rolling_times.append(time)
             rolling_values.append(value)
