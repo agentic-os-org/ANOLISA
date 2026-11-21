@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 mod control;
 mod descriptors;
+mod lifecycle;
 mod native;
 mod sdk;
 

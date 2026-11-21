@@ -113,6 +113,11 @@ class TaskScope:
             return await task._invoke_step(hook, payload)
         return await task.invoke_native(hook, payload)
 
+    async def emit(self, event: str, payload: dict) -> dict[str, str]:
+        """Emit an installed semantic callback through this acknowledged Scope."""
+        await self.validate()
+        return await self.admission.task.emit(event, payload)
+
     async def register(self, sequence: int, call_id: str, name: str, arguments: Any) -> None:
         await self.validate()
         await self.call(

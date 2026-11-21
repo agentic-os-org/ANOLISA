@@ -136,6 +136,7 @@ if (process.env.AW_PI_PROBE === "1") {
     const bridge = await import(new URL("./bridge.mjs", import.meta.url));
     const installed = bridge.installSessionBridge(session);
     installations.set(session, installed);
+    await installed.sessionStart();
     return result;
   };
   try {
@@ -145,7 +146,8 @@ if (process.env.AW_PI_PROBE === "1") {
   } finally {
     for (const [session, installed] of installations) {
       installed.dispose();
-      session.dispose();
+      await session.dispose();
+      await installed.sessionEnd("disposed");
     }
   }
 }

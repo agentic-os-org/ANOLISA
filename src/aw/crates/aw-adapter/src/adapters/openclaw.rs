@@ -109,6 +109,17 @@ impl Adapter for OpenClaw {
     }
 
     fn normalize(&self, binding: &NativeContext, name: &str, native: &Value) -> Result<Value> {
+        if crate::callback::lifecycle(name) {
+            let hook = match name {
+                "session.start" => "session_start",
+                "turn.stop" => "before_agent_finalize",
+                _ => "session_end",
+            };
+            if native["hook"] != hook {
+                return Err("OpenClaw lifecycle Hook differs from its route".into());
+            }
+            return super::lifecycle::normalize(binding, "openclaw", name, native);
+        }
         let hook = match name {
             "tool.before" => "before_tool_call",
             "tool.after" => "after_tool_call",
@@ -180,6 +191,11 @@ impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
         let mut capabilities =
             super::super::adapter::catalog::OPENCLAW.capabilities(&self.version, "gateway");
+        if self.input.options.reloadable || !self.bundle_verified {
+            for name in ["session.start", "turn.stop", "session.end"] {
+                capabilities.events.remove(name);
+            }
+        }
         if self.bundle_verified
             && !self.input.options.reloadable
             && verified_model_api(&self.settings)
@@ -231,11 +247,18 @@ impl PreparedLaunch for Prepared {
             .to_owned();
         let mut hooks = json!({"before":[],"after":[]});
         let mut events = BTreeMap::new();
-        for name in ["tool.before", "tool.after", "security.violation"] {
+        for name in [
+            "session.start",
+            "tool.before",
+            "tool.after",
+            "security.violation",
+            "turn.stop",
+            "session.end",
+        ] {
             let selected = adapter::native_steps(
                 context.steps,
                 name,
-                name != "security.violation"
+                matches!(name, "tool.before" | "tool.after")
                     && adapter::observation_enabled(&self.input.document, &self.input.target),
             );
             if selected.is_empty() {
@@ -245,7 +268,8 @@ impl PreparedLaunch for Prepared {
             let group = match name {
                 "tool.before" => "before",
                 "tool.after" => "after",
-                _ => "final",
+                "security.violation" => "final",
+                _ => name,
             };
             hooks[group] = json!(selected
                 .iter()
@@ -300,8 +324,8 @@ impl PreparedLaunch for Prepared {
                 "reloadable":self.input.options.reloadable,
             }}),
         );
-        if self.input.options.reloadable {
-            // The native request gate is conversation-scoped; only the AW entry
+        if self.input.options.reloadable || events.contains_key("turn.stop") {
+            // The native request and finalization gates is conversation-scoped; only the AW entry
             // receives permission in this private overlay.
             entries.get_mut(PLUGIN).ok_or("missing AW plugin entry")?["hooks"] =
                 json!({"allowConversationAccess":true});

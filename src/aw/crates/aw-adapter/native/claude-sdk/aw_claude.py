@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import replace
+from hashlib import sha256
 import json
 import logging
 import os
@@ -18,6 +20,7 @@ import claude_agent_sdk
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultDeny
 
 _CLIENT_CREATED = False
+_stop_delivery: ContextVar[str | None] = ContextVar("aw_claude_stop_delivery", default=None)
 
 
 class CallbackFailure(RuntimeError):
@@ -49,6 +52,10 @@ class Bridge:
         if launch_bound:
             self._validate_launch()
         self.set_routes(self.config.get("hooks"))
+        self.turn_id: str | None = None
+        self._stop_turn: str | None = None
+        self._stop_replies: dict[str, tuple[bytes, asyncio.Future[dict[str, Any]]]] = {}
+        self.session_id: str | None = None
         self.final = None
         if self.config.get("final_profile"):
             from aw_final import FinalGate
@@ -65,7 +72,8 @@ class Bridge:
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
             if (
-                hook.get("event") not in {"input.submit", "tool.before", "tool.after", "security.violation"}
+                hook.get("event") not in {"session.start", "input.submit", "tool.before", "tool.after", "security.violation",
+                                          "turn.stop", "session.end"}
                 or not isinstance(hook.get("step"), str)
                 or not hook["step"]
                 or hook.get("on_error") not in {"report", "block"}
@@ -207,6 +215,120 @@ class Bridge:
                     return result
         return {}
 
+    async def _observe_session(self, event: str, native: str, cwd: str, **fields: str) -> None:
+        payload = {"hook_event_name": native, "session_id": self.session_id, "cwd": cwd, **fields}
+        for hook in self.config["hooks"]:
+            if hook["event"] == event:
+                try:
+                    code, stdout = await self._transport(hook, payload)
+                    if code != 0 or stdout.strip() not in (b"", b"{}"):
+                        raise CallbackFailure("invalid_native_response")
+                except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+                    logging.getLogger(__name__).error("AW %s/%s failed: %s", event, hook["step"], error)
+
+    async def session_initialized(self, message: Any, cwd: str) -> None:
+        if self.session_id is not None:
+            return
+        from claude_agent_sdk import SystemMessage
+
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            session = message.data.get("session_id")
+            if isinstance(session, str) and session:
+                self.session_id = session
+                await self._observe_session("session.start", "AWSessionInit", cwd)
+
+    async def session_disconnected(self, cwd: str, reason: str) -> None:
+        if self.session_id is not None:
+            await self._observe_session("session.end", "AWSessionDisconnect", cwd, reason=reason)
+            self.session_id = None
+
+    def bind_stop_deliveries(self, query: Any) -> None:
+        if not any(hook["event"] == "turn.stop" for hook in self.config["hooks"]):
+            return
+        # Claude SDK 0.2.88 drops the control request ID before calling HookMatcher.
+        # Preserve it on this unshared Query, after connection and before any prompt.
+        handler = getattr(query, "_handle_control_request", None)
+        if not callable(handler):
+            raise CallbackFailure("Claude SDK cannot expose native Stop delivery identity")
+
+        async def with_delivery(frame: dict[str, Any]) -> Any:
+            request = frame["request"]
+            if (
+                request["subtype"] != "hook_callback"
+                or (request.get("input") or {}).get("hook_event_name") != "Stop"
+            ):
+                return await handler(frame)
+            token = _stop_delivery.set(frame.get("request_id"))
+            try:
+                return await handler(frame)
+            finally:
+                _stop_delivery.reset(token)
+
+        query._handle_control_request = with_delivery
+
+    def _stop_failure(self) -> dict[str, Any]:
+        if any(hook["event"] == "turn.stop" and hook["on_error"] == "block"
+               for hook in self.config["hooks"]):
+            return {"decision": "block", "reason": "AW turn stop check failed"}
+        return {}
+
+    async def stop_callback(
+        self, payload: dict[str, Any], _tool_use_id: str | None, _context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the Stop decision to Claude before the terminal result is emitted."""
+        delivery = _stop_delivery.get()
+        turn = self.turn_id
+        if turn is None or not isinstance(delivery, str) or not delivery or len(delivery) > 512:
+            logging.getLogger(__name__).error("AW Stop has no active turn or SDK delivery ID")
+            return self._stop_failure()
+        if self._stop_turn != turn:
+            self._stop_turn = turn
+            self._stop_replies.clear()
+        fingerprint = sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).digest()
+        previous = self._stop_replies.get(delivery)
+        if previous is not None:
+            original, reply = previous
+            if original != fingerprint:
+                return self._stop_failure()
+            return dict(await asyncio.shield(reply))
+        # The durable receipt fences replay after a completed cache entry is evicted.
+        if len(self._stop_replies) >= 64:
+            completed = next((key for key, (_, reply) in self._stop_replies.items()
+                              if reply.done()), None)
+            if completed is None:
+                return self._stop_failure()
+            del self._stop_replies[completed]
+        reply = asyncio.get_running_loop().create_future()
+        self._stop_replies[delivery] = (fingerprint, reply)
+        native = {**payload, "turn_id": turn, "attempt_id": delivery,
+                  "delivery_id": delivery, "reason": "stop_requested"}
+        try:
+            result = await self._check_stop(native)
+        except BaseException:
+            reply.set_result(self._stop_failure())
+            raise
+        reply.set_result(result)
+        return dict(result)
+
+    async def _check_stop(self, native: dict[str, Any]) -> dict[str, Any]:
+        for hook in self.config["hooks"]:
+            if hook["event"] != "turn.stop":
+                continue
+            try:
+                code, stdout = await self._transport(hook, native)
+                if code == 2:
+                    reason = json.loads(stdout or b'"AW policy requires the turn to continue"')
+                    if not isinstance(reason, str) or not reason:
+                        raise CallbackFailure("invalid_native_response")
+                    return {"decision": "block", "reason": reason}
+                if code != 0 or stdout.strip() not in (b"", b"{}"):
+                    raise CallbackFailure("invalid_native_response")
+            except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+                logging.getLogger(__name__).error("AW turn.stop/%s failed: %s", hook["step"], error)
+                if hook["on_error"] == "block":
+                    return {"decision": "block", "reason": "AW turn stop check failed"}
+        return {}
+
     def failure_reply(self, event: str, hook: dict[str, Any]) -> dict[str, Any]:
         if event == "tool.before" and hook["on_error"] == "block":
             return _deny("AW hook failed; configured failure action blocked the tool")
@@ -280,6 +402,10 @@ class Bridge:
                     hooks.setdefault(native, []).append(
                         HookMatcher(hooks=[self.callback], timeout=timeout)
                     )
+        stops = [hook for hook in self.config["hooks"] if hook["event"] == "turn.stop"]
+        if stops:
+            timeout = sum(hook["budget_ms"] + 3000 for hook in stops) / 1000 + 1
+            hooks.setdefault("Stop", []).append(HookMatcher(hooks=[self.stop_callback], timeout=timeout))
         permission = options.can_use_tool
         if before and permission is not None:
             original_permission = permission
@@ -337,7 +463,8 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
     bridge = Bridge()
     composed = bridge.options(options)
     _CLIENT_CREATED = True
-    if any(hook["event"] == "input.submit" for hook in bridge.config["hooks"]):
+    if any(hook["event"] in {"session.start", "input.submit", "turn.stop", "session.end"}
+           for hook in bridge.config["hooks"]):
         from aw_foreground import CheckedClient
         client = CheckedClient(composed, bridge)
     else:

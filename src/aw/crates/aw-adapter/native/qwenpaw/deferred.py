@@ -34,6 +34,7 @@ class DeferredPlugin:
             capabilities={
                 **PROFILE,
                 "events": {
+                    "turn.stop": ["observe"],
                     "tool.before": ["observe", "block"],
                     "tool.after": ["observe", "replace_result"],
                     **({"input.submit": ["observe", "block"]} if input_enabled else {}),

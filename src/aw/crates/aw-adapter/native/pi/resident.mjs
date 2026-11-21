@@ -35,6 +35,7 @@ export async function runWorker(app, sdk, core, args, {
     }
     if (record.closing) return await record.closing;
     // Fence callbacks and model transport before abort can yield to the SDK.
+    const reason = record.pending ? "cancelled" : "disposed";
     record.scope.failed = true;
     record.inputAbort?.abort();
     record.closing = (async () => {
@@ -45,6 +46,7 @@ export async function runWorker(app, sdk, core, args, {
             await record.pending?.catch(() => {});
             record.bridge.dispose();
             await record.dispose();
+            await record.bridge.sessionEnd(reason);
           })(), 12000);
         } finally {
           await record.scope.close();
@@ -123,7 +125,7 @@ export async function runWorker(app, sdk, core, args, {
         // Cancellation closes the task, including an input event whose reply was lost.
         return checked ? closeSession(session) : record.abort();
       }, configurable: false, writable: false });
-      if (checked) {
+      if (checked || policy.hooks.some(hook => hook.event === "session.end")) {
         Object.defineProperty(session, "dispose", { value: () => closeSession(session),
           configurable: false, writable: false });
       }
@@ -173,6 +175,7 @@ export async function runWorker(app, sdk, core, args, {
         return pending.finally(() => { if (record.pending === pending) record.pending = null; });
       }, configurable: false, writable: false });
       if (startup.resident_policy_reload) await scope.acknowledge();
+      await bridge.sessionStart();
       active.set(session, record);
       return { ...result, close: () => closeSession(session) };
     } catch (error) {

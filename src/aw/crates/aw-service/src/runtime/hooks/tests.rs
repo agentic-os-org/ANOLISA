@@ -334,3 +334,16 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
     );
     assert!(runtime.instances.lock().unwrap().is_empty());
 }
+
+#[test]
+fn stop_delivery_correlation_is_stable_when_a_later_turn_is_active() {
+    let stop = |turn: &str, delivery: &str| {
+        json!({
+            "name":"turn.stop", "session_id":"session", "turn_id":turn,
+            "native":{"delivery_id":delivery,"attempt_id":delivery}
+        })
+    };
+    let first = event_correlation(&stop("one", "delivery")).unwrap();
+    assert_eq!(first, event_correlation(&stop("two", "delivery")).unwrap());
+    assert_ne!(first, event_correlation(&stop("two", "retry")).unwrap());
+}

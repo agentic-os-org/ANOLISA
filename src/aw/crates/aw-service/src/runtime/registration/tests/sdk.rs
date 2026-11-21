@@ -10,7 +10,7 @@ fn fixture() -> Value {
     .unwrap()
 }
 
-fn command(f: &Fixture, key: &str, mode: Availability) -> RegistrationCommand {
+pub(super) fn command(f: &Fixture, key: &str, mode: Availability) -> RegistrationCommand {
     let mut value = serde_json::to_value(f.command(key)).unwrap();
     value["action"] = json!("register_sdk");
     value["sdk_version"] = fixture()["sdk_protocol"].clone();

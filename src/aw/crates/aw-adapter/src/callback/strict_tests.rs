@@ -93,3 +93,32 @@ fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
     )
     .is_err());
 }
+
+#[test]
+fn withholding_allows_success_and_propagates_execution_failure() {
+    let adapter = adapter::select("qwenpaw").unwrap();
+    let success = json!({"kind":"skipped", "status":"ok", "effects":[],
+        "failure":null, "failure_action":null, "call":{"process":null}});
+    let response_for = |event, output| {
+        response(
+            adapter,
+            event,
+            "withhold_result",
+            output,
+            "qwenpaw",
+            &json!({}),
+            &mut Vec::new(),
+        )
+    };
+    assert!(matches!(
+        response_for("tool.after", success.clone()).unwrap().exit,
+        Exit::Code(0)
+    ));
+    assert!(response_for("tool.before", success).is_err());
+    assert!(response_for(
+        "tool.after",
+        json!({"status":"error",
+        "failure":"provider", "failure_action":"withhold_result"})
+    )
+    .is_err());
+}

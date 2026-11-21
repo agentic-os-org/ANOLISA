@@ -82,6 +82,9 @@ impl Adapter for Pi {
         if native["event"] != event {
             return Err("Pi event does not match binding".into());
         }
+        if crate::callback::lifecycle(event) {
+            return super::lifecycle::normalize(binding, "pi", event, native);
+        }
         if event == "input.submit" {
             return super::submission::normalize(binding, native, "pi", "text");
         }
@@ -243,7 +246,14 @@ impl PreparedLaunch for Prepared {
 }
 pub(crate) const fn route_options() -> aw_core::routes::RouteOptions<'static> {
     aw_core::routes::RouteOptions {
-        events: &["input.submit", "tool.before", "tool.after"],
+        events: &[
+            "session.start",
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+        ],
         observe_events: &[],
         event_filter: aw_core::routes::EventFilter::All,
         max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
@@ -277,6 +287,26 @@ pub(crate) fn routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_observes_the_native_turn_reason_without_a_tool() {
+        let binding = NativeContext {
+            target: "pi".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        for (event, reason) in [
+            ("session.start", Value::Null),
+            ("turn.stop", json!("aborted")),
+            ("session.end", json!("disposed")),
+        ] {
+            let native =
+                json!({"event":event,"session_id":"session","turn_id":"turn","reason":reason});
+            let value = Pi.normalize(&binding, event, &native).unwrap();
+            assert_eq!(value["native"]["reason"], reason);
+            assert!(value.get("tool").is_none());
+        }
+    }
 
     #[test]
     fn strict_output_uses_the_shared_release_declaration() {

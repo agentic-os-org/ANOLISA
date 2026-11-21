@@ -8,6 +8,7 @@ use trust::install_profile;
 
 mod cancellation;
 mod dispatch;
+mod lifecycle;
 mod timeouts;
 mod trust;
 

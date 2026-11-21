@@ -122,6 +122,17 @@ impl Adapter for DeepSeek {
     }
 
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if matches!(event, "session.start" | "turn.stop") && native["event"] == event {
+            let seam = if event == "session.start" {
+                "agent/created"
+            } else {
+                "turn/end"
+            };
+            if native["seam"] != seam {
+                return Err("DeepSeek lifecycle event comes from a different native seam".into());
+            }
+            return super::lifecycle::normalize(binding, "deepseek-harness", event, native);
+        }
         if !matches!(
             event,
             "input.submit" | "tool.before" | "tool.after" | "security.violation"
@@ -272,7 +283,14 @@ fn routes(
         return Err("DeepSeek final security gate requires a Provider step".into());
     }
     let options = aw_core::routes::RouteOptions {
-        events: aw_core::routes::STANDARD_EVENTS,
+        events: &[
+            "session.start",
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "security.violation",
+            "turn.stop",
+        ],
         observe_events: &[],
         event_filter: aw_core::routes::EventFilter::All,
         max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
@@ -302,6 +320,27 @@ mod tests {
     use super::*;
     use aw_core::admission::StepExecution;
     use std::path::PathBuf;
+
+    #[test]
+    fn lifecycle_preserves_the_committed_turn_reason() {
+        let binding = NativeContext {
+            target: "dsh".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        for (event, seam, reason) in [
+            ("session.start", "agent/created", Value::Null),
+            ("turn.stop", "turn/end", json!("aborted")),
+        ] {
+            let native = json!({"event":event,"seam":seam,"session_id":"session","turn_id":"2","reason":reason});
+            let normalized = DeepSeek.normalize(&binding, event, &native).unwrap();
+            assert_eq!(normalized["session_id"], "session");
+            assert_eq!(normalized["native"]["reason"], reason);
+            let mut wrong = native;
+            wrong["seam"] = json!("process.exit");
+            assert!(DeepSeek.normalize(&binding, event, &wrong).is_err());
+        }
+    }
 
     #[test]
     fn projection_matches_the_native_replacement_boundary() {

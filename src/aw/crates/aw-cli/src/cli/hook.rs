@@ -33,6 +33,11 @@ pub(super) fn callback(args: &Arguments) -> Exit {
                     .flags
                     .get("--event")
                     .is_some_and(|v| v == "input.submit"))
+                || (args
+                    .flags
+                    .get("--adapter")
+                    .is_some_and(|v| v == "claude-sdk")
+                    && args.flags.get("--event").is_some_and(|v| v == "turn.stop"))
                 || args.flags.contains_key("--close-event")
                 || args.flags.contains_key("--event-receipt")
                 || args
@@ -223,7 +228,11 @@ pub(super) fn invoke_bound(
         },
         deadline,
     );
-    let mut complete = invoked.is_ok() && handle.steps.last().map(String::as_str) == Some(step);
+    let replayed = invoked
+        .as_ref()
+        .is_ok_and(|value| value["stop_replay"] == true);
+    let mut complete =
+        invoked.is_ok() && (replayed || handle.steps.last().map(String::as_str) == Some(step));
     let result: Result<HookOutput> = invoked.map_err(Into::into).and_then(|output| {
         aw_adapter::callback::response(
             adapter,
@@ -237,7 +246,8 @@ pub(super) fn invoke_bound(
         .map_err(Into::into)
     });
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if matches!(event, "input.submit" | "tool.before")
+    if !replayed
+        && matches!(event, "input.submit" | "tool.before" | "turn.stop")
         && handle.steps.last().map(String::as_str) != Some(step)
         && aw_adapter::callback::stops_before(&binding.adapter, result.as_ref().ok(), on_error)
     {

@@ -491,7 +491,7 @@ def validate_hooks(hooks: Any) -> None:
     if not isinstance(hooks, list):
         raise ValueError("AW bridge configuration requires hooks")
     for hook in hooks:
-        if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
+        if hook.get("event") not in {"input.submit", "tool.before", "tool.after", "turn.stop"}:
             raise ValueError("Unsupported AW native event")
         if not isinstance(hook.get("step"), str) or not hook["step"]:
             raise ValueError("AW step must be a nonempty string")
@@ -519,7 +519,7 @@ class AwPolicyMiddleware(MiddlewareBase):
                             if hook["event"] == "tool.before"), None)
         chain = [AwInvocationMiddleware(config), *[
             AwToolMiddleware(config, hook, last_before=hook is last_before)
-            for hook in config["hooks"] if hook["event"] != "input.submit"
+            for hook in config["hooks"] if hook["event"] in {"tool.before", "tool.after"}
         ]]
         if scope.execution is not None:
             from aw_execution import AwPrivateMiddleware
@@ -561,7 +561,7 @@ class AwBridge:
         )
         additions = [
             AwToolMiddleware(self.config, hook, last_before=hook is last_before)
-            for hook in self.config["hooks"] if hook["event"] != "input.submit"
+            for hook in self.config["hooks"] if hook["event"] in {"tool.before", "tool.after"}
         ]
         factory = Agent
         extra = {}

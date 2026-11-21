@@ -102,20 +102,24 @@ function compose(config, options) {
         return result;
       }) }))]));
   for (const [event, nativeEvents] of [
+    ["session.start", ["SessionStart"]],
+    ["session.end", ["SessionEnd"]],
     ["input.submit", ["UserPromptSubmit"]],
     ["tool.before", ["PreToolUse"]], ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
-    if (final && event === "input.submit") continue;
+    const sessionEvent = event === "session.start" || event === "session.end";
+    if (final && (event === "input.submit" || sessionEvent)) continue;
     const routes = config.hooks.filter((hook) => hook.event === event);
     if (!routes.length && !(native && event === "tool.before") && !final) continue;
     const body = async (input, id, { signal }) => {
       const payload = copy(input);
+      if (event === "session.start" && payload.source === "compact") return {};
       if (final && !final.record(payload)) return deny("AW final gate does not cover this tool path");
       noteSkillRead(payload, config.skillState.query);
       if (event === "input.submit") payload.aw_turn_id = randomUUID();
       const verifySkill = routes.some(hook => hook.skill_check === true) ?
         await resolveSkill(payload, { ...options, env: config.skillEnvironment ?? options.env }, config.skillState.query, signal) : undefined;
-      if (event !== "input.submit" && id !== undefined && id !== payload.tool_use_id)
+      if (!sessionEvent && event !== "input.submit" && id !== undefined && id !== payload.tool_use_id)
         return event === "tool.before" ? deny("AW tool identity mismatch") : {};
       for (const hook of routes) {
         try {

@@ -8,6 +8,7 @@ mod claude_typescript;
 pub(super) mod codex;
 pub(super) mod deepseek;
 pub(super) mod hermes;
+pub(super) mod lifecycle;
 pub(super) mod openclaw;
 mod openclaw_bundle;
 pub(super) mod pi;

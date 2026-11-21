@@ -198,7 +198,7 @@ impl PreparedLaunch for Prepared {
 pub(crate) const fn route_options() -> aw_core::routes::RouteOptions<'static> {
     // After wrappers are outermost, so they also observe an inner before denial.
     aw_core::routes::RouteOptions {
-        events: &["input.submit", "tool.after", "tool.before"],
+        events: &["input.submit", "tool.after", "tool.before", "turn.stop"],
         observe_events: &[],
         event_filter: aw_core::routes::EventFilter::All,
         max_budget_ms: aw_core::routes::DEFAULT_MAX_BUDGET_MS,
@@ -237,6 +237,9 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 }
 
 fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+    if event == "turn.stop" && native["event"] == event {
+        return super::lifecycle::normalize(binding, "agentscope", event, native);
+    }
     if event == "input.submit" && native["event"] == event {
         return super::submission::normalize(binding, native, "agentscope", "input_text");
     }
@@ -272,6 +275,20 @@ mod tests {
     use super::*;
     use aw_core::admission::StepExecution;
     use std::path::PathBuf;
+
+    #[test]
+    fn turn_stop_retains_native_reply_identity_and_reason() {
+        let binding = NativeContext {
+            target: "agentscope".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        let native = json!({"event":"turn.stop","session_id":"session","turn_id":"reply","reason":"interrupted"});
+        let normalized = normalize(&binding, "turn.stop", &native).unwrap();
+        assert_eq!(normalized["turn_id"], "reply");
+        assert_eq!(normalized["native"]["reason"], "interrupted");
+        assert!(normalized.get("tool").is_none());
+    }
 
     #[test]
     fn withholding_requires_a_bridge_capable_sdk_version() {

@@ -13,6 +13,7 @@ for (const file of [
   "transport.mjs",
   "control.mjs",
   "source-helpers.mjs",
+  "source-profile.mjs",
   "sources.mjs",
   "index.d.ts",
   "sources.d.ts",

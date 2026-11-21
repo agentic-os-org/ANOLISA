@@ -124,6 +124,20 @@ impl Adapter for QoderSdk {
         }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if matches!(event, "session.start" | "session.end") {
+            let name = if event == "session.start" {
+                "SessionStart"
+            } else {
+                "SessionEnd"
+            };
+            if native["hook_event_name"] != name
+                || native["cwd"].as_str() != binding.cwd.to_str()
+                || native["source"] == "compact"
+            {
+                return Err("Qoder SDK lifecycle event or cwd differs from its route".into());
+            }
+            return super::lifecycle::normalize(binding, "qoder-sdk", event, native);
+        }
         if event == "security.violation" {
             return super::qoder_final::normalize(binding, native);
         }
@@ -165,6 +179,8 @@ impl PreparedLaunch for Prepared {
         }
         if self.input.options.reloadable {
             capabilities.events.remove("input.submit");
+            capabilities.events.remove("session.start");
+            capabilities.events.remove("session.end");
             if let Some(effects) = capabilities.events.get_mut("tool.after") {
                 effects.retain(|effect| effect != "replace_result");
             }
@@ -336,5 +352,31 @@ impl PreparedLaunch for Prepared {
                 timeout: Duration::from_secs(30),
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn session_callbacks_preserve_the_native_session_end_reason() {
+        let context = NativeContext {
+            target: "qoder-sdk".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        let mut native = json!({"hook_event_name":"SessionStart","session_id":"session","cwd":"/work","source":"startup"});
+        assert!(QoderSdk
+            .normalize(&context, "session.start", &native)
+            .is_ok());
+        native["hook_event_name"] = json!("SessionEnd");
+        native["reason"] = json!("logout");
+        assert_eq!(
+            QoderSdk
+                .normalize(&context, "session.end", &native)
+                .unwrap()["native"]["reason"],
+            "logout"
+        );
     }
 }

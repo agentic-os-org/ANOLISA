@@ -19,6 +19,17 @@ struct Envelope {
 #[derive(Deserialize)]
 #[serde(tag = "event", deny_unknown_fields)]
 enum Event {
+    #[serde(rename = "session.start")]
+    SessionStart,
+    #[serde(rename = "turn.stop")]
+    TurnStop {
+        turn_id: String,
+        reason: String,
+        #[serde(default)]
+        attempt_id: Option<String>,
+    },
+    #[serde(rename = "session.end")]
+    SessionEnd { reason: String },
     #[serde(rename = "input.submit")]
     Input { turn_id: String, text: String },
     #[serde(rename = "tool.before")]
@@ -37,7 +48,7 @@ enum Event {
 }
 
 fn identity(value: &str) -> Result<()> {
-    if value.trim().is_empty() || value.len() > 512 {
+    if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
         return Err("SDK semantic identities must be nonempty and at most 512 bytes".into());
     }
     Ok(())
@@ -58,6 +69,20 @@ impl Adapter for Sdk {
             "agent":{"adapter":"sdk","binding_id":context.target,"instance_id":context.instance_id},
             "native":native});
         match envelope.event {
+            Event::SessionStart => {}
+            Event::TurnStop {
+                turn_id,
+                reason,
+                attempt_id,
+            } => {
+                identity(&turn_id)?;
+                super::lifecycle::reason(&reason)?;
+                if let Some(attempt_id) = attempt_id {
+                    identity(&attempt_id)?;
+                }
+                output["turn_id"] = json!(turn_id);
+            }
+            Event::SessionEnd { reason } => super::lifecycle::reason(&reason)?,
             Event::Input { turn_id, text } => {
                 identity(&turn_id)?;
                 output["turn_id"] = json!(turn_id);
@@ -76,7 +101,7 @@ impl Adapter for Sdk {
                         input,
                         result,
                     } => (call_id, name, input, result),
-                    Event::Input { .. } => unreachable!("input handled above"),
+                    _ => unreachable!("non-tool events handled above"),
                 };
                 identity(&call_id)?;
                 identity(&name)?;

@@ -87,8 +87,25 @@ class AwSubmissionMiddleware(MiddlewareBase):
                     AwToolMiddleware(config, hook)._log_failure(type(error).__name__)
                     if hook["on_error"] == "block":
                         raise SubmissionDenied("AW input check failed; submission blocked") from error
+        stops = [hook for hook in config["hooks"] if hook["event"] == "turn.stop"]
+        if stops:
+            from agentscope.event import ReplyEndEvent
+
         async with aclosing(next_handler()) as stream:
             async for item in stream:
+                if stops and isinstance(item, ReplyEndEvent) and item.session_id == owner["session"]:
+                    payload = {"event": "turn.stop", "session_id": item.session_id,
+                               "turn_id": item.reply_id, "reason": str(item.finished_reason)}
+                    for hook in stops:
+                        try:
+                            code, stdout, stderr = await owner["scope"].invoke(
+                                hook, payload, (hook["budget_ms"] + 3000) / 1000
+                            )
+                            AwToolMiddleware._diagnostic(stderr)
+                            if code != 0 or stdout.strip():
+                                raise CallbackFailure("invalid_turn_stop_response")
+                        except (OSError, TimeoutError, CallbackFailure) as error:
+                            AwToolMiddleware(config, hook)._log_failure(type(error).__name__)
                 yield item
 
 
