@@ -1,6 +1,10 @@
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
+import remarkParse from 'remark-parse';
+import {unified} from 'unified';
 import {exists, repoRoot, stripCopilotShellNavigation, toPosix, walkFiles, writeGenerated} from './lib.mjs';
+
+const parser = unified().use(remarkParse);
 
 const componentChangelogs = [];
 for (const sourceRoot of ['src', 'distribution']) {
@@ -23,6 +27,34 @@ function stripSourceLocaleLink(markdown) {
   return markdown.replace(sourceLocaleLink, '');
 }
 
+// Relative links are literal text inside code spans and fences, so the rewrite
+// must leave those source bytes untouched. The Markdown parser reports absolute
+// offsets for every node, including code nested in blockquotes and lists.
+function codeRanges(markdown) {
+  const ranges = [];
+  const visit = (node) => {
+    if (node.type === 'inlineCode' || node.type === 'code') {
+      if (node.position) ranges.push([node.position.start.offset, node.position.end.offset]);
+      return;
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(parser.parse(markdown));
+  return ranges;
+}
+
+const sourceLink = /(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g;
+
+function rewriteSourceLinks(markdown, source) {
+  const ranges = codeRanges(markdown);
+  const insideCode = (offset) => ranges.some(([start, end]) => offset >= start && offset < end);
+  return markdown.replace(sourceLink, (match, image, label, target, offset) => {
+    if (insideCode(offset)) return match;
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
+    return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
+  });
+}
+
 async function document(source, language) {
   const markdown = stripCopilotShellNavigation(stripSourceLocaleLink(await readFile(path.join(repoRoot, source), 'utf8')));
   if (sourceLocaleLink.test(markdown)) {
@@ -32,10 +64,7 @@ async function document(source, language) {
     name: displayName(source),
     source,
     language,
-    markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
-      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
-      return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
-    }),
+    markdown: rewriteSourceLinks(markdown, source),
   };
 }
 
