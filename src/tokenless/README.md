@@ -54,6 +54,12 @@ streams without Stash while preserving failing tests, diagnostics, summaries, an
 order. See [CTest output](../../docs/user-guide/en/tokenless/index.md#ctest-output) for
 scope boundaries, output reconstruction, and validation limits.
 
+Ninja (`[k/N]`) and non-verbose CMake Unix Makefiles (`[PPP%]`) build progress reaching
+PostTool can share repeated action verbs, directory paths, and file suffixes without Stash
+while preserving compiler diagnostics, failures, and record order. See
+[CMake and Ninja build output](../../docs/user-guide/en/tokenless/index.md#cmake-and-ninja-build-output)
+for scope boundaries, output reconstruction, and validation limits.
+
 ## Features
 
 | Capability | Savings indicator | Details |

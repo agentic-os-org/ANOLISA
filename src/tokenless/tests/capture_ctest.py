@@ -202,17 +202,27 @@ def capture(
     return record
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--project", choices=PROJECTS, required=True)
+    parser.add_argument(
+        "--suite",
+        choices=("ctest", "build", "all"),
+        default="ctest",
+        help="Capture suite: 'ctest' (default, ctest_serial + ctest_parallel), 'build' (ninja/make build runs), or 'all'",
+    )
     parser.add_argument(
         "--sources-dir",
         type=Path,
         default=None,
         help="Directory containing pre-cloned <dir>/<project> repositories with matching tag and pinned commit (fails closed if missing or mismatched)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -222,14 +232,17 @@ def main() -> None:
     work.mkdir()
     home.mkdir()
 
-    repo, tag, expected_commit, cmake_opts, expect_zero = PROJECTS[args.project]
+    repo, tag, expected_commit, cmake_opts, ctest_expect_zero = PROJECTS[args.project]
     image_id = checked(["docker", "image", "inspect", IMAGE_NAME, "--format", "{{.Id}}"]).strip()
     commit, clone_method = resolve_source(
         args.project, repo, tag, expected_commit, source, args.sources_dir
     )
 
+    tools = ("cmake", "ctest", "ninja", "gcc", "g++")
+    if args.suite in ("build", "all"):
+        tools = ("cmake", "ctest", "ninja", "make", "gcc", "g++")
     tool_versions = {}
-    for tool in ("cmake", "ctest", "ninja", "gcc", "g++"):
+    for tool in tools:
         tool_versions[tool] = checked(
             ["docker", "run", "--rm", "--network", "none", image_id, tool, "--version"]
         ).splitlines()[0].strip()
@@ -292,31 +305,78 @@ def main() -> None:
         image_id,
     ]
 
-    # Configure and build prerequisites cleanly before capturing CTest runs.
-    prep_steps = [
+    prep_steps: list[list[str]] = [
         ["cmake", "-S", "/work/source", "-B", "/work/build-ninja", "-G", "Ninja", *cmake_opts],
-        ["cmake", "--build", "/work/build-ninja"],
     ]
+    if args.suite == "ctest":
+        prep_steps.append(["cmake", "--build", "/work/build-ninja"])
+    else:
+        prep_steps.append(
+            [
+                "cmake",
+                "-S",
+                "/work/source",
+                "-B",
+                "/work/build-make",
+                "-G",
+                "Unix Makefiles",
+                *cmake_opts,
+            ]
+        )
     for step in prep_steps:
         checked(["docker", "run", *common_flags, *real_mount, *step])
 
-    runs = [
-        ("ctest_serial", ["ctest", "--test-dir", "/work/build-ninja", "--output-on-failure"]),
+    build_runs: list[tuple[str, list[str], bool]] = [
+        ("ninja_cold", ["cmake", "--build", "/work/build-ninja"], True),
+        ("ninja_incremental", ["cmake", "--build", "/work/build-ninja"], True),
+        ("make_cold", ["cmake", "--build", "/work/build-make", "-j", "2"], True),
+        ("make_incremental", ["cmake", "--build", "/work/build-make", "-j", "2"], True),
+        (
+            "failure_unknown_target",
+            ["cmake", "--build", "/work/build-ninja", "--target", "tokenless_nonexistent_target"],
+            False,
+        ),
+    ]
+    ctest_runs: list[tuple[str, list[str], bool]] = [
+        (
+            "ctest_serial",
+            ["ctest", "--test-dir", "/work/build-ninja", "--output-on-failure"],
+            ctest_expect_zero,
+        ),
         (
             "ctest_parallel",
             ["ctest", "--test-dir", "/work/build-ninja", "-j", "2", "--output-on-failure"],
+            ctest_expect_zero,
         ),
     ]
+    if args.suite == "ctest":
+        runs = ctest_runs
+    elif args.suite == "build":
+        runs = build_runs
+    else:
+        runs_by_name = {entry[0]: entry for entry in [*build_runs, *ctest_runs]}
+        # CTest reads /work/build-ninja produced by ninja_cold, and incremental runs follow cold runs.
+        all_suite_order = (
+            "ninja_cold",
+            "ninja_incremental",
+            "ctest_serial",
+            "ctest_parallel",
+            "make_cold",
+            "make_incremental",
+            "failure_unknown_target",
+        )
+        runs = [runs_by_name[name] for name in all_suite_order]
+
     provenance_runs: dict[str, dict[str, object]] = {}
-    for name, cmd_args in runs:
+    for name, cmd_args, run_expect_zero in runs:
         container_name = f"tokenless-ctest-{args.project}-{name}-{os.getpid()}"
         command = ["docker", "run", *common_flags, "--name", container_name, *real_mount, *cmd_args]
         recorded_command = [*sanitized_prefix, *cmd_args]
         record = capture(command, recorded_command, output / name, container_name=container_name)
         exit_code = int(record["exit_code"])  # type: ignore[arg-type]
-        if expect_zero and exit_code != 0:
+        if run_expect_zero and exit_code != 0:
             raise SystemExit(f"{args.project}/{name}: expected exit 0, got {exit_code}")
-        if not expect_zero and exit_code == 0:
+        if not run_expect_zero and exit_code == 0:
             raise SystemExit(f"{args.project}/{name}: expected non-zero exit, got 0")
         provenance_runs[name] = {
             "options": cmd_args,

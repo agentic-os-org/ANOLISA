@@ -3,6 +3,7 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod cmake_build;
 mod ctest;
 mod gradle;
 mod maven;
@@ -121,13 +122,14 @@ impl BuildLogCompressor {
                 | BuildLogFormat::Maven
                 | BuildLogFormat::Gradle
                 | BuildLogFormat::Ctest
+                | BuildLogFormat::CmakeBuild
         ) && store.is_none()
         {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
-        // Preserve already-compacted Gradle and CTest results as terminal even when an
+        // Preserve already-compacted Gradle, CTest, and CMake/Ninja results as terminal even when an
         // oversized preamble pushes the template header out of the sample window.
         if !matches!(
             format,
@@ -135,18 +137,27 @@ impl BuildLogCompressor {
                 | BuildLogFormat::Maven
                 | BuildLogFormat::Gradle
                 | BuildLogFormat::Ctest
+                | BuildLogFormat::CmakeBuild
         ) {
             if gradle::is_compacted(&lines) {
                 format = BuildLogFormat::Gradle;
             } else if ctest::is_compacted(&lines) {
                 format = BuildLogFormat::Ctest;
+            } else if cmake_build::is_compacted(&lines) {
+                format = BuildLogFormat::CmakeBuild;
             }
         }
-        let (maven_layouts, gradle_layouts, ctest_layouts) = match format {
-            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new(), Vec::new()),
-            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines), Vec::new()),
-            BuildLogFormat::Ctest => (Vec::new(), Vec::new(), ctest::plan(&lines)),
-            _ => (Vec::new(), Vec::new(), Vec::new()),
+        let (maven_layouts, gradle_layouts, ctest_layouts, cmake_layouts) = match format {
+            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new(), Vec::new(), Vec::new()),
+            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines), Vec::new(), Vec::new()),
+            BuildLogFormat::Ctest => (Vec::new(), Vec::new(), ctest::plan(&lines), Vec::new()),
+            BuildLogFormat::CmakeBuild => (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                cmake_build::plan(&lines),
+            ),
+            _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         let mut maven_transfers = Vec::new();
         if format == BuildLogFormat::Maven
@@ -205,6 +216,39 @@ impl BuildLogCompressor {
                 HashSet::new(),
                 ctest_layouts,
             )
+        } else if format == BuildLogFormat::CmakeBuild {
+            let sub_format = if !cmake_build::is_compacted(&lines) && store.is_some() {
+                detect_scored_format(&sample).or_else(|| detect_generic(&sample))
+            } else {
+                None
+            };
+            let roles = if let Some(sub_format) = sub_format {
+                let templates = dominant_generic_templates(sub_format, &stripped);
+                let mut open_fence = None;
+                // Mirror scope::enter_line's fence and non-TAB control boundaries (including
+                // mixed-ending '\r') plus custom CMake/Ninja counter steps that parse_row
+                // cannot compact; legacy non-scoped routes continue classifying line-by-line.
+                let mut roles = stripped
+                    .iter()
+                    .map(|line| {
+                        if scope::step_fence(&mut open_fence, line)
+                            || line.chars().any(|ch| ch != '\t' && ch.is_control())
+                            || cmake_build::is_custom_counter_step(line)
+                        {
+                            LineRole::Summary
+                        } else {
+                            classify(line, sub_format, &templates)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for edit in &cmake_layouts {
+                    roles[edit.start..edit.end].fill(LineRole::Summary);
+                }
+                roles
+            } else {
+                vec![LineRole::Summary; lines.len()]
+            };
+            (roles, HashSet::new(), cmake_layouts)
         } else {
             let templates = dominant_generic_templates(format, &stripped);
             (
@@ -425,7 +469,8 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
     let ctest = ctest::detect(&sample);
-    // Keep CR visible to Maven, Gradle, and CTest, whose layout grammars only handle LF records.
+    let cmake_build = cmake_build::detect(&sample);
+    // Keep CR visible to Maven, Gradle, CTest, and CMakeBuild, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
@@ -444,6 +489,14 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     if ctest {
         return (Some(BuildLogFormat::Ctest), sample);
     }
+    if cmake_build {
+        return (Some(BuildLogFormat::CmakeBuild), sample);
+    }
+    let format = detect_scored_format(&sample).or_else(|| detect_generic(&sample));
+    (format, sample)
+}
+
+fn detect_scored_format(sample: &[String]) -> Option<BuildLogFormat> {
     let formats = [
         BuildLogFormat::Cargo,
         BuildLogFormat::Pytest,
@@ -471,8 +524,7 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
             winner_score = score;
         }
     }
-    let format = winner.or_else(|| detect_generic(&sample));
-    (format, sample)
+    winner
 }
 
 fn is_anchored(sample: &[String]) -> bool {

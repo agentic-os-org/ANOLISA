@@ -188,23 +188,46 @@ class TestCaptureCtestSourcePinning(unittest.TestCase):
                 os.chdir(old_cwd)
 
     def test_projects_match_committed_provenance(self) -> None:
-        provenance_path = (
-            COMPONENT_ROOT
-            / "crates/tokenless-compressors/tests/fixtures/build_logs/ctest/provenance.json"
+        for rel_path, expected_count in (
+            ("crates/tokenless-compressors/tests/fixtures/build_logs/ctest/provenance.json", 6),
+            ("crates/tokenless-compressors/tests/fixtures/build_logs/cmake_build/provenance.json", 8),
+        ):
+            entries = json.loads((COMPONENT_ROOT / rel_path).read_text(encoding="utf-8"))
+            self.assertEqual(len(entries), expected_count)
+            by_repo = {
+                entry["environment"]["repository"]: (
+                    entry["environment"]["tag"],
+                    entry["environment"]["commit"],
+                    entry["environment"]["cmake_options"],
+                )
+                for entry in entries
+            }
+            for repo, (tag, commit, cmake_opts) in by_repo.items():
+                matching = [
+                    spec for spec in capture_ctest.PROJECTS.values() if spec[0] == repo
+                ]
+                self.assertEqual(len(matching), 1)
+                self.assertEqual((tag, commit, cmake_opts), matching[0][1:4])
+
+        ctest_entries = json.loads(
+            (
+                COMPONENT_ROOT
+                / "crates/tokenless-compressors/tests/fixtures/build_logs/ctest/provenance.json"
+            ).read_text(encoding="utf-8")
         )
-        entries = json.loads(provenance_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(entries), 6)
-        by_repo = {
-            entry["environment"]["repository"]: (
-                entry["environment"]["tag"],
-                entry["environment"]["commit"],
-                entry["environment"]["cmake_options"],
+        ctest_repos = {entry["environment"]["repository"] for entry in ctest_entries}
+        for repo, *_ in capture_ctest.PROJECTS.values():
+            self.assertIn(repo, ctest_repos)
+
+    def test_suite_flag_defaults_to_ctest_and_accepts_build_suites(self) -> None:
+        parser = capture_ctest.build_parser()
+        default_args = parser.parse_args(["--project", "brotli", "--output", "/tmp/out"])
+        self.assertEqual(default_args.suite, "ctest")
+        for suite in ("ctest", "build", "all"):
+            parsed = parser.parse_args(
+                ["--project", "brotli", "--suite", suite, "--output", "/tmp/out"]
             )
-            for entry in entries
-        }
-        for repo, tag, commit, cmake_opts, _ in capture_ctest.PROJECTS.values():
-            self.assertIn(repo, by_repo)
-            self.assertEqual(by_repo[repo], (tag, commit, cmake_opts))
+            self.assertEqual(parsed.suite, suite)
 
 
 if __name__ == "__main__":

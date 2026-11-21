@@ -163,8 +163,14 @@ class HookParity(unittest.TestCase):
                         else:
                             self.assertEqual(replaced, {**shell, "stdout": expected["output"]})
 
-    def test_maven_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
-        content = (Path(corpus.REPO_ROOT) / "crates/tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt").read_text()
+    def _assert_lossless_build_log_envelope(
+        self,
+        fixture_relpath: str,
+        command: str,
+        session_id: str,
+        expected_header: str,
+    ) -> None:
+        content = (Path(corpus.REPO_ROOT) / fixture_relpath).read_text()
         for agent, agent_env in {**corpus.RESPONSE_AGENTS, "codex": {"TOKENLESS_AGENT_ID": "codex"}}.items():
             for failed in (False, True):
                 with self.subTest(agent=agent, failed=failed):
@@ -176,8 +182,8 @@ class HookParity(unittest.TestCase):
                         if failed:
                             continue  # This text-only wire shape carries no exit status.
                         response = content
-                    payload = {"tool_name": "Bash", "tool_input": {"command": "mvn --batch-mode clean package"},
-                               "tool_response": response, "session_id": "maven", "tool_use_id": "maven"}
+                    payload = {"tool_name": "Bash", "tool_input": {"command": command},
+                               "tool_response": response, "session_id": session_id, "tool_use_id": session_id}
                     actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
                         extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
                     self.assertEqual(actual.returncode, 0, actual.stderr)
@@ -197,82 +203,40 @@ class HookParity(unittest.TestCase):
                         compact = replaced["stdout"]
                         self.assertEqual(replaced, {**shell, "stdout": compact})
                     self.assertLess(len(compact), len(content))
-                    self.assertIn("Maven templates", compact)
+                    self.assertIn(expected_header, compact)
                     self.assertNotIn("tokenless retrieve", compact)
+
+    def test_maven_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt",
+            "mvn --batch-mode clean package",
+            "maven",
+            "Maven templates",
+        )
 
     def test_gradle_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
-        content = (Path(corpus.REPO_ROOT) / "crates/tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt").read_text()
-        for agent, agent_env in {**corpus.RESPONSE_AGENTS, "codex": {"TOKENLESS_AGENT_ID": "codex"}}.items():
-            for failed in (False, True):
-                with self.subTest(agent=agent, failed=failed):
-                    shell = {"stdout": content, "stderr": "diagnostic field stays exact\n", "exit_code": int(failed), "duration_ms": 123}
-                    response = shell
-                    if agent == "cosh-ng":
-                        response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
-                    elif agent == "opencode":
-                        if failed:
-                            continue  # This text-only wire shape carries no exit status.
-                        response = content
-                    payload = {"tool_name": "Bash", "tool_input": {"command": "./gradlew build"},
-                               "tool_response": response, "session_id": "gradle", "tool_use_id": "gradle"}
-                    actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
-                        extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
-                    self.assertEqual(actual.returncode, 0, actual.stderr)
-                    envelope = json.loads(actual.stdout)
-                    if failed or agent in {"codex", "qwencode"}:
-                        self.assertEqual(envelope, {})
-                        continue
-                    fields = envelope["hookSpecificOutput"]
-                    self.assertNotIn("additionalContext", fields)
-                    if agent == "cosh-ng":
-                        replaced = json.loads(fields["updatedToolResponse"])
-                    else:
-                        replaced = fields["updatedToolOutput"]
-                    if agent == "opencode":
-                        compact = replaced
-                    else:
-                        compact = replaced["stdout"]
-                        self.assertEqual(replaced, {**shell, "stdout": compact})
-                    self.assertLess(len(compact), len(content))
-                    self.assertIn("Gradle templates", compact)
-                    self.assertNotIn("tokenless retrieve", compact)
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt",
+            "./gradlew build",
+            "gradle",
+            "Gradle templates",
+        )
 
     def test_ctest_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
-        content = (Path(corpus.REPO_ROOT) / "crates/tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt").read_text()
-        for agent, agent_env in {**corpus.RESPONSE_AGENTS, "codex": {"TOKENLESS_AGENT_ID": "codex"}}.items():
-            for failed in (False, True):
-                with self.subTest(agent=agent, failed=failed):
-                    shell = {"stdout": content, "stderr": "diagnostic field stays exact\n", "exit_code": int(failed), "duration_ms": 123}
-                    response = shell
-                    if agent == "cosh-ng":
-                        response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
-                    elif agent == "opencode":
-                        if failed:
-                            continue  # This text-only wire shape carries no exit status.
-                        response = content
-                    payload = {"tool_name": "Bash", "tool_input": {"command": "ctest --output-on-failure"},
-                               "tool_response": response, "session_id": "ctest", "tool_use_id": "ctest"}
-                    actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
-                        extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
-                    self.assertEqual(actual.returncode, 0, actual.stderr)
-                    envelope = json.loads(actual.stdout)
-                    if failed or agent in {"codex", "qwencode"}:
-                        self.assertEqual(envelope, {})
-                        continue
-                    fields = envelope["hookSpecificOutput"]
-                    self.assertNotIn("additionalContext", fields)
-                    if agent == "cosh-ng":
-                        replaced = json.loads(fields["updatedToolResponse"])
-                    else:
-                        replaced = fields["updatedToolOutput"]
-                    if agent == "opencode":
-                        compact = replaced
-                    else:
-                        compact = replaced["stdout"]
-                        self.assertEqual(replaced, {**shell, "stdout": compact})
-                    self.assertLess(len(compact), len(content))
-                    self.assertIn("CTest templates", compact)
-                    self.assertNotIn("tokenless retrieve", compact)
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt",
+            "ctest --output-on-failure",
+            "ctest",
+            "CTest templates",
+        )
+
+    def test_cmake_build_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt",
+            "cmake --build /work/build-ninja",
+            "cmake-build",
+            "CMake/Ninja templates",
+        )
 
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
