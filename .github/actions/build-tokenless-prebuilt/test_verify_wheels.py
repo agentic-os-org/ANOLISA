@@ -43,7 +43,9 @@ def binary_payload(os_name: str, architecture: str) -> bytes:
     return bytes(payload)
 
 
-def add_member(archive: zipfile.ZipFile, name: str, payload: bytes, mode: int = 0o100644) -> None:
+def add_member(
+    archive: zipfile.ZipFile, name: str, payload: bytes, mode: int = 0o100644
+) -> None:
     info = zipfile.ZipInfo(name)
     info.create_system = 3
     info.external_attr = mode << 16
@@ -59,6 +61,7 @@ def create_runtime(
     platform: str | None = None,
     binary_architecture: str | None = None,
     executables: tuple[str, ...] | None = None,
+    native_extension: str | None = None,
 ) -> Path:
     platform = platform or PLATFORMS[(os_name, architecture)]
     path = directory / f"anolisa_tokenless-{version}-cp311-abi3-{platform}.whl"
@@ -82,13 +85,17 @@ def create_runtime(
                 + "\n"
             ).encode(),
         )
-        extension = "_native.pyd" if os_name == "windows" else "_native.abi3.so"
+        extension = native_extension or (
+            "_native.pyd" if os_name == "windows" else "_native.abi3.so"
+        )
         add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
         add_member(archive, "anolisa_tokenless/_bin/__init__.py", b"")
         if executables is None:
             executables = ("tokenless.exe",) if os_name == "windows" else ("tokenless",)
         for executable in executables:
-            add_member(archive, f"anolisa_tokenless/_bin/{executable}", payload, 0o100755)
+            add_member(
+                archive, f"anolisa_tokenless/_bin/{executable}", payload, 0o100755
+            )
     return path
 
 
@@ -336,6 +343,40 @@ def main() -> int:
                 "x86_64",
                 expect_success=False,
             )
+
+        for os_name, architecture in PLATFORMS:
+            suffix = "pyd" if os_name == "windows" else "abi3.so"
+            for index, extension in enumerate(
+                (f"_native_extra.{suffix}", f"_native.unsupported.{suffix}")
+            ):
+                bad_name = root / f"bad-native-name-{os_name}-{architecture}-{index}"
+                bad_name.mkdir()
+                create_runtime(
+                    bad_name, os_name, architecture, native_extension=extension
+                )
+                if (os_name, architecture) == ("linux", "x86_64"):
+                    create_agentscope(bad_name)
+                run_verifier(
+                    bad_name,
+                    "--layout",
+                    "flat",
+                    "--os",
+                    os_name,
+                    "--arch",
+                    architecture,
+                    expect_success=False,
+                )
+            if os_name != "windows":
+                generic = root / f"generic-native-{os_name}-{architecture}"
+                generic.mkdir()
+                create_runtime(
+                    generic, os_name, architecture, native_extension="_native.so"
+                )
+                if (os_name, architecture) == ("linux", "x86_64"):
+                    create_agentscope(generic)
+                run_verifier(
+                    generic, "--layout", "flat", "--os", os_name, "--arch", architecture
+                )
 
         bad_architecture = root / "bad-architecture"
         bad_architecture.mkdir()
