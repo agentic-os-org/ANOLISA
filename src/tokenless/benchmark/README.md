@@ -40,3 +40,9 @@ reports are run/machine-specific artifacts and are never committed — regenerat
 them locally or attach them to the PR as CI artifacts. The suite-wide
 [`.gitignore`](.gitignore) is the backstop, so a new layer cannot leak reports
 before someone remembers to add its own rules.
+
+Generate final results for any subset of L1–L4 with the offline
+[report reader](reporting/README.md). It takes explicitly selected measurement
+files, produces a Tokenless-only report and a two-product comparison, and keeps
+unrun layers, unverified scores and missing billing visible. It does not run a
+model, infer prices, or publish host identities from input metadata.

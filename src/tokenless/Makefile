@@ -183,7 +183,7 @@ build-dsh-plugin: stamp-adapter-templates
 # Run tests
 test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-parity \
       test-adapters test-claude-code-detect test-raw-package \
-      test-npm-package test-stale-helper-cleanup test-benchmark-rtk-probe test-benchmark-l4
+      test-npm-package test-stale-helper-cleanup test-benchmark-rtk-probe test-benchmark-l4 test-benchmark-reporting
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -317,6 +317,13 @@ test-benchmark-l4:
 	PYTHONPATH="$(abspath ../../benchmark/swe-runner/src)" $(L4_TEST_PYTHON) -m pytest -q \
 	    benchmark/l4-end-to-end/tests ../../benchmark/swe-runner/tests/unit/trace_extraction/test_openclaw_sqlite.py
 	@for script in benchmark/l4-end-to-end/assets/scripts/*.sh; do bash -n "$$script" || exit 1; done
+
+# 报告生成器测试只读取临时测量文件，不启动模型、Docker 或压缩器。
+.PHONY: test-benchmark-reporting
+REPORT_TEST_PYTHON ?= python3
+test-benchmark-reporting:
+	@$(REPORT_TEST_PYTHON) -c 'import sys; sys.exit("report tests require Python >= 3.12" if sys.version_info < (3, 12) else 0)'
+	$(REPORT_TEST_PYTHON) -m pytest -q benchmark/reporting/tests
 
 # Hook counterfactuals need the real binary to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe

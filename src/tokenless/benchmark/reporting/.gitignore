@@ -1,0 +1,9 @@
+# 测量文件、报告与本地测试缓存不是代码提交。
+reports/
+out/
+*-report_zh.md
+measurements/
+runs/
+__pycache__/
+.pytest_cache/
+*.pyc
