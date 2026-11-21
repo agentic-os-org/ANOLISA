@@ -389,3 +389,76 @@ fn security_disconnect_records_failed_and_queued_frames() {
     }
     assert!(degraded, "socket write loss must degrade backend health");
 }
+
+#[test]
+fn reusing_subscription_id_does_not_tear_down_replacement_connection() {
+    let fixture = ServiceFixture::start();
+    let subscribe = |command| {
+        let request = Request::new(command);
+        let mut stream =
+            UnixStream::connect(&fixture.socket_path).expect("subscriber should connect");
+        write_frame(&mut stream, &request).expect("subscribe request should encode");
+        let mut reader = BufReader::new(stream);
+        let ack: Response = read_frame(&mut reader)
+            .expect("subscribe ack should decode")
+            .expect("subscribe ack should exist");
+        assert!(matches!(ack.result, Ok(ResponseBody::Subscribed)));
+        reader
+    };
+
+    let required_id = Uuid::new_v4();
+    let reader_a = subscribe(Command::SubscribeRequiredViolations {
+        subscription_id: required_id,
+    });
+    let mut reader_b = subscribe(Command::SubscribeRequiredViolations {
+        subscription_id: required_id,
+    });
+    // Give the superseded connection thread time to observe disconnect/replacement and run cleanup.
+    drop(reader_a);
+    thread::sleep(Duration::from_millis(120));
+
+    let apply = fixture_apply_policy();
+    let applied = fixture.call(Command::ApplyPolicyLeased {
+        request: apply.clone(),
+        required_subscription_id: required_id,
+    });
+    assert!(
+        matches!(applied.result, Ok(ResponseBody::Applied(_))),
+        "superseded connection cleanup must not revoke replacement required lease: {:?}",
+        applied.result
+    );
+
+    let violation = fixture_violation(&apply);
+    fixture
+        .backend
+        .publish_violation(violation.clone())
+        .expect("violation should publish");
+    let streamed: Response = read_frame(&mut reader_b)
+        .expect("replacement subscriber should stay registered in EventHub")
+        .expect("violation frame should exist");
+    assert_eq!(streamed.result, Ok(ResponseBody::Violation(violation)));
+
+    // Also verify BestEffort `SubscribeViolations` reuse keeps the replacement in EventHub.
+    let observer_id = Uuid::new_v4();
+    let obs_a = subscribe(Command::SubscribeViolations {
+        subscription_id: observer_id,
+    });
+    let mut obs_b = subscribe(Command::SubscribeViolations {
+        subscription_id: observer_id,
+    });
+    drop(obs_a);
+    thread::sleep(Duration::from_millis(120));
+
+    let violation_2 = fixture_violation(&apply);
+    fixture
+        .backend
+        .publish_violation(violation_2.clone())
+        .expect("second violation should publish");
+    let streamed_obs: Response = read_frame(&mut obs_b)
+        .expect("replacement best-effort subscriber should stay registered in EventHub")
+        .expect("observer violation frame should exist");
+    assert_eq!(
+        streamed_obs.result,
+        Ok(ResponseBody::Violation(violation_2))
+    );
+}
