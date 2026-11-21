@@ -81,6 +81,10 @@ def merge(json_str, config_path):
     existing["mcpServers"].update(servers)
 
     if "mcp" in new and isinstance(new["mcp"], dict):
+        if "mcp" in existing and not isinstance(existing["mcp"], dict):
+            print(f"ERROR: mcp in {config_path} is not a JSON object; "
+                  "repair the existing settings before merging", file=sys.stderr)
+            sys.exit(1)
         if "mcp" not in existing:
             existing["mcp"] = {}
         existing["mcp"].update(new["mcp"])
