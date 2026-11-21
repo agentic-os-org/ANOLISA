@@ -8,14 +8,14 @@
 
 - [接入教程](integration.md) · 用本地脚本跑通允许、阻断和故障处理。
 - [Agent / SDK 接入](native-agents.md) · 按框架选择版本、工厂和启动方式。
+- [双语言 Runtime SDK（6 包）](deployment/native-sdk.md) · 核心包与可选适配包选型、`LanguageSource` 零适配接入、Descriptor 与协作 PID 挂接。
+- [Python SDK](deployment/python-sdk.md) · `anolisa-aw-sdk`、`aw_sdk.sources`、QwenPaw 与 Claude Worker 接入。
+- [Provider 开发](providers/index.md) · `aw-provider/v1alpha1` 三方法最小骨架、`aw.yaml` 挂接、sec-core、Tokenless 和只读展示。
 - [自定义 Hook](providers/hooks.md) · 布尔脚本与原生命令。
-- [Provider 开发](providers/index.md) · 协议、sec-core、Tokenless 和只读展示。
 
 ## 部署与验证
 
 - [独立实例](deployment/independent-instances.md) · 业务自管进程的原生启动准备、Ready、策略更新与释放。
-- [应用持有的 SDK](deployment/native-sdk.md) · 安装 TypeScript 客户端并接入原生 Qoder Query。
-- [Python SDK](deployment/python-sdk.md) · 安装异步客户端与原生 QwenPaw 插件。
 - [常驻 SDK](deployment/resident.md) · 任务工厂、MCP 与客户端清理。
 - [服务与容器](deployment/lifecycle.md) · 持久化、退出、升级和容量。
 - [策略更新](deployment/policy-updates.md) · 预热、排空、激活和失败恢复。

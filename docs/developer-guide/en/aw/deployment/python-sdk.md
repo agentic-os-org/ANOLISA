@@ -18,10 +18,62 @@ releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
 For framework-free declarative instrumentation (`aw_sdk.sources`) and direct
-semantic callbacks (`task.emit`), see
+semantic callbacks (`task.emit`), see the full 6-package matrix and rules in
 [Runtime SDK integration](native-sdk.md#framework-free-integration).
 For wrapped tools that take class instances, that guide describes how to
 provide `snapshot_arg` to preserve the checked input through stream iteration.
+
+| Package | Role | Primary import | Descriptor profile |
+| --- | --- | --- | --- |
+| `anolisa-aw-sdk` (core) | Transport, `Instance`/`Task`/`Admission`/`TaskScope`, Descriptor loader, cooperative control, `LanguageSource` | `aw_sdk`, `aw_sdk.sources` | — (`adapter: sdk`) |
+| `anolisa-aw-sdk-claude` (optional) | Resident Claude Agent SDK worker | `aw_sdk_claude` (`ResidentClaude`) | `claude-resident-hooks` |
+| `anolisa-aw-sdk-qwenpaw` (optional) | QwenPaw native plugin & deferred after-only plugin | `aw_sdk_qwenpaw` (`QwenPawPlugin`, `AfterOnlyPlugin`) | `qwenpaw-installed-native-hooks` |
+
+## Zero-adapter Python Agent (`aw_sdk.sources`)
+
+Install only `anolisa-aw-sdk`, configure an `adapter: sdk` target named `app`
+in `aw.yaml`, start `aw service serve --config /absolute/aw.yaml`, and export
+its socket as `AW_SOCKET`:
+
+```python
+import asyncio
+import os
+from aw_sdk.sources import LanguageSource, SourceDenied
+
+
+class CustomAgent:
+    async def ask(self, prompt: str) -> str:
+        return await self.echo(text=prompt)
+
+    async def echo(self, *, text: str) -> str:
+        return f"echo:{text}"
+
+
+async def main() -> None:
+    agent = CustomAgent()
+    async with LanguageSource.create(
+        endpoint=os.environ["AW_SOCKET"],
+        target="app",
+        availability="required",
+    ) as source:
+        async with source.session(session_id="example-python-agent") as session:
+            session.instrument(
+                agent,
+                input_methods=["ask"],
+                tool_methods={"echo": "echo"},
+            )
+            try:
+                print(await agent.ask("hello"))
+            except SourceDenied as denied:
+                print(f"AW denied {denied.event}")
+
+
+asyncio.run(main())
+```
+
+For resident Claude Agent SDK workers using `anolisa-aw-sdk-claude`
+(`ResidentClaude.from_config` with `--profile claude-resident-hooks` and
+`aw connect --sdk-pid`), see the [Claude SDK guide](../agents/claude-sdk.md).
 
 ## Install and integrate
 

@@ -46,6 +46,12 @@ Every request carries `api_version`, `method` and a request ID. The Provider mus
 return the same version and request ID. The caller supplies the ID and remains
 responsible for its lifecycle and correlation with the chosen Provider instance.
 
+| Method | Called when | Key request fields | Key success response fields |
+| --- | --- | --- | --- |
+| `describe` | Discovery / admission | `api_version`, `method`, `request_id` | `operations[]` (`name`, `events`, `effects`, optional `event_adapters`) |
+| `validate_config` | Config admission | `config` (private JSON object) | `status: "ok"` (or `status: "error"`, `error_code`) |
+| `invoke` | Runtime Hook evaluation | `operation`, `config`, `config_revision`, `budget_ms`, `allowed_effects`, `input_digest`, `event` | `input_digest` (echoed), `effects[]` |
+
 ### `describe`
 
 ```json
@@ -94,6 +100,14 @@ validated configuration. A successful response does not validate Agent settings,
 prove that rules were installed or authenticate the Provider executable.
 
 ### `invoke`
+
+```json
+{"api_version":"aw-provider/v1alpha1","method":"invoke","request_id":"invoke-1","operation":"check","config":{"blocked_tools":["Bash"]},"config_revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","budget_ms":5000,"allowed_effects":["observe","block"],"input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","event":{"name":"tool.before","agent":{"adapter":"qoder","binding_id":"qoder","instance_id":"inst-1"},"session_id":"sess-1","tool":{"name":"bash","native_name":"Bash","call_id":"call-1","input":{"command":"ls"},"result":null},"native":{}}}
+```
+
+```json
+{"api_version":"aw-provider/v1alpha1","request_id":"invoke-1","status":"ok","input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","effects":[{"type":"block","reason_code":"tool_policy"}]}
+```
 
 An invocation supplies the configured operation, private configuration,
 configuration revision, remaining budget, admitted effects, normalized event and

@@ -16,15 +16,29 @@ python3 src/aw/scripts/check.py
 门禁执行 Python 行为测试、格式、Clippy、locked Rust 测试、摘要向量、rustdoc、布局与能力清单检查。
 日志标出失败命令，每条命令有期限和所属进程清理。修改 AW 实现需通过完整 Linux 门禁；打包流程见[源码构建](../../contribute/zh/aw/building.md)。
 
-| 改动范围 | 开发中可先运行 |
+| 改动范围 | 最小本地验证命令 |
 | --- | --- |
-| 文档、导航 | `bash scripts/docs-lint.sh`、`python3 scripts/docs-link-check.py` |
+| 文档与链接 | `bash scripts/docs-lint.sh && python3 scripts/docs-link-check.py && python3 -B -m unittest src/aw/tests/test_ci_scope_docs.py` |
 | Python 门禁 | `python3 -B -m unittest discover -s src/aw/tests -p 'test_ci_*.py'` |
+| Python / TypeScript SDK | 从 `src/aw` 运行 `cargo test --locked -p aw-cli --test sdk_protocol` |
+| Provider 协议（`aw-provider`） | 从 `src/aw` 运行 `cargo test --locked -p aw-provider` |
 | Host / service / CLI | 从 `src/aw` 运行 `cargo test --locked -p aw-host -p aw-service -p aw-cli` |
 | 包执行 | 从 `src/aw` 运行 `cargo test --locked -p aw-exec --test packages` |
 | 包数据库与管理 | 从 `src/aw` 运行 `cargo test --locked -p aw-package --lib store::tests` 和 `cargo test --locked -p aw-package --lib provider_tests` |
 | 事务恢复 | 从 `src/aw` 运行 `cargo test --locked -p aw-package --lib store::transaction::tests` |
-| Provider | 对应独立 workspace 的 `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
+| 一方 Provider workspace | `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
+
+## 首批可领取贡献方向
+
+外部贡献者可以从以下三个边界清晰的方向快速切入：
+
+| 方向 | 推荐起步任务 | 入口文档 |
+| --- | --- | --- |
+| 新框架适配与 SDK 桥接 | 用 `LanguageSource`（`aw_sdk.sources` / `@anolisa/aw-sdk/sources`）接入新的 Python/Node.js Agent 并补充示例；新增可选 SDK 适配包或薄层原生 Adapter 并补齐 `regression-matrix.json` 覆盖。 | [双语言 Runtime SDK](../../docs/developer-guide/zh/aw/deployment/native-sdk.md) · [Agent 接入索引](../../docs/developer-guide/zh/aw/native-agents.md) |
+| 轻量外部 Provider | 基于 `aw-provider/v1alpha1`（`describe` / `validate_config` / `invoke`）编写独立 Provider，例如工作区／文件快照、规则或语义命令／提示词检查、自定义审计输出或结果过滤。 | [Provider 开发与分发](../../docs/developer-guide/zh/aw/providers/index.md) · [Provider 协议](../../docs/developer-guide/zh/aw/providers/protocol.md) |
+| 文档与示例完善 | 补充可运行的端到端示例、新版本 Agent 排错指南，或完善中英文（`en/` + `zh/`）文档一致性与导航。 | [快速入门](../../docs/user-guide/zh/aw/index.md) · [文档规范](../../specs/documentation-standard.md) |
+
+向本仓库提交新框架或新 Provider PR 前，建议先开 Issue 说明目标框架／协议边界与本地验证方式，并遵循[仓库贡献指南](../../CONTRIBUTING_zh.md)。
 
 ## 修改能力支持
 

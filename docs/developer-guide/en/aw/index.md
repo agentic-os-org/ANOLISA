@@ -8,14 +8,14 @@ For developers integrating AW into applications, deploying workers or implementi
 
 - [Integration tutorial](integration.md) · Test allow, block and failure handling with a local script.
 - [Agent / SDK integration](native-agents.md) · Select versions, factories and launch modes.
+- [Runtime SDKs (6 packages)](deployment/native-sdk.md) · Dual-language core/adapter packages, `LanguageSource` zero-adapter instrumentation, Descriptors and cooperative PID attach.
+- [Python SDK](deployment/python-sdk.md) · `anolisa-aw-sdk`, `aw_sdk.sources`, QwenPaw and Claude worker integration.
+- [Provider development](providers/index.md) · Minimal 3-method `aw-provider/v1alpha1` skeleton, `aw.yaml` wiring, sec-core, Tokenless and read-only views.
 - [Custom Hooks](providers/hooks.md) · Boolean scripts and native commands.
-- [Provider development](providers/index.md) · Protocol, sec-core, Tokenless and read-only views.
 
 ## Deploy and validate
 
 - [Independent instances](deployment/independent-instances.md) · Prepare native startup, confirm Ready, update and release application-owned instances.
-- [Application-owned SDK](deployment/native-sdk.md) · Install the TypeScript client and connect native Qoder Queries.
-- [Python SDK](deployment/python-sdk.md) · Install the async client and native QwenPaw plugin.
 - [Resident SDKs](deployment/resident.md) · Task factories, MCP and client cleanup.
 - [Services and containers](deployment/lifecycle.md) · Persistence, shutdown, upgrades and capacity.
 - [Policy updates](deployment/policy-updates.md) · Prewarm, drain, activate and recover.

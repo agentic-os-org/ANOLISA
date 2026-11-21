@@ -12,9 +12,60 @@
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
 连接；协作式控制还要求 `aw-sdk-control/v1`。安装语言包不会升级 AW。
 
-通用语言级 Source Runtime（`aw_sdk.sources`）与无框架语义回调（`task.emit`）见
+通用语言级 Source Runtime（`aw_sdk.sources`）与无框架语义回调（`task.emit`）的完整 6 包矩阵与规则见
 [通用应用接入](native-sdk.md#通用应用接入)。工具接收类实例时，参照其中的
 `snapshot_arg` 约定提供参数副本，使流迭代沿用已检查的输入。
+
+| 包名 | 角色 | 主要导入 | Descriptor Profile |
+| --- | --- | --- | --- |
+| `anolisa-aw-sdk`（核心包） | 传输、`Instance`/`Task`/`Admission`/`TaskScope`、Descriptor 加载、协作控制、`LanguageSource` | `aw_sdk`、`aw_sdk.sources` | —（`adapter: sdk`） |
+| `anolisa-aw-sdk-claude`（可选） | 常驻 Claude Agent SDK Worker | `aw_sdk_claude`（`ResidentClaude`） | `claude-resident-hooks` |
+| `anolisa-aw-sdk-qwenpaw`（可选） | QwenPaw 原生插件与工具后延迟插件 | `aw_sdk_qwenpaw`（`QwenPawPlugin`、`AfterOnlyPlugin`） | `qwenpaw-installed-native-hooks` |
+
+## 自研 Python Agent 零适配接入（`aw_sdk.sources`）
+
+仅安装核心包 `anolisa-aw-sdk`，在 `aw.yaml` 中配置 `adapter: sdk` 目标 `app`，
+启动 `aw service serve --config /absolute/aw.yaml` 并将私有 socket 设为 `AW_SOCKET`：
+
+```python
+import asyncio
+import os
+from aw_sdk.sources import LanguageSource, SourceDenied
+
+
+class CustomAgent:
+    async def ask(self, prompt: str) -> str:
+        return await self.echo(text=prompt)
+
+    async def echo(self, *, text: str) -> str:
+        return f"echo:{text}"
+
+
+async def main() -> None:
+    agent = CustomAgent()
+    async with LanguageSource.create(
+        endpoint=os.environ["AW_SOCKET"],
+        target="app",
+        availability="required",
+    ) as source:
+        async with source.session(session_id="example-python-agent") as session:
+            session.instrument(
+                agent,
+                input_methods=["ask"],
+                tool_methods={"echo": "echo"},
+            )
+            try:
+                print(await agent.ask("hello"))
+            except SourceDenied as denied:
+                print(f"AW denied {denied.event}")
+
+
+asyncio.run(main())
+```
+
+使用可选包 `anolisa-aw-sdk-claude`（`ResidentClaude.from_config` 搭配
+`--profile claude-resident-hooks` 与 `aw connect --sdk-pid`）接入常驻 Claude Worker 时，
+见 [Claude SDK 指南](../agents/claude-sdk.md)。
 
 ## 安装与接入
 
