@@ -33,8 +33,13 @@ async function document(source, language) {
     source,
     language,
     markdown: markdown.replace(/(!?)\[([^\]]*)\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, image, label, target) => {
-      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), target));
-      return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved})`;
+      const hash = target.indexOf('#');
+      const beforeHash = hash < 0 ? target : target.slice(0, hash);
+      const query = beforeHash.indexOf('?');
+      const pathname = query < 0 ? beforeHash : beforeHash.slice(0, query);
+      const suffix = `${query < 0 ? '' : beforeHash.slice(query)}${hash < 0 ? '' : target.slice(hash)}`;
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), pathname));
+      return `${image}[${label}](https://github.com/agentic-os-org/ANOLISA/blob/main/${resolved}${suffix})`;
     }),
   };
 }
