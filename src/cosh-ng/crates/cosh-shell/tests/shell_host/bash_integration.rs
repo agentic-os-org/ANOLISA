@@ -47,6 +47,7 @@ fn run_fixture(case: &str, interactive: bool) -> String {
         "tests/fixture.bash",
         "tests/hook-fixture.bash",
         "tests/hook-helper.bash",
+        "tests/hook-disabled-helper.bash",
         "tests/hook-fault-helper.bash",
         "tests/hook-output-failure.bash",
         "tests/hook-live.bash",
@@ -79,9 +80,11 @@ fn run_fixture(case: &str, interactive: bool) -> String {
     }
     if case.starts_with("hook_") {
         fs::copy(
-            assets.join(if fault_live {
+            assets.join(if case == "hook_guide_off_registration" {
+                "tests/hook-disabled-helper.bash"
+            } else if fault_live {
                 "tests/hook-fault-helper.bash"
-            } else if shadow || prompt_test {
+            } else if shadow {
                 "tests/hook-shadow-helper.py"
             } else {
                 "tests/hook-helper.bash"
@@ -206,12 +209,19 @@ fn run_fixture(case: &str, interactive: bool) -> String {
             .env("COSH_PROMPT_MODE", parts[2]);
         let failure = "; __round=1; false";
         let setup = "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" setup";
+        let observe_status =
+            "builtin printf 'RETREAT_STATUS:%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\"\n";
         let mut lines = if parts[1] == "retreat" {
             vec![
                 format!("{setup}\n"),
                 "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" retreat\n"
                     .to_string(),
                 "false\n".to_string(),
+                observe_status.to_string(),
+                "( exit 5 )\n".to_string(),
+                observe_status.to_string(),
+                "false | (exit 2) | (exit 3)\n".to_string(),
+                observe_status.to_string(),
                 "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" check\n"
                     .to_string(),
             ]
@@ -865,10 +875,22 @@ fn chld_trap_changes_retire_the_observer_after_the_first_detection_window() {
 }
 
 #[cfg(target_os = "linux")]
+fn assert_retreat_status_passthrough(output: &str) {
+    for expected in [
+        "RETREAT_STATUS:1:1",
+        "RETREAT_STATUS:5:5",
+        "RETREAT_STATUS:3:1 2 3",
+    ] {
+        assert!(output.contains(expected), "missing {expected}: {output}");
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn lost_prompt_slot_overwrite_stops_recording() {
     let output = run_fixture("hook_prompt_active_retreat_overwrite", true);
     assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
+    assert_retreat_status_passthrough(&output);
 }
 
 #[cfg(target_os = "linux")]
@@ -876,6 +898,7 @@ fn lost_prompt_slot_overwrite_stops_recording() {
 fn lost_prompt_slot_delete_stops_recording() {
     let output = run_fixture("hook_prompt_active_retreat_delete", true);
     assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
+    assert_retreat_status_passthrough(&output);
 }
 
 #[cfg(target_os = "linux")]
@@ -883,4 +906,23 @@ fn lost_prompt_slot_delete_stops_recording() {
 fn lost_prompt_slot_readonly_stops_recording() {
     let output = run_fixture("hook_prompt_active_retreat_readonly", true);
     assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
+    assert_retreat_status_passthrough(&output);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lost_prompt_slot_runtime_disabled_stops_recording() {
+    let output = run_fixture("hook_prompt_active_retreat_disabled", true);
+    assert!(output.contains("HOOK_RETREAT_OK:disabled"), "{output}");
+    assert_retreat_status_passthrough(&output);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn registration_guide_off_leaves_the_shell_untouched() {
+    let output = run_fixture("hook_guide_off_registration", true);
+    assert!(
+        output.contains("HOOK_GUIDE_OFF_REGISTRATION_OK"),
+        "{output}"
+    );
 }
