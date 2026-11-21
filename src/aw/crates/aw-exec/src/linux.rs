@@ -8,7 +8,7 @@ use crate::{CommandSpec, Error, Limits, Output, Stream};
 use std::{
     io::{self, Read, Write},
     os::fd::AsRawFd,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
     thread,
     time::{Duration, Instant},
 };
@@ -106,16 +106,6 @@ struct Captured {
     sent: usize,
 }
 
-fn check_stop(deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
-    if cancelled.load(Ordering::Relaxed) {
-        return Err(Error::Cancelled);
-    }
-    if Instant::now() >= deadline {
-        return Err(Error::DeadlineExceeded);
-    }
-    Ok(())
-}
-
 fn exchange(
     child: &mut OwnedChild,
     input: &[u8],
@@ -136,7 +126,7 @@ fn exchange(
     let mut out_done = false;
     let mut err_done = false;
     loop {
-        check_stop(deadline, cancelled)?;
+        crate::check_active(deadline, cancelled)?;
         if captured.sent == input.len() {
             stdin.take();
         }
@@ -213,7 +203,7 @@ pub(super) fn run(
     cancelled: &AtomicBool,
     cooperative: bool,
 ) -> Result<Output, Error> {
-    check_stop(deadline, cancelled)?;
+    crate::check_active(deadline, cancelled)?;
     if input.len() > limits.input_bytes {
         return Err(Error::InputLimit {
             limit: limits.input_bytes,

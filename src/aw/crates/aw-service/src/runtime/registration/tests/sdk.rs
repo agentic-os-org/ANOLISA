@@ -627,3 +627,5 @@ fn sdk_callbacks_reuse_cached_routes_and_adopt_resident_policy_updates() {
     f.call(RegistrationCommand::Release { handle: root })
         .unwrap();
 }
+
+mod shadow;

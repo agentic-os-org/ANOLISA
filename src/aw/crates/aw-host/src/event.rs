@@ -1,8 +1,8 @@
 //! One shared event budget and once-only step claims; scheduling belongs to the Adapter.
 
 use crate::{
-    check, identifier, positive, Error, Exchange, Failure, FailureAction, Host, Invocation, Method,
-    StepOutput,
+    check, decision::step_configuration, identifier, positive, BindingContext, Error, Exchange,
+    Failure, FailureAction, Host, Invocation, Method, ObligationUpdate, StepOutput, StepTrace,
 };
 use aw_core::admission::{AdmittedStep, StepExecution};
 use aw_provider::{
@@ -16,19 +16,28 @@ use std::{
     time::{Duration, Instant},
 };
 
+type ResultProjection = fn(&mut Value) -> Result<(), aw_provider::Error>;
+
+struct BoundContext<'a> {
+    identity: BindingContext,
+    active: &'a (dyn Fn() -> bool + Sync),
+}
+
 /// A local event tied to one prepared Host and one absolute deadline.
 ///
 /// Invoke configured steps serially or concurrently according to native Adapter
 /// semantics. Every step may be claimed once; failed attempts are not retried.
 /// The caller must collect all required results before admitting a native submission or dispatching a tool.
 pub struct Event<'a> {
-    host: &'a Host,
+    pub(super) host: &'a Host,
+    binding: Option<BoundContext<'a>>,
+    pub(super) obligation_audit: Option<&'a (dyn Fn(ObligationUpdate<'_>) -> bool + Sync)>,
     value: Value,
     native_input: Option<Vec<u8>>,
-    gate: EventGate,
-    id: String,
-    deadline: Instant,
-    cancelled: &'a AtomicBool,
+    pub(super) gate: EventGate,
+    pub(super) id: String,
+    pub(super) deadline: Instant,
+    pub(super) cancelled: &'a AtomicBool,
     claimed: Mutex<BTreeSet<String>>,
     callback: Mutex<Option<(Value, Vec<u8>)>>,
     validated: OnceLock<()>,
@@ -139,6 +148,8 @@ impl Host {
         check(deadline, cancelled)?;
         Ok(Event {
             host: self,
+            binding: None,
+            obligation_audit: None,
             value,
             native_input,
             gate,
@@ -152,7 +163,43 @@ impl Host {
     }
 }
 
-impl Event<'_> {
+impl<'a> Event<'a> {
+    /// Attaches authority from the runtime that admitted the event and its owner.
+    ///
+    /// Local embedders must authenticate session, instance and task ownership
+    /// before minting the context. The authority callback rechecks that
+    /// admission before each action and before an enforcing decision returns.
+    /// Native payloads never populate this field.
+    ///
+    /// # Errors
+    /// Rejects a context for another instance and a repeated bind attempt.
+    pub fn with_binding(
+        mut self,
+        binding: BindingContext,
+        active: &'a (dyn Fn() -> bool + Sync),
+    ) -> Result<Self, Error> {
+        if self.binding.is_some() || self.value["agent"]["instance_id"] != binding.instance_id {
+            return Err(Error::Invalid("authoritative binding does not match event"));
+        }
+        self.binding = Some(BoundContext {
+            identity: binding,
+            active,
+        });
+        Ok(self)
+    }
+
+    /// Attach the durable action journal owned by the caller.
+    ///
+    /// A true result acknowledges a completed persistent write. The Host
+    /// refuses to start an obligation until its pending record is acknowledged.
+    pub fn with_obligation_audit(
+        mut self,
+        audit: &'a (dyn Fn(ObligationUpdate<'_>) -> bool + Sync),
+    ) -> Self {
+        self.obligation_audit = Some(audit);
+        self
+    }
+
     /// Adopt an admitted first-step input before any policy or native Hook runs.
     ///
     /// The Adapter supplies native bytes with the same identity and revised arguments.
@@ -162,7 +209,8 @@ impl Event<'_> {
     /// Rejects later/concurrent steps, unsupported events, invalid bounds or replay.
     pub fn input_view(&self, input: Value, native_input: Vec<u8>) -> Result<(), Error> {
         let first = self
-            .steps()
+            .callback_steps()
+            .into_iter()
             .next()
             .ok_or(Error::Invalid("missing first step"))?;
         let claimed = self
@@ -248,6 +296,17 @@ impl Event<'_> {
         Ok(())
     }
 
+    pub(super) fn check_binding(&self) -> Result<(), Failure> {
+        let binding = self
+            .binding
+            .as_ref()
+            .ok_or(Failure::Decision("authoritative_binding_unavailable"))?;
+        if !(binding.active)() {
+            return Err(Failure::Decision("authoritative_binding_expired"));
+        }
+        Ok(())
+    }
+
     /// Process-local correlation ID shared by all attempts within this event.
     pub fn id(&self) -> &str {
         &self.id
@@ -272,6 +331,49 @@ impl Event<'_> {
             .filter(move |step| step.event == name)
     }
 
+    /// Native callbacks needed to enforce this event or open a shadow-only event.
+    pub fn callback_steps(&self) -> Vec<&AdmittedStep> {
+        aw_core::routes::callback_steps(
+            self.host.configuration().as_value(),
+            self.host.steps(),
+            self.gate.event(),
+        )
+    }
+
+    /// Deferred steps over this event's final retained input or result.
+    pub fn shadow_steps(&self) -> impl Iterator<Item = &AdmittedStep> {
+        self.steps().filter(|step| self.is_shadow(step))
+    }
+
+    /// Whether the step uses deferred shadow evaluation.
+    pub fn is_shadow(&self, step: &AdmittedStep) -> bool {
+        aw_core::routes::is_shadow(self.host.configuration().as_value(), step)
+    }
+
+    /// Evaluate a shadow after the caller has completed the enforcing callbacks.
+    ///
+    /// The local deadline reserves child cleanup within the original event budget.
+    /// The native normalizer can add a bounded candidate result projection to
+    /// the private Provider request after the enforcing path settles.
+    /// # Errors
+    /// Rejects a non-shadow step, an unknown step or a duplicate invocation.
+    pub fn invoke_shadow(
+        &self,
+        step_id: &str,
+        deadline: Instant,
+        project_result: fn(&mut Value) -> Result<(), aw_provider::Error>,
+    ) -> Result<Invocation, Error> {
+        if !self.shadow_steps().any(|step| step.step_id == step_id) {
+            return Err(Error::Invalid("step is not admitted for shadow evaluation"));
+        }
+        self.invoke_with_environment(
+            step_id,
+            None,
+            deadline.min(self.deadline),
+            Some(project_result),
+        )
+    }
+
     /// Execute one retained step, preserving failure details and its `on_error` action.
     ///
     /// Tool-selector misses retain their claim and return a neutral skipped result.
@@ -283,7 +385,7 @@ impl Event<'_> {
     /// Returns a selection error for unknown/already claimed steps. All call failures,
     /// including pre-spawn cancellation/deadline, are recorded inside the invocation.
     pub fn invoke(&self, step_id: &str) -> Result<Invocation, Error> {
-        self.invoke_with_environment(step_id, None)
+        self.invoke_with_environment(step_id, None, self.deadline, None)
     }
 
     /// Execute a step with the complete environment observed by its native callback.
@@ -302,18 +404,27 @@ impl Event<'_> {
         step_id: &str,
         environment: &BTreeMap<OsString, OsString>,
     ) -> Result<Invocation, Error> {
-        self.invoke_with_environment(step_id, Some(environment))
+        self.invoke_with_environment(step_id, Some(environment), self.deadline, None)
     }
 
     fn invoke_with_environment(
         &self,
         step_id: &str,
         environment: Option<&BTreeMap<OsString, OsString>>,
+        deadline: Instant,
+        project_result: Option<ResultProjection>,
     ) -> Result<Invocation, Error> {
         let step = self
             .steps()
             .find(|step| step.step_id == step_id)
             .ok_or(Error::Invalid("step was not admitted for this event"))?;
+        let configured = step_configuration(self.host.configuration().as_value(), step)?;
+        let shadow = configured["mode"] == "shadow";
+        let decision = configured["decision"] == true;
+        let mut trace = (shadow || decision).then(|| StepTrace {
+            shadow,
+            ..Default::default()
+        });
         let provider = self
             .host
             .providers
@@ -349,8 +460,8 @@ impl Event<'_> {
         // Missing identity is an invocation failure, never evidence of non-coverage.
         // Native hooks need the same normalized contract as structured Providers.
         let started = Instant::now();
-        let validation = (|| -> Result<(), Failure> {
-            check(self.deadline, self.cancelled)?;
+        let selection = (|| -> Result<bool, Failure> {
+            check(deadline, self.cancelled)?;
             if callback.is_none() {
                 if self.validated.get().is_none() {
                     self.host.protocol.validate_event(&self.value)?;
@@ -359,71 +470,126 @@ impl Event<'_> {
             } else {
                 self.host.protocol.validate_event(value)?;
             }
-            check(self.deadline, self.cancelled)?;
-            Ok(())
+            let selected = step.matches_tool(value);
+            if selected && decision && !shadow {
+                self.check_binding()?;
+            }
+            check(deadline, self.cancelled)?;
+            Ok(selected)
         })();
         record.elapsed = started.elapsed();
-        let (record, result) = if let Err(error) = validation {
-            (record, Err(error))
-        } else if !step.matches_tool(value) {
-            (record, Ok(StepOutput::Skipped))
-        } else {
-            let transport = self.host.transport(provider, self.deadline, self.cancelled);
-            match &step.execution {
-                StepExecution::Native => {
-                    let input = callback
-                        .as_ref()
-                        .map(|(_, input)| input)
-                        .or(self.native_input.as_ref())
-                        .ok_or(Error::Invalid("native callback input is missing"))?;
-                    transport.native(record, input, environment)
-                }
-                StepExecution::Provider { effects, .. } | StepExecution::Hook { effects, .. } => {
-                    let request_id = record.request_id.clone();
-                    let operation =
-                        if let StepExecution::Provider { operation, .. } = &step.execution {
-                            operation.as_str()
-                        } else {
-                            "invoke"
-                        };
-                    // Bind one immutable event across callbacks; projections belong
-                    // only to the final replacement Provider, not earlier observers.
-                    let mut event = callback
-                        .as_ref()
-                        .map(|(value, _)| value)
-                        .unwrap_or(&self.value)
-                        .clone();
-                    if !step.execution.replaces_result() {
-                        if let Some(tool) = event.get_mut("tool").and_then(Value::as_object_mut) {
-                            tool.remove("result_projection");
-                        }
+        let (record, result) = match selection {
+            Err(error) => (record, Err(error)),
+            Ok(false) => (record, Ok(StepOutput::Skipped)),
+            Ok(true) => {
+                let transport = self.host.transport(provider, deadline, self.cancelled);
+                match &step.execution {
+                    StepExecution::Native => {
+                        let input = callback
+                            .as_ref()
+                            .map(|(_, input)| input)
+                            .or(self.native_input.as_ref())
+                            .ok_or(Error::Invalid("native callback input is missing"))?;
+                        transport.native(record, input, environment)
                     }
-                    let build = |budget_ms| {
-                        let value = json!({
-                            "api_version": VERSION, "method": "invoke", "request_id": request_id,
-                            "operation": operation, "config_revision": self.host.revision(),
-                            "budget_ms": budget_ms, "allowed_effects": effects,
-                            "config": provider.config, "event": event,
-                        });
-                        if matches!(step.execution, StepExecution::Hook { .. }) {
-                            self.host.protocol.bind_hook_invocation(value)
-                        } else {
-                            self.host.protocol.bind_invocation(value)
+                    StepExecution::Provider { effects, .. }
+                    | StepExecution::Hook { effects, .. } => {
+                        let request_id = record.request_id.clone();
+                        let operation =
+                            if let StepExecution::Provider { operation, .. } = &step.execution {
+                                operation.as_str()
+                            } else {
+                                "invoke"
+                            };
+                        // Only steps evaluating a replacement receive a supplied projection.
+                        let mut event = callback
+                            .as_ref()
+                            .map(|(value, _)| value)
+                            .unwrap_or(&self.value)
+                            .clone();
+                        let shadow_result = shadow
+                            && configured["effects"].as_array().is_some_and(|effects| {
+                                effects.iter().any(|effect| effect == "replace_result")
+                            });
+                        if !step.execution.replaces_result() && !shadow_result {
+                            if let Some(tool) = event.get_mut("tool").and_then(Value::as_object_mut)
+                            {
+                                tool.remove("result_projection");
+                            }
                         }
-                    };
-                    let Exchange { record, result } =
-                        if let StepExecution::Hook { reason_code, .. } = &step.execution {
-                            transport.hook(record, build, reason_code.as_deref())
-                        } else {
-                            transport.exchange(record, build)
+                        let binding = self
+                            .binding
+                            .as_ref()
+                            .filter(|_| self.host.sends_binding(step))
+                            .map_or(Value::Null, |binding| {
+                                binding
+                                    .identity
+                                    .envelope(&self.id, &event, self.host.revision())
+                            });
+                        let build = |budget_ms| {
+                            if shadow_result {
+                                if let Some(project) = project_result {
+                                    project(&mut event)?;
+                                }
+                            }
+                            let mut value = json!({
+                                "api_version": VERSION, "method": "invoke", "request_id": request_id,
+                                "operation": operation, "config_revision": self.host.revision(),
+                                "budget_ms": budget_ms, "allowed_effects": effects,
+                                "config": provider.config, "event": event,
+                            });
+                            if shadow {
+                                value["allowed_effects"] = configured["effects"].clone();
+                            }
+                            if decision {
+                                value["decision"] = Value::Bool(true);
+                            }
+                            if !binding.is_null() {
+                                value["binding"] = binding.clone();
+                            }
+                            if matches!(step.execution, StepExecution::Hook { .. }) {
+                                self.host.protocol.bind_hook_invocation(value)
+                            } else {
+                                self.host.protocol.bind_invocation(value)
+                            }
                         };
-                    let result = result.and_then(|reply| match reply {
-                        Reply::Invocation(outcome) => Ok(StepOutput::Provider(outcome)),
-                        _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
-                            "unexpected invocation reply type",
-                        ))),
-                    });
-                    (record, result)
+                        let Exchange { record, result } =
+                            if let StepExecution::Hook { reason_code, .. } = &step.execution {
+                                transport.hook(record, build, reason_code.as_deref())
+                            } else {
+                                transport.exchange(record, build)
+                            };
+                        let result = result.and_then(|reply| match reply {
+                            Reply::Invocation(mut outcome) => {
+                                if let Some(trace) = &mut trace {
+                                    trace.effect_types = outcome.as_value()["effects"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(|effect| {
+                                            effect["type"].as_str().map(str::to_owned)
+                                        })
+                                        .collect();
+                                    if decision {
+                                        self.settle_decision(
+                                            step,
+                                            configured,
+                                            &mut outcome,
+                                            &binding,
+                                            trace,
+                                        )?;
+                                    } else {
+                                        outcome.observe_only();
+                                    }
+                                }
+                                Ok(StepOutput::Provider(outcome))
+                            }
+                            _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
+                                "unexpected invocation reply type",
+                            ))),
+                        });
+                        (record, result)
+                    }
                 }
             }
         };
@@ -440,6 +606,7 @@ impl Event<'_> {
             record,
             result,
             failure_action,
+            trace,
         })
     }
 }

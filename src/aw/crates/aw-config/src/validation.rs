@@ -1,6 +1,6 @@
 //! Cross-field constraints for desired configuration; no capability discovery.
 
-use crate::Error;
+use crate::{requirements::step_enabled, Error};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -85,7 +85,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             .enumerate()
         {
             let path = format!("{path}/steps/{index}");
-            let active = enabled && step["enabled"] != false;
+            let active = enabled && step_enabled(step);
             require(
                 name != "input.submit" || step.get("match").is_none(),
                 &path,
@@ -131,6 +131,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 &format!("{path}/reason_code"),
                 "configured reason codes belong only to boolean hooks",
             )?;
+            validate_step_mode(name, step, protocol, providers, &path)?;
             require(
                 !native || matches!(name.as_str(), "tool.before" | "tool.after"),
                 &path,
@@ -199,6 +200,65 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_step_mode(
+    event: &str,
+    step: &Value,
+    protocol: &str,
+    providers: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<(), Error> {
+    let shadow = step["mode"] == "shadow";
+    let decision = step["decision"] == true;
+    require(
+        !(shadow || decision) || protocol == "aw-provider/v1alpha1",
+        path,
+        "shadow and decisions require a structured Provider",
+    )?;
+    require(
+        decision || step.get("obligations").is_none(),
+        &format!("{path}/obligations"),
+        "obligation routes require a decision step",
+    )?;
+    if decision {
+        require(
+            matches!(
+                event,
+                "tool.before" | "input.submit" | "turn.stop" | "security.violation"
+            ) && step["effects"].as_array().is_some_and(|effects| {
+                effects
+                    .iter()
+                    .all(|effect| effect == "observe" || effect == "block")
+            }),
+            path,
+            "Provider decisions require a blocking gate and observe or block effects",
+        )?;
+        require(
+            shadow
+                || step["mode"] == "off"
+                || (step["on_error"] == "block"
+                    && step["effects"]
+                        .as_array()
+                        .is_some_and(|effects| effects.iter().any(|effect| effect == "block"))),
+            path,
+            "enforced Provider decisions require block effect and block on_error",
+        )?;
+    }
+    if let Some(routes) = step["obligations"].as_object() {
+        for (kind, route) in routes {
+            let provider = route["provider"].as_str().ok_or(Error::InvalidSchema)?;
+            require(
+                step["provider"] != provider
+                    && providers
+                        .get(provider)
+                        .is_some_and(|value| value["protocol"] == "aw-provider/v1alpha1"),
+                &format!("{path}/obligations/{kind}/provider"),
+                "an obligation must route to a different configured structured Provider",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Result<(), Error> {
     if let Some(tools) = value["match"]["tools"].as_array() {
         require(
@@ -225,15 +285,19 @@ fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Resul
                             | "qoder-sdk"
                             | "agentscope"
                             | "codex"
+                            | "sdk"
                     )
                 )
                 && parts.next().is_some_and(|name| {
-                    !name.is_empty() && !name.contains('*') && !name.chars().any(char::is_control)
+                    name == "*"
+                        || (!name.is_empty()
+                            && !name.contains('*')
+                            && !name.chars().any(char::is_control))
                 });
             require(
                 standard || native,
                 &format!("{path}/match/tools/{index}"),
-                "expected all tools, a standard tool or an exact native:<adapter>:<name>",
+                "expected all tools, a standard tool, native:<adapter>:<name> or native:<adapter>:*",
             )?;
             require(
                 !native || adapter.is_some_and(|adapter| adapters.contains(adapter)),

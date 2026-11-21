@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { checkCallbacks, fixture, nativeReply } from '../shared/final-bridge-test.mjs';
 
 test('TypeScript factory rejects unverified launch paths and gates first prompt on readiness', async () => {
   const root = mkdtempSync(join(tmpdir(), 'aw-ts-contract-'));
@@ -133,5 +134,33 @@ process.exit(${JSON.stringify(mode)}==='deny'?2:['error','report','unacknowledge
       else process.env.AW_CLAUDE_CONFIG = original;
       rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test('TypeScript final gate leaves native callbacks and ordinary policy intact in shadow', async t => {
+  const original = process.env.AW_CLAUDE_CONFIG;
+  for (const mode of ['off', 'shadow', 'enforce']) {
+    await t.test(mode, async t => {
+      const root = mkdtempSync(join(tmpdir(), 'aw-ts-final-callback-'));
+      t.after(() => {
+        if (original === undefined) delete process.env.AW_CLAUDE_CONFIG;
+        else process.env.AW_CLAUDE_CONFIG = original;
+        rmSync(root, { recursive: true, force: true });
+      });
+      const { file, entry, log } = fixture(root, 'claude', mode);
+      process.env.AW_CLAUDE_CONFIG = file;
+      mkdirSync(join(root, 'shared'));
+      copyFileSync(new URL('typescript-bridge.mjs', import.meta.url), join(root, 'bridge.mjs'));
+      copyFileSync(new URL('../shared/transport.mjs', import.meta.url), join(root, 'shared/transport.mjs'));
+      copyFileSync(new URL('../shared/js-runtime/final-records.mjs', import.meta.url), join(root, 'final-records.mjs'));
+      const { createQuery } = await import(pathToFileURL(join(root, 'bridge.mjs')));
+      const query = await createQuery({ prompt: 'text', options: {
+        cwd: root, model: 'fixture-model', settingSources: [], tools: ['Bash'],
+        hooks: { PreToolUse: [{ hooks: [async () => nativeReply] }] },
+      } });
+      t.after(() => query.close());
+      const sdk = await import(pathToFileURL(entry));
+      await checkCallbacks(root, 'claude', mode, sdk.options, log);
+    });
   }
 });

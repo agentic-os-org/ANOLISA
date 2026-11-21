@@ -1,7 +1,8 @@
 /** Keep the legacy final gate bound to one foreground Query and native identities. */
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { finalRecords } from './final-records.mjs';
 
 let created = false;
 let active;
@@ -25,12 +26,10 @@ export function finalLaunch(config, prompt, options) {
     throw Error('AW Qoder final gate covers only native tool Hooks');
   }
   created = true;
-  const root = dirname(config.ready_path), records = Object.create(null), completions = new Map();
-  const save = () => {
-    writeFileSync(`${root}/qoder-final-records.tmp`, JSON.stringify(records), { mode: 0o600 });
-    renameSync(`${root}/qoder-final-records.tmp`, `${root}/qoder-final-records.json`);
-  };
-  save();
+  const enforcing = config.final_enforcing !== false;
+  const root = dirname(config.ready_path), completions = new Map();
+  let records = Object.create(null);
+  const snapshots = finalRecords(root, 'qoder', enforcing);
   let release, failed = false;
   const ready = new Promise(resolve => { release = resolve; });
   const completion = (event, id) => {
@@ -44,6 +43,9 @@ export function finalLaunch(config, prompt, options) {
     return completions.get(key);
   };
   active = {
+    enforcing,
+    prepare: () => snapshots.publish(records),
+    close: () => snapshots.close(),
     async *input() {
       await ready;
       if (!failed) yield { type: 'user', parent_tool_use_id: null,
@@ -52,17 +54,27 @@ export function finalLaunch(config, prompt, options) {
     wait: (event, id) => completion(event, id).promise,
     complete: (event, id) => completion(event, id).done(),
     record(payload) {
+      const supported = payload.tool_name === 'Bash' && !payload.tool_input?.run_in_background;
       if (payload.hook_event_name === 'PreToolUse') {
-        return payload.tool_name === 'Bash' && !payload.tool_input?.run_in_background;
+        return supported;
       }
-      const id = payload.tool_use_id;
-      if (typeof id !== 'string' || !id || Object.keys(records).length >= 1024) throw Error('AW Qoder identity limit');
-      const native = Object.fromEntries(['session_id', 'cwd', 'tool_use_id', 'tool_name', 'tool_input']
-        .map(key => [key, payload[key]]));
-      native.is_error = payload.hook_event_name === 'PostToolUseFailure';
-      if (Object.hasOwn(records, id)) native.ambiguous = true;
-      records[id] = JSON.parse(JSON.stringify(native));
-      save();
+      if (!enforcing && !supported) return;
+      try {
+        const id = payload.tool_use_id;
+        if (typeof id !== 'string' || !id) throw Error('AW Qoder identity limit');
+        const duplicate = Object.hasOwn(records, id);
+        if (Object.keys(records).length >= 1024 && !(enforcing && duplicate)) throw Error('AW Qoder identity limit');
+        const native = enforcing && duplicate ? records[id] : JSON.parse(JSON.stringify({
+          ...Object.fromEntries(['session_id', 'cwd', 'tool_use_id', 'tool_name', 'tool_input']
+            .map(key => [key, payload[key]])),
+          is_error: payload.hook_event_name === 'PostToolUseFailure',
+        }));
+        const next = { ...records, [id]: duplicate ? { ...native, ambiguous: true } : native };
+        if (enforcing) records = next;
+        if (snapshots.publish(next)) records = next;
+      } catch (error) {
+        if (enforcing) throw error;
+      }
       return true;
     },
     verify() {
@@ -72,7 +84,7 @@ export function finalLaunch(config, prompt, options) {
       }
     },
     release() { release(); },
-    cancel() { failed = true; release(); },
+    cancel() { snapshots.close(); failed = true; release(); },
   };
   return active;
 }

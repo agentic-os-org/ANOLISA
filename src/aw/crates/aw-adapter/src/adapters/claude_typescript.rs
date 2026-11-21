@@ -96,7 +96,7 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        super::claude_final::validate(steps)?;
+        super::claude_final::validate(&self.input.document, steps)?;
         if steps
             .iter()
             .any(|step| matches!(step.execution, StepExecution::Native))
@@ -133,7 +133,8 @@ impl PreparedLaunch for Prepared {
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
-                "final_profile": final_profile, "typescript": self.sdk,
+                "final_profile": final_profile, "final_enforcing": super::claude_final::enforcing(&hooks),
+                "typescript": self.sdk,
             }))?,
         )?;
         let mut command = self.input.command.clone();

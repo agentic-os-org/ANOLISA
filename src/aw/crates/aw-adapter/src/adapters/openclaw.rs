@@ -256,6 +256,7 @@ impl PreparedLaunch for Prepared {
             "session.end",
         ] {
             let selected = adapter::native_steps(
+                &self.input.document,
                 context.steps,
                 name,
                 matches!(name, "tool.before" | "tool.after")

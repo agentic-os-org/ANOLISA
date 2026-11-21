@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-test('final preload closes early events, reaps cancellation and skips subsequent steps', { timeout: 15000 }, () => {
+test('final preload preserves shadow results and enforces denial, cancellation and cleanup', { timeout: 15000 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'aw-claude-final-'));
   try {
     mkdirSync(join(root, 'shared/js-runtime'), { recursive: true });
     for (const [source, target] of [['final-preload.mjs', 'preload.mjs'],
-      ['final-gate.mjs', 'claude-final-gate.mjs'], ['../shared/js-runtime/fetch-gate.mjs', 'shared/js-runtime/fetch-gate.mjs']]) {
+      ['final-gate.mjs', 'claude-final-gate.mjs'],
+      ['../shared/js-runtime/fetch-gate.mjs', 'shared/js-runtime/fetch-gate.mjs'],
+      ['../shared/js-runtime/final-records.mjs', 'final-records.mjs']]) {
       copyFileSync(new URL(source, import.meta.url), join(root, target));
     }
     const executable = join(root, 'aw');
@@ -28,12 +30,15 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { finalRecords } from './final-records.mjs';
 const root=${JSON.stringify(root)};
+const shadow=process.env.MODE==='shadow';
 const native={session_id:'session',tool_use_id:'call',tool_name:'Bash',tool_input:{command:'test'},cwd:'/work'};
-writeFileSync(root+'/claude-final-records.json',JSON.stringify({call:native}));
+const records = finalRecords(root,'claude',!shadow);
+records.publish({call:native});
 const config={executable:root+'/aw',binding:'/fixture',origin:'https://model.test',ready_token:'fixture',
 final_profile:{bun:'fixture',sha256:{'_bundled/claude':createHash('sha256').update(readFileSync('/proc/self/exe')).digest('hex')}},
-hooks:[1,2].map(i=>({event:'security.violation',step:'step-'+i,on_error:'block',budget_ms:1000}))};
+hooks:(shadow?[1]:[1,2]).map(i=>({event:'security.violation',step:'step-'+i,on_error:shadow?'report':'block',budget_ms:1000}))};
 writeFileSync(root+'/config.json',JSON.stringify(config));
 process.env.AW_CLAUDE_FINAL_CONFIG=root+'/config.json';process.env.BUN_OPTIONS='--preload='+root+'/preload.mjs';
 globalThis.Bun={version:'fixture'};let sent;
@@ -43,6 +48,12 @@ const controller=new AbortController();
 const body=JSON.stringify({metadata:{user_id:JSON.stringify({session_id:'session'})},messages:[
 {role:'assistant',content:[{type:'tool_use',id:'call',name:'Bash',input:{command:'test'}}]},
 {role:'user',content:[{type:'tool_result',tool_use_id:'call',content:'secret'}]}]});
+if(process.env.MODE==='stale'){
+records.close();
+await fetch('https://model.test/v1/messages',{body});
+assert.equal(sent.messages[1].content[0].content,'AW withheld the final tool result');
+assert.equal(existsSync(process.env.CALLS),false);
+} else {
 const pending=fetch('https://model.test/v1/messages',{body,signal:controller.signal}).then(()=>null,error=>error);
 if(process.env.MODE==='abort'){
 for(let i=0;i<200&&!existsSync(process.env.CALLS);i++) await new Promise(resolve=>setTimeout(resolve,5));
@@ -51,12 +62,19 @@ const error=await pending;
 const calls=readFileSync(process.env.CALLS,'utf8').trim().split('\\n').map(JSON.parse);
 assert.equal(calls.length,2);assert(calls.every(call=>!existsSync('/proc/'+call.pid)));
 assert.deepEqual(calls[0].payload,calls[1].payload);
-if(process.env.MODE==='allow'){assert.equal(sent.messages[1].content[0].content,'secret');assert(calls[1].args.includes('step-2'));}
+if(shadow){
+assert.equal(error,null);assert.equal(sent.messages[1].content[0].content,'secret');
+assert(calls.every(call=>call.args[call.args.indexOf('--on-error')+1]==='report'));
+await fetch('https://other.test/v1/messages',{body});
+assert.equal(sent.messages[1].content[0].content,'secret');
+} else if(process.env.MODE==='allow'){assert.equal(sent.messages[1].content[0].content,'secret');assert(calls[1].args.includes('step-2'));}
 else {assert(calls[1].args.includes('--close-event'));assert(!calls[1].args.includes('step-2'));
 if(process.env.MODE==='abort'){assert.equal(error,controller.signal.reason);assert.equal(sent,undefined);}
 else assert.equal(sent.messages[1].content[0].content,'AW withheld the final tool result');}
+records.close();
+}
 `);
-    for (const mode of ['allow', 'deny', 'cleanup-error', 'abort']) {
+    for (const mode of ['allow', 'deny', 'cleanup-error', 'abort', 'shadow', 'stale']) {
       const result = spawnSync(process.execPath, [join(root, 'run.mjs')], {
         env: { ...process.env, MODE: mode, CALLS: join(root, `${mode}.jsonl`) },
         encoding: 'utf8', timeout: 3000,

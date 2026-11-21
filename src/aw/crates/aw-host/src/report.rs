@@ -12,6 +12,8 @@ pub enum Method {
     ValidateConfig,
     /// Evaluate one admitted event step.
     Invoke,
+    /// Execute one action authorized by an admitted obligation route.
+    ExecuteObligation,
     /// Execute an uninterpreted native callback without a Provider handshake.
     NativeHook,
 }
@@ -23,6 +25,7 @@ impl Method {
             Self::ValidateConfig => "validate_config",
             Self::Invoke => "invoke",
             Self::NativeHook => "native_hook",
+            Self::ExecuteObligation => "execute_obligation",
         }
     }
 }
@@ -82,6 +85,9 @@ pub enum Failure {
         /// Validated machine code, retained separately from diagnostic text.
         code: String,
     },
+    /// A safe reason code for a decision or an unconfirmed protection.
+    #[error("Provider decision could not be applied: {0}")]
+    Decision(&'static str),
     /// Invalid request or response, including disallowed effects or wrong bindings.
     #[error(transparent)]
     Protocol(aw_provider::Error),
@@ -127,6 +133,45 @@ pub enum StepOutput {
     Native(NativeOutput),
 }
 
+/// Durable lifecycle notification for a configured action.
+pub struct ObligationUpdate<'a> {
+    /// Trusted action kind from the configured route.
+    pub kind: &'a str,
+    /// Correlation with the checked candidate.
+    pub candidate_id: &'a str,
+    /// Admitted operation on the executor.
+    pub operation: &'a str,
+    /// Action request identity and execution metadata.
+    pub record: &'a CallRecord,
+    /// Pending before spawn, or the verified outcome after transport.
+    pub status: &'static str,
+}
+
+/// Metadata for one requested obligation that reached its configured executor.
+pub struct ObligationRecord {
+    /// The obligation kind from trusted policy configuration.
+    pub kind: String,
+    /// Correlation and process metadata for the action attempt.
+    pub record: CallRecord,
+    /// Fixed completion or failure category, without Provider-supplied text.
+    pub status: &'static str,
+}
+
+/// Bounded audit metadata emitted for shadow and advisory decision steps.
+#[derive(Default)]
+pub struct StepTrace {
+    /// Whether this step ran with its effects suppressed.
+    pub shadow: bool,
+    /// The validated advisory decision, if one was returned.
+    pub decision: Option<&'static str>,
+    /// Returned effect types before shadow suppression.
+    pub effect_types: Vec<String>,
+    /// Requested obligation kinds, mapped to configured names or the unmapped marker.
+    pub obligations: Vec<String>,
+    /// Ordered action attempts under the original event deadline.
+    pub actions: Vec<ObligationRecord>,
+}
+
 /// Result of one claimed event step; the embedding Adapter owns effect adoption.
 pub struct Invocation {
     /// Correlated execution metadata, including the native process status when available.
@@ -135,6 +180,8 @@ pub struct Invocation {
     pub result: Result<StepOutput, Failure>,
     /// Present only on failure; does not replace or hide `result`.
     pub failure_action: Option<FailureAction>,
+    /// Metadata-only trace of a shadow step or advisory decision.
+    pub trace: Option<StepTrace>,
 }
 
 /// Failed preparation call with its metadata; formatting omits Provider diagnostics.

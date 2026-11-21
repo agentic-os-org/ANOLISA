@@ -49,7 +49,7 @@ pub(crate) fn collect(config: &aw_config::Configuration) -> Result<Vec<Projected
         .filter(|event| event["enabled"] == true)
         .filter_map(|event| event["steps"].as_array())
         .flatten()
-        .filter(|step| step["enabled"] != false)
+        .filter(|step| aw_config::requirements::step_enabled(step))
         .count();
     let mut steps = Vec::new();
     for target in agents.keys() {

@@ -13,6 +13,7 @@ const deny = reason => ({ hookSpecificOutput: { hookEventName: 'PreToolUse',
 export async function createQuery({ prompt, options }) {
   if (created) throw Error('AW Claude SDK supports one foreground Query');
   const config = JSON.parse(readFileSync(process.env.AW_CLAUDE_CONFIG, 'utf8'));
+  const finalEnforcing = Boolean(config.final_profile) && config.final_enforcing !== false;
   const root = dirname(config.ready_path);
   const allowed = ['model', 'cwd', 'settingSources', 'tools', 'allowedTools', 'mcpServers',
     'hooks', 'env', 'maxTurns'];
@@ -29,6 +30,9 @@ export async function createQuery({ prompt, options }) {
     throw Error('AW Claude TypeScript covers only in-process SDK MCP servers');
   }
   const prefixes = Object.keys(servers).map(name => `mcp__${name}__`);
+  const supportsTool = payload => typeof payload.tool_name === 'string' &&
+    (payload.tool_name === 'Bash' || prefixes.some(prefix => payload.tool_name.startsWith(prefix))) &&
+    !payload.tool_input?.run_in_background;
   for (const [name, file] of Object.entries(config.typescript.files)) {
     if (createHash('sha256').update(readFileSync(file)).digest('hex') !== config.typescript.sha256[name]) {
       throw Error('AW Claude TypeScript fingerprint changed after admission');
@@ -37,11 +41,8 @@ export async function createQuery({ prompt, options }) {
   const env = { ...process.env, ...options.env };
   if (env.BUN_OPTIONS || env.NODE_OPTIONS || Object.keys(env).some(key =>
     key.startsWith('CLAUDE_CODE_USE_') && env[key])) throw Error('AW runtime/provider overrides unsupported');
-  const records = Object.create(null);
-  const saveRecords = () => {
-    writeFileSync(`${root}/claude-final-records.tmp`, JSON.stringify(records), { mode: 0o600 });
-    renameSync(`${root}/claude-final-records.tmp`, `${root}/claude-final-records.json`);
-  };
+  let records = Object.create(null);
+  let snapshots;
   if (config.final_profile) {
     const base = new URL(env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com');
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password ||
@@ -53,11 +54,10 @@ export async function createQuery({ prompt, options }) {
     writeFileSync(`${root}/claude-final-runtime.json`, JSON.stringify({ ...config,
       origin: base.origin, messages_path: base.pathname.replace(/\/+$/, '') + '/v1/messages',
       cwd: resolve(options.cwd ?? process.cwd()) }), { mode: 0o600 });
-    saveRecords();
     env.BUN_OPTIONS = `--preload=${preload}`;
     env.AW_CLAUDE_FINAL_CONFIG = `${root}/claude-final-runtime.json`;
   }
-  env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  if (finalEnforcing) env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
   const invoke = async (route, payload, signal, close = false) => {
     const result = await run(config.executable, ['hook', '--adapter', 'claude-sdk',
       '--binding', config.binding, '--event', route.event, '--step', route.step,
@@ -72,15 +72,25 @@ export async function createQuery({ prompt, options }) {
   const callback = async (payload, call, context) => {
     const before = payload.hook_event_name === 'PreToolUse';
     if (call !== payload.tool_use_id) return before ? deny('AW tool identity mismatch') : {};
-    if (before && (!(payload.tool_name === 'Bash' || prefixes.some(prefix => payload.tool_name.startsWith(prefix))) ||
-        payload.tool_input?.run_in_background)) return deny('AW final gate does not cover this tool path');
-    if (!before && config.final_profile) {
-      if (!call || Object.keys(records).length >= 1024) throw Error('AW final identity limit');
-      const native = Object.fromEntries(['session_id', 'cwd', 'tool_use_id', 'tool_name', 'tool_input']
-        .map(key => [key, payload[key]]));
-      if (Object.hasOwn(records, call)) native.ambiguous = true;
-      records[call] = copy(native);
-      saveRecords();
+    if (before && finalEnforcing && !supportsTool(payload)) {
+      return deny('AW final gate does not cover this tool path');
+    }
+    if (!before && config.final_profile && (finalEnforcing || supportsTool(payload))) {
+      try {
+        if (typeof call !== 'string' || !call) throw Error('AW final identity limit');
+        const duplicate = Object.hasOwn(records, call);
+        if (Object.keys(records).length >= 1024 && !(finalEnforcing && duplicate)) {
+          throw Error('AW final identity limit');
+        }
+        const native = finalEnforcing && duplicate ? records[call] :
+          copy(Object.fromEntries(['session_id', 'cwd', 'tool_use_id', 'tool_name', 'tool_input']
+            .map(key => [key, payload[key]])));
+        const next = { ...records, [call]: duplicate ? { ...native, ambiguous: true } : native };
+        if (finalEnforcing) records = next;
+        if (snapshots.publish(next)) records = next;
+      } catch (error) {
+        if (finalEnforcing) throw error;
+      }
     }
     let active;
     let completed = false;
@@ -126,7 +136,7 @@ export async function createQuery({ prompt, options }) {
   for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
     const routes = config.hooks.filter(route => route.event === (event === 'PreToolUse' ? 'tool.before' : 'tool.after'));
     hooks[event] = [{ onFailure: event === 'PreToolUse' &&
-      (config.final_profile || routes.some(route => route.on_error === 'block')) ? 'block' : 'continue',
+      (finalEnforcing || routes.some(route => route.on_error === 'block')) ? 'block' : 'continue',
     timeout: Math.ceil((routes.reduce((total, route) => total + route.budget_ms + 3000, 0) + 2500) / 1000),
     hooks: [async (payload, call, context) => {
       const finished = completion(event, call);
@@ -139,7 +149,7 @@ export async function createQuery({ prompt, options }) {
         const result = await handler(copy(payload), call, context);
         const specific = result?.hookSpecificOutput;
         if (event === 'PreToolUse' && specific?.updatedInput) return deny('AW does not cover argument rewrites');
-        if (config.final_profile && (specific?.additionalContext || result?.systemMessage)) {
+        if (finalEnforcing && (specific?.additionalContext || result?.systemMessage)) {
           throw Error('AW final gate does not cover Hook context injection');
         }
         return result;
@@ -162,8 +172,14 @@ export async function createQuery({ prompt, options }) {
     yield { type: 'user', session_id: '', parent_tool_use_id: null,
       message: { role: 'user', content: prompt } };
   }
-  const query = sdk.query({ prompt: input(), options: composed });
+  let query;
   try {
+    if (config.final_profile) {
+      const { finalRecords } = await import('./final-records.mjs');
+      snapshots = finalRecords(root, 'claude', finalEnforcing);
+      snapshots.publish(records);
+    }
+    query = sdk.query({ prompt: input(), options: composed });
     await query.initializationResult();
     if (config.final_profile) {
       const runtime = JSON.parse(readFileSync(`${root}/claude-final-ready.json`, 'utf8'));
@@ -176,9 +192,13 @@ export async function createQuery({ prompt, options }) {
     renameSync(`${config.ready_path}.tmp`, config.ready_path);
     release();
     // Expose iteration and teardown only: runtime reconfiguration would invalidate admission.
-    return { [Symbol.asyncIterator]: () => query[Symbol.asyncIterator](), close: () => query.close() };
+    return { [Symbol.asyncIterator]: () => query[Symbol.asyncIterator](), close: () => {
+      snapshots?.close();
+      return query.close();
+    } };
   } catch (error) {
-    query.close();
+    snapshots?.close();
+    query?.close();
     release();
     throw error;
   }

@@ -5,7 +5,7 @@ use std::{process::Command, time::Duration};
 
 #[test]
 fn evicted_stop_replies_preserve_block_reason_and_allow_without_repeating_the_provider() {
-    for action in ["report", "block"] {
+    for (action, shadow) in [("report", false), ("block", false), ("report", true)] {
         let fixture = Fixture::new();
         let mut document = fixture.document();
         document["spec"]["agents"] =
@@ -20,15 +20,24 @@ request = json.load(sys.stdin)
 reply = {key: request[key] for key in ('api_version', 'request_id')}
 reply['status'] = 'ok'
 if request['method'] == 'describe':
-    reply['operations'] = [{'name':'check','events':['turn.stop'],'effects':['block']}]
+    reply['operations'] = [
+        {'name':'check','events':['turn.stop'],'effects':['block']},
+        {'name':'observe_stop','events':['turn.stop'],'effects':['observe']},
+    ]
 elif request['method'] == 'invoke':
     native = request['event']['native']
-    with Path(request['config']['calls']).open('a') as log:
-        log.write(native['delivery_id'] + '\n')
     reply['input_digest'] = request['input_digest']
-    reply['effects'] = [
-        {'type':'block','reason_code':'policy_denied','text':'Wait for confirmation · 请先确认'}
-    ] if native['veto'] else []
+    reply['effects'] = []
+    if request['operation'] == 'check':
+        with Path(request['config']['calls']).open('a') as log:
+            log.write(native['delivery_id'] + '\n')
+        if native['veto']:
+            reply['effects'] = [
+                {'type':'block','reason_code':'policy_denied','text':'Wait for confirmation · 请先确认'}
+            ]
+    else:
+        with Path(request['config']['shadow_calls']).open('a') as log:
+            log.write(native['delivery_id'] + '\n')
 print(json.dumps(reply))
 "#,
         )
@@ -36,12 +45,22 @@ print(json.dumps(reply))
         document["spec"]["providers"]["policy"] = json!({
             "protocol":"aw-provider/v1alpha1","transport":{"type":"stdio","location":"agent",
             "argv":[fixture.python, provider]}, "timeout_ms":3000,"max_output_bytes":4096,
-            "config":{"calls":fixture.root.join("calls")}
+            "config":{"calls":fixture.root.join("calls"),"shadow_calls":fixture.root.join("shadow-calls")}
         });
         document["spec"]["events"] = json!({"turn.stop":{"enabled":true,"steps":[
             {"id":"check","provider":"policy","operation":"check",
                 "effects":["block"],"on_error":action}
         ]}});
+        if shadow {
+            document["spec"]["events"]["turn.stop"]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .insert(
+                    0,
+                    json!({"id":"shadow","provider":"policy","operation":"observe_stop",
+                    "effects":["observe"],"on_error":"report","mode":"shadow"}),
+                );
+        }
         let service = Service::start(&fixture, &document);
         let binding: Binding = serde_json::from_value(
             service
@@ -97,6 +116,16 @@ print(json.dumps(reply))
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        if shadow {
+            let observed = fs::read_to_string(fixture.root.join("shadow-calls")).unwrap();
+            assert_eq!(
+                observed
+                    .lines()
+                    .filter(|delivery| *delivery == "original")
+                    .count(),
+                1
+            );
+        }
         service
             .client
             .call(

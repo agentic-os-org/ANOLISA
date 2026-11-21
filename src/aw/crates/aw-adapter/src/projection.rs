@@ -3,6 +3,30 @@
 use super::{adapter::HookOutput, Exit, Result};
 use serde_json::{json, Value};
 
+/// Add the bounded evaluation projection to a normalized post-tool callback.
+pub fn add_result_projection(event: &mut Value) -> Result<()> {
+    if event["name"] == "tool.after" && event["tool"].get("result_projection").is_none() {
+        if let Some(projection) = event["agent"]["adapter"]
+            .as_str()
+            .and_then(|adapter| project(adapter, &event["native"]))
+        {
+            project_within_limit(event, projection)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn project_within_limit(event: &mut Value, projection: Value) -> Result<()> {
+    event["tool"]["result_projection"] = projection;
+    if serde_json::to_vec(event)?.len() > aw_provider::MAX_MESSAGE_BYTES {
+        event["tool"]
+            .as_object_mut()
+            .ok_or("missing tool")?
+            .remove("result_projection");
+    }
+    Ok(())
+}
+
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
         "deepseek-harness" if native["nested"] != true => &native["tool_response"],

@@ -20,6 +20,7 @@ mod validity;
 
 pub(super) struct Owner {
     pub(super) parent: Option<String>,
+    pub(super) provider_session: Option<String>,
     pub(super) process: Process,
     pub(super) independent: bool,
     pub(super) native: bool,
@@ -170,6 +171,7 @@ impl Runtime {
             id.into(),
             Owner {
                 parent: None,
+                provider_session: None,
                 independent: false,
                 native: false,
                 sdk: None,
@@ -254,6 +256,7 @@ impl Runtime {
                 id.clone(),
                 Owner {
                     parent: Some(parent.into()),
+                    provider_session: independent.then(|| format!("scope-{id}")),
                     independent,
                     native: false,
                     sdk,
@@ -384,6 +387,7 @@ impl Runtime {
                 {
                     entry.cancelled.store(true, Ordering::Release);
                 }
+                self.cancel_shadow(|owner| children.iter().any(|id| id == owner))?;
             }
             for child in children {
                 let ready = self
@@ -475,6 +479,7 @@ impl Owner {
     ) -> Self {
         Self {
             parent: None,
+            provider_session: None,
             process,
             cancelled,
             independent: true,

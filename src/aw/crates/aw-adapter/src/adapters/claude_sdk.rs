@@ -126,7 +126,7 @@ impl PreparedLaunch for Prepared {
         capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        super::claude_final::validate(steps)?;
+        super::claude_final::validate(&self.input.document, steps)?;
         super::sdk_tools::routes(&self.input.document, steps, "claude-sdk").map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
@@ -184,7 +184,16 @@ impl PreparedLaunch for Prepared {
         if final_profile.is_some() {
             super::claude_final::configure(context)?;
         }
-        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "resident_policy_reload": self.input.options.resident_policy_reload, "hooks": hooks, "final_profile": final_profile}))?)?;
+        let config = context.files.write(
+            "claude-sdk-hooks.json",
+            &serde_json::to_vec(&json!({
+                "executable": context.executable, "binding": context.binding_path,
+                "ready_path": ready, "ready_token": token, "observation_enabled": observe,
+                "resident_policy_reload": self.input.options.resident_policy_reload,
+                "hooks": hooks, "final_profile": final_profile,
+                "final_enforcing": super::claude_final::enforcing(&hooks),
+            }))?,
+        )?;
         let mut command = self.input.command.clone();
         let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {

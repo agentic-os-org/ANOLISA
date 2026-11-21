@@ -32,14 +32,15 @@ fn final_runtime_gate_checks_owned_bytes_and_native_identity() {
         .arg(native.join("claude-sdk/final-gate.test.mjs"))
         .arg(native.join("claude-sdk/final-preload.test.mjs"))
         .arg(native.join("claude-sdk/typescript-bridge.test.mjs"));
-    let output = fixture.run(command);
+    let output = support::Process::spawn(&fixture, command)
+        .finish_with_timeout(std::time::Duration::from_secs(45));
     assert!(
         output.status.success(),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 12"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 16"));
 }
 
 #[test]
@@ -54,7 +55,7 @@ fn final_factory_rejects_uncovered_delivery_paths() {
     let output = fixture.run(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stderr.contains("Ran 4 tests") && stderr.contains("\nOK\n"),
+        output.status.success() && stderr.contains("Ran 5 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }

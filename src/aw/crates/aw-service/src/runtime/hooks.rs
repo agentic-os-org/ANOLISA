@@ -22,6 +22,7 @@ pub(super) struct Lease {
     handle: Option<Value>,
     completion_digest: Option<[u8; 32]>,
     cancelled: Arc<AtomicBool>,
+    closed: bool,
 }
 
 fn at_claim_limit(leases: &BTreeMap<String, Lease>, lifecycle: bool) -> bool {
@@ -210,56 +211,73 @@ impl Runtime {
         let lifecycle_key = lifecycle
             .then(|| self.lifecycle_key(instance_id, &key))
             .transpose()?;
-        let cancelled = {
+        let (cancelled, deferred_only) = {
             // The worker shares this flag even before its handle is ready.
             let mut hooks = lock_until(&hooks, deadline, "event_open_timeout")?;
             if !lifecycle && !managed && !hooks.contains_key(&key) && at_claim_limit(&hooks, false)
             {
                 return Err(rejected("native_event_limit"));
             }
-            // Record a close even if it raced ahead of the first OpenHookEvent.
-            if let Some(receipt) = &lifecycle_key {
-                let existing = hooks.get(&key).map(|lease| Arc::clone(&lease.cancelled));
-                if let Some(cancelled) = &existing {
-                    cancelled.store(true, Ordering::Release);
-                }
-                self.close_lifecycle_receipt(instance_id, receipt)?;
-                if let Some(cancelled) = existing {
-                    cancelled
-                } else {
+            // A durable lifecycle receipt also fences close-before-open.
+            let lease = if let Some(receipt) = &lifecycle_key {
+                let Some(lease) = hooks.get_mut(&key) else {
+                    self.close_lifecycle_receipt(instance_id, receipt)?;
                     return Ok(json!({"closed": true}));
-                }
+                };
+                lease
             } else {
-                let lease = hooks.entry(key).or_insert(Lease {
+                hooks.entry(key).or_insert(Lease {
                     lifecycle_key: None,
                     digest: [0; 32],
                     handle: None,
                     completion_digest: None,
                     cancelled: Arc::new(AtomicBool::new(true)),
+                    closed: true,
+                })
+            };
+            let deferred_only = {
+                // A settled callback may have an independent shadow reservation.
+                let _events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                let shadow = self.shadow.lock().map_err(|_| rejected("state_poisoned"))?;
+                let reserved = shadow.as_ref().is_some_and(|event| {
+                    lease
+                        .handle
+                        .as_ref()
+                        .is_some_and(|handle| handle["event_id"] == event.key)
                 });
-                lease.cancelled.store(true, Ordering::Release);
-                Arc::clone(&lease.cancelled)
+                if !reserved {
+                    lease.cancelled.store(true, Ordering::Release);
+                }
+                reserved
+            };
+            lease.closed = true;
+            if let Some(receipt) = &lifecycle_key {
+                self.close_lifecycle_receipt(instance_id, receipt)?;
             }
+            (Arc::clone(&lease.cancelled), deferred_only)
         };
         drop(state);
-        loop {
-            {
-                let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
-                if !events
-                    .values()
-                    .any(|entry| Arc::ptr_eq(&entry.cancelled, &cancelled))
+        // Lifecycle close also acknowledges the durable terminal receipt.
+        if lifecycle || !deferred_only {
+            loop {
                 {
-                    break;
+                    let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                    if !events
+                        .values()
+                        .any(|entry| Arc::ptr_eq(&entry.cancelled, &cancelled))
+                    {
+                        break;
+                    }
                 }
+                if Instant::now() >= deadline {
+                    return Err(rejected("event_close_timeout"));
+                }
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(5)),
+                );
             }
-            if Instant::now() >= deadline {
-                return Err(rejected("event_close_timeout"));
-            }
-            thread::sleep(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(5)),
-            );
         }
         self.expired
             .lock()
@@ -319,7 +337,7 @@ impl Runtime {
                     entry.cancelled.store(true, Ordering::Release);
                     active = true;
                 }
-                active
+                self.cancel_shadow(|owner| owner == instance_id)? || active
             };
             let preparing = match update.try_lock() {
                 Ok(_) => false,
@@ -466,7 +484,7 @@ impl Runtime {
             self.retire_lifecycle_leases(&mut leases)?;
         }
         if let Some(lease) = leases.get_mut(&correlation) {
-            if lease.cancelled.load(Ordering::Acquire) {
+            if lease.closed || lease.cancelled.load(Ordering::Acquire) {
                 if let Some(key) = lease.lifecycle_key.as_deref() {
                     if super::lifecycle::replays_stop(&value) {
                         return self.reopen_stop(key, &value);
@@ -529,6 +547,7 @@ impl Runtime {
                 handle: None,
                 completion_digest: None,
                 cancelled: Arc::clone(&cancelled),
+                closed: false,
             },
         );
         // Initialization may wait on durable storage. Keep cancellation writable.
@@ -546,7 +565,7 @@ impl Runtime {
         let lease = leases
             .get_mut(&correlation)
             .ok_or_else(|| rejected("native_event_closed"))?;
-        if lease.cancelled.load(Ordering::Acquire) {
+        if lease.closed || lease.cancelled.load(Ordering::Acquire) {
             return Err(rejected("native_event_closed"));
         }
         lease.handle = Some(handle.clone());

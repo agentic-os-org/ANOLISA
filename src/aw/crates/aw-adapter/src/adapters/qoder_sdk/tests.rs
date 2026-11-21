@@ -181,16 +181,165 @@ fn reloadable_execution_grants_fail_before_the_sdk_probe() {
     }
 }
 
+fn prepare_final(
+    fixture: &Fixture,
+    steps: Value,
+    reloadable: bool,
+) -> (aw_config::Configuration, Box<dyn PreparedLaunch>) {
+    let mut profile: Value = serde_json::from_str::<Vec<Value>>(include_str!(
+        "../../../native/qoder-sdk/final-profiles.json"
+    ))
+    .unwrap()
+    .remove(0);
+    profile["runtime_target"] = profile["target"].clone();
+    fs::write(
+        fixture.root.path().join("final-profile.json"),
+        profile.to_string(),
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("node"),
+        r#"#!/bin/sh
+if [ "$#" = 5 ]; then
+    : > probed-final
+    cat final-profile.json
+else
+    printf '{"global":{"entry":"%s/sdk.mjs","version":"1.0.57","worker_version":"1.1.81"}}\n' "$PWD"
+fi
+"#,
+    )
+    .unwrap();
+    let mut input = fixture.input(None, reloadable);
+    input.document = crate::test_support::final_gate_document("qoder-sdk", steps);
+    let config = aw_config::Validator::new()
+        .unwrap()
+        .parse(&serde_json::to_vec(&input.document).unwrap())
+        .unwrap();
+    let prepared = crate::select("qoder-sdk")
+        .unwrap()
+        .prepare(input, &AtomicBool::new(false))
+        .unwrap();
+    (config, prepared)
+}
+
 #[test]
-fn empty_optional_final_policy_preserves_resident_mode() {
+fn off_final_steps_pass_launch_preflight_without_the_final_probe() {
     let fixture = Fixture::new();
-    let mut input = fixture.input(None, false);
-    input.document["spec"]["events"]["security.violation"] =
-        json!({"enabled":true,"required":false,"steps":[]});
-    let prepared = QoderSdk.prepare(input, &AtomicBool::new(false)).unwrap();
+    let (config, prepared) = prepare_final(
+        &fixture,
+        json!([crate::test_support::final_gate_step("off", "block")]),
+        true,
+    );
+    let capabilities = prepared.capabilities();
+    assert_eq!(capabilities.entrypoint, "sdk-worker");
+    assert!(!capabilities.events.contains_key("security.violation"));
+    assert!(!fixture.root.path().join("probed-final").exists());
+    let admitted = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
+    assert!(admitted.is_empty());
+    prepared.validate_steps(&admitted).unwrap();
+
+    let (config, prepared) = prepare_final(&fixture, json!([]), false);
     assert_eq!(prepared.capabilities().entrypoint, "sdk-worker");
-    assert!(!prepared
-        .capabilities()
-        .events
-        .contains_key("security.violation"));
+    let rejected =
+        aw_core::admission::preflight(&config, "sdk", &prepared.capabilities()).unwrap_err();
+    assert!(rejected
+        .to_string()
+        .contains("evidence lacks an enabled event"));
+    assert!(!fixture.root.path().join("probed-final").exists());
+}
+
+#[test]
+fn shadow_final_gate_passes_launch_validation_and_enforce_remains_fail_closed() {
+    for (mode, on_error, expected_action, success) in [
+        ("shadow", "block", "report", true),
+        ("enforce", "block", "block", true),
+        ("enforce", "report", "report", false),
+    ] {
+        let fixture = Fixture::new();
+        let (config, mut prepared) = prepare_final(
+            &fixture,
+            json!([crate::test_support::final_gate_step(mode, on_error)]),
+            false,
+        );
+        let capabilities = prepared.capabilities();
+        assert_eq!(capabilities.entrypoint, "foreground-final-worker");
+        assert!(fixture.root.path().join("probed-final").exists());
+        let steps = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].on_error, expected_action);
+        if success {
+            prepared.validate_steps(&steps).unwrap();
+            let launch = fixture.root.path().join("launch");
+            fs::create_dir(&launch).unwrap();
+            let files = crate::test_support::Artifacts(launch);
+            prepared
+                .configure(&LaunchContext {
+                    files: &files,
+                    binding_path: &fixture.root.path().join("binding"),
+                    executable: &fixture.root.path().join("aw"),
+                    steps: &steps,
+                })
+                .unwrap();
+            let private: Value =
+                serde_json::from_slice(&fs::read(files.0.join("qoder-sdk.json")).unwrap()).unwrap();
+            assert_eq!(private["final_enforcing"], mode == "enforce");
+        } else {
+            assert!(prepared
+                .validate_steps(&steps)
+                .unwrap_err()
+                .to_string()
+                .contains("requires structured fail-closed final steps"));
+        }
+    }
+}
+
+#[test]
+fn native_shadow_is_rejected_and_the_final_adapter_checks_native_steps() {
+    let validator = aw_config::Validator::new().unwrap();
+    let fixture = Fixture::new();
+    let (config, prepared) = prepare_final(
+        &fixture,
+        json!([crate::test_support::final_gate_step("shadow", "block")]),
+        false,
+    );
+    let native = |mode: &str| {
+        json!({
+            "id":"native","provider":"native","mode":mode,"native":{},"on_error":"report"
+        })
+    };
+    let mut document = config.as_value().clone();
+    let mut provider = document["spec"]["providers"]["policy"].clone();
+    provider["protocol"] = json!("native-hook/v1alpha1");
+    document["spec"]["providers"]["native"] = provider;
+    let mut shadow = document.clone();
+    shadow["spec"]["events"]["security.violation"]["steps"] = json!([native("shadow")]);
+    let Err(error) = validator.parse(&serde_json::to_vec(&shadow).unwrap()) else {
+        panic!("native shadow final step was accepted");
+    };
+    assert!(error
+        .to_string()
+        .contains("shadow and decisions require a structured Provider"));
+
+    document["spec"]["events"]["tool.before"] = json!({"enabled":true,"steps":[native("enforce")]});
+    let config = validator
+        .parse(&serde_json::to_vec(&document).unwrap())
+        .unwrap();
+    let mut steps =
+        aw_core::admission::preflight(&config, "sdk", &prepared.capabilities()).unwrap();
+    assert!(prepared
+        .validate_steps(&steps)
+        .unwrap_err()
+        .to_string()
+        .contains("structured Provider steps"));
+    // Defend the final Adapter boundary even when passed an unsupported native step.
+    steps
+        .iter_mut()
+        .find(|step| step.event == "tool.before")
+        .unwrap()
+        .event = "security.violation".into();
+    assert!(prepared
+        .validate_steps(&steps)
+        .unwrap_err()
+        .to_string()
+        .contains("fail-closed final steps"));
 }

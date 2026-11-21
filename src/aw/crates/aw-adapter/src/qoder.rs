@@ -360,7 +360,7 @@ pub(super) fn generate(
     ] {
         let observe = matches!(name, "tool.before" | "tool.after")
             && adapter::observation_enabled(document, target);
-        let selected = adapter::native_steps(steps, name, observe);
+        let selected = adapter::native_steps(document, steps, name, observe);
         if selected.is_empty() {
             continue;
         }
