@@ -102,11 +102,11 @@ prove that rules were installed or authenticate the Provider executable.
 ### `invoke`
 
 ```json
-{"api_version":"aw-provider/v1alpha1","method":"invoke","request_id":"invoke-1","operation":"check","config":{"blocked_tools":["Bash"]},"config_revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","budget_ms":5000,"allowed_effects":["observe","block"],"input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","event":{"name":"tool.before","agent":{"adapter":"qoder","binding_id":"qoder","instance_id":"inst-1"},"session_id":"sess-1","tool":{"name":"bash","native_name":"Bash","call_id":"call-1","input":{"command":"ls"},"result":null},"native":{}}}
+{"api_version":"aw-provider/v1alpha1","method":"invoke","request_id":"invoke-1","operation":"check","config":{"blocked_tools":["Bash"]},"config_revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","budget_ms":5000,"allowed_effects":["observe","block"],"input_digest":"sha256:d1d08ad48a88a42c28b16a17b8ef9e7b22ba2021b38b8cd32f739846fa38ac13","event":{"name":"tool.before","agent":{"adapter":"qoder","binding_id":"qoder","instance_id":"inst-1"},"session_id":"sess-1","tool":{"name":"bash","native_name":"Bash","call_id":"call-1","input":{"command":"ls"},"result":null},"native":{}}}
 ```
 
 ```json
-{"api_version":"aw-provider/v1alpha1","request_id":"invoke-1","status":"ok","input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","effects":[{"type":"block","reason_code":"tool_policy"}]}
+{"api_version":"aw-provider/v1alpha1","request_id":"invoke-1","status":"ok","input_digest":"sha256:d1d08ad48a88a42c28b16a17b8ef9e7b22ba2021b38b8cd32f739846fa38ac13","effects":[{"type":"block","reason_code":"tool_policy"}]}
 ```
 
 An invocation supplies the configured operation, private configuration,
