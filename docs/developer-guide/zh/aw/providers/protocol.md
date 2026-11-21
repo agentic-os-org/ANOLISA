@@ -37,6 +37,12 @@ JSON 文档。公共信封拒绝未知字段；Provider 私有配置和原生
 每条请求包含 `api_version`、`method` 和请求 ID。Provider 必须返回相同版本和
 请求 ID。调用方分配 ID，并负责其生命周期及与所选 Provider 实例的关联。
 
+| 方法 | 调用时机 | 关键请求字段 | 关键成功响应字段 |
+| --- | --- | --- | --- |
+| `describe` | 能力发现／准入 | `api_version`、`method`、`request_id` | `operations[]`（`name`、`events`、`effects`、可选 `event_adapters`） |
+| `validate_config` | 配置准入 | `config`（私有 JSON 对象） | `status: "ok"`（或 `status: "error"`、`error_code`） |
+| `invoke` | 运行时 Hook 评估 | `operation`、`config`、`config_revision`、`budget_ms`、`allowed_effects`、`input_digest`、`event` | `input_digest`（原样回传）、`effects[]` |
+
 ### `describe`
 
 ```json
@@ -79,6 +85,14 @@ Host 一起部署；旧 Host 在发现阶段会拒绝未知字段。
 规则已经安装或 Provider 可执行文件已经认证。
 
 ### `invoke`
+
+```json
+{"api_version":"aw-provider/v1alpha1","method":"invoke","request_id":"invoke-1","operation":"check","config":{"blocked_tools":["Bash"]},"config_revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","budget_ms":5000,"allowed_effects":["observe","block"],"input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","event":{"name":"tool.before","agent":{"adapter":"qoder","binding_id":"qoder","instance_id":"inst-1"},"session_id":"sess-1","tool":{"name":"bash","native_name":"Bash","call_id":"call-1","input":{"command":"ls"},"result":null},"native":{}}}
+```
+
+```json
+{"api_version":"aw-provider/v1alpha1","request_id":"invoke-1","status":"ok","input_digest":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","effects":[{"type":"block","reason_code":"tool_policy"}]}
+```
 
 调用包含配置的操作、私有配置、配置版本、剩余预算、允许的效果、统一事件和不透明
 输入摘要。随附 JSON Schema 校验消息信封与各事件字段形状，`Protocol` 进一步校验

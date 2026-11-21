@@ -3,22 +3,20 @@
 [中文版](README_zh.md)
 
 AW provides unified Hook orchestration, managed MCP integration and hot policy updates for Agents and SDK applications.
-One configuration composes security checks before tool execution, output compression afterward and custom rules.
+One configuration composes security checks before tool execution, output compression afterward and custom rules across CLI Agents, native framework adapters and custom Python/Node.js applications.
 Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
 Agents retain their models, interfaces and permissions. AW runs on Linux.
 
 <a id="install-and-use"></a>
 <a id="installation-and-first-run"></a>
 
-## Quickstart
+## 5-minute quickstart
 
-Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
-AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
-Install and sign in to your Agent first, then generate configuration with `aw config init`.
-For changed or missing local Provider files, `aw uninstall --keep-changed` retains changed paths and clears package records; see [operations](../../docs/user-guide/en/aw/operations.md#upgrade-and-uninstall).
+Install AW `0.2.0` core (and optional Provider extensions) from the [installation guide](../../docs/user-guide/en/aw/installation.md).
+AW currently ships as standalone release archives; `anolisa install aw` and RPM packages are not available yet.
+Install and sign in to your Agent first, then initialize, validate and launch with the `0.2.0` CLI.
 
-The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
-selected in the guide; both `qodercli` and `aw` must be on `PATH`.
+The example below uses a signed-in Qoder CLI (`AW_PREFIX` is your AW installation prefix; `aw` and `qodercli` must be on `PATH`):
 
 ```bash
 export AW_HOME="$HOME/aw"
@@ -32,11 +30,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
 In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
-Offline validation checks the service limit of 64 applicable enabled steps per target across all events.
-The local service remains reusable after the Agent exits. Inspect and stop it when finished.
-
-SDK deployments can compile configuration-bound wiring hints with `aw config descriptor`;
-see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-config-descriptor).
+After the Agent exits, the local service stays reusable until you inspect and stop it:
 
 ```bash
 aw service status --config "$AW_HOME/aw.yaml"
@@ -47,23 +41,17 @@ aw service stop --config "$AW_HOME/aw.yaml"
 
 | Capability | What you can do |
 | --- | --- |
-| Hook orchestration | Select rules by target and tool, compose sec-core, Tokenless and custom Hooks, and share step ordering, execution deadlines and audit. |
+| Hook orchestration | Select rules by target and tool, compose `sec-core`, `Tokenless` and custom Providers, and share step ordering, execution deadlines and audit. |
 | Managed MCP | Apply the same policies at supported actual tool-call boundaries, checking invocation identity and approved arguments. |
-| Policy updates | Explicitly apply a new policy to a supported idle instance so subsequent tasks use the new revision. |
+| Policy updates | Explicitly apply a new policy (`aw update`) to a supported idle instance so subsequent tasks use the new revision. |
 
 Adapters connect native events and adopt supported effects; Providers implement policies.
-The sec-core Provider can check locally resolved Skills before Qoder SDK and QwenPaw load their instructions; see [security setup](../../docs/user-guide/en/aw/security.md#check-skills-before-loading).
-
-Core works independently. Install and enable the corresponding Providers for security checks and compression.
+AW core works independently. Install and enable Providers when you need security scanning (`sec-core`) or tool output compression (`Tokenless`).
 Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
-
-Use `aw connect --agent TARGET --pid PID` to attach a supported native process, then `aw update --agent TARGET` to apply policy while idle. Both commands default to `aw.yaml` in the current directory; see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-connect-and-aw-update) for prerequisites and explicit configuration selection.
-
-Use `aw instance setup` or an application-owned `prepare` call to retain native startup across the eight supported Adapters after one-time integration. Native readiness confirms registration, and `aw update` applies policy between completed tasks. SDK factories and QwenPaw use task Scopes; Qoder, OpenClaw and Hermes use native request boundaries. See [independent instances](../../docs/developer-guide/en/aw/deployment/independent-instances.md).
 
 ## Hook support matrix
 
-✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, MCP and policy updates.
+✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, Skill checks, MCP, policy updates and [verified baselines](../../docs/developer-guide/en/aw/native-agents.md).
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
@@ -81,74 +69,47 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 
-Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
-
-Codex CLI 0.163.0 and 0.166.0 have been verified with one `aw run` configuration
-for sec-core checks and ordinary model-visible PostToolUse text replacement.
-Local app-server stdio also passes when its trusted client keeps the launch
-directory and Codex configuration for every new thread and turn.
-Code Mode, prior capture and telemetry, and Hook transport failures remain
-outside that protection; see the
-[Codex guide](../../docs/developer-guide/en/aw/agents/codex.md).
-
-Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).
-
-Ordinary resident Qoder SDK and QwenPaw can check submitted text before model
-requests through `input.submit`. The sec-core Provider supports fast prompt
-injection scanning with separate risk and failure policies; see
-[user submission checks](../../docs/user-guide/en/aw/security.md#check-user-submissions).
-
-
 <a id="hook-support"></a>
 <a id="adapter-capability-coverage"></a>
 
-## Supported entrypoints
+## Dual-language Runtime SDKs
 
-AW currently integrates Qoder CLI, Codex CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
-Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
-SDK applications can use managed factories or the public Runtime SDK with
-application-owned semantic callbacks. Qoder applications can load one configuration
-with `createQoderBridge` and defer attachment until the first tool; see [SDK integration](../../docs/developer-guide/en/aw/deployment/native-sdk.md). Runtime admission checks the required
-native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
-record the tested framework versions.
-[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.
-The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
-MCP and policy updates by Adapter and launch mode, with links to verified baselines and setup.
+AW `0.2.0` ships 6 independent SDK packages (2 core packages + 4 optional framework adapter packages) so applications keep native startup, authentication and scheduling:
 
+| Language | Core package | Optional framework adapters |
+| --- | --- | --- |
+| Python (`>=3.11`) | `anolisa-aw-sdk` (`aw_sdk`, `aw_sdk.sources`) | `anolisa-aw-sdk-claude`, `anolisa-aw-sdk-qwenpaw` |
+| TypeScript / Node.js (`>=22`) | `@anolisa/aw-sdk` (`@anolisa/aw-sdk`, `@anolisa/aw-sdk/sources`) | `@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi` |
 
-Resident tasks recheck service and owner validity during idle periods and before
-covered dispatch. Status separates live workers from failed AW bridges; see
-[operations](../../docs/user-guide/en/aw/operations.md) for recovery.
+- **Custom Python or Node.js Agents (zero Rust Adapter)**: Install only the core package and instrument input/tool methods with `LanguageSource` (`aw_sdk.sources` / `@anolisa/aw-sdk/sources`).
+- **Resident framework applications**: Install the matching optional adapter package, compile config-bound startup hints with `aw config descriptor`, start the application natively, and attach with `aw connect --config aw.yaml --sdk-pid PID`.
+
+See the [Runtime SDK guide](../../docs/developer-guide/en/aw/deployment/native-sdk.md) and [Python SDK guide](../../docs/developer-guide/en/aw/deployment/python-sdk.md) for runnable examples and deployment descriptors.
+
+## Provider protocol
+
+External policy, safety, compression or checkpointing tools connect to AW through the `aw-provider/v1alpha1` stdio JSON protocol without linking Rust libraries or checking out ANOLISA:
+
+- Implement three one-shot JSON methods over stdin/stdout: `describe`, `validate_config` and `invoke`.
+- Wire any installed executable directly in `aw.yaml` via `providers.<id>.transport.argv`, or package it as an optional local extension bundle.
+- Reference first-party implementations live under `providers/agent-sec-core` and `providers/tokenless`.
+
+See [Provider development](../../docs/developer-guide/en/aw/providers/index.md) for a minimal standalone Provider skeleton and `aw.yaml` wiring, and [Provider protocol](../../docs/developer-guide/en/aw/providers/protocol.md) for schemas and admission rules.
 
 ## Documentation
 
 | Task | Guide |
 | --- | --- |
-| Install and complete a first run | [Quickstart](../../docs/user-guide/en/aw/index.md) |
+| Install and complete a first run | [Quickstart](../../docs/user-guide/en/aw/index.md) · [Installation](../../docs/user-guide/en/aw/installation.md) |
 | Look up every subcommand and option | [CLI reference](../../docs/user-guide/en/aw/cli-reference.md) |
 | Select an Agent, configure rules and update policy | [Configuration and launch](../../docs/user-guide/en/aw/configuration.md) |
-| Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md), [sec-core](../../docs/user-guide/en/aw/security.md) |
-| Inspect runtime records | [AgentSight](../../docs/user-guide/en/aw/observability.md) |
-| Check status, upgrade/uninstall and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
-| Write Providers, integrate SDKs or understand the architecture | [Developer guide](../../docs/developer-guide/en/aw/index.md) |
+| Compare Hook, Skill, MCP and policy-update support | [Capability matrix](../../docs/user-guide/en/aw/capabilities.md) |
+| Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md) · [sec-core](../../docs/user-guide/en/aw/security.md) |
+| Inspect runtime and audit records | [AgentSight](../../docs/user-guide/en/aw/observability.md) · [Operations](../../docs/user-guide/en/aw/operations.md) |
+| Integrate SDKs, independent instances or custom Providers | [Developer guide](../../docs/developer-guide/en/aw/index.md) |
 
 <a id="code-architecture"></a>
 <a id="development-and-validation"></a>
 
 The [architecture overview](docs/design/en/architecture.md) describes framework and Provider ownership and call paths.
-See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.
-
-`aw config add-native-source` records native source references without opening or
-rewriting their files. The shared loader API retains native configuration and
-reports admission separately from activation; see [configuration](../../docs/user-guide/en/aw/configuration.md#record-native-configuration-sources).
-
-Local audit consumers can use `aw audit-export` to read retained metadata after
-service shutdown. See [audit export](../../docs/user-guide/en/aw/cli-reference.md#aw-audit-export)
-for the owned state directory and bounded read interface.
-
-For experimental native QwenPaw startup followed by cooperative attachment,
-see [deferred tool-after integration](../../docs/developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
-The installed plugin holds the first tool until ready; `aw connect
---config aw.yaml --sdk-pid PID` starts or reuses AW without launching the Agent.
-
-Application-owned resident Claude and Pi workers can also publish an SDK attach listener. The controller attaches each worker by PID before protected work begins. These entries always require AW and cover configured `input.submit`, `tool.before` (including `replace_input`) and `tool.after` (including `replace_result`); other Hooks are rejected at admission. A Claude worker whose native cleanup cannot be confirmed is terminated with its process group. Pi strict result protection follows the managed 0.84.2–1.5.2 release range. [Claude Python worker](../../docs/developer-guide/en/aw/agents/claude-sdk.md) · [Pi TypeScript worker](../../docs/developer-guide/en/aw/deployment/native-sdk.md#pi-worker-integration)
+See [Contributing](CONTRIBUTING.md) for local verification commands, starter contribution areas and CI gates.

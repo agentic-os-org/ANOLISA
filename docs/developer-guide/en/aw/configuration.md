@@ -35,7 +35,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `hermes`, `pi`, `claude-sdk`, `codex` or `agentscope`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `deepseek-harness`, `hermes`, `pi`, `claude-sdk`, `codex`, `agentscope` or `sdk`; recognition is not runtime certification |
 | `agents.<id>.shutdown_grace_ms` | External-signal shutdown grace, 1..120000 ms, default 2000; see [lifecycle](deployment/lifecycle.md) |
 | `daemon.limits` | Resident service concurrency limits; see [capacity settings](deployment/lifecycle.md#concurrent-service-budgets) |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |

@@ -16,15 +16,29 @@ python3 src/aw/scripts/check.py
 The gate runs Python behavior tests, formatting, Clippy, locked Rust tests, digest vectors, rustdoc, layout and capability inventory checks.
 Logs identify failing commands; each command has a deadline and owned-process cleanup. AW implementation changes require the complete Linux gate. See [building](../../contribute/en/aw/building.md) for packages.
 
-| Change | Targeted development check |
+| Change | Minimal local verification |
 | --- | --- |
-| Documentation and navigation | `bash scripts/docs-lint.sh`, `python3 scripts/docs-link-check.py` |
+| Documentation and links | `bash scripts/docs-lint.sh && python3 scripts/docs-link-check.py && python3 -B -m unittest src/aw/tests/test_ci_scope_docs.py` |
 | Python gates | `python3 -B -m unittest discover -s src/aw/tests -p 'test_ci_*.py'` |
+| Python / TypeScript SDKs | From `src/aw`, `cargo test --locked -p aw-cli --test sdk_protocol` |
+| Provider protocol (`aw-provider`) | From `src/aw`, `cargo test --locked -p aw-provider` |
 | Host / service / CLI | From `src/aw`, `cargo test --locked -p aw-host -p aw-service -p aw-cli` |
 | Package execution | From `src/aw`, `cargo test --locked -p aw-exec --test packages` |
 | Package database / management | From `src/aw`, `cargo test --locked -p aw-package --lib store::tests` and `cargo test --locked -p aw-package --lib provider_tests` |
 | Transaction recovery | From `src/aw`, `cargo test --locked -p aw-package --lib store::transaction::tests` |
-| Provider | Independent workspace `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
+| First-party Provider workspace | `cargo test --locked --manifest-path providers/PROVIDER/Cargo.toml` |
+
+## Starter contribution areas
+
+New contributors can start with self-contained tasks across three tracks:
+
+| Track | Good first tasks | Starting point |
+| --- | --- | --- |
+| Agent framework integration | Test `LanguageSource` (`aw_sdk.sources` / `@anolisa/aw-sdk/sources`) on a new Python/Node.js Agent and contribute an example; add an optional SDK adapter package or thin native Adapter with `regression-matrix.json` coverage. | [Runtime SDKs](../../docs/developer-guide/en/aw/deployment/native-sdk.md) · [Agent index](../../docs/developer-guide/en/aw/native-agents.md) |
+| Lightweight external Providers | Build a focused `aw-provider/v1alpha1` Provider (`describe` / `validate_config` / `invoke`) for workspace/file checkpointing, rule-based or semantic command/prompt checks, custom audit sinks or output filters. | [Provider development](../../docs/developer-guide/en/aw/providers/index.md) · [Provider protocol](../../docs/developer-guide/en/aw/providers/protocol.md) |
+| Documentation and examples | Add runnable end-to-end examples, troubleshoot guides for new Agent versions, or refine bilingual (`en/` + `zh/`) parity and navigation. | [User guide](../../docs/user-guide/en/aw/index.md) · [Documentation standard](../../specs/documentation-standard.md) |
+
+Before opening a PR for a new framework or Provider in this repository, open an issue describing the target framework/protocol boundary and expected local tests, and follow [repository contributing](../../CONTRIBUTING.md).
 
 ## Change capability support
 

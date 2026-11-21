@@ -14,8 +14,9 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 
 ## 1. 安装 AW
 
-从目标提交对应的成功 AW Integration 运行中下载 `aw-core` 压缩包和匹配的
-`SHA256SUMS`，按[安装指南](installation.md#获取安装包)校验并解压。
+从 [GitHub Releases](https://github.com/agentic-os-org/ANOLISA/releases?q=aw%2Fv)（例如 `aw/v0.2.0`）
+或目标提交对应的 AW Integration CI 运行中下载 `aw-core` 压缩包和匹配的 `SHA256SUMS`，
+按[安装指南](installation.md#获取安装包)校验并解压。
 进入解压后的 `aw-core` 目录，安装预编译 CLI：
 
 ```bash
@@ -100,4 +101,6 @@ aw service stop --config "$AW_HOME/aw.yaml"
 | 查找子命令、参数、默认值和示例 | [CLI 命令参考](cli-reference.md) |
 | 查看状态、停止服务、升级或排错 | [运行维护](operations.md) |
 | 对比 Hook、MCP 与策略更新的支持范围 | [能力支持矩阵](capabilities.md) |
-| 编写 Provider 或接入 SDK 应用 | [开发指南](../../../developer-guide/zh/aw/index.md) |
+| 接入 Python 或 Node.js SDK 应用 | [Runtime SDK](../../../developer-guide/zh/aw/deployment/native-sdk.md) · [Python SDK](../../../developer-guide/zh/aw/deployment/python-sdk.md) |
+| 开发并挂接外部 Provider | [Provider 开发](../../../developer-guide/zh/aw/providers/index.md) · [执行协议](../../../developer-guide/zh/aw/providers/protocol.md) |
+| 浏览全部接入与部署文档 | [开发指南](../../../developer-guide/zh/aw/index.md) |

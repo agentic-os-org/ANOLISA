@@ -33,15 +33,155 @@ ANOLISA/
 
 ## 独立接入
 
-1. 实现 `describe`、`validate_config` 和 `invoke`，通过 stdin/stdout 交换 JSON。
-   协议字段、错误和能力声明见 [Provider 协议](protocol.md)。
-2. 用自己的发布方式交付可执行程序及依赖，配置 `transport.argv` 指向安装后的绝对路径。
-   后端所需凭据、socket 和数据目录由 Provider 的安装说明约定。
-3. 在配置中声明 Provider 和 Hook 步骤，验证允许、阻断、超时、错误与清理行为。
-   从[组件接入教程](../integration.md)或[最小 Rust 示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/examples/policy.rs)开始。
+可以在 ANOLISA 仓库外使用任意语言开发、测试和部署 Provider，无需链接 Rust crate。
+每个方法以一次性进程执行：从 stdin 读取单个 UTF-8 JSON 请求，向 stdout 输出单个
+UTF-8 JSON 响应（允许放行和策略 `block` 均以 `0` 退出；非零退出码表示执行失败）。
+
+### 1. 三方法最小 Provider 骨架
+
+将以下脚本保存为 `/absolute/path/to/my-provider.py`（`chmod 755`），完整实现
+`aw-provider/v1alpha1` 的三个方法（`describe`、`validate_config` 与 `invoke`）：
+
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+
+def valid_config(cfg):
+    return (
+        isinstance(cfg, dict)
+        and isinstance(cfg.get("blocked_tools"), list)
+        and all(isinstance(name, str) for name in cfg["blocked_tools"])
+    )
+
+
+def main():
+    req = json.load(sys.stdin)
+    reply = {
+        "api_version": "aw-provider/v1alpha1",
+        "request_id": req["request_id"],
+        "status": "ok",
+    }
+    method = req["method"]
+
+    if method == "describe":
+        reply["operations"] = [
+            {
+                "name": "check",
+                "events": ["tool.before", "tool.after"],
+                "effects": ["observe", "block"],
+            }
+        ]
+    elif method == "validate_config":
+        if not valid_config(req.get("config")):
+            reply.update(status="error", error_code="invalid_config")
+    elif method == "invoke":
+        cfg = req.get("config")
+        if req.get("operation") != "check" or not valid_config(cfg):
+            reply.update(status="error", error_code="invalid_operation_or_config")
+        else:
+            tool = req["event"]["tool"]["native_name"]
+            blocked = req["event"]["name"] == "tool.before" and tool in cfg["blocked_tools"]
+            reply["input_digest"] = req["input_digest"]
+            reply["effects"] = (
+                [{"type": "block", "reason_code": "tool_policy"}]
+                if blocked and "block" in req["allowed_effects"]
+                else []
+            )
+    else:
+        reply.update(status="error", error_code="unsupported_method")
+
+    json.dump(reply, sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 2. 脱离 AW 本地冒烟测试
+
+直接通过管道发送 `describe` 和 `validate_config` 请求，确认退出码为 `0` 且 stdout 返回合法 JSON：
+
+```bash
+printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"describe","request_id":"req-1"}' \
+  | /usr/bin/python3 /absolute/path/to/my-provider.py
+printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config","request_id":"req-2","config":{"blocked_tools":["Bash"]}}' \
+  | /usr/bin/python3 /absolute/path/to/my-provider.py
+```
+
+### 3. 在 `aw.yaml` 中挂接并验证
+
+以 `protocol: aw-provider/v1alpha1` 与 `transport.argv` 声明 Provider，并在事件步骤中绑定对应 `operation`：
+
+```yaml
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: custom-provider-demo
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/path/to/aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [/absolute/path/to/qodercli]
+  providers:
+    my-policy:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv: [/usr/bin/python3, /absolute/path/to/my-provider.py]
+      timeout_ms: 1000
+      max_output_bytes: 65536
+      config:
+        blocked_tools: ["Bash"]
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: check-blocked-tools
+          provider: my-policy
+          operation: check
+          effects: [observe, block]
+          on_error: block
+```
+
+校验配置后，接入真实 Agent（或按[组件接入教程](../integration.md)本地测试）验证放行、阻断、超时与失败处理：
+
+```bash
+aw config validate --config /absolute/path/to/aw.yaml
+aw run --config /absolute/path/to/aw.yaml --agent qoder
+```
+
+### 4. 独立部署
+
+按自己的发布流程交付可执行文件及依赖，在 `transport.argv` 指向安装后的绝对路径（不要求 AW 包安装记录）；
+也可按需打成本地扩展包供 `aw install --bundle` 管理（见[本地 Provider 包参考](../reference/packages.md)）。
+后端所需凭据、socket 和数据目录在 Provider 自身安装说明中约定。
+
+### 常见 Provider 接入模式
+
+| 场景模式 | 常用事件与效果 | 参考 |
+| --- | --- | --- |
+| 安全／规则／语义检查 | `input.submit` 或 `tool.before` 使用 `observe`、`block` | [sec-core](sec-core.md) · [policy.rs](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/examples/policy.rs) |
+| 命令改写与输出压缩 | `tool.before` 使用 `replace_input`；`tool.after` 使用 `replace_result` | [Tokenless](tokenless.md) |
+| 状态快照／审计观测 | `tool.before` 与 `tool.after` 使用 `observe`（外部状态快照或遥测记录） | [Provider 协议](protocol.md) |
 
 Provider 返回候选效果；Adapter 负责在原生框架中采用。自定义实现无需链接 AW，
 也不必使用 Rust。用户已有的 Agent 和模型配置继续由原生框架管理。
+完整请求／响应 Schema、预算、错误码与能力准入规则见 [Provider 协议](protocol.md)。
 
 ## 收录到协作目录
 
