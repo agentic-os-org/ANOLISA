@@ -142,7 +142,8 @@ failure is not reported as a clean testbed. Each cleanup records the observed
 container presence and opt-in in `logs/cleanup.provenance`, with repeat/phase
 and started/completed outcomes. Repeats require completed pre- and post-clean
 records for that repeat; absent or partial records set `cleanup_incomplete`.
-Log collection failures return non-zero rather than silently losing provenance.
+Collection continues with later hosts after one transfer fails, and returns
+non-zero after collecting all reachable evidence rather than hiding the failure.
 The preflight verifies
 both the deployed Tokenless executable and the plugin bundle against their
 freshly built counterparts.
@@ -156,7 +157,11 @@ priced as an upper bound (cached input at the full input price); the ledger in
 cached price and a full-scale estimate. An unreadable existing store or a known
 per-turn/aggregate mismatch stops the sweep with `stop_reason=metering_failure`
 and exit 2; a cap stop is separately recorded and exits 3. Sweep failures retain
-a non-zero exit status. Required input/output/cache-read usage fields must be
+a non-zero exit status. Polling waits are interruptible; cancellation does not
+wait for the whole polling interval. When the sweep leader exits, members of its
+process group that are still running are stopped before final accounting; only
+then is the group ID cleared, so EXIT cleanup cannot target a recycled group.
+Required input/output/cache-read usage fields must be
 non-negative integers; missing or null fields are not fabricated zeroes.
 Missing data is not a zero-cost observation.
 
@@ -461,19 +466,20 @@ proxy's own counters, and a run without it is void rather than a data point.
 
 The component target `make test-benchmark-l4 L4_TEST_PYTHON=<venv-python>` runs the
 L4 offline pytest suite, the shared SQLite billing regressions, and checks every
-L4 shell script with `bash -n`. The
-Tokenless CI job invokes it in a private Python 3.12 environment with pytest,
-pydantic and tiktoken; it makes no Docker or model calls. Required billing-module
-imports fail the tests instead of skipping them when dependencies are missing.
+L4 shell script with `bash -n`. Python >= 3.12 is required locally; the target
+checks both that version and the shared billing-test path before running pytest.
+The Tokenless CI job invokes it in a private Python 3.12 environment with
+pytest, pydantic and tiktoken; it makes no Docker or model calls. Required
+billing-module imports fail the tests instead of skipping them when
+dependencies are missing.
 
-`remote_fleet.sh collect` retrieves `out/`, `logs/` and the complete `eval/` tree,
-including `.eval-complete`. `analyze_solve_rate.py --evals <runs-root> --runs
-<runs-root>` can read this collected host layout and validate the current
-predictions. Report design fields are read from the matching arm configuration
-snapshot, not a cached model/cost constant; use `analyze_runs.py --configs-dir
-<original-configs>` for historical runs. Workers, timeout and pull registry are
-recorded in the sweep summary; missing historical runtime values remain unknown.
-
+Report fields use the matching arm configuration and observed runtime
+parameters. Use `--configs-dir <original-configs>` for historical runs; missing
+historical runtime values stay unknown. Executable and plugin digests are kept
+separately in provenance; the compressor binary digest
+(`logs/tokenless_binary.sha256`) is part of the completeness gate, so a run tree
+collected before that log existed reads as `incomplete`. Collection and
+analysis commands are in [Running](#running).
 
 Run `python -m pytest src/tokenless/benchmark/l4-end-to-end/tests -q` from the
 repository root. The checks use synthetic run trees and stub build/evaluation
@@ -494,7 +500,14 @@ criterion. The collector also compares the marker with the current `preds.json`;
 use `--runs <collected-run-root>` when runs and evaluations were collected into
 separate directories. Unbound historical reports require explicit
 `--allow-legacy` and are labeled `legacy_unverified`; without a selected-task
-denominator they can be inspected but cannot yield a solve rate. The denominator
+denominator they can be inspected but cannot yield a solve rate. A legacy report
+without `submitted_instances` publishes `submitted: null`, never zero; its
+affected repeat/arm and pooled aggregates stay `evaluation_complete: false` and
+publish no rate even when `selection.json` supplies the denominator, because the
+submitted count remains unknown. A report that resolves more instances than it
+submitted is refused with or without a selection. A repeat/arm that mixes cells
+with and without a denominator names
+the cells that suppress its rate on stderr. The denominator
 comes from `selection.json` or run metadata, not just submitted patches, so
 preparation failures, timeouts and patch-extraction failures remain unresolved.
 A completed attempt with no predictions contributes zero resolved tasks; an

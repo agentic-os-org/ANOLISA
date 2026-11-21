@@ -894,6 +894,7 @@ def provenance(runs, hosts_map, aliases):
     revisions = {}
     plugin_versions = {"tokenless": {}, "headroom": {}}
     bundle_hashes = {
+        "tokenless_binary_sha256": ("logs/tokenless_binary.sha256", {}),
         "tokenless_bundle_sha256": ("logs/tokenless_dist.sha256", {}),
         "reference_bundle_sha256": ("logs/headroom_dist.sha256", {}),
     }
@@ -932,6 +933,9 @@ def provenance(runs, hosts_map, aliases):
     )
     reference_plugin, reference_version_complete = collapse(plugin_versions["headroom"])
     model_alias, alias_complete = collapse(aliases)
+    binary_hash, binary_hash_complete = collapse(
+        bundle_hashes["tokenless_binary_sha256"][1]
+    )
     tokenless_hash, tokenless_hash_complete = collapse(
         bundle_hashes["tokenless_bundle_sha256"][1]
     )
@@ -964,6 +968,7 @@ def provenance(runs, hosts_map, aliases):
         "anolisa_commit": anolisa_commit,
         "tokenless_plugin": tokenless_plugin,
         "reference_plugin": reference_plugin,
+        "tokenless_binary_sha256": binary_hash,
         "tokenless_bundle_sha256": tokenless_hash,
         "reference_bundle_sha256": reference_hash,
         "model_alias": model_alias,
@@ -974,6 +979,7 @@ def provenance(runs, hosts_map, aliases):
             tokenless_version_complete,
             reference_version_complete,
             tokenless_hash_complete,
+            binary_hash_complete,
             reference_hash_complete,
             alias_complete,
             not cleanup_incomplete,

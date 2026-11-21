@@ -147,6 +147,7 @@ if [ "$ledger_status" -ne 0 ]; then
 fi
 echo "[pilot] $(date -u +%FT%TZ) arms=$L4_ARMS instances=$(grep -c . "$L4_INSTANCE_LIST") cap=$CAP margin=$MARGIN"
 SWEEP_PID=
+POLL_PID=
 stop_sweep() {
     [ -n "$SWEEP_PID" ] || return 0
     kill -TERM -- "-$SWEEP_PID" 2>/dev/null || kill -TERM "$SWEEP_PID" 2>/dev/null || true
@@ -158,6 +159,11 @@ stop_sweep() {
 pilot_cleanup() {
     local status=$?
     trap - TERM INT EXIT
+    if [ -n "$POLL_PID" ]; then
+        kill -TERM "$POLL_PID" 2>/dev/null || true
+        wait "$POLL_PID" 2>/dev/null || true
+        POLL_PID=
+    fi
     stop_sweep
     [ -z "$SWEEP_PID" ] || wait "$SWEEP_PID" 2>/dev/null || true
     exit "$status"
@@ -169,7 +175,10 @@ setsid bash "$HERE/remote_run.sh" > "$W/logs/pilot-sweep.log" 2>&1 &
 SWEEP_PID=$!
 stop_reason=completed
 while kill -0 "$SWEEP_PID" 2>/dev/null; do
-    sleep "$POLL"
+    sleep "$POLL" &
+    POLL_PID=$!
+    wait "$POLL_PID"
+    POLL_PID=
     spent=$(ledger)
     case $? in
         0) continue ;;
@@ -184,6 +193,15 @@ while kill -0 "$SWEEP_PID" 2>/dev/null; do
 done
 wait "$SWEEP_PID" 2>/dev/null
 rc=$?
+# setsid made the sweep leader a process-group leader, and the runner and agent
+# processes it started can outlive it. A group with a live member keeps its ID
+# out of reuse, so stop the survivors through the group now; only then forget
+# the ID, so the EXIT trap can never signal a recycled group.
+if kill -0 -- "-$SWEEP_PID" 2>/dev/null; then
+    echo "[pilot] $(date -u +%FT%TZ) sweep leader exited; stopping the members of its process group that are still running"
+    stop_sweep
+fi
+SWEEP_PID=
 spent=$(ledger final)
 ledger_rc=$?
 [ "$ledger_rc" -eq 0 ] || stop_reason=metering_failure

@@ -24,9 +24,39 @@ import hashlib
 import json
 import os
 import re
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 L4 = os.path.normpath(os.path.join(HERE, "..", ".."))
+
+
+def host_label(host_dir):
+    """Label a cell by its host run-tree directory, as analyze_runs.hosts() does.
+
+    Scored and unscored cells of one host share the label by construction rather
+    than by matching ``hostN`` anywhere in the path, which can hit the --evals
+    root instead of the host directory.
+    """
+    name = os.path.basename(os.path.normpath(host_dir))
+    return name.split("-", 1)[0] if name.startswith("host") else "unknown"
+
+
+def submitted_count(doc, path, verified):
+    """Return ``submitted_instances`` from one report, or None for a legacy gap.
+
+    A missing count is unknown, never zero, and only an explicitly unverified
+    historical report may lack it.
+    """
+    submitted = doc.get("submitted_instances")
+    if submitted is None:
+        if verified:
+            raise SystemExit(
+                f"current evaluation report lacks submitted_instances: {path}"
+            )
+        return None
+    if isinstance(submitted, bool) or not isinstance(submitted, int) or submitted < 0:
+        raise SystemExit(f"invalid submitted_instances in evaluation report: {path}")
+    return submitted
 
 
 def selected_task_ids(run_dir):
@@ -83,7 +113,7 @@ def unscored_cells(evals, runs, seen_runs):
         no_predictions = finished and submitted == 0
         host_dir = os.path.dirname(os.path.dirname(os.path.dirname(arm_dir)))
         yield {
-            "host": os.path.basename(host_dir),
+            "host": host_label(host_dir),
             "repeat": int(match.group(1)),
             "arm": arm_match.group(1),
             "selected": len(selected),
@@ -153,10 +183,10 @@ def load_reports(evals: str, runs: str | None = None, allow_legacy: bool = False
                 f"cannot bind evaluation to current predictions: {path}; supply --runs, "
                 "or --allow-legacy for explicitly unverified historical reports"
             )
-        host = "unknown"
-        hm = re.search(r"(host\d)", path)
-        if hm:
-            host = hm.group(1)
+        host_dir = os.path.dirname(cell_root)
+        if os.path.basename(host_dir) == "eval":
+            host_dir = os.path.dirname(host_dir)
+        host = host_label(host_dir)
         try:
             doc = json.load(open(path))
         except (OSError, json.JSONDecodeError):
@@ -168,6 +198,13 @@ def load_reports(evals: str, runs: str | None = None, allow_legacy: bool = False
         if selected is not None and not resolved <= selected:
             raise SystemExit(
                 f"evaluation resolved IDs are outside the selected task set: {path}"
+            )
+        submitted = submitted_count(doc, path, verified)
+        # An unknown selection does not make contradictory counts valid.
+        if submitted is not None and len(resolved) > submitted:
+            raise SystemExit(
+                f"evaluation resolves {len(resolved)} instances but submitted "
+                f"{submitted}: {path}"
             )
         unresolved = (
             selected - resolved
@@ -191,7 +228,7 @@ def load_reports(evals: str, runs: str | None = None, allow_legacy: bool = False
                 else "legacy_unverified",
                 "repeat": int(m.group(1)),
                 "arm": m.group(2),
-                "submitted": doc.get("submitted_instances"),
+                "submitted": submitted,
                 "completed": doc.get("completed_instances"),
                 "resolved": sorted(resolved),
                 "unresolved": sorted(unresolved),
@@ -234,6 +271,9 @@ def main():
             "unresolved": [],
             "unscored": [],
             "hosts_scored": 0,
+            "denominator_known": True,
+            "submitted_known": True,
+            "unknown_denominator_hosts": [],
             "empty": [],
             "error": [],
         }
@@ -243,12 +283,15 @@ def main():
     for r in reports:
         k = (r["repeat"], r["arm"])
         acc = by_repeat_arm[k]
-        acc["submitted"] += r["submitted"] or 0
+        if r["submitted"] is None:
+            acc["submitted_known"] = False
+        else:
+            acc["submitted"] += r["submitted"]
         if r["selected"] is None:
-            raise SystemExit(
-                "legacy evaluation has no selected-task denominator; only its submitted counts may be inspected"
-            )
-        acc["selected"] += r["selected"]
+            acc["denominator_known"] = False
+            acc["unknown_denominator_hosts"].append(r["host"])
+        else:
+            acc["selected"] += r["selected"]
         acc["resolved"] += len(r["resolved"])
         acc["unresolved"] += r["unresolved"]
         acc["unscored"] += r["unscored"]
@@ -261,18 +304,33 @@ def main():
 
     per_arm = {}
     for (rep, arm), acc in sorted(by_repeat_arm.items()):
-        sub = acc["submitted"]
-        selected = acc["selected"]
+        sub = acc["submitted"] if acc["submitted_known"] else None
+        selected = acc["selected"] if acc["denominator_known"] else None
+        if selected is None and seen_cells[(rep, arm)] > len(
+            acc["unknown_denominator_hosts"]
+        ):
+            # One legacy cell without a selection makes the whole repeat/arm
+            # denominator unknown; name it so the missing rate is explicable.
+            print(
+                f"warning: repeat {rep} arm {arm} mixes cells with and without a "
+                "selected-task denominator; no solve rate is published because of "
+                f"host(s) {', '.join(sorted(acc['unknown_denominator_hosts']))}",
+                file=sys.stderr,
+            )
+        # An unknown submitted count leaves the evidence incomplete even when the
+        # selection denominator is known: the candidate could not bind its report
+        # to the predictions it scored, so a rate would overstate coverage.
+        complete = acc["denominator_known"] and acc["submitted_known"] and not acc["unscored"]
         per_arm[f"repeat{rep}-arm{arm}"] = {
             "hosts_attempted": seen_cells[(rep, arm)],
             "hosts_scored": acc["hosts_scored"],
-            "evaluation_complete": not acc["unscored"],
+            "evaluation_complete": complete,
             "unscored_ids": sorted(acc["unscored"]),
             "submitted": sub,
             "selected": selected,
             "resolved": acc["resolved"],
             "solve_rate_pct": round(acc["resolved"] / selected * 100, 1)
-            if selected and not acc["unscored"]
+            if complete and selected
             else None,
             "unresolved_ids": sorted(acc["unresolved"]),
             "empty_patch_ids": sorted(acc["empty"]),
@@ -281,30 +339,33 @@ def main():
 
     arm_totals = {}
     for arm in sorted({a for _, a in by_repeat_arm}):
-        sub = sum(v["submitted"] for k, v in per_arm.items() if k.endswith(f"arm{arm}"))
-        res = sum(v["resolved"] for k, v in per_arm.items() if k.endswith(f"arm{arm}"))
-        selected = sum(
-            v["selected"] for k, v in per_arm.items() if k.endswith(f"arm{arm}")
+        cells = [v for k, v in per_arm.items() if k.endswith(f"arm{arm}")]
+        res = sum(v["resolved"] for v in cells)
+        sub = (
+            sum(v["submitted"] for v in cells)
+            if all(v["submitted"] is not None for v in cells)
+            else None
         )
-        complete = all(
-            v["evaluation_complete"]
-            for k, v in per_arm.items()
-            if k.endswith(f"arm{arm}")
+        selected = (
+            sum(v["selected"] for v in cells)
+            if all(v["selected"] is not None for v in cells)
+            else None
         )
-        if selected:
-            # 成功数不能超过已提交 patch 数；缺失评分的 cell 不得从分母静默消失。
-            if res > sub:
-                raise SystemExit(
-                    f"arm {arm}: resolved {res} > submitted {sub}; an eval report is "
-                    "missing submitted_instances -- fix the inputs, do not pool"
-                )
-            arm_totals[arm] = {
-                "submitted": sub,
-                "selected": selected,
-                "resolved": res,
-                "evaluation_complete": complete,
-                "solve_rate_pct": round(res / selected * 100, 1) if complete else None,
-            }
+        complete = all(v["evaluation_complete"] for v in cells)
+        # Success cannot exceed submitted patches, whether or not the selection
+        # denominator is known; a missing scoring cell must not vanish from it.
+        if sub is not None and res > sub:
+            raise SystemExit(
+                f"arm {arm}: resolved {res} > submitted {sub}; the evaluation "
+                "inputs are inconsistent -- fix the inputs, do not pool"
+            )
+        arm_totals[arm] = {
+            "submitted": sub,
+            "selected": selected,
+            "resolved": res,
+            "evaluation_complete": complete,
+            "solve_rate_pct": round(res / selected * 100, 1) if complete else None,
+        }
 
     doc = {
         "metric": "SWE-bench resolved: FAIL_TO_PASS must flip to passing and "
@@ -331,9 +392,9 @@ def main():
         fh.write(json.dumps(doc, indent=2) + "\n")
     print(f"wrote {args.out}")
     for arm, v in sorted(arm_totals.items()):
-        print(
-            f"  arm {arm}: {v['resolved']}/{v['selected']} selected tasks = {v['solve_rate_pct']}%"
-        )
+        selected = "unknown" if v["selected"] is None else v["selected"]
+        rate = "unknown" if v["solve_rate_pct"] is None else f"{v['solve_rate_pct']}%"
+        print(f"  arm {arm}: {v['resolved']}/{selected} selected tasks = {rate}")
     print(
         "  most frequent failures:",
         ", ".join(

@@ -1,6 +1,7 @@
 # Copyright 2026 Alibaba Cloud
 # Licensed under the Apache License, Version 2.0.
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -1186,6 +1187,7 @@ def test_pilot_preserves_sweep_exit_status(tmp_path: Path, rc: int) -> None:
     source = (SCRIPTS / "run_pilot.sh").read_text()
     begin = source.index('\nwait "$SWEEP_PID"')
     ledger_stub = 'ledger() { printf "{}\\n" > "$SWEEP/pilot-cost.json"; echo 1; };\n'
+    ledger_stub += "trap '[ -z \"${SWEEP_PID:-}\" ] || echo REUSED_SWEEP_PID' EXIT\n"
     harness = (
         ledger_stub
         + f"(exit {rc}) &\nSWEEP_PID=$!\nstop_reason=completed\n"
@@ -1200,6 +1202,7 @@ def test_pilot_preserves_sweep_exit_status(tmp_path: Path, rc: int) -> None:
     )
     # 使用桩账本避免任何真实模型或主机操作。
     assert result.returncode == rc, result.stdout + result.stderr
+    assert "REUSED_SWEEP_PID" not in result.stdout
 
 
 def test_sync_never_installs_system_packages() -> None:
@@ -1323,7 +1326,7 @@ def test_log_collection_failure_cannot_be_hidden(
         "\n# ---------------------------------------------------------------------------",
         begin,
     )
-    harness = 'HOSTS=(fixture); SSH_PW=(); SSH_OPTS=(); say() { echo "$*"; }; rsh() { return 1; }; scp() { :; };\n'
+    harness = 'HOSTS=(fixture later); SSH_PW=(); SSH_OPTS=(); say() { echo "$*"; }; rsh() { return 1; }; scp() { :; };\n'
     harness += (
         'rsync() { case "$*" in *logs/*) return "$LOG_RC";; *) return 0;; esac; };\n'
     )
@@ -1341,6 +1344,9 @@ def test_log_collection_failure_cannot_be_hidden(
     )
     assert (result.returncode != 0) is log_failure
     assert ("provenance is incomplete" in result.stdout) is log_failure
+    # A failure on the first host must not stop collection from the later one.
+    for host in ("fixture", "later"):
+        assert (f"log collection FAILED on {host}" in result.stdout) is log_failure
 
 
 @pytest.mark.parametrize(
@@ -1487,7 +1493,7 @@ def test_preflight_verifies_deployed_plugin_bundle(
 
 def test_repeat_cleanup_refuses_dirty_containers_without_opt_in(tmp_path: Path) -> None:
     source = (SCRIPTS / "clean_between_repeats.sh").read_text()
-    begin = source.index("cids=$(docker ps")
+    begin = source.index('mkdir -p "$W/logs"')
     end = source.index("# Record the volumes", begin)
     result = subprocess.run(
         ["bash", "-c", "docker() { echo existing-container; };\n" + source[begin:end]],
@@ -1598,8 +1604,9 @@ def test_retry_archives_the_previous_prediction_tree(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+@pytest.mark.parametrize("poll", ["1", "30"])
 def test_cancelled_pilot_reaps_its_detached_sweep(
-    tmp_path: Path, signal_name: str
+    tmp_path: Path, signal_name: str, poll: str
 ) -> None:
     import signal
     import time
@@ -1625,7 +1632,7 @@ wait "$child"
             HERE=str(tmp_path),
             W=str(tmp_path),
             SWEEP=str(tmp_path),
-            POLL="1",
+            POLL=poll,
             CAP="100",
             MARGIN="1",
             L4_ARMS="a",
@@ -1644,7 +1651,7 @@ wait "$child"
         assert (tmp_path / "pids").exists()
         pids = [int(value) for value in (tmp_path / "pids").read_text().split()]
         process.send_signal(getattr(signal, signal_name))
-        assert process.wait(timeout=5) != 0
+        assert process.wait(timeout=3) != 0
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             try:
@@ -1654,6 +1661,76 @@ wait "$child"
             time.sleep(0.05)
         else:
             pytest.fail("sweep process group survived pilot cancellation")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        if pids:
+            try:
+                os.killpg(pids[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_pilot_stops_group_members_that_outlive_the_sweep_leader(
+    tmp_path: Path,
+) -> None:
+    import signal
+    import time
+
+    source = (SCRIPTS / "run_pilot.sh").read_text()
+    block = source[source.index('echo "[pilot] $(date -u +%FT%TZ) arms=') :]
+    setup = 'ledger() { echo 0; printf "{}" > "$SWEEP/pilot-cost.json"; };\n'
+    setup += 'setsid() { exec "$PY_SWE" -c \'import os,sys; os.setsid(); os.execvp(sys.argv[1],sys.argv[1:])\' "$@"; };\n'
+    # The leader exits on SIGTERM without waiting for its worker, as a runner
+    # crash would; the worker stays in the sweep's process group. `$$` rather
+    # than BASHPID keeps the stub portable to bash 3.2.
+    (tmp_path / "remote_run.sh").write_text("""#!/bin/bash
+trap 'exit 0' TERM
+sleep 60 & child=$!
+echo "$$ $child" > "$HERE/pids"
+wait "$child"
+""")
+    (tmp_path / "logs").mkdir()
+    instance_list = tmp_path / "instances"
+    instance_list.write_text("case\n")
+    process = subprocess.Popen(
+        ["bash", "-c", setup + block],
+        env=dict(
+            os.environ,
+            HERE=str(tmp_path),
+            W=str(tmp_path),
+            SWEEP=str(tmp_path),
+            POLL="1",
+            CAP="100",
+            MARGIN="1",
+            L4_ARMS="a",
+            L4_INSTANCE_LIST=str(instance_list),
+            PY_SWE=sys.executable,
+            L4_STOP_GRACE_SECS="0.1",
+        ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    pids = []
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "pids").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (tmp_path / "pids").exists()
+        pids = [int(value) for value in (tmp_path / "pids").read_text().split()]
+        os.kill(pids[0], signal.SIGTERM)  # only the leader, never the pilot
+        output, _ = process.communicate(timeout=10)
+        assert "stopping the members of its process group" in output
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pids[1], 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("sweep worker outlived its leader and the pilot")
     finally:
         if process.poll() is None:
             process.kill()
@@ -1681,7 +1758,7 @@ def test_zero_prediction_and_unscored_cells_do_not_disappear(
     expected: object,
 ) -> None:
     solve = load_analysis("analyze_solve_rate")
-    arm = tmp_path / "host1" / "out" / "repeat-1" / "arm-a"
+    arm = tmp_path / "host1-fixture" / "out" / "repeat-1" / "arm-a"
     (arm / "run").mkdir(parents=True)
     (arm / "selection.json").write_text(
         json.dumps({"instance_ids": ["case", "timeout"], "attempt_complete": finished})
@@ -1708,6 +1785,7 @@ def test_zero_prediction_and_unscored_cells_do_not_disappear(
     assert doc["pooled_by_arm_over_repeats"]["a"]["solve_rate_pct"] == expected
     cell = doc["per_repeat_arm"]["repeat1-arma"]
     assert cell["hosts_attempted"] == 1 and cell["hosts_scored"] == 0
+    assert doc["cells"][0]["host"] == "host1"
     assert cell["unscored_ids"] == (["case", "timeout"] if expected is None else [])
 
 
@@ -1748,6 +1826,203 @@ def test_config_snapshot_requires_all_executed_arms_and_marks_authored_fields(
     shared = analysis.shared_configuration(str(tmp_path))
     assert shared["context_window"] is None
     assert shared["context_window_authored"] is False
+
+
+def test_legacy_inspection_reports_counts_without_inventing_a_denominator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    solve = load_analysis("analyze_solve_rate")
+    evaluation = tmp_path / "host1-fixture" / "eval" / "repeat-1-arm-a" / "evaluate"
+    evaluation.mkdir(parents=True)
+    (evaluation / "model.old.json").write_text(
+        '{"submitted_instances":1,"resolved_ids":["case"]}'
+    )
+    output = tmp_path / "solve.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["solve", "--evals", str(tmp_path), "--allow-legacy", "--out", str(output)],
+    )
+    solve.main()
+    doc = json.loads(output.read_text())
+    assert doc["prediction_verification"] == "legacy_unverified"
+    pooled = doc["pooled_by_arm_over_repeats"]["a"]
+    assert pooled["submitted"] == 1 and pooled["resolved"] == 1
+    assert pooled["selected"] is None and pooled["solve_rate_pct"] is None
+    assert pooled["evaluation_complete"] is False
+
+
+def run_legacy_solve(root: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> dict:
+    solve = load_analysis("analyze_solve_rate")
+    output = root / "solve.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["solve", "--evals", str(root), "--allow-legacy", "--out", str(output), *extra],
+    )
+    solve.main()
+    return json.loads(output.read_text())
+
+
+def write_legacy_report(root: Path, host: str, report: dict) -> Path:
+    evaluation = root / host / "eval" / "repeat-1-arm-a" / "evaluate"
+    evaluation.mkdir(parents=True)
+    (evaluation / "model.old.json").write_text(json.dumps(report))
+    return evaluation
+
+
+def test_legacy_report_without_submitted_count_is_unknown_not_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_legacy_report(tmp_path, "host1-fixture", {"resolved_ids": ["case"]})
+    doc = run_legacy_solve(tmp_path, monkeypatch)
+    assert doc["cells"][0]["submitted"] is None
+    assert doc["per_repeat_arm"]["repeat1-arma"]["submitted"] is None
+    pooled = doc["pooled_by_arm_over_repeats"]["a"]
+    assert pooled["submitted"] is None and pooled["resolved"] == 1
+    assert pooled["solve_rate_pct"] is None
+
+
+def test_legacy_selection_without_submitted_count_stays_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A selection makes the denominator known but cannot recover the historical
+    # submitted count, so neither the cell nor the pooled arm may publish a rate.
+    write_legacy_report(tmp_path, "host1-box", {"resolved_ids": ["case"]})
+    arm = tmp_path / "host1-box" / "out" / "repeat-1" / "arm-a"
+    arm.mkdir(parents=True)
+    (arm / "selection.json").write_text(json.dumps({"instance_ids": ["case"]}))
+    doc = run_legacy_solve(tmp_path, monkeypatch)
+    cell = doc["per_repeat_arm"]["repeat1-arma"]
+    assert cell["submitted"] is None and cell["selected"] == 1
+    assert cell["resolved"] == 1
+    assert cell["evaluation_complete"] is False
+    assert cell["solve_rate_pct"] is None
+    pooled = doc["pooled_by_arm_over_repeats"]["a"]
+    assert pooled["submitted"] is None and pooled["selected"] == 1
+    assert pooled["resolved"] == 1
+    assert pooled["evaluation_complete"] is False
+    assert pooled["solve_rate_pct"] is None
+    assert "1/1 selected tasks = unknown" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {"submitted_instances": 1, "resolved_ids": ["case1", "case2"]},
+        {"submitted_instances": -1, "resolved_ids": []},
+        {"submitted_instances": True, "resolved_ids": []},
+        {"submitted_instances": "1", "resolved_ids": []},
+    ],
+)
+def test_legacy_counts_are_validated_without_a_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report: dict
+) -> None:
+    write_legacy_report(tmp_path, "host1-fixture", report)
+    with pytest.raises(SystemExit, match="submitted"):
+        run_legacy_solve(tmp_path, monkeypatch)
+
+
+def test_current_report_without_submitted_count_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    solve = load_analysis("analyze_solve_rate")
+    arm = tmp_path / "host1-fixture" / "out" / "repeat-1" / "arm-a"
+    (arm / "run").mkdir(parents=True)
+    (arm / "selection.json").write_text(json.dumps({"instance_ids": ["case"]}))
+    preds = b'{"case": {}}'
+    (arm / "run" / "preds.json").write_bytes(preds)
+    cell = tmp_path / "host1-fixture" / "eval" / "repeat-1-arm-a"
+    (cell / "evaluate").mkdir(parents=True)
+    digest = hashlib.sha256(preds).hexdigest()
+    (cell / ".eval-complete").write_text(f"{digest} run1\n")
+    (cell / "evaluate" / "model.run1.json").write_text('{"resolved_ids": ["case"]}')
+    output = tmp_path / "solve.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "solve",
+            "--evals",
+            str(tmp_path),
+            "--runs",
+            str(tmp_path),
+            "--out",
+            str(output),
+        ],
+    )
+    with pytest.raises(SystemExit, match="lacks submitted_instances"):
+        solve.main()
+
+
+def test_scored_cells_take_their_label_from_the_host_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hostN component above the host directory must not become the label.
+    root = tmp_path / "host2-archive" / "runs"
+    write_legacy_report(
+        root, "host1-box", {"submitted_instances": 1, "resolved_ids": ["case"]}
+    )
+    write_legacy_report(
+        root, "replay", {"submitted_instances": 1, "resolved_ids": ["case"]}
+    )
+    doc = run_legacy_solve(root, monkeypatch)
+    assert sorted(cell["host"] for cell in doc["cells"]) == ["host1", "unknown"]
+
+
+def test_mixed_denominator_cells_are_named_on_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    write_legacy_report(
+        tmp_path, "host1-box", {"submitted_instances": 1, "resolved_ids": ["case"]}
+    )
+    arm = tmp_path / "host1-box" / "out" / "repeat-1" / "arm-a"
+    arm.mkdir(parents=True)
+    (arm / "selection.json").write_text(json.dumps({"instance_ids": ["case"]}))
+    write_legacy_report(
+        tmp_path, "host2-box", {"submitted_instances": 1, "resolved_ids": []}
+    )
+    doc = run_legacy_solve(tmp_path, monkeypatch)
+    pooled = doc["pooled_by_arm_over_repeats"]["a"]
+    assert pooled["selected"] is None and pooled["solve_rate_pct"] is None
+    captured = capsys.readouterr()
+    assert "repeat 1 arm a mixes cells" in captured.err
+    assert "host2" in captured.err and "host1" not in captured.err
+    assert "1/unknown selected tasks = unknown" in captured.out
+
+
+def test_provenance_records_the_compressor_binary_digest(tmp_path: Path) -> None:
+    analysis = load_analysis()
+    log = tmp_path / "host1" / "logs" / "tokenless_binary.sha256"
+    log.parent.mkdir(parents=True)
+    log.write_text("b" * 64 + "  tokenless\n")
+    prov = analysis.provenance(str(tmp_path), {"host1": "host1"}, {})
+    assert prov["tokenless_binary_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize("binary_digest", [True, False])
+def test_missing_compressor_binary_digest_marks_provenance_incomplete(
+    tmp_path: Path, binary_digest: bool
+) -> None:
+    analysis = load_analysis()
+    host = tmp_path / "host1"
+    (host / "out" / "repeat-1").mkdir(parents=True)
+    (host / "out" / "repeat-1" / "sweep-summary.txt").write_text("revision=abc123\n")
+    logs = host / "logs"
+    logs.mkdir()
+    (logs / "plugins_list.log").write_text("tokenless 1.2.3\nheadroom 4.5.6\n")
+    for name, char in (
+        ("tokenless_binary.sha256", "b"),
+        ("tokenless_dist.sha256", "c"),
+        ("headroom_dist.sha256", "d"),
+    ):
+        (logs / name).write_text(char * 64 + "  fixture\n")
+    if not binary_digest:
+        (logs / "tokenless_binary.sha256").unlink()
+    prov = analysis.provenance(str(tmp_path), {"host1": "host1"}, {"host1": ["model"]})
+    assert prov["incomplete"] is (not binary_digest)
 
 
 def test_disclosure_audit_uses_the_cached_runner_dataset(
