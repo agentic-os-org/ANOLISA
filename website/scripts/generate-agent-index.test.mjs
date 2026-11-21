@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
 const installCommand = 'curl -fsSL https://get.agentic-os.sh | bash';
+const wrappedInstallCommand = 'curl -fsSL \\\n  https://get.agentic-os.sh \\\n  | bash';
 
 async function createFixture(t, migrated, missing) {
   const root = await mkdtemp(path.join(tmpdir(), 'agent-index-test-'));
@@ -39,7 +40,7 @@ async function createFixture(t, migrated, missing) {
         tokenless: {install: 'anolisa install tokenless', install_method: 'cli'},
       },
     }),
-    'docs/user-guide/en/getting-started/quickstart.md': `# Quickstart\n\n${installCommand}\n`,
+    'docs/user-guide/en/getting-started/quickstart.md': `# Quickstart\n\n${wrappedInstallCommand}\n`,
     'docs/user-guide/en/getting-started/building.md': '# Building\n',
     'docs/user-guide/en/intro.md': '# User guide\n',
     'docs/developer-guide/en/intro.md': '# Developer guide\n',
