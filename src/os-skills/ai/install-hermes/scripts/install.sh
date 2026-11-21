@@ -14,8 +14,13 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@gitcode.com:GitHub_Trending/he/hermes-agent.git"
-REPO_URL_HTTPS="https://gitcode.com/GitHub_Trending/he/hermes-agent.git"
+# Clone sources, tried in order. The GitCode mirror answers 401 to anonymous
+# clones, so a host without GitCode credentials needs the public upstream: it is
+# the repository SKILL.md names as the GitHub project. Each URL can be overridden
+# for a private mirror (HERMES_REPO_URL_SSH / _HTTPS / _GITHUB).
+REPO_URL_SSH="${HERMES_REPO_URL_SSH:-git@gitcode.com:GitHub_Trending/he/hermes-agent.git}"
+REPO_URL_HTTPS="${HERMES_REPO_URL_HTTPS:-https://gitcode.com/GitHub_Trending/he/hermes-agent.git}"
+REPO_URL_GITHUB="${HERMES_REPO_URL_GITHUB:-https://github.com/NousResearch/hermes-agent.git}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 PYTHON_VERSION="3.11"
@@ -835,8 +840,21 @@ clone_repo() {
             if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
                 log_success "Cloned via HTTPS"
             else
-                log_error "Failed to clone repository"
-                exit 1
+                # The mirror needs GitCode credentials on many hosts; fall back
+                # to the upstream rather than failing the whole install.
+                rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial HTTPS clone
+                log_warn "Mirror clone failed, trying the GitHub upstream..."
+                if git clone --branch "$BRANCH" "$REPO_URL_GITHUB" "$INSTALL_DIR"; then
+                    log_success "Cloned via GitHub upstream"
+                    log_warn "Cloned from the upstream, not the mirror. Update and support come from whichever remote this clone records."
+                else
+                    rm -rf "$INSTALL_DIR" 2>/dev/null
+                    log_error "Failed to clone repository from every source:"
+                    log_info "  $REPO_URL_SSH"
+                    log_info "  $REPO_URL_HTTPS"
+                    log_info "  $REPO_URL_GITHUB"
+                    exit 1
+                fi
             fi
         fi
     fi
@@ -1613,4 +1631,7 @@ main() {
     print_success
 }
 
-main
+# Run only when executed, so tests can source the helpers without installing.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
