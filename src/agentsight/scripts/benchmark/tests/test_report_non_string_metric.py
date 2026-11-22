@@ -117,17 +117,16 @@ def test_summary_matches_the_clean_input_report(
 
 
 @pytest.mark.parametrize("broken_metric", [["unknown"], {"unknown": 1}, None, 12])
-def test_summarize_load_skips_non_string_metric_names(broken_metric) -> None:
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "load.jsonl"
-        path.write_bytes(broken_payload(broken_metric))
-        summary = render_report.summarize_load(path)
-        assert summary["requests"] == 12
-        assert summary["http_success"] == 12
-        assert summary["timeouts"] == 0
-        assert summary["latency"]["avg"] == pytest.approx(5)
+def test_summarize_load_skips_non_string_metric_names(
+    broken_metric, tmp_path: Path
+) -> None:
+    path = tmp_path / "load.jsonl"
+    path.write_bytes(broken_payload(broken_metric))
+    summary = render_report.summarize_load(path)
+    assert summary["requests"] == 12
+    assert summary["http_success"] == 12
+    assert summary["timeouts"] == 0
+    assert summary["latency"]["avg"] == pytest.approx(5)
 
 
 def test_missing_metric_key_is_skipped(tmp_path: Path) -> None:
