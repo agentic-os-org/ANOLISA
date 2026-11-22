@@ -109,3 +109,78 @@ it("registers distinct tools and routes ANOLISA reads to the existing MCP backen
   assert.equal(observed.content[0].text, "ANOLISA-SEED");
   assert.deepEqual(calls.at(-1), { name: "memory_observe", params: args });
 });
+
+it("treats empty JSON array memory_search results as zero hits rather than non-JSON suppression", async (t) => {
+  const sessionDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "memory-empty-search-"),
+  );
+  t.after(() => fs.rmSync(sessionDir, { recursive: true, force: true }));
+
+  type Tool = {
+    name: string;
+    execute: (
+      id: string,
+      params: Record<string, unknown>,
+    ) => Promise<{
+      content: { type: string; text: string }[];
+      details?: Record<string, unknown>;
+    }>;
+  };
+  const tools = new Map<string, Tool>();
+  const warnings: string[] = [];
+  const replies = ["[]", "debug noise on stdout", '{"unexpected":true}'];
+  let idx = 0;
+
+  t.mock.method(
+    McpStdioClient.prototype,
+    "callTool",
+    async () => replies[idx++],
+  );
+  plugin.register({
+    pluginConfig: { binaryPath: process.execPath, userId: "1000", sessionDir },
+    resolvePath: (p: string) => p,
+    logger: {
+      info() {},
+      warn(msg: string) {
+        warnings.push(msg);
+      },
+      error() {},
+      debug() {},
+    },
+    on() {},
+    registerTool(spec: Tool) {
+      tools.set(spec.name, spec);
+    },
+    registerMemoryCapability() {},
+    registerMemoryCorpusSupplement() {},
+  } as never);
+
+  const searchTool = tools.get("anolisa_memory_search")!;
+  // Ignore any registration-time warnings (e.g. retiring the previous test's client).
+  warnings.length = 0;
+
+  // 1. Valid zero-hit JSON array "[]" must NOT be suppressed as non-JSON
+  const emptyResult = await searchTool.execute("empty-1", {
+    query: "nonexistent-topic",
+    mode: "hybrid",
+  });
+  assert.equal(emptyResult.content[0].text, "(no matching memories found)");
+  assert.deepEqual(emptyResult.details, {
+    debug: { backend: "agent-memory", effectiveMode: "hybrid" },
+    count: 0,
+    suspiciousCount: 0,
+  });
+  assert.equal(warnings.length, 0);
+
+  // 2. Non-JSON stdout must still be suppressed and logged
+  const nonJsonResult = await searchTool.execute("bad-1", { query: "noise" });
+  assert.match(nonJsonResult.content[0].text, /non-JSON result; suppressed/);
+  assert.deepEqual(nonJsonResult.details, { suppressed: true });
+  assert.equal(warnings.length, 1);
+
+  // 3. Valid JSON that is not an array must still be suppressed and logged
+  const nonArrayResult = await searchTool.execute("bad-2", { query: "obj" });
+  assert.match(nonArrayResult.content[0].text, /non-JSON result; suppressed/);
+  assert.deepEqual(nonArrayResult.details, { suppressed: true });
+  assert.equal(warnings.length, 2);
+});

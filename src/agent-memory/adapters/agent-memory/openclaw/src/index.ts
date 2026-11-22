@@ -231,19 +231,34 @@ export default definePluginEntry({
         async execute(_toolCallId: string, params: Record<string, unknown>) {
           try {
             const text = await client.callTool("anolisa_memory_search", params);
+            let parsedArray = false;
             let count = 0;
             let suspiciousCount = 0;
             try {
               const parsed = JSON.parse(text);
               if (Array.isArray(parsed)) {
+                parsedArray = true;
                 count = parsed.length;
                 suspiciousCount = parsed.filter(
-                  (h: Record<string, unknown>) => h.suspicious === true,
+                  (h: Record<string, unknown>) => h && h.suspicious === true,
                 ).length;
               }
             } catch {
               // Server returned a non-JSON string (e.g. when the index
-              // is disabled). Leave count at 0 rather than guess.
+              // is disabled). Leave parsedArray false so it is suppressed below.
+            }
+            if (parsedArray && count === 0) {
+              return {
+                content: [{ type: "text", text: "(no matching memories found)" }],
+                details: {
+                  debug: {
+                    backend: "agent-memory",
+                    effectiveMode: (params.mode as string) || "bm25",
+                  },
+                  count: 0,
+                  suspiciousCount: 0,
+                },
+              };
             }
             // Wrap results through the safety module for prompt-injection
             // isolation. The wrapper escapes content and adds an untrusted-
