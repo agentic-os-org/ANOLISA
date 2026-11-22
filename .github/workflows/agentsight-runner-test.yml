@@ -13,6 +13,7 @@ on:
   # Every PR must report the matrix checks so unrelated changes cannot deadlock
   # a required eBPF load (6.6) check through top-level path filtering.
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -34,7 +35,7 @@ jobs:
       run_ebpf: ${{ steps.changes.outputs.run_ebpf }}
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
 
@@ -43,17 +44,31 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [[ "$EVENT_NAME" != "pull_request" && "$EVENT_NAME" != "merge_group" ]]; then
             echo "run_ebpf=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid pull request or merge-group SHA input" >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
+            if [[ "$HEAD_SHA" != "$CHECKOUT_SHA" ]]; then
+              echo "Merge-group head SHA does not match the checked out commit" >&2
+              exit 1
+            fi
+            RANGE="$BASE_SHA..$HEAD_SHA"
+          else
+            RANGE="$BASE_SHA...$HEAD_SHA"
+          fi
 
           changed_paths="$RUNNER_TEMP/agentsight-changed-paths"
-          git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" -- > "$changed_paths"
+          git diff --no-renames --name-only -z "$RANGE" -- > "$changed_paths"
           run_ebpf=false
           while IFS= read -r -d '' path; do
             case "$path" in

@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
   pull_request:
     branches: [main, 'release/**']
+  merge_group:
   workflow_dispatch:
     inputs:
       run_copilot_shell:
@@ -95,16 +96,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Check which components changed
         id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -e
           echo "=== Detect Changes ==="
 
           # Get changed files
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
+            if [[ ! "$MERGE_GROUP_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$MERGE_GROUP_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid merge-group SHA input" >&2
+              exit 1
+            fi
+            if [[ "$MERGE_GROUP_HEAD_SHA" != "$CHECKOUT_SHA" ]]; then
+              echo "Merge-group head SHA does not match the checked out commit" >&2
+              exit 1
+            fi
+            CHANGED=$(git diff --name-only --no-renames "$MERGE_GROUP_BASE_SHA..$MERGE_GROUP_HEAD_SHA")
+          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
             CHANGED=$(git diff --name-only --no-renames HEAD~1 HEAD || true)
           else
             CHANGED=$(git diff --name-only --no-renames --diff-filter=ACDMRT HEAD || true)

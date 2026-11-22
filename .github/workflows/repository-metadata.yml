@@ -30,6 +30,8 @@ on:
       - ".github/scripts/dingtalk_notification.py"
       - ".github/scripts/test_dingtalk_notification.py"
       - ".github/workflows/ci.yaml"
+      - ".github/workflows/agentsight-runner-test.yml"
+      - ".github/scripts/test_merge_queue_workflows.py"
       - ".github/workflows/prelint.yml"
       - ".github/workflows/release.yaml"
       - ".github/workflows/repository-metadata.yml"
@@ -64,11 +66,14 @@ on:
       - ".github/scripts/dingtalk_notification.py"
       - ".github/scripts/test_dingtalk_notification.py"
       - ".github/workflows/ci.yaml"
+      - ".github/workflows/agentsight-runner-test.yml"
+      - ".github/scripts/test_merge_queue_workflows.py"
       - ".github/workflows/prelint.yml"
       - ".github/workflows/release.yaml"
       - ".github/workflows/repository-metadata.yml"
       - ".github/workflows/issue-automation.yml"
       - ".github/workflows/issue-claim.yml"
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -97,6 +102,9 @@ jobs:
 
       - name: Test automatic release notes
         run: python3 -B .github/scripts/test_release_notes.py
+
+      - name: Test merge queue change detection
+        run: python3 -B .github/scripts/test_merge_queue_workflows.py
 
   community-automation:
     name: Test community automation
