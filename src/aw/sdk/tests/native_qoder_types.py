@@ -101,7 +101,7 @@ def main() -> None:
             ' const agent = { async ask(prompt: string) { return prompt; }, async run(cmd: string) { return { ok: Boolean(cmd) }; } };\n'
             ' const inst = langSession.instrument(agent, { inputMethods: { ask: { extractText: (p: string) => p } }, toolMethods: { run: { name: "sh", extractInput: (c: string) => ({ cmd: c }), extractResult: (r: { ok: boolean }) => r.ok } } });\n'
             " inst.restore();\n"
-            ' const streamTool = langSession.wrapToolStream(async function* (cmd: string) { yield cmd; }, { name: "st", extractInput: (c: string) => ({ cmd: c }), extractResult: (items: string[]) => items.join(",") });\n'
+            ' const streamTool = langSession.wrapToolStream(async function* (cmd: string) { yield cmd; }, { name: "st", extractInput: (c: string) => ({ cmd: c }), snapshotResult: (chunk: string) => chunk, extractResult: (items: string[]) => items.join(",") });\n'
             ' for await (const chunk of streamTool("go")) { void chunk; }\n'
             ' async function* chunks(text: string) { yield text; }\n'
             ' const factory = (text: string) => chunks(text);\n'

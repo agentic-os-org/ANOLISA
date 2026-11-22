@@ -461,20 +461,26 @@ Opt in per `LanguageSource` to keep existing observe/block callers unchanged:
   - Without `extractResult` / `extract_result`, the SDK only accepts strict
     plain JSON values (in TypeScript, dense plain arrays with no extra named,
     non-enumerable, symbol, or accessor properties, and plain objects with
-    enumerable string data properties) and delivers a detached copy of the
-    **exact audited JSON value**. Opaque custom types, sparse arrays, arrays
-    with extra properties, and unbuffered lazy iterators/generators fail closed
-    (`source_result_isolation_required` or
+    enumerable string data properties; a top-level `undefined` return from a
+    non-streaming TypeScript tool is preserved as `undefined` on delivery while
+    projected as `null` in the audited `tool.after` payload, whereas `undefined`
+    inside objects/arrays or in stream chunks is rejected) and delivers a
+    detached copy of the **exact audited JSON value**. Opaque custom types,
+    sparse arrays, arrays with extra properties, and unbuffered lazy
+    iterators/generators fail closed (`source_result_isolation_required` or
     `source_stream_withhold_requires_buffering`).
   - With `extractResult` / `extract_result`, AW evaluates the extractor once
-    and audits the normalized JSON projection it returns. On non-streaming
-    strict routes, opaque non-JSON objects still fail closed unless the caller
-    also provides `snapshotResult` / `snapshot_result` to detach the native
-    value; in that case AW audits the extracted projection rather than opaque
-    native fields.
+    on an isolated copy and audits the normalized JSON projection it returns.
+    On non-streaming strict routes, opaque non-JSON objects still fail closed
+    unless the caller also provides `snapshotResult` / `snapshot_result` to
+    detach the native value; in that case AW audits the extracted projection
+    rather than opaque native fields.
   - When a required `tool.after` check fails under `on_error: withhold_result`,
     the SDK raises `SourceResultWithheld` (`toolExecuted` / `tool_executed = true`)
-    and never returns unchecked output.
+    and never returns unchecked output. Under `on_error: report`, audited
+    recoverable Provider faults on `tool.after` are recorded and allow the
+    checked original result through, while Scope/RPC/cancellation/audit faults
+    remain fail-closed.
 - **Honest streaming boundary and unified byte budget**: Unbuffered streaming
   tools cannot recall chunks already yielded to callers. When `tool.after`
   admits `replace_result` or `on_error: withhold_result`, an unbuffered stream
@@ -482,15 +488,19 @@ Opt in per `LanguageSource` to keep existing observe/block callers unchanged:
   generator with `source_stream_withhold_requires_buffering`. Set
   `bufferStream: true` / `buffer_stream=True` to buffer isolated strict plain
   JSON chunk snapshots up to both `maxStreamItems` / `max_stream_items` and
-  `maxStreamBytes` / `max_stream_bytes` (default `1048576` bytes). Strict
-  stream buffering rejects unmeterably opaque custom types
-  (`source_result_isolation_required`) even when `extractResult` /
+  `maxStreamBytes` / `max_stream_bytes` (default `1048576` bytes). This byte
+  budget applies only to buffered streams (ordinary non-streaming tool results
+  do not use `maxStreamBytes` / `max_stream_bytes`) and is metered in compact
+  UTF-8 JSON (`JSON.stringify` in TypeScript; `separators=(",", ":")`,
+  `ensure_ascii=False` in Python; wire RPC framing may be larger when ASCII
+  escapes are used). Strict stream buffering rejects unmeterably opaque custom
+  types (`source_result_isolation_required`) even when `extractResult` /
   `extract_result` or `snapshotResult` / `snapshot_result` is configured, and
-  enforces `maxStreamBytes` / `max_stream_bytes` on both the serialized UTF-8
-  JSON byte length of the buffered chunk snapshot array and the serialized
-  UTF-8 JSON byte length of the single-evaluated audited `tool.after` payload
-  (including after `extractResult` / `extract_result`). Overflow or withholding
-  closes the underlying iterator and yields zero chunks.
+  enforces `maxStreamBytes` / `max_stream_bytes` on both the buffered chunk
+  snapshot array (including `[]` at 2 bytes for an empty stream) and the
+  single-evaluated audited `tool.after` payload (including after
+  `extractResult` / `extract_result`). Overflow or withholding closes the
+  underlying iterator and yields zero chunks.
 
 See the [TypeScript Source example](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 and [Python Source example](../../../../../src/aw/sdk/python/examples/language_source.py).

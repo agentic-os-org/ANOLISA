@@ -279,6 +279,13 @@ class SourceSession:
                     call_id=resolved_call,
                     tool_name=tool_name,
                 )
+            if decision["decision"] == "block":
+                raise SourceDenied(
+                    "tool.after",
+                    session_id=self.session_id,
+                    call_id=resolved_call,
+                    tool_name=tool_name,
+                )
             return decision
 
     def wrap_input(

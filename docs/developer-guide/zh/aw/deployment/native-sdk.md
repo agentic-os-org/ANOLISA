@@ -374,25 +374,30 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
   `apply_result`），不支持的形态报 `source_result_replace_unsupported`。
   在严格后置路由（`replace_result` 或 `on_error: withhold_result`）下：
   - 未配置 `extractResult`／`extract_result` 时，SDK 仅接受严格普通 JSON 值（TypeScript
-    要求稠密普通数组且不含额外命名／不可枚举／Symbol／访问器属性，普通对象仅含可枚举字符串数据属性），
+    要求稠密普通数组且不含额外命名／不可枚举／Symbol／访问器属性，普通对象仅含可枚举字符串数据属性；
+    非流式 TypeScript 工具直接返回顶层 `undefined` 时为兼容无返回值函数会原样返回 `undefined`，
+    其送审 `tool.after` 投影为 `null`，而对象／数组内部或流分块中的 `undefined` 会被拒绝），
     向调用方交付**与审核记录完全一致的独立 JSON 副本（exact audited JSON value）**；
     不透明自定义类型、稀疏数组、带额外属性的数组以及未缓冲惰性迭代器／生成器均失败关闭
     （`source_result_isolation_required` 或 `source_stream_withhold_requires_buffering`）。
-  - 配置 `extractResult`／`extract_result` 时，提取器仅求值一次，AW 审核其返回的规范化 JSON 投影。
+  - 配置 `extractResult`／`extract_result` 时，提取器在独立副本上仅求值一次，AW 审核其返回的规范化 JSON 投影。
     非流式严格路由对不透明非 JSON 对象默认拒绝，仅当调用方同时提供 `snapshotResult`／
     `snapshot_result`（隔离原生对象副本）时放行；此时 AW 审核的是提取投影而非不透明原生字段。
   - `on_error: withhold_result` 下必需 `tool.after` 检查故障时抛出 `SourceResultWithheld`
-    （`toolExecuted`／`tool_executed = True`），绝不返回未审核原文。
+    （`toolExecuted`／`tool_executed = True`），绝不返回未审核原文；`on_error: report` 下，
+    `tool.after` 的已审计可恢复 Provider 故障会记录日志并放行原结果，Scope／RPC／取消／审计等故障仍失败关闭。
 - **流式诚实边界与统一字节预算**：未缓冲的流式工具无法撤回已产出分块。当 `tool.after`
   准入 `replace_result` 或 `on_error: withhold_result` 时，未缓冲流（异步生成器或同步生成器／迭代器）
   在启动原生生成器前即报 `source_stream_withhold_requires_buffering`。设置 `bufferStream: true`／
   `buffer_stream=True` 可将隔离后的严格普通 JSON 分块快照缓冲至 `maxStreamItems`／
   `max_stream_items` 与 `maxStreamBytes`／`max_stream_bytes`（默认 `1048576` 字节）双上限。
-  严格流缓冲拒绝无法准确计量的不透明自定义类型（即使已配置 `extractResult`／`extract_result`
-  或 `snapshotResult`／`snapshot_result`，仍报 `source_result_isolation_required`），并将
-  `maxStreamBytes`／`max_stream_bytes` 统一应用于**缓冲分块快照数组的 UTF-8 JSON 字节长度**与
-  **单次提取求值后实际送审 `tool.after` 载荷的 UTF-8 JSON 字节长度**。超限或扣留时立即关闭底层迭代器，
-  并保证零分块产出。
+  该字节预算仅适用于流缓冲（普通非流式结果无此流预算），按紧凑 UTF-8 JSON 计量（TypeScript 为
+  `JSON.stringify` UTF-8 字节，Python 为 `separators=(",", ":")` 且 `ensure_ascii=False`；传输层
+  采用 ASCII 转义的 JSON-RPC 帧可能略长于紧凑计量值）。严格流缓冲拒绝无法准确计量的不透明自定义类型
+  （即使已配置 `extractResult`／`extract_result` 或 `snapshotResult`／`snapshot_result`，仍报
+  `source_result_isolation_required`），并将 `maxStreamBytes`／`max_stream_bytes` 统一应用于
+  **缓冲分块快照数组（含空流 `[]` 占 2 字节）**与**单次提取求值后实际送审 `tool.after` 载荷**的紧凑
+  UTF-8 JSON 字节长度。超限或扣留时立即关闭底层迭代器，并保证零分块产出。
 
 完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
