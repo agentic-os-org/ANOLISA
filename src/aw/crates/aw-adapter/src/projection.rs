@@ -29,6 +29,7 @@ pub(crate) fn project_within_limit(event: &mut Value, projection: Value) -> Resu
 
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
+        "sdk" => &native["result"],
         "deepseek-harness" if native["nested"] != true => &native["tool_response"],
         "qoder" | "qwenpaw" | "pi" | "agentscope" | "codex" => &native["tool_response"],
         "qoder-sdk" if native["hook_event_name"] == "PostToolUse" => &native["tool_response"],
@@ -106,6 +107,11 @@ fn text_slot<'a>(
             ));
         }
     }
+    if adapter == "sdk" {
+        if let Some(text) = result["text"].as_str() {
+            return Some(("/text", text));
+        }
+    }
     if adapter == "qoder-sdk" && native["tool_name"] == "Read" && result["type"] == "text" {
         return result["file"]["content"]
             .as_str()
@@ -132,6 +138,7 @@ fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
             native["tool_call"]["name"].as_str().unwrap_or(""),
             &native["effective_input"],
         ),
+        "sdk" => (native["name"].as_str().unwrap_or(""), &native["input"]),
         "qwenpaw" => (
             native["tool_call"]["name"].as_str().unwrap_or(""),
             &Value::Null,
@@ -308,7 +315,7 @@ pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
         "hermes" => {
             json!({"aw_replacement": if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}})
         }
-        "openclaw" | "qwenpaw" | "pi" | "agentscope" | "deepseek-harness" => {
+        "sdk" | "openclaw" | "qwenpaw" | "pi" | "agentscope" | "deepseek-harness" => {
             json!({"aw_replacement":value})
         }
         _ => return Err("unsupported result replacement adapter".into()),

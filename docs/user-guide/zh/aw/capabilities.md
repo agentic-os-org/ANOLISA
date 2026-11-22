@@ -13,8 +13,9 @@
 AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下能力由 Adapter 接入原生工具流程；具体版本和启动步骤见[Agent 接入索引](../../../developer-guide/zh/aw/native-agents.md)。
 
 Python 和 TypeScript 应用均可通过 `sdk/application` profile 接入通用输入、工具和生命周期
-Hook。创建 `LanguageSource` 时声明需要的生命周期事件，再从应用的原生边界调用对应的
-`SourceSession` 方法。应用在结束轮次前采用 `turn.stop` 返回的决策。
+Hook，支持显式启用的 `replace_input`、`replace_result` 与 `withhold_result`（流式严格替换或
+扣留要求先完成有界缓冲）。创建 `LanguageSource` 时声明需要的生命周期事件，再从应用的原生边界
+调用对应的 `SourceSession` 方法。应用在结束轮次前采用 `turn.stop` 返回的决策。
 [通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)
 
 ## Hook 支持矩阵
@@ -34,7 +35,7 @@ Hook。创建 `LanguageSource` 时声明需要的生命周期事件，再从应�
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。

@@ -13,10 +13,13 @@ Application-owned resident Claude and Pi workers can also publish an SDK attach 
 AW shares tool checks, result processing and custom rules across Agents. Adapters connect these capabilities to native tool execution. See the [Agent index](../../../developer-guide/en/aw/native-agents.md) for versions and setup.
 
 Use the `sdk/application` profile to install framework-free input, tool and lifecycle
-boundaries in Python or TypeScript. Select the lifecycle events when creating a
-`LanguageSource`, then call the corresponding `SourceSession` methods from the
-application's native boundaries. The application adopts the returned `turn.stop`
-decision before allowing the turn to end. [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration)
+boundaries in Python or TypeScript, including opt-in `replace_input`,
+`replace_result` and `withhold_result` (strict streaming replacement or
+withholding requires bounded buffering). Select the lifecycle events when
+creating a `LanguageSource`, then call the corresponding `SourceSession` methods
+from the application's native boundaries. The application adopts the returned
+`turn.stop` decision before allowing the turn to end.
+[Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration)
 
 ## Hook support matrix
 
@@ -35,7 +38,7 @@ decision before allowing the turn to end. [Runtime SDK integration](../../../dev
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.

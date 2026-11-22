@@ -2229,10 +2229,18 @@
             "security-retry",
             "typescript-sdk-package",
             "python-sdk-package"
+          ],
+          "replace_input": [
+            "typescript-sdk-package",
+            "python-sdk-package"
           ]
         },
         "tool.after": {
           "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ],
+          "replace_result": [
             "typescript-sdk-package",
             "python-sdk-package"
           ]
@@ -2268,7 +2276,8 @@
         "python-sdk-package"
       ],
       "tokenless": [
-        "security-retry"
+        "security-retry",
+        "final-replacement"
       ]
     }
   },

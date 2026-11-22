@@ -79,6 +79,7 @@ fn sdk_worker_explicit(source_id: &str) -> RouteOptions<'_> {
 fn semantic_sdk(source_id: &str) -> RouteOptions<'_> {
     RouteOptions {
         events: super::lifecycle::SEMANTIC_SDK,
+        include_replace_input: true,
         ..sdk_worker_observed(source_id)
     }
 }

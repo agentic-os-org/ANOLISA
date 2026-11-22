@@ -3,24 +3,28 @@ import { randomUUID } from "node:crypto";
 import { Admission } from "./admission.mjs";
 import { Instance } from "./client.mjs";
 import {
-  defaultExtractInput,
   defaultExtractText,
   findPrototypeDescriptor,
   isAsyncGeneratorFunction,
-  jsonEqual,
   readStream,
   snapshotInputArg,
-  snapshotStreamChunk,
   toolExecuted,
   normalizeJson,
   restoreEntries,
   snapshotToolInput,
   validateIdentity,
 } from "./source-helpers.mjs";
+import {
+  DEFAULT_MAX_STREAM_BYTES,
+  SourceResultWithheld,
+  buildToolWrapper,
+  routeHasStrictAfter,
+} from "./source-mutation.mjs";
 import { AwError } from "./transport.mjs";
 
 import { SOURCE_PROTOCOL, DEFAULT_SOURCE_EVENTS, sourceCapabilities, confirmSourceRoutes } from "./source-profile.mjs";
 export { SOURCE_PROTOCOL, DEFAULT_SOURCE_EVENTS, sourceCapabilities, confirmSourceRoutes } from "./source-profile.mjs";
+export { DEFAULT_MAX_STREAM_BYTES, SourceResultWithheld };
 
 export const DEFAULT_MAX_STREAM_ITEMS = 1024;
 const WRAPPED = Symbol("aw.source.wrapped");
@@ -88,6 +92,10 @@ export class SourceSession {
     );
   }
 
+  _strictAfter() {
+    return !this.fallback && routeHasStrictAfter(this.task?.routes);
+  }
+
   _requireOpen() {
     if (this.closed) throw new AwError("source_session_closed");
   }
@@ -107,10 +115,11 @@ export class SourceSession {
   _verifyRouteCoverage() {
     const task = this.admission.task;
     if (this.fallback || !task) return;
+    const caps = this._source.instance.options.capabilities;
     for (const hook of task.routes?.hooks ?? []) {
       if (!this.events.includes(hook.event))
         throw new AwError("source_route_coverage_incomplete");
-      if (hook.replace_input || hook.replace_result || hook.skill_check)
+      if (!confirmSourceRoutes(caps, { hooks: [hook] }))
         throw new AwError("source_route_effect_unsupported");
     }
   }
@@ -216,7 +225,13 @@ export class SourceSession {
           });
         this._requireOpen();
         signal?.throwIfAborted();
-        return { callId: resolvedCall, input: snapshot, decision };
+        let effective = snapshot;
+        let outDecision = decision;
+        if (Object.hasOwn(decision, "updated_input")) {
+          effective = snapshotToolInput(decision.updated_input);
+          outDecision = { ...decision, updated_input: effective };
+        }
+        return { callId: resolvedCall, input: effective, decision: outDecision };
       });
     }
     this._requireOpen();
@@ -242,7 +257,12 @@ export class SourceSession {
     }
   }
 
-  async _afterAdmittedTool(name, input, result, { callId, signal }) {
+  async _afterAdmittedTool(
+    name,
+    input,
+    result,
+    { callId, signal, normalized = false },
+  ) {
     try {
       if (this._taskClosed) throw new AwError("source_session_closed");
       if (!this._observeAfter())
@@ -253,17 +273,24 @@ export class SourceSession {
       const toolName = validateIdentity(name);
       const resolvedCall = validateIdentity(callId);
       const snapshot = snapshotToolInput(input);
-      return await this.task.emit(
+      const decision = await this.task.emit(
         "tool.after",
         {
           session_id: this.sessionId,
           call_id: resolvedCall,
           name: toolName,
           input: snapshot,
-          result: normalizeJson(result),
+          result: normalized ? result : normalizeJson(result),
         },
         signal,
       );
+      if (decision.decision === "withhold")
+        throw new SourceResultWithheld("tool.after", {
+          sessionId: this.sessionId,
+          callId: resolvedCall,
+          toolName,
+        });
+      return decision;
     } catch (error) {
       throw toolExecuted(error);
     }
@@ -323,115 +350,13 @@ export class SourceSession {
     return this.wrapTool(fn, { ...options, stream: true });
   }
 
-  wrapTool(
-    fn,
-    {
-      name,
-      extractInput,
-      extractCallId,
-      extractResult,
-      extractSignal,
-      snapshotArg,
-      stream: asStream,
-      maxStreamItems = DEFAULT_MAX_STREAM_ITEMS,
-    } = {},
-  ) {
-    if (typeof fn !== "function") throw new AwError("source_callable_required");
-    if (!Number.isInteger(maxStreamItems) || maxStreamItems < 1)
-      throw new AwError("source_invalid_stream_limit");
-    const session = this;
-    const toolName = validateIdentity(name ?? fn.name);
-    const inputOf = extractInput ?? defaultExtractInput;
-    const streaming = asStream === true || isAsyncGeneratorFunction(fn);
-
-    function requireCheckedInput(callArgs, snapshot) {
-      if (!jsonEqual(snapshotToolInput(inputOf(...callArgs)), snapshot))
-        throw new AwError("source_input_mutated");
-    }
-
-    async function admitCall(args) {
-      const signal = extractSignal?.(...args);
-      const callArgs = args.map((arg) => snapshotInputArg(arg, snapshotArg));
-      const rawInput = inputOf(...callArgs);
-      const callId = extractCallId?.(...callArgs);
-      const { callId: resolvedCall, input: snapshot } =
-        await session.beforeTool(toolName, rawInput, { callId, signal });
-      session._requireOpen();
-      signal?.throwIfAborted();
-      requireCheckedInput(callArgs, snapshot);
-      return { resolvedCall, snapshot, signal, callArgs };
-    }
-
-    async function observeResult(result, callId, snapshot, signal) {
-      try {
-        const payload = extractResult ? extractResult(result) : result;
-        await session._afterAdmittedTool(toolName, snapshot, payload, {
-          callId,
-          signal,
-        });
-      } catch (error) {
-        throw toolExecuted(error);
-      }
-    }
-
-    if (streaming) {
-      async function* wrappedStream(...args) {
-        const { resolvedCall, snapshot, signal, callArgs } =
-          await admitCall(args);
-        const items = session._observeAfter() ? [] : null;
-        let dispatched = false;
-        // Transfer ownership before the native stream finishes closing.
-        function finish(close) {
-          return session._runAdmittedCall(async () => {
-            await close();
-            if (session._observeAfter())
-              await observeResult(items, resolvedCall, snapshot, signal);
-          });
-        }
-        const stream = readStream(
-          () => {
-            requireCheckedInput(callArgs, snapshot);
-            dispatched = true;
-            return fn.apply(this, callArgs);
-          },
-          session.signal,
-          signal,
-          session._activeStreams,
-          items ? finish : undefined,
-        );
-        try {
-          for await (const item of stream) {
-            if (items && session._observeAfter()) {
-              if (items.length >= maxStreamItems)
-                throw new AwError("source_stream_result_too_large");
-              items.push(
-                extractResult ? snapshotStreamChunk(item) : normalizeJson(item),
-              );
-            }
-            yield item;
-          }
-        } catch (error) {
-          throw dispatched ? toolExecuted(error) : error;
-        }
-      }
-      wrappedStream[WRAPPED] = true;
-      return wrappedStream;
-    }
-    async function wrapped(...args) {
-      const { resolvedCall, snapshot, signal, callArgs } =
-        await admitCall(args);
-      session._requireOpen();
-      signal?.throwIfAborted();
-      requireCheckedInput(callArgs, snapshot);
-      return session._runAdmittedCall(async () => {
-        const result = await fn.apply(this, callArgs);
-        if (session._observeAfter())
-          await observeResult(result, resolvedCall, snapshot, signal);
-        return result;
-      });
-    }
-    wrapped[WRAPPED] = true;
-    return wrapped;
+  wrapTool(fn, options = {}) {
+    return buildToolWrapper(
+      this,
+      fn,
+      { maxStreamItems: DEFAULT_MAX_STREAM_ITEMS, ...options },
+      WRAPPED,
+    );
   }
 
   instrument(target, { inputMethods = [], toolMethods = [] } = {}) {
@@ -588,13 +513,20 @@ export class LanguageSource {
     target,
     availability = "required",
     events = DEFAULT_SOURCE_EVENTS,
+    replaceInput = false,
+    replaceResult = false,
+    withholdResult = false,
     cwd,
     environment,
     config,
     timeoutMs,
     reconnectMs,
   }) {
-    const capabilities = sourceCapabilities(events);
+    const capabilities = sourceCapabilities(events, {
+      replaceInput,
+      replaceResult,
+      withholdResult,
+    });
     const instance = new Instance({
       endpoint,
       target,

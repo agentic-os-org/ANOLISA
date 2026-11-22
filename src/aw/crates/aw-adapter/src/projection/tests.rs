@@ -457,3 +457,39 @@ fn hermes_after_callbacks_correlate_the_same_decoded_result() {
         assert_eq!(raw, native);
     }
 }
+
+#[test]
+fn sdk_projects_and_replaces_string_and_structured_text_slots() {
+    for (result, expected_replaced) in [
+        (json!("raw output"), json!("redacted")),
+        (
+            json!({"text": "raw output", "meta": 1}),
+            json!({"text": "redacted", "meta": 1}),
+        ),
+        (
+            json!({"stdout": "raw output", "exit_code": 0}),
+            json!({"stdout": "redacted", "exit_code": 0}),
+        ),
+        (
+            json!({"content": [{"type": "text", "text": "raw output"}]}),
+            json!({"content": [{"type": "text", "text": "redacted"}]}),
+        ),
+    ] {
+        let native = json!({
+            "api_version": "aw-hook-source/v1",
+            "event": "tool.after",
+            "session_id": "sess",
+            "call_id": "call-1",
+            "name": "bash",
+            "input": {"command": "echo hi"},
+            "result": result,
+        });
+        let projected = project("sdk", &native).unwrap();
+        assert_eq!(projected["text"], "raw output");
+        assert_eq!(projected["content_origin"], "command_output");
+        assert_eq!(projected["status"], "success");
+        let out = reply("sdk", &native, "redacted").unwrap();
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value, json!({"aw_replacement": expected_replaced}));
+    }
+}

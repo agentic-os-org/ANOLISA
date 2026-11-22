@@ -66,7 +66,7 @@ if args.protocol == "provider":
     print(json.dumps(reply))
     sys.exit(0)
 
-run_id = request["run_id"]
+run_id = request.get("run_id") or request["session_id"]
 (args.root / f"native-{run_id}-{args.label}.bin").write_bytes(raw)
 (args.root / f"argv-{run_id}-{args.label}.json").write_text(json.dumps(args.literal))
 if args.behavior == "environment":

@@ -19,6 +19,7 @@ export type SourceEvent =
 export const SOURCE_PROTOCOL: "aw-hook-source/v1";
 export const DEFAULT_SOURCE_EVENTS: readonly SourceEvent[];
 export const DEFAULT_MAX_STREAM_ITEMS: number;
+export const DEFAULT_MAX_STREAM_BYTES: number;
 
 export class SourceDenied extends AwError {
   readonly event: SourceEvent;
@@ -37,8 +38,31 @@ export class SourceDenied extends AwError {
   );
 }
 
+export class SourceResultWithheld extends AwError {
+  readonly event: SourceEvent;
+  readonly sessionId?: string;
+  readonly callId?: string;
+  readonly toolName?: string;
+  readonly toolExecuted: true;
+  constructor(
+    event?: SourceEvent,
+    details?: {
+      sessionId?: string;
+      callId?: string;
+      toolName?: string;
+    },
+  );
+}
+
+export interface SourceCapabilityOptions {
+  replaceInput?: boolean;
+  replaceResult?: boolean;
+  withholdResult?: boolean;
+}
+
 export function sourceCapabilities(
   events?: readonly SourceEvent[],
+  options?: SourceCapabilityOptions,
 ): Capabilities;
 export function confirmSourceRoutes(
   capabilities: Capabilities,
@@ -61,12 +85,21 @@ export interface WrapToolOptions<
   name?: string;
   /** Detach an argument with application-specific state for the checked call. */
   snapshotArg?: (value: Args[number]) => Args[number];
+  /** Detach a non-plain tool result for strict-after audit and delivery. */
+  snapshotResult?: (value: Result) => Result;
   extractInput?: (...args: Args) => Record<string, unknown>;
+  applyInput?: (
+    updatedInput: Record<string, unknown>,
+    originalArgs: Args,
+  ) => Args;
   extractCallId?: (...args: Args) => string | undefined;
   extractResult?: (result: Result) => unknown;
+  applyResult?: (originalResult: Result, replacedResult: unknown) => Result;
   extractSignal?: (...args: Args) => AbortSignal | undefined;
   stream?: boolean;
   maxStreamItems?: number;
+  maxStreamBytes?: number;
+  bufferStream?: boolean;
 }
 
 export type StreamResult<T> = T extends AsyncIterable<infer Y> ? Y : never;
@@ -190,7 +223,7 @@ export class SourceSession {
   close(options?: { timeoutMs?: number }): Promise<void>;
 }
 
-export interface LanguageSourceCreateOptions {
+export interface LanguageSourceCreateOptions extends SourceCapabilityOptions {
   endpoint: string;
   target: string;
   availability?: Availability;

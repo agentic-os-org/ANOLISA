@@ -311,7 +311,11 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
             input,
             &fixture.root,
         );
-        native["run_id"] = json!("coexist");
+        if adapter == "sdk" {
+            native["session_id"] = json!("coexist");
+        } else {
+            native["run_id"] = json!("coexist");
+        }
         let mut original = serde_json::to_vec(&native).unwrap();
         let snapshot = String::from_utf8(original.clone()).unwrap();
         let order = if adapter == "openclaw" {

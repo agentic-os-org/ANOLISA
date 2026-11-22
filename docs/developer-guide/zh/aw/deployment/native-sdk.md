@@ -357,6 +357,43 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 - 同一对象实例的同一方法同一时刻只能由一个活动 `SourceSession` 插桩（重复插桩报
   `source_already_instrumented`）；并发处理多会话时请按请求使用独立对象实例或按会话直接包装函数。
 
+### 输入／结果改写与故障扣留（`replace_input`、`replace_result`、`withhold_result`）
+
+按 `LanguageSource` 实例显式开启，保持既有 observe/block 调用方完全兼容：
+
+- 在 TypeScript 的 `LanguageSource.create(...)` 传入 `replaceInput: true`、
+  `replaceResult: true` 和／或 `withholdResult: true`（Python 为 `replace_input=True`、
+  `replace_result=True`、`withhold_result=True`）；路由确认会拒绝任何未声明对应效果或
+  `withhold_result` 故障动作的策略步骤。
+- **`replace_input`**：当 `tool.before` Provider 返回获准修改后的参数时，`wrapTool`／
+  `wrap_tool` 安全重建普通 JSON dict/object 参数（或调用可选 `applyInput`／`apply_input`
+  处理自定义参数形态），并在原生执行前复核投影输入；无法安全重建的形态报
+  `source_input_replace_unsupported`，绝不静默丢弃改写。
+- **`replace_result`、`withhold_result` 与严格输出隔离**：`tool.after` 返回替换文本时，
+  `wrapTool`／`wrap_tool` 替换字符串或普通结构化文本封装（或调用可选 `applyResult`／
+  `apply_result`），不支持的形态报 `source_result_replace_unsupported`。
+  在严格后置路由（`replace_result` 或 `on_error: withhold_result`）下：
+  - 未配置 `extractResult`／`extract_result` 时，SDK 仅接受严格普通 JSON 值（TypeScript
+    要求稠密普通数组且不含额外命名／不可枚举／Symbol／访问器属性，普通对象仅含可枚举字符串数据属性），
+    向调用方交付**与审核记录完全一致的独立 JSON 副本（exact audited JSON value）**；
+    不透明自定义类型、稀疏数组、带额外属性的数组以及未缓冲惰性迭代器／生成器均失败关闭
+    （`source_result_isolation_required` 或 `source_stream_withhold_requires_buffering`）。
+  - 配置 `extractResult`／`extract_result` 时，提取器仅求值一次，AW 审核其返回的规范化 JSON 投影。
+    非流式严格路由对不透明非 JSON 对象默认拒绝，仅当调用方同时提供 `snapshotResult`／
+    `snapshot_result`（隔离原生对象副本）时放行；此时 AW 审核的是提取投影而非不透明原生字段。
+  - `on_error: withhold_result` 下必需 `tool.after` 检查故障时抛出 `SourceResultWithheld`
+    （`toolExecuted`／`tool_executed = True`），绝不返回未审核原文。
+- **流式诚实边界与统一字节预算**：未缓冲的流式工具无法撤回已产出分块。当 `tool.after`
+  准入 `replace_result` 或 `on_error: withhold_result` 时，未缓冲流（异步生成器或同步生成器／迭代器）
+  在启动原生生成器前即报 `source_stream_withhold_requires_buffering`。设置 `bufferStream: true`／
+  `buffer_stream=True` 可将隔离后的严格普通 JSON 分块快照缓冲至 `maxStreamItems`／
+  `max_stream_items` 与 `maxStreamBytes`／`max_stream_bytes`（默认 `1048576` 字节）双上限。
+  严格流缓冲拒绝无法准确计量的不透明自定义类型（即使已配置 `extractResult`／`extract_result`
+  或 `snapshotResult`／`snapshot_result`，仍报 `source_result_isolation_required`），并将
+  `maxStreamBytes`／`max_stream_bytes` 统一应用于**缓冲分块快照数组的 UTF-8 JSON 字节长度**与
+  **单次提取求值后实际送审 `tool.after` 载荷的 UTF-8 JSON 字节长度**。超限或扣留时立即关闭底层迭代器，
+  并保证零分块产出。
+
 完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
 与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
 

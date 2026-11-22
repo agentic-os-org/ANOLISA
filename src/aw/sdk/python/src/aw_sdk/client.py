@@ -3,6 +3,7 @@
 import asyncio
 from copy import deepcopy
 import inspect
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -10,6 +11,31 @@ from uuid import uuid4
 
 from aw_sdk.transport import AwError, SDK, rpc, same_identity
 from aw_sdk.scope_watch import ScopeWatch
+
+_UNSET = object()
+
+
+def _parse_sdk_directive(event: str, stdout: bytes) -> tuple[str, Any]:
+    text = stdout.strip()
+    if not text:
+        return ("none", None)
+    try:
+        parsed = json.loads(text.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AwError("invalid_callback_response") from error
+    if not isinstance(parsed, dict):
+        raise AwError("invalid_callback_response")
+    if event == "tool.before" and set(parsed) == {"aw_updated_input"}:
+        updated = parsed["aw_updated_input"]
+        if not isinstance(updated, dict):
+            raise AwError("invalid_callback_response")
+        return ("replace_input", updated)
+    if event == "tool.after":
+        if set(parsed) == {"aw_withheld"} and parsed["aw_withheld"] is True:
+            return ("withhold", None)
+        if set(parsed) == {"aw_replacement"}:
+            return ("replace_result", parsed["aw_replacement"])
+    raise AwError("invalid_callback_response")
 
 
 class Instance:
@@ -469,8 +495,8 @@ class Task:
             outputs.append(bytes(value))
         return result["code"], outputs[0], outputs[1]
 
-    async def emit(self, event: str, payload: dict) -> dict[str, str]:
-        """Emit at an installed boundary and return the decision for native adoption."""
+    async def emit(self, event: str, payload: dict) -> dict[str, Any]:
+        """Emit at an installed boundary; caller adopts block, rewrites and withholding."""
         if self.closed or self._closing:
             raise AwError("task_closed")
         if self.instance.capabilities.get("adapter") != "sdk":
@@ -479,18 +505,33 @@ class Task:
             raise AwError("semantic_event_unavailable")
         native = {**deepcopy(payload), "api_version": "aw-hook-source/v1", "event": event}
         hooks = [hook for hook in self.routes["hooks"] if hook["event"] == event]
+        updated_input: dict[str, Any] | None = None
+        replaced_result: Any = _UNSET
         for hook in hooks:
-            code, _, _ = await self.invoke_native(hook, native)
+            code, stdout, _ = await self.invoke_native(hook, native)
             if code == 2:
                 return {"decision": "block", "coverage": "checked"}
             if self.fallback:
                 break
-        return {
+            if stdout:
+                kind, value = _parse_sdk_directive(event, stdout)
+                if kind == "withhold":
+                    return {"decision": "withhold", "coverage": "checked"}
+                if kind == "replace_input":
+                    updated_input = value
+                elif kind == "replace_result":
+                    replaced_result = value
+        reply: dict[str, Any] = {
             "decision": "continue",
             "coverage": (
                 "unavailable" if self.fallback else "checked" if hooks else "not_configured"
             ),
         }
+        if updated_input is not None:
+            reply["updated_input"] = updated_input
+        if replaced_result is not _UNSET:
+            reply["replaced_result"] = replaced_result
+        return reply
 
     async def close(self) -> None:
         if self.closed:
