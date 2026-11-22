@@ -19,31 +19,30 @@ function isPlainRecord(value) {
   return proto === Object.prototype || proto === null;
 }
 
-function parseSdkDirective(event, stdout) {
-  const text = stdout.toString("utf8").trim();
-  if (!text) return ["none", undefined];
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new AwError("invalid_callback_response", { cause: error });
-  }
-  if (!isPlainRecord(parsed)) throw new AwError("invalid_callback_response");
-  const keys = Object.keys(parsed);
+function parseSdkDirective(event, directive) {
+  if (directive === undefined || directive === null) return ["none", undefined];
+  if (!isPlainRecord(directive)) throw new AwError("invalid_callback_response");
+  const keys = Object.keys(directive);
+  const kind = directive.type;
   if (
     event === "tool.before" &&
-    keys.length === 1 &&
-    keys[0] === "aw_updated_input"
+    kind === "replace_input" &&
+    keys.length === 2 &&
+    Object.hasOwn(directive, "input")
   ) {
-    if (!isPlainRecord(parsed.aw_updated_input))
+    if (!isPlainRecord(directive.input))
       throw new AwError("invalid_callback_response");
-    return ["replace_input", parsed.aw_updated_input];
+    return ["replace_input", directive.input];
   }
-  if (event === "tool.after" && keys.length === 1) {
-    if (keys[0] === "aw_withheld" && parsed.aw_withheld === true)
+  if (event === "tool.after") {
+    if (kind === "withhold_result" && keys.length === 1)
       return ["withhold", undefined];
-    if (keys[0] === "aw_replacement")
-      return ["replace_result", parsed.aw_replacement];
+    if (
+      kind === "replace_result" &&
+      keys.length === 2 &&
+      Object.hasOwn(directive, "result")
+    )
+      return ["replace_result", directive.result];
   }
   throw new AwError("invalid_callback_response");
 }
@@ -435,10 +434,10 @@ export class Task {
       null,
     );
   }
-  async invokeStep(hook, payload, signal) {
+  async invokeStepRaw(hook, payload, signal) {
     signal?.throwIfAborted();
     if (this.closed || this.closing) throw new AwError("task_closed");
-    if (this.fallback) return neutral();
+    if (this.fallback) return { ...neutral(), directive: undefined };
     const result = await this.call(
       {
         method: "sdk_callback",
@@ -451,7 +450,7 @@ export class Task {
       signal,
       Math.max(this.instance.options.timeoutMs, (hook.budget_ms ?? 0) + 1000),
     );
-    if (!result) return neutral();
+    if (!result) return { ...neutral(), directive: undefined };
     const bytes = (value) =>
       Array.isArray(value) &&
       value.length <= 1024 * 1024 &&
@@ -466,7 +465,24 @@ export class Task {
       code: result.code,
       stdout: Buffer.from(result.stdout),
       stderr: Buffer.from(result.stderr),
+      directive: result.directive,
     };
+  }
+  async invokeStep(hook, payload, signal) {
+    const { code, stdout, stderr } = await this.invokeStepRaw(
+      hook,
+      payload,
+      signal,
+    );
+    return { code, stdout, stderr };
+  }
+  async invokeSemantic(hook, payload, signal = this.signal) {
+    try {
+      return await this.invokeStepRaw(hook, payload, signal);
+    } catch (error) {
+      await this.abortEvent(hook, payload);
+      throw error;
+    }
   }
   /** Emit from an installed semantic boundary and adopt block, rewrites and withholding. */
   async emit(event, payload, signal = this.signal) {
@@ -485,12 +501,12 @@ export class Task {
     let updatedInput;
     let replacedResult = UNSET;
     for (const hook of hooks) {
-      const response = await this.invoke(hook, native, signal);
+      const response = await this.invokeSemantic(hook, native, signal);
       if (response.code === 2)
         return { decision: "block", coverage: "checked" };
       if (this.fallback) break;
-      if (response.stdout.length > 0) {
-        const [kind, value] = parseSdkDirective(event, response.stdout);
+      if (response.directive !== undefined) {
+        const [kind, value] = parseSdkDirective(event, response.directive);
         if (kind === "withhold")
           return { decision: "withhold", coverage: "checked" };
         if (kind === "replace_input") updatedInput = value;

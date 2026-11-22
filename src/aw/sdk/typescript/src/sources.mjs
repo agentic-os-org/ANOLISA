@@ -290,6 +290,12 @@ export class SourceSession {
           callId: resolvedCall,
           toolName,
         });
+      if (decision.decision === "block")
+        throw new SourceDenied("tool.after", {
+          sessionId: this.sessionId,
+          callId: resolvedCall,
+          toolName,
+        });
       return decision;
     } catch (error) {
       throw toolExecuted(error);

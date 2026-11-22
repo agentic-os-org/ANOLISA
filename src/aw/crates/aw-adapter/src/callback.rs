@@ -193,7 +193,8 @@ pub fn response(
             )?;
             return Ok(adapter.reply(on_error == "block"));
         }
-        if (adapter_id == "pi" || claude_fault)
+        let sdk_fault = adapter_id == "sdk" && provider_fault;
+        if (adapter_id == "pi" || claude_fault || sdk_fault)
             && on_error == "report"
             && output["failure_action"] == "report"
             && event == "tool.after"

@@ -156,3 +156,79 @@ fn sdk_withholding_requires_an_audited_provider_fault() {
     }
     assert!(reply("tool.before", "withhold_result", fault).is_err());
 }
+
+#[test]
+fn sdk_after_report_recovers_only_for_audited_recoverable_provider_faults() {
+    let adapter = adapter::select("sdk").unwrap();
+    for failure in [
+        "exit",
+        "incomplete_input",
+        "provider",
+        "protocol",
+        "transport",
+    ] {
+        let fault = json!({"kind":"provider", "status":"error",
+            "failure":failure, "failure_action":"report", "effects":[],
+            "failure_detail":"deadline_exceeded"});
+        let mut diagnostics = Vec::new();
+        let output = response(
+            adapter,
+            "tool.after",
+            "report",
+            fault.clone(),
+            "sdk",
+            &json!({}),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(matches!(output.exit, Exit::Code(0)));
+        assert!(output.stdout.is_empty());
+        assert!(!diagnostics.is_empty());
+        for (key, value) in [
+            ("kind", json!("native")),
+            ("status", json!("unknown")),
+            ("failure", json!("cancelled")),
+            ("failure", json!("cleanup")),
+            ("failure", json!("unknown")),
+            ("failure_action", json!("block")),
+            ("failure_action", json!("withhold_result")),
+            ("effects", json!([{"type":"observe"}])),
+        ] {
+            let mut invalid = fault.clone();
+            invalid[key] = value;
+            assert!(response(
+                adapter,
+                "tool.after",
+                "report",
+                invalid,
+                "sdk",
+                &json!({}),
+                &mut Vec::new()
+            )
+            .is_err());
+        }
+        assert!(response(
+            adapter,
+            "tool.before",
+            "report",
+            fault,
+            "sdk",
+            &json!({}),
+            &mut Vec::new()
+        )
+        .is_err());
+    }
+    for detail in [Value::Null, json!("cancelled"), json!("cleanup")] {
+        assert!(response(
+            adapter,
+            "tool.after",
+            "report",
+            json!({"kind":"provider", "status":"error", "failure":"transport",
+                "failure_detail":detail, "failure_action":"report", "effects":[]}),
+            "sdk",
+            &json!({}),
+            &mut Vec::new()
+        )
+        .is_err());
+    }
+}

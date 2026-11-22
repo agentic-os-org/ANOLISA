@@ -81,12 +81,13 @@ export interface WrapInputOptions<Args extends unknown[] = unknown[]> {
 export interface WrapToolOptions<
   Args extends unknown[] = unknown[],
   Result = unknown,
+  SnapshotItem = Result,
 > {
   name?: string;
   /** Detach an argument with application-specific state for the checked call. */
   snapshotArg?: (value: Args[number]) => Args[number];
-  /** Detach a non-plain tool result for strict-after audit and delivery. */
-  snapshotResult?: (value: Result) => Result;
+  /** Detach a non-plain tool result (or stream chunk) for strict-after audit and delivery. */
+  snapshotResult?: (value: SnapshotItem) => SnapshotItem;
   extractInput?: (...args: Args) => Record<string, unknown>;
   applyInput?: (
     updatedInput: Record<string, unknown>,
@@ -116,6 +117,10 @@ type ImplicitToolResult<R> =
   | Awaited<R>
   | (R extends AsyncIterable<infer Y> ? Y[] : never);
 
+type ImplicitSnapshotItem<R> =
+  | Awaited<R>
+  | (R extends AsyncIterable<infer Y> ? Y : never);
+
 export type MethodKeys<T extends object> = {
   [K in keyof T]: T[K] extends (...args: never[]) => unknown ? K : never;
 }[keyof T] &
@@ -131,8 +136,14 @@ export type ToolMethodMap<T extends object> = {
   [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
     ?
         | string
-        | (WrapToolOptions<A, ImplicitToolResult<R>> & { stream?: false })
-        | (WrapToolOptions<A, StreamResult<Awaited<R>>[]> & { stream: true })
+        | (WrapToolOptions<A, ImplicitToolResult<R>, ImplicitSnapshotItem<R>> & {
+            stream?: false;
+          })
+        | (WrapToolOptions<
+            A,
+            StreamResult<Awaited<R>>[],
+            StreamResult<Awaited<R>>
+          > & { stream: true })
     : never;
 };
 
@@ -201,15 +212,19 @@ export class SourceSession {
   ): (...args: Args) => ImplicitResult<Result>;
   wrapToolStream<Args extends unknown[], Yield>(
     fn: (...args: Args) => AsyncIterable<Yield> | Promise<AsyncIterable<Yield>>,
-    options?: Omit<WrapToolOptions<Args, Yield[]>, "stream">,
+    options?: Omit<WrapToolOptions<Args, Yield[], Yield>, "stream">,
   ): (...args: Args) => AsyncGenerator<Yield, void, unknown>;
   wrapTool<Args extends unknown[], Yield>(
     fn: (...args: Args) => AsyncIterable<Yield> | Promise<AsyncIterable<Yield>>,
-    options: WrapToolOptions<Args, Yield[]> & { stream: true },
+    options: WrapToolOptions<Args, Yield[], Yield> & { stream: true },
   ): (...args: Args) => AsyncGenerator<Yield, void, unknown>;
   wrapTool<Args extends unknown[], Result>(
     fn: (...args: Args) => Result,
-    options?: WrapToolOptions<Args, ImplicitToolResult<Result>> & {
+    options?: WrapToolOptions<
+      Args,
+      ImplicitToolResult<Result>,
+      ImplicitSnapshotItem<Result>
+    > & {
       stream?: false;
     },
   ): (...args: Args) => ImplicitResult<Result>;

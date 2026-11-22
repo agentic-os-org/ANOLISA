@@ -67,16 +67,22 @@ def prepare_audited_result(
     extract_result: Callable[[Any], Any] | None,
     max_bytes: int | None = None,
     isolate_for_extract: bool = False,
+    is_stream: bool = False,
 ) -> Any:
     """Evaluate extract_result once, normalize once, and apply max_bytes to the audited JSON."""
     if extract_result is None:
         projected = (
             deepcopy(value)
-            if (isolate_for_extract and is_plain_json(value))
+            if (isolate_for_extract and not is_stream and is_plain_json(value))
             else normalize_json(value)
         )
     else:
-        source = deepcopy(value) if (isolate_for_extract and is_plain_json(value)) else value
+        if isolate_for_extract and is_stream:
+            source = [deepcopy(item) for item in value]
+        elif isolate_for_extract and is_plain_json(value):
+            source = deepcopy(value)
+        else:
+            source = value
         projected = normalize_json(extract_result(source))
     if max_bytes is not None and json_encoded_bytes(projected) > max_bytes:
         raise AwError("source_stream_result_too_large")
@@ -136,6 +142,8 @@ def buffer_sync_iterator(
             if buffered_bytes > max_stream_bytes:
                 raise AwError("source_stream_result_too_large")
             checked.append(isolated)
+        if buffered_bytes > max_stream_bytes:
+            raise AwError("source_stream_result_too_large")
     finally:
         close_lazy_result(iterator)
     return checked
@@ -261,6 +269,7 @@ async def deliver_strict_result(
                 call_id,
                 max_bytes=max_stream_bytes,
                 isolate_for_extract=True,
+                is_stream=True,
             )
             if "replaced_result" in decision:
                 deliver = apply_stream_result(
@@ -325,6 +334,7 @@ async def run_tool_stream(
                 call_id,
                 max_bytes=max_stream_bytes if strict else None,
                 isolate_for_extract=strict,
+                is_stream=True,
             )
         return None
 
@@ -340,6 +350,8 @@ async def run_tool_stream(
                         item = await stream.read()
                     except StopAsyncIteration:
                         session._require_open()
+                        if buffered_bytes > max_stream_bytes:
+                            raise AwError("source_stream_result_too_large")
                         decision = await session._run_admitted_call(
                             lambda: finish(checked_items, strict=True)
                         )
@@ -463,6 +475,7 @@ def build_tool_wrapper(
         *,
         max_bytes: int | None = None,
         isolate_for_extract: bool = False,
+        is_stream: bool = False,
     ) -> dict[str, Any]:
         with tool_executed():
             projected = prepare_audited_result(
@@ -470,6 +483,7 @@ def build_tool_wrapper(
                 extract_result=extract_result,
                 max_bytes=max_bytes,
                 isolate_for_extract=isolate_for_extract,
+                is_stream=is_stream,
             )
             return await session._after_admitted_tool(
                 tool_name, snapshot, projected, call_id=call_id, normalized=True

@@ -71,16 +71,29 @@ export function jsonEncodedBytes(value) {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+function cloneBufferedChunks(chunks) {
+  return chunks.map((item) => {
+    const copy = cloneStrictPlainJson(item);
+    if (copy === UNCLONEABLE)
+      throw new AwError("source_result_isolation_required");
+    return copy;
+  });
+}
+
 export function prepareAuditedResult(
   value,
-  { extractResult, maxBytes, isolateForExtract = false } = {},
+  { extractResult, maxBytes, isolateForExtract = false, isStream = false } = {},
 ) {
   let raw = value;
   if (extractResult) {
     let source = value;
     if (isolateForExtract) {
-      const detached = cloneStrictPlainJson(value);
-      if (detached !== UNCLONEABLE) source = detached;
+      if (isStream) {
+        source = cloneBufferedChunks(value);
+      } else {
+        const detached = cloneStrictPlainJson(value);
+        if (detached !== UNCLONEABLE) source = detached;
+      }
     }
     raw = extractResult(source);
   }
@@ -144,6 +157,8 @@ function bufferSyncIterable(
         throw new AwError("source_stream_result_too_large");
       checked.push(isolated);
     }
+    if (bufferedBytes > maxStreamBytes)
+      throw new AwError("source_stream_result_too_large");
   } finally {
     closeLazyResult(iterator);
   }
@@ -277,14 +292,15 @@ export async function deliverStrictToolResult(
         callId,
         snapshot,
         signal,
-        { maxBytes: maxStreamBytes, isolateForExtract: true },
+        { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true },
       );
       const deliver = Object.hasOwn(decision, "replaced_result")
         ? applyStreamResult(checkedItems, decision.replaced_result, {
             applyResult,
             customExtract,
           })
-        : checkedItems.map((item) => cloneStrictPlainJson(item));
+        : cloneBufferedChunks(checkedItems);
+      signal?.throwIfAborted();
       return deliver[Symbol.iterator]();
     }
     const isolated = isolateStrictValue(result, {
@@ -336,6 +352,8 @@ export async function* runToolStream({
   function finish(close) {
     return session._runAdmittedCall(async () => {
       await close();
+      if (strictAfter && bufferedBytes > maxStreamBytes)
+        throw new AwError("source_stream_result_too_large");
       if (session._observeAfter()) {
         afterDecision = await observeResult(
           items,
@@ -343,7 +361,7 @@ export async function* runToolStream({
           snapshot,
           signal,
           strictAfter
-            ? { maxBytes: maxStreamBytes, isolateForExtract: true }
+            ? { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true }
             : undefined,
         );
       }
@@ -392,9 +410,10 @@ export async function* runToolStream({
               applyResult,
               customExtract,
             })
-          : items.map((out) => cloneStrictPlainJson(out));
+          : cloneBufferedChunks(items);
       for (const out of deliver) {
         session._requireOpen();
+        signal?.throwIfAborted();
         yield out;
       }
     }
@@ -466,13 +485,14 @@ export function buildToolWrapper(
     callId,
     snapshot,
     signal,
-    { maxBytes, isolateForExtract = false } = {},
+    { maxBytes, isolateForExtract = false, isStream = false } = {},
   ) {
     try {
       const projected = prepareAuditedResult(result, {
         extractResult,
         maxBytes,
         isolateForExtract,
+        isStream,
       });
       return await session._afterAdmittedTool(toolName, snapshot, projected, {
         callId,
