@@ -1742,3 +1742,76 @@ fn a_policy_denied_file_operation_is_stored_as_blocked() {
     assert_eq!(event_result(&io_error), "failed");
     assert_eq!(event_result(&allowed), "allowed");
 }
+
+#[test]
+fn blocked_evidence_does_not_steal_pending_activation_claim() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let action = containment_action(ContainmentLifecycle::Pending);
+    store
+        .upsert_case(&fixture_case(action.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+    store
+        .claim_containment_action(&action)
+        .expect("action should be claimed");
+
+    store
+        .append_containment_evidence(action.case_id, action.binding_id, &[], 95, true, 500)
+        .expect("blocked evidence should append");
+
+    assert_eq!(
+        store
+            .activate_containment_action(action.action_id, action.updated_at_ns, 600)
+            .expect("activation should succeed"),
+        ContainmentActivationResult::Activated,
+        "blocked evidence must not overwrite the action's CAS generation timestamp"
+    );
+    let stored = store
+        .containment_action(action.action_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    assert_eq!(stored.lifecycle_state, ContainmentLifecycle::Active);
+    assert_eq!(stored.blocked_at_ns, Some(500));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mark_containment_blocked_does_not_steal_reconciliation_claim() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let action = containment_action(ContainmentLifecycle::Active);
+    store
+        .upsert_case(&fixture_case(action.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+    store
+        .insert_containment_action(&action)
+        .expect("action should insert");
+
+    let mut claimed = store
+        .claim_containment_reconciliation(&action, 1_000)
+        .expect("claim should query")
+        .expect("due active action should be claimed");
+    let claimed_at_ns = claimed.updated_at_ns;
+
+    store
+        .mark_containment_blocked(action.binding_id, 2_000)
+        .expect("late block during detach should succeed");
+
+    claimed.lifecycle_state = ContainmentLifecycle::Expired;
+    claimed.next_retry_at_ns = None;
+    claimed.updated_at_ns = 2_500;
+    assert!(
+        store
+            .finish_containment_reconciliation(
+                &claimed,
+                ContainmentLifecycle::Expiring,
+                claimed_at_ns,
+            )
+            .expect("finish should execute"),
+        "mark_containment_blocked must not invalidate an active reconciliation claim"
+    );
+    let stored = store
+        .containment_action(action.action_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    assert_eq!(stored.lifecycle_state, ContainmentLifecycle::Expired);
+    assert_eq!(stored.blocked_at_ns, Some(2_000));
+}
