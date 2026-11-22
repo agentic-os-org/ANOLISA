@@ -7,6 +7,7 @@ import argparse
 import csv
 import gzip
 import json
+import logging
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -85,8 +86,11 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
         metric = item.get("metric")
         # a valid JSON record can still carry a non-string metric name; it
         # identifies no known metric, so skip the record instead of raising on
-        # the unhashable LOAD_METRICS lookup below
+        # the unhashable LOAD_METRICS lookup below. Mirror validate_results.py,
+        # which logs each malformed line it drops rather than skipping silently.
         if not isinstance(metric, str):
+            logging.warning(
+                "skipping k6 record with a non-string metric name: %r", metric)
             continue
         data = item.get("data")
         if not isinstance(data, dict):
