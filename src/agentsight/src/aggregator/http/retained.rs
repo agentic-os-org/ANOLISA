@@ -369,8 +369,14 @@ impl ConnectionState {
                     counter.request(request);
                 }
                 match assembly {
-                    super::pending_response::PendingResponse::Headers(source) => {
-                        counter.source(source)
+                    super::pending_response::PendingResponse::Headers {
+                        event,
+                        pending_body,
+                    } => {
+                        counter.source(event);
+                        if let Some((_, body_buffer)) = pending_body {
+                            counter.bytes += body_buffer.capacity();
+                        }
                     }
                     super::pending_response::PendingResponse::Body { response, .. } => {
                         counter.response(response)
