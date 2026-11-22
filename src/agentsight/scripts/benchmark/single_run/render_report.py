@@ -89,6 +89,11 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
     latency: dict[str, list[float]] = {name: [] for name in LOAD_METRICS}
     for item in json_lines(path):
         metric = item.get("metric")
+        # a valid JSON record can still carry a non-string metric name; it
+        # identifies no known metric, so skip the record instead of raising on
+        # the unhashable LOAD_METRICS lookup below
+        if not isinstance(metric, str):
+            continue
         data = item.get("data")
         if not isinstance(data, dict):
             continue
@@ -603,7 +608,7 @@ def main() -> int:
             f"average {agent_load['average_active_streams']:.2f}.",
             f"Received output: {agent_load['received_output_tokens_per_second']:.2f} tokens/s; "
             f"target per agent: {agent_load['target_tokens_per_second_per_agent']:.2f} tokens/s.",
-            "Fixture: synthetic ` x` (one test token per SSE delta). Output rates cover the measurement window; "
+            "Fixture: ` x` verified with `cl100k_base`. Output rates cover the measurement window; "
             "token reconciliation above includes synthetic input usage and drained responses.",
             "\n| Agent | PID | Measured output tok/s | Error |",
             "| ---: | ---: | ---: | --- |",
