@@ -30,6 +30,9 @@ export default function CopyCommand({command, label, copiedLabel}: Props) {
       <button type="button" onClick={copy} aria-label={label}>
         {copied ? copiedLabel : label}
       </button>
+      <span className="commandStatus" role="status">
+        {copied ? copiedLabel : ''}
+      </span>
     </div>
   );
 }
