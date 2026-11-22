@@ -111,6 +111,19 @@ class TestMatchWithTargets:
         # so target (0) is NOT > main (12) — no match
         assert len(evidence) == 0
 
+    def test_target_before_and_after_main_matches(self) -> None:
+        """A sensitive target appearing both before and after the main match must still match."""
+        read_rule = _make_rule(r"\bcat\b", [r"/etc/shadow"])
+        assert _match_with_targets(
+            "F=/etc/shadow cat /etc/shadow", read_rule, Language.BASH
+        ) == ["F=/etc/shadow cat /etc/shadow"]
+        tamper_rule = _make_rule(r">>\s*", [r"/etc/hosts", r"\.ssh/"])
+        assert _match_with_targets(
+            "cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys",
+            tamper_rule,
+            Language.BASH,
+        ) == ["cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys"]
+
     def test_multi_segment_only_matching_included(self) -> None:
         """Only segments where both main + target match are in evidence."""
         rule = _make_rule(r"\bcat\b", [r"/etc/shadow"])
