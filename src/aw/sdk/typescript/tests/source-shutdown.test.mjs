@@ -231,24 +231,38 @@ test(
   "direct submit and beforeTool track occupancy and reject after close",
   { timeout: 3000 },
   async () => {
-    for (const kind of ["submit", "beforeTool"]) {
+    for (const kind of ["submit", "beforeTool", "sessionStart", "turnStop", "sessionEnd"]) {
       const entered = Promise.withResolvers();
       const release = Promise.withResolvers();
-      const { source, tasks } = fakeSource(async (_event, _payload, signal) => {
-        assert.equal(tasks[0].closed, false);
-        entered.resolve();
-        // Ignore abort inside the stub to exercise post-RPC close race as well.
-        void signal;
-        await release.promise;
-        assert.equal(tasks[0].closed, false);
-        return { decision: "continue", coverage: "checked" };
-      });
+      const { source, tasks } = fakeSource(
+        async (_event, _payload, signal) => {
+          assert.equal(tasks[0].closed, false);
+          entered.resolve();
+          // Ignore abort inside the stub to exercise post-RPC close race as well.
+          void signal;
+          await release.promise;
+          assert.equal(tasks[0].closed, false);
+          return { decision: "continue", coverage: "checked" };
+        },
+        {
+          events: [
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "session.start",
+            "turn.stop",
+            "session.end",
+          ],
+        },
+      );
       const session = source.session({ timeoutMs: 100 });
       try {
-        const call =
-          kind === "submit"
-            ? session.submit("hello")
-            : session.beforeTool("shell", { cmd: "ls" });
+        let call;
+        if (kind === "submit") call = session.submit("hello");
+        else if (kind === "beforeTool") call = session.beforeTool("shell", { cmd: "ls" });
+        else if (kind === "sessionStart") call = session.sessionStart();
+        else if (kind === "turnStop") call = session.turnStop("turn1", "stop");
+        else call = session.sessionEnd("done");
         call.catch(() => {});
         await entered.promise;
         await assert.rejects(session.close({ timeoutMs: 100 }), {
@@ -257,6 +271,49 @@ test(
         assert.equal(tasks[0].closed, false);
         release.resolve();
         await assert.rejects(call, { code: "source_session_closed" });
+        await session.close({ timeoutMs: 5000 });
+        assert.equal(tasks[0].closed, true);
+      } finally {
+        release.resolve();
+        await source.close({ timeoutMs: 5000 });
+      }
+    }
+  },
+);
+
+test(
+  "turnStop preserves block decision during session close and caller abort",
+  { timeout: 3000 },
+  async () => {
+    for (const abortCaller of [false, true]) {
+      const entered = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const { source, tasks } = fakeSource(
+        async (event) => {
+          assert.equal(event, "turn.stop");
+          assert.equal(tasks[0].closed, false);
+          entered.resolve();
+          await release.promise;
+          return { decision: "block", coverage: "checked" };
+        },
+        { events: ["input.submit", "tool.before", "tool.after", "turn.stop"] },
+      );
+      const session = source.session({ timeoutMs: 100 });
+      const controller = new AbortController();
+      try {
+        const call = session.turnStop("turn1", "stop", { signal: controller.signal });
+        call.catch(() => {});
+        await entered.promise;
+        if (abortCaller) {
+          controller.abort(new Error("caller cancelled"));
+        } else {
+          await assert.rejects(session.close({ timeoutMs: 100 }), {
+            code: "source_close_pending",
+          });
+        }
+        assert.equal(tasks[0].closed, false);
+        release.resolve();
+        assert.deepEqual(await call, { decision: "block", coverage: "checked" });
         await session.close({ timeoutMs: 5000 });
         assert.equal(tasks[0].closed, true);
       } finally {

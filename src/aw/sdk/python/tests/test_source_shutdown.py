@@ -204,7 +204,7 @@ class SourceShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(source.instance.closed)
 
     async def test_direct_submit_and_before_tool_track_occupancy_and_reject_after_close(self) -> None:
-        for kind in ("submit", "before_tool"):
+        for kind in ("submit", "before_tool", "session_start", "turn_stop", "session_end"):
             with self.subTest(kind=kind):
                 entered, release = asyncio.Event(), asyncio.Event()
 
@@ -215,14 +215,29 @@ class SourceShutdownTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(tasks[0].closed)
                     return {"decision": "continue", "coverage": "checked"}
 
-                source, tasks = fake_source(handler)
+                source, tasks = fake_source(
+                    handler,
+                    events=(
+                        "input.submit",
+                        "tool.before",
+                        "tool.after",
+                        "session.start",
+                        "turn.stop",
+                        "session.end",
+                    ),
+                )
                 session = source.session(timeout_ms=100)
                 try:
-                    call = asyncio.create_task(
-                        session.submit("hello")
-                        if kind == "submit"
-                        else session.before_tool("shell", {"cmd": "ls"})
-                    )
+                    if kind == "submit":
+                        call = asyncio.create_task(session.submit("hello"))
+                    elif kind == "before_tool":
+                        call = asyncio.create_task(session.before_tool("shell", {"cmd": "ls"}))
+                    elif kind == "session_start":
+                        call = asyncio.create_task(session.session_start())
+                    elif kind == "turn_stop":
+                        call = asyncio.create_task(session.turn_stop("turn1", "stop"))
+                    else:
+                        call = asyncio.create_task(session.session_end("done"))
                     await entered.wait()
                     with self.assertRaisesRegex(AwError, "^source_close_pending$"):
                         await session.close(timeout_ms=100)
@@ -235,6 +250,35 @@ class SourceShutdownTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     release.set()
                     await source.close(timeout_ms=5000)
+
+    async def test_turn_stop_preserves_block_decision_during_close(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def handler(event, _):
+            self.assertEqual(event, "turn.stop")
+            self.assertFalse(tasks[0].closed)
+            entered.set()
+            await release.wait()
+            return {"decision": "block", "coverage": "checked"}
+
+        source, tasks = fake_source(
+            handler,
+            events=("input.submit", "tool.before", "tool.after", "turn.stop"),
+        )
+        session = source.session(timeout_ms=100)
+        try:
+            call = asyncio.create_task(session.turn_stop("turn1", "stop"))
+            await entered.wait()
+            with self.assertRaisesRegex(AwError, "^source_close_pending$"):
+                await session.close(timeout_ms=100)
+            self.assertFalse(tasks[0].closed)
+            release.set()
+            self.assertEqual(await call, {"decision": "block", "coverage": "checked"})
+            await session.close(timeout_ms=5000)
+            self.assertTrue(tasks[0].closed)
+        finally:
+            release.set()
+            await source.close(timeout_ms=5000)
 
     async def test_consumer_stream_cleanup_error_not_repeated_and_stop_race_rejects(self) -> None:
         source, tasks = fake_source(lambda *_: asyncio.sleep(0, result={"decision": "continue"}))

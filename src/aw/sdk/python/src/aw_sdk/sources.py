@@ -191,7 +191,11 @@ class SourceSession:
 
         async def emit() -> dict[str, str]:
             assert self.task is not None
-            return await self.task.emit(event, {"session_id": self.session_id, **fields})
+            decision = await self.task.emit(event, {"session_id": self.session_id, **fields})
+            if decision["decision"] == "block":
+                return decision
+            self._require_open()
+            return decision
 
         return await self._run_admitted_call(emit)
 
