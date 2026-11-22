@@ -323,12 +323,13 @@ impl AuditStore {
     ) -> Result<bool, AuditError> {
         let blocked_at_ns = sqlite_time(blocked_at_ns)?;
         let changed = self.connection()?.execute(
+            // Keep `updated_at_ns` exclusive to lifecycle CAS transitions so
+            // kernel denial timestamps cannot invalidate an active claim.
             "UPDATE containment_actions
              SET blocked_at_ns = CASE
                      WHEN blocked_at_ns IS NULL OR blocked_at_ns > ?1 THEN ?1
                      ELSE blocked_at_ns
-                 END,
-                 updated_at_ns = MAX(updated_at_ns, ?1)
+                 END
              WHERE binding_id = ?2",
             params![blocked_at_ns, binding_id.to_string()],
         )?;
