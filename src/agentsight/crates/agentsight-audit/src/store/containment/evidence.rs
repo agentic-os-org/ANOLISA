@@ -95,13 +95,15 @@ impl AuditStore {
             }
         }
         if blocked {
+            // Preserve `containment_actions.updated_at_ns` for reconciliation
+            // CAS leases; `blocked_at_ns` records the earliest kernel denial
+            // and `risk_cases.updated_at_ns` already tracks case activity.
             let changed = transaction.execute(
                 "UPDATE containment_actions
                  SET blocked_at_ns = CASE
                          WHEN blocked_at_ns IS NULL OR blocked_at_ns > ?1 THEN ?1
                          ELSE blocked_at_ns
-                     END,
-                     updated_at_ns = MAX(updated_at_ns, ?1)
+                     END
                  WHERE binding_id = ?2 AND case_id = ?3",
                 params![occurred_at_ns, binding_id.to_string(), case_id.to_string()],
             )?;
