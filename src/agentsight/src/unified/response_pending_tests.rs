@@ -1144,3 +1144,45 @@ fn finish_partial_accepts_buffered_partial_body() {
         panic!("expected HttpComplete");
     }
 }
+
+#[test]
+fn persist_drained_pending_delivers_ffi_without_sqlite_or_pending_info() {
+    let mut aggregator = Aggregator::new();
+    let body = r#"{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 74\r\n\r\n"
+        )
+        .is_empty()
+    );
+
+    let completed = aggregator.http_mut().complete_pid_partial_responses(PID);
+    assert_eq!(completed.len(), 1);
+    let analysis = Analyzer::new().analyze_aggregated(&completed[0]);
+    let (output, _pending) = GenAIBuilder::new().build_with_pending(
+        &analysis,
+        &ResponseSessionMapper::new(),
+        &HashMap::new(),
+    );
+    assert!(
+        output
+            .events
+            .iter()
+            .any(|event| matches!(event, GenAISemanticEvent::LLMCall(_)))
+    );
+
+    let (ffi_sender, ffi_rx) = crate::ffi::FfiEventSender::test_channel();
+    super::persist_drained_genai_events(None, &output.events, None, &[], Some(&ffi_sender));
+
+    assert!(
+        matches!(ffi_rx.try_recv(), Some(crate::ffi::FfiEvent::Llm(_))),
+        "FFI mode without SQLite or pending_info must still receive drained CleanExitPartial LLMCalls"
+    );
+}
