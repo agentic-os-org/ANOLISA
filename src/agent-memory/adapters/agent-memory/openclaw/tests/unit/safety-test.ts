@@ -141,4 +141,18 @@ describe("wrapMemoryResultsForPrompt", () => {
     assert.ok(wrapped.includes("SUSPICIOUS"));
     assert.ok(wrapped.includes("prompt-injection"));
   });
+
+  it("tolerates null and malformed search hits", () => {
+    const hits = [
+      null,
+      "stray",
+      { path: "notes/a.md", snippet: "ok", score: null, suspicious: "yes" },
+      { path: null, snippet: 123, score: Number.POSITIVE_INFINITY, suspicious: true },
+    ];
+    const wrapped = wrapMemoryResultsForPrompt(JSON.stringify(hits));
+    assert.ok(wrapped.includes("1. ok [path: notes/a.md, score: n/a]"));
+    assert.ok(wrapped.includes("2.  [path: , score: n/a [SUSPICIOUS]]"));
+    assert.ok(wrapped.includes("1 result(s) matched prompt-injection heuristics"));
+    assert.equal(wrapMemoryResultsForPrompt("[null, 42]"), "");
+  });
 });
