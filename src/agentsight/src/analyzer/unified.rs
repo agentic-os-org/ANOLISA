@@ -839,31 +839,49 @@ impl Analyzer {
             // a single record.
             let text = String::from_utf8_lossy(extra);
             let reassembled = SSEParser::parse_stream(&text);
-            usage = reassembled.events.iter().fold(usage, |usage, event| {
-                let parsed = self.token.parse_data(&event.data);
-                let event_json = serde_json::from_str::<serde_json::Value>(&event.data).ok();
-                match parsed {
-                    Some(parsed) => match event_json {
-                        Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
-                        None => crate::analyzer::token::merge_usage(usage, parsed),
-                    },
-                    None => usage,
+            // If the continuation buffer ended before the final blank-line
+            // separator (for example, a split terminal `message_delta` at
+            // EOF/drain), `SSEParser::parse_stream` leaves that trailing frame
+            // in `reassembled.remaining`. Re-parse its `data:` payload as an
+            // event first, and otherwise fall back to scanning only
+            // `reassembled.remaining` so already-parsed events are never
+            // re-scanned while split terminal counters still merge into `usage`.
+            let tail = (!reassembled.remaining.trim().is_empty())
+                .then(|| SSEParser::parse_stream(&format!("{}\n\n", reassembled.remaining)));
+            let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
+
+            usage =
+                reassembled
+                    .events
+                    .iter()
+                    .chain(tail_events.iter())
+                    .fold(usage, |usage, event| {
+                        let parsed = self.token.parse_data(&event.data);
+                        let event_json =
+                            serde_json::from_str::<serde_json::Value>(&event.data).ok();
+                        match parsed {
+                            Some(parsed) => match event_json {
+                                Some(event_json) => {
+                                    merge_usage_from_event(usage, parsed, &event_json)
+                                }
+                                None => crate::analyzer::token::merge_usage(usage, parsed),
+                            },
+                            None => usage,
+                        }
+                    });
+
+            if !reassembled.remaining.trim().is_empty() && tail_events.is_empty() {
+                if let Some(parsed) = self.token.parse_data(&reassembled.remaining) {
+                    usage = crate::analyzer::token::merge_usage(usage, parsed);
                 }
-            });
+            }
+
             if usage.is_none() {
-                // Last resort: a regex-free scan over the raw buffer text. It
-                // reads the number after a usage field name in arbitrary text,
-                // so it only runs when nothing parseable was recovered — over a
-                // stream that already produced exact counters it could only add
-                // noise.
-                usage = self.token.parse_data(&text);
-                if usage.is_none() {
-                    log::debug!(
-                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                        extra.len(),
-                        reassembled.events.len(),
-                    );
-                }
+                log::debug!(
+                    "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                    extra.len(),
+                    reassembled.events.len(),
+                );
             }
         }
 
@@ -2346,6 +2364,42 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert_eq!(record.input_tokens, 6);
         assert_eq!(record.output_tokens, 241);
         assert_eq!(record.total_tokens(), 20598);
+    }
+
+    #[test]
+    fn unterminated_continuation_terminal_delta_merges_with_start() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
+        )];
+        // Stream ended after message_delta before a trailing `\n\n` separator:
+        // `SSEParser::parse_stream` leaves this in `reassembled.remaining`.
+        let continuation = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":6,\"output_tokens\":42,\"cache_creation_input_tokens\":500}}";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("unterminated terminal delta in remaining must merge");
+
+        assert_eq!(record.input_tokens, 6);
+        assert_eq!(record.output_tokens, 42);
+        assert_eq!(record.cache_creation_tokens, Some(500));
+    }
+
+    #[test]
+    fn truncated_continuation_delta_raises_placeholder_output_tokens() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
+        )];
+        // Truncated JSON inside the un-delimited tail of continuation_bytes.
+        let continuation = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("truncated tail delta in remaining must update output_tokens");
+
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
     }
 
     #[test]
