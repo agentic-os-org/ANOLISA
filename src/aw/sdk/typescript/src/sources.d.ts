@@ -129,9 +129,9 @@ type SnapshotItemOf<T> = T extends EagerIterable
   ? T
   : T extends AsyncIterable<infer Y>
     ? Y
-    : T extends Iterable<infer Y>
+    : T extends { next(): IteratorResult<infer Y, unknown> }
       ? Y
-      : T extends { next(): IteratorResult<infer Y, unknown> }
+      : T extends Iterable<infer Y>
         ? Y
         : T;
 
