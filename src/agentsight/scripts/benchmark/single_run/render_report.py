@@ -612,7 +612,7 @@ def main() -> int:
             f"average {agent_load['average_active_streams']:.2f}.",
             f"Received output: {agent_load['received_output_tokens_per_second']:.2f} tokens/s; "
             f"target per agent: {agent_load['target_tokens_per_second_per_agent']:.2f} tokens/s.",
-            "Fixture: ` x` verified with `cl100k_base`. Output rates cover the measurement window; "
+            "Fixture: synthetic ` x` (one test token per SSE delta). Output rates cover the measurement window; "
             "token reconciliation above includes synthetic input usage and drained responses.",
             "\n| Agent | PID | Measured output tok/s | Error |",
             "| ---: | ---: | ---: | --- |",
