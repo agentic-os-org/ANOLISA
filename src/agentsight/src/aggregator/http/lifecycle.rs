@@ -48,8 +48,11 @@ impl RemovedConnection {
                     if let Some(request) = request {
                         metadata_request(request);
                     }
-                    if let PendingResponse::Body { response, .. } = assembly {
-                        metadata_response(response);
+                    match assembly {
+                        PendingResponse::Body { response, .. } => metadata_response(response),
+                        PendingResponse::Headers { pending_body, .. } => {
+                            *pending_body = None;
+                        }
                     }
                 }
                 ConnectionState::Idle => {}
@@ -115,10 +118,16 @@ impl RemovedConnection {
                     response.completion_timestamp_ns = Some(end_timestamp_ns);
                     pair_or_response(id, request, response, false)
                 }
-                PendingResponse::Headers(_) => AggregatedResult::RequestOnly {
-                    connection_id: id,
-                    request: request?,
-                },
+                PendingResponse::Headers { pending_body, .. } => {
+                    let mut request = request?;
+                    if let Some((_, body_buffer)) = pending_body {
+                        request.set_reassembled_body(body_buffer);
+                    }
+                    AggregatedResult::RequestOnly {
+                        connection_id: id,
+                        request,
+                    }
+                }
             },
         };
         metrics::counter!("agentsight_http_abandoned_emitted_total", "reason" => reason.as_str())
