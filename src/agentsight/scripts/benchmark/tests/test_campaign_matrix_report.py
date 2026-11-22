@@ -186,3 +186,139 @@ def test_final_report_excludes_unusable_checks_from_the_denominator(
     )
     report = (tmp_path / "final-report.md").read_text()
     assert "| 通过命令 | 4/4 |" in report
+
+
+@pytest.mark.parametrize("bad_evaluation", [["PASS"], "PASS", 1, True])
+def test_non_object_evaluation_preserves_inventory_and_matrix_counts(
+    tmp_path: Path, bad_evaluation: object
+) -> None:
+    import aggregate_report
+
+    items = [
+        (
+            tmp_path / "runs" / "trial-1" / "run-result.json",
+            {
+                "scenario": "matrix",
+                "version": "baseline",
+                "label": "qps-100",
+                "repetition": 1,
+                "qps": 100,
+                "summary": {},
+                "evaluation": {"verdict": "PASS", "missing": [], "failed": []},
+            },
+        ),
+        (
+            tmp_path / "runs" / "trial-2" / "run-result.json",
+            {
+                "scenario": "matrix",
+                "version": "baseline",
+                "label": "qps-100",
+                "repetition": 2,
+                "qps": 100,
+                "summary": {},
+                "evaluation": bad_evaluation,
+            },
+        ),
+    ]
+
+    aggregate_report.write_run_inventory(tmp_path, items)
+    with (tmp_path / "run-inventory.csv").open(encoding="utf-8", newline="") as handle:
+        inventory_rows = list(csv.DictReader(handle))
+    assert len(inventory_rows) == 2
+    assert inventory_rows[0]["verdict"] == "PASS"
+    assert inventory_rows[1]["verdict"] == ""
+    assert inventory_rows[1]["missing_gates"] == "[]"
+    assert inventory_rows[1]["failed_gates"] == "[]"
+
+    rows = aggregate_report.matrix_rows(items)
+    assert len(rows) == 1
+    assert rows[0]["repetitions"] == 2
+    assert rows[0]["pass_count"] == 1
+
+
+def test_matrix_report_cli_handles_non_object_evaluation_end_to_end(
+    tmp_path: Path,
+) -> None:
+    settings, items, capacities, _, _, regression = complete_formal_evidence(1)
+    config = json.loads((BENCHMARK / "campaign/campaign.example.json").read_text())
+    for section, values in settings.items():
+        config[section].update(values)
+    config["thresholds"] = thresholds()
+    config["recovery"].update(tolerance_ratio=0.1, recovery_window_seconds=2)
+    config["fault"]["repetitions_per_case"] = 1
+    config_path = tmp_path / "campaign.json"
+    config_path.write_text(json.dumps(config))
+    (tmp_path / "manifest.json").write_text("{}")
+    (tmp_path / "regression.json").write_text(json.dumps(regression))
+    for version, capacity in capacities.items():
+        (tmp_path / f"capacity-{version}.json").write_text(json.dumps(capacity))
+    for index, (_, run) in enumerate(items):
+        run["summary"] = summary()
+        run.setdefault("evaluation", {"verdict": "PASS"})
+        run["started_at_unix"] = 0
+        path = tmp_path / "runs" / f"run-{index}" / "run-result.json"
+        path.parent.mkdir(parents=True)
+        if run["scenario"] == "recovery" and run["label"] == "recover":
+            write_recovery_artifacts(path)
+        if run["scenario"] == "fault":
+            import campaign_evidence
+
+            measurement = path.parent / "measurement"
+            measurement.mkdir()
+            (measurement / "fault-results.json").write_text(
+                json.dumps(
+                    {
+                        "outcomes": {
+                            name: {"handled": 1} for name in campaign_evidence.FAULT_CASES
+                        },
+                        "server_healthy_after": True,
+                        "sse_truncation_verified": True,
+                        "process_alive_before": True,
+                        "process_alive_after": True,
+                    }
+                )
+            )
+        if index == 0:
+            run["evaluation"] = ["PASS"]
+        path.write_text(json.dumps(run))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK / "campaign/aggregate_report.py"),
+            "--campaign",
+            str(config_path),
+            "--results",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    final = json.loads((tmp_path / "final-summary.json").read_text())
+    assert final["verdict"] == "INCONCLUSIVE"
+    assert "baseline matrix 100 QPS rep 1 did not pass" in final["issues"]
+    with (tmp_path / "run-inventory.csv").open(encoding="utf-8", newline="") as handle:
+        inventory_rows = list(csv.DictReader(handle))
+    target = next(r for r in inventory_rows if r["result_path"] == "runs/run-0/run-result.json")
+    assert target["verdict"] == ""
+    assert target["missing_gates"] == "[]"
+    assert target["failed_gates"] == "[]"
+
+
+def test_audit_campaign_handles_non_object_soak_evaluation() -> None:
+    import campaign_evidence
+
+    settings, items, capacities, recovery, faults, regression = complete_formal_evidence(1)
+    for _, run in items:
+        run["summary"] = summary()
+        run.setdefault("evaluation", {"verdict": "PASS"})
+        run["started_at_unix"] = 0
+        if run["scenario"] == "soak" and run["version"] == "baseline":
+            run["evaluation"] = "PASS"
+
+    issues = campaign_evidence.audit_campaign(
+        settings, items, capacities, recovery, faults, regression
+    )
+    assert "baseline soak run did not pass the frozen window" in issues
