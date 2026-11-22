@@ -12,8 +12,8 @@ export function validateCronExpr(expr: string): boolean {
 }
 
 // Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
-const MARKER_RE_QUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+'([^']+)'/;
-const MARKER_RE_UNQUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+(\S+)/;
+const MARKER_RE_QUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*?-w\s+'((?:[^']|'\\'')*)'(?=\s|$)/;
+const MARKER_RE_UNQUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*?-w\s+(\S+)/;
 
 function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
@@ -103,7 +103,7 @@ async function writeCrontab(lines: string[]): Promise<boolean> {
 
 function extractWorkspace(line: string): string | null {
   let m = MARKER_RE_QUOTED.exec(line);
-  if (m) return m[1];
+  if (m) return m[1].replace(/'\\''/g, "'");
   m = MARKER_RE_UNQUOTED.exec(line);
   if (m) return m[1];
   return null;

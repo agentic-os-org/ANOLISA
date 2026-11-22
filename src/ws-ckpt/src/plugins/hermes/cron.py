@@ -15,8 +15,8 @@ _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
 
 # Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
 _CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
-_MARKER_RE = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+'([^']+)'")
-_MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+(\S+)")
+_MARKER_RE = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*?-w\s+'((?:[^']|'\\'')*)'(?=\s|$)")
+_MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*?-w\s+(\S+)")
 
 
 def _build_cron_line(workspace: str, schedule: str, binary: str) -> str:
@@ -64,7 +64,7 @@ def _write_crontab(lines: List[str]) -> bool:
 def _extract_workspace(line: str) -> Optional[str]:
     m = _MARKER_RE.search(line)
     if m:
-        return m.group(1)
+        return m.group(1).replace("'\\''", "'")
     m = _MARKER_RE_UNQUOTED.search(line)
     if m:
         return m.group(1)
