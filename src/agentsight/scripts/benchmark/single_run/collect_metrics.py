@@ -17,6 +17,7 @@ from pathlib import Path
 FIELDS = (
     "timestamp",
     "monotonic_timestamp",
+    "counter_timestamp",
     "cpu_interval_seconds",
     "input_qps",
     "process_alive",
@@ -334,6 +335,7 @@ def sample(
         "completed": "",
     }
     row.update(read_internal_metrics(metrics))
+    row["counter_timestamp"] = time.monotonic()
     if identity is not None and read_process_identity(pid) != identity:
         # A process can exit and its PID can be reused between procfs reads.
         row["process_alive"] = 0
@@ -395,6 +397,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     if args.start_file is not None:
+        baseline_time = time.monotonic()
+        baseline_row, _, _ = sample(
+            args.pid,
+            read_cpu_ticks(args.pid),
+            baseline_time,
+            args.input_qps,
+            args.metrics_file,
+            identity,
+        )
         deadline = time.monotonic() + 65
         while not args.start_file.exists() and not STOP:
             if time.monotonic() > deadline:
@@ -467,6 +478,17 @@ def main() -> int:
         )
         writer.writerow(row)
         handle.flush()
+    # Persist the baseline after sampling so file I/O cannot shorten the measurement window.
+    if args.start_file is not None:
+        write_json(
+            Path(args.output).with_name("metrics-baseline.json"),
+            {
+                "monotonic_timestamp": baseline_row.get("monotonic_timestamp"),
+                "counter_timestamp": baseline_row.get("counter_timestamp"),
+                "ring_buffer_dropped": baseline_row.get("ring_buffer_dropped", ""),
+                "channel_dropped": baseline_row.get("channel_dropped", ""),
+            },
+        )
     return 0
 
 

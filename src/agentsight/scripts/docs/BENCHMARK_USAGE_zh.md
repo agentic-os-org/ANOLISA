@@ -159,11 +159,11 @@ bash scripts/benchmark/single_run/resource_run.sh \
 
 A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。A/B HTML 从 `resource-summary.json` 读取权威 RSS/CPU 统计和 `valid` 标记；结果无效或未验证时页面标记为 INVALID，不输出改善判定。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告、日志和自包含的 `metrics-report.html` 评估报告位于 `run/`，A/B 则位于 `before/`、`after/`。
 
-只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且可用的探针计数未发现丢事件时，结果才是 VALID。报告分别打印 Ring Buffer 和用户态通道丢事件数；计数覆盖全部探针类型，不能据此确定丢失事件的类型。即使全部请求的 usage 正确，发现丢事件仍判为 INVALID，不计算优化比例。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
+只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且正式负载窗口和尾部收流阶段没有丢事件时，结果才是 VALID。`probe_drops` 保留 Ring Buffer 和用户态通道的累计计数以兼容旧报告，`probe_drop_phases` 将每类计数拆分为 `before_load`、`load`、`tail` 和 `unattributed`。只有能明确证明发生在负载开始之前的丢事件才仅作诊断；`load`、`tail` 或 `unattributed` 为正，或计数器复位（包括归零）时，都会判为 INVALID，即使全部请求的 usage 正确。基线丢包计数为正时，基线时间戳缺失或迟到同样判为 INVALID；基线计数为空或为零时，即使时间戳缺失或迟到，也不单独导致 INVALID。基线的 `counter_timestamp` 必须严格早于 `agents/start.json.start`，它在计数读取完成后立即记录，与 CPU 采样使用的 `monotonic_timestamp` 相互独立。计数覆盖全部探针类型，不能据此确定丢失事件的类型。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
 
 此一键脚本默认 32 个 Agent、每路 100 tok/s、60 秒；仅负载的 `run.sh` 仍默认 900 秒。支持上面的负载、探针发现、端口和安全限制参数，完整列表见 `resource_run.sh --help`。RSS 和 CPU 约每秒采样一次，覆盖尾部收流。主统计使用 `agents/start.json` 中的单调时钟起止窗口，尾部收流单独保存在每轮的 `tail` 对象和文本报告中。
 
-平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
+平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp`、`counter_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
 
 ### 7.1 使用最小 C 宿主测量 FFI 动态库
 
