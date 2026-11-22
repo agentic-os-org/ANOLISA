@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+### Added
+
+- A release catalog in `packaging/released-skills.txt` now decides which Skill
+  directories are installed from source, packed into the raw archives and the
+  RPM source package, and advertised by the COSH extensions, so a Skill can be
+  added to the source tree for trial without being delivered to installed
+  agents before a maintainer approves it (#10023)
+- The checked-in COSH root and per-category `cosh-extension.json` Skill lists are
+  generated from that catalog by `packaging/cosh_manifests.py --write`, and CI
+  fails when they drift from it (#10023)
+
+### Changed
+
+- `make -C src/os-skills install` installs the released Skill set only and now
+  requires Python 3.6 or newer, checking the interpreter before writing any
+  file; set `PYTHON3=/path/to/python3` to choose it (#10023)
+- Packaged OpenClaw and Hermes adapter registrations are filtered against the
+  catalog instead of being copied verbatim (#10023)
+
+### Fixed
+
+- The `setup-mcp` skill refuses to merge into a configuration file it cannot
+  decode as UTF-8 instead of rewriting it from an empty one, which had dropped
+  every setting outside `mcpServers`; a malformed but decodable file is backed
+  up to `<path>.bak` first, and the existing file mode and symlink target are
+  preserved (#9769)
+- The `install-openclaw` skill reports an undecodable configuration as invalid
+  JSON and ignores an unreadable cached pairing or device-auth file — moving the
+  device auth aside — instead of failing with a traceback (#9769)
+
 ## [0.7.0] - 2026-11-12
 
 ### Removed

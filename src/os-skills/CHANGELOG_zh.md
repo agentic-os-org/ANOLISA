@@ -9,6 +9,30 @@
 
 ## [未发布]
 
+## [0.8.0] - 2026-11-22
+
+### 新增
+
+- 引入发布目录清单 `packaging/released-skills.txt`，统一决定哪些技能目录参与源码安装、
+  raw 归档与 RPM 源码包，以及 COSH 扩展对外声明的技能集合。新技能可先留在源码树中
+  供手动试用，维护者登记后再进入默认交付（#10023）
+- 仓库内 COSH 根级与分类 `cosh-extension.json` 的技能列表由该清单生成
+  （`packaging/cosh_manifests.py --write`），与清单不一致时 CI 直接失败（#10023）
+
+### 变更
+
+- `make -C src/os-skills install` 只安装已发布的技能集合，并要求 Python 3.6 及以上；
+  写入任何文件前先校验解释器，可用 `PYTHON3=/path/to/python3` 指定（#10023）
+- 打包时按清单过滤 OpenClaw 与 Hermes 的适配注册，不再原样复制（#10023）
+
+### 修复
+
+- `setup-mcp` 技能在配置文件无法按 UTF-8 解码时拒绝合并，不再用空配置重写——此前会
+  删掉 `mcpServers` 之外的所有设置；语法非法但可解码的文件会先备份为 `<path>.bak`，
+  并保留原文件权限与符号链接目标（#9769）
+- `install-openclaw` 技能将不可解码的配置报告为 JSON 非法，对不可读的缓存配对文件与
+  device-auth 文件改为忽略（device-auth 移到一旁），不再以异常退出（#9769）
+
 ## [0.7.0] - 2026-11-12
 
 ### 移除
