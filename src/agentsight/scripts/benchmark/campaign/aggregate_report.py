@@ -144,11 +144,18 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
     grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     for _, run in items:
         if run.get("scenario") == "matrix":
+            raw_qps = run.get("qps")
             try:
-                qps = int(run["qps"])
-            except (KeyError, TypeError, ValueError, OverflowError):
-                # Keep the record in the inventory and final audit, but do not
-                # invent a load level for unusable evidence in comparisons.
+                qps = int(raw_qps)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            # Keep malformed levels in the inventory without turning them into
+            # another load level in the performance comparison.
+            if (
+                qps <= 0
+                or isinstance(raw_qps, bool)
+                or (isinstance(raw_qps, float) and raw_qps != qps)
+            ):
                 continue
             version = run.get("version")
             if not isinstance(version, str):
