@@ -9,6 +9,12 @@
 
 ## [未发布]
 
+### 新增
+
+- `redis-admin` 技能：面向运行中的 Redis/Valkey 实例的只读诊断、
+  内存与淘汰治理、持久化与 fork 健康检查、复制观察
+  （[#7984](https://github.com/agentic-os-org/ANOLISA/issues/7984)）。
+
 ## [0.7.0] - 2026-11-12
 
 ### 移除
