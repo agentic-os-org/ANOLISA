@@ -3,6 +3,7 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import {runInNewContext} from 'node:vm';
 import {
   documentSidebar, footerLinks, insertNavigation, loadNavigation, navbarItems,
   navigationTranslations, userGuideSidebar, websiteSidebars,
@@ -132,7 +133,16 @@ test('website configuration rejects ambiguous routes and documents assigned to m
   await assert.rejects(loadNavigation(root), /duplicate sidebar document developer-guide\/sdk\/tokenless\/index/);
 });
 
-test('old routes redirect directly to flat destinations with locale, prefix, and fragments', async (t) => {
+function followRedirect(html, href) {
+  const location = new URL(href);
+  let replacement;
+  location.replace = (url) => { replacement = url; };
+  const [, script] = html.match(/<script>([\s\S]+?)<\/script>/);
+  runInNewContext(script, {URL, location});
+  return replacement;
+}
+
+test('old routes redirect directly to flat destinations with locale, prefix, query, and fragments', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'manual-redirect-'));
   t.after(() => rm(root, {recursive: true, force: true}));
   const redirects = await loadDocumentRedirects();
@@ -162,7 +172,15 @@ test('old routes redirect directly to flat destinations with locale, prefix, and
     const redirect = await readFile(path.join(root, locale,
       'docs/user-guide/user-entrypoint/cosh-ng/quickstart/index.html'), 'utf8');
     assert.ok(redirect.includes(`${prefix}docs/user-guide/cosh-ng/#quick-start`));
-    assert.ok(redirect.includes('if(location.hash)target.hash=location.hash'));
+    const origin = 'https://docs.example';
+    const oldPath = `${origin}${prefix}docs/user-guide/user-entrypoint/cosh-ng/quickstart/`;
+    const newPath = `${origin}${prefix}docs/user-guide/cosh-ng/`;
+    const query = '?tag=a%2Fb&tag=c&empty=';
+    assert.equal(followRedirect(redirect, `${oldPath}${query}`), `${newPath}${query}#quick-start`);
+    assert.equal(followRedirect(redirect, `${oldPath}${query}#steps`), `${newPath}${query}#steps`);
+    const external = await readFile(path.join(root, locale, 'docs/user-guide/runtime/blaze/index.html'), 'utf8');
+    assert.equal(followRedirect(external, `${origin}${prefix}docs/user-guide/runtime/blaze/${query}`),
+      'https://github.com/agentic-os-org/blaze-rs');
     const landing = await readFile(path.join(root, locale, 'docs/index.html'), 'utf8');
     assert.ok(landing.includes(`${prefix}docs/user-guide/`));
     const aw = await readFile(path.join(root, locale, 'docs/user-guide/user-entrypoint/aw/index.html'), 'utf8');
