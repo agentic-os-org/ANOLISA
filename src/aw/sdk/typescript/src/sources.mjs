@@ -134,9 +134,17 @@ export class SourceSession {
       throw new AwError("semantic_event_unavailable");
     const combined = this._combineSignal(signal);
     await this.prepare(combined);
-    return this._runAdmittedCall(() =>
-      this.task.emit(event, { session_id: this.sessionId, ...fields }, combined),
-    );
+    return this._runAdmittedCall(async () => {
+      const decision = await this.task.emit(
+        event,
+        { session_id: this.sessionId, ...fields },
+        combined,
+      );
+      if (decision.decision === "block") return decision;
+      this._requireOpen();
+      signal?.throwIfAborted();
+      return decision;
+    });
   }
 
   async sessionStart({ signal } = {}) {
