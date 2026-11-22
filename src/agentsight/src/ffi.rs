@@ -115,7 +115,30 @@ impl SecurityDropState {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct TestFfiReceiver(mpsc::Receiver<QueuedEvent>);
+
+#[cfg(test)]
+impl TestFfiReceiver {
+    pub(crate) fn try_recv(&self) -> Option<FfiEvent> {
+        self.0.try_recv().ok().map(|queued| *queued.event)
+    }
+}
+
 impl FfiEventSender {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, TestFfiReceiver) {
+        let (tx, rx) = mpsc::sync_channel(16);
+        let sender = Self {
+            tx,
+            eventfd: -1,
+            enable_raw_https: false,
+            budget: QueueBudget::new(0),
+            security_drops: Arc::new(SecurityDropState::default()),
+        };
+        (sender, TestFfiReceiver(rx))
+    }
+
     pub(crate) fn raw_https_enabled(&self) -> bool {
         self.enable_raw_https
     }
