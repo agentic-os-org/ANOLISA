@@ -117,9 +117,25 @@ type ImplicitToolResult<R> =
   | Awaited<R>
   | (R extends AsyncIterable<infer Y> ? Y[] : never);
 
-type ImplicitSnapshotItem<R> =
-  | Awaited<R>
-  | (R extends AsyncIterable<infer Y> ? Y : never);
+type EagerIterable =
+  | string
+  | String
+  | readonly unknown[]
+  | ArrayBufferView
+  | ReadonlyMap<unknown, unknown>
+  | ReadonlySet<unknown>;
+
+type SnapshotItemOf<T> = T extends EagerIterable
+  ? T
+  : T extends AsyncIterable<infer Y>
+    ? Y
+    : T extends Iterable<infer Y>
+      ? Y
+      : T extends { next(): IteratorResult<infer Y, unknown> }
+        ? Y
+        : T;
+
+type ImplicitSnapshotItem<R> = SnapshotItemOf<Awaited<R>>;
 
 export type MethodKeys<T extends object> = {
   [K in keyof T]: T[K] extends (...args: never[]) => unknown ? K : never;
@@ -139,11 +155,9 @@ export type ToolMethodMap<T extends object> = {
         | (WrapToolOptions<A, ImplicitToolResult<R>, ImplicitSnapshotItem<R>> & {
             stream?: false;
           })
-        | (WrapToolOptions<
-            A,
-            StreamResult<Awaited<R>>[],
-            StreamResult<Awaited<R>>
-          > & { stream: true })
+        | (Awaited<R> extends AsyncIterable<infer Y>
+            ? WrapToolOptions<A, Y[], Y> & { stream: true }
+            : never)
     : never;
 };
 

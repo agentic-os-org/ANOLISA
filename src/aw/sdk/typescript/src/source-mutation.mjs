@@ -236,8 +236,21 @@ export function validateStreamLimits(maxStreamItems, maxStreamBytes) {
     throw new AwError("source_invalid_stream_limit");
 }
 
+function* replayBufferedSync(deliver, signal, session) {
+  try {
+    for (const out of deliver) {
+      session?._requireOpen();
+      signal?.throwIfAborted();
+      yield out;
+    }
+  } catch (error) {
+    throw toolExecuted(error);
+  }
+}
+
 export async function deliverToolResult(session, result, opts) {
-  if (session._strictAfter()) return deliverStrictToolResult(result, opts);
+  if (session._strictAfter())
+    return deliverStrictToolResult(result, { ...opts, session });
   if (!session._observeAfter()) return result;
   const decision = await opts.observeResult(
     result,
@@ -259,6 +272,7 @@ export async function deliverToolResult(session, result, opts) {
 export async function deliverStrictToolResult(
   result,
   {
+    session,
     observeResult,
     callId,
     snapshot,
@@ -300,8 +314,9 @@ export async function deliverStrictToolResult(
             customExtract,
           })
         : cloneBufferedChunks(checkedItems);
+      session?._requireOpen();
       signal?.throwIfAborted();
-      return deliver[Symbol.iterator]();
+      return replayBufferedSync(deliver, signal, session);
     }
     const isolated = isolateStrictValue(result, {
       snapshotResult,

@@ -361,6 +361,33 @@ test(
             },
             (err) => err?.code === "source_result_isolation_required" && err.toolExecuted === true,
           );
+
+          // 9) P2: Sync buffered replay iterator honors caller cancellation between next() calls.
+          const abortController = new AbortController();
+          const cancelReason = new Error("caller_cancelled_sync_replay");
+          const cancellableSync = session.wrapTool(
+            function* () {
+              yield { part: 1 };
+              yield { part: 2 };
+            },
+            {
+              name: "sync_cancel",
+              bufferStream: true,
+              extractInput: (req) => req,
+              extractSignal: (_req, sig) => sig,
+            },
+          );
+          const replay = await cancellableSync(
+            { command: "ok" },
+            abortController.signal,
+          );
+          assert.deepEqual(replay.next(), { value: { part: 1 }, done: false });
+          abortController.abort(cancelReason);
+          assert.throws(
+            () => replay.next(),
+            (err) => err === cancelReason && err.toolExecuted === true,
+          );
+          assert.deepEqual(replay.next(), { value: undefined, done: true });
         });
       } finally {
         await source.close();

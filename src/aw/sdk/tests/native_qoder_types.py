@@ -122,6 +122,21 @@ def main() -> None:
             ' tools.then();\n'
             ' for await (const chunk of langSession.wrapInputStream(factory)("go")) chunk.toUpperCase();\n'
             ' for await (const chunk of langSession.wrapTool(factory, {stream:true})("go")) chunk.toUpperCase();\n'
+            ' function* syncStream() { yield { text: "ok" }; }\n'
+            ' const syncWrapped = langSession.wrapTool(syncStream, { bufferStream: true, snapshotResult: (chunk) => ({ text: chunk.text }) });\n'
+            ' for (const chunk of await syncWrapped()) chunk.text.toUpperCase();\n'
+            ' langSession.instrument({ syncStream }, { toolMethods: { syncStream: { bufferStream: true, snapshotResult: (chunk) => ({ text: chunk.text }) } } }).restore();\n'
+            ' const syncIter = (): Iterator<{ text: string }> => ({ next: () => ({ done: true, value: undefined }) });\n'
+            ' void langSession.wrapTool(syncIter, { bufferStream: true, snapshotResult: (chunk) => ({ text: chunk.text }) });\n'
+            ' const syncIterable = (): Iterable<{ text: string }> => ({ [Symbol.iterator]: () => syncIter() });\n'
+            ' void langSession.wrapTool(syncIterable, { bufferStream: true, snapshotResult: (chunk) => ({ text: chunk.text }) });\n'
+            ' // @ts-expect-error Sync stream snapshotResult receives a chunk, not the Generator.\n'
+            ' langSession.wrapTool(syncStream, { bufferStream: true, snapshotResult: (chunk) => { void chunk.next; return chunk; } });\n'
+            ' void langSession.wrapTool(() => "ok", { snapshotResult: (s) => s.trim() });\n'
+            ' void langSession.wrapTool(() => ["a"], { snapshotResult: (arr) => arr.map((x) => x.toUpperCase()) });\n'
+            ' void langSession.wrapTool(() => new Map<string, number>(), { snapshotResult: (m) => { void m.get("a"); return new Map(m.entries()); } });\n'
+            ' void langSession.wrapTool(() => new Set<string>(), { snapshotResult: (s) => { void s.has("a"); return new Set(s); } });\n'
+            ' void langSession.wrapTool(() => new Uint8Array(2), { snapshotResult: (b) => { void b.byteLength; return new Uint8Array(b); } });\n'
             " await langSession.close({timeoutMs: 5000});\n"
             " await source.close({closeInstance: true, timeoutMs: 5000});\n"
             " return session;\n}\n"
