@@ -298,9 +298,9 @@ fn section_heading(line: &str) -> Option<&str> {
 
 fn extract_first_paragraph(body: &str) -> String {
     // Take the first non-empty paragraph. A paragraph ends at a blank
-    // line; `lines()` strips the terminator of either convention, so a
-    // CRLF file yields the same paragraph as an LF one. Leading heading
-    // lines are not paragraphs: skip every one of them before the
+    // line or at a following CommonMark ATX heading; `lines()` strips the
+    // terminator of either convention, so a CRLF file yields the same
+    // paragraph as an LF one. Leading heading lines are skipped before the
     // paragraph starts, otherwise a document whose body begins with a
     // title plus a subtitle reports the subtitle's markup ("## Subtitle")
     // as the description. The heading check runs on the raw line, before
@@ -308,8 +308,11 @@ fn extract_first_paragraph(body: &str) -> String {
     // place as the description.
     let mut paragraph = String::new();
     for line in body.lines() {
-        if paragraph.is_empty() && is_atx_heading(line) {
-            continue;
+        if is_atx_heading(line) {
+            if paragraph.is_empty() {
+                continue;
+            }
+            break;
         }
         let line = line.trim();
         if line.is_empty() {
@@ -838,6 +841,23 @@ Search the web.
 
         assert_eq!(entry.metadata.description, "Search the web for dogs.");
         assert!(entry.parse_status.is_degraded()); // missing frontmatter
+    }
+
+    #[test]
+    fn test_parse_description_stops_before_following_atx_heading() {
+        let content = "---\nname: test\n---\n# Title\nDoes a thing.\n## Parameters\n- `x` (string, required): Input\n";
+        let entry = parse_skill_md(content, "test");
+        assert_eq!(entry.metadata.description, "Does a thing.");
+        assert_eq!(entry.parameters.len(), 1);
+
+        let indented = "Does a thing.\n  ## Next\nBody.\n";
+        assert_eq!(extract_first_paragraph(indented), "Does a thing.");
+
+        let non_heading = "Covers #hashtag\n    # not a heading\n";
+        assert_eq!(
+            extract_first_paragraph(non_heading),
+            "Covers #hashtag # not a heading"
+        );
     }
 
     #[test]
