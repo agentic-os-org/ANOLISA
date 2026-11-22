@@ -1,8 +1,10 @@
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 RUNNER_PATH = pathlib.Path(__file__).parents[1] / "run.py"
@@ -129,6 +131,50 @@ class ManifestTests(unittest.TestCase):
             runner = RUNNER.Runner(args, RUNNER.load_manifest(RUNNER_PATH.parent / "manifest.json"))
             self.assertEqual(runner.cleanup()["status"], "PASS")
             self.assertFalse(home.exists())
+
+    def cleanup_bundle(self, directory: str, sessions: list[str]) -> pathlib.Path:
+        bundle = pathlib.Path(directory) / "bundle"
+        home = pathlib.Path(directory) / "home"
+        bundle.mkdir()
+        home.mkdir()
+        (bundle / "cleanup-state.json").write_text(
+            json.dumps({"home": str(home), "sessions": sessions}), encoding="utf-8"
+        )
+        return bundle
+
+    def run_cleanup_only(self, bundle: pathlib.Path, close: mock.Mock) -> tuple[int, dict]:
+        output = io.StringIO()
+        with (
+            mock.patch.object(RUNNER.subprocess, "run", return_value=close),
+            redirect_stdout(output),
+        ):
+            code = RUNNER.main(["--cleanup-only", "--artifact-dir", str(bundle)])
+        return code, json.loads(output.getvalue())
+
+    def test_cleanup_only_failed_session_close_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = self.cleanup_bundle(directory, ["cosh-e2e-session"])
+            code, report = self.run_cleanup_only(bundle, mock.Mock(returncode=1))
+            state = json.loads((bundle / "cleanup-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(
+            report["actions"],
+            [
+                "close shell-use session cosh-e2e-session",
+                f"remove isolated HOME {bundle.parent / 'home'}",
+            ],
+        )
+        self.assertEqual(state["status"], "FAIL")
+
+    def test_cleanup_only_successful_session_close_exits_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = self.cleanup_bundle(directory, ["cosh-e2e-session"])
+            code, report = self.run_cleanup_only(bundle, mock.Mock(returncode=0))
+            state = json.loads((bundle / "cleanup-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(state["status"], "PASS")
 
 
 if __name__ == "__main__":
