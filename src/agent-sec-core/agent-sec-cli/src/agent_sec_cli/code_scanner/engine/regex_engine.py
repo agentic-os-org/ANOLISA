@@ -51,9 +51,7 @@ def _match_with_targets(
     evidence: list[str] = []
     for seg in segments:
         m = main_pat.search(seg)
-        if m and any(
-            t.start() > m.start() for tp in target_pats if (t := tp.search(seg))
-        ):
+        if m and any(tp.search(seg, m.start() + 1) for tp in target_pats):
             evidence.append(seg.strip())
     return evidence
 

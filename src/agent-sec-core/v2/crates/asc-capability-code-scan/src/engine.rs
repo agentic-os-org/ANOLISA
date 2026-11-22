@@ -140,15 +140,17 @@ fn match_with_targets(
         else {
             continue;
         };
+        let Some(first_char) = segment[main_match.start()..].chars().next() else {
+            continue;
+        };
+        let search_from = main_match.start() + first_char.len_utf8();
         let mut satisfied = false;
         for target in target_patterns {
-            let Some(hit) = target
-                .find(segment)
+            if target
+                .find_from_pos(segment, search_from)
                 .map_err(|_| CodeScanError::EngineResource)?
-            else {
-                continue;
-            };
-            if hit.start() > main_match.start() {
+                .is_some()
+            {
                 satisfied = true;
                 break;
             }
@@ -305,6 +307,30 @@ mod tests {
         rule.target_regexes = Some(vec![r"/etc/shadow".to_owned()]);
         let findings = run_regex_rules("/etc/shadow cat", &[rule], Language::Bash).unwrap();
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn target_appearing_both_before_and_after_main_in_segment_still_matches() {
+        let mut read_rule = plain_rule("read-sensitive", r"\bcat\b", Severity::Warn);
+        read_rule.target_regexes = Some(vec![r"/etc/shadow".to_owned()]);
+        let findings = run_regex_rules(
+            "F=/etc/shadow cat /etc/shadow",
+            &[read_rule],
+            Language::Bash,
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].evidence, ["F=/etc/shadow cat /etc/shadow"]);
+
+        let mut tamper_rule = plain_rule("tamper-sensitive", r">>\s*", Severity::Warn);
+        tamper_rule.target_regexes = Some(vec![r"/etc/hosts".to_owned(), r"\.ssh/".to_owned()]);
+        let tamper_findings = run_regex_rules(
+            "cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys",
+            &[tamper_rule],
+            Language::Bash,
+        )
+        .unwrap();
+        assert_eq!(tamper_findings.len(), 1);
     }
 
     #[test]
