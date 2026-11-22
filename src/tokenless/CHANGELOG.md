@@ -9,6 +9,18 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-11-22
+
+### Added
+
+- PostTool compacts repeated records in recognized serial and parallel CTest output without requiring Stash. The output preserves test order, numbers, names, statuses, durations, failure diagnostics, and summaries. ([#10342](https://github.com/agentic-os-org/ANOLISA/pull/10342))
+- PostTool compacts repeated build steps in recognized Ninja and non-verbose CMake Unix Makefiles output without requiring Stash. The output preserves step counters, target paths, compiler diagnostics, and build failures. ([#10383](https://github.com/agentic-os-org/ANOLISA/pull/10383))
+- PostTool can compact Playwright MCP accessibility snapshots into tables that retain element refs for browser actions. Compression requires host support for text replacement and Stash recovery, and `tokenless retrieve <hash>` returns the exact original. Chrome DevTools MCP snapshots pass through unchanged. The feature is enabled by default and adds the `browser_snapshot` content type and `browser_snapshot_reduction` operation to Protocol v2. Upgrade Core and the Python SDK together if a client strictly validates response values. Set `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` or the Python SDK's `browser_snapshot_enabled=False` to disable the feature and keep snapshot responses compatible with older parsers. ([#10439](https://github.com/agentic-os-org/ANOLISA/pull/10439))
+
+### Fixed
+
+- The L4 reproducibility report reads the requested run directory when its path contains glob characters such as brackets. ([#10270](https://github.com/agentic-os-org/ANOLISA/pull/10270))
+
 ## [0.9.6] - 2026-11-19
 
 ### Added

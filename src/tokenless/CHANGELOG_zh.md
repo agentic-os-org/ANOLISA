@@ -9,6 +9,18 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.7] - 2026-11-22
+
+### 新增
+
+- PostTool 无需 Stash 即可压缩可识别的串行和并行 CTest 输出中的重复记录。压缩后的输出保留测试顺序、编号、名称、状态、用时、失败诊断和汇总。([#10342](https://github.com/agentic-os-org/ANOLISA/pull/10342))
+- PostTool 无需 Stash 即可压缩可识别的 Ninja 和非详细模式 CMake Unix Makefiles 输出中的重复构建步骤。压缩后的输出保留步骤计数、目标路径、编译器诊断和构建失败信息。([#10383](https://github.com/agentic-os-org/ANOLISA/pull/10383))
+- PostTool 可将 Playwright MCP 无障碍快照压缩成表格，并保留浏览器操作所需的元素 ref。压缩要求宿主支持文本替换和 Stash 恢复，可用 `tokenless retrieve <hash>` 取回完全一致的原文。Chrome DevTools MCP 快照原样透传。该功能默认启用，并在 Protocol v2 中新增 `browser_snapshot` 内容类型和 `browser_snapshot_reduction` 操作。如果客户端严格校验响应字段的取值，请同时升级 Core 和 Python SDK。设置 `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 或 Python SDK 的 `browser_snapshot_enabled=False` 可关闭该功能，使快照响应兼容旧版解析器。([#10439](https://github.com/agentic-os-org/ANOLISA/pull/10439))
+
+### 修复
+
+- 当运行目录路径包含方括号等 glob 字符时，L4 可复现性报告会读取指定的运行目录。([#10270](https://github.com/agentic-os-org/ANOLISA/pull/10270))
+
 ## [0.9.6] - 2026-11-19
 
 ### 新增

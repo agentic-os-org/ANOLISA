@@ -400,7 +400,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Nov 19 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Nov 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Compact recognized CTest, CMake Unix Makefiles, and Ninja output in PostTool
+- Compact Playwright MCP snapshots with element refs and Stash recovery
+- Read literal run directory paths in the L4 reproducibility report
+
+* Thu Nov 19 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.6-1
 - Compact recognized Maven and Gradle build output in PostTool
 - Add opt-in mixed-content compression and hybrid HTML views inside JSON
 - Refine QwenWork output replacement and limit macOS PreTool to recovery
