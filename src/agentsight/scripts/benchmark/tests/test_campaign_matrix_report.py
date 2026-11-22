@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
@@ -14,7 +15,19 @@ BENCHMARK = Path(__file__).parents[1]
 
 
 @pytest.mark.parametrize(
-    "qps_shape", ["valid", "missing", "null", "text", "object", "infinite"]
+    "qps_shape",
+    [
+        "valid",
+        "missing",
+        "null",
+        "text",
+        "object",
+        "infinite",
+        "fractional",
+        "boolean",
+        "zero",
+        "negative",
+    ],
 )
 def test_matrix_report_cli_preserves_incomplete_evidence(
     tmp_path: Path, qps_shape: str
@@ -67,6 +80,10 @@ def test_matrix_report_cli_preserves_incomplete_evidence(
                     "text": "bad",
                     "object": {},
                     "infinite": float("inf"),
+                    "fractional": 100.75,
+                    "boolean": True,
+                    "zero": 0,
+                    "negative": -100,
                 }[qps_shape]
         path.write_text(json.dumps(run))
     result = subprocess.run(
@@ -91,12 +108,13 @@ def test_matrix_report_cli_preserves_incomplete_evidence(
     assert "runs/run-0/run-result.json" in inventory
     if qps_shape != "valid":
         assert "baseline matrix 100 QPS rep 1 did not pass" in final["issues"]
-        import aggregate_report
-
-        rows = aggregate_report.matrix_rows(aggregate_report.discover(tmp_path))
+        with (tmp_path / "performance-comparison.csv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            rows = list(csv.DictReader(handle))
         assert len(rows) == 9
         assert not any(
-            row["version"] == "baseline" and row["qps"] == 100 for row in rows
+            row["version"] == "baseline" and row["qps"] == "100" for row in rows
         )
 
 
@@ -130,6 +148,15 @@ def test_matrix_rows_skip_records_without_identity() -> None:
     ]
     rows = aggregate_report.matrix_rows(null_evaluation)
     assert rows[0]["pass_count"] == 0
+
+
+@pytest.mark.parametrize("qps", [100, 100.0, "100"])
+def test_matrix_rows_keep_exact_integer_levels(qps: int | float | str) -> None:
+    import aggregate_report
+
+    run = {"scenario": "matrix", "qps": qps, "version": "baseline"}
+    rows = aggregate_report.matrix_rows([(Path("run-result.json"), run)])
+    assert [row["qps"] for row in rows] == [100]
 
 
 def test_final_report_excludes_unusable_checks_from_the_denominator(
