@@ -8,7 +8,7 @@ From the monorepo checkout (local path):
 
 ```bash
 cd src/agentsight/dsh-plugin
-pnpm install && pnpm run build
+pnpm install --frozen-lockfile --ignore-scripts && pnpm run build
 dsh plugin --profile web add .
 ```
 
@@ -27,7 +27,7 @@ dsh --profile web --patch ./src/agentsight/dsh-plugin/cordis.patch.yml
 ## Development
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm run build
 ```
 
