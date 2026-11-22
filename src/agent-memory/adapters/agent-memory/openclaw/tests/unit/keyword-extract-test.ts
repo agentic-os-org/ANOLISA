@@ -176,6 +176,34 @@ describe("extractCjkTrigrams", () => {
     assert.ok(trigrams.length > 0);
     assert.ok(trigrams.includes("\u79d8\u5bc6\u4ee3"));
   });
+
+  it("preserves supplementary Han characters and slices by code point", () => {
+    const trigrams = extractCjkTrigrams("\u8bf7\u67e5\u9605\u{20bb7}\u91ce\u5bb6\u6700\u65b0\u83dc\u5355");
+    assert.ok(trigrams.includes("\u67e5\u9605\u{20bb7}"));
+    assert.ok(trigrams.includes("\u9605\u{20bb7}\u91ce"));
+    assert.ok(trigrams.includes("\u{20bb7}\u91ce\u5bb6"));
+    for (const t of trigrams) {
+      assert.equal(Array.from(t).length, 3);
+      assert.equal(Buffer.from(t, "utf8").toString("utf8"), t);
+    }
+  });
+
+  it("returns empty for fewer than 3 code points despite UTF-16 surrogates", () => {
+    // 𠮷野 is 2 code points (3 UTF-16 code units); must not form a broken trigram.
+    assert.deepEqual(extractCjkTrigrams("\u{20bb7}\u91ce"), []);
+  });
+
+  it("retains CJK Extension B-I and Compatibility Supplement ideographs", () => {
+    const trigrams = extractCjkTrigrams(
+      "\u{20000}\u{2a700}\u{2ebf0}\u{2f800}\u{30000}\u{31350}",
+    );
+    assert.deepEqual(trigrams, [
+      "\u{20000}\u{2a700}\u{2ebf0}",
+      "\u{2a700}\u{2ebf0}\u{2f800}",
+      "\u{2ebf0}\u{2f800}\u{30000}",
+      "\u{2f800}\u{30000}\u{31350}",
+    ]);
+  });
 });
 
 describe("buildRecallQueries", () => {
@@ -326,6 +354,19 @@ describe("buildRecallQueries", () => {
       keywordCandidate.split(" ").includes("uk"),
       "keyword candidate should include 'uk'",
     );
+  });
+
+  it("includes supplementary Han trigrams in recall candidates", () => {
+    const queries = buildRecallQueries("\u8bf7\u67e5\u9605\u{20bb7}\u91ce\u5bb6\u6700\u65b0\u83dc\u5355");
+    assert.ok(
+      queries.some((q) => q.split(" ").includes("\u{20bb7}\u91ce\u5bb6")),
+      "should include supplementary Han trigram query candidate",
+    );
+    assert.ok(queries.length <= 6);
+    const encoder = new TextEncoder();
+    for (const q of queries) {
+      assert.ok(encoder.encode(q).byteLength <= MAX_QUERY_BYTES);
+    }
   });
 
   it("exports MAX_RESULTS and RRF_K constants", () => {
