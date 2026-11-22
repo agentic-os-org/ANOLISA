@@ -92,7 +92,7 @@ async def main() -> None:
             }
     finally:
         await instance.close()
-    capabilities["events"]["tool.after"].append("replace_result")
+    capabilities["events"]["tool.after"].append("block")
     inflated = Instance(
         endpoint=sys.argv[1],
         target="app",

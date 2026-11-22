@@ -71,15 +71,17 @@ export function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
-const UNCLONEABLE = Symbol("uncloneable");
+export const UNCLONEABLE = Symbol("uncloneable");
 
-function clonePlainJson(value, depth = 0) {
+function cloneJsonValue(value, allowUndefined, depth = 0, seen = new Set()) {
   if (depth > MAX_DEPTH) return UNCLONEABLE;
-  if (value === null || value === undefined) return value;
+  if (value === null) return null;
+  if (value === undefined) return allowUndefined ? undefined : UNCLONEABLE;
   const kind = typeof value;
   if (kind === "boolean" || kind === "string") return value;
   if (kind === "number") return Number.isFinite(value) ? value : UNCLONEABLE;
   if (kind !== "object" || types.isProxy(value)) return UNCLONEABLE;
+  if (seen.has(value)) return UNCLONEABLE;
   const array = Array.isArray(value);
   const proto = Object.getPrototypeOf(value);
   if (array ? proto !== Array.prototype : !isPlainObject(value))
@@ -88,17 +90,30 @@ function clonePlainJson(value, depth = 0) {
   const keys = Reflect.ownKeys(value);
   if (array && (keys.pop() !== "length" || keys.length !== value.length))
     return UNCLONEABLE;
-  for (const [index, key] of keys.entries()) {
-    if (typeof key !== "string" || (array && key !== String(index)))
-      return UNCLONEABLE;
-    const property = Object.getOwnPropertyDescriptor(value, key);
-    if (!property?.enumerable || !Object.hasOwn(property, "value"))
-      return UNCLONEABLE;
-    const item = clonePlainJson(property.value, depth + 1);
-    if (item === UNCLONEABLE) return UNCLONEABLE;
-    setDataProperty(copy, key, item);
+  seen.add(value);
+  try {
+    for (const [index, key] of keys.entries()) {
+      if (typeof key !== "string" || (array && key !== String(index)))
+        return UNCLONEABLE;
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property?.enumerable || !Object.hasOwn(property, "value"))
+        return UNCLONEABLE;
+      const item = cloneJsonValue(property.value, allowUndefined, depth + 1, seen);
+      if (item === UNCLONEABLE) return UNCLONEABLE;
+      setDataProperty(copy, key, item);
+    }
+    return copy;
+  } finally {
+    seen.delete(value);
   }
-  return copy;
+}
+
+export function clonePlainJson(value) {
+  return cloneJsonValue(value, true);
+}
+
+export function cloneStrictPlainJson(value) {
+  return cloneJsonValue(value, false);
 }
 
 export function jsonEqual(a, b) {

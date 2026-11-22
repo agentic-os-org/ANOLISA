@@ -20,6 +20,7 @@ pub fn native(adapter: &str, original: &Value, input: &Value) -> Result<Vec<u8>>
     }
     let mut value = original.clone();
     match adapter {
+        "sdk" => value["input"] = input.clone(),
         "qoder" | "qoder-sdk" | "claude-sdk" | "hermes" => value["tool_input"] = input.clone(),
         // OpenClaw freezes arguments from an earlier approval hook, so a later
         // checked replacement might not be the command it dispatches.
@@ -80,7 +81,7 @@ pub fn reply(
         }
         "openclaw" => json!({"params":input}),
         "hermes" => json!({"action":"modify","args":input,"aw_checked_input":true}),
-        "pi" | "agentscope" | "qwenpaw" => json!({"aw_updated_input":input}),
+        "sdk" | "pi" | "agentscope" | "qwenpaw" => json!({"aw_updated_input":input}),
         _ => return Err("unsupported input replacement dialect".into()),
     };
     output.exit = NativeExit::Code(0);
@@ -204,6 +205,42 @@ mod tests {
             stderr: b"denied".to_vec(),
         };
         let denied = reply("qoder", "tool.before", output, json!({"command":"checked"})).unwrap();
+        assert!(matches!(denied.exit, NativeExit::Code(2)));
+        assert!(denied.stdout.is_empty());
+    }
+
+    #[test]
+    fn sdk_input_replacement_updates_envelope_and_preserves_denial_precedence() {
+        let original = json!({
+            "api_version": "aw-hook-source/v1",
+            "event": "tool.before",
+            "session_id": "sess",
+            "call_id": "call-1",
+            "name": "bash",
+            "input": {"command": "raw"}
+        });
+        let rebuilt: Value =
+            serde_json::from_slice(&native("sdk", &original, &json!({"command": "safe"})).unwrap())
+                .unwrap();
+        assert_eq!(rebuilt["input"], json!({"command": "safe"}));
+        assert_eq!(rebuilt["call_id"], "call-1");
+        let neutral = HookOutput {
+            exit: NativeExit::Code(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let revised = reply("sdk", "tool.before", neutral, json!({"command": "safe"})).unwrap();
+        assert!(matches!(revised.exit, NativeExit::Code(0)));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&revised.stdout).unwrap(),
+            json!({"aw_updated_input": {"command": "safe"}})
+        );
+        let denied_out = HookOutput {
+            exit: NativeExit::Code(2),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let denied = reply("sdk", "tool.before", denied_out, json!({"command": "safe"})).unwrap();
         assert!(matches!(denied.exit, NativeExit::Code(2)));
         assert!(denied.stdout.is_empty());
     }

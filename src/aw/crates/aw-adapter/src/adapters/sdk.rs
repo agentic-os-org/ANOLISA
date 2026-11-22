@@ -128,8 +128,13 @@ pub(crate) fn validate_capabilities(
     capabilities: &aw_core::admission::AdapterCapabilities,
 ) -> Result<()> {
     let supported = crate::adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
+    let invalid_failure = capabilities.failure_actions.iter().any(|(event, actions)| {
+        event != "tool.after"
+            || !capabilities.events.contains_key("tool.after")
+            || actions.iter().any(|action| action != "withhold_result")
+    });
     if capabilities.version != supported.version
-        || !capabilities.failure_actions.is_empty()
+        || invalid_failure
         || capabilities.events.iter().any(|(event, effects)| {
             supported
                 .events
@@ -182,25 +187,53 @@ mod tests {
         );
     }
     #[test]
-    fn semantic_profile_rejects_unverified_effects_and_protocols() {
+    fn semantic_profile_accepts_rewrite_and_withholding_and_rejects_unverified_effects() {
         let document = json!({"spec":{"agents":{"app":{"adapter":"sdk"}},
             "execution":{"default_event_budget_ms":1000}}});
         let mut capabilities =
             crate::adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
         assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_ok());
         capabilities
+            .failure_actions
+            .insert("tool.after".into(), vec!["withhold_result".into()]);
+        assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_ok());
+        capabilities.failure_actions.clear();
+
+        // Backward compatibility: observe/block-only capabilities remain valid.
+        let mut legacy = capabilities.clone();
+        legacy
+            .events
+            .insert("tool.before".into(), vec!["observe".into(), "block".into()]);
+        legacy
+            .events
+            .insert("tool.after".into(), vec!["observe".into()]);
+        assert!(crate::reload::scope_policy(&document, "app", &[], &legacy).is_ok());
+
+        capabilities
             .events
             .get_mut("tool.after")
             .unwrap()
-            .push("replace_result".into());
+            .push("block".into());
         assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_err());
         capabilities.events.get_mut("tool.after").unwrap().pop();
+        capabilities
+            .events
+            .get_mut("tool.before")
+            .unwrap()
+            .push("ask".into());
+        assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_err());
+        capabilities.events.get_mut("tool.before").unwrap().pop();
         capabilities.version = "v0".into();
         assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_err());
         capabilities.version = "aw-hook-source/v1".into();
         capabilities
             .failure_actions
-            .insert("tool.after".into(), vec!["withhold_result".into()]);
+            .insert("tool.before".into(), vec!["withhold_result".into()]);
+        assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_err());
+        capabilities.failure_actions.clear();
+        capabilities
+            .failure_actions
+            .insert("tool.after".into(), vec!["block".into()]);
         assert!(crate::reload::scope_policy(&document, "app", &[], &capabilities).is_err());
     }
 }

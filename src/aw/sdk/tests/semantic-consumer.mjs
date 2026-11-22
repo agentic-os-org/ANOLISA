@@ -117,7 +117,7 @@ async function main() {
       ...capabilities,
       events: {
         ...capabilities.events,
-        "tool.after": ["observe", "replace_result"],
+        "tool.after": ["observe", "block"],
       },
     },
   });

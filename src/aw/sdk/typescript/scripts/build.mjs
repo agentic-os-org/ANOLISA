@@ -14,6 +14,7 @@ for (const file of [
   "control.mjs",
   "source-helpers.mjs",
   "source-profile.mjs",
+  "source-mutation.mjs",
   "sources.mjs",
   "index.d.ts",
   "sources.d.ts",

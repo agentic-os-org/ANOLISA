@@ -65,7 +65,7 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | × | × | ✓ | × |
-| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
+| `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
 <a id="hook-support"></a>
