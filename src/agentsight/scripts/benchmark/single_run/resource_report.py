@@ -84,6 +84,67 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     }
 
 
+DROP_PHASES = ("before_load", "load", "tail", "unattributed")
+
+
+def counter_phase_deltas(
+    rows: list[dict[str, str]],
+    key: str,
+    start: float | None,
+    end: float | None,
+    final: float | None,
+    baseline: float | None,
+    baseline_timestamp: float | None,
+) -> dict[str, float]:
+    """Split cumulative counters by sample phase; resets stay gated as unattributed."""
+    phases = {phase: 0.0 for phase in DROP_PHASES}
+    previous = baseline if baseline is not None and baseline >= 0 else 0.0
+    if previous > 0:
+        if (
+            baseline_timestamp is not None
+            and start is not None
+            and baseline_timestamp < start
+        ):
+            phases["before_load"] = previous
+        else:
+            phases["unattributed"] = previous
+    for row in rows:
+        value = numeric(row.get(key))
+        if value is None or value < 0:
+            continue
+        timestamp = numeric(
+            row.get("counter_timestamp", row.get("monotonic_timestamp"))
+        )
+        if timestamp is None or start is None or end is None:
+            phase = "unattributed"
+        elif timestamp < start:
+            phase = "before_load"
+        elif timestamp < end:
+            phase = "load"
+        else:
+            phase = "tail"
+        if value < previous:
+            phases["unattributed"] = max(1.0, phases["unattributed"] + value)
+        else:
+            phases[phase] += value - previous
+        previous = value
+    if final is not None and final >= 0:
+        if final < previous:
+            phases["unattributed"] = max(1.0, phases["unattributed"] + final)
+        else:
+            phases["tail"] += final - previous
+    return phases
+
+
+def drops_require_failure(probe_drop_phases: dict[str, dict[str, float]]) -> bool:
+    """Only pre-load drops are informational; every other attribution remains fatal."""
+    return any(
+        phases[phase] > 0
+        for phases in probe_drop_phases.values()
+        for phase in ("load", "tail", "unattributed")
+    )
+
+
 def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     """Gate load-window resources on both capture correctness and usable CPU samples."""
     worker = read_json(directory / "worker-result.json")
@@ -100,12 +161,18 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "channel_dropped": [],
     }
     final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    baseline_metrics = read_json(directory / "metrics-baseline.json")
     invalid_counters: set[str] = set()
     for key in drop_samples:
         value = numeric(final_metrics.get(key))
         if value is not None and value >= 0:
             drop_samples[key].append(value)
         elif key in final_metrics:
+            invalid_counters.add(key)
+        baseline = numeric(baseline_metrics.get(key))
+        if baseline is not None and baseline >= 0:
+            drop_samples[key].append(baseline)
+        elif baseline_metrics.get(key) not in (None, ""):
             invalid_counters.add(key)
     counter_samples = {"eviction_count": evictions, **drop_samples}
     metrics = directory / "metrics.csv"
@@ -124,6 +191,18 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     window = read_json(directory / "agents/start.json")
     start, end = numeric(window.get("start")), numeric(window.get("end"))
     window_valid = start is not None and end is not None and end > start
+    probe_drop_phases = {
+        key: counter_phase_deltas(
+            rows,
+            key,
+            start,
+            end,
+            numeric(final_metrics.get(key)),
+            numeric(baseline_metrics.get(key)),
+            numeric(baseline_metrics.get("counter_timestamp")),
+        )
+        for key in drop_samples
+    }
     resources = resource_stats(rows, start, end) if window_valid else resource_stats([], 0, 0)
     tail = resource_stats(rows, end, math.inf) if window_valid else None
     average, peak = resources["rss_average_mib"], resources["rss_peak_mib"]
@@ -138,8 +217,10 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         resource_error = "CPU samples cover less than 95% of the load window"
     total = worker.get("host_memory_mib")
     load_status = "PASS" if load.get("passed") is True else "FAIL" if load else "UNVERIFIED"
-    probe_drops = {key: max(values) if values else None for key, values in drop_samples.items()}
-    events_dropped = any(value is not None and value > 0 for value in probe_drops.values())
+    probe_drops = {
+        key: max(values) if values else None for key, values in drop_samples.items()
+    }
+    events_dropped = drops_require_failure(probe_drop_phases)
     sent = capture.get("sent")
     conflicts = capture.get("conflicts")
     quality = {}
@@ -228,6 +309,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,
+        "probe_drop_phases": probe_drop_phases,
         "ffi_consumer": ffi,
         "ffi_error": ffi_error,
         "ffi_dropped": numeric(final_metrics.get("ffi_dropped", "0")) if ffi is not None else None,
@@ -388,8 +470,20 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
             f"ring={drop_count(drops['ring_buffer_dropped'])}; "
             f"channel={drop_count(drops['channel_dropped'])}"
         )
-        if any(value is not None and value > 0 for value in drops.values()):
-            lines.append(f"{label} capture failed: probe events were dropped")
+        for counter, phases in run["probe_drop_phases"].items():
+            lines.append(
+                f"{label} {counter} phases: before_load={drop_count(phases['before_load'])}; "
+                f"load={drop_count(phases['load'])}; drain={drop_count(phases['tail'])}; "
+                f"unattributed={drop_count(phases['unattributed'])}"
+            )
+        if drops_require_failure(run["probe_drop_phases"]):
+            lines.append(
+                f"{label} capture failed: probe events were dropped during load/drain or were unattributed"
+            )
+        elif any(value is not None and value > 0 for value in drops.values()):
+            lines.append(
+                f"{label} probe drops were confined to pre-load and did not fail the load/drain capture gate"
+            )
         if run["capture"] == "FAIL":
             counts = {
                 key: str(value) if value is not None else "N/A"
