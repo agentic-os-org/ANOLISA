@@ -76,23 +76,32 @@ fn has_conditional_blocks(content: &str) -> bool {
 /// Compile content that contains `<!-- @if -->` / `<!-- @else -->` / `<!-- @endif -->` blocks.
 ///
 /// Algorithm:
-/// - Maintain a stack `emit_at_depth: Vec<bool>` starting with `[true]`.
+/// - Maintain a stack `scope_stack: Vec<ScopeFrame>` starting with root `ScopeFrame { active: true, saw_else: false }`.
 /// - On `@if expr`: push `eval(expr)` when the parent scope is active, else push `false`.
-/// - On `@else`: toggle the top entry **only** when all parent entries are `true`.
+/// - On `@else`: toggle the top entry's `active` **only** when all parent entries are `true` and mark `saw_else = true`. A duplicate `@else` at the same scope flags a structural anomaly.
 /// - On `@endif`: pop the top entry.
 /// - Emit a line only when all stack entries are `true`.
 ///
 /// If the directive structure does not balance — an `@if` left open at
-/// end-of-input, or a stray `@else`/`@endif` with no enclosing `@if` — the
-/// input is an unexpected state under `compile`'s contract ("Never fails;
-/// returns original content on any unexpected state") and the original
-/// content is returned unchanged. Suppressing to end-of-file on an unclosed
-/// `@if` would silently delete the remainder; stripping a stray directive
-/// would silently rewrite structure the author did not balance.
+/// end-of-input, a duplicate `@else` in one scope, or a stray `@else`/`@endif`
+/// with no enclosing `@if` — the input is an unexpected state under `compile`'s
+/// contract ("Never fails; returns original content on any unexpected state")
+/// and the original content is returned unchanged. Suppressing to end-of-file on
+/// an unclosed `@if` would silently delete the remainder; stripping a stray
+/// directive would silently rewrite structure the author did not balance.
 fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
+    #[derive(Clone, Copy)]
+    struct ScopeFrame {
+        active: bool,
+        saw_else: bool,
+    }
+
     let mut output = String::with_capacity(content.len());
     // Depth 0 = root level, always emit.
-    let mut emit_at_depth: Vec<bool> = vec![true];
+    let mut scope_stack: Vec<ScopeFrame> = vec![ScopeFrame {
+        active: true,
+        saw_else: false,
+    }];
     // Set when the directive structure is unbalanced; checked at the end so
     // the fallback decision covers both stray directives seen mid-input and
     // a depth stack that never returned to 1.
@@ -104,20 +113,28 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
 
         if let Some(expr) = parse_if_directive(trimmed) {
             // Push: active iff parent scope is active AND condition true.
-            let parent_active = emit_at_depth.iter().all(|&e| e);
+            let parent_active = scope_stack.iter().all(|frame| frame.active);
             let condition = parent_active && evaluate_expr(expr, env);
-            emit_at_depth.push(condition);
+            scope_stack.push(ScopeFrame {
+                active: condition,
+                saw_else: false,
+            });
             continue;
         }
 
         if is_else_directive(trimmed) {
-            if emit_at_depth.len() > 1 {
-                // Toggle only when all parent depths are true.
-                let len = emit_at_depth.len();
-                let parent_active = emit_at_depth[..len - 1].iter().all(|&e| e);
-                if parent_active {
-                    let last = emit_at_depth.last_mut().unwrap();
-                    *last = !*last;
+            if scope_stack.len() > 1 {
+                let len = scope_stack.len();
+                if scope_stack[len - 1].saw_else {
+                    // Duplicate @else at the same @if depth.
+                    structural_anomaly = true;
+                } else {
+                    scope_stack[len - 1].saw_else = true;
+                    // Toggle only when all parent depths are true.
+                    let parent_active = scope_stack[..len - 1].iter().all(|frame| frame.active);
+                    if parent_active {
+                        scope_stack[len - 1].active = !scope_stack[len - 1].active;
+                    }
                 }
             } else {
                 // @else with no enclosing @if.
@@ -127,8 +144,8 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
         }
 
         if is_endif_directive(trimmed) {
-            if emit_at_depth.len() > 1 {
-                emit_at_depth.pop();
+            if scope_stack.len() > 1 {
+                scope_stack.pop();
             } else {
                 // @endif with no enclosing @if.
                 structural_anomaly = true;
@@ -139,13 +156,13 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
         // Emit the line when all depth conditions are satisfied, with its own
         // terminator: directive lines are dropped, but the surviving lines
         // keep the file's line endings.
-        if emit_at_depth.iter().all(|&e| e) {
+        if scope_stack.iter().all(|frame| frame.active) {
             output.push_str(body);
             output.push_str(terminator);
         }
     }
 
-    if emit_at_depth.len() != 1 {
+    if scope_stack.len() != 1 {
         // An @if was never closed: emit-suppression would otherwise stay on
         // for the entire remainder of the file.
         structural_anomaly = true;
@@ -1183,6 +1200,27 @@ Run: pip install requests
         let env = env_linux_no_uv();
         let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\nC\n<!-- @else -->\nD\n";
         assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_duplicate_else_returns_original_content() {
+        // An @if block with multiple @else directives is structurally broken.
+        // It must take the original-content fallback rather than toggling
+        // emission back on and merging mutually exclusive branches.
+        let env_darwin = env_darwin_uv();
+        let content =
+            "<!-- @if os == darwin -->\nA\n<!-- @else -->\nB\n<!-- @else -->\nC\n<!-- @endif -->\n";
+        assert_eq!(compile(content, &env_darwin), content);
+
+        let env_linux = env_linux_no_uv();
+        assert_eq!(compile(content, &env_linux), content);
+
+        // Nested conditional where inner scope has duplicate @else
+        let nested = "<!-- @if os == darwin -->\n<!-- @if has_command(\"uv\") -->\nUV\n<!-- @else -->\nNO_UV\n<!-- @else -->\nEXTRA\n<!-- @endif -->\n<!-- @endif -->\n";
+        assert_eq!(compile(nested, &env_darwin), nested);
+
+        // Even when outer scope condition is false, inner structural anomaly must be caught
+        assert_eq!(compile(nested, &env_linux), nested);
     }
 
     #[test]
