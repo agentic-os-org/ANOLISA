@@ -351,22 +351,31 @@ def downsample(
     series: Sequence[Sequence[float | None]],
     max_points: int,
 ) -> list[int]:
-    """Keep first/last and per-bucket extrema so spikes survive the reduction."""
+    """Keep a shared set of display points within the requested budget."""
     count = len(times)
+    if max_points < 1:
+        raise ValueError("max_points must be positive")
     if count <= max_points:
         return list(range(count))
-    step = max(1.0, count / max_points)
+    if max_points == 1:
+        return [count - 1]
+
+    # Reserve both endpoints and up to two extrema per series and bucket.
+    bucket_count = (max_points - 2) // (2 * max(1, len(series)))
+    if bucket_count == 0:
+        return [index * (count - 1) // (max_points - 1) for index in range(max_points)]
+
     keep: set[int] = {0, count - 1}
-    start = 0
-    while start < count:
-        end = min(count, max(start + 1, int(round(start + step))))
+    interior_count = count - 2
+    for bucket in range(bucket_count):
+        start = 1 + bucket * interior_count // bucket_count
+        end = 1 + (bucket + 1) * interior_count // bucket_count
         for values in series:
             window = [index for index in range(start, end) if values[index] is not None]
             if not window:
                 continue
             keep.add(min(window, key=lambda index: values[index]))
             keep.add(max(window, key=lambda index: values[index]))
-        start = end
     return sorted(keep)
 
 

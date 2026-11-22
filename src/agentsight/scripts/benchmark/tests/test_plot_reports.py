@@ -68,6 +68,42 @@ def test_make_chart_handles_unequal_timelines() -> None:
     assert "<svg" in svg
 
 
+def test_chart_honors_the_point_budget_for_all_series() -> None:
+    from plot_metrics import PlotSeries, build_chart
+
+    times = [float(index) for index in range(2800)]
+    baseline = times.copy()
+    optimized = times.copy()
+    baseline[1000], baseline[1520] = 50_000.0, -50_000.0
+    optimized[500], optimized[2200] = -40_000.0, 40_000.0
+    plots = [
+        PlotSeries("Baseline", "MiB", "blue", "--series-1", baseline),
+        PlotSeries("Optimized", "MiB", "green", "--series-2", optimized),
+    ]
+
+    _, chart = build_chart("rss", "RSS", times, plots, None, False, 700)
+
+    assert len(chart["t"]) <= 700
+    assert chart["t"][0] == times[0]
+    assert chart["t"][-1] == times[-1]
+    for reduced, original in zip(chart["series"], (baseline, optimized)):
+        assert len(reduced["v"]) == len(chart["t"])
+        assert min(reduced["v"]) == min(original)
+        assert max(reduced["v"]) == max(original)
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"), [(1, [5]), (2, [0, 5]), (3, [0, 2, 5])]
+)
+def test_downsample_preserves_timeline_coverage_for_small_budgets(
+    budget: int, expected: list[int]
+) -> None:
+    from plot_metrics import downsample
+
+    times = [float(index) for index in range(6)]
+    assert downsample(times, [times, times[::-1]], budget) == expected
+
+
 @pytest.mark.parametrize(
     ("key", "opt", "expected"),
     [
