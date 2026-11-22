@@ -37,7 +37,12 @@ impl ConnectionState {
 #[derive(Debug, Clone)]
 pub(crate) enum PendingResponse {
     /// Header prefix awaiting the terminating blank line.
-    Headers(Rc<SslEvent>),
+    Headers {
+        event: Rc<SslEvent>,
+        /// Request body state carried until response headers parse enough to
+        /// distinguish an interim 1xx status from a final response.
+        pending_body: Option<(Option<usize>, Vec<u8>)>,
+    },
     /// Parsed headers with undecoded body bytes and a framing cursor.
     Body {
         response: ParsedResponse,
@@ -128,6 +133,20 @@ impl Framing {
 }
 
 impl PendingResponse {
+    pub(super) fn headers(event: Rc<SslEvent>) -> Self {
+        Self::Headers {
+            event,
+            pending_body: None,
+        }
+    }
+
+    pub(super) fn take_pending_body(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Headers { pending_body, .. } => pending_body.take().map(|(_, buf)| buf),
+            Self::Body { .. } => None,
+        }
+    }
+
     fn exceeds_limit(&self, limit: usize) -> bool {
         matches!(self, Self::Body { response, framing, .. }
             if response.body_len > limit || matches!(framing, Framing::Length(n) if *n > limit))
@@ -159,13 +178,13 @@ impl PendingResponse {
         // event for a headers-only assembly, the retained fragment timestamp
         // for one with body bytes.
         let end_timestamp_ns = match self {
-            Self::Headers(event) => event.timestamp_ns,
+            Self::Headers { event, .. } => event.timestamp_ns,
             Self::Body {
                 end_timestamp_ns, ..
             } => *end_timestamp_ns,
         };
         let response = match self {
-            Self::Headers(_) => self.parsed_headers(max_headers).ok().flatten()?,
+            Self::Headers { .. } => self.parsed_headers(max_headers).ok().flatten()?,
             Self::Body { response, .. } => {
                 // Framing never completed: accept the buffered bytes as the
                 // final (partial) body rather than dropping the response.
@@ -183,7 +202,7 @@ impl PendingResponse {
     /// SSL direction that owns the response.
     pub(super) fn direction(&self) -> i32 {
         match self {
-            Self::Headers(event) => event.rw,
+            Self::Headers { event, .. } => event.rw,
             Self::Body { response, .. } => response.source_event.rw,
         }
     }
@@ -192,7 +211,7 @@ impl PendingResponse {
     pub(super) fn append(&mut self, event: &SslEvent, limit: usize) -> Result<()> {
         let data = &event.buf[..event.buf_size() as usize];
         let (source, used, cap) = match self {
-            Self::Headers(source) => {
+            Self::Headers { event: source, .. } => {
                 let len = source.buf.len();
                 (source, len, limit.saturating_add(MAX_RESPONSE_HEADERS))
             }
@@ -224,7 +243,7 @@ impl PendingResponse {
     /// (`AgentsightConfig::max_headers`) so assembled responses are held to
     /// the same cap as the ones the parser accepted whole.
     pub(super) fn parsed_headers(&self, max_headers: usize) -> Result<Option<ParsedResponse>> {
-        let Self::Headers(event) = self else {
+        let Self::Headers { event, .. } = self else {
             return Ok(None);
         };
         let Some(end) = event.buf.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -393,38 +412,19 @@ impl HttpConnectionAggregator {
             }
             ConnectionState::RequestPending { request } => (
                 Some(request),
-                PendingResponse::Headers(Rc::new(event.clone())),
+                PendingResponse::headers(Rc::new(event.clone())),
             ),
             ConnectionState::RequestBodyPending {
-                mut request,
+                request,
                 expected_body_len,
                 body_buffer,
-            } => {
-                let assembly = PendingResponse::Headers(Rc::new(event.clone()));
-                // An interim 1xx response (`100 Continue`) does not answer the
-                // request: a client that sent `Expect: 100-continue` writes the
-                // body only after receiving it. Collapsing to RequestPending
-                // here would expose `reassembled_body` as the empty partial
-                // body and every body continuation afterwards would hit the
-                // no-op fallback of `process_raw_body_data`, silently dropping
-                // the prompt. Keep the pending body state instead.
-                if matches!(
-                    assembly.parsed_headers(self.max_headers),
-                    Ok(Some(ref response)) if is_informational(response.status_code)
-                ) {
-                    self.insert(
-                        id,
-                        ConnectionState::RequestBodyPending {
-                            request,
-                            expected_body_len,
-                            body_buffer,
-                        },
-                    );
-                    return None;
-                }
-                request.set_reassembled_body(body_buffer);
-                (Some(request), assembly)
-            }
+            } => (
+                Some(request),
+                PendingResponse::Headers {
+                    event: Rc::new(event.clone()),
+                    pending_body: Some((expected_body_len, body_buffer)),
+                },
+            ),
             other => {
                 self.insert(id, other);
                 return None;
@@ -432,8 +432,41 @@ impl HttpConnectionAggregator {
         };
         match assembly.parsed_headers(self.max_headers) {
             Ok(Some(response)) => {
-                drop(assembly);
-                if let Some(request) = request {
+                let pending_body = match assembly {
+                    PendingResponse::Headers { pending_body, .. } => pending_body,
+                    PendingResponse::Body { .. } => None,
+                };
+                if is_informational(response.status_code) {
+                    // An interim 1xx response (`100 Continue`) does not finalize
+                    // the request even when its headers arrived split across
+                    // multiple SSL reads: restore RequestBodyPending with the
+                    // retained expectation and buffer, then process any
+                    // coalesced trailing response bytes through `process_response`.
+                    if let Some(request) = request {
+                        match pending_body {
+                            Some((expected_body_len, body_buffer)) => {
+                                self.insert(
+                                    id,
+                                    ConnectionState::RequestBodyPending {
+                                        request,
+                                        expected_body_len,
+                                        body_buffer,
+                                    },
+                                );
+                            }
+                            None => {
+                                self.insert(id, ConnectionState::RequestPending { request });
+                            }
+                        }
+                    } else {
+                        self.insert(id, ConnectionState::Idle);
+                    }
+                    return self.process_response(response);
+                }
+                if let Some(mut request) = request {
+                    if let Some((_, body_buffer)) = pending_body {
+                        request.set_reassembled_body(body_buffer);
+                    }
                     self.insert(id, ConnectionState::RequestPending { request });
                 } else {
                     self.insert(id, ConnectionState::Idle);
