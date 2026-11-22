@@ -450,6 +450,202 @@ Run {fence}a{run}b{fence} now."
 }
 
 #[test]
+fn inline_code_edges_keep_literal_backticks_separate_from_fences() {
+    for tag in ["code", "kbd", "samp"] {
+        for (text, expected) in [
+            ("`orders`", "`` `orders` ``"),
+            ("`prefix", "`` `prefix ``"),
+            ("suffix`", "`` suffix` ``"),
+            ("``literal`", "``` ``literal` ```"),
+            ("`", "`` ` ``"),
+            ("``", "``` `` ```"),
+        ] {
+            let html = page(&format!(
+                "<p>{PARAGRAPH}</p><p>Use <{tag}>{text}</{tag}> here.</p>"
+            ));
+            let view = HtmlExtractor.render(&html).unwrap();
+            assert_eq!(
+                body_of(&view),
+                format!("{PARAGRAPH}\n\nUse {expected} here."),
+                "{tag}: {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn adjacent_code_spans_do_not_merge_their_fences() {
+    for (html, expected) in [
+        ("<code>alpha</code><code>beta</code>", "`alpha`<!-- -->`beta`"),
+        (
+            "<code>a</code><span><kbd>b</kbd></span><samp>c</samp>",
+            "`a`<!-- -->`b`<!-- -->`c`",
+        ),
+        ("<code>a</code><!-- removed --><code>b</code>", "`a`<!-- -->`b`"),
+        ("<code>a</code><code></code><code>b</code>", "`a`<!-- -->`b`"),
+        ("<a><code>a</code></a><code>b</code>", "`a`<!-- -->`b`"),
+    ] {
+        let view = HtmlExtractor
+            .render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>")))
+            .unwrap();
+        assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\n{expected}"));
+    }
+}
+
+#[test]
+fn internal_backticks_and_plain_spans_keep_existing_output() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Use <code>a``b</code> and <code>plain</code>.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\nUse ```a``b``` and `plain`.")
+    );
+}
+
+#[test]
+fn adjacent_link_code_spans_keep_both_boundaries() {
+    for (html, expected) in [
+        ("<a><code>a</code></a><a><code>b</code></a>", "`a`<!-- -->`b`"),
+        ("<code>a</code><a><kbd>b</kbd></a><samp>c</samp>", "`a`<!-- -->`b`<!-- -->`c`"),
+        ("<a href=\"\"><code>`a`</code></a><a><code>b</code></a>", "`` `a` ``<!-- -->`b`"),
+        ("<a href=\"javascript:void(0)\"><code>a</code></a><a href=\"data:text/plain,b\"><code>b</code></a>", "`a`<!-- -->`b`"),
+        ("<code>a</code><a href=\"/x\"><code>b[</code></a>", "`a`[`b[`](/x)"),
+        ("<code>a</code><a href=\"/x\"><code>b</code>[</a>", "`a`<!-- -->`b`["),
+        ("<span><a><code>a</code></a></span><a><span><code>b</code></span></a>", "`a`<!-- -->`b`"),
+        ("<code>a</code><a> <code>b</code></a>", "`a` `b`"),
+        ("<a> <code>b</code></a><code>c</code>", "`b`<!-- -->`c`"),
+        ("<a><code>a</code> </a><code>b</code>", "`a` `b`"),
+        ("<code>a</code><a>`literal</a>", "`a``literal"),
+        ("<code>a</code><a><code>b</code><br><code>c</code></a><code>d</code>", "`a`<!-- -->`b`\n`c`<!-- -->`d`"),
+        ("<code>a<br>`b`</code><a><code>c</code></a>", "`a`\n`` `b` ``<!-- -->`c`"),
+    ] {
+        let view = HtmlExtractor.render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>"))).unwrap();
+        assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\n{expected}"), "{html}");
+    }
+}
+
+// Check what one CommonMark parser reads, not just fence spelling. Enable
+// its GFM table extension because the renderer emits pipe tables.
+pub(super) fn assert_inline_content(markdown: &str, expected_text: &str, expected_code: &[&str]) {
+    use pulldown_cmark::{Event, Options, Parser};
+
+    let mut visible = String::new();
+    let mut code = Vec::new();
+    for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
+        match event {
+            Event::Text(text) => visible.push_str(&text),
+            Event::Code(text) => {
+                visible.push_str(&text);
+                code.push(text);
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        code.iter().map(|text| &**text).eq(expected_code.iter().copied()),
+        "expected spans {expected_code:?}, got {code:?} from {markdown}"
+    );
+    assert_eq!(visible, expected_text, "{markdown}");
+}
+
+#[test]
+fn literal_backslashes_before_code_keep_visible_text_and_spans() {
+    for spans in [
+        "<code>a</code><code>b</code>",
+        "<a><code>a</code></a><a><code>b</code></a>",
+        "<a href=\"\"><code>a</code><code>b</code></a>",
+    ] {
+        for slashes in [r"\", r"\\", r"\\\"] {
+            let view = HtmlExtractor
+                .render(&page(&format!("<p>{PARAGRAPH}</p><p>x{slashes}{spans}</p>")))
+                .unwrap();
+            let markdown = body_of(&view);
+            let (_, paragraph) = markdown.split_once("\n\n").unwrap();
+            assert_inline_content(paragraph, &format!("x{slashes}ab"), &["a", "b"]);
+        }
+    }
+}
+
+#[test]
+fn split_backslash_runs_keep_every_literal_in_block_buffers() {
+    let splice = r"x\\<a>\<code>y</code></a>";
+    let blocks = format!(
+        "<p>{splice}</p><h2>{splice}</h2><dl><dt>{splice}</dt></dl>\
+         <table><caption>{splice}</caption><thead><tr><th>Header</th></tr></thead>\
+         <tbody><tr><td>{splice}</td></tr></tbody></table>\
+         <ul><li>{splice}</li></ul>"
+    );
+    let view = HtmlExtractor
+        .render(&page(&format!("<p>{PARAGRAPH}</p>{blocks}")))
+        .unwrap();
+    let (_, body) = body_of(&view).split_once("\n\n").unwrap();
+    let fragment = HtmlExtractor.render_fragment(&blocks).unwrap().output("Retrieve original");
+    let (_, fragment_body) = fragment.split_once('\n').unwrap();
+    let expected = format!("{}Header{}", r"x\\\y".repeat(4), r"x\\\y".repeat(2));
+    for markdown in [body, fragment_body] {
+        assert_inline_content(markdown, &expected, &["y"; 6]);
+    }
+}
+
+#[test]
+fn fallback_links_escape_only_the_new_part_of_a_split_run() {
+    for (html, visible) in [
+        (r"x\<a>\<code>y</code></a>", r"x\\y"),
+        (r#"x\\\<a href="">\\<code>y</code></a>"#, r"x\\\\\y"),
+        (r#"x\\<a href="javascript:void(0)">\<code>y</code></a>"#, r"x\\\y"),
+        (r#"x\<a href="data:text/plain,v">\<code>y</code></a>"#, r"x\\y"),
+        (r#"x\<a href="/url">\<code>y</code>[</a>"#, r"x\\y["),
+        // The HTML parser's marquee formatting scope keeps both anchors nested.
+        (r"x\\<a>\<marquee><a>\\<code>y</code></a></marquee></a>", r"x\\\\\y"),
+        (r"x\<a>word\<code>y</code></a>", r"x\word\y"),
+        (r"x\<a> \<code>y</code></a>", r"x\ \y"),
+    ] {
+        let view = HtmlExtractor
+            .render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>")))
+            .unwrap();
+        let (_, body) = body_of(&view).split_once("\n\n").unwrap();
+        assert_inline_content(body, visible, &["y"]);
+    }
+
+    let html = r"<code>a</code><a><marquee><a>\<code>y</code></a></marquee></a>";
+    let view = HtmlExtractor
+        .render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>")))
+        .unwrap();
+    let (_, body) = body_of(&view).split_once("\n\n").unwrap();
+    assert_eq!(body, r"`a`\\`y`");
+    assert_inline_content(body, r"a\y", &["a", "y"]);
+}
+
+#[test]
+fn literal_backticks_do_not_impersonate_code_span_boundaries() {
+    for (html, expected) in [
+        ("x`<code>b</code>", "x``b`"),
+        ("<span>x`</span><code>b</code>", "x``b`"),
+        ("<code>a</code>x`<code>b</code>", "`a`x``b`"),
+        ("<code>a</code>`y", "`a``y"),
+        ("<a href=\"/x\"><code>a</code></a><code>b</code>", "[`a`](/x)`b`"),
+        ("<strong><code>a</code></strong><code>b</code>", "**`a`**`b`"),
+        ("<code>a</code><br><code>b</code>", "`a`\n`b`"),
+        ("<code>a</code> <code>b</code>", "`a` `b`"),
+        ("x`<strong><code>b</code></strong><code>c</code>", "x`**`b`**`c`"),
+    ] {
+        let view = HtmlExtractor
+            .render(&page(&format!("<p>{PARAGRAPH}</p><p>{html}</p>")))
+            .unwrap();
+        assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\n{expected}"));
+    }
+    // A flushed block must not lend its span position to the next buffer.
+    let view = HtmlExtractor
+        .render(&page(&format!(
+            "<p>{PARAGRAPH}</p><p><code>a</code></p><p>xx`<code>b</code></p>"
+        )))
+        .unwrap();
+    assert_eq!(body_of(&view), format!("{PARAGRAPH}\n\n`a`\n\nxx``b`"));
+}
+
+#[test]
 fn lists_nest_and_ordered_lists_honor_start() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><ul><li>one<ul><li>one.a</li><li>one.b</li></ul></li>\

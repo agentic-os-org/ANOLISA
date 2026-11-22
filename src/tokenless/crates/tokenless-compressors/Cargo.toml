@@ -18,3 +18,6 @@ tokenless-protocol = { path = "../tokenless-protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
 toon-format.workspace = true
+
+[dev-dependencies]
+pulldown-cmark.workspace = true
