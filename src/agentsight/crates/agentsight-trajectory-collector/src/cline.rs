@@ -351,7 +351,11 @@ pub fn convert_cline_events(
         // look like mixed user turns and leak environment noise into every
         // user step message.
         let content = if role == "user" {
-            strip_environment_details(&content)
+            let stripped = strip_environment_details(&content);
+            if content_is_empty(&stripped) {
+                continue;
+            }
+            stripped
         } else {
             content
         };
@@ -437,6 +441,7 @@ pub fn extract_private_metadata(
 ) -> HashMap<String, serde_json::Value> {
     let mut user_count = 0u64;
     let mut assistant_count = 0u64;
+    let mut in_assistant_turn = false;
 
     for event in events.iter().filter(|e| is_api_record(e)) {
         let content = event.get("content").unwrap_or(&serde_json::Value::Null);
@@ -444,14 +449,20 @@ pub fn extract_private_metadata(
             Some("user") => {
                 if user_yields_step(content) {
                     user_count += 1;
+                    in_assistant_turn = false;
+                } else if !content_is_empty(&strip_environment_details(content)) {
+                    // Tool-result carriers stay in the event stream and end the
+                    // current assistant turn; environment-only user records are skipped.
+                    in_assistant_turn = false;
                 }
             }
             Some("assistant") => {
-                if !content_is_empty(content) {
+                if !content_is_empty(content) && !in_assistant_turn {
                     assistant_count += 1;
+                    in_assistant_turn = true;
                 }
             }
-            _ => {}
+            _ => in_assistant_turn = false,
         }
     }
 
@@ -863,5 +874,71 @@ mod tests {
         assert_eq!(events3.len(), n);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_consecutive_assistant_and_env_only_user_records_merge_consistently() {
+        let events = vec![
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "Fix the bug"}]
+            }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Part 1"}]
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "<environment_details>\n# Files\n</environment_details>"}]
+            }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Part 2"}]
+            }),
+        ];
+
+        let traj = convert_cline_events(&events, "cline").unwrap();
+        let extra = extract_private_metadata(&events, "demo");
+
+        // The environment-details-only user record must neither emit a phantom
+        // empty user step nor split the surrounding assistant records.
+        let user_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == agentsight_atif::StepSource::User)
+            .count();
+        let agent_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == agentsight_atif::StepSource::Agent)
+            .count();
+        assert_eq!(user_steps, 1, "steps: {:?}", traj.steps);
+        assert_eq!(agent_steps, 1, "steps: {:?}", traj.steps);
+        assert_eq!(extra["user_message_count"], serde_json::json!(1));
+        assert_eq!(extra["assistant_message_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn test_direct_consecutive_assistant_records_count_as_one_turn() {
+        let events = vec![
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "Hi"}]
+            }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Interrupted"}]
+            }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Continued"}]
+            }),
+        ];
+
+        let traj = convert_cline_events(&events, "cline").unwrap();
+        let extra = extract_private_metadata(&events, "demo");
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(extra["user_message_count"], serde_json::json!(1));
+        assert_eq!(extra["assistant_message_count"], serde_json::json!(1));
     }
 }
