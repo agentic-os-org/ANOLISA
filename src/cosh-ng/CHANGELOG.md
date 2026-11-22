@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-22
+
+### Added
+
+- Login health gains optional checks for memory pressure, disk space and inode usage, resource quotas, unexpected read-only filesystems, service state, and out-of-memory (OOM) events, with filesystem and host event notices. Every new notice is off by default or diagnostics-only, so default login output is unchanged and the 300 ms login budget still applies (#10362)
+
+### Fixed
+
+- Chinese questions whose `?` is followed by more Chinese text or doubled (such as `你还好吗?我想问问` or `什么是mutex??`) reach AI routing again instead of failing with `command not found`; ASCII questions and expansion-sensitive command positions still run as ordinary shell commands (#10298)
+- `cosh audit status` reports gaps in the audit event sequence — deleted, duplicated, or reordered records — and states the integrity boundary, so a discontinuous local audit trail is visible instead of silently accepted (#10309)
+- `web_fetch` blocks loopback, private, link-local, and cloud instance metadata addresses (including the metadata endpoint outside the usual private ranges) and re-checks every redirect hop, so an approved fetch cannot reach internal services. It also refuses targets that route through a system proxy — including public sites — on the first hop and redirects, so proxy-only egress deployments lose this fetch path; exclude a directly reachable target with `NO_PROXY` to keep it (#10313)
+- `cosh guide` keeps setup on a single screen: choosing Default login shell or Manage AI services no longer flashes the terminal or leaves setup output in shell scrollback, the login entry line stays consistent across logins, and pages repaint correctly on terminal resize (#10322)
+- A model connection that goes silent for more than 120 seconds now ends the turn with a readable timeout error instead of waiting indefinitely; steadily streaming responses keep no total-duration deadline, and the question is preserved so the shell stays usable (#10331)
+- A large paste into an interactive session is buffered and shown once when it completes, instead of redrawing the whole draft on every chunk, so input stays responsive (#10340)
+- A Bash tool request that cannot be handed to the shell (such as a bare-newline heredoc) is blocked with a rewrite hint on the automatic approval path too, instead of showing a sent receipt and then waiting forever (#10343)
+- Leaving the terminal during an agent turn cancels the turn and the in-flight model request, instead of continuing in the background and consuming tokens (#10344)
+- Long agent replies are no longer silently clipped: the reply card renders text within its width, and a reply that exceeds the display capacity shows a localized truncation notice instead of dropping the tail without warning (#10345)
+- An authentication failure from a configured provider (such as HTTP 401 or 403) ends the active turn with the provider error and returns shell input, instead of opening an authentication picker that captures input; run `/auth` to update credentials and ask again (#10346)
+- Saving configuration is serialized and published atomically, so concurrent sessions — for example changing the language while another session saves — no longer truncate the config file or lose existing AI service settings; file ownership and permissions are preserved (#10347)
+- Very long single command lines (above 16K characters) no longer freeze input: they run as ordinary shell commands without the costly routing and history scans on every submission path, and oversized history entries are no longer deleted under memory pressure (#10348, #10384)
+- Agent backend processes show a stable name in process listings again, so `ps` and `pgrep` lookups and out-of-memory accounting identify them correctly instead of a changing descriptor number (#10349)
+- Renaming or deleting a managed account no longer strands its login record: `cosh login status` and `cosh login restore` resolve records by user ID, and a new `cosh login reconcile` (with `--yes` to apply) rebinds or removes drifted records, so the package can upgrade and uninstall again (#10354)
+- Foreground commands stay responsive under memory pressure: command-boundary handling avoids spawning helper processes and uses a lightweight path while the session is over its memory limit, so commands no longer stall for tens of seconds (#10356)
+- Stdio MCP servers no longer start automatically at session startup until trusted, whether declared in system or user configuration; HTTP servers keep their existing connection behavior. Trust is pinned to the exact command, arguments, environment, and tool set, and any change re-asks for trust. After upgrading, each preset stdio server needs a one-time `/mcp trust <server>` per user to restore auto-start (#10359)
+- Recommend-mode wording matches actual behavior: the footer and guide state that read-only inspection may still run and explicitly allowed tools run, while side-effecting shell calls are denied before execution (#10361)
+- In the default `auto` approval mode, `printenv` no longer runs automatically: every form goes through an approval prompt instead of printing environment values straight to the terminal. Requests matching `trusted_commands`, explicit read-only overrides, and confirmed `trust` mode still run automatically (#10365)
+- Skill content from project, custom, and extension directories is presented to the model as untrusted data wrapped in a boundary, so instructions embedded in a skill file cannot pose as system or user directives; user and system skills keep their trusted guidance (#10369)
+- Login health filesystem checks are accurate on real hosts: filesystem event notices bind to the correct scanned volumes, and disk capacity alerts evaluate only writable volumes — a read-only or quota-enforced view holds its current state instead of alerting or recovering on headroom alone (#10376, #10381)
+
 ## [0.30.0] - 2026-11-19
 
 ### Added
