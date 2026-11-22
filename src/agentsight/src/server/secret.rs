@@ -12,8 +12,10 @@
 //! local viewer keeps its own plaintext config by design (per-user directory,
 //! non-root) and must not reuse this module.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -117,29 +119,118 @@ fn derive_key(base_dir: &Path, create_salt: bool) -> io::Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-/// Read the per-install salt, generating it with mode 0o400 when absent and
-/// `create` is set. Refusing to create during decryption ensures a config
-/// copied without its salt file never silently "decrypts" to garbage keys.
-fn load_or_create_salt(path: &PathBuf, create: bool) -> io::Result<Vec<u8>> {
-    match std::fs::read(path) {
-        Ok(salt) if salt.len() == SALT_LEN => Ok(salt),
-        Ok(_) => Err(io::Error::other(format!(
+static TEMP_SALT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Open an existing regular salt file without following symlinks and validate its length.
+fn read_salt_nofollow(path: &Path) -> io::Result<Vec<u8>> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("salt path {} is not a regular file", path.display()),
+        ));
+    }
+    let mut salt = Vec::with_capacity(SALT_LEN + 1);
+    file.read_to_end(&mut salt)?;
+    if salt.len() == SALT_LEN {
+        Ok(salt)
+    } else {
+        Err(io::Error::other(format!(
             "corrupt salt file {} (expected {SALT_LEN} bytes)",
             path.display()
-        ))),
+        )))
+    }
+}
+
+/// Write `salt` into a unique `0o400` staging file and publish it atomically via `hard_link`
+/// so concurrent writers cannot overwrite an earlier salt and other users can never read it
+/// even transiently. Falls back to `O_CREAT | O_EXCL | O_NOFOLLOW` when hard links are
+/// unsupported by the underlying filesystem.
+fn write_salt_exclusively(path: &Path, salt: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let seq = TEMP_SALT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!("{SALT_FILE_NAME}.{}.{seq}.tmp", std::process::id()));
+
+    let create_staged = || -> io::Result<()> {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o400).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file: File = opts.open(&tmp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+        }
+        file.write_all(salt)?;
+        file.sync_all()?;
+        Ok(())
+    };
+
+    if let Err(e) = create_staged() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    let link_res = std::fs::hard_link(&tmp_path, path);
+    let _ = std::fs::remove_file(&tmp_path);
+
+    match link_res {
+        Ok(()) => Ok(Some(salt.to_vec())),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o400).custom_flags(libc::O_NOFOLLOW);
+            }
+            match opts.open(path) {
+                Ok(mut file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+                    }
+                    file.write_all(salt)?;
+                    file.sync_all()?;
+                    Ok(Some(salt.to_vec()))
+                }
+                Err(direct_err) if direct_err.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+                Err(direct_err) => Err(direct_err),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the per-install salt without following symlinks, creating it atomically with
+/// mode 0o400 when absent and `create` is set. Refusing to create during decryption
+/// ensures a config copied without its salt file never silently "decrypts" to garbage keys.
+fn load_or_create_salt(path: &Path, create: bool) -> io::Result<Vec<u8>> {
+    match read_salt_nofollow(path) {
+        Ok(salt) => Ok(salt),
         Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             let mut salt = vec![0u8; SALT_LEN];
             rand_bytes(&mut salt).map_err(crypto_err)?;
-            std::fs::write(path, &salt)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+            match write_salt_exclusively(path, &salt)? {
+                Some(created) => Ok(created),
+                None => read_salt_nofollow(path),
             }
-            Ok(salt)
         }
         Err(e) => Err(e),
     }
@@ -161,6 +252,8 @@ fn machine_id() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -231,6 +324,125 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o400);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_at_salt_path_is_rejected_without_creating_target() {
+        let dir = tmp_dir("symlink");
+        let outside = dir.join("outside_target");
+        let salt_dir = dir.join("store");
+        std::fs::create_dir_all(&salt_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, salt_dir.join(SALT_FILE_NAME)).unwrap();
+
+        let err = seal("sk-secret", &salt_dir).expect_err("must reject symlink salt target");
+        assert!(
+            !outside.exists(),
+            "salt creation must never follow a symlink and create {outside:?}: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_first_seal_keeps_every_ciphertext_decryptable() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..25 {
+            let dir = tmp_dir(&format!("race-{round}"));
+            let workers = 8;
+            let barrier = Arc::new(Barrier::new(workers));
+            let handles: Vec<_> = (0..workers)
+                .map(|idx| {
+                    let dir = dir.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let plain = format!("sk-secret-{idx}");
+                        let sealed = seal(&plain, &dir).unwrap();
+                        (plain, sealed)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            for (plain, sealed) in results {
+                assert_eq!(
+                    unseal(&sealed, &dir).as_deref(),
+                    Some(plain.as_str()),
+                    "concurrent initialization in round {round} overwrote an earlier salt"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unseal_and_seal_reject_symlink_pointing_to_valid_salt() {
+        let dir = tmp_dir("symlink-valid");
+        let real_dir = dir.join("real");
+        let link_dir = dir.join("link");
+        std::fs::create_dir_all(&link_dir).unwrap();
+
+        let sealed = seal("sk-secret", &real_dir).unwrap();
+        std::os::unix::fs::symlink(real_dir.join(SALT_FILE_NAME), link_dir.join(SALT_FILE_NAME))
+            .unwrap();
+
+        assert!(
+            unseal(&sealed, &link_dir).is_none(),
+            "unseal must refuse a symlinked salt file even when target is valid"
+        );
+        assert!(
+            seal("sk-other", &link_dir).is_err(),
+            "seal must refuse overwriting or reading a symlinked salt file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_seal_leaves_only_owner_read_only_salt_file() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let dir = tmp_dir("cleanup");
+        let workers = 8;
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles: Vec<_> = (0..workers)
+            .map(|idx| {
+                let dir = dir.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    seal(&format!("sk-{idx}"), &dir).unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![SALT_FILE_NAME.to_string()]);
+        let mode = std::fs::metadata(dir.join(SALT_FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o400);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_corrupt_salt_without_overwriting() {
+        let dir = tmp_dir("corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SALT_FILE_NAME), b"short").unwrap();
+
+        let err = seal("sk-secret", &dir).expect_err("short salt must fail");
+        assert!(err.to_string().contains("corrupt salt file"), "{err}");
+        assert_eq!(std::fs::read(dir.join(SALT_FILE_NAME)).unwrap(), b"short");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
