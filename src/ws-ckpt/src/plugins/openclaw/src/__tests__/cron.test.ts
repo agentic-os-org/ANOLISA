@@ -223,6 +223,31 @@ describe("cron executable discovery", () => {
     expect(await CrontabManager.listInstalled("/ws")).toEqual(["0 * * * *"]);
   });
 
+  it("keeps single-quoted workspace paths idempotent and isolated from prefix workspaces", async () => {
+    const wsQuoted = "/tmp/alice's-project";
+    const wsPrefix = "/tmp/alice";
+    let installed = "";
+    mockRunCrontab.mockImplementation(async (_args, opts) => {
+      if (opts?.input !== undefined) installed = opts.input;
+      return { exitCode: 0, stdout: installed, stderr: "" };
+    });
+
+    expect(await CrontabManager.sync(wsQuoted, ["0 * * * *"])).toBe(true);
+    const first = installed;
+    expect(await CrontabManager.sync(wsQuoted, ["0 * * * *"])).toBe(true);
+    expect(installed).toBe(first);
+    expect(await CrontabManager.listInstalled(wsQuoted)).toEqual(["0 * * * *"]);
+    expect(await CrontabManager.listInstalled(wsPrefix)).toEqual([]);
+
+    // Removing the prefix workspace must not clobber the apostrophe workspace's entry.
+    expect(await CrontabManager.remove(wsPrefix)).toBe(true);
+    expect(installed).toBe(first);
+
+    // Removing the apostrophe workspace must cleanly delete its own entry.
+    expect(await CrontabManager.remove(wsQuoted)).toBe(true);
+    expect(installed).toBe("");
+  });
+
   it("executes a discovered launcher with a restricted cron PATH and literal shell characters", async () => {
     const fs = await vi.importActual<typeof import("fs")>("fs");
     const directory = fs.mkdtempSync(resolve("node_modules", "cron-launcher-"));

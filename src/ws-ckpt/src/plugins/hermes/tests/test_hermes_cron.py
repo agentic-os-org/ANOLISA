@@ -131,6 +131,18 @@ class TestExtractWorkspace:
     def test_non_ws_ckpt(self):
         assert _extract_workspace("0 * * * * echo hello") is None
 
+    def test_single_quoted_workspace_unescapes_and_does_not_match_prefix(self):
+        ws = "/tmp/alice's-project"
+        line = _build_cron_line(ws, "0 * * * *", "/usr/bin/ws-ckpt")
+        assert _extract_workspace(line) == ws
+        assert _match_workspace(line, ws) is True
+        assert _match_workspace(line, "/tmp/alice") is False
+
+        ws_tricky = "/tmp/a''b -w 'nested'"
+        tricky_line = _build_cron_line(ws_tricky, "0 * * * *", "/usr/bin/ws-ckpt")
+        assert _extract_workspace(tricky_line) == ws_tricky
+        assert _match_workspace(tricky_line, ws_tricky) is True
+
 
 class TestMatchWorkspace:
     def test_match(self):
