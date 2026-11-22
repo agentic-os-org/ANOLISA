@@ -2898,13 +2898,6 @@ fn persist_drained_genai_events(
                     exporter.export(events);
                 }
             }
-            if let Some(sender) = ffi_sender {
-                for event in events {
-                    if let GenAISemanticEvent::LLMCall(call) = event {
-                        sender.send_llm(call.clone());
-                    }
-                }
-            }
         }
         // No SQLite store (or no pending info): fall back to plain export,
         // which suppresses exporters under FFI mode exactly like the live path.
@@ -2913,6 +2906,13 @@ fn persist_drained_genai_events(
                 for exporter in exporters {
                     exporter.export(events);
                 }
+            }
+        }
+    }
+    if let Some(sender) = ffi_sender {
+        for event in events {
+            if let GenAISemanticEvent::LLMCall(call) = event {
+                sender.send_llm(call.clone());
             }
         }
     }
