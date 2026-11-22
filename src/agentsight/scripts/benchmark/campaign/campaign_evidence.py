@@ -22,6 +22,12 @@ from fault_injector import delivery_failures
 from validate_results import json_lines
 
 VERSIONS = ("baseline", "optimized")
+
+
+def evaluation_dict(run: dict[str, Any]) -> dict[str, Any]:
+    """Return a run's evaluation mapping, or empty dict when absent or non-object."""
+    evaluation = run.get("evaluation")
+    return evaluation if isinstance(evaluation, dict) else {}
 RECOVERY_PHASES = ("stable", "overload", "recover")
 FAULT_CASES = {
     "invalid_json",
@@ -397,7 +403,7 @@ def recovery_outcome(
             True,
         )
     for label in ("stable", "recover"):
-        verdict = (phases[label][1].get("evaluation") or {}).get("verdict")
+        verdict = evaluation_dict(phases[label][1]).get("verdict")
         quality_checks[f"{label}_load_gates"] = (verdict == "PASS", True)
     for name, (actual, expected) in quality_checks.items():
         if actual is None:
@@ -597,7 +603,7 @@ def audit_campaign(
                     runs[0].get("qps") != qps
                     or runs[0].get("duration_seconds") != matrix["duration_seconds"]
                     or runs[0].get("warmup_seconds") != matrix["warmup_seconds"]
-                    or (runs[0].get("evaluation") or {}).get("verdict") != "PASS"
+                    or evaluation_dict(runs[0]).get("verdict") != "PASS"
                 ):
                     issues.append(
                         f"{version} matrix {qps} QPS rep {repetition} did not pass"
@@ -617,7 +623,7 @@ def audit_campaign(
                 or soak[0].get("label") != f"qps-{soak_qps}"
                 or soak[0].get("duration_seconds") != soak_settings["duration_seconds"]
                 or soak[0].get("warmup_seconds") != soak_settings["warmup_seconds"]
-                or (soak[0].get("evaluation") or {}).get("verdict") != "PASS"
+                or evaluation_dict(soak[0]).get("verdict") != "PASS"
             ):
                 issues.append(f"{version} soak run did not pass the frozen window")
 

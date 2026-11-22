@@ -124,7 +124,7 @@ def write_run_inventory(
         for path, run in sorted(
             items, key=lambda item: item[0].relative_to(results).as_posix()
         ):
-            evaluation = run.get("evaluation") or {}
+            evaluation = campaign_evidence.evaluation_dict(run)
             row = {field: run.get(field, "") for field in fields[:7]}
             row.update(
                 verdict=evaluation.get("verdict", ""),
@@ -168,7 +168,7 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
             "version": version,
             "repetitions": len(runs),
             "pass_count": sum(
-                (run.get("evaluation") or {}).get("verdict") == "PASS"
+                campaign_evidence.evaluation_dict(run).get("verdict") == "PASS"
                 for run in runs
             ),
         }
@@ -353,8 +353,7 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
     for _, run in runs:
         summary = run.get("summary")
         summary = summary if isinstance(summary, dict) else {}
-        evaluation = run.get("evaluation")
-        verdict = evaluation.get("verdict", "—") if isinstance(evaluation, dict) else "—"
+        verdict = campaign_evidence.evaluation_dict(run).get("verdict", "—")
         version = display(run.get("version"))
         duration = display(run.get("duration_seconds"), "s")
         lines.append(
