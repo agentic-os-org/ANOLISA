@@ -1446,6 +1446,12 @@ impl HttpConnectionAggregator {
             if let Some((response, end_timestamp_ns)) =
                 assembly.finish_partial(self.max_body_bytes, self.max_headers)
             {
+                let mut request = request;
+                if let Some(body_buffer) = assembly.take_pending_body()
+                    && let Some(req) = request.as_mut()
+                {
+                    req.set_reassembled_body(body_buffer);
+                }
                 // Side tables are only dropped once the connection is known
                 // completed; a put-back arm (unusable headers) must keep them
                 // so the evidence path stays intact (#7716 review).
@@ -1954,6 +1960,108 @@ mod tests {
             panic!("expected HttpComplete, got {result:?}");
         };
         assert_eq!(pair.request.body(), body);
+    }
+
+    #[test]
+    fn test_split_100_continue_preserves_request_body_pending() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let pid = 4322;
+        let ssl_ptr = 0xC001;
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"split-100"}]}"#;
+
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let header_end = headers.len();
+        let request_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, headers.into_bytes(), 1);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 11,
+            headers: HashMap::from([
+                ("content-length".to_string(), body.len().to_string()),
+                ("expect".to_string(), "100-continue".to_string()),
+            ]),
+            body_offset: header_end,
+            body_len: 0,
+            source_event: request_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // Interim `100 Continue` split across two SSL_read events.
+        let interim_part1 =
+            create_mock_ssl_event_with_buf(pid, ssl_ptr, b"HTTP/1.1 100 ".to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&interim_part1).is_none());
+
+        let interim_part2 =
+            create_mock_ssl_event_with_buf(pid, ssl_ptr, b"Continue\r\n\r\n".to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&interim_part2).is_none());
+        assert!(
+            matches!(
+                aggregator.connections.peek(&ConnectionId { pid, ssl_ptr }),
+                Some(ConnectionState::RequestBodyPending { .. })
+            ),
+            "completed interim 100 Continue must restore RequestBodyPending"
+        );
+
+        // Client now sends the withheld request body.
+        let body_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, body.to_vec(), 1);
+        assert!(aggregator.process_raw_body_data(&body_event).is_none());
+
+        // Final response arrives and must complete with the full request body.
+        let response_event = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            0,
+        );
+        let result = aggregator.process_raw_body_data(&response_event);
+        let Some(AggregatedResult::HttpComplete(pair)) = result else {
+            panic!("expected HttpComplete, got {result:?}");
+        };
+        assert_eq!(pair.request.body(), body);
+    }
+
+    #[test]
+    fn test_split_final_response_during_request_body_pending_keeps_partial_body() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let pid = 4323;
+        let ssl_ptr = 0xC002;
+        let partial_body = br#"{"model":"gpt-4""#;
+
+        let headers = "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n";
+        let mut first = headers.as_bytes().to_vec();
+        first.extend_from_slice(partial_body);
+        let request_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, first, 1);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 11,
+            headers: HashMap::from([("content-length".to_string(), "64".to_string())]),
+            body_offset: headers.len(),
+            body_len: partial_body.len(),
+            source_event: request_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let part1 = create_mock_ssl_event_with_buf(pid, ssl_ptr, b"HTTP/1.1 400 ".to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&part1).is_none());
+
+        let part2 = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"Bad Request\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            0,
+        );
+        let result = aggregator.process_raw_body_data(&part2);
+        let Some(AggregatedResult::HttpComplete(pair)) = result else {
+            panic!("expected HttpComplete, got {result:?}");
+        };
+        assert_eq!(pair.request.body(), partial_body);
+        assert_eq!(pair.response.parsed.status_code, 400);
     }
 
     #[test]
@@ -3930,7 +4038,7 @@ mod tests {
             conn_id,
             ConnectionState::ResponsePending {
                 request: None,
-                assembly: PendingResponse::Headers(create_mock_ssl_event_with_buf(
+                assembly: PendingResponse::headers(create_mock_ssl_event_with_buf(
                     conn_id.pid,
                     conn_id.ssl_ptr,
                     vec![b'z'; 512],
