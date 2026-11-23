@@ -1,6 +1,6 @@
 //! Query and formatting utilities for tokenless stats.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::record::{CompressionMode, StatsRecord};
 use crate::recorder::{RetrieveTotals, StatsSummary};
@@ -96,8 +96,11 @@ pub fn format_summary(
         total.tokens_percent()
     ));
 
-    // Breakdown by operation type
-    let mut by_op: HashMap<&str, StatsSummary> = HashMap::new();
+    // Breakdown by operation type. A BTreeMap plus a name tie-break keeps
+    // the section byte-identical across runs; the previous HashMap grouping
+    // made equal-count operations follow random iteration order, and the
+    // JSON path (`format_summary_json`) was already name-ordered.
+    let mut by_op: BTreeMap<&str, StatsSummary> = BTreeMap::new();
     for r in &active {
         let op = r.operation.as_str();
         let entry = by_op.entry(op).or_default();
@@ -113,7 +116,12 @@ pub fn format_summary(
     output.push('\n');
 
     let mut ops: Vec<_> = by_op.iter().collect();
-    ops.sort_by_key(|b| std::cmp::Reverse(b.1.total_records));
+    ops.sort_by(|(left_op, left), (right_op, right)| {
+        right
+            .total_records
+            .cmp(&left.total_records)
+            .then_with(|| left_op.cmp(right_op))
+    });
 
     for (op, s) in ops {
         output.push_str(&format!("  {}: {} records\n", op, s.total_records));
@@ -988,5 +996,48 @@ mod tests {
     fn test_format_list_empty() {
         let output = format_list(&[], 10);
         assert!(output.contains("No records found"));
+    }
+
+    #[test]
+    fn test_format_summary_breakdown_orders_ties_by_operation_name() {
+        // One record per operation type: every group has the same count, so
+        // only the name tie-break defines the order. The section must be
+        // reproducible run to run (snapshot-friendly), like the JSON path's
+        // BTreeMap ordering. Iterating 16 times makes an accidentally sorted
+        // HashMap order vanishingly unlikely to pass on unfixed code.
+        let records: Vec<StatsRecord> = [
+            OperationType::CompressSchema,
+            OperationType::CompressResponse,
+            OperationType::RewriteCommand,
+            OperationType::CompressToon,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, op)| {
+            let mut r = test_record();
+            r.id = index as i64 + 1;
+            r.operation = op.clone();
+            r
+        })
+        .collect();
+
+        for _ in 0..16 {
+            let output = format_summary(&records, None, None, None);
+            let positions: Vec<usize> = [
+                "compress-response",
+                "compress-schema",
+                "compress-toon",
+                "rewrite-command",
+            ]
+            .iter()
+            .map(|op| output.find(&format!("  {op}: ")).unwrap_or(usize::MAX))
+            .collect();
+            let mut sorted = positions.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                positions, sorted,
+                "equal-count operations must be ordered by name"
+            );
+        }
     }
 }
