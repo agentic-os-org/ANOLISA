@@ -512,7 +512,8 @@ fn local_maintenance_jobs(
             | DatabaseId::SecurityAudit
             | DatabaseId::Enforcement
             | DatabaseId::Causal
-            | DatabaseId::Tokenless => None,
+            | DatabaseId::Tokenless
+            | DatabaseId::AwAudit => None,
         };
         if let Some(job) = job {
             jobs.push(job?);
