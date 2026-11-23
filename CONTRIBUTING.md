@@ -294,6 +294,28 @@ Before requesting review, confirm that:
 - The PR template records risk, compatibility, and rollback considerations.
 - Documentation and bilingual counterparts are updated when required.
 
+### Draft PRs and claiming
+
+Use a **Draft PR** (`isDraft=true`) for early work-in-progress or prototype
+feedback, and mark it **Ready for review** (`isDraft=false`) when it is ready
+for formal review and merge gates:
+
+- Opening a Draft PR does **not** claim or lock an issue by itself. To reserve
+  an accepted issue while iterating, comment `/claim` on the issue first (see
+  [`.github/TRIAGE.md`](.github/TRIAGE.md#claiming-community-work)).
+- Draft PRs do not enter formal code review unless you explicitly ask for early
+  feedback in a PR comment.
+- Post a short progress update if you need more time on a claimed issue, or
+  comment `/unclaim` if you can no longer continue. Maintainers may check in
+  after 7 days without visible progress and release inactive claims after 14
+  days (staying in Draft does not extend an inactive claim indefinitely).
+- When a linked issue is resolved by another PR or closed, competing
+  ready-for-review PRs are closed with a courtesy note linking the resolution;
+  unconverted Draft PRs do not block issue closure.
+
+The full normative lifecycle matrix and automation rules are defined in
+[`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md).
+
 ## Documentation synchronization
 
 Follow the [PR documentation update rules in §5 of the documentation standard](specs/documentation-standard.md#5-pr-documentation-update-rules)
