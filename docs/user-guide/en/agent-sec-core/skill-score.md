@@ -82,6 +82,10 @@ The proxy must support the existing Messages request parameters (`thinking` and 
 
 An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. Both legacy variables are required and retain Bailian endpoint restrictions; a custom proxy requires the explicit configuration file. To roll back proxy routing, restore the Bailian configuration above.
 
+Judge failure lines keep the error code and append a bounded JSON object after `diagnostic=`. Its `stage` identifies audit, probe repair, final judgment or critical review. Its `reason` distinguishes interrupted transfer (`body_truncated`), missing answer text (`missing_text`), missing or malformed token usage (`missing_usage`, `invalid_usage`), and invalid Judge output (`output_json`, `output_contract`). Response failures include the HTTP status and observed byte counts when available. Each model request may replay one interrupted transfer within its deadline and three transport attempts. A corrected prompt starts a new request. A probe repair that returns valid JSON but leaves required probes invalid records `probe_repair/output_contract`. Missing text or usage fails the attempt. A repeated request can incur provider charges.
+
+When `plan` or `run` returns a terminal error, stderr includes a `[skill-score] Command failed: diagnostic=` JSON line with the operation, reason, and OS errno when known. For an installed runtime, the operation identifies manifest parsing, version checks, image receipt verification or local image inspection. Only recognized filenames can appear in this event. For an incomplete probe, `report.execution[]` can include `failure_kind` and a list of recognized `collection_errors`. The existing completion and judgment fields retain their meaning.
+
 ## Plan and execute
 
 ```sh

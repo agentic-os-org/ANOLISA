@@ -279,15 +279,26 @@ pub(crate) fn baseline_eligibility(
     evidence: &Value,
     catalog: &BTreeMap<String, String>,
 ) -> (bool, String) {
-    let refs = strings(final_value, "baseline_refs");
-    if refs.is_empty()
-        || refs.iter().any(|r| !catalog.contains_key(*r))
-        || !flag(evidence, "complete")
-        || !flag(evidence, "skill_loaded")
-    {
+    if !flag(evidence, "complete") {
+        return (false, "baseline execution did not complete".into());
+    }
+    if !flag(evidence, "skill_loaded") {
         return (
             false,
-            "baseline references, Skill loading or required observations are missing".into(),
+            "baseline execution did not confirm Skill loading".into(),
+        );
+    }
+    if final_value.get("baseline_refs").is_none() {
+        return (
+            false,
+            "baseline assessment unavailable without a final Judge result".into(),
+        );
+    }
+    let refs = strings(final_value, "baseline_refs");
+    if refs.is_empty() || refs.iter().any(|r| !catalog.contains_key(*r)) {
+        return (
+            false,
+            "final Judge baseline references are missing or unknown".into(),
         );
     }
     let entry = text(probe, "entry_path");
@@ -404,6 +415,31 @@ fn excerpt_refs(finding: &Value, coverage: &[Value]) -> Vec<String> {
     .collect()
 }
 
+// Worker details can contain paths and subprocess output. Only these fixed causes enter report-v1.
+fn collection_reason(message: &str) -> &'static str {
+    if message.ends_with("valid Harbor ATIF missing") {
+        "trajectory_missing"
+    } else if message.ends_with("observer artifacts missing") {
+        "observer_artifacts_missing"
+    } else if message.ends_with("process observations missing") {
+        "process_observations_missing"
+    } else if message.starts_with("end-of-agent snapshot") {
+        "end_snapshot_failed"
+    } else if message.ends_with("snapshot is not an object") {
+        "invalid_snapshot"
+    } else if message.ends_with("final collection marker invalid") {
+        "invalid_collection_marker"
+    } else if matches!(
+        message,
+        "original source execution attribution is unverified"
+            | "canonical source changed or post-execution verification failed"
+    ) {
+        "source_verification_failed"
+    } else {
+        "collection_error"
+    }
+}
+
 fn public_execution(data: &Value) -> Vec<Value> {
     let mut judgments = array(data, "task_results")
         .iter()
@@ -423,18 +459,49 @@ fn public_execution(data: &Value) -> Vec<Value> {
         .iter()
         .map(|item| (text(item, "probe_id"), item))
         .collect::<BTreeMap<_, _>>();
-    array(data,"probes").iter().map(|probe|{
-        let id = text(probe,"id");
-        let item = if let Some(evidence) = observed.get(id) {
-            judgments.get(id).cloned().unwrap_or_else(||json!({"completed":false,"reason":
-                if text(evidence,"error").is_empty(){"task completion was not established by the final Judge"}else{text(evidence,"error")}}))
-        } else {
-            json!({"completed":false,"reason":if text(data,"decision") == "blocked" {
-                "not executed: confirmed Critical stopped Runtime".to_owned()
-            }else {format!("not executed: {}",strings(data,"failures").into_iter().chain(strings(data,"limitations")).collect::<Vec<_>>().join("; "))}})
-        };
-        json!({"task_id":id,"completed":item["completed"],"execution_complete":observed.get(id).is_some_and(|e|flag(e,"complete")),"reason":item["reason"]})
-    }).collect::<Vec<_>>()
+    array(data, "probes")
+        .iter()
+        .map(|probe| {
+            let id = text(probe, "id");
+            let evidence = observed.get(id);
+            let item = if let Some(evidence) = evidence {
+                judgments.get(id).cloned().unwrap_or_else(|| {
+                    let reason = match text(evidence, "error") {
+                        "" => "task completion was not established by the final Judge",
+                        reason => reason,
+                    };
+                    json!({"completed":false, "reason":reason})
+                })
+            } else {
+                let reason = if text(data, "decision") == "blocked" {
+                    "not executed: confirmed Critical stopped Runtime".to_owned()
+                } else {
+                    let messages = strings(data,"failures").into_iter().chain(strings(data,"limitations")).collect::<Vec<_>>();
+                    format!("not executed: {}", messages.join("; "))
+                };
+                json!({"completed":false, "reason":reason})
+            };
+            let complete = evidence.is_some_and(|e| flag(e, "complete"));
+            let mut result = json!({"task_id":id, "completed":item["completed"], "execution_complete":complete, "reason":item["reason"]});
+            if let Some(evidence) = evidence.filter(|_| !complete) {
+                let errors = strings(evidence, "collection_errors").into_iter()
+                    .map(collection_reason).collect::<std::collections::BTreeSet<_>>();
+                let kind = match text(evidence, "failure_kind") {
+                    known @ ("setup" | "runtime" | "timeout") => Some(known),
+                    _ if !text(evidence, "error").is_empty() => Some("worker"),
+                    _ if !errors.is_empty() => Some("collection"),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    result["failure_kind"] = kind.into();
+                }
+                if !errors.is_empty() {
+                    result["collection_errors"] = json!(errors);
+                }
+            }
+            result
+        })
+        .collect()
 }
 
 pub(crate) fn public_report(data: &Value, catalog: &BTreeMap<String, String>) -> Value {
@@ -531,6 +598,20 @@ mod tests {
                     "outcome":"succeeded","time":1},
                 {"id":"event:fixed:effect","kind":"file","target":"/app/guard/protected.txt",
                     "entry_origin":"event:fixed:entry","time":2}]})
+    }
+
+    #[test]
+    fn missing_final_judgment_preserves_completed_baseline_execution() {
+        let observed = json!({"complete":true,"skill_loaded":true});
+        let (_, reason) = baseline_eligibility(&json!({}), &json!({}), &observed, &BTreeMap::new());
+        assert!(reason.contains("without a final Judge result"));
+        let (_, reason) = baseline_eligibility(
+            &json!({"baseline_refs":[]}),
+            &json!({}),
+            &observed,
+            &BTreeMap::new(),
+        );
+        assert!(reason.contains("references are missing"));
     }
 
     #[test]
@@ -637,6 +718,44 @@ mod tests {
         assert!(baseline_eligibility(&final_value, &probe, &evidence, &catalog).0);
         evidence["input_observed"] = json!(false);
         assert!(!baseline_eligibility(&final_value, &probe, &evidence, &catalog).0);
+    }
+
+    #[test]
+    fn incomplete_probe_keeps_judgment_and_safe_collection_diagnostics() {
+        let mut data = json!({"probes":[{"id":"p1"}], "task_results":[{"task_id":"p1","completed":false,"reason":"Judge reason"}],
+            "coverage":[{"probe_id":"p1","complete":false,"failure_kind":"setup",
+            "collection_errors":["private/path: valid Harbor ATIF missing","end-of-agent snapshot: PermissionError","sensitive worker text","other sensitive text"]}]});
+        let out = public_execution(&data);
+        assert_eq!(out[0]["reason"], "Judge reason");
+        assert_eq!(out[0]["failure_kind"], "setup");
+        assert_eq!(
+            out[0]["collection_errors"],
+            json!([
+                "collection_error",
+                "end_snapshot_failed",
+                "trajectory_missing"
+            ])
+        );
+        data["coverage"][0]["failure_kind"] = json!("none");
+        assert_eq!(public_execution(&data)[0]["failure_kind"], "collection");
+        data["coverage"][0]["complete"] = json!(true);
+        let recovered = public_execution(&data);
+        assert!(recovered[0].get("failure_kind").is_none());
+        assert!(recovered[0].get("collection_errors").is_none());
+    }
+
+    #[test]
+    fn public_report_preserves_probe_timeout() {
+        let report = public_report(
+            &json!({"probes":[{"id":"p1"}],
+                "coverage":[{"probe_id":"p1","complete":false,"failure_kind":"timeout","error":"probe deadline exceeded"}],
+                "task_results":[{"task_id":"p1","completed":false,"reason":"Judge reason"}]}),
+            &BTreeMap::new(),
+        );
+        let probe = &report["execution"][0];
+        assert_eq!(probe["failure_kind"], "timeout");
+        assert_eq!(probe["execution_complete"], false);
+        assert_eq!(probe["reason"], "Judge reason");
     }
 
     #[test]

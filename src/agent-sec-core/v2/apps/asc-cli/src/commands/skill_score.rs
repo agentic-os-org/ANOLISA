@@ -59,13 +59,32 @@ impl SkillScoreCommand {
                 let message = asc_model_client::remote::RemoteModel::from_environment()
                     .map_or(message.clone(), |model| model.redact_diagnostic(&message));
                 eprintln!("skill-score: {message}");
-                if matches!(
-                    error,
-                    asc_skill_score::Error::Contract(_) | asc_skill_score::Error::Json(_)
-                ) {
-                    2
+                let phase = if matches!(self.action, ScoreAction::Plan { .. }) {
+                    "plan"
                 } else {
-                    1
+                    "run"
+                };
+                eprintln!(
+                    "[skill-score] Command failed: diagnostic={}",
+                    error.diagnostic(phase)
+                );
+                match &error {
+                    Error::Contract(_)
+                    | Error::Json(_)
+                    | Error::Check {
+                        stage: "plan.skill.resolve" | "skill.entry.inspect" | "task.content.verify",
+                        ..
+                    } => 2,
+                    // Malformed installed JSON historically has exit status 2.
+                    Error::Check {
+                        stage:
+                            "runtime.manifest.parse"
+                            | "runtime.active-manifest.parse"
+                            | "runtime.image-receipt.verify",
+                        source,
+                        ..
+                    } if matches!(source.as_ref(), Error::Json(_)) => 2,
+                    _ => 1,
                 }
             }
         }
@@ -88,9 +107,12 @@ impl SkillScoreCommand {
             } => (
                 None,
                 skill_dir.canonicalize().map_err(|error| {
-                    asc_skill_score::Error::Contract(format!(
-                        "stage=plan.skill.resolve path={skill_dir:?}: Skill directory is unavailable: {error}"
-                    ))
+                    Error::check(
+                        "plan.skill.resolve",
+                        skill_dir,
+                        "Skill directory is unavailable",
+                        error,
+                    )
                 })?,
                 output_file.as_deref(),
                 None,
@@ -168,11 +190,22 @@ impl SkillScoreCommand {
                 output_file,
                 evidence_dir,
             } = self.input(&cancelled)?;
-            if !skill.join("SKILL.md").is_file() {
-                let path = skill.join("SKILL.md");
-                return Err(asc_skill_score::Error::Contract(format!(
-                    "stage=skill.entry.inspect path={path:?}: Skill directory must contain SKILL.md"
-                )));
+            let entry = skill.join("SKILL.md");
+            let metadata = entry.metadata().map_err(|e| {
+                Error::check(
+                    "skill.entry.inspect",
+                    &entry,
+                    "Skill directory must contain SKILL.md",
+                    e,
+                )
+            })?;
+            if !metadata.is_file() {
+                return Err(Error::check(
+                    "skill.entry.inspect",
+                    &entry,
+                    "Skill directory must contain SKILL.md",
+                    Error::Contract("entry is not a regular file".into()),
+                ));
             }
             check_targets(&skill, output_file, evidence_dir)?;
             let temporary = tempfile::Builder::new()
