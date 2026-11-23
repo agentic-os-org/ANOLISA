@@ -62,6 +62,9 @@
     "wait_for_input_submit": {
       "type": "boolean"
     },
+    "observe_session_start": {
+      "type": "boolean"
+    },
     "availability": {
       "enum": [
         "required",

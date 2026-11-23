@@ -128,17 +128,22 @@ test("native response errors drain the partial event before reporting denial", a
 
 
 test("native Qoder session starts are observed without changing native Hooks", async () => {
-  assert.deepEqual(qoderCapabilities(false).events["session.start"], ["observe"]);
+  assert.equal(qoderCapabilities(false).events["session.start"], undefined);
+  assert.deepEqual(qoderCapabilities(false, true).events["session.start"], ["observe"]);
   const calls = [];
   const task = scope(async (selected, event) => {
     calls.push([selected.event, event.session_id]);
     return { code: 0, stdout: Buffer.alloc(0) };
   });
   task.routes.hooks = [{ ...hook, event: "session.start", on_error: "report" }];
+  let preparations = 0;
+  task.prepare = () => { preparations++; };
   const attached = qoderOptions(task);
   const run = attached.options.hooks.SessionStart[0].hooks[0];
   await run({ hook_event_name: "SessionStart", session_id: "session", source: "compact" });
   assert.deepEqual(calls, []);
+  assert.equal(preparations, 0);
   assert.deepEqual(await run({ hook_event_name: "SessionStart", session_id: "session", source: "startup" }), {});
   assert.deepEqual(calls, [["session.start", "session"]]);
+  assert.equal(preparations, 1);
 });

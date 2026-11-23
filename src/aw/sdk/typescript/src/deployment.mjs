@@ -190,6 +190,7 @@ export async function loadDescriptor({
         "profile",
         "endpoint",
         "wait_for_input_submit",
+        ...(Object.hasOwn(value, "observe_session_start") ? ["observe_session_start"] : []),
         "availability",
       ]) ||
       !fields(value.profile, ["adapter", "version", "entrypoint"]) ||
@@ -202,6 +203,8 @@ export async function loadDescriptor({
       !value.endpoint.startsWith("/") ||
       value.endpoint.includes("\0") ||
       typeof value.wait_for_input_submit !== "boolean" ||
+      (value.observe_session_start !== undefined &&
+        typeof value.observe_session_start !== "boolean") ||
       !["required", "native_fallback"].includes(value.availability) ||
       Object.values(value.profile).some(
         (text) => typeof text !== "string" || !/\P{White_Space}/u.test(text),
@@ -231,6 +234,7 @@ export async function loadDescriptor({
     target: value.target,
     endpoint: value.endpoint,
     inputEnabled: value.wait_for_input_submit,
+    ...(value.observe_session_start ? { sessionStartEnabled: true } : {}),
     availability: value.availability,
   };
 }

@@ -115,6 +115,16 @@ export async function fixture(required = true, input = false) {
         return "native-ready";
       },
       async *[Symbol.asyncIterator]() {
+        for (const group of input.options.hooks.SessionStart ?? []) {
+          for (const callback of group.hooks) {
+            await callback({
+              hook_event_name: "SessionStart",
+              session_id: "session",
+              source: "startup",
+              cwd: input.options.cwd ?? root + "/work",
+            });
+          }
+        }
         if (input.options.hooks.UserPromptSubmit) {
           calls.push("input");
           for (const group of input.options.hooks.UserPromptSubmit) {
@@ -173,6 +183,15 @@ export async function fixture(required = true, input = false) {
         ...extra,
       });
       return bridge;
+    },
+    async descriptor() {
+      const path = root + "/descriptor.json";
+      const { stdout } = await execute(binary, [
+        "config", "descriptor", "--config", configFile, "--agent", "app",
+        "--profile", "qoder-public-hooks",
+      ], { timeout: 8000 });
+      await writeFile(path, stdout, { mode: 0o600 });
+      return path;
     },
     async attach() {
       service = spawn(

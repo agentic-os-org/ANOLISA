@@ -38,6 +38,7 @@ export async function createQoderBridge({
   const clean = hookEnvironment(environment);
   const {
     inputEnabled,
+    sessionStartEnabled,
     availability: configuredAvailability,
     target: selected,
     endpoint,
@@ -50,7 +51,7 @@ export async function createQoderBridge({
     environment: clean,
   });
   target = selected;
-  const capabilities = qoderCapabilities(inputEnabled);
+  const capabilities = qoderCapabilities(inputEnabled, sessionStartEnabled);
   const supported = Object.keys(capabilities.events);
   if (
     availability === "native_fallback" &&

@@ -27,7 +27,17 @@ fn deployment_round_trip_exposes_only_startup_hints() {
     assert_eq!(descriptor.profile().adapter, "qoder-sdk");
     assert_eq!(descriptor.endpoint(), "/run/aw/aw.sock");
     assert!(descriptor.wait_for_input_submit());
+    assert!(!descriptor.observe_session_start());
     assert_eq!(descriptor.availability(), Availability::Required);
+    assert_eq!(serde_json::to_value(&descriptor).unwrap(), value);
+}
+
+#[test]
+fn deployment_round_trips_an_enabled_session_start_hint() {
+    let mut value = document();
+    value["observe_session_start"] = json!(true);
+    let descriptor = parse(&value).unwrap();
+    assert!(descriptor.observe_session_start());
     assert_eq!(serde_json::to_value(&descriptor).unwrap(), value);
 }
 
@@ -44,6 +54,7 @@ fn deployment_rejects_unknown_missing_mistyped_or_mismatched_fields() {
         ("endpoint", json!("relative.sock")),
         ("endpoint", json!("/invalid\0.sock")),
         ("wait_for_input_submit", json!("true")),
+        ("observe_session_start", json!("true")),
         ("availability", json!("optional")),
         ("unexpected", json!(true)),
     ] {

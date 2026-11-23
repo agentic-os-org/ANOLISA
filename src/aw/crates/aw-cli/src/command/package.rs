@@ -223,12 +223,23 @@ pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<cra
         agent["adapter"] == adapter && target.is_none_or(|target| target == name.as_str())
     });
     let view = match (matches.next(), matches.next()) {
-        (Some((name, _)), None) => serde_json::json!({
-            "target": name,
-            "daemon": {"endpoint": spec["daemon"]["endpoint"], "state_dir": spec["daemon"]["state_dir"]},
-            "input_enabled": spec["events"]["input.submit"]["enabled"] == true,
-            "target_requires_service": aw_config::requirements::requires_service(&config, name)?,
-        }),
+        (Some((name, _)), None) => {
+            let requirements = aw_config::requirements::project(&config, name)?;
+            let mut view = serde_json::json!({
+                "target": name,
+                "daemon": {"endpoint": spec["daemon"]["endpoint"], "state_dir": spec["daemon"]["state_dir"]},
+                "input_enabled": spec["events"]["input.submit"]["enabled"] == true,
+                "target_requires_service": requirements.iter().any(|event| event.required),
+            });
+            if aw_adapter::deployment::emits_session_start_hint(adapter)
+                && requirements
+                    .iter()
+                    .any(|event| event.event == "session.start")
+            {
+                view["observe_session_start"] = serde_json::json!(true);
+            }
+            view
+        }
         _ => serde_json::json!({"target": null}),
     };
     serde_json::to_writer(std::io::stdout().lock(), &view)?;

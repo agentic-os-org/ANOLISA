@@ -3,7 +3,9 @@
 use aw_contracts::deployment::{Availability, DeploymentDescriptor};
 use aw_core::{
     admission::AdapterCapabilities,
-    descriptor::{compile, verify, DescriptorError},
+    descriptor::{
+        compile, compile_with_options, verify, verify_with_options, CompileOptions, DescriptorError,
+    },
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -285,4 +287,51 @@ fn deployment_verification_rejects_changed_well_shaped_hints() {
             Err(DescriptorError::Mismatch)
         ));
     }
+}
+
+#[test]
+fn session_start_hint_is_controlled_by_compile_options() {
+    let mut value = document();
+    value["spec"]["events"]["session.start"] = json!({"enabled":true,"required":false,"steps":[]});
+    let input = bytes(&value);
+    let mut caps = capabilities();
+    caps.events
+        .insert("session.start".into(), vec!["observe".into()]);
+
+    let without_hint =
+        compile(&input, "qoder", caps.clone(), Availability::NativeFallback).unwrap();
+    assert!(!without_hint.observe_session_start());
+
+    let hinted_options = CompileOptions {
+        session_start_hint: true,
+    };
+    let with_hint = compile_with_options(
+        &input,
+        "qoder",
+        caps.clone(),
+        Availability::NativeFallback,
+        hinted_options,
+    )
+    .unwrap();
+    assert!(with_hint.observe_session_start());
+
+    verify_with_options(
+        &with_hint,
+        &input,
+        "qoder",
+        caps.clone(),
+        Availability::NativeFallback,
+        hinted_options,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify(
+            &with_hint,
+            &input,
+            "qoder",
+            caps,
+            Availability::NativeFallback
+        ),
+        Err(DescriptorError::Mismatch)
+    ));
 }

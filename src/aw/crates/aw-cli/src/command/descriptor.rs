@@ -1,6 +1,6 @@
 //! Compile bounded deployment hints from the same configuration used by Service.
 
-use aw_core::descriptor::Availability;
+use aw_core::descriptor::{Availability, CompileOptions};
 use clap::{builder::PossibleValuesParser, Args};
 use std::io::Write;
 
@@ -26,7 +26,7 @@ pub(super) fn run(options: Options) -> crate::cli::Result<crate::cli::Exit> {
     let profile = aw_adapter::deployment::profile(&options.profile, input_enabled)?;
     let required = profile.requires_service
         || aw_config::requirements::requires_service(&configuration, &options.agent)?;
-    let descriptor = aw_core::descriptor::compile(
+    let descriptor = aw_core::descriptor::compile_with_options(
         &bytes,
         &options.agent,
         profile.capabilities,
@@ -34,6 +34,9 @@ pub(super) fn run(options: Options) -> crate::cli::Result<crate::cli::Exit> {
             Availability::Required
         } else {
             Availability::NativeFallback
+        },
+        CompileOptions {
+            session_start_hint: profile.session_start_hint,
         },
     )?;
     let mut output = serde_json::to_vec_pretty(&descriptor)?;

@@ -9,11 +9,11 @@ export const qoderProfile = Object.freeze({
   entrypoint: "sdk-worker",
 });
 
-export function qoderCapabilities(inputEnabled) {
+export function qoderCapabilities(inputEnabled, sessionStartEnabled = false) {
   return {
     ...qoderProfile,
     events: {
-      "session.start": ["observe"],
+      ...(sessionStartEnabled ? { "session.start": ["observe"] } : {}),
       ...(inputEnabled ? { "input.submit": ["observe", "block"] } : {}),
       "tool.before": ["observe", "block"],
       "tool.after": ["observe"],
@@ -52,6 +52,7 @@ export function qoderOptions(task, options = {}) {
     const callback = async (input, id, context = {}) => {
       const signal = context.signal;
       signal?.throwIfAborted();
+      if (event === "session.start" && input?.source === "compact") return {};
       let payload,
         started = false,
         routes = [];
@@ -60,7 +61,6 @@ export function qoderOptions(task, options = {}) {
         if (task.fallback) return {};
         routes = task.routes.hooks.filter((hook) => hook.event === event);
         payload = structuredClone(input);
-        if (event === "session.start" && payload.source === "compact") return {};
         if (
           id !== undefined &&
           (event === "tool.before" || event === "tool.after") &&

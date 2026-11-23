@@ -100,7 +100,7 @@ fn descriptor_binds_exact_configuration_and_selects_native_waiting() {
             let capabilities = aw_adapter::deployment::profile(profile, input).unwrap();
             let descriptor =
                 aw_core::descriptor::DeploymentDescriptor::parse(&output.stdout).unwrap();
-            aw_core::descriptor::verify(
+            aw_core::descriptor::verify_with_options(
                 &descriptor,
                 &bytes,
                 "business",
@@ -109,6 +109,9 @@ fn descriptor_binds_exact_configuration_and_selects_native_waiting() {
                     aw_core::descriptor::Availability::Required
                 } else {
                     aw_core::descriptor::Availability::NativeFallback
+                },
+                aw_core::descriptor::CompileOptions {
+                    session_start_hint: capabilities.session_start_hint,
                 },
             )
             .unwrap();
@@ -279,4 +282,87 @@ fn show_selects_only_one_matching_target_without_disclosing_configuration() {
         .success());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
     assert!(!show(&["--sdk-target", "qoder-sdk"]).status.success());
+}
+
+#[test]
+fn session_start_hint_is_scoped_to_qoder_public_hooks() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let base_fields = [
+        "availability",
+        "configuration_sha256",
+        "endpoint",
+        "profile",
+        "target",
+        "version",
+        "wait_for_input_submit",
+    ];
+    for (adapter, profile, expects_hint) in [
+        ("qoder-sdk", "qoder-public-hooks", true),
+        ("claude-sdk", "claude-resident-hooks", false),
+        ("pi", "pi-worker-hooks", false),
+    ] {
+        let mut document = configuration(directory.path(), adapter);
+        document["spec"]["events"]["session.start"] =
+            json!({"enabled": true, "required": false, "steps": []});
+        let output = invoke(directory.path(), &document, profile);
+        assert!(
+            output.status.success(),
+            "{profile}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        if expects_hint {
+            assert_eq!(value["observe_session_start"], json!(true));
+        } else {
+            assert!(
+                value.get("observe_session_start").is_none(),
+                "{profile} unexpectedly emitted observe_session_start"
+            );
+            assert_eq!(keys, base_fields);
+        }
+        let bytes = fs::read(directory.path().join("aw.json")).unwrap();
+        let capabilities = aw_adapter::deployment::profile(profile, false).unwrap();
+        let descriptor = aw_core::descriptor::DeploymentDescriptor::parse(&output.stdout).unwrap();
+        aw_core::descriptor::verify_with_options(
+            &descriptor,
+            &bytes,
+            "business",
+            capabilities.capabilities,
+            if capabilities.requires_service {
+                aw_core::descriptor::Availability::Required
+            } else {
+                aw_core::descriptor::Availability::NativeFallback
+            },
+            aw_core::descriptor::CompileOptions {
+                session_start_hint: capabilities.session_start_hint,
+            },
+        )
+        .unwrap();
+
+        let show = Command::new(env!("CARGO_BIN_EXE_aw"))
+            .args(["config", "show", "--config"])
+            .arg(directory.path().join("aw.json"))
+            .args(["--sdk-target", adapter])
+            .output()
+            .unwrap();
+        assert!(
+            show.status.success(),
+            "{adapter}: {}",
+            String::from_utf8_lossy(&show.stderr)
+        );
+        let shown: Value = serde_json::from_slice(&show.stdout).unwrap();
+        assert_eq!(
+            shown.get("observe_session_start") == Some(&json!(true)),
+            expects_hint
+        );
+    }
+    assert!(!directory.path().join("state").exists());
 }

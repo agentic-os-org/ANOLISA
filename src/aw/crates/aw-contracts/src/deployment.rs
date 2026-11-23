@@ -47,6 +47,8 @@ struct Fields {
     profile: DeploymentProfile,
     endpoint: String,
     wait_for_input_submit: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    observe_session_start: bool,
     availability: Availability,
 }
 
@@ -96,6 +98,11 @@ impl DeploymentDescriptor {
     /// Whether input submission must wait for AW before reaching the model.
     pub fn wait_for_input_submit(&self) -> bool {
         self.0.wait_for_input_submit
+    }
+
+    /// Whether the selected target requests session-start observation.
+    pub fn observe_session_start(&self) -> bool {
+        self.0.observe_session_start
     }
 
     /// Existing service availability contract selected during compilation.

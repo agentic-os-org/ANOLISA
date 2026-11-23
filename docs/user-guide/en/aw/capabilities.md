@@ -264,7 +264,7 @@ cases record the unchecked execution boundary and confirm that an AW deny still
 prevents execution. These cases do not certify final-argument enforcement.
 
 The configuration-driven Qoder SDK bridge uses public native Hooks and cooperative
-PID attachment. Model inference starts without AW when input.submit is disabled;
-first-tool admission fixes its Scope. Supported checks are input/tool-before
+PID attachment. With `session.start` and `input.submit` disabled, model inference
+can begin before attachment and first-tool admission fixes the Scope. Supported checks are input/tool-before
 observation and blocking, and tool-after observation. Result replacement/final
 checks retain their managed entrypoints. See [SDK deployment](../../../developer-guide/en/aw/deployment/native-sdk.md#configuration-driven-qoder-integration).

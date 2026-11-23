@@ -43,7 +43,9 @@ export async function loadConfiguration({
     throw new AwError("sdk_target_required");
   if (
     typeof document.input_enabled !== "boolean" ||
-    typeof document.target_requires_service !== "boolean"
+    typeof document.target_requires_service !== "boolean" ||
+    (document.observe_session_start !== undefined &&
+      typeof document.observe_session_start !== "boolean")
   )
     throw new AwError("sdk_configuration_invalid");
   const daemon = document.daemon;
@@ -59,6 +61,7 @@ export async function loadConfiguration({
     target: document.target,
     endpoint,
     inputEnabled: document.input_enabled,
+    ...(document.observe_session_start ? { sessionStartEnabled: true } : {}),
     availability:
       requiresService || document.target_requires_service
         ? "required"

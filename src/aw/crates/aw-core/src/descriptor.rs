@@ -26,6 +26,13 @@ pub enum DescriptorError {
     Mismatch,
 }
 
+/// Optional startup hints requested by the caller's Adapter deployment profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Emit `observe_session_start: true` when `session.start` is applicable.
+    pub session_start_hint: bool,
+}
+
 /// Compiles deployment hints without probing Providers, installing or activating Hooks.
 ///
 /// The caller supplies an existing trusted Adapter profile and its availability
@@ -42,6 +49,27 @@ pub fn compile(
     target: &str,
     capabilities: AdapterCapabilities,
     availability: Availability,
+) -> Result<DeploymentDescriptor, DescriptorError> {
+    compile_with_options(
+        bytes,
+        target,
+        capabilities,
+        availability,
+        CompileOptions::default(),
+    )
+}
+
+/// Compiles deployment hints with explicit profile-declared [`CompileOptions`].
+///
+/// # Errors
+/// Rejects invalid configuration, unsupported profile requirements, unresolved
+/// endpoints and availability conflicts.
+pub fn compile_with_options(
+    bytes: &[u8],
+    target: &str,
+    capabilities: AdapterCapabilities,
+    availability: Availability,
+    options: CompileOptions,
 ) -> Result<DeploymentDescriptor, DescriptorError> {
     let candidate = AdmissionEngine::new()?.preflight(bytes, target, capabilities)?;
     let config = candidate.configuration();
@@ -63,7 +91,7 @@ pub fn compile(
     let (_, endpoint) = aw_config::service_paths::resolve(Path::new(state), Path::new(endpoint))
         .map_err(|_| DescriptorError::Endpoint)?;
     let profile = candidate.capabilities();
-    let value = json!({
+    let mut value = json!({
         "version": VERSION,
         "configuration_sha256": candidate.revision(),
         "target": candidate.target(),
@@ -76,6 +104,13 @@ pub fn compile(
         "wait_for_input_submit": requirements.iter().any(|event| event.event == "input.submit"),
         "availability": availability,
     });
+    if options.session_start_hint
+        && requirements
+            .iter()
+            .any(|event| event.event == "session.start")
+    {
+        value["observe_session_start"] = json!(true);
+    }
     let encoded = aw_contracts::canonical::bytes(&value)?;
     Ok(DeploymentDescriptor::parse(&encoded)?)
 }
@@ -96,7 +131,30 @@ pub fn verify(
     capabilities: AdapterCapabilities,
     availability: Availability,
 ) -> Result<(), DescriptorError> {
-    if descriptor != &compile(bytes, target, capabilities, availability)? {
+    verify_with_options(
+        descriptor,
+        bytes,
+        target,
+        capabilities,
+        availability,
+        CompileOptions::default(),
+    )
+}
+
+/// Recompiles with explicit [`CompileOptions`] and compares every deployment hint.
+///
+/// # Errors
+/// Returns compilation errors for invalid inputs or [`DescriptorError::Mismatch`]
+/// when a well-shaped descriptor contains stale or changed hints.
+pub fn verify_with_options(
+    descriptor: &DeploymentDescriptor,
+    bytes: &[u8],
+    target: &str,
+    capabilities: AdapterCapabilities,
+    availability: Availability,
+    options: CompileOptions,
+) -> Result<(), DescriptorError> {
+    if descriptor != &compile_with_options(bytes, target, capabilities, availability, options)? {
         return Err(DescriptorError::Mismatch);
     }
     Ok(())
