@@ -216,6 +216,16 @@ cargo doc --workspace --no-deps   # required when changing public API or doc com
 - Clippy warnings are denied by default. To allow a specific lint, use `#[allow(clippy::xxx)]` at the narrowest scope with a comment explaining why.
 - Never comment out tests or remove assertions to pass checks — find and fix the root cause.
 
+### 3.6 Test Module Organization
+
+- **Unit vs. integration placement**: prefer integration tests under `tests/` whenever behavior can be verified through the public API alone (alongside runnable `# Examples` doctests for public usage); reserve white-box `#[cfg(test)] mod tests` for private internals and module-scoped invariants.
+- **No `include!()` for hand-written tests or fixtures**: reserve `include!()` for build-generated code under `OUT_DIR` (e.g., eBPF skeletons). `cargo fmt --all` does not traverse `include!()`, allowing silent formatting drift past CI and weakening IDE analysis.
+- **White-box unit tests**: keep small suites inline in `#[cfg(test)] mod tests { use super::*; ... }`; split larger suites into standard Rust 2018+ child modules (`foo.rs` declares `#[cfg(test)] mod tests;` backed by `foo/tests.rs`, further split into `foo/tests/<topic>.rs`; crate roots `lib.rs` / `main.rs` use `src/tests.rs`). Avoid `#[path]` for ordinary unit tests. `use super::*;` is the permitted glob-import exception inside test submodules, and attaching `foo/tests.rs` does not change `foo.rs`'s role as a leaf implementation module.
+- **Shared test helpers by Cargo compilation boundary**:
+  - Within one crate's unit tests (`src/`): use `#[cfg(test)] mod test_support;` (or the parent `foo/tests.rs`) rather than chaining multiple `include!()` files in one `mod tests` block.
+  - Across integration tests (`tests/*.rs`): use `tests/common/mod.rs` (see §3.2 exception), `#[path = "support/..."]`, or single-entry integration test modules.
+  - Across `src/` unit tests, `tests/` integration tests, or sibling crates (where `#[cfg(test)]` is not visible across Cargo compilation boundaries): gate shared mocks, fakes, or fixtures behind an additive bare-named `test-util` feature (enabled only in `[dev-dependencies]`, or placed in a dev-only helper crate); for small read-only helpers outside `src/` (e.g., standalone test oracles), `#[path = "..."] mod ...;` is also acceptable instead of `include!()`.
+
 ## 4. Python Conventions
 
 > Detailed Python standards are in [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md).
