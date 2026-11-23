@@ -32,7 +32,8 @@ const COUNT_BY_ALLOWED: [&str; 3] = ["category", "event_type", "trace_id"];
 /// v1's `--output` formats, sorted for the error message.
 const OUTPUT_FORMATS: [&str; 3] = ["json", "jsonl", "table"];
 // V1's diagnostic vocabulary; unlisted producer values remain queryable.
-const EVENT_TYPES: [&str; 8] = [
+const EVENT_TYPES: [&str; 9] = [
+    "authorization_receipt",
     "code_scan",
     "harden",
     "pii_scan",
@@ -201,13 +202,13 @@ impl EventsCommand {
         for (value, known, kind, label) in [
             (
                 self.event_type.as_deref(),
-                &EVENT_TYPES,
+                EVENT_TYPES.as_slice(),
                 "event_type",
                 "types",
             ),
             (
                 self.category.as_deref(),
-                &CATEGORIES,
+                CATEGORIES.as_slice(),
                 "category",
                 "categories",
             ),
@@ -803,7 +804,7 @@ mod tests {
         assert_eq!(transport.requests[0].params["category"], "future_category");
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
-            "Warning: Unknown event_type 'future_type'. Known types: code_scan, harden, pii_scan, prompt_scan, sandbox_prehook, skill_ledger, summary, verify\n\
+            "Warning: Unknown event_type 'future_type'. Known types: authorization_receipt, code_scan, harden, pii_scan, prompt_scan, sandbox_prehook, skill_ledger, summary, verify\n\
              Warning: Unknown category 'future_category'. Known categories: asset_verify, code_scan, hardening, pii_scan, prompt_scan, sandbox, skill_ledger, summary\n"
         );
     }
