@@ -40,6 +40,21 @@ fn classify_with_context(
     setup: &str,
     locale: Option<&str>,
 ) -> Option<String> {
+    classify_with_context_in(shell, input, top_token, setup, locale, None)
+}
+
+fn classify_in(shell: &str, input: &str, top_token: &str, dir: &std::path::Path) -> Option<String> {
+    classify_with_context_in(shell, input, top_token, ":", None, Some(dir))
+}
+
+fn classify_with_context_in(
+    shell: &str,
+    input: impl AsRef<OsStr>,
+    top_token: &str,
+    setup: &str,
+    locale: Option<&str>,
+    dir: Option<&std::path::Path>,
+) -> Option<String> {
     let mut command = Process::new(shell);
     if shell == "bash" {
         command.args(["--noprofile", "--norc"]);
@@ -48,6 +63,9 @@ fn classify_with_context(
     }
     if let Some(locale) = locale {
         command.env("LANG", locale).env("LC_ALL", locale);
+    }
+    if let Some(dir) = dir {
+        command.current_dir(dir);
     }
     let script = format!(
         "{}\n{setup}\n_cosh_classify_missing \"$1\" \"$2\"",
@@ -185,6 +203,10 @@ fn unquoted_expansion_guard_matrix() {
         "有没有名字带 [abc] 的文件",
         "看看 {a,b} 哪个大",
         "what is 2+2?",
+        // English questions whose `?` sits inside the sentence, bare or
+        // wrapped in quotes, carry no expansion.
+        "What is 6 multiplied by 7? Reply with only the number.",
+        "\"What is 6 multiplied by 7? Reply with only the number.\"",
         // A question mark closing a Han word is punctuation, not a glob.
         "你好你是谁?",
         "你还好吗? 我想问问",
@@ -596,6 +618,168 @@ fn command_veto_matrix_is_consistent() {
         assert_bash_zsh(input, top_token, "command");
     }
     assert_bash_zsh("帮我看 \"$PATH\"", "帮我看", "natural_language");
+}
+
+#[test]
+fn english_question_punctuation_reaches_the_classifier() {
+    let dir = std::env::temp_dir().join(format!("cosh-question-{}", super::unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, top_token) in [
+            // A `?` that closes a word inside the sentence is question
+            // punctuation, not a glob for the classifier.
+            (
+                "What is 6 multiplied by 7? Reply with only the number.",
+                "What",
+            ),
+            // Without a matching file the same shape is still a question.
+            ("What is 7? Reply with only the number.", "What"),
+            // Quoting the whole sentence must not change how it is judged.
+            (
+                "\"What is 6 multiplied by 7? Reply with only the number.\"",
+                "What is 6 multiplied by 7? Reply with only the number.",
+            ),
+            ("\"Can you help\"", "Can you help"),
+            // The sentence-final `?` and Han sentences keep their routing.
+            ("What is that number multiplied by 2?", "What"),
+            (
+                "\u{8bf7}\u{95ee} 6 \u{4e58}\u{4ee5} 7 \u{7b49}\u{4e8e}\u{591a}\u{5c11}\u{ff1f}\u{53ea}\u{56de}\u{7b54}\u{6570}\u{5b57}",
+                "\u{8bf7}\u{95ee}",
+            ),
+        ] {
+            assert_eq!(
+                classify_in(shell, input, top_token, &dir).as_deref(),
+                Some("natural_language"),
+                "{shell}: {input:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn question_punctuation_keeps_command_syntax_shell_owned() {
+    let dir = std::env::temp_dir().join(format!("cosh-question-veto-{}", super::unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // `7?` names this file, so the shell rewrites an unquoted `?` word before
+    // the classifier reads the line: the bare form must stay native.
+    std::fs::write(dir.join("70"), b"x").expect("write fixture");
+    // Paired with the `"What is this"?` case below, this file is what the
+    // shell's glob would rewrite that line to.
+    std::fs::write(dir.join("What is this!"), b"x").expect("write fixture");
+    std::fs::write(dir.join("What"), b"x").expect("write fixture");
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, top_token) in [
+            (
+                "What is 6 multiplied by 7? Reply with only the number.",
+                "What",
+            ),
+            ("What is 7? Reply with only the number.", "What"),
+            // A `?` after the closing quote is unquoted, so the shell globs
+            // it; stripping it must not turn the line into a quoted sentence
+            // and let it escape the veto. The same holds when the glob really
+            // matches a file here, and for the full-width `？`.
+            ("\"Can you help\"?", "Can you help?"),
+            ("\"What is 7?\"?", "What is 7?"),
+            ("\"What is this\"?", "What is this?"),
+            ("\"What is 7?\"\u{ff1f}", "What is 7?\u{ff1f}"),
+            // Real command syntax stays with the shell.
+            ("What is 6 | cat?", "What"),
+            ("What is 6 > out?", "What"),
+            ("What is $(id)?", "What"),
+            ("What is `id`?", "What"),
+            ("What is 6? | cat", "What"),
+            // Quotes that do not wrap the whole line stay shell-owned too.
+            ("\"What is 6?", "What is 6?"),
+            ("What is \"6\" times 7?", "What"),
+            ("What is 6? \"really\"", "What"),
+            ("\"\"", "\"\""),
+            // Two adjacent `?` read as a glob, not as punctuation.
+            ("Who are you??", "Who"),
+            ("\"Who are you??\"", "Who are you??"),
+        ] {
+            assert_eq!(
+                classify_in(shell, input, top_token, &dir).as_deref(),
+                Some("command"),
+                "{shell}: {input:?}"
+            );
+        }
+        for (input, top_token) in [
+            // A `?` inside the quotes is never glob-expanded, so a matching
+            // cwd file cannot rewrite the line: quoted questions stay
+            // questions regardless of cwd.
+            (
+                "\"What is 6 multiplied by 7? Reply with only the number.\"",
+                "What is 6 multiplied by 7? Reply with only the number.",
+            ),
+            ("\"What is 7?\"", "What is 7?"),
+        ] {
+            assert_eq!(
+                classify_in(shell, input, top_token, &dir).as_deref(),
+                Some("natural_language"),
+                "{shell}: {input:?}"
+            );
+        }
+        assert_eq!(
+            classify_with_context_in(
+                shell,
+                r#""Wha? number""#,
+                "Wha? number",
+                if shell == "zsh" {
+                    "setopt globsubst"
+                } else {
+                    ":"
+                },
+                None,
+                Some(&dir),
+            )
+            .as_deref(),
+            Some("ambiguous"),
+            "{shell}: quoted text must not become a question by matching the file What"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn question_mark_probe_keeps_the_caller_locale() {
+    let Some(utf8) = utf8_locale() else {
+        return;
+    };
+    // `?` is one character in a UTF-8 locale, so `7?` names the fixture and the
+    // interactive shell rewrites the line; byte-wise under `C` it names
+    // nothing. The veto's probe must predict both the way the caller's shell
+    // does, or the classifier routes a line the shell already expanded.
+    let dir = std::env::temp_dir().join(format!("cosh-question-locale-{}", super::unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("7中"), b"x").expect("write fixture");
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (locale, expected) in [(utf8, "command"), ("C", "natural_language")] {
+            assert_eq!(
+                classify_with_context_in(
+                    shell,
+                    "What is 7? Reply with only the number.",
+                    "What",
+                    ":",
+                    Some(locale),
+                    Some(&dir),
+                )
+                .as_deref(),
+                Some(expected),
+                "{shell}: the veto probe must glob `7?` the way {locale} does"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

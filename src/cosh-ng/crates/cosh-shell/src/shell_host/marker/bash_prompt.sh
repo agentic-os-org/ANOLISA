@@ -166,7 +166,7 @@ _cosh_command_not_found_handle() {
       _cosh_delegate_bash_command_not_found "$command" "$@"
       return $?
     fi
-    _cosh_emit_intercept_marker "$original" "natural_language" false "$sensitive"
+    _cosh_emit_intercept_marker "$original" "natural_language" true "$sensitive"
     return 0
   fi
   _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
@@ -344,14 +344,11 @@ _cosh_bounded_preexec_marker() {
       return 0
     fi
   fi
-  if ! builtin type -t -- "$first_word" >/dev/null 2>&1; then
-    local intent
-    intent="$(_cosh_classify_missing "$classification_command" "$first_word")"
-    if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" != 1 \
-       && "$intent" == natural_language ]] && _cosh_ai_enabled; then
-      return 0
-    fi
-  fi
+  # Always record the execution boundary. A missing command intercepted as
+  # natural language emits a correlated intercept with this same generation,
+  # and the ledger silent-closes the start without a block; a command the shell
+  # actually runs keeps its block. Skipping the record here on a natural-language
+  # guess dropped executed commands whose quoted text merely looked like a question.
 
   display_command="$command"
   if _cosh_is_handoff_wrapper "$command"; then
