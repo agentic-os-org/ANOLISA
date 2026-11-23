@@ -18,7 +18,7 @@ use super::approval_actions::{
 use super::approval_reason::{
     approval_reason_line, approval_reason_rows, approval_reason_styled_lines,
 };
-use super::approval_warning::{irrecoverable_warning_text, render_irrecoverable_warning};
+use super::approval_warning::{approval_warning_rows, render_approval_warnings};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
@@ -125,9 +125,11 @@ impl RatatuiInlineRenderer {
             if let Some(reason) = model.reason {
                 lines.push(approval_reason_line(reason, i18n));
             }
-            if model.irrecoverable {
-                lines.push(irrecoverable_warning_text(i18n));
-            }
+            lines.extend(
+                approval_warning_rows(&model, self.content_width(), i18n)
+                    .into_iter()
+                    .map(|(row, _)| row),
+            );
             lines.extend(command_rows);
             if model.queue_total > 1 {
                 let position = model.queue_position.to_string();
@@ -204,9 +206,11 @@ impl RatatuiInlineRenderer {
         if let Some(reason) = model.reason {
             lines.push(approval_reason_line(reason, i18n));
         }
-        if model.irrecoverable {
-            lines.push(irrecoverable_warning_text(i18n));
-        }
+        lines.extend(
+            approval_warning_rows(&model, self.content_width(), i18n)
+                .into_iter()
+                .map(|(row, _)| row),
+        );
         for warning in &model.hook_warnings {
             let icon = hook_warning_icon(warning.decision);
             lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
@@ -277,7 +281,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate
             })
             .unwrap_or(0);
         let expanded_rows = if model.expanded { 2 } else { 0 };
-        let warning_rows = u16::from(model.irrecoverable);
+        let warning_rows = approval_warning_rows(model, content_width, i18n).len() as u16;
         return 3
             + action_rows
             + command_rows
@@ -310,7 +314,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate
     // V6a slim generic card: border(2) + metadata(1) + actions(N) + content;
     // keys(1) + policy(2) only when expanded (ARP-R8).
     let expanded_rows = if model.expanded { 3 } else { 0 };
-    let warning_rows = u16::from(model.irrecoverable);
+    let warning_rows = approval_warning_rows(model, content_width, i18n).len() as u16;
     3 + action_rows
         + preview_rows
         + next_rows
@@ -383,7 +387,8 @@ fn render_approval_panel(
         i18n,
         inner.width as usize,
     );
-    let warning_height = u16::from(model.irrecoverable);
+    let warning_rows = approval_warning_rows(&model, approval_content_width(area.width), i18n);
+    let warning_height = warning_rows.len() as u16;
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(reason_height),
@@ -434,9 +439,7 @@ fn render_approval_panel(
         .render(chunks[1], buffer);
     }
 
-    if model.irrecoverable {
-        render_irrecoverable_warning(i18n, chunks[2], buffer);
-    }
+    render_approval_warnings(warning_rows, chunks[2], buffer);
 
     if !model.hook_warnings.is_empty() {
         let mut warning_lines: Vec<Line<'_>> = Vec::new();
@@ -541,7 +544,8 @@ fn render_command_tool_approval_panel(
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
     let queue_height = u16::from(model.queue_total > 1);
-    let warning_height = u16::from(model.irrecoverable);
+    let warning_rows = approval_warning_rows(&model, approval_content_width(area.width), i18n);
+    let warning_height = warning_rows.len() as u16;
     let action_lines = approval_action_styled_rows(
         model_action_set(&model),
         model.selected_action,
@@ -605,9 +609,7 @@ fn render_command_tool_approval_panel(
         .render(chunks[2], buffer);
     }
 
-    if model.irrecoverable {
-        render_irrecoverable_warning(i18n, chunks[3], buffer);
-    }
+    render_approval_warnings(warning_rows, chunks[3], buffer);
 
     let command_lines = command_rows
         .into_iter()

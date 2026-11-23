@@ -192,6 +192,7 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
     assert!(output.contains("已取消 req-1"), "{output}");
     assert!(output.contains("Bash · 高风险"), "{output}");
     assert!(output.contains("可能执行仓库内嵌脚本"), "{output}");
+    assert_inline_before_followup(&output, "终端输出不会脱敏", "已取消 req-1");
     assert!(!output.contains("风险 medium"), "{output}");
     assert!(output.contains("此工具请求需要你的批准。"), "{output}");
     assert!(output.contains("命令:"), "{output}");

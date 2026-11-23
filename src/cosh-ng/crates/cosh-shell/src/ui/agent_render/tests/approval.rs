@@ -60,6 +60,47 @@ fn approval_panel_turn_consent_wraps_actions_at_narrow_width() {
         .find(|line| line.contains("Deny"))
         .expect("deny line");
     assert!(!deny_line.contains("Allow all this turn"), "{deny_line}");
+
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 80] {
+            for renderer in [
+                RatatuiInlineRenderer::with_width(width).with_language(language),
+                RatatuiInlineRenderer::plain_with_width(width).with_language(language),
+            ] {
+                for (subject, turn_consent, disclosed) in [
+                    ("tool Bash", false, true),
+                    ("tool run_shell_command", false, true),
+                    ("tool Read", false, false),
+                    ("tool Read", true, true),
+                ] {
+                    let mut model = turn_consent_model(None);
+                    model.subject = subject;
+                    model.turn_consent = turn_consent;
+                    let text = renderer.approval_panel_lines(model).join("\n");
+                    let compact = panel_content_without_layout(&text);
+                    let warning = match (language, turn_consent) {
+                        (crate::Language::ZhCn, true) => "本轮终端输出不会脱敏。",
+                        (crate::Language::ZhCn, false) => "终端输出不会脱敏。",
+                        (_, true) => "Thisturn'sterminaloutputisnotredacted.",
+                        (_, false) => "Terminaloutputisnotredacted.",
+                    };
+                    assert_eq!(compact.contains(warning), disclosed, "{text}");
+                    let scrollback = if language == crate::Language::ZhCn {
+                        "输出可能留在滚屏记录中。"
+                    } else {
+                        "Outputmaystayinscrollback."
+                    };
+                    assert_eq!(compact.contains(scrollback), disclosed, "{text}");
+                    assert!(text.contains(if language == crate::Language::ZhCn {
+                        "拒绝"
+                    } else {
+                        "Deny"
+                    }), "{text}");
+                    assert_rendered_width(&text, width as usize);
+                }
+            }
+        }
+    }
 }
 
 /// 宽终端（≥120 列）单行容纳 5 动作（D8）。

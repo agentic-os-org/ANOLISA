@@ -228,6 +228,9 @@ macro_rules! approval_git_repo_config_ids {
             $remaining,
             $($ids,)*
             ApprovalRiskPhraseGitRepoConfigExecution,
+            ApprovalCommandOutputUnredacted,
+            ApprovalTurnOutputUnredacted,
+            ApprovalOutputScrollback,
         );
     };
 }
