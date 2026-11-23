@@ -680,4 +680,176 @@ mod tests {
         ));
         drop(sender);
     }
+
+    /// Real pre-release natural-expiry acceptance. Requires a committed login
+    /// (run cosh-core --oauth-login first) and HOME pointing at the round home.
+    /// Holds one real STS in a Static provider (never auto-refreshed) and issues
+    /// the same controlled request before and after its expiry. Run with
+    /// --ignored --exact; emits only fingerprints, times and RequestIds.
+    #[cfg(feature = "oauth-pre")]
+    #[tokio::test]
+    #[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"]
+    async fn real_pre_sts_natural_expiry() {
+        use super::super::store::{KeyringOAuthBackend, OAuthStore};
+        use crate::provider::sysom::SysomProvider;
+        use crate::provider::{
+            ContentGenerator, GenerateConfig, GenerateEvent, Message, ProviderFailureKind,
+        };
+        use futures::StreamExt;
+        use sha2::{Digest, Sha256};
+
+        let home = dirs::home_dir().expect("HOME set");
+        let store = Arc::new(OAuthStore::new(
+            &home.join(".copilot-shell"),
+            Arc::new(KeyringOAuthBackend),
+        ));
+        let state = store.read_state().expect("read state");
+        let generation = state.active.expect("commit a login first").generation;
+        let client = Arc::new(OAuthClient::new(format!(
+            "https://{}",
+            super::super::contract::bound_host()
+        )));
+        let manager = OAuthCredentialManager::new(client, store.clone(), generation);
+        let lease = manager.ensure().await.expect("refresh stored token");
+        let creds = &lease.credentials;
+        let fingerprint = hex::encode(Sha256::digest(
+            format!(
+                "{}|{}",
+                creds.access_key_id,
+                creds.security_token.clone().unwrap_or_default()
+            )
+            .as_bytes(),
+        ));
+        let ttl = lease.expires_at.saturating_duration_since(Instant::now());
+        let issue_wall = chrono::Utc::now();
+        let expiry_wall = issue_wall + chrono::Duration::from_std(ttl).unwrap();
+        eprintln!(
+            "EXPIRY_CASE generation={generation} sts_fp={fingerprint} issue={} ttl_secs={} expiry={}",
+            issue_wall.to_rfc3339(),
+            ttl.as_secs(),
+            expiry_wall.to_rfc3339()
+        );
+        let provider = SysomProvider::new(
+            &creds.access_key_id,
+            &creds.access_key_secret,
+            creds.security_token.as_deref(),
+            super::super::contract::PRE_HOST,
+        );
+        let config = GenerateConfig {
+            model: "auto".into(),
+            ..Default::default()
+        };
+        let before_wall = chrono::Utc::now();
+        let before = provider
+            .generate(&[Message::user("请只回复两个字：好的")], &[], &config)
+            .await;
+        let before_ok = match before {
+            Ok(stream) => {
+                let events: Vec<_> = stream.collect().await;
+                events
+                    .iter()
+                    .any(|e| matches!(e, GenerateEvent::TextDelta(_)))
+            }
+            Err(_) => false,
+        };
+        eprintln!(
+            "EXPIRY_BEFORE wall={} success={before_ok}",
+            before_wall.to_rfc3339()
+        );
+        assert!(before_ok, "STS must work before expiry");
+        let wait =
+            lease.expires_at.saturating_duration_since(Instant::now()) + Duration::from_secs(8);
+        eprintln!("EXPIRY_WAIT secs={}", wait.as_secs());
+        tokio::time::sleep(wait).await;
+        let after_wall = chrono::Utc::now();
+        let after = provider
+            .generate(&[Message::user("请只回复两个字：好的")], &[], &config)
+            .await;
+        let after_expired = match after {
+            Err(error) => {
+                eprintln!(
+                    "EXPIRY_AFTER wall={} gateway_error={error}",
+                    after_wall.to_rfc3339()
+                );
+                let explicit = error.contains("InvalidSecurityToken.Expired")
+                    || error.contains("SecurityTokenExpired");
+                eprintln!("EXPIRY_AFTER_CODE explicit_expired_code={explicit}");
+                explicit || error.contains("InvalidSecurityToken") || error.contains("Expired")
+            }
+            Ok(stream) => {
+                let events: Vec<_> = stream.collect().await;
+                let expired = events.iter().any(|e| {
+                    matches!(e, GenerateEvent::ProviderFailure(f) if f.kind == ProviderFailureKind::CredentialsExpired)
+                });
+                for e in &events {
+                    if let GenerateEvent::ProviderFailure(f) = e {
+                        eprintln!(
+                            "EXPIRY_AFTER_STREAM code={} request_id={:?} kind={:?}",
+                            f.code, f.request_id, f.kind
+                        );
+                    }
+                }
+                eprintln!(
+                    "EXPIRY_AFTER wall={} stream_expired={expired}",
+                    after_wall.to_rfc3339()
+                );
+                expired
+            }
+        };
+        assert!(
+            after_expired,
+            "the same held STS must be rejected after expiry"
+        );
+        assert!(
+            after_wall > expiry_wall,
+            "after request must be past expiry"
+        );
+        eprintln!("EXPIRY_CASE_PASS sts_fp={fingerprint}");
+    }
+
+    /// Real pre-release revoke acceptance: a valid refresh is revoked, then the
+    /// same refresh must be rejected. Token stays in this test process; only
+    /// RequestIds/categories are emitted. Requires a committed login.
+    #[cfg(feature = "oauth-pre")]
+    #[tokio::test]
+    #[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"]
+    async fn real_pre_revoke_then_refresh_rejected() {
+        use super::super::store::{KeyringOAuthBackend, OAuthStore};
+
+        let home = dirs::home_dir().expect("HOME set");
+        let store = Arc::new(OAuthStore::new(
+            &home.join(".copilot-shell"),
+            Arc::new(KeyringOAuthBackend),
+        ));
+        let state = store.read_state().expect("read state");
+        let login = state.active.expect("commit a login first");
+        let token = store
+            .load_refresh(login.generation)
+            .expect("load refresh")
+            .expect("refresh slot present");
+        let client = OAuthClient::new(format!("https://{}", super::super::contract::bound_host()));
+        let before = client.refresh(&token).await;
+        eprintln!(
+            "REVOKE_BEFORE_REFRESH generation={} ok={}",
+            login.generation,
+            before.is_ok()
+        );
+        assert!(before.is_ok(), "refresh must be valid before revoke");
+        let revoke = client.revoke(&login.client_id, &token).await;
+        eprintln!("REVOKE ok={}", revoke.is_ok());
+        assert!(revoke.is_ok(), "remote revoke must succeed");
+        let after = client.refresh(&token).await;
+        match after {
+            Err(error) => {
+                eprintln!(
+                    "REVOKE_AFTER_REFRESH code={} denied={}",
+                    error.code(),
+                    error == OAuthError::PermissionDenied
+                );
+                assert_eq!(error, OAuthError::PermissionDenied);
+            }
+            Ok(_) => panic!("revoked refresh must be rejected"),
+        }
+        eprintln!("REVOKE_CASE_PASS generation={}", login.generation);
+    }
 }

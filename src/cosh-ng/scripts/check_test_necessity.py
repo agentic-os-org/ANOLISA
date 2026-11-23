@@ -201,7 +201,22 @@ def main(argv=None) -> int:
     )
     if health_matrix_count != 1:
         failures.append("the provisioned health report matrix must match its exact registry entry")
-    ordinary_ignored_count = ignored_count - provisioned_count - helper_count - health_matrix_count
+    oauth_acceptance_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["disposition"] == "provisioned-oauth-acceptance"
+    )
+    if oauth_acceptance_count != 5:
+        failures.append(
+            "the provisioned pre-release OAuth acceptance tests must match their exact registry set of five"
+        )
+    ordinary_ignored_count = (
+        ignored_count
+        - provisioned_count
+        - helper_count
+        - health_matrix_count
+        - oauth_acceptance_count
+    )
     if ordinary_ignored_count != 3 or heavy_count - provisioned_count != 3:
         failures.append(
             f"ordinary ignored tests ({ordinary_ignored_count}) and explicit-heavy registry tests "

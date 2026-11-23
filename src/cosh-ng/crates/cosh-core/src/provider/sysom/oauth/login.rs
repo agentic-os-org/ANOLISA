@@ -581,7 +581,7 @@ mod tests {
     /// browser over stdin (never argv). Opens a local page; run with --ignored.
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    #[ignore]
+    #[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"]
     async fn macos_browser_handoff_canary() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

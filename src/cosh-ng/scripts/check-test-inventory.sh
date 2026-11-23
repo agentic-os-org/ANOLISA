@@ -89,8 +89,19 @@ health_matrix_ignored_count="$(
 if [[ "$health_matrix_ignored_count" -ne 1 ]]; then
   fail "expected exactly one provisioned health report matrix, found $health_matrix_ignored_count"
 fi
-ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count))
-echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix"
+# Real pre-release OAuth acceptance (login/refresh/expiry/revoke/route readback)
+# and the macOS keychain/browser handoff canaries need an independently
+# provisioned login, route, or desktop; they do not consume the ordinary skip budget.
+oauth_ignored_count="$(
+  rg --count-matches '#\[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"\]' \
+    crates/cosh-core/src/provider/sysom/oauth/ \
+    | awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$oauth_ignored_count" -ne 5 ]]; then
+  fail "expected exactly five provisioned pre-release OAuth acceptance tests, found $oauth_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count - oauth_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix, $oauth_ignored_count provisioned OAuth acceptance"
 if [[ "$ordinary_ignored_count" -gt 3 ]]; then
   fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi
