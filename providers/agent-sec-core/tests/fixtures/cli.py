@@ -31,6 +31,22 @@ if "scan-pii" in sys.argv:
         case["stdout"] = {"ok": True, "verdict": "deny" if risk else "pass",
                           "summary": {"source": source, "truncated": False,
                                       "bytes_scanned": len(text.encode())}}
+        summary = case["stdout"]["summary"]
+        if "v1_ruleset_sha256" in case:
+            ruleset_hash = case["v1_ruleset_sha256"]
+            if "--redact-output" in sys.argv:
+                ruleset_hash = case.get("v1_redaction_sha256", ruleset_hash)
+            summary["custom_rules"] = {
+                "status": "loaded", "runtime_error_count": 0, "budget_exhausted": False,
+                "truncated": False, "ruleset_sha256": ruleset_hash,
+            }
+        else:
+            summary["ruleset_id"] = case.get("ruleset_id", "fixture-v2")
+        if "--redact-output" in sys.argv:
+            case["stdout"]["redacted_text"] = re.sub(
+                case.get("pii_pattern", "SENSITIVE"), "[MASKED]", text
+            )
+            case.update(case.get("redactions_by_text", {}).get(text, case.get("redaction", {})))
 time.sleep(case.get("sleep", 0))
 sys.stderr.write(case.get("stderr", "") + "e" * case.get("stderr_repeat", 0))
 sys.stderr.flush()

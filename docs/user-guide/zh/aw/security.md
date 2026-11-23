@@ -123,7 +123,9 @@ git -c http.sslVerify=false --version
 
 使用[工具 PII 配置](../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)，沿用同一 CLI、Provider 和已运行后端。替换绝对路径，按 [Qoder SDK](../../../developer-guide/zh/aw/agents/qoder-sdk.md) 或 [QwenPaw](../../../developer-guide/zh/aw/agents/qwenpaw.md) 指南准备原生 worker/App。通过 `aw run --config aw.tool-pii.yaml --agent sdk` 或 `--agent app` 启动。
 
-输入步骤在执行前扫描选中的完整参数，敏感内容会被拒绝，工具不执行。输出步骤扫描实际结果，命中的文本槽替换为 `Sensitive data detected by AW; content withheld.`；替换前再次检查保留的结果结构。检查失败时停止原始输出交付并结束 Query/回复；工具已产生的副作用仍保留。验证时使用合成测试凭证。
+输入步骤在工具执行前阻断敏感参数。示例为输出配置了 `pii.output_mode: mask`，需要使用每次扫描都返回 `summary.ruleset_id` 的 V2 agent-sec-core 后端。字段缺失时，Provider 返回 `missing_ruleset_id`，示例的 `on_error: withhold_result` 会停止交付。检查通过的结果按原样交付。如果工具返回的一行文本含银行卡号，替换结果会保留前后文字，并采用 sec-core 脱敏后的卡号。验证时使用合成测试凭证。
+
+风险只涉及文本槽，但后端未提供可用的局部改写、改写后仍有风险或响应超过协议上限时，整个槽替换为 `Sensitive data detected by AW; content withheld.`。对于结构化结果，Provider 还会检查原始 JSON。无法确认其他字段安全，或任一扫描失败时，示例的 `on_error: withhold_result` 会停止交付整个结果并结束 Query/回复。工具已产生的副作用仍保留。
 
 各工具阶段明确选择 PII 的检查方。AW 接管时移除原生 PII 的 PreToolUse/PostToolUse 注册，按需保留用户提交检查。[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#工具-pii-策略)说明配置、不支持的结果结构和原生模式限制。
 

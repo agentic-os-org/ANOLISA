@@ -33,6 +33,7 @@ pub(super) struct Pii {
 pub(super) enum OutputMode {
     Observe,
     ReplaceResult,
+    Mask,
 }
 
 #[derive(Deserialize)]

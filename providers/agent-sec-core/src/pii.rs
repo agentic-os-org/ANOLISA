@@ -1,4 +1,4 @@
-//! Shared stdin-only PII scanning for user and tool boundaries.
+//! Shared CLI and daemon PII scanning for user and tool boundaries.
 
 use aw_exec::{CommandSpec, Limits};
 use serde::Deserialize;
@@ -71,6 +71,30 @@ struct ScanResult {
     ok: bool,
     verdict: String,
     summary: Value,
+    #[serde(default)]
+    redacted_text: Option<String>,
+}
+
+pub(super) struct ScannedText {
+    pub(super) verdict: Verdict,
+    pub(super) ruleset_id: Option<String>,
+    redacted_text: Option<String>,
+    redacted_text_omitted: bool,
+}
+
+impl ScannedText {
+    pub(super) fn redaction(self) -> Option<String> {
+        if self.verdict == Verdict::Risk && !self.redacted_text_omitted {
+            self.redacted_text
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn changed_redaction(self, original: &str) -> Option<String> {
+        self.redaction()
+            .filter(|text| !text.is_empty() && text != original)
+    }
 }
 
 /// Scan all UTF-8 text within the remaining invocation budget.
@@ -89,6 +113,18 @@ pub fn call(
     trace_context: &Value,
     timeout: Duration,
 ) -> Result<Verdict, Error> {
+    Ok(scan_cli(cli, socket, text, source, trace_context, timeout, false)?.verdict)
+}
+
+pub(super) fn scan_cli(
+    cli: &Path,
+    socket: &Path,
+    text: &str,
+    source: Source,
+    trace_context: &Value,
+    timeout: Duration,
+    redact_output: bool,
+) -> Result<ScannedText, Error> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or("invalid_budget")?;
@@ -96,7 +132,7 @@ pub fn call(
     if timeout_ms == 0 {
         return Err("deadline_exceeded".into());
     }
-    let command = CommandSpec {
+    let mut command = CommandSpec {
         program: cli.into(),
         args: vec![
             "--trace-context".into(),
@@ -115,12 +151,19 @@ pub fn call(
         cwd: std::env::current_dir().map_err(|_| "cli_context_error")?,
         environment: std::env::vars_os().collect(),
     };
+    if redact_output {
+        command.args.push("--redact-output".into());
+    }
     let output = aw_exec::run(
         &command,
         text.as_bytes(),
         Limits {
             input_bytes: aw_provider::MAX_MESSAGE_BYTES,
-            stdout_bytes: 1024 * 1024,
+            stdout_bytes: if redact_output {
+                crate::daemon_client::MAX_RESPONSE_FRAME_BYTES
+            } else {
+                1024 * 1024
+            },
             stderr_bytes: 65536,
         },
         deadline,
@@ -151,6 +194,17 @@ pub fn call_daemon(
     trace_context: &Value,
     timeout: Duration,
 ) -> Result<Verdict, Error> {
+    Ok(scan_daemon(socket, text, source, trace_context, timeout, false)?.verdict)
+}
+
+pub(super) fn scan_daemon(
+    socket: &Path,
+    text: &str,
+    source: Source,
+    trace_context: &Value,
+    timeout: Duration,
+    redact_output: bool,
+) -> Result<ScannedText, Error> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or("invalid_budget")?;
@@ -162,7 +216,7 @@ pub fn call_daemon(
             "source": source.as_str(),
             "includeLowConfidence": false,
             "rawEvidence": false,
-            "redactOutput": false,
+            "redactOutput": redact_output,
             "maxBytes": null,
             "inputTruncated": false,
             "inputBytesScanned": null,
@@ -179,7 +233,7 @@ fn parse_result(
     source: Source,
     text_len: usize,
     deadline: Instant,
-) -> Result<Verdict, Error> {
+) -> Result<ScannedText, Error> {
     if !result.ok {
         return Err("scan_error".into());
     }
@@ -205,9 +259,23 @@ fn parse_result(
     if Instant::now() >= deadline {
         return Err("deadline_exceeded".into());
     }
-    match result.verdict.as_str() {
-        "pass" => Ok(Verdict::Pass),
-        "warn" | "deny" => Ok(Verdict::Risk),
-        _ => Err("invalid_scan_result".into()),
-    }
+    let verdict = match result.verdict.as_str() {
+        "pass" => Verdict::Pass,
+        "warn" | "deny" => Verdict::Risk,
+        _ => return Err("invalid_scan_result".into()),
+    };
+    Ok(ScannedText {
+        verdict,
+        ruleset_id: match summary.get("ruleset_id") {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+            Some(_) => return Err("invalid_scan_result".into()),
+        },
+        redacted_text: result.redacted_text,
+        redacted_text_omitted: match summary.get("redacted_text_omitted") {
+            None => false,
+            Some(Value::Bool(omitted)) => *omitted,
+            Some(_) => return Err("invalid_scan_result".into()),
+        },
+    })
 }

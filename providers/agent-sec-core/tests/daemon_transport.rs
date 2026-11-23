@@ -266,6 +266,13 @@ fn daemon_transport_parity_trace_and_zero_cli_spawn() {
                     continue;
                 }
                 let srv_req_id = format!("daemon-srv-{seq}");
+                let redact = req.params["redactOutput"] == true;
+                if (redact && current_mode == "drop-redaction")
+                    || (current_mode == "drop-review"
+                        && req.params["text"].as_str().unwrap().contains("[MASKED]"))
+                {
+                    continue;
+                }
                 let resp = if current_mode == "error" {
                     serde_json::to_value(ErrorResponse {
                         request_id: srv_req_id,
@@ -304,15 +311,30 @@ fn daemon_transport_parity_trace_and_zero_cli_spawn() {
                         "action.pii_scan" => {
                             let text = req.params["text"].as_str().unwrap();
                             let risky = text.contains("SENSITIVE");
-                            json!({
+                            let mut report = json!({
                                 "ok": true,
                                 "verdict": if risky { "deny" } else { "pass" },
                                 "summary": {
                                     "source": req.params["source"],
+                                    "ruleset_id": "fixture-v2",
                                     "truncated": false,
                                     "bytes_scanned": text.len()
                                 }
-                            })
+                            });
+                            if redact {
+                                report["redacted_text"] =
+                                    json!(text.replace("SENSITIVE", "[MASKED]"));
+                                if current_mode == "omitted" {
+                                    report["summary"]["redacted_text_omitted"] = json!(true);
+                                }
+                                if current_mode == "invalid-omission" {
+                                    report["summary"]["redacted_text_omitted"] = json!("false");
+                                }
+                                if current_mode == "incomplete" {
+                                    report["summary"]["truncated"] = json!(true);
+                                }
+                            }
+                            report
                         }
                         _ => unreachable!(),
                     };
@@ -385,7 +407,11 @@ fn daemon_transport_parity_trace_and_zero_cli_spawn() {
         &scan_tool_output_pii_request("secret SENSITIVE value", 2000),
     );
     assert_eq!(replace_tool_out["status"], "ok");
-    assert_eq!(replace_tool_out["effects"][0]["type"], "replace_result");
+    assert_eq!(
+        replace_tool_out["effects"][0],
+        json!({"type":"replace_result",
+        "reason_code":"pii_risk","text":"Sensitive data detected by AW; content withheld."})
+    );
 
     let deny_final = invoke_binary_daemon(
         &sock,
@@ -408,6 +434,65 @@ fn daemon_transport_parity_trace_and_zero_cli_spawn() {
     assert!(baggage.contains("agentsec.agent.name=qoder"));
     assert!(baggage.contains("agentsec.session.id=sess-1"));
     assert!(baggage.contains("agentsec.tool_call.id=native-tool-9"));
+
+    let mask_request = |text: &str| {
+        let mut request = scan_tool_output_pii_request(text, 2000);
+        request.as_object_mut().unwrap().remove("input_digest");
+        request["config"]["pii"]["output_mode"] = json!("mask");
+        request["event"]["tool"]["result"] = json!(text);
+        support::bind_req(request)
+    };
+    recorded.lock().unwrap().clear();
+    let pass = invoke_binary_daemon(&sock, &mask_request("public"));
+    assert_eq!(
+        pass["effects"],
+        json!([{"type":"observe","reason_code":"pii_pass"}])
+    );
+    let calls = std::mem::take(&mut *recorded.lock().unwrap());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].params["redactOutput"], false);
+
+    let mask = mask_request("contact SENSITIVE for delivery");
+    let result = invoke_binary_daemon(&sock, &mask);
+    assert_eq!(
+        result["effects"],
+        json!([{"type":"replace_result","reason_code":"pii_risk",
+        "text":"contact [MASKED] for delivery"}])
+    );
+    let calls = std::mem::take(&mut *recorded.lock().unwrap());
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].params["redactOutput"], false);
+    assert_eq!(calls[1].params["redactOutput"], false);
+    assert_eq!(calls[1].params["text"], "");
+    assert_eq!(calls[2].params["redactOutput"], true);
+    assert_eq!(calls[2].params["text"], "contact SENSITIVE for delivery");
+    assert_eq!(calls[2].trace_context, calls[0].trace_context);
+    assert_eq!(calls[3].params["redactOutput"], false);
+    assert_eq!(calls[3].params["text"], "contact [MASKED] for delivery");
+
+    *mode.lock().unwrap() = "omitted".into();
+    assert_eq!(
+        invoke_binary_daemon(&sock, &mask)["effects"][0]["text"],
+        "Sensitive data detected by AW; content withheld."
+    );
+    for (case, error) in [
+        ("incomplete", "incomplete_pii_scan"),
+        ("invalid-omission", "invalid_scan_result"),
+        ("drop-redaction", "daemon_transport_error"),
+    ] {
+        *mode.lock().unwrap() = case.into();
+        let reply = invoke_binary_daemon(&sock, &mask);
+        assert_eq!(reply["error_code"], error);
+        assert!(reply.get("effects").is_none());
+    }
+
+    *mode.lock().unwrap() = "drop-review".into();
+    let mut structured = mask.clone();
+    structured.as_object_mut().unwrap().remove("input_digest");
+    structured["event"]["tool"]["result"] = json!({"stdout":"contact SENSITIVE for delivery"});
+    let reply = invoke_binary_daemon(&sock, &support::bind_req(structured));
+    assert_eq!(reply["error_code"], "daemon_transport_error");
+    assert!(reply.get("effects").is_none());
 
     // 6. Daemon error & timeout never retry and never fall back to CLI
     *mode.lock().unwrap() = "error".to_string();

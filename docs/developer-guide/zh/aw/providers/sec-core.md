@@ -163,7 +163,7 @@ Provider 的私有 `config` 接受以下字段：
 | `mode` | 必填，`observe` 或 `block`，影响 `scan_code` 和 `check_skill` |
 | `unmapped_tool` | 可选，`error`（默认）或 `observe`，控制 `scan_code` 对已选中但没有映射的工具的处理 |
 | `prompt` | 可选 `{mode: observe\|block, scan_mode: fast}`，用于 `scan_prompt` |
-| `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|replace_result}`；输入模式用于用户及工具输入，输出模式用于工具结果 |
+| `pii` | 可选 `{input_mode: observe\|block, output_mode: observe\|mask\|replace_result}`；输入模式用于用户及工具输入，输出模式用于工具结果 |
 | `skill` | 可选布尔值，默认 `false`；启用 `check_skill` |
 | `tools` | 最多 128 个精确的规范化代码工具名；配置 `skill`、`prompt` 或 `pii` 时可省略 |
 | `tools.<name>.language` | `bash` 或 `python` |
@@ -265,13 +265,22 @@ Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原
 
 [双框架示例](../../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)在同一 Provider 上组合工具输入 PII、代码扫描和输出 PII。`scan_tool_input` 以 `tool_input` 来源扫描完整工具参数；`pii.input_mode: block` 时命中返回 `block/pii_risk`。`scan_tool_output` 以 `tool_output` 来源扫描工具实际完整结果。通过返回 `observe/pii_pass`；观察模式命中返回 `observe/pii_risk`。
 
-配置增加 `pii.input_mode`（`observe` / `block`）和 `pii.output_mode`（`observe` / `replace_result`），两者在配置 `pii` 时必填。此时 `tools` 可省略或为空；代码扫描仍依赖其工具映射。
+配置增加 `pii.input_mode`（`observe` / `block`）和 `pii.output_mode`（`observe` / `mask` / `replace_result`），两者在配置 `pii` 时必填。此时 `tools` 可省略或为空；代码扫描仍依赖其工具映射。
 
 结构化参数和结果先按 JSON 扫描以保留字段和值的上下文，再逐个扫描解码后的字符串值与对象键，保留换行、Tab 和自定义规则锚点的语义。普通字符串直接扫描。所有扫描及保留结构检查共用本次调用的剩余预算；预算耗尽时检查失败。
 
-`pii.output_mode: replace_result` 命中后需要 Adapter 授权的文本投影。Provider 在私有副本中清空唯一对应文本，再用同一预算扫描保留结构。保留结构通过后返回固定安全提示 `Sensitive data detected by AW; content withheld.`，保留原生错误状态和元数据。缺失或歧义文本槽、保留字段仍含敏感信息时返回 `unsupported_pii_result`。后端脱敏文本不参与替换。安全的失败工具结果保留原错误语义；Qoder 的 `PostToolUseFailure` 无法替换错误文本，含 PII 时停止交付。
+`pii.output_mode: mask` 需要 V2 agent-sec-core 后端（CLI 或 daemon）。同一次 `scan_tool_output` 调用中的每次扫描都须返回相同的非空 `summary.ruleset_id`。字段缺失时返回 `missing_ruleset_id`，标识变化时返回 `ruleset_changed`。两种错误响应均不含效果，由 Host 执行 `on_error`。`observe` 和 `replace_result` 继续支持省略该字段的 V1 响应。
 
-必需检查使用输入 `on_error: block`、输出 `on_error: withhold_result`。CLI/后端不可用（含 `--transport daemon` 下非 root peer）、非零退出或 daemon/协议错误、空或损坏响应、来源不符、截断或不完整扫描、字节数不符、自定义规则无效或失败均返回检查错误，与风险命中分开。`--transport cli` 下文本经 stdin 传入，`--transport daemon` 下文本经 root 属主的 daemon Unix socket 传入，Provider 响应均不含原文或 findings。共用 PII 传输同时提供 `Source::UserInput`，供提交阶段消费者复用。
+`mask` 和 `replace_result` 都需要在步骤中准入 `replace_result` 效果。工具结果命中风险时，Provider 在私有副本中清空 Adapter 授权的文本槽，扫描保留的 stderr、元数据等字段。文本槽缺失、无法唯一定位或保留字段仍含风险时，返回 `unsupported_pii_result`。
+
+- `replace_result` 用固定提示 `Sensitive data detected by AW; content withheld.` 替换整个文本槽。
+- `mask` 请求 sec-core 脱敏授权文本槽，并复核候选文本。对于嵌套文本槽，还要请求脱敏原始 JSON。如果原始 JSON 命中，改写必须局限于授权槽。完整 JSON 的脱敏结果缺失、被省略、为空或与原文相同，或改写涉及槽外字段时，返回 `unsupported_pii_result`。原始 JSON 在初扫时命中、脱敏时改判为通过，也返回此错误。只有候选放回槽后与完整 JSON 的脱敏结果逐字节一致（原始 JSON 命中时），且重建的结果通过复核，才采用局部脱敏文本。
+- 风险仅涉及授权槽时，候选文本不可用、与原文相同、复核仍命中或超过协议上限，均使用固定提示。整段 JSON 投影还须能无歧义解码，保留原有结构和键名，且解码后的键和值均通过复核。每个改写后的字符串须与后端对其原始解码值的脱敏结果一致，包括含实际换行的字符串。任何阶段的传输故障或不完整扫描均按 `on_error` 处理。
+
+按预期脱敏响应大小设置 Provider 的 `max_output_bytes`，例如 65536–524288 字节。超过此 Host 配置上限时，步骤按 `on_error` 处理。初次检查通过时直接返回 `observe/pii_pass`，省去脱敏请求。替换保留原生错误状态和元数据。
+安全的失败工具结果保留原错误语义；Qoder 的 `PostToolUseFailure` 无法替换错误文本，含 PII 时停止交付。
+
+必需检查使用输入 `on_error: block`、输出 `on_error: withhold_result`。CLI/后端不可用（含 `--transport daemon` 下非 root peer）、非零退出或 daemon/协议错误、空或损坏响应、来源不符、截断或不完整扫描、字节数不符、自定义规则无效或失败均返回检查错误，与风险命中分开。`--transport cli` 下文本经 stdin 传入，`--transport daemon` 下文本经 root 属主的 daemon Unix socket 传入，`mask` 响应携带用于替换的文本，findings 保留在后端。共用 PII 传输同时提供 `Source::UserInput`，供提交阶段消费者复用。
 
 Qoder SDK 普通常驻 Query 返回原生 `updatedToolOutput` 替换指令；受限 `--reloadable` 模式在准入时拒绝替换。QwenPaw 普通 App 回复对选中替换或停止交付的工具流进行缓冲，Coordinator 的公开流同样等待最终采用。生产配置按实际工具选择范围。多文本块、媒体、托管 MCP 和后台结果交付需要分别完成原生验收；Post 回调本身不能证明这些模式采用了替换。
 
