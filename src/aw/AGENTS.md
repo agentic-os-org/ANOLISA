@@ -62,6 +62,29 @@ runtime management, or installable and upgradeable delivery.
   capabilities. Source SPI and Resolved Hook Plan remain development targets;
   current executable support comes from code, profiles and acceptance evidence.
 
+## Layering and KISS guardrails
+
+Keep crate responsibilities small, single-sourced and obvious (see the full
+boundary table in [Framework and Provider rules](docs/design/en/development/architecture.md)):
+
+- **Adapter identity stays in `aw-adapter`.** Adapter names, profile IDs,
+  capability ceilings and profile-specific hints (such as `DeploymentProfile`
+  flags) are declared once in `aw-adapter`. Shared crates (`aw-contracts`,
+  `aw-provider`, `aw-exec`, `aw-core`, `aw-host`) MUST NOT hardcode adapter or
+  profile string literals; callers pass explicit typed options (e.g.
+  `CompileOptions`) instead.
+- **Prefer profile data over string branching.** In `aw-service` and `aw-cli`,
+  read typed declarations from `aw-adapter` rather than adding new
+  `if adapter == "..."` checks. Keep unavoidable runtime exceptions narrow,
+  documented and isolated to one place.
+- **Enforce one-way crate boundaries.** `aw-adapter` must not depend on
+  `aw-service`, `aw-host` or `aw-cli`; libraries must not depend on `aw-cli`;
+  framework crates must not depend on concrete Providers.
+- **Apply KISS.** Prefer one explicit typed field over duplicated string
+  matching, parallel state machines or speculative abstractions. Before adding
+  a flag or cross-crate contract, verify which crate owns that fact and extend
+  the owning layer in place instead of mirroring it elsewhere.
+
 ## Required reading by task
 
 Read every matching row; linked development rules apply to the same task even
