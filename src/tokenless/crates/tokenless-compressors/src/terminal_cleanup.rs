@@ -66,7 +66,4 @@ fn sgr_sequence_len(s: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/terminal_cleanup_tests.rs");
-}
+mod tests;

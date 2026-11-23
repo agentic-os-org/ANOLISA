@@ -167,7 +167,4 @@ fn saves_enough(original: &str, replacement: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/json_embedded_tests.rs");
-}
+mod tests;

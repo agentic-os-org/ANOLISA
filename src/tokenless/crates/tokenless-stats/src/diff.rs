@@ -823,7 +823,4 @@ fn format_stash(stash: Option<&StashMetrics>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/diff_tests.rs");
-}
+mod tests;

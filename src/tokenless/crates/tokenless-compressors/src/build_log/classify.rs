@@ -457,7 +457,4 @@ fn is_c_diagnostic(line: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/classify_tests.rs");
-}
+mod tests;

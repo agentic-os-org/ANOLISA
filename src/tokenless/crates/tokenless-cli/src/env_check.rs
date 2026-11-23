@@ -1605,7 +1605,4 @@ pub fn run(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/env_check_tests.rs");
-}
+mod tests;

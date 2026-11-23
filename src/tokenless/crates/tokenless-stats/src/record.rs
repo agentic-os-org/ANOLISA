@@ -347,7 +347,4 @@ impl StatsRecord {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/record_tests.rs");
-}
+mod tests;

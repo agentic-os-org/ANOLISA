@@ -5887,9 +5887,8 @@ fn ctest_post_tool_retains_generic_recovery_when_no_test_layout_saves_tokens() {
 // Reuses tokenless-compressors' shared test decoder directly to avoid a duplicate copy;
 // #[allow(dead_code)] silences strip_sgr, which only the compressor suites call.
 #[allow(dead_code)]
-mod literal_oracle {
-    include!("../../tokenless-compressors/tests/common/literal_oracle.rs");
-}
+#[path = "../../tokenless-compressors/tests/common/literal_oracle.rs"]
+mod literal_oracle;
 
 #[test]
 fn cmake_build_post_tool_preserves_v2_lossless_contract_without_stash() {

@@ -262,7 +262,4 @@ impl TokenlessConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/config_tests.rs");
-}
+mod tests;

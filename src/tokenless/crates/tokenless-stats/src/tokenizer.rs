@@ -30,7 +30,4 @@ impl Default for Tokenizer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/tokenizer_tests.rs");
-}
+mod tests;

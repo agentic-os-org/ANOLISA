@@ -585,16 +585,4 @@ fn render(rows: &[Option<ParsedRow<'_>>]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::{BuildLogCompressor, sample_lines};
-    use super::*;
-    use crate::Recoverability;
-    use tokenless_ccr::{InMemoryStore, RecoveryMethod};
-
-    #[allow(dead_code)]
-    mod oracle {
-        include!("../../tests/common/literal_oracle.rs");
-    }
-
-    include!("../tests/cmake_build_tests.rs");
-}
+mod tests;

@@ -538,7 +538,4 @@ impl SchemaCompressor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/schema_compressor_tests.rs");
-}
+mod tests;

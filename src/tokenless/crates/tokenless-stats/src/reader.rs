@@ -353,5 +353,4 @@ fn read_record(row: &rusqlite::Row<'_>, include_content: bool) -> Result<Value, 
 }
 
 #[cfg(test)]
-#[path = "reader_tests.rs"]
 mod tests;

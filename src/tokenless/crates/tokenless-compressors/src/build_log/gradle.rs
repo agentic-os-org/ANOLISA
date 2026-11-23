@@ -9,8 +9,6 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-#[cfg(test)]
-use super::scope::MAX_LINE_BYTES;
 use super::scope::{self, MAX_BYTES, MAX_EDITS, MAX_ROWS, complete, plain, valid_line};
 use super::{LayoutEdit, saves_both};
 
@@ -370,17 +368,4 @@ fn render(chunk: &[&str]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::{BuildLogCompressor, BuildLogOperation, sample_lines};
-    use super::*;
-    use crate::Recoverability;
-    use tokenless_ccr::{InMemoryStore, RecoveryMethod, StashStore};
-
-    #[allow(dead_code)]
-    mod oracle {
-        include!("../../tests/common/gradle_oracle.rs");
-    }
-
-    use oracle::{decode, strip_sgr};
-    include!("../tests/gradle_tests.rs");
-}
+mod tests;

@@ -47,7 +47,4 @@ pub(crate) fn generic_progress_template(line: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/template_tests.rs");
-}
+mod tests;
