@@ -350,6 +350,11 @@ fn normalize_prompt_total(prompt: u64, cached: Option<u64>) -> u64 {
 
 /// Resolve session-level `(input, output, cached)` totals, preferring ATIF
 /// `final_metrics` and normalizing Anthropic-style exclusive `cached > prompt`.
+///
+/// When `final_metrics.total_prompt_tokens` is present without
+/// `total_cached_tokens`, fall back to `total_cached` (the summed per-step
+/// cached count) solely as the `cached > prompt` normalization hint so
+/// session totals preserve `input >= cached` instead of reporting `m3 > 1`.
 fn session_usage_totals(trajectory: &AtifTrajectory, calls: &[LlmCall]) -> (u64, u64, u64) {
     let final_metrics = trajectory.final_metrics.as_ref();
     let total_cached = final_metrics
@@ -2695,5 +2700,31 @@ mod tests {
         let empty_cost = compute_cost(&empty_steps).expect("empty compute_cost");
         assert_eq!(empty_cost.total_real_input_tok, 16_300);
         assert_eq!(empty_cost.total_real_cached_tok, 16_000);
+    }
+
+    #[test]
+    fn final_prompt_without_final_cached_uses_step_cached_hint_to_preserve_input_ge_cached() {
+        let mut t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "metrics":{"prompt_tokens":100,"completion_tokens":50,"cached_tokens":8000},
+             "message":"a"}
+        ]"#,
+        );
+        // final_metrics omits total_cached_tokens; total_prompt_tokens (100) < step cached sum (8000).
+        t.final_metrics = Some(crate::atif::AtifFinalMetrics {
+            total_prompt_tokens: Some(100),
+            total_completion_tokens: Some(50),
+            total_cached_tokens: None,
+            total_steps: None,
+            extra: None,
+        });
+
+        let cost = compute_cost(&t).expect("compute_cost");
+        assert_eq!(cost.total_real_cached_tok, 8_000);
+        assert_eq!(cost.total_real_input_tok, 8_100);
+        let m3 = compute_ratio_metrics(&cost).m3_cache_hit_rate.expect("m3");
+        assert!(m3 <= 1.0, "m3_cache_hit_rate must stay in [0, 1], got {m3}");
     }
 }
