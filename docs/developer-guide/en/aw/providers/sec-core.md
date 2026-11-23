@@ -189,7 +189,7 @@ The Provider's private `config` accepts:
 | `mode` | Required, `observe` or `block`; affects `scan_code` and `check_skill` |
 | `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
 | `prompt` | Optional `{mode: observe\|block, scan_mode: fast}` for `scan_prompt` |
-| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; input mode covers user/tool input; output mode covers tool results |
+| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|mask\|replace_result}`; input mode covers user/tool input; output mode covers tool results |
 | `skill` | Optional boolean, default `false`; enables `check_skill` |
 | `tools` | Up to 128 exact normalized code tool names; may be omitted when `skill`, `prompt` or `pii` is configured |
 | `tools.<name>.language` | `bash` or `python` |
@@ -318,13 +318,40 @@ newlines, tabs and custom-rule anchors. A plain string is scanned directly.
 All scans, including the retained-envelope check, share the invocation's remaining
 budget; an exhausted budget fails the check.
 
-With `pii.output_mode: replace_result`, a risky result requires an Adapter-authorized
-text projection. The Provider clears that single text value in a private copy
-and scans the retained envelope within the same budget. Only a clean retained
-envelope yields `replace_result` with the fixed message
-`Sensitive data detected by AW; content withheld.` It never adopts backend
-redacted text. A missing or ambiguous slot, or sensitive retained fields, returns
-`unsupported_pii_result`. Native error state and result metadata remain intact.
+Use a V2 agent-sec-core backend (CLI or daemon) for `pii.output_mode: mask`.
+Every scan in a `scan_tool_output` invocation must return the same nonempty
+`summary.ruleset_id`. A missing field returns `missing_ruleset_id`. A changed
+ID returns `ruleset_changed`. In both cases the Provider returns no
+effects and the Host applies `on_error`. V1 reports that omit the field are
+still supported in `observe` and `replace_result` modes.
+
+Both `mask` and `replace_result` require the `replace_result` effect. On a risk,
+the Provider clears the Adapter-authorized text slot in a private copy and scans
+the retained fields, including stderr and metadata. A missing or ambiguous slot
+or a risk in the retained fields returns `unsupported_pii_result`.
+
+- `replace_result` replaces the whole slot with
+  `Sensitive data detected by AW; content withheld.`
+- `mask` requests a redaction of the authorized slot and scans the proposed
+  text. A nested slot also requires a redaction of the original JSON. If that
+  JSON has findings, its redaction must show that changes are confined to the
+  slot. An absent, omitted, empty or unchanged full-JSON redaction, or changes
+  outside the slot, return `unsupported_pii_result`. The same error applies if
+  the initial JSON scan found a risk and the redaction scan reports a pass.
+  The Provider adopts a
+  candidate only when it accounts for the full-JSON redaction byte for byte
+  (if the JSON had findings) and the reconstructed result passes.
+- When only the slot is at risk, an unavailable, unchanged, still risky or
+  oversized candidate yields the fixed message. A whole JSON projection must
+  also decode unambiguously, preserve its structure and keys, and pass checks
+  on its decoded keys and values. Each changed string must match the backend's
+  redaction of its original decoded value, including any literal newlines.
+  A transport failure or incomplete scan at any stage follows `on_error`.
+
+Set the Provider's `max_output_bytes` for the expected masked reply, for example
+65536–524288 bytes. If the reply exceeds this configured Host limit, the step
+follows `on_error`. Results that pass the initial checks return `observe/pii_pass`
+without a redaction request. Replacement preserves native error state and metadata.
 Safe failed-tool results retain their original error semantics; a Qoder
 `PostToolUseFailure` containing PII is withheld because that callback cannot
 replace the native error text.
@@ -335,8 +362,8 @@ required checks. CLI/backend unavailability (including a non-root peer with
 responses, wrong source, truncated or incomplete scans, byte-count mismatch and
 invalid or failed custom rules produce errors, separately from risk. With
 `--transport cli`, text travels over stdin; with `--transport daemon`, it is sent
-over the root-owned daemon's Unix socket. Provider responses contain neither source
-text nor findings. The shared PII transport also supports `Source::UserInput` for
+over the root-owned daemon's Unix socket. A mask response carries the selected
+replacement text. Scan findings stay with the backend. The shared PII transport also supports `Source::UserInput` for
 submission consumers.
 
 Qoder SDK ordinary resident Queries return the native `updatedToolOutput` directive;

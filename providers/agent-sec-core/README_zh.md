@@ -33,7 +33,7 @@ Pi Coding Agent 常驻 worker 在 `input.submit` 复用 `check_skill` 校验本�
 时仍需 `--cli`；切回 `--transport cli` 即可回退）。详见
 [配置与运行](../../docs/developer-guide/zh/aw/providers/sec-core.md)。
 
-[工具 PII 示例](examples/aw.tool-pii.yaml)支持 Qoder SDK 与 QwenPaw。`scan_tool_input` 阻断敏感参数，`scan_tool_output` 用固定安全提示替换命中的文本槽。必需输出检查使用 `on_error: withhold_result`；扫描失败与风险命中分别处理。
+[工具 PII 示例](examples/aw.tool-pii.yaml)适用于 Qoder SDK 和 QwenPaw。示例阻断敏感参数，并设置 `pii.output_mode: mask`，由 sec-core 脱敏工具结果中的敏感片段，保留上下文。该模式需要返回 `summary.ruleset_id` 的 V2 agent-sec-core 后端。`observe` 仅报告风险，`replace_result` 用固定提示替换整个文本槽。必需输出检查使用 `on_error: withhold_result`。
 
 - [配置与运行](../../docs/developer-guide/zh/aw/providers/sec-core.md)
 - [配置示例](examples/aw.yaml)

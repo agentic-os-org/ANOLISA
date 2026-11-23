@@ -137,7 +137,12 @@ fn run_inner(
             reply["error_code"] = json!(code);
         }
     }
-    let bytes = serde_json::to_vec(&reply).map_err(|_| Error::Internal)?;
+    let mut bytes = serde_json::to_vec(&reply).map_err(|_| Error::Internal)?;
+    // Count the entire reply, including JSON escaping and the trailing newline.
+    if bytes.len() >= MAX_MESSAGE_BYTES && reply["effects"][0]["type"] == "replace_result" {
+        reply["effects"][0]["text"] = json!(tool_pii::WITHHELD);
+        bytes = serde_json::to_vec(&reply).map_err(|_| Error::Internal)?;
+    }
     match protocol.check_response(&request, &bytes) {
         Ok(_) | Err(aw_provider::Error::ProviderFailure { .. }) => {}
         Err(error) => return Err(error.into()),

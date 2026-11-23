@@ -42,9 +42,11 @@ without spawning `agent-sec-cli`
 to roll back). See [Configuration and operation](../../docs/developer-guide/en/aw/providers/sec-core.md).
 
 Use [the tool PII example](examples/aw.tool-pii.yaml) for Qoder SDK or QwenPaw.
-`scan_tool_input` blocks sensitive arguments; `scan_tool_output` replaces a risky
-text slot with a fixed safety message. Required output checks use
-`on_error: withhold_result`; scan failures remain distinct from risk.
+The example blocks sensitive arguments and sets `pii.output_mode: mask` to
+preserve the surrounding text when sec-core redacts a tool result. This mode
+requires a V2 agent-sec-core backend that returns `summary.ruleset_id`. Use
+`observe` to report risks or `replace_result` to replace the whole text slot
+with a safety message. Required output checks use `on_error: withhold_result`.
 
 - [Configuration and operation](../../docs/developer-guide/en/aw/providers/sec-core.md)
 - [Configuration example](examples/aw.yaml)

@@ -27,11 +27,14 @@ spec:
           - --socket
           - /run/agent-sec-core/daemon.sock
       timeout_ms: 4500
-      max_output_bytes: 4096
+      # Mask returns surrounding text. Size the response budget for expected output
+      # (for example, 65536 to 524288 bytes).
+      max_output_bytes: 65536
       config:
         version: 1
         mode: block
-        pii: {input_mode: block, output_mode: replace_result}
+        # observe reports risk, mask redacts spans, replace_result withholds the whole slot.
+        pii: {input_mode: block, output_mode: mask}
         tools:
           bash: {language: bash, input_pointer: /command}
           execute_shell_command: {language: bash, input_pointer: /command}

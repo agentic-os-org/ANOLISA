@@ -10,7 +10,7 @@ use std::time::Duration;
 const MAX_CONTEXT_BYTES: usize = 32 * 1024;
 const MAX_BUSINESS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REQUEST_FRAME_BYTES: usize = MAX_BUSINESS_BYTES + MAX_CONTEXT_BYTES;
-const MAX_RESPONSE_FRAME_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_RESPONSE_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Version constant for `TraceCarrierV1` (`1`).
 pub const TRACE_CARRIER_VERSION_V1: u8 = 1;

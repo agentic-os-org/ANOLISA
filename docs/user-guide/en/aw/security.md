@@ -139,12 +139,22 @@ follow the [Qoder SDK](../../../developer-guide/en/aw/agents/qoder-sdk.md) or
 [QwenPaw](../../../developer-guide/en/aw/agents/qwenpaw.md) setup for the native
 worker/App. Start with `aw run --config aw.tool-pii.yaml --agent sdk` or `--agent app`.
 
-The input step scans all selected arguments before execution and blocks sensitive
-content without running the tool. The output step scans the actual result;
-a risky text slot becomes `Sensitive data detected by AW; content withheld.`
-The remaining result structure is checked before replacement. Check failures
-withhold original output and stop the Query/reply; completed tool side effects
-remain. Use synthetic test credentials when verifying these behaviors.
+The input step blocks sensitive arguments before the tool runs. The example sets
+`pii.output_mode: mask` for output. Use a V2 agent-sec-core backend that returns
+`summary.ruleset_id` on every scan. A missing field produces `missing_ruleset_id`
+and the example's `on_error: withhold_result` stops delivery. A clean result
+from the V2 backend passes through. If the tool
+returns a line containing a card number, the replacement keeps the surrounding
+text and uses sec-core's masked form for the number. Use synthetic credentials
+to verify this behavior.
+
+When the risk is confined to the text slot but a partial rewrite is unavailable,
+still risky, or too large for the protocol, the entire slot becomes
+`Sensitive data detected by AW; content withheld.` For a structured result,
+the Provider also checks the original JSON. If it cannot establish that the
+other fields are safe, or a scan fails, the example's `on_error: withhold_result`
+stops delivery of the complete result and ends the Query/reply. Completed tool
+side effects remain.
 
 Select one owner for PII in each tool phase. Remove native PII PreToolUse/PostToolUse
 registrations when AW owns those phases; keep user-submit checks as required.
