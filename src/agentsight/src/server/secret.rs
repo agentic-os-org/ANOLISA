@@ -500,9 +500,12 @@ mod tests {
         let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         assert_eq!(rc, 0, "mkfifo failed: {}", io::Error::last_os_error());
 
-        assert!(unseal("enc:v1:AAAA:AAAA", &dir).is_none());
+        let sample_dir = tmp_dir("fifo-sample");
+        let sealed = seal("sk-secret", &sample_dir).unwrap();
+        assert!(unseal(&sealed, &dir).is_none());
         let err = seal("sk-secret", &dir).expect_err("FIFO salt path must fail cleanly");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let _ = std::fs::remove_dir_all(&sample_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
