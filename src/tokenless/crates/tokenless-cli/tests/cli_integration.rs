@@ -2297,7 +2297,7 @@ fn diff_defaults_on_and_round_trips_git_patch_and_original() {
         git(&["init", "-q"]);
         git(&["config", "core.autocrlf", "false"]);
         git(&["config", "core.quotePath", quote_path]);
-        let mut paths: Vec<std::path::PathBuf> = [
+        let paths: Vec<std::path::PathBuf> = [
             "f",
             "user settings.py",
             "trailing ",
@@ -2313,22 +2313,28 @@ fn diff_defaults_on_and_round_trips_git_patch_and_original() {
         .map(Into::into)
         .collect();
         #[cfg(windows)]
-        paths.retain(|path| {
-            !path.to_string_lossy().ends_with(' ')
-                && !path
-                    .to_string_lossy()
-                    .chars()
-                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
-        });
+        let paths: Vec<std::path::PathBuf> = paths
+            .into_iter()
+            .filter(|path| {
+                !path.to_string_lossy().ends_with(' ')
+                    && !path
+                        .to_string_lossy()
+                        .chars()
+                        .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+            })
+            .collect();
         // With quotePath=false these bytes are emitted raw, outside the
-        // text input accepted by the compression API.
-        #[cfg(unix)]
-        {
+        // text input accepted by the compression API. macOS APFS/HFS+ rejects
+        // invalid UTF-8 filenames at the VFS layer (EPERM/EILSEQ).
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let paths = {
             use std::os::unix::ffi::OsStringExt;
+            let mut paths = paths;
             if quote_path == "true" {
                 paths.push(std::ffi::OsString::from_vec(b"non-utf8-\xff.py".to_vec()).into());
             }
-        }
+            paths
+        };
         let original: String = (0..24)
             .map(|i| format!("line {i:02}: {}{ending}", "unchanged context ".repeat(4)))
             .collect();
