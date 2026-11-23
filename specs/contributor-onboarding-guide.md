@@ -62,7 +62,7 @@ systems, SRE, security, framework, or distro engineer), follow these steps — d
      Commit type such as `feat`/`fix`/`docs`/`refactor`/`test`/`chore`
      (`type(scope): description`, e.g., `feat(sec-core): ...` or
      `fix(sight): ...`; mandatory `scope`, DCO `Signed-off-by`, and
-     `Assisted-by: <tool>:<version>` when AI-assisted). Use
+     `Assisted-by: <tool>` when AI-assisted). Use
      [`.github/pull_request_template.md`](../.github/pull_request_template.md)
      with `closes #<n>` (or `no-issue: <reason>` for trivial fixes) and keep
      English/Chinese docs paired
