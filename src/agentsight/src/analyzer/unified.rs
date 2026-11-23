@@ -839,15 +839,15 @@ impl Analyzer {
             // a single record.
             let text = String::from_utf8_lossy(extra);
             let reassembled = SSEParser::parse_stream(&text);
-            // If the continuation buffer ended before the final blank-line
-            // separator (for example, a split terminal `message_delta` at
-            // EOF/drain), `SSEParser::parse_stream` leaves that trailing frame
-            // in `reassembled.remaining`. Re-parse its `data:` payload as an
-            // event first, and otherwise fall back to scanning only
-            // `reassembled.remaining` so already-parsed events are never
-            // re-scanned while split terminal counters still merge into `usage`.
-            let tail = (!reassembled.remaining.trim().is_empty())
-                .then(|| SSEParser::parse_stream(&format!("{}\n\n", reassembled.remaining)));
+            // Any bytes after the last blank line — whether an incomplete line
+            // in `reassembled.remaining` or complete lines of an un-terminated
+            // frame ending at `\n` — were never emitted into `reassembled.events`.
+            // Frame that un-emitted tail first as `data:` events, and otherwise
+            // scan only that unframed tail so already-parsed events are never
+            // re-scanned while line-boundary and mid-line split tails merge.
+            let unframed_tail = unframed_sse_tail(&text);
+            let tail = (!unframed_tail.trim().is_empty())
+                .then(|| SSEParser::parse_stream(&format!("{unframed_tail}\n\n")));
             let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
 
             usage =
@@ -870,8 +870,8 @@ impl Analyzer {
                         }
                     });
 
-            if !reassembled.remaining.trim().is_empty() && tail_events.is_empty() {
-                if let Some(parsed) = self.token.parse_data(&reassembled.remaining) {
+            if !unframed_tail.trim().is_empty() && tail_events.is_empty() {
+                if let Some(parsed) = self.token.parse_data(unframed_tail) {
                     usage = crate::analyzer::token::merge_usage(usage, parsed);
                 }
             }
@@ -1430,6 +1430,28 @@ impl Analyzer {
             output_per_block: response_count.per_block,
         })
     }
+}
+
+/// Return the slice of an SSE text buffer starting right after the last blank
+/// line (or after any leading UTF-8 BOM if no blank line occurred), capturing
+/// both incomplete final lines and newline-terminated unframed trailing events.
+fn unframed_sse_tail(buffer: &str) -> &str {
+    let bytes = buffer.as_bytes();
+    let mut pos = usize::from(buffer.starts_with('\u{feff}')) * 3;
+    let mut last_blank_end = pos;
+    while let Some(rel) = memchr::memchr2(b'\r', b'\n', &bytes[pos..]) {
+        let line_len = rel;
+        let term_len = if bytes[pos + rel] == b'\r' && bytes.get(pos + rel + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        pos += line_len + term_len;
+        if line_len == 0 {
+            last_blank_end = pos;
+        }
+    }
+    &buffer[last_blank_end..]
 }
 
 #[cfg(test)]
@@ -2399,6 +2421,41 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
             .expect("truncated tail delta in remaining must update output_tokens");
 
         assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn newline_terminated_unframed_delta_without_prior_usage_recovers_tokens() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}",
+        )];
+        // Single trailing `\n` without the blank `\n\n` terminator: `parse_stream`
+        // consumes the line yet leaves both `events` and `remaining` empty.
+        let continuation =
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("newline-terminated unframed tail must still yield usage");
+
+        assert_eq!(record.input_tokens, 0);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn newline_terminated_unframed_delta_merges_with_start() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
+        )];
+        let continuation = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":6,\"output_tokens\":42}}\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("newline-terminated unframed delta after prior frame must merge");
+
+        assert_eq!(record.input_tokens, 6);
         assert_eq!(record.output_tokens, 42);
     }
 
