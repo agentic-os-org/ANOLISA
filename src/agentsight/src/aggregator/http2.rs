@@ -1024,6 +1024,7 @@ impl Http2StreamAggregator {
                          MAX_CONTINUATION_BUFFER ({} bytes), dropping",
                         fragment.len()
                     );
+                    self.continuation_buffers.remove(&stream_id);
                     // The peer's encoder still applied this block's
                     // dynamic-table insertions, so keeping the stale decoder
                     // would mis-resolve every later dynamic index on the
@@ -1546,7 +1547,6 @@ impl Http2StreamAggregator {
                 stream.response_complete = true;
                 stream.end_timestamp_ns = end_timestamp_ns;
                 let stream = self.finalize_completed(stream_id, stream);
-                self.closed_streams.pop(&stream_id);
                 completed.push(stream);
             }
             (other, _) => {
@@ -3940,5 +3940,50 @@ mod tests {
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].end_timestamp_ns, 300);
         assert!(completed[0].decoded_response_headers.is_none());
+    }
+
+    #[test]
+    fn deferred_trailer_keeps_retired_stream_in_closed_streams() {
+        let mut aggregator = Http2StreamAggregator::new();
+        let req = hpack::Encoder::new().encode([
+            (b":method".as_slice(), b"POST".as_slice()),
+            (b":path".as_slice(), b"/v1/messages".as_slice()),
+        ]);
+        let resp = hpack::Encoder::new().encode([(b":status".as_slice(), b"200".as_slice())]);
+        let trailer = hpack::Encoder::new().encode([(b"grpc-status".as_slice(), b"0".as_slice())]);
+
+        let completed = aggregator.process_frames(vec![
+            create_test_frame(1, 0x01, 0x05, req, create_test_event(7, 1, 1, 100)),
+            create_test_frame(1, 0x01, 0x04, resp, create_test_event(7, 1, 0, 200)),
+            create_test_frame(
+                1,
+                0x00,
+                0x00,
+                b"ok".to_vec(),
+                create_test_event(7, 1, 0, 250),
+            ),
+            // Trailer HEADERS(END_STREAM, !END_HEADERS) followed by CONTINUATION(END_HEADERS).
+            create_test_frame(1, 0x01, 0x01, trailer, create_test_event(7, 1, 0, 300)),
+            create_test_frame(1, 0x09, 0x04, Vec::new(), create_test_event(7, 1, 0, 310)),
+        ]);
+        assert_eq!(completed.len(), 1);
+
+        // Late stray DATA frame on the same stream must be ignored via closed_streams
+        // instead of resurrecting an active WaitingRequestData stream.
+        assert!(
+            aggregator
+                .process_frames(vec![create_test_frame(
+                    1,
+                    0x00,
+                    0x00,
+                    b"stray".to_vec(),
+                    create_test_event(7, 1, 0, 320),
+                )])
+                .is_empty()
+        );
+        assert!(
+            !aggregator.streams.contains(&completed[0].stream_id),
+            "retired stream must stay in closed_streams after deferred trailer completion"
+        );
     }
 }
