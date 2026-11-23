@@ -67,13 +67,17 @@ fn approval_panel_turn_consent_wraps_actions_at_narrow_width() {
                 RatatuiInlineRenderer::with_width(width).with_language(language),
                 RatatuiInlineRenderer::plain_with_width(width).with_language(language),
             ] {
-                for (subject, turn_consent, disclosed) in [
-                    ("tool Bash", false, true),
-                    ("tool run_shell_command", false, true),
-                    ("tool Read", false, false),
-                    ("tool Read", true, true),
+                for (kind, subject, turn_consent, disclosed) in [
+                    ("tool request", "tool Bash", false, true),
+                    ("tool request", "tool run_shell_command", false, true),
+                    ("tool request", "tool Read", false, false),
+                    ("tool request", "tool Read", true, true),
+                    // Locally issued shell commands disclose through the `kind`
+                    // disjunct, not the tool-alias or turn-consent conditions.
+                    ("shell command request", "shell command", false, true),
                 ] {
                     let mut model = turn_consent_model(None);
+                    model.kind = kind;
                     model.subject = subject;
                     model.turn_consent = turn_consent;
                     let text = renderer.approval_panel_lines(model).join("\n");
