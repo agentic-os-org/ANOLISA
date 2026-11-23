@@ -410,10 +410,30 @@ jobs:
           path: /tmp/python-wheels
 
       - name: Select Python 3.11
-        if: needs.package.outputs.component == 'tokenless'
+        if: needs.package.outputs.component == 'tokenless' || needs.package.outputs.component == 'agent-sec-core'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Package the matching Skill Score recipe and raw index entries
+        id: score-raw
+        if: >-
+          needs.package.outputs.component == 'agent-sec-core' &&
+          !contains(needs.package.outputs.version, '-') &&
+          !contains(needs.package.outputs.version, '+')
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          test "$commit" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+          base="sec-core-$VERSION-linux-x86_64.tar.gz"
+          cp "/tmp/prebuilt/agent-sec-core-prebuilt-$VERSION-linux-x86_64/$base" /tmp/archives/
+          scripts=src/agent-sec-core/packaging/skill-score
+          python3 "$scripts/package-optional.py" /tmp/archives --version "$VERSION" \
+            --source-commit "$commit" --epoch "$(git show -s --format=%ct HEAD)"
+          python3 "$scripts/prepare-release.py" /tmp/archives --version "$VERSION" \
+            --source-commit "$commit" --stable-index
 
       - name: Verify Tokenless Python wheels
         if: needs.package.outputs.component == 'tokenless'
@@ -443,6 +463,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PREBUILT_ENABLED: ${{ needs.package.outputs.prebuilt-enabled }}
+          SCORE_RAW_RESULT: ${{ steps.score-raw.outcome }}
         run: |
           COMPONENT="${{ needs.package.outputs.component }}"
           VERSION="${{ needs.package.outputs.version }}"
@@ -493,6 +514,10 @@ jobs:
           if [ "$COMPONENT" = anolisa ]; then
             ASSETS+=("/tmp/archives/manifests-${VERSION}.tar.gz")
             ASSETS+=(/tmp/archives/manifests-latest.tar.gz /tmp/archives/SHA256SUMS-manifests.txt)
+          fi
+          if [ "$SCORE_RAW_RESULT" = success ]; then
+            ASSETS+=("/tmp/archives/sec-core-skill-score-$VERSION-linux-x86_64.tar.gz")
+            ASSETS+=("/tmp/archives/sec-core-$VERSION-raw-index-v2.toml")
           fi
           if [ "$COMPONENT" = tokenless ]; then
             while IFS= read -r asset; do

@@ -141,11 +141,14 @@ def stage_payload(payload: Path, version: str, commit: str) -> bytes:
 def package(output: Path, version: str, commit: str, epoch: int) -> Path:
     if not re.fullmatch(r"[a-f0-9]{40}", commit):
         raise ValueError("full source commit is required")
-    if not re.fullmatch(
+    base_version = tomllib.loads(
+        (ROOT / "packaging/anolisa/component.toml").read_text()
+    )["component"]["version"]
+    if version != base_version and not re.fullmatch(
         r"\d+\.\d+\.\d+-skillscore\." + commit[:12] + r"(?:\.base\.[a-f0-9]{12})?",
         version,
     ):
-        raise ValueError("preview version must bind the exact source commit")
+        raise ValueError("expected the sec-core version or a commit-bound preview")
     with tempfile.TemporaryDirectory(prefix="asc-optional-package-") as directory:
         stage = Path(directory)
         payload = stage / PAYLOAD

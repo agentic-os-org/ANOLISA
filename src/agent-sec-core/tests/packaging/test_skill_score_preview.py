@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise fork release identity without a Linux build or Docker daemon."""
+"""Exercise stable and preview release identity without a Linux build or Docker."""
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -11,7 +12,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "packaging/skill-score/prepare-preview.py"
+SCRIPT = ROOT / "packaging/skill-score/prepare-release.py"
 SPEC = importlib.util.spec_from_file_location("prepare_preview", SCRIPT)
 assert SPEC and SPEC.loader
 PREVIEW = importlib.util.module_from_spec(SPEC)
@@ -239,6 +240,59 @@ class PreviewTest(unittest.TestCase):
     def test_rejects_source_version_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "bind"):
             PREVIEW.prepare(self.directory, "a" * 40, VERSION, self.components)
+
+    def test_stable_tag_binds_both_raw_archives_without_replacing_shared_index(
+        self,
+    ) -> None:
+        stable = tomllib.loads((ROOT / "packaging/anolisa/component.toml").read_text())[
+            "component"
+        ]["version"]
+        self.package(stable)
+        (self.directory / f"sec-core-{VERSION}-linux-x86_64.tar.gz").rename(
+            self.directory / f"sec-core-{stable}-linux-x86_64.tar.gz"
+        )
+        OPTIONAL.package(self.directory, stable, SOURCE, 1)
+        (self.directory / PREVIEW.INSTALLER).unlink()
+        shared_index = self.directory / "index-v2.toml"
+        shared_index.write_text("existing mirror data")
+        PREVIEW.prepare(self.directory, SOURCE, stable, None)
+        index = self.directory / f"sec-core-{stable}-raw-index-v2.toml"
+        entries = tomllib.loads(index.read_text())["entries"]
+        self.assertEqual(
+            [row["component"] for row in entries], list(PREVIEW.COMPONENTS)
+        )
+        for row in entries:
+            self.assertEqual(row["version"], stable)
+            self.assertNotIn("url", row)  # Use the standard mirror layout.
+            raw = self.directory / f'{row["component"]}-{stable}-linux-x86_64.tar.gz'
+            self.assertEqual(row["size"], raw.stat().st_size)
+            self.assertEqual(
+                row["sha256"], hashlib.sha256(raw.read_bytes()).hexdigest()
+            )
+            with tarfile.open(raw) as archive:
+                contract = next(
+                    m for m in archive if m.name.endswith("/component.toml")
+                )
+                data = archive.extractfile(contract).read()
+                self.assertEqual(
+                    row["manifest_digest"], "sha256:" + hashlib.sha256(data).hexdigest()
+                )
+        self.assertEqual(shared_index.read_text(), "existing mirror data")
+        self.assertFalse((self.directory / "index.toml").exists())
+        index.unlink()
+        with self.assertRaisesRegex(ValueError, "identity"):
+            PREVIEW.prepare(self.directory, "b" * 40, stable, None)
+        self.assertFalse(index.exists())
+
+    def test_stable_and_preview_versions_are_not_interchangeable(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stable release"):
+            PREVIEW.prepare(self.directory, SOURCE, VERSION, None)
+        for wrong in ("0.0.0", "1.2.3-rc.1", "1.2.3-skillscore.ffffffffffff"):
+            with (
+                self.subTest(wrong=wrong),
+                self.assertRaisesRegex(ValueError, "version"),
+            ):
+                OPTIONAL.package(self.directory, wrong, SOURCE, 1)
 
     def test_rejects_standalone_launcher(self) -> None:
         self.package(members=(tarfile.TarInfo("./bin/agent-sec-skill-score"),))

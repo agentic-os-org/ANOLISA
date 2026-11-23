@@ -22,7 +22,7 @@ tar --owner=0 --group=0 --mtime="@$score_epoch" -czf \
     "$score_output/anolisa-cli-$score_installer_version-linux-x86_64.tar.gz" \
     -C "$score_repo/distribution/anolisa/target/release" anolisa
 git -C "$score_repo" diff --exit-code
-python3 "$score_component/packaging/skill-score/prepare-preview.py" "$score_output" \
+python3 "$score_component/packaging/skill-score/prepare-release.py" "$score_output" \
     --source-commit "$score_source" --version "$score_version" \
     --components "$score_repo/distribution/anolisa/manifests/components-v2.toml"
 python3 "$score_component/packaging/skill-score/bundle-preview.py" "$score_output" \
