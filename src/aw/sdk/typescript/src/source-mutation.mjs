@@ -248,10 +248,61 @@ function* replayBufferedSync(deliver, signal, session) {
   }
 }
 
+async function deliverBufferedSync(
+  result,
+  {
+    session,
+    observeResult,
+    callId,
+    snapshot,
+    signal,
+    extractResult,
+    applyResult,
+    snapshotResult,
+    maxStreamItems,
+    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES,
+  },
+) {
+  const customExtract = Boolean(extractResult);
+  const checkedItems = bufferSyncIterable(result, {
+    maxStreamItems,
+    maxStreamBytes,
+    snapshotResult,
+    customExtract,
+  });
+  const decision = await observeResult(
+    checkedItems,
+    callId,
+    snapshot,
+    signal,
+    { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true },
+  );
+  const deliver = Object.hasOwn(decision, "replaced_result")
+    ? applyStreamResult(checkedItems, decision.replaced_result, {
+        applyResult,
+        customExtract,
+      })
+    : cloneBufferedChunks(checkedItems);
+  session?._requireOpen();
+  signal?.throwIfAborted();
+  return replayBufferedSync(deliver, signal, session);
+}
+
 export async function deliverToolResult(session, result, opts) {
   if (session._strictAfter())
     return deliverStrictToolResult(result, { ...opts, session });
   if (!session._observeAfter()) return result;
+  if (
+    opts.bufferStream &&
+    isLazyResult(result) &&
+    typeof result[Symbol.asyncIterator] !== "function"
+  ) {
+    try {
+      return await deliverBufferedSync(result, { ...opts, session });
+    } catch (error) {
+      throw toolExecuted(error);
+    }
+  }
   const decision = await opts.observeResult(
     result,
     opts.callId,
@@ -295,28 +346,18 @@ export async function deliverStrictToolResult(
         closeLazyResult(result);
         throw new AwError("source_stream_withhold_requires_buffering");
       }
-      const checkedItems = bufferSyncIterable(result, {
-        maxStreamItems,
-        maxStreamBytes,
-        snapshotResult,
-        customExtract,
-      });
-      const decision = await observeResult(
-        checkedItems,
+      return await deliverBufferedSync(result, {
+        session,
+        observeResult,
         callId,
         snapshot,
         signal,
-        { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true },
-      );
-      const deliver = Object.hasOwn(decision, "replaced_result")
-        ? applyStreamResult(checkedItems, decision.replaced_result, {
-            applyResult,
-            customExtract,
-          })
-        : cloneBufferedChunks(checkedItems);
-      session?._requireOpen();
-      signal?.throwIfAborted();
-      return replayBufferedSync(deliver, signal, session);
+        extractResult,
+        applyResult,
+        snapshotResult,
+        maxStreamItems,
+        maxStreamBytes,
+      });
     }
     const isolated = isolateStrictValue(result, {
       snapshotResult,
