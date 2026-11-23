@@ -548,7 +548,7 @@ tokenless stats diff --session <session-id> \
 | `--sort saved\|time` | Session 总览 | 默认按节省量降序，也可按时间从新到旧 |
 | `-U, --context <n>` | 内容差异 | 每处变化周围的未变化行数，默认 `3` |
 | `--no-color` | 文本输出 | 关闭 ANSI 颜色 |
-| `--json` | 所有范围 | 输出 schema `1.0` JSON。会话概览仅包含指标。单条记录和单次工具调用的报告可包含结构化差异片段。 |
+| `--json` | 所有范围 | 输出 schema `1.0` JSON。Session 总览只包含指标。record 和 tool-use 报告可包含结构化 diff hunk。 |
 
 任一端内容不可用或超过 1 MiB 时不生成内容差异，渲染的 hunk 最多 500 行。单记录和 tool-use 差异可能包含存储的源文本，使用共享终端或收集输出时注意敏感信息。完整说明见[效果度量](measuring-savings.md)和[配置与数据隐私](configuration-and-privacy.md)。
 

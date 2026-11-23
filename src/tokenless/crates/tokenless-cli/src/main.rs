@@ -317,7 +317,7 @@ enum StatsCommands {
         no_color: bool,
         /// Output machine-readable JSON for the selected report
         ///
-        /// Session overviews omit diff hunks. Record and tool-use reports can
+        /// Session overviews omit the `diff` object. Record and tool-use reports can
         /// include hunks when source content is available.
         #[arg(long)]
         json: bool,
