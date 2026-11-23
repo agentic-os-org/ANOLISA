@@ -25,14 +25,12 @@ from aw_sdk._source_profile import DEFAULT_MAX_STREAM_BYTES
 from aw_sdk.transport import AwError
 
 
-def _json_strict_equal(a: Any, b: Any) -> bool:
-    if type(a) is not type(b):
-        return False
-    if isinstance(a, list):
-        return len(a) == len(b) and all(_json_strict_equal(x, y) for x, y in zip(a, b))
-    if isinstance(a, dict):
-        return a.keys() == b.keys() and all(_json_strict_equal(a[key], b[key]) for key in a)
-    return a == b
+def _serialize_input_projection(value: dict[str, Any]) -> str:
+    """Use the RPC encoder's scalar representation with deterministic key order."""
+    try:
+        return json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise AwError("source_invalid_payload") from error
 
 
 def is_lazy_result(value: Any) -> bool:
@@ -520,7 +518,7 @@ def build_tool_wrapper(
                 snapshot_arg=snapshot_arg,
             )
             rebuilt_input = snapshot_tool_input(input_extractor(*call_args, **call_kwargs))
-            if not _json_strict_equal(rebuilt_input, snapshot):
+            if _serialize_input_projection(rebuilt_input) != _serialize_input_projection(snapshot):
                 raise AwError("source_input_replace_mismatch")
         return resolved_call, snapshot, call_args, call_kwargs
 

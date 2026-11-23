@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from enum import IntEnum, StrEnum
 import inspect
 import json
 import os
@@ -195,7 +197,13 @@ class CapabilityTests(unittest.TestCase):
 
 @unittest.skipUnless("AW_TEST_BINARY" in os.environ, "requires AW_TEST_BINARY")
 class LanguageSourceMutationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rewritten_input_requires_matching_json_types(self) -> None:
+    async def test_rewritten_input_matches_json_projection(self) -> None:
+        class Level(IntEnum):
+            ONE = 1
+
+        class Mode(StrEnum):
+            ENABLED = "enabled"
+
         with tempfile.TemporaryDirectory(prefix="awp-", dir="/tmp") as tmp:
             proc, endpoint, _ = start_aw_service(Path(tmp))
             try:
@@ -213,7 +221,7 @@ class LanguageSourceMutationTests(unittest.IsolatedAsyncioTestCase):
                         async def tool(args: dict[str, object]) -> None:
                             executed.append(args)
 
-                        for approved, rebuilt in ((False, 0), (True, 1), (1, 1.0)):
+                        for approved, rebuilt in ((False, 0), (True, 1), (1, 1.0), (-0.0, 0.0)):
                             with self.subTest(approved=approved, rebuilt=rebuilt):
                                 wrapped = session.wrap_tool(
                                     tool,
@@ -229,6 +237,26 @@ class LanguageSourceMutationTests(unittest.IsolatedAsyncioTestCase):
                                         {"command": "raw:types", "options": [{"enabled": approved}]}
                                     )
                         self.assertEqual(executed, [])
+
+                        with_enums = session.wrap_tool(
+                            tool,
+                            apply_input=lambda updated, _args, _kwargs: (
+                                (
+                                    {
+                                        "mode": Mode(updated["mode"]),
+                                        "level": Level(updated["level"]),
+                                        "command": updated["command"],
+                                    },
+                                ),
+                                {},
+                            ),
+                            snapshot_arg=deepcopy,
+                        )
+                        await with_enums({"command": "raw:types", "level": 1, "mode": "enabled"})
+                        self.assertEqual(len(executed), 1)
+                        self.assertEqual(executed[0]["command"], "safe:types")
+                        self.assertIs(executed[0]["level"], Level.ONE)
+                        self.assertIs(executed[0]["mode"], Mode.ENABLED)
             finally:
                 stop_service(proc)
 
