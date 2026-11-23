@@ -13,6 +13,75 @@ async fn generate(provider: &SysomProvider) -> Vec<GenerateEvent> {
 }
 
 #[tokio::test]
+async fn identity_activation_is_required_before_any_model_dispatch() {
+    let fixture = Fixture::start("Sysom.Identity.SysomNotActivated", false).await;
+    let provider = fixture.provider().await;
+    let events = generate(&provider).await;
+    assert!(
+        matches!(events.as_slice(), [GenerateEvent::ProviderFailure(failure)]
+        if failure.code == "Sysom.Identity.SysomNotActivated"
+        && failure.kind == ProviderFailureKind::ActivationRequired
+        && failure.dispatch == DispatchState::NotDispatched)
+    );
+    assert_eq!(fixture.requests.lock().await.len(), 5);
+}
+
+#[tokio::test]
+async fn identity_activation_retry_gets_fresh_challenge_and_then_checks_model_activation() {
+    let fixture = Fixture::start("Sysom.Identity.SysomNotActivated", false).await;
+    let provider = fixture.provider().await;
+    let initial = generate(&provider).await;
+    assert!(
+        matches!(initial.as_slice(), [GenerateEvent::ProviderFailure(failure)]
+        if failure.kind == ProviderFailureKind::ActivationRequired)
+    );
+    *fixture.exchange_code.lock().await = "Success".into();
+    fixture
+        .model(
+            200,
+            "application/json",
+            r#"{"code":"Sysom.ServiceNotActivated","success":false}"#,
+        )
+        .await;
+    assert!(
+        matches!(generate(&provider).await.as_slice(), [GenerateEvent::ProviderFailure(failure)]
+        if failure.code == "Sysom.Identity.SysomNotActivated")
+    );
+    assert_eq!(fixture.requests.lock().await.len(), 5);
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    assert!(
+        matches!(generate(&provider).await.as_slice(), [GenerateEvent::ProviderFailure(failure)]
+        if failure.code == "Sysom.ServiceNotActivated"
+        && failure.kind == ProviderFailureKind::ActivationRequired)
+    );
+    fixture
+        .model(
+            200,
+            "text/event-stream",
+            "event: OK\ndata: {\"choices\":[{\"message\":{\"content\":\"answer\"}}]}\n\n",
+        )
+        .await;
+    assert!(
+        matches!(generate(&provider).await.as_slice(), [GenerateEvent::TextDelta(text), GenerateEvent::MessageEnd] if text == "answer")
+    );
+    let requests = fixture.requests.lock().await;
+    let exchanges: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|request| request.starts_with("POST /api/v1/identity/ecs-model/credentials"))
+        .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
+        .collect();
+    assert_eq!(exchanges.len(), 2);
+    assert_ne!(exchanges[0]["challengeId"], exchanges[1]["challengeId"]);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with(&format!("POST {API_PATH}")))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn identity_provider_signs_each_model_request_with_ensured_lease_without_role_fallback() {
     let fixture = Fixture::start("Success", false).await;
     fixture

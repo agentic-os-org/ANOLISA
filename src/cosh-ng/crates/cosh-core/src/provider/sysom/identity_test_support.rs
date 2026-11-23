@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 pub(super) struct Fixture {
     pub(super) endpoint: String,
+    pub(super) exchange_code: Arc<Mutex<String>>,
     pub(super) model_response: Arc<Mutex<String>>,
     pub(super) metadata_response: Arc<Mutex<Option<String>>>,
     pub(super) requests: Arc<Mutex<Vec<String>>>,
@@ -36,7 +37,9 @@ impl Fixture {
         let proof_permits = proof_gate.clone();
         let credential_ttl = Arc::new(std::sync::atomic::AtomicU64::new(900));
         let issued_ttl = credential_ttl.clone();
-        let code = exchange_code.to_owned();
+        let exchange_code = Arc::new(Mutex::new(exchange_code.to_owned()));
+        let code = exchange_code.clone();
+        let challenges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -48,6 +51,7 @@ impl Fixture {
                 let challenge_permits = challenge_permits.clone();
                 let proof_permits = proof_permits.clone();
                 let code = code.clone();
+                let challenges = challenges.clone();
                 let issued_ttl = issued_ttl.clone();
                 tokio::spawn(async move {
                     let mut raw = Vec::new();
@@ -94,9 +98,19 @@ impl Fixture {
                     }
                     let body = if path.ends_with("/challenge") {
                         challenge_permits.acquire().await.unwrap().forget();
-                        serde_json::json!({"code":"Success","success":true,"data":{"challengeId":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","audience":"sysom:ecs-model:prod:cn-hangzhou:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","serverTime":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:02:00Z"}}).to_string()
+                        let number = challenges.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let alphabet =
+                            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                        let challenge = format!(
+                            "{}{}{}A",
+                            "A".repeat(40),
+                            alphabet[(number / 64) % 64] as char,
+                            alphabet[number % 64] as char,
+                        );
+                        serde_json::json!({"code":"Success","success":true,"data":{"challengeId":challenge,"audience":format!("sysom:ecs-model:prod:cn-hangzhou:v1:{challenge}"),"serverTime":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:02:00Z"}}).to_string()
                     } else if path.ends_with("/credentials") {
                         gate.acquire().await.unwrap().forget();
+                        let code = code.lock().await.clone();
                         if code == "Success" {
                             let expiry =
                                 chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
@@ -128,6 +142,7 @@ impl Fixture {
         });
         Self {
             endpoint,
+            exchange_code,
             model_response,
             metadata_response,
             requests,

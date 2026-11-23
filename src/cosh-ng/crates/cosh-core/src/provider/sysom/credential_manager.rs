@@ -432,6 +432,25 @@ mod tests {
         assert!(manager.state.lock().await.cached.is_none());
     }
     #[tokio::test]
+    async fn identity_activation_failure_clears_old_lease_and_has_bounded_negative_cache() {
+        let fixture = super::super::identity_test_support::Fixture::start(
+            "Sysom.Identity.SysomNotActivated",
+            false,
+        )
+        .await;
+        let manager = manager(&fixture).await;
+        let mut old = lease(1, 100);
+        old.refresh_at = Instant::now() - Duration::from_secs(1);
+        manager.state.lock().await.cached = Some(old);
+        for _ in 0..2 {
+            let error = manager.ensure().await.err().unwrap();
+            assert_eq!(error.code(), "Sysom.Identity.SysomNotActivated");
+            assert!(!error.is_transient());
+        }
+        assert!(manager.state.lock().await.cached.is_none());
+        assert_eq!(fixture.requests.lock().await.len(), 5);
+    }
+    #[tokio::test]
     async fn invalidating_old_ticket_during_refresh_keeps_new_generation() {
         let fixture = super::super::identity_test_support::Fixture::start("Success", true).await;
         let manager = manager(&fixture).await;

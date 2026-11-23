@@ -24,6 +24,7 @@ pub(super) enum IdentityError {
     LeaseExpired,
     InvalidResponse,
     PermissionDenied,
+    SysomNotActivated,
     InvalidProof,
     ChallengeNotRedeemable,
     Throttled,
@@ -47,6 +48,7 @@ impl IdentityError {
             Self::LeaseExpired => "Sysom.Identity.LeaseExpired",
             Self::InvalidResponse => "Sysom.Identity.InvalidResponse",
             Self::PermissionDenied => "Sysom.Identity.PermissionDenied",
+            Self::SysomNotActivated => "Sysom.Identity.SysomNotActivated",
             Self::InvalidProof => "Sysom.Identity.InvalidInstanceProof",
             Self::ChallengeNotRedeemable => "Sysom.Identity.ChallengeNotRedeemable",
             Self::Throttled => "Sysom.Identity.Throttled",
@@ -351,6 +353,13 @@ fn envelope(body: &[u8]) -> Result<Value, IdentityError> {
     if code != "Success" {
         return Err(match code {
             "Sysom.Identity.PermissionDenied" => IdentityError::PermissionDenied,
+            "Sysom.Identity.SysomNotActivated"
+                if value
+                    .get("success")
+                    .is_none_or(|success| success.as_bool() == Some(false)) =>
+            {
+                IdentityError::SysomNotActivated
+            }
             "Sysom.Identity.InvalidInstanceProof" => IdentityError::InvalidProof,
             "Sysom.Identity.ChallengeNotRedeemable" => IdentityError::ChallengeNotRedeemable,
             "Sysom.Identity.Throttled" => IdentityError::Throttled,
@@ -723,6 +732,7 @@ mod tests {
             "SysomCredentials([REDACTED])"
         );
         for code in [
+            "Sysom.Identity.SysomNotActivated",
             "Sysom.Identity.PermissionDenied",
             "Sysom.Identity.InvalidInstanceProof",
             "Sysom.Identity.ChallengeNotRedeemable",
@@ -741,5 +751,45 @@ mod tests {
         }
         assert!(canonical_pkcs7(base64(&vec![0; MAX_DER]).as_bytes()).is_ok());
         assert!(canonical_pkcs7(base64(&vec![0; MAX_DER + 1]).as_bytes()).is_err());
+    }
+
+    #[test]
+    fn identity_activation_code_requires_an_exact_identity_contract() {
+        for code in [
+            "Sysom.ServiceNotActivated",
+            "Sysom.Identity.NotActivated",
+            "Sysom.Identity.SysomNotActivated.extra",
+        ] {
+            let payload = serde_json::json!({"code":code,"success":false});
+            assert!(matches!(
+                envelope(&serde_json::to_vec(&payload).unwrap()),
+                Err(IdentityError::InvalidResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn identity_activation_rejects_contradictory_or_invalid_success_flags() {
+        for success in [
+            serde_json::json!(true),
+            serde_json::json!("false"),
+            serde_json::json!(null),
+        ] {
+            let body =
+                serde_json::json!({"code":"Sysom.Identity.SysomNotActivated","success":success});
+            assert!(matches!(
+                envelope(&serde_json::to_vec(&body).unwrap()),
+                Err(IdentityError::InvalidResponse)
+            ));
+        }
+        for body in [
+            serde_json::json!({"code":"Sysom.Identity.SysomNotActivated","success":false}),
+            serde_json::json!({"Code":"Sysom.Identity.SysomNotActivated","RequestId":"safe-id"}),
+        ] {
+            assert!(matches!(
+                envelope(&serde_json::to_vec(&body).unwrap()),
+                Err(IdentityError::SysomNotActivated)
+            ));
+        }
     }
 }

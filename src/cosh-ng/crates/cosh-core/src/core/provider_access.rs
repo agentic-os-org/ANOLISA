@@ -332,7 +332,7 @@ fn pollable(failure: &ProviderFailure) -> bool {
             (failure.kind, failure.code.as_str()),
             (
                 ProviderFailureKind::ActivationRequired,
-                "Sysom.ServiceNotActivated"
+                "Sysom.ServiceNotActivated" | "Sysom.Identity.SysomNotActivated"
             ) | (
                 ProviderFailureKind::CreditsPreparing,
                 "Sysom.CreditsPreparing"
