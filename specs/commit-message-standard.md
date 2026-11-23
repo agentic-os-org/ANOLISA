@@ -64,33 +64,33 @@ reference or a list of what the software can do.
 ## 3. Trailers
 
 ```
-Assisted-by: <tool>:<version>
+Assisted-by: <tool>
 Signed-off-by: Name <email>
 ```
 
 `Assisted-by` goes **above** `Signed-off-by`. Omit `Assisted-by` if no AI was
-involved. Every commit must carry a `Signed-off-by` trailer using the
-contributor's own Git identity.
+involved.
+
+- Use the common product or CLI name of the assistant (for example, `Qoder`,
+  `Claude Code`, `Codex`, `Cursor`, `Antigravity`), without appending a version
+  or model name and without ad-hoc abbreviations.
+- Use `Assisted-by: LLM` when using a custom/local setup or when you prefer not
+  to name a specific product.
+- Repeat `Assisted-by:` lines if multiple tools contributed substantially.
+- `Assisted-by` is not enforced by CI, and external PRs that omit it or retain
+  a legacy `<tool>:<version>` suffix are not rejected on that basis.
+
+Every commit must carry a `Signed-off-by` trailer using the human contributor's
+own Git identity. AI agents must not sign off under an agent identity; the
+human submitter takes full responsibility for reviewing, testing, and
+certifying the change.
 
 ```bash
 git commit \
-  --trailer "Assisted-by: Qoder:1.7.0" \
+  --trailer "Assisted-by: Qoder" \
   --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" \
   -m '...'
 ```
-
-### Tool identifier detection
-
-| Detection method | Tool identifier |
-|---|---|
-| `$QODER_VERSION` env var | `Qoder:<ver>` |
-| `$CLAUDE_CODE_VERSION` env var | `Claude Code:<ver>` |
-| Parent process is Qoder.app / QoderWork.app | Read `CFBundleShortVersionString` from app bundle |
-| Parent process is Claude.app | `Claude:<ver>` |
-| Parent process is Cursor.app | `Cursor:<ver>` |
-
-When generating commits, detect the active tool and fill in the actual version.
-Do **not** hardcode a fixed string like `Qoder:latest`.
 
 ## 4. Scope
 
@@ -230,13 +230,14 @@ User-visible changes:
   The existing native Hook-connection mode retains its arguments and
   behavior.
 
-Assisted-by: <tool>:<version>
+Assisted-by: <tool>
 Signed-off-by: Zhang San <zhangsan@example.com>
 ```
 
 These are examples of an accurate delta, not required sentences or a mandatory
-layout for every commit. Replace the trailer placeholders with the detected
-tool/version and the contributor's own Git identity.
+layout for every commit. Replace the trailer placeholders with the active tool
+name (or `LLM`, or omit `Assisted-by` if purely human-authored) and the
+contributor's own Git identity.
 
 ## 10. What CI checks
 
