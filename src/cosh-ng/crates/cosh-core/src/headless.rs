@@ -2178,4 +2178,73 @@ mod tests {
         assert_eq!(matched.record.messages.len(), 1);
         assert_eq!(matched.record.session_id.as_str(), old_id.as_str());
     }
+
+    #[test]
+    fn background_compaction_does_not_load_across_login_generations() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path().join("workspace");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(workspace.join(".copilot-shell")).expect("create config dir");
+        fs::write(
+            workspace.join(".copilot-shell/config.toml"),
+            format!("[session]\npersist_dir = \"{}\"\n", sessions.display()),
+        )
+        .expect("write project config");
+        let store =
+            SessionStore::for_test_workspace(sessions.to_str().expect("utf-8 root"), &workspace)
+                .expect("build store");
+        let mut envelope = PersistedSession::new(
+            ProviderSessionId::new(),
+            store.workspace_scope().to_string(),
+            "auto".to_string(),
+            vec![crate::provider::Message::user("SYNTH_MARKER_GEN1_ALPHA")],
+        );
+        envelope.auth_generation = Some(1);
+        envelope.compaction = Some(crate::compaction::CompactionState {
+            revision: 1,
+            compacted_through: 1,
+            summary: "SYNTH_MARKER_GEN1_ALPHA summary".to_string(),
+            model: "auto".to_string(),
+            prompt_version: 1,
+            source_digest: "digest".to_string(),
+            tokens_before: None,
+            tokens_after: None,
+            created_at_ms: 0,
+        });
+        envelope.compaction_revision = 1;
+        store.persist(&mut envelope).expect("persist gen1");
+        let session_id = envelope.session_id.clone();
+
+        let args = CliArgs::try_parse_from([
+            "cosh-core",
+            "--headless",
+            "--workspace",
+            workspace.to_str().expect("utf-8 workspace"),
+            "--resume",
+            session_id.as_str(),
+        ])
+        .expect("parse resume args");
+        let config = load_runtime_config(&args, &workspace);
+        let mut runtime =
+            SessionRuntime::initialize(&args, &config, Some(1)).expect("load gen1 record");
+        assert!(runtime.record.was_loaded);
+        assert!(runtime.record.compaction.is_some());
+
+        let mut engine = crate::core::CoshCore::new_legacy(
+            config.clone(),
+            Box::new(crate::provider::mock::MockProvider::new(Vec::new())),
+            crate::tool::ToolRegistry::new(),
+        );
+        engine.session_id = session_id.to_string();
+        assert!(engine.session_auth_generation().is_none());
+        runtime.refresh_background_compaction(&mut engine);
+        assert!(
+            engine.compaction.state().is_none(),
+            "gen1 compaction must not load into an unbound/other-generation engine"
+        );
+        assert!(
+            !format!("{:?}", engine.compaction.state()).contains("SYNTH_MARKER_GEN1_ALPHA"),
+            "old-generation synthetic marker must stay out of the live compaction"
+        );
+    }
 }

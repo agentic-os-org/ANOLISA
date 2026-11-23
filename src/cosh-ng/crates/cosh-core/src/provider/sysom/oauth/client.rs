@@ -469,7 +469,7 @@ mod tests {
     /// Sends only a synthetic PKCE pair to the anonymous challenge Action.
     #[cfg(feature = "oauth-pre")]
     #[tokio::test]
-    #[ignore]
+    #[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"]
     async fn pre_anonymous_challenge_readback() {
         let client = OAuthClient::new(format!("https://{}", super::super::contract::PRE_HOST));
         let pkce = super::super::contract::Pkce::generate();

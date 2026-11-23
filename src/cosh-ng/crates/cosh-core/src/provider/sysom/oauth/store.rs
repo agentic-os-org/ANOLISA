@@ -604,7 +604,7 @@ mod tests {
     /// Real-machine macOS keychain handoff canary; run explicitly with --ignored.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore]
+    #[ignore = "provisioned pre-release OAuth acceptance; requires independent login/route/macOS desktop"]
     fn macos_keychain_roundtrip_canary() {
         let backend = KeyringOAuthBackend;
         let slot = format!("canary-{}", uuid::Uuid::new_v4());
