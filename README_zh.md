@@ -42,6 +42,12 @@
 > 本社区以中立、开放的方式参与这一方向的探索；
 > ANOLISA 是本社区设计的 Agentic OS 架构中的核心系统软件栈。
 
+> [!TIP]
+> **想参与 ANOLISA 协作？直接让你的 AI Coding Agent 带你入门。**
+> 在常用 Coding Agent（Claude Code、Codex、Qoder、Cursor、Antigravity 等）中加载本仓库，直接提问：
+> *「我是一名 `<系统 / SRE / 安全 / 框架>` 工程师，我可以如何加入这个项目的协作？」*
+> Agent 会自动读取 [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md)，结合你的操作系统与技术方向匹配[贡献赛道](contribute/zh/tracks.md)、筛选当前未锁定的开放 Issue，并带你走通 [`CONTRIBUTING_zh.md`](CONTRIBUTING_zh.md) 与 [`GOVERNANCE_zh.md`](GOVERNANCE_zh.md) 中的协作流程。
+
 <a id="快速开始"></a>
 
 ## 1. 快速开始
@@ -281,7 +287,7 @@ aw inspect --config "$AW_HOME/anolisa.yaml" --json
 | 在应用中嵌入组件能力 | [SDK 指南](https://agentic-os.sh/zh/docs/developer-guide/sdk/) |
 | 为 Agent 或框架接入 AW | [AW 接入指南](https://agentic-os.sh/zh/docs/developer-guide/aw/) |
 | 开发和分发 AW Provider | [Provider 开发与协议](https://agentic-os.sh/zh/docs/developer-guide/aw/providers/) · [Provider 实现](providers/README_zh.md) |
-| 参与 ANOLISA 开发 | [贡献者指南](CONTRIBUTING_zh.md) · [分组件章节](https://agentic-os.sh/zh/docs/contribute/) |
+| 参与 ANOLISA 开发 | [贡献者指南](CONTRIBUTING_zh.md) · [贡献赛道](contribute/zh/tracks.md) · [社区治理](GOVERNANCE_zh.md) · [Agent 协作引导](specs/contributor-onboarding-guide.md) · [分组件章节](https://agentic-os.sh/zh/docs/contribute/) |
 
 <a id="仓库目录"></a>
 

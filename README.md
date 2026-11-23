@@ -46,6 +46,12 @@ by integrating their own system software optimized for Agent workloads into ANOL
 > approach to exploring this direction; ANOLISA is the core system software
 > stack in the Agentic OS architecture we design.
 
+> [!TIP]
+> **Want to contribute? Let your AI coding agent onboard you.**
+> Open this repository in your coding agent (Claude Code, Codex, Qoder, Cursor, Antigravity, etc.) and ask:
+> *"I'm a `<systems / SRE / security / framework>` engineer — how can I join and collaborate on ANOLISA?"*
+> It will read [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md), match your OS and background to a [contribution track](contribute/en/tracks.md), surface open unlocked issues, and walk you through [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`GOVERNANCE.md`](GOVERNANCE.md).
+
 <a id="get-started"></a>
 
 ## 1. Get started
@@ -318,7 +324,7 @@ Choose a guide for the integration you want to build:
 | Embed a component capability in an application | [SDK guide](https://agentic-os.sh/docs/developer-guide/sdk/) |
 | Connect an Agent or framework to AW | [AW integration](https://agentic-os.sh/docs/developer-guide/aw/) |
 | Develop and distribute an AW Provider | [Provider development and protocol](https://agentic-os.sh/docs/developer-guide/aw/providers/) · [Provider implementations](providers/README.md) |
-| Contribute to ANOLISA | [Contribution guide](CONTRIBUTING.md) · [Component chapters](https://agentic-os.sh/docs/contribute/) |
+| Contribute to ANOLISA | [Contribution guide](CONTRIBUTING.md) · [Ways to contribute](contribute/en/tracks.md) · [Governance](GOVERNANCE.md) · [Agent onboarding](specs/contributor-onboarding-guide.md) · [Component chapters](https://agentic-os.sh/docs/contribute/) |
 
 <a id="repository-layout"></a>
 

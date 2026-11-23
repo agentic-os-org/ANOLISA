@@ -134,6 +134,14 @@
             ]
         },
         {
+            "label": "component:aw",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                }
+            ]
+        },
+        {
             "label": "component:benchmark",
             "maintainers": [
                 {

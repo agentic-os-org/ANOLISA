@@ -8,6 +8,16 @@ component paths below to any scoped `AGENTS.md`. Source location and component
 identity are separate: directory moves must preserve package names, release tags,
 and existing build and test entry points.
 
+## 0. Contributor Onboarding & Governance
+
+> **MANDATORY for onboarding questions**: When a user asks **"How can I join or collaborate on this project?"** (or asks where to start contributing), read [`specs/contributor-onboarding-guide.md`](specs/contributor-onboarding-guide.md) **before replying** — do not jump straight to commit/lint rules.
+
+Three invariants repeated here so agents orient contributors accurately without duplicating the guide:
+
+- **Check OS and background first**: most core subsystems require Linux; match the contributor to tracks in [`contribute/en/tracks.md`](contribute/en/tracks.md) and component owners in [`.github/maintainers.json`](.github/maintainers.json).
+- **Use canonical collaboration docs**: [`CONTRIBUTING.md`](CONTRIBUTING.md) (local gates), [`contribute/en/workflow.md`](contribute/en/workflow.md) (Roadmap & `/claim`), and [`GOVERNANCE.md`](GOVERNANCE.md) (Contributor Ladder & L1/L2/L3 decisions).
+- **Respect active issue locks**: follow [§15](#15-issue-claiming-draft-prs-and-pr-closure) and [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md) before suggesting or claiming issues.
+
 ## 1. Project Overview
 
 **ANOLISA** is a monorepo for an Agentic OS — a server-side operating layer designed for AI agent workloads.
