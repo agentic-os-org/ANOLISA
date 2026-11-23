@@ -273,19 +273,24 @@ if (await exists(contributorRoot)) {
   documentationSources.push(...(await walkFiles(contributorRoot, (file) => file.endsWith('.md')))
     .map((file) => toPosix(path.relative(repoRoot, file))));
 }
-for (const source of ['CONTRIBUTING.md',
-  ...componentRows.map((component) => `${component.source_path}/CONTRIBUTING.md`)]) {
+for (const source of [
+  'CONTRIBUTING.md',
+  'GOVERNANCE.md',
+  'specs/issue-claim-and-pr-lifecycle.md',
+  ...componentRows.map((component) => `${component.source_path}/CONTRIBUTING.md`),
+]) {
   if (await exists(path.join(repoRoot, source))) documentationSources.push(source);
 }
 
 const sourceCommit = process.env.GITHUB_SHA || git('rev-parse', 'HEAD');
+const repoUrl = repositoryUrl();
 const index = {
-  schema_version: '1.3.0',
+  schema_version: '1.4.0',
   project: {
     name: 'ANOLISA',
     description: 'A multi-component system software stack for AI Agent workloads.',
   },
-  repository: repositoryUrl(),
+  repository: repoUrl,
   default_branch: 'main',
   source_commit: sourceCommit,
   license: overrides.license,
@@ -305,6 +310,17 @@ const index = {
       'Match OS and architecture, prefer the matching entry marked preferred, and ask if the remaining choice is ambiguous.',
     confirmation_rule:
       'Ask before changes. Run commands only for non-manual variants; manual variants point to documentation.',
+  },
+  contribution: {
+    guide_url: siteHref('docs/contribute/'),
+    tracks_url: siteHref('docs/contribute/tracks/'),
+    workflow_url: siteHref('docs/contribute/workflow/'),
+    governance_url: siteHref('docs/contribute/governance/'),
+    roadmap_url: `${repoUrl}/discussions/categories/community-roadmap`,
+    good_first_issue_url: `${repoUrl}/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22`,
+    help_wanted_url: `${repoUrl}/issues?q=is%3Aissue+is%3Aopen+label%3A%22action%3Ahelpwanted%22`,
+    claim_command: '/claim',
+    claim_lifecycle_spec: `${repoUrl}/blob/main/specs/issue-claim-and-pr-lifecycle.md`,
   },
   documentation: documentationSources.map((source) => ({
     source,
@@ -340,6 +356,17 @@ const indexText = [
   `4. ${index.setup_workflow.selection_rule}`,
   '5. Check only its requirements and preflight. Bootstrap a missing required CLI from install.cli after confirmation.',
   '6. Run and verify automated entries. Open documentation_url for manual entries.',
+  '',
+  '## Contribution & governance',
+  '',
+  `Guide: ${index.contribution.guide_url}`,
+  `Tracks: ${index.contribution.tracks_url}`,
+  `Workflow: ${index.contribution.workflow_url}`,
+  `Governance: ${index.contribution.governance_url}`,
+  `Roadmap: ${index.contribution.roadmap_url}`,
+  `Good first issues: ${index.contribution.good_first_issue_url}`,
+  `Help wanted issues: ${index.contribution.help_wanted_url}`,
+  `Claim command: ${index.contribution.claim_command} (spec: ${index.contribution.claim_lifecycle_spec})`,
   '',
   '## Components',
   '',
@@ -448,7 +475,7 @@ await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Contribute: ${siteHref('docs/contribute/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Contribute: ${siteHref('docs/contribute/')}\n- Ways to contribute: ${siteHref('docs/contribute/tracks/')}\n- Issue & claiming workflow: ${siteHref('docs/contribute/workflow/')}\n- Governance: ${siteHref('docs/contribute/governance/')}\n- Community roadmap: ${index.contribution.roadmap_url}\n- Good first issues: ${index.contribution.good_first_issue_url}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];

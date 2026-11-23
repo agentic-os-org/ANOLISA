@@ -13,6 +13,7 @@
     "license",
     "install",
     "setup_workflow",
+    "contribution",
     "documentation",
     "components",
     "platform_support"
@@ -80,6 +81,32 @@
         },
         "selection_rule": {"type": "string", "minLength": 1},
         "confirmation_rule": {"type": "string", "minLength": 1}
+      }
+    },
+    "contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guide_url",
+        "tracks_url",
+        "workflow_url",
+        "governance_url",
+        "roadmap_url",
+        "good_first_issue_url",
+        "help_wanted_url",
+        "claim_command",
+        "claim_lifecycle_spec"
+      ],
+      "properties": {
+        "guide_url": {"type": "string", "pattern": "^https://"},
+        "tracks_url": {"type": "string", "pattern": "^https://"},
+        "workflow_url": {"type": "string", "pattern": "^https://"},
+        "governance_url": {"type": "string", "pattern": "^https://"},
+        "roadmap_url": {"type": "string", "pattern": "^https://"},
+        "good_first_issue_url": {"type": "string", "pattern": "^https://"},
+        "help_wanted_url": {"type": "string", "pattern": "^https://"},
+        "claim_command": {"const": "/claim"},
+        "claim_lifecycle_spec": {"type": "string", "pattern": "^https://"}
       }
     },
     "documentation": {

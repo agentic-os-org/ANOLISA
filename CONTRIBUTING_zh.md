@@ -32,15 +32,18 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 | 组件 | 路径 | 平台 | 构建名称 | Scope | 开发入口和最低本地门禁 |
 | --- | --- | --- | --- | --- | --- |
 | cosh-ng | `src/cosh-ng/` | Linux 完整功能；macOS 功能受限 | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`、`cargo fmt --all -- --check`，随后按 `src/cosh-ng/CONTRIBUTING_zh.md` 选择最接近改动的测试 |
-| agent-sec-core | `src/agent-sec-core/` | 仅 Linux | `sec-core` | `sec-core` | Python 3.11.6 和 `uv`; `make build-all`、`make test` |
-| agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
+| agent-sec-core | `src/agent-sec-core/` | 仅 Linux | `agent-sec-core`（`sec-core`） | `sec-core` | V2 Rust CLI/daemon 与沙箱：`make build`、`make test-rust-v2`（无需 `uv` 或固定 Python 运行时）；Python 专属测试使用 Python 3.11.6 和 `uv` |
+| agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `agentsight`（`sight`） | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
 | tokenless | `src/tokenless/` | 完整开发在 Linux；发布的 CLI 二进制和 npm adapter 支持 macOS x64/arm64 | `tokenless` | `tokenless` | `make build`、`make lint`、`make test` |
-| agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
-| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 源码安装需要 Python 3.6+；无需编译；使用 Python 3.11 运行[组件回归测试](#skill-回归测试与路径归属) |
+| agent-memory | `src/agent-memory/` | 仅 Linux | `agent-memory`（`memory`） | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
+| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `os-skills`（`skills`） | `skill` | 源码安装需要 Python 3.6+；无需编译；使用 Python 3.11 运行[组件回归测试](#skill-回归测试与路径归属) |
 | anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
-| SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
+| SkillFS | `src/skillfs/` | 仅 Linux | `skillfs` | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
 | ktuner | `src/ktuner/` | 仅 Linux | 不适用 | `ktuner` | `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` |
+| aw | `src/aw/` | 仅 Linux | `aw` | `aw` | 在仓库根目录执行 `python3 src/aw/scripts/check.py`（工具链由 `src/aw/rust-toolchain.toml` 固定） |
+
+具体的 AW Provider 实现位于 [`providers/`](providers/README_zh.md)（各自拥有独立工作区与契约测试，也支持通过 `--component aw-provider-<name>` 单独构建）。跨组件评测运行器位于 [`benchmark/`](benchmark/README_zh.md)（scope 为 `benchmark`）。
 
 `tokenless` 可以发布 macOS 产物，但其二进制需要从 Linux 交叉编译。不要把 macOS checkout 当作 tokenless 的构建环境。标为 Linux 的组件都必须在 Linux 上构建和测试。`cosh-ng` 和 `agentsight` 的 macOS 受限路径见上表。
 
@@ -48,7 +51,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 - TypeScript 插件、adapter 和网站需要 Node.js 与 npm，版本要求以各包的 `package.json` 和构建说明为准。
 - Rust 组件需要 stable Rust 工具链。若组件固定了工具链版本或增加了原生库，请遵循对应的 `AGENTS.md`。
-- `agent-sec-core` 使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)。`os-skills` 的源码安装和发布清单工具需要 Python **3.6+** 及标准库，源码安装可通过 `PYTHON3=/path/to/python3` 选择解释器。组件回归测试在独立虚拟环境中使用 Python **3.11**。
+- `agent-sec-core` 的 Python 专属测试与工具链使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)（其 V2 Rust 构建与 `make test-rust-v2` 不需要 `uv` 或固定 Python 运行时）。`os-skills` 的源码安装和发布清单工具需要 Python **3.6+** 及标准库，源码安装可通过 `PYTHON3=/path/to/python3` 选择解释器。组件回归测试在独立虚拟环境中使用 Python **3.11**。
 - 修改 `agentsight` eBPF probe 时需要 `clang` 和 `libbpf` 头文件。
 
 ## Fork 并创建分支
@@ -90,37 +93,40 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 统一构建
 
-`scripts/build-all.sh` 是 Linux 便捷构建入口。重复使用 `--component`，选择需要的
-维护中组件：`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
+`scripts/build-all.sh` 是原生 Linux 构建与文件安装入口（需要 Bash 4.4+）。默认组件栈（`--all` 或不传 `--component`）构建 `cosh-ng`、`skillfs`、`ws-ckpt`、`tokenless`、`agentsight`、`agent-sec-core`（V2）和 `aw`，并自动附带匹配的 `providers/<component>/`（`aw-provider-*`）包。额外可选组件包括 `agent-memory` 与 `os-skills`，支持别名 `sec-core`、`sight`、`memory`、`skills`（也支持显式指定 `--component aw-provider-<name>`）。
 
-脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
+脚本不会构建 `anolisa` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
-不指定安装模式时，各组件按自己的安装规则选择用户主目录内的路径，这一步不需要提权。
-依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
-安装模式，通常需要 `sudo`。开发时建议指定组件并关闭安装。
+`build-all.sh` 默认采用**系统安装**配置（`PREFIX=/usr/local`），安装系统依赖或执行直接系统安装时可能使用 `sudo`。使用 `--user` 可安装到 `$HOME/.local` 下且默认不执行提权命令（配合 `--supported-only` 自动跳过仅支持系统模式的组件；仅当显式传入 `--install-system-deps` 时才允许在用户模式下安装系统构建包）。使用 `--prefix /usr --destdir "$PWD/target/pkgroot"` 可在不需 `sudo` 的前提下暂存打包目录。开发时建议显式指定组件并加上 `--no-install`。
 
 ```bash
 ./scripts/build-all.sh --help
+./scripts/build-all.sh --all --check-deps
 ./scripts/build-all.sh --no-install --component cosh-ng
-./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --component sec-core --component tokenless
+./scripts/build-all.sh --no-install --component agent-sec-core --component tokenless
+./scripts/build-all.sh --all --user --supported-only
 ```
 
 主要选项如下。
 
 | 选项 | 作用 |
 | --- | --- |
-| `--no-install` | 安装依赖并构建，随后跳过安装。 |
-| `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `user`。 |
-| `--usr`、`--system` | 选择系统安装模式。 |
+| `--all` | 选择默认组件栈及匹配的 AW Provider。 |
+| `--component <name>` | 构建一个受支持的组件（或 `aw-provider-<name>`），可以重复指定。 |
+| `--no-install` | 准备依赖并构建，但不安装文件。 |
+| `--install` | 准备依赖、构建并安装文件（默认）。 |
+| `--system`、`--user` | 选择系统安装（`/usr/local`，默认）或用户安装（`$HOME/.local`）配置。 |
+| `--supported-only` | 配合 `--user` 仅构建/安装支持用户模式的组件，并报告跳过的目标。 |
+| `--install-mode <mode>` | 显式指定 `system` 或 `user` 模式。 |
+| `--prefix <path>`、`--destdir <path>` | 指定安装前缀，或在无需 `sudo` 的情况下暂存到绝对打包根目录。 |
+| `--deps-only`、`--check-deps` | 仅准备构建依赖而不编译，或只读检查依赖而不修改主机。 |
 | `--ignore-deps` | 跳过依赖准备和运行时校验；仅用于已配好依赖的主机。 |
-| `--deps-only` | 只安装依赖，不构建。 |
-| `--uninstall` | 删除已安装文件；与 `--component` 一起使用可限定组件。 |
-| `--dry-run` | 只打印动作，不修改文件或 systemd 状态。 |
-| `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式。 |
-| `--component <name>` | 构建或卸载一个受支持的组件，可以重复指定。 |
+| `--install-system-deps` | 在 `--user` 模式下显式允许安装原生系统构建包。 |
+| `--jobs <N>` | 限制每个组件的最大 Cargo 并行编译任务数。 |
+| `--dry-run` | 仅打印执行计划，不下载也不修改文件系统。 |
+| `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式（默认）。 |
 
-开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
+旧版 `--uninstall` 选项会被 `build-all.sh` 直接拒绝；如需卸载已安装的文件与服务，请按对应组件的移除步骤操作。开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
 
 `sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
 
