@@ -35,6 +35,7 @@ def run_case(
     behavior: str | None,
     *,
     tokenless_on_path: bool = True,
+    extra_env: dict[str, str] | None = None,
 ) -> ContractResult:
     """Run one (hook, agent, behavior) case hermetically.
 
@@ -50,16 +51,19 @@ def run_case(
             mock_bin = os.path.join(tmp, "tokenless")
             shutil.copy(MOCK_TOKENLESS, mock_bin)
             os.chmod(mock_bin, os.stat(mock_bin).st_mode | stat.S_IEXEC)
+        env_overrides = {
+            "TOKENLESS_MOCK_BEHAVIOR": behavior or "",
+            "TOKENLESS_MOCK_LOG": spawn_log,
+            "TOKENLESS_MOCK_REQUEST_LOG": request_log,
+        }
+        if extra_env:
+            env_overrides.update(extra_env)
         proc = corpus.run_hook(
             hook_script,
             stdin_text,
             agent_env,
             tokenless_bin=mock_bin,
-            extra_env={
-                "TOKENLESS_MOCK_BEHAVIOR": behavior or "",
-                "TOKENLESS_MOCK_LOG": spawn_log,
-                "TOKENLESS_MOCK_REQUEST_LOG": request_log,
-            },
+            extra_env=env_overrides,
             tokenless_on_path=tokenless_on_path,
         )
         try:

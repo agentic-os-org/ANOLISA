@@ -28,6 +28,22 @@ pub enum StatsError {
     Serialization(#[from] serde_json::Error),
 }
 
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_BUSY_TIMEOUT_MS: u64 = 10;
+const MAX_BUSY_TIMEOUT_MS: u64 = 5_000;
+const BUSY_TIMEOUT_ENV: &str = "TOKENLESS_STATS_BUSY_TIMEOUT_MS";
+
+fn parse_busy_timeout(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| (MIN_BUSY_TIMEOUT_MS..=MAX_BUSY_TIMEOUT_MS).contains(ms))
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_BUSY_TIMEOUT)
+}
+
+fn configured_busy_timeout() -> Duration {
+    parse_busy_timeout(std::env::var(BUSY_TIMEOUT_ENV).ok().as_deref())
+}
+
 /// Statistics recorder that stores metrics in SQLite
 pub struct StatsRecorder {
     conn: Mutex<Connection>,
@@ -45,7 +61,7 @@ impl StatsRecorder {
             std::fs::set_permissions(db_path.as_ref(), std::fs::Permissions::from_mode(0o600)).ok();
         }
 
-        Self::enable_wal(&conn, Duration::from_secs(5))?;
+        Self::enable_wal(&conn, configured_busy_timeout())?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
 
         conn.execute(

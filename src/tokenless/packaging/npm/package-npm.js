@@ -158,11 +158,15 @@ function printUsage() {
   node packaging/npm/package-npm.js
   node packaging/npm/package-npm.js --target <target>
   node packaging/npm/package-npm.js --all
+  node packaging/npm/package-npm.js --skip-adapter-build
 
 Targets: ${TARGETS.map((target) => target.pkg_suffix).join(', ')}
 
 Target selectors also accept an OS, npm CPU, architecture, or Rust target
 triple and may select more than one matching target.
+
+Options:
+  --skip-adapter-build  Reuse already-built OpenClaw and dsh adapter bundles
 
 Prebuilt binaries are read from:
   target/npm-prebuilt/<target>/tokenless`);
@@ -179,6 +183,7 @@ function optionValue(args, index, option) {
 function parseArgs() {
   const args = process.argv.slice(2);
   let all = false;
+  let skipAdapterBuild = false;
   let targetName;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -186,6 +191,9 @@ function parseArgs() {
     switch (arg) {
       case '--all':
         all = true;
+        break;
+      case '--skip-adapter-build':
+        skipAdapterBuild = true;
         break;
       case '--target':
         targetName = optionValue(args, index, arg);
@@ -204,7 +212,7 @@ function parseArgs() {
     throw new Error('--all and --target cannot be used together');
   }
   if (all) {
-    return TARGETS;
+    return { targets: TARGETS, skipAdapterBuild };
   }
 
   const currentName = `${process.platform}-${process.arch}`;
@@ -224,7 +232,7 @@ function parseArgs() {
       TARGETS.map((candidate) => candidate.pkg_suffix).join(', '),
     );
   }
-  return targets;
+  return { targets, skipAdapterBuild };
 }
 
 function readHeader(path) {
@@ -413,6 +421,24 @@ function walkFiles(dir, cb) {
   }
 }
 
+function verifyAdaptersReady() {
+  const openclawDir = join(tokenlessRoot, 'adapters', 'tokenless', 'openclaw');
+  const openclawIndex = join(openclawDir, 'dist', 'index.js');
+  if (!existsSync(openclawIndex) || !statSync(openclawIndex).isFile()) {
+    throw new Error(
+      `OpenClaw plugin build did not produce adapters/tokenless/openclaw/dist/index.js`,
+    );
+  }
+
+  const dshDir = join(tokenlessRoot, 'adapters', 'tokenless', 'dsh');
+  for (const relative of ['package.json', 'cordis.patch.yml', 'dist/index.js']) {
+    const filePath = join(dshDir, relative);
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      throw new Error(`Native dsh adapter bundle is missing adapters/tokenless/dsh/${relative}`);
+    }
+  }
+}
+
 /**
  * Build adapter payloads that are not plain source files. The OpenClaw plugin
  * is TypeScript and must be compiled to dist/index.js before it can be
@@ -455,18 +481,7 @@ function buildAdapters() {
     );
   }
 
-  if (!existsSync(join(openclawDir, 'dist', 'index.js'))) {
-    throw new Error(
-      `OpenClaw plugin build did not produce adapters/tokenless/openclaw/dist/index.js`,
-    );
-  }
-
-  const dshDir = join(tokenlessRoot, 'adapters', 'tokenless', 'dsh');
-  for (const relative of ['package.json', 'cordis.patch.yml', 'dist/index.js']) {
-    if (!existsSync(join(dshDir, relative))) {
-      throw new Error(`Native dsh adapter bundle is missing adapters/tokenless/dsh/${relative}`);
-    }
-  }
+  verifyAdaptersReady();
 }
 
 /**
@@ -532,7 +547,7 @@ function copyAdapters(rootPkgDir) {
   });
 }
 
-function packageRoot(targets) {
+function packageRoot(targets, { skipAdapterBuild = false } = {}) {
   const rootPkgDir = join(distDir, 'tokenless');
   console.log(`\n📦 Packaging anolisa-tokenless@${version} (root)...`);
 
@@ -564,7 +579,11 @@ process.exit(1);
   // integration on macOS and Linux alike. postinstall copies them to the
   // user-level data dir that run-hook.sh already searches
   // (~/.local/share/anolisa/...).
-  buildAdapters();
+  if (skipAdapterBuild) {
+    verifyAdaptersReady();
+  } else {
+    buildAdapters();
+  }
   copyAdapters(rootPkgDir);
 
   // Copy README and LICENSE
@@ -630,7 +649,7 @@ process.exit(1);
 async function main() {
   console.log(`\n🚀 Token-Less npm packaging (v${version})\n`);
 
-  const targets = parseArgs();
+  const { targets, skipAdapterBuild } = parseArgs();
   console.log(`Targets: ${targets.map((target) => target.pkg_suffix).join(', ')}`);
 
   // Validate the complete input set before replacing an existing dist tree.
@@ -639,6 +658,9 @@ async function main() {
     console.log(`\n🔎 Verifying ${target.pkg_suffix} binaries from ${binDir}...`);
     return [target, collectPrebuiltBinaries(target, binDir)];
   });
+  if (skipAdapterBuild) {
+    verifyAdaptersReady();
+  }
 
   if (existsSync(distDir)) rmSync(distDir, { recursive: true });
   mkdirSync(distDir, { recursive: true });
@@ -649,7 +671,7 @@ async function main() {
 
   // The root package always advertises every published platform package, even
   // when only one selected platform package is assembled locally.
-  packageRoot(TARGETS);
+  packageRoot(TARGETS, { skipAdapterBuild });
 
   console.log(`\n✅ Selected packages ready in: ${distDir}/`);
   console.log('\nTo publish (platform packages first, root last; registry pinned to npmjs):');

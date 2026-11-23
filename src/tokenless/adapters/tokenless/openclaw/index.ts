@@ -12,6 +12,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const OPERATION_TIMEOUT_MS = 8_000;
+const OPERATION_TIMEOUT_ENV = "TOKENLESS_OPENCLAW_TIMEOUT_MS";
 const OPTIMIZATION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const OPTIMIZATION_STATE_MAX_ENTRIES = 1_024;
 const RETRIEVE_TOOL = "tokenless_retrieve";
@@ -206,6 +207,16 @@ function loadToolCategories(): ToolCategories {
   }
 }
 
+function operationTimeoutMs(): number {
+  const raw = process.env[OPERATION_TIMEOUT_ENV];
+  if (!raw) return OPERATION_TIMEOUT_MS;
+  const parsed = Math.floor(Number(raw));
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= OPERATION_TIMEOUT_MS) {
+    return parsed;
+  }
+  return OPERATION_TIMEOUT_MS;
+}
+
 function runOperation(
   operation: "before_model" | "pre_tool" | "post_tool" | "retrieve",
   input: Record<string, unknown>,
@@ -218,7 +229,7 @@ function runOperation(
   try {
     const stdout = execFileSync(tokenlessPath, ["compress"], {
       encoding: "utf-8",
-      timeout: OPERATION_TIMEOUT_MS,
+      timeout: operationTimeoutMs(),
       // A recovered original can be much larger than its compressed view.
       maxBuffer: 64 * 1024 * 1024,
       input: JSON.stringify({

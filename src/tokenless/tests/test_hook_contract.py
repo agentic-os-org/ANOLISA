@@ -12,15 +12,23 @@ Later adapter migrations extend the agent matrices below rather than
 adding new suites.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract"))
 
 import contract_runner
 import corpus
+
+if corpus.HOOKS_DIR not in sys.path:
+    sys.path.insert(1, corpus.HOOKS_DIR)
+
+import hook_utils
 
 # Behavior classes whose envelope must be a plain skip on every replacement
 # host: the hook fails open and emits the original unchanged.
@@ -133,12 +141,21 @@ class ResponseHookContract(unittest.TestCase):
             payload["tool_response"], separators=(",", ":"), ensure_ascii=False
         )
 
-    def run_case(self, agent: str, behavior):
+    def run_case(
+        self,
+        agent: str,
+        behavior,
+        *,
+        tokenless_on_path: bool = True,
+        extra_env: dict[str, str] | None = None,
+    ):
         return contract_runner.run_case(
             corpus.RESPONSE_HOOK,
             self.fixture,
             RESPONSE_AGENTS[agent],
             behavior,
+            tokenless_on_path=tokenless_on_path,
+            extra_env=extra_env,
         )
 
     def expected_replacement(self, agent: str) -> dict:
@@ -188,10 +205,8 @@ class ResponseHookContract(unittest.TestCase):
                 self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_fallback_binary_does_not_advertise_marker_recovery(self):
-        result = contract_runner.run_case(
-            corpus.RESPONSE_HOOK,
-            self.fixture,
-            RESPONSE_AGENTS["claude-code"],
+        result = self.run_case(
+            "claude-code",
             "applied",
             tokenless_on_path=False,
         )
@@ -302,7 +317,11 @@ class ResponseHookContract(unittest.TestCase):
     def test_timeout_kills_the_subprocess_and_passes_through(self):
         for agent in ("claude-code", "qwenwork"):
             with self.subTest(agent=agent):
-                result = self.run_case(agent, "timeout")
+                result = self.run_case(
+                    agent,
+                    "timeout",
+                    extra_env={"TOKENLESS_HOOK_TIMEOUT_SECS": "0.5"},
+                )
                 self.assertEqual(result.envelope, {})
                 self.assertEqual(result.spawns, ["compress"])
 
@@ -318,12 +337,19 @@ class SchemaHookContract(unittest.TestCase):
         self.tools = payload["llm_request"]["config"]["tools"]
         self.content = json.dumps(self.tools, separators=(",", ":"))
 
-    def run_case(self, agent: str, behavior):
+    def run_case(
+        self,
+        agent: str,
+        behavior,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ):
         return contract_runner.run_case(
             corpus.SCHEMA_HOOK,
             self.fixture,
             corpus.SCHEMA_AGENTS[agent],
             behavior,
+            extra_env=extra_env,
         )
 
     def envelope_with(self, tools) -> dict:
@@ -381,9 +407,36 @@ class SchemaHookContract(unittest.TestCase):
                 self.assertEqual(result.spawns, [])
 
     def test_timeout_kills_the_subprocess_and_passes_through(self):
-        result = self.run_case("qwencode", "timeout")
+        result = self.run_case(
+            "qwencode",
+            "timeout",
+            extra_env={"TOKENLESS_HOOK_TIMEOUT_SECS": "0.5"},
+        )
         self.assertEqual(result.envelope, {})
         self.assertEqual(result.spawns, ["compress"])
+
+
+class HookTimeoutOverrideTest(unittest.TestCase):
+    def test_effective_compress_timeout_bounds_overrides(self):
+        cases = [
+            (None, 8.0),
+            ("", 8.0),
+            ("invalid", 8.0),
+            ("0", 8.0),
+            ("-1", 8.0),
+            ("nan", 8.0),
+            ("inf", 8.0),
+            ("99", 8.0),
+            ("8", 8.0),
+            ("0.5", 0.5),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                env_patch = {} if raw is None else {"TOKENLESS_HOOK_TIMEOUT_SECS": raw}
+                with mock.patch.dict(os.environ, env_patch, clear=False):
+                    if raw is None:
+                        os.environ.pop("TOKENLESS_HOOK_TIMEOUT_SECS", None)
+                    self.assertEqual(hook_utils._effective_compress_timeout(8), expected)
 
 
 if __name__ == "__main__":

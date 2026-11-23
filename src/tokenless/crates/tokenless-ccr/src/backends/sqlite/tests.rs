@@ -7,6 +7,14 @@ fn tmp_store(ttl: u64, cap: usize) -> (SqliteStore, tempfile::TempDir) {
     (store, dir)
 }
 
+fn expire_all(store: &SqliteStore) {
+    let expired_at = now_unix().saturating_sub(1) as i64;
+    store
+        .lock_conn()
+        .execute("UPDATE stash SET expires_at = ?", [expired_at])
+        .expect("expire stash rows");
+}
+
 #[test]
 fn retrieve_is_case_insensitive() {
     let (store, _dir) = tmp_store(60, 100);
@@ -72,18 +80,35 @@ fn retrieve_missing_returns_none() {
 
 #[test]
 fn expired_entry_not_retrievable() {
-    let (store, _dir) = tmp_store(1, 100);
+    let before = now_unix();
+    let (store, _dir) = tmp_store(60, 100);
     let key = store.stash("ephemeral").unwrap().key;
-    thread::sleep(std::time::Duration::from_secs(2));
+    let after = now_unix();
+    let expires_at: i64 = store
+        .lock_conn()
+        .query_row(
+            "SELECT expires_at FROM stash WHERE hash = ?",
+            [&key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        ((before + 60) as i64..=(after + 60) as i64).contains(&expires_at),
+        "unexpected expires_at {expires_at} outside [{}, {}]",
+        before + 60,
+        after + 60,
+    );
+    assert_eq!(store.retrieve(&key).unwrap(), Some("ephemeral".to_string()));
+    expire_all(&store);
     assert_eq!(store.retrieve(&key).unwrap(), None);
 }
 
 #[test]
 fn evict_expired_reports_count() {
-    let (store, _dir) = tmp_store(1, 100);
+    let (store, _dir) = tmp_store(60, 100);
     let _ = store.stash("a").unwrap();
     let _ = store.stash("b").unwrap();
-    thread::sleep(std::time::Duration::from_secs(2));
+    expire_all(&store);
     assert_eq!(store.evict_expired().unwrap(), 2);
     assert_eq!(store.len(), 0);
 }
@@ -118,9 +143,9 @@ fn delete_missing_returns_false() {
 fn delete_expired_returns_false() {
     // Trait: Ok(false) when already expired. DELETE must include
     // `expires_at >= now` so an expired row is not reported as a live delete.
-    let (store, _dir) = tmp_store(1, 100);
+    let (store, _dir) = tmp_store(60, 100);
     let write = store.stash("ephemeral").unwrap();
-    thread::sleep(std::time::Duration::from_secs(2));
+    expire_all(&store);
     assert!(!store.delete(&write.key, write.generation).unwrap());
     assert_eq!(store.retrieve(&write.key).unwrap(), None);
 }
@@ -196,11 +221,11 @@ fn expired_rows_physically_deleted_after_retrieve() {
     // Lazy purge: a retrieve must physically DELETE expired rows, not
     // merely filter them via the WHERE clause. Mirrors headroom's
     // `SqliteCcrStore::get` lazy-purge sweep.
-    let (store, _dir) = tmp_store(1, 100);
+    let (store, _dir) = tmp_store(60, 100);
     let _ = store.stash("a").unwrap();
     let _ = store.stash("b").unwrap();
     assert_eq!(store.len(), 2);
-    thread::sleep(std::time::Duration::from_secs(2));
+    expire_all(&store);
     // Both rows are now expired. A retrieve for any (absent) key triggers
     // the purge sweep; `len()` must then read 0 because the rows were
     // physically deleted, not just hidden.

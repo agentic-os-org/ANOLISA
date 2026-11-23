@@ -24,9 +24,31 @@ use std::time::Duration;
 /// The hidden `compress` flag that marks the rewrite child.
 pub(crate) const CHILD_FLAG: &str = "rewrite-child";
 /// The limit Tokenless applied while RTK ran as a separate process.
-const REWRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_REWRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_REWRITE_TIMEOUT_MS: u64 = 200;
+const MAX_REWRITE_TIMEOUT_MS: u64 = 5_000;
+const REWRITE_TIMEOUT_ENV: &str = "TOKENLESS_REWRITE_TIMEOUT_MS";
 /// How long a stderr write may take before the run goes on without it.
 const REPORT_TIMEOUT: Duration = Duration::from_millis(200);
+
+fn parse_rewrite_timeout(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| (MIN_REWRITE_TIMEOUT_MS..=MAX_REWRITE_TIMEOUT_MS).contains(ms))
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_REWRITE_TIMEOUT)
+}
+
+fn rewrite_timeout() -> Duration {
+    parse_rewrite_timeout(std::env::var(REWRITE_TIMEOUT_ENV).ok().as_deref())
+}
+
+fn timeout_message(timeout: Duration) -> String {
+    if timeout.subsec_nanos() == 0 {
+        format!("RTK rewrite timed out after {} seconds", timeout.as_secs())
+    } else {
+        format!("RTK rewrite timed out after {} ms", timeout.as_millis())
+    }
+}
 
 /// Runs the PreTool `request` through `tokenless compress` in a child that
 /// leads a new process group, and relays the child's output.
@@ -47,6 +69,7 @@ pub(crate) fn run_in_child(request: &str) -> Result<i32, String> {
     use std::time::Instant;
 
     let started = Instant::now();
+    let timeout = rewrite_timeout();
     let mut child =
         spawn_child().map_err(|error| format!("cannot start the RTK rewrite: {error}"))?;
     // A child that ends before it reads the request reports why itself.
@@ -89,7 +112,7 @@ pub(crate) fn run_in_child(request: &str) -> Result<i32, String> {
         }
         (Some(code), _) => Ok(code),
         // The deadline reports the timeout before it kills the child's group.
-        (None, Some(libc::SIGKILL)) if started.elapsed() >= REWRITE_TIMEOUT => Ok(1),
+        (None, Some(libc::SIGKILL)) if started.elapsed() >= timeout => Ok(1),
         (_, signal) => Err(format!(
             "the RTK rewrite ended by signal {}",
             signal.unwrap_or_default()
@@ -156,20 +179,18 @@ impl Drop for Deadline {
 }
 
 fn watch(finished: &(Mutex<bool>, Condvar), tree: &tree::Tree) {
+    let timeout = rewrite_timeout();
     let (lock, wake) = finished;
     let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
     let (guard, _) = wake
-        .wait_timeout_while(guard, REWRITE_TIMEOUT, |finished| !*finished)
+        .wait_timeout_while(guard, timeout, |finished| !*finished)
         .unwrap_or_else(PoisonError::into_inner);
     if *guard {
         return;
     }
     // The guard stays held until the process ends, so dropping the deadline
     // blocks and no response follows the timeout report.
-    let message = format!(
-        "RTK rewrite timed out after {} seconds",
-        REWRITE_TIMEOUT.as_secs()
-    );
+    let message = timeout_message(timeout);
     // A write to a stderr pipe that nobody drains blocks, and so does taking
     // the stderr lock while the rewrite is stuck in such a write. Neither may
     // keep the processes alive.
@@ -237,7 +258,10 @@ mod tree {
             // SAFETY: getpgrp and getpid take no arguments and cannot fail.
             if unsafe { libc::getpgrp() == libc::getpid() } {
                 // SAFETY: process group 0 is the group of this process, which it leads.
-                unsafe { libc::killpg(0, libc::SIGKILL) };
+                if unsafe { libc::killpg(0, libc::SIGKILL) } == 0 {
+                    // Allow asynchronous SIGKILL delivery before `watch` falls through to `exit(1)`.
+                    std::thread::sleep(super::Duration::from_secs(1));
+                }
             }
         }
     }
@@ -315,5 +339,44 @@ mod tree {
             // SAFETY: the job handle is live.
             unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rewrite_timeout_bounds_overrides() {
+        assert_eq!(parse_rewrite_timeout(None), Duration::from_secs(5));
+        assert_eq!(parse_rewrite_timeout(Some("")), Duration::from_secs(5));
+        assert_eq!(
+            parse_rewrite_timeout(Some("invalid")),
+            Duration::from_secs(5)
+        );
+        assert_eq!(parse_rewrite_timeout(Some("0")), Duration::from_secs(5));
+        assert_eq!(parse_rewrite_timeout(Some("199")), Duration::from_secs(5));
+        assert_eq!(
+            parse_rewrite_timeout(Some("200")),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            parse_rewrite_timeout(Some("500")),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_rewrite_timeout(Some("5000")), Duration::from_secs(5));
+        assert_eq!(parse_rewrite_timeout(Some("5001")), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn timeout_message_formats_whole_seconds_and_millis() {
+        assert_eq!(
+            timeout_message(Duration::from_secs(5)),
+            "RTK rewrite timed out after 5 seconds"
+        );
+        assert_eq!(
+            timeout_message(Duration::from_millis(500)),
+            "RTK rewrite timed out after 500 ms"
+        );
     }
 }

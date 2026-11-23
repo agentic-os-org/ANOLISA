@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -611,7 +612,7 @@ def forward_stderr(proc: subprocess.CompletedProcess) -> None:
 
 
 def _run_in_group(
-    args: list[str], input_data: str, timeout: int
+    args: list[str], input_data: str, timeout: int | float
 ) -> subprocess.CompletedProcess:
     # The rewrite child requires its own group. Its watchdog survives a killed
     # Hook; if our outer timeout fires first, we must end that entire group.
@@ -640,7 +641,7 @@ def _run_in_group(
 
 
 def run(
-    args: list[str], input_data: str, timeout: int = 3, *, isolated: bool = False
+    args: list[str], input_data: str, timeout: int | float = 3, *, isolated: bool = False
 ) -> subprocess.CompletedProcess | None:
     """Run a subprocess with input data, returning None on failure."""
     try:
@@ -769,8 +770,21 @@ def build_post_tool_request(
     return request
 
 
+def _effective_compress_timeout(default: int | float) -> float:
+    raw = os.environ.get("TOKENLESS_HOOK_TIMEOUT_SECS")
+    if not raw:
+        return float(default)
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return float(default)
+    if math.isfinite(parsed) and 0 < parsed <= default:
+        return parsed
+    return float(default)
+
+
 def run_compress(
-    tokenless_bin: str, request: dict, timeout: int, expected_operation: str
+    tokenless_bin: str, request: dict, timeout: int | float, expected_operation: str
 ) -> dict | None:
     """Run ``tokenless compress`` on one request; None on any failure.
 
@@ -788,7 +802,7 @@ def run_compress(
     proc = run(
         args,
         json.dumps(request, ensure_ascii=False),
-        timeout=timeout,
+        timeout=_effective_compress_timeout(timeout),
         isolated=isolated,
     )
     if proc is None or proc.returncode != 0 or not proc.stdout.strip():

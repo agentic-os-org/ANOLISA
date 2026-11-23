@@ -75,13 +75,41 @@ print(f"AgentScope {agentscope.__version__} smoke test passed")
 PY
 }
 
-run_smoke v1-minimum 'agentscope==1.0.11'
-run_smoke v1-latest 'agentscope>=1.0.11,<1.1'
-run_smoke v2-minimum 'agentscope==2.0.0'
-run_smoke v2-direct-2-0-1 'agentscope==2.0.1'
-run_smoke v2-direct-2-0-2 'agentscope==2.0.2'
-run_smoke v2-app-minimum 'agentscope==2.0.3'
-run_smoke v2-latest 'agentscope>=2,<2.1'
+run_smoke_batch() {
+    local -a pids=()
+    local -a names=()
+    while [ "$#" -ge 2 ]; do
+        local venv_name="$1"
+        local agentscope_requirement="$2"
+        shift 2
+        run_smoke "$venv_name" "$agentscope_requirement" >"$TEST_ROOT/$venv_name.log" 2>&1 &
+        pids+=("$!")
+        names+=("$venv_name")
+    done
+
+    local status=0
+    local idx
+    for idx in "${!pids[@]}"; do
+        if ! wait "${pids[$idx]}"; then
+            status=1
+        fi
+        cat "$TEST_ROOT/${names[$idx]}.log"
+    done
+    return "$status"
+}
+
+# Batch 1 warms uv's package cache for both 1.x and 2.x dependency trees before
+# the remaining five environments install concurrently.
+run_smoke_batch \
+    v1-minimum 'agentscope==1.0.11' \
+    v2-minimum 'agentscope==2.0.0'
+
+run_smoke_batch \
+    v1-latest 'agentscope>=1.0.11,<1.1' \
+    v2-direct-2-0-1 'agentscope==2.0.1' \
+    v2-direct-2-0-2 'agentscope==2.0.2' \
+    v2-app-minimum 'agentscope==2.0.3' \
+    v2-latest 'agentscope>=2,<2.1'
 
 EXPECTED_VERSION="$(sed -n \
     's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"

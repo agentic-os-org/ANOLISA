@@ -1227,3 +1227,19 @@ fn warn_stats_survives_an_unwritable_stderr() {
     }
     drop(dev_full);
 }
+
+#[test]
+fn parse_busy_timeout_bounds_test_overrides() {
+    assert_eq!(parse_busy_timeout(None), Duration::from_secs(5));
+    assert_eq!(parse_busy_timeout(Some("")), Duration::from_secs(5));
+    assert_eq!(parse_busy_timeout(Some("abc")), Duration::from_secs(5));
+    assert_eq!(parse_busy_timeout(Some("0")), Duration::from_secs(5));
+    assert_eq!(parse_busy_timeout(Some("9")), Duration::from_secs(5));
+    assert_eq!(parse_busy_timeout(Some("10")), Duration::from_millis(10));
+    assert_eq!(parse_busy_timeout(Some("200")), Duration::from_millis(200));
+    assert_eq!(
+        parse_busy_timeout(Some("5000")),
+        Duration::from_millis(5000)
+    );
+    assert_eq!(parse_busy_timeout(Some("5001")), Duration::from_secs(5));
+}
