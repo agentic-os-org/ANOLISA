@@ -32,6 +32,15 @@ pub const DEFAULT_SLS_PATH: &str = "/var/log/anolisa/sls/ops/tokenless.jsonl";
 /// Allowed path prefixes for TOKENLESS_SLS_PATH env var override.
 /// NOTE: /tmp/ is world-writable on most Unix systems — other local users
 /// can read the JSONL file if placed there. Prefer /var/log/ for production.
+/// On macOS, `/var` and `/tmp` symlink to `/private/var` and `/private/tmp`,
+/// so canonicalized paths carry the `/private/` prefix.
+#[cfg(target_os = "macos")]
+const ALLOWED_SLS_PREFIXES: &[&str] = &["/var/log/", "/private/var/log/", "/tmp/", "/private/tmp/"];
+
+/// Allowed path prefixes for TOKENLESS_SLS_PATH env var override.
+/// NOTE: /tmp/ is world-writable on most Unix systems — other local users
+/// can read the JSONL file if placed there. Prefer /var/log/ for production.
+#[cfg(not(target_os = "macos"))]
 const ALLOWED_SLS_PREFIXES: &[&str] = &["/var/log/", "/tmp/"];
 
 /// Root-owned prefixes where creating a symlink requires privilege. For
@@ -39,6 +48,15 @@ const ALLOWED_SLS_PREFIXES: &[&str] = &["/var/log/", "/tmp/"];
 /// canonicalization resolves it elsewhere (e.g. `/var/log` symlinked to
 /// another filesystem). World-writable prefixes like `/tmp/` are excluded
 /// because an unprivileged user can place a symlink there to escape.
+#[cfg(target_os = "macos")]
+const TRUSTED_SLS_PREFIXES: &[&str] = &["/var/log/", "/private/var/log/"];
+
+/// Root-owned prefixes where creating a symlink requires privilege. For
+/// these, the original (pre-canonicalize) path can be trusted even when
+/// canonicalization resolves it elsewhere (e.g. `/var/log` symlinked to
+/// another filesystem). World-writable prefixes like `/tmp/` are excluded
+/// because an unprivileged user can place a symlink there to escape.
+#[cfg(not(target_os = "macos"))]
 const TRUSTED_SLS_PREFIXES: &[&str] = &["/var/log/"];
 
 /// Canonicalize a path, walking up the parent chain to resolve symlinks

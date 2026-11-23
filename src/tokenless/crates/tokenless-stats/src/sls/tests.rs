@@ -307,32 +307,40 @@ fn test_resolve_sls_path_rejects_non_whitelisted_prefix() {
 #[test]
 #[cfg(unix)]
 fn test_resolve_sls_path_accepts_valid_path() {
-    // Valid paths under /var/log/ or /tmp/ are accepted.
+    // Valid paths under /var/log/ or /tmp/ are accepted and returned
+    // canonicalized (e.g. `/private/var/log` and `/private/tmp` on macOS).
+    let var_log = fs::canonicalize("/var/log").unwrap_or_else(|_| PathBuf::from("/var/log"));
+    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
     assert_eq!(
         resolve_sls_path(Some("/var/log/custom/tokenless.jsonl")),
-        PathBuf::from("/var/log/custom/tokenless.jsonl")
+        var_log.join("custom/tokenless.jsonl")
     );
     assert_eq!(
         resolve_sls_path(Some("/tmp/tokenless-test.jsonl")),
-        PathBuf::from("/tmp/tokenless-test.jsonl")
+        tmp.join("tokenless-test.jsonl")
     );
 }
 
 #[test]
 #[cfg(unix)]
 fn test_validate_sls_path_symlinked_prefix() {
-    // When /var/log is symlinked to another filesystem, canonicalization
-    // resolves it to the real target which no longer starts with
-    // /var/log/. Since /var/log is root-owned (creating the symlink needs
-    // privilege), the original path is trusted and the path is still
-    // accepted. Here /var/log is a real directory (no symlink), so both
-    // the original and reconstructed paths match the /var/log/ prefix.
+    // When /var/log is symlinked to another filesystem (or /private/var/log
+    // on macOS), canonicalization resolves it to the real target. Since
+    // /var/log is root-owned (creating the symlink needs privilege), the
+    // original path is trusted and the resolved path is still accepted.
+    let expected_root = fs::canonicalize("/var/log").unwrap_or_else(|_| PathBuf::from("/var/log"));
     let result = validate_sls_path(std::path::Path::new(
         "/var/log/anolisa/sls/ops/tokenless.jsonl",
     ));
-    assert!(result.is_some());
-    let resolved = result.unwrap();
-    assert!(resolved.to_str().unwrap().starts_with("/var/log/"));
+    let resolved = result.expect("path under /var/log/ must be accepted");
+    assert!(
+        resolved.starts_with(&expected_root),
+        "expected {resolved:?} to start with {expected_root:?}"
+    );
+    assert!(
+        resolved.ends_with("anolisa/sls/ops/tokenless.jsonl"),
+        "unexpected resolved suffix: {resolved:?}"
+    );
 }
 
 #[test]
@@ -391,9 +399,26 @@ fn test_validate_sls_path_rejects_tmp_symlink_escape() {
     // The path must be REJECTED: the resolved path no longer matches an
     // allowed prefix, and /tmp/ is not a trusted prefix, so the original
     // path must not be used as a fallback.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     let link = dir.path().join("escape");
     std::os::unix::fs::symlink("/etc", &link).unwrap();
     let escaped = link.join("cron.d/evil.jsonl");
     assert!(validate_sls_path(&escaped).is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_validate_sls_path_macos_private_prefixes() {
+    assert_eq!(
+        validate_sls_path(std::path::Path::new(
+            "/private/var/log/custom/tokenless.jsonl"
+        )),
+        Some(PathBuf::from("/private/var/log/custom/tokenless.jsonl"))
+    );
+    assert_eq!(
+        validate_sls_path(std::path::Path::new("/private/tmp/tokenless-test.jsonl")),
+        Some(PathBuf::from("/private/tmp/tokenless-test.jsonl"))
+    );
+    assert!(validate_sls_path(std::path::Path::new("/private/etc/passwd")).is_none());
+    assert!(validate_sls_path(std::path::Path::new("/private/tmp-evil/tokenless.jsonl")).is_none());
 }

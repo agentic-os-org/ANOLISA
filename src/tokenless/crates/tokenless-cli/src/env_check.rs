@@ -682,7 +682,22 @@ fn check_config_file(path: &str) -> bool {
 /// Check a permission type.
 fn check_permission(perm: &str) -> bool {
     match perm {
-        "file_read" => fs::read_to_string("/proc/self/status").is_ok(),
+        "file_read" => {
+            #[cfg(target_os = "linux")]
+            {
+                fs::read_to_string("/proc/self/status").is_ok()
+            }
+            #[cfg(all(unix, not(target_os = "linux")))]
+            {
+                // Non-Linux Unix systems (e.g. macOS) have no /proc filesystem;
+                // mirror tool_ready_hook.sh's readability check on `/`.
+                fs::read_dir("/").is_ok()
+            }
+            #[cfg(not(unix))]
+            {
+                std::env::current_exe().and_then(fs::File::open).is_ok()
+            }
+        }
         "file_write" => {
             let test_path =
                 std::env::temp_dir().join(format!(".tokenless-ready-test-{}", std::process::id()));
