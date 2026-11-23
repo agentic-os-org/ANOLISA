@@ -137,7 +137,4 @@ fn mostly_text(scan: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/content_tests.rs");
-}
+mod tests;

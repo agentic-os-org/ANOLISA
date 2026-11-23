@@ -2061,7 +2061,4 @@ fn indent(inner: &str, pad: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/html_tests.rs");
-}
+mod tests;

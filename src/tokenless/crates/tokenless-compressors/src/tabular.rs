@@ -228,7 +228,4 @@ fn saves_both(candidate: &str, original: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/tabular_tests.rs");
-}
+mod tests;

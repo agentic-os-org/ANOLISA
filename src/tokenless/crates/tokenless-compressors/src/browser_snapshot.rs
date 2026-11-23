@@ -165,6 +165,4 @@ impl BrowserSnapshotCompressor {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("tests/browser_snapshot_tests.rs");
-}
+mod tests;

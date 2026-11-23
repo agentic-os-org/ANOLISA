@@ -902,7 +902,4 @@ impl StatsSummary {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/recorder_tests.rs");
-}
+mod tests;

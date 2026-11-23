@@ -1623,7 +1623,4 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/main_tests.rs");
-}
+mod tests;

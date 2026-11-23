@@ -611,13 +611,4 @@ fn sample_lines(input: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/build_log_tests.rs");
-}
-
-#[cfg(test)]
-mod pnpm_tests {
-    use super::*;
-    include!("tests/pnpm_tests.rs");
-}
+mod tests;

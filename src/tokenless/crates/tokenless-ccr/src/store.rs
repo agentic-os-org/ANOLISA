@@ -93,7 +93,4 @@ impl From<rusqlite::Error> for StashError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/store_tests.rs");
-}
+mod tests;

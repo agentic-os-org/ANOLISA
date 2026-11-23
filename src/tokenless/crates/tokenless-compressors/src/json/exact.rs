@@ -640,7 +640,4 @@ fn is_integer(number: &serde_json::Number) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/json_exact_tests.rs");
-}
+mod tests;

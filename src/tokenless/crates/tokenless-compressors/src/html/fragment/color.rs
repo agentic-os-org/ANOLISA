@@ -343,7 +343,4 @@ const NAMED_COLORS: [(&str, u32); 148] = [
 ];
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../../tests/html_color_tests.rs");
-}
+mod tests;

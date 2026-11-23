@@ -568,15 +568,12 @@ fn render(records: &[Record]) -> String {
 }
 
 #[cfg(test)]
+#[path = "../../tests/common/maven_oracle.rs"]
+mod oracle;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    mod oracle {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/common/maven_oracle.rs"
-        ));
-    }
 
     #[test]
     fn static_grammars_compile() {

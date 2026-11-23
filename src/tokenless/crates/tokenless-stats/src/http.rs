@@ -252,5 +252,4 @@ fn response(value: Value) -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "http_tests.rs"]
 mod tests;

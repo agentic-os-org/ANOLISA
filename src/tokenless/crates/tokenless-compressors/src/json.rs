@@ -925,7 +925,4 @@ fn prefix_chars(value: &str, count: usize) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/json_tests.rs");
-}
+mod tests;

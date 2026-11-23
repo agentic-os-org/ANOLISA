@@ -826,7 +826,4 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/html_fragment_tests.rs");
-}
+mod tests;

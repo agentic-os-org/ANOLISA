@@ -650,9 +650,9 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
 | Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.7.0（TOON spec v4.4） |
-| JSON 压缩测试 | `crates/tokenless-compressors/src/tests/json_tests.rs` |
-| Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/build_log_tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
-| Browser Snapshot 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/browser_snapshot_tests.rs`、`crates/tokenless-runtime/src/post_tool/tests/browser_snapshot_pipeline_tests.rs`、`crates/tokenless-compressors/tests/fixtures/content/browser_*` |
+| JSON 压缩测试 | `crates/tokenless-compressors/src/json/tests.rs` |
+| Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/build_log/tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
+| Browser Snapshot 压缩测试与 Fixture | `crates/tokenless-compressors/src/browser_snapshot/tests.rs`、`crates/tokenless-runtime/src/post_tool/pipeline/tests/browser_snapshot.rs`、`crates/tokenless-compressors/tests/fixtures/content/browser_*` |
 | PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
 | TOON spec v4.4 回归测试 | `benchmark/l1-compressor/tests/l1_toon_spec_v44.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |

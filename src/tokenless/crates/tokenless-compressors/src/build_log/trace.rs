@@ -190,7 +190,4 @@ fn is_at_frame(line: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("../tests/trace_tests.rs");
-}
+mod tests;
