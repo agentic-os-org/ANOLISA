@@ -1,8 +1,11 @@
 """Unit tests for custom PII regex detection."""
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from agent_sec_cli.pii_checker.custom_rules import (
     CustomPiiRule,
@@ -150,19 +153,30 @@ def test_rule_order_is_stable_within_each_severity(tmp_path: Path) -> None:
     ]
 
 
-def test_finding_limit_does_not_stop_later_rules(tmp_path: Path) -> None:
-    path = _write_rules(
-        tmp_path,
-        """
-- type: noisy_secret
-  regex: X
-  severity: deny
-- type: boundary_probe
-  regex: '(?=SECRET)'
-  severity: deny
-""".lstrip(),
+def test_finding_limit_does_not_stop_later_rules(monkeypatch) -> None:
+    # Keep the candidate assertions independent of both runtime limits.
+    def rule(pii_type: str, expression: str) -> CustomPiiRule:
+        pattern = re.compile(expression)
+        return CustomPiiRule(
+            pii_type=pii_type,
+            regex=expression,
+            severity="deny",
+            pattern=SimpleNamespace(
+                finditer=lambda text, *, timeout: pattern.finditer(text)
+            ),
+        )
+
+    ruleset = CustomPiiRuleSet(
+        status=CustomRuleStatus.LOADED,
+        rules=(rule("noisy_secret", "X"), rule("boundary_probe", "(?=SECRET)")),
     )
-    detector = CustomPiiDetector(path)
+    monkeypatch.setattr(
+        custom_detector_module, "load_custom_rules", lambda path: ruleset
+    )
+    monkeypatch.setattr(
+        custom_detector_module, "time", SimpleNamespace(perf_counter=lambda: 0.0)
+    )
+    detector = CustomPiiDetector()
 
     candidates = detector.detect(("X" * 101) + "SECRET")
 
@@ -172,9 +186,8 @@ def test_finding_limit_does_not_stop_later_rules(tmp_path: Path) -> None:
 
 
 def test_rule_timeout_is_fail_open_and_sanitized(monkeypatch) -> None:
-    class TimeoutPattern:
-        def finditer(self, text: str, *, timeout: float):
-            raise TimeoutError
+    pattern = Mock()
+    pattern.finditer.side_effect = TimeoutError
 
     ruleset = CustomPiiRuleSet(
         status=CustomRuleStatus.LOADED,
@@ -183,7 +196,7 @@ def test_rule_timeout_is_fail_open_and_sanitized(monkeypatch) -> None:
                 pii_type="dogfood_token",
                 regex="sensitive-pattern",
                 severity="deny",
-                pattern=TimeoutPattern(),
+                pattern=pattern,
             ),
         ),
         ruleset_sha256="a" * 64,
@@ -191,9 +204,13 @@ def test_rule_timeout_is_fail_open_and_sanitized(monkeypatch) -> None:
     monkeypatch.setattr(
         custom_detector_module, "load_custom_rules", lambda path: ruleset
     )
+    monkeypatch.setattr(
+        custom_detector_module, "time", SimpleNamespace(perf_counter=lambda: 0.0)
+    )
     detector = CustomPiiDetector()
 
     assert detector.detect("safe input") == []
+    pattern.finditer.assert_called_once_with("safe input", timeout=0.020)
     assert detector.summary() == {
         "status": "loaded",
         "rule_count": 1,
@@ -309,10 +326,8 @@ def test_shared_scanner_keeps_custom_summary_thread_local(monkeypatch) -> None:
 
 
 def test_total_budget_stops_before_running_rules(monkeypatch) -> None:
-    class UnusedPattern:
-        def finditer(self, text: str, *, timeout: float):
-            raise AssertionError("rule should not run after budget exhaustion")
-
+    pattern = Mock()
+    pattern.finditer.return_value = ()
     ruleset = CustomPiiRuleSet(
         status=CustomRuleStatus.LOADED,
         rules=(
@@ -320,21 +335,27 @@ def test_total_budget_stops_before_running_rules(monkeypatch) -> None:
                 pii_type="dogfood_token",
                 regex="unused",
                 severity="deny",
-                pattern=UnusedPattern(),
+                pattern=pattern,
             ),
         ),
     )
-    times = iter((0.0, 1.0))
+    clock = Mock()
     monkeypatch.setattr(
         custom_detector_module, "load_custom_rules", lambda path: ruleset
     )
     monkeypatch.setattr(
-        custom_detector_module.time, "perf_counter", lambda: next(times)
+        custom_detector_module, "time", SimpleNamespace(perf_counter=clock)
     )
     detector = CustomPiiDetector()
 
-    assert detector.detect("safe input") == []
-    assert detector.summary()["budget_exhausted"] is True
+    for elapsed, expected_calls in ((0.199, 1), (0.200, 0)):
+        times = iter((0.0, elapsed))
+        clock.side_effect = lambda: next(times, elapsed)
+        pattern.finditer.reset_mock()
+
+        assert detector.detect("safe input") == []
+        assert pattern.finditer.call_count == expected_calls
+        assert detector.summary()["budget_exhausted"] is (expected_calls == 0)
 
 
 def test_default_scanner_reloads_fixed_file_and_keeps_builtins_on_error(
