@@ -67,3 +67,9 @@
 # OS Skills component-specific build action and workflow.
 /.github/actions/build-os-skills-prebuilt/ @zkl123                  # auto-label: component:skill
 /.github/workflows/os-skills-prebuilt-ci.yaml @zkl123              # auto-label: component:skill
+
+# Omarchy initially follows the existing global review owner.
+/distribution/omarchy/                 @casparant # auto-label: component:omarchy
+/docs/user-guide/en/omarchy/            @casparant # auto-label: component:omarchy
+/docs/user-guide/zh/omarchy/            @casparant # auto-label: component:omarchy
+/.github/actions/build-omarchy-prebuilt/ @casparant # auto-label: component:omarchy

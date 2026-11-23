@@ -328,6 +328,11 @@ groups:
   - id: user-entrypoint
     label: {en: User Entrypoint Layer, zh: 用户入口层}
     items:
+      - component: omarchy
+        label: {en: Omarchy integration, zh: Omarchy 桌面集成}
+        description:
+          en: Install and use the desktop AI assistant.
+          zh: 安装和使用桌面 AI 助手。
       - component: cosh-ng
         label: {en: cosh (cosh-ng), zh: cosh (cosh-ng)}
         description:

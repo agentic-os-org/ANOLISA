@@ -97,6 +97,35 @@ function generate(root, env = {}) {
   return result;
 }
 
+test('assigns every registered component to exactly one architecture layer', async (t) => {
+  const {root} = await createFixture(t, true);
+  // Small fixtures miss registry additions, so check the current component table.
+  await copyFile(path.resolve(scriptsDir, '../../AGENTS.md'), path.join(root, 'AGENTS.md'));
+  await copyFile(path.resolve(scriptsDir, '../agent-index/overrides.json'),
+    path.join(root, 'website/agent-index/overrides.json'));
+  const result = generate(root);
+  assert.equal(result.status, 0, result.stderr);
+  const index = JSON.parse(await readFile(
+    path.join(root, 'website/.generated/static/agents/repo-index.json'), 'utf8',
+  ));
+  const layeredIds = index.project.layers.flatMap((layer) => layer.components);
+  assert.deepEqual(
+    [...layeredIds].sort(),
+    index.components.map((component) => component.id).sort(),
+  );
+  assert.equal(new Set(layeredIds).size, layeredIds.length);
+  assert.deepEqual(
+    index.project.layers.filter((layer) => layer.components.includes('omarchy'))
+      .map((layer) => layer.id),
+    ['user-entrypoint'],
+  );
+  const omarchy = index.components.find((component) => component.id === 'omarchy');
+  assert.deepEqual(omarchy.platform_support,
+    {linux: true, macos: false, windows: false, architectures: ['x86_64']});
+  assert.deepEqual(omarchy.install_variants.find((variant) => variant.preferred).platforms,
+    [{os: 'linux', architectures: ['x86_64']}]);
+});
+
 for (const migrated of [false, true]) {
   test(`generates complete endpoints with ${migrated ? 'migrated' : 'legacy'} component paths`, async (t) => {
     const {root, paths, files} = await createFixture(t, migrated);

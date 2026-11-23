@@ -1,0 +1,55 @@
+name: Build Omarchy prebuilt package
+description: Compose the Omarchy installer from pinned official inputs and source-built AW bridges.
+
+inputs:
+  version:
+    description: Integration version without a v prefix.
+    required: true
+  target-os:
+    description: Target operating system; only Linux is supported.
+    required: true
+  target-arch:
+    description: Target architecture; only x86_64 is supported.
+    required: true
+  profile:
+    description: Build profile; ubuntu24-x86_64 is supported.
+    required: true
+  tag:
+    description: Approved release tag; empty for Preview builds.
+    required: false
+    default: ''
+
+outputs:
+  artifact-directory:
+    description: Directory containing the archive, SHA-256 sidecars and CycloneDX SBOM.
+    value: ${{ steps.build.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.6'
+
+    - name: Select Rust
+      shell: bash
+      run: rustup toolchain install 1.97.1 --profile minimal
+
+    - name: Build and verify Omarchy release
+      id: build
+      shell: bash
+      env:
+        OUTPUT: ${{ runner.temp }}/omarchy-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        CACHE: ${{ runner.temp }}/omarchy-build-cache
+        VERSION: ${{ inputs.version }}
+        TARGET_OS: ${{ inputs.target-os }}
+        TARGET_ARCH: ${{ inputs.target-arch }}
+        PROFILE: ${{ inputs.profile }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        test "$TARGET_OS/$TARGET_ARCH/$PROFILE" = linux/x86_64/ubuntu24-x86_64
+        python3 distribution/omarchy/release.py \
+          --output "$OUTPUT" --cache "$CACHE" --version "$VERSION" --tag "$TAG"
+        echo "artifact-directory=$OUTPUT" >> "$GITHUB_OUTPUT"

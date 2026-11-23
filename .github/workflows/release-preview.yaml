@@ -24,6 +24,7 @@ on:
           - agent-memory
           - skillfs
           - anolisa
+          - omarchy
       version:
         description: 'Version (e.g. 2.1.0, without v prefix)'
         required: true
@@ -115,7 +116,7 @@ jobs:
     if: needs.package-preview.outputs.prebuilt-enabled == 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    runs-on: ${{ matrix.component == 'omarchy' && 'ubuntu-24.04' || fromJSON('["self-hosted", "Linux", "X64", "anolisa-release-cross-x64"]') }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -217,11 +218,23 @@ jobs:
           target-arch: ${{ matrix.target-arch }}
           profile: ${{ matrix.profile }}
 
+      - name: Build Omarchy precompiled package
+        id: omarchy-prebuilt
+        if: matrix.component == 'omarchy'
+        uses: ./.github/actions/build-omarchy-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ''
+
       - name: Select precompiled package output
         id: prebuilt
         shell: bash
         env:
           COMPONENT: ${{ matrix.component }}
+          OMARCHY_DIRECTORY: ${{ steps.omarchy-prebuilt.outputs.artifact-directory }}
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           AGENT_MEMORY_DIRECTORY: ${{ steps.agent-memory-prebuilt.outputs.artifact-directory }}
           SEC_CORE_DIRECTORY: ${{ steps.sec-core-prebuilt.outputs.artifact-directory }}
@@ -234,6 +247,7 @@ jobs:
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            omarchy) ARTIFACT_DIRECTORY="$OMARCHY_DIRECTORY" ;;
             agent-memory) ARTIFACT_DIRECTORY="$AGENT_MEMORY_DIRECTORY" ;;
             agent-sec-core) ARTIFACT_DIRECTORY="$SEC_CORE_DIRECTORY" ;;
             os-skills) ARTIFACT_DIRECTORY="$OS_SKILLS_DIRECTORY" ;;

@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone launchers and fixtures set their import path before loading helpers.
+# Imported pytest fixtures intentionally share the names of test arguments.
+"tests/*.py" = ["E402", "F811"]
+"plugin/bridge.py" = ["E402"]
+[project]
+name = "anolisa-omarchy"
+version = "0.1.3"
+description = "Native Omarchy entry points and local views for ANOLISA components"
+requires-python = ">=3.11"
+license = "Apache-2.0 AND MIT"

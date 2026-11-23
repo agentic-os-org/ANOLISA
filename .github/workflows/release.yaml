@@ -15,6 +15,7 @@ on:
       - 'ktuner/v*'
       - 'anolisa/v*'
       - 'aw/v*'
+      - 'omarchy/v*'
 
 permissions:
   contents: write
@@ -65,6 +66,7 @@ jobs:
             ktuner)   COMPONENT="ktuner" ;;
             aw)       COMPONENT="aw" ;;
             anolisa)  COMPONENT="anolisa" ;;
+            omarchy)  COMPONENT="omarchy" ;;
             *)
               echo "Unknown scope: $SCOPE"
               exit 1
@@ -149,7 +151,7 @@ jobs:
     if: needs.package.outputs.prebuilt-enabled == 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    runs-on: ${{ matrix.component == 'omarchy' && 'ubuntu-24.04' || fromJSON('["self-hosted", "Linux", "X64", "anolisa-release-cross-x64"]') }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -260,11 +262,23 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build Omarchy precompiled package
+        id: omarchy-prebuilt
+        if: matrix.component == 'omarchy'
+        uses: ./.github/actions/build-omarchy-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Select precompiled package output
         id: prebuilt
         shell: bash
         env:
           COMPONENT: ${{ matrix.component }}
+          OMARCHY_DIRECTORY: ${{ steps.omarchy-prebuilt.outputs.artifact-directory }}
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           AGENT_MEMORY_DIRECTORY: ${{ steps.agent-memory-prebuilt.outputs.artifact-directory }}
           SEC_CORE_DIRECTORY: ${{ steps.sec-core-prebuilt.outputs.artifact-directory }}
@@ -277,6 +291,7 @@ jobs:
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            omarchy) ARTIFACT_DIRECTORY="$OMARCHY_DIRECTORY" ;;
             agent-memory) ARTIFACT_DIRECTORY="$AGENT_MEMORY_DIRECTORY" ;;
             agent-sec-core) ARTIFACT_DIRECTORY="$SEC_CORE_DIRECTORY" ;;
             os-skills) ARTIFACT_DIRECTORY="$OS_SKILLS_DIRECTORY" ;;
@@ -483,6 +498,7 @@ jobs:
             ktuner)         PREFIX="ktuner/v" ;;
             aw)             PREFIX="aw/v" ;;
             anolisa)        PREFIX="anolisa/v" ;;
+            omarchy)        PREFIX="omarchy/v" ;;
           esac
 
           NOTES_FILE="$RUNNER_TEMP/release-notes.md"

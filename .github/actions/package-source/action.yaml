@@ -67,6 +67,7 @@ runs:
           skillfs)        SRC_DIR="src/skillfs" ;;
           ktuner)         SRC_DIR="src/ktuner" ;;
           anolisa)        SRC_DIR="distribution/anolisa" ;;
+          omarchy)        SRC_DIR="distribution/omarchy" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"
             exit 1
@@ -161,6 +162,19 @@ runs:
             fi
           ) || exit 1
 
+        elif [ "${{ inputs.component }}" = "omarchy" ]; then
+          archive_root="/tmp/build/${ARCHIVE_NAME}"
+          existing="$(find "$archive_root" -mindepth 1 -print -quit)" || exit 1
+          if [ -L "$archive_root" ] || [ -n "$existing" ]; then
+            echo "ERROR: omarchy archive staging directory must be empty: $archive_root" >&2
+            exit 1
+          fi
+          # Archive only committed integration files, never local caches or credentials.
+          git archive HEAD "$SRC_DIR" | tar -x --strip-components=2 -C "/tmp/build/${ARCHIVE_NAME}" || exit 1
+          cp LICENSE "/tmp/build/${ARCHIVE_NAME}/LICENSE" || exit 1
+          # Include the canonical manuals without copying uncommitted worktree files.
+          git show HEAD:docs/user-guide/en/omarchy/index.md | sed 's|../../zh/omarchy/index.md|USER_GUIDE_zh.md|g' > "$archive_root/USER_GUIDE.md" || exit 1
+          git show HEAD:docs/user-guide/zh/omarchy/index.md | sed 's|../../en/omarchy/index.md|USER_GUIDE.md|g' > "$archive_root/USER_GUIDE_zh.md" || exit 1
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
           # Source0 must contain source and lockfiles only. Source1 supplies

@@ -23,7 +23,8 @@
         "deps",
         "ci",
         "docs",
-        "chore"
+        "chore",
+        "omarchy"
       ]
     ],
     "scope-empty": [

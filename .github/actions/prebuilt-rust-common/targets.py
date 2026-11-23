@@ -6,6 +6,9 @@ import runpy
 from pathlib import Path
 
 TARGETS = {
+    "omarchy": (
+        {"target-os": "linux", "target-arch": "x86_64", "profile": "ubuntu24-x86_64"},
+    ),
     "agent-sec-core": (
         {"target-os": "linux", "target-arch": "x86_64", "profile": "gnu2.28-x86_64"},
     ),

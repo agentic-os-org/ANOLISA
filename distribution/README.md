@@ -12,6 +12,7 @@ installation and upgrades.
 | [packaging/aw](packaging/aw/README.md) | Build and assemble independent AW core and Provider archives |
 | `Makefile` | `aw-packages` for archives and `aw-integration-backends` for separate backend acceptance builds |
 | [anolisa](anolisa/README.md) | ANOLISA CLI source, documentation and delivery entrypoints |
+| [omarchy](omarchy/README.md) | Omarchy desktop integration, standalone installer and user guide |
 
 AW Provider extension management uses the private file transaction engine inside
 `aw-package`; runtime file leases belong to `aw-exec`. These modules do not install

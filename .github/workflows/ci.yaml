@@ -38,6 +38,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_omarchy:
+        description: 'Force run Omarchy integration tests'
+        required: false
+        type: boolean
+        default: false
       run_anolisa:
         description: 'Force run anolisa tests (ignore change detection)'
         required: false
@@ -86,6 +91,7 @@ jobs:
       ws_ckpt: ${{ steps.changes.outputs.ws_ckpt }}
       agent_memory: ${{ steps.changes.outputs.agent_memory }}
       anolisa: ${{ steps.changes.outputs.anolisa }}
+      omarchy: ${{ steps.changes.outputs.omarchy }}
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
@@ -135,6 +141,7 @@ jobs:
           WS_CKPT=false
           AGENT_MEMORY=false
           ANOLISA=false
+          OMARCHY=false
           SKILLFS=false
           COSH_NG=false
           KTUNER=false
@@ -161,6 +168,15 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/agent-memory/"; then
             AGENT_MEMORY=true
+          fi
+          if echo "$CHANGED" | grep -q "^distribution/omarchy/"; then
+            OMARCHY=true
+          fi
+          if echo "$CHANGED" | grep -Eq '^docs/user-guide/(en|zh)/omarchy/'; then
+            OMARCHY=true
+          fi
+          if echo "$CHANGED" | grep -Eq '^\.github/actions/build-omarchy-prebuilt/|^\.github/actions/prebuilt-rust-common/|^\.github/workflows/release(-preview)?\.yaml$'; then
+            OMARCHY=true
           fi
           if echo "$CHANGED" | grep -q "^distribution/anolisa/"; then
             ANOLISA=true
@@ -225,6 +241,10 @@ jobs:
           echo "tokenless=$TOKENLESS" >> $GITHUB_OUTPUT
           echo "ws_ckpt=$WS_CKPT" >> $GITHUB_OUTPUT
           echo "agent_memory=$AGENT_MEMORY" >> $GITHUB_OUTPUT
+          if [[ "${{ inputs.run_omarchy }}" == "true" ]]; then
+            OMARCHY=true
+          fi
+          echo "omarchy=$OMARCHY" >> $GITHUB_OUTPUT
           echo "anolisa=$ANOLISA" >> $GITHUB_OUTPUT
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
@@ -2341,3 +2361,39 @@ jobs:
         run: |
           cd src/ktuner
           cargo test
+
+  test-omarchy:
+    name: Test Omarchy integration
+    needs: detect-changes
+    if: needs.detect-changes.outputs.omarchy == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.6'
+      - name: Install test dependencies
+        run: python -m pip install -r distribution/omarchy/tests/requirements.txt
+      - name: Install offscreen Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libopengl0 libxkbcommon0
+      - name: Check Python formatting and lint
+        run: |
+          python -m ruff check distribution/omarchy
+          python -m ruff format --check distribution/omarchy
+      - name: Run integration and release failure tests
+        run: python -m pytest distribution/omarchy/tests -q
+      - name: Test the real QML view
+        run: python distribution/omarchy/tests/run_qml.py
+      - name: Render the panel and check actions and metrics
+        run: python distribution/omarchy/tests/check_panel.py --output "$RUNNER_TEMP/omarchy-panel-proof"
+      - name: Keep offscreen panel evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-panel-proof
+          path: ${{ runner.temp }}/omarchy-panel-proof
+          retention-days: 14
+          if-no-files-found: error

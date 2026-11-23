@@ -2,6 +2,14 @@
   "repository": "https://github.com/agentic-os-org/ANOLISA",
   "license": "Apache-2.0",
   "components": {
+    "omarchy": {
+      "platform_support": {
+        "linux": true,
+        "macos": false,
+        "windows": false,
+        "architectures": ["x86_64"]
+      }
+    },
     "agent-memory": {
       "install_name": "agent-memory"
     },

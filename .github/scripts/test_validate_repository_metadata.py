@@ -21,6 +21,19 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name) / "repository"
         shutil.copytree(SOURCE_ROOT / ".github", self.root / ".github")
+        # Supporting paths outside .github are also inputs to the real validator.
+        # Materialize the declared baseline before testing metadata mutations.
+        metadata = json.loads((SOURCE_ROOT / ".github/components.json").read_text(encoding="utf-8"))
+        for component in metadata["components"]:
+            for relative in component.get("supporting_paths", []):
+                if relative.startswith(".github/"):
+                    continue
+                source, target = SOURCE_ROOT / relative, self.root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_dir():
+                    shutil.copytree(source, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(source, target)
         self.validator = self.root / ".github/scripts/validate-repository-metadata.py"
 
     def tearDown(self) -> None:
