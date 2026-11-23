@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the base and optional raw components to one immutable fork release."""
+"""Bind the base and optional raw components to a stable tag or immutable fork preview."""
 
 import argparse
 import hashlib
@@ -51,7 +51,7 @@ def package_contract(
             contract["component"]["name"] != component
             or contract["component"]["version"] != version
         ):
-            raise ValueError("raw package identity differs from preview")
+            raise ValueError("raw package identity differs from release")
         for member in members:
             name = member.name.removeprefix("./")
             standard_wheel = (
@@ -97,18 +97,24 @@ def package_contract(
 
 
 def prepare(
-    directory: Path, source_commit: str, version: str, components: Path
-) -> dict:
+    directory: Path, source_commit: str, version: str, components: Path | None
+) -> dict | None:
+    """Write fork delivery metadata with a catalog, or a tagged raw index fragment."""
+    preview = components is not None
     if not re.fullmatch(r"[a-f0-9]{40}", source_commit):
         raise ValueError("source commit must be a full Git SHA")
-    if not re.fullmatch(
+    if preview and not re.fullmatch(
         r"\d+\.\d+\.\d+-skillscore\."
         + source_commit[:12]
         + r"(?:\.base\.[a-f0-9]{12})?",
         version,
     ):
         raise ValueError("preview version must bind the source commit")
-    required = ["runtime-manifest.json", INSTALLER]
+    if not preview and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise ValueError("a stable release version is required")
+    required = ["runtime-manifest.json"]
+    if preview:
+        required.append(INSTALLER)
     packages = {
         component: f"{component}-{version}-linux-x86_64.tar.gz"
         for component in COMPONENTS
@@ -137,22 +143,36 @@ def prepare(
         )
     ):
         raise ValueError("source release must bind build inputs, not prebuilt images")
-    index = 'schema_version = 1\nchannel = "stable"\npublisher = "asc-fork-preview"\n'
+    index = (
+        'schema_version = 1\nchannel = "stable"\npublisher = "asc-fork-preview"\n'
+        if preview
+        else 'schema_version = 2\nchannel = "stable"\npublisher = "sec-core"\n'
+    )
     for component, name in packages.items():
         contract = package_contract(directory / name, component, version, runtime_bytes)
+        artifact = (
+            f'url = "{name}"'
+            if preview
+            else f'artifact_id = "{component}-{version}-linux-x86_64-tar"\n'
+            f"size = {(directory / name).stat().st_size}"
+        )
         index += f"""\n[[entries]]
 component = "{component}"
 version = "{version}"
 channel = "stable"
 artifact_type = "tar_gz"
 backend = "raw"
-url = "{name}"
+{artifact}
 os = "linux"
 arch = "x86_64"
 install_modes = ["system"]
 sha256 = "{digest(directory / name)}"
 manifest_digest = "sha256:{hashlib.sha256(contract).hexdigest()}"
 """
+    if components is None:
+        # Only these two rows belong to this tag. The mirror owns its full index.
+        (directory / f"sec-core-{version}-raw-index-v2.toml").write_text(index)
+        return None
     for name in ("index-v2.toml", "index.toml"):
         (directory / name).write_text(index)
     shutil.copyfile(components, directory / "components-v2.toml")
@@ -197,7 +217,11 @@ def main() -> None:
     parser.add_argument("directory", type=Path)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--components", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--components", type=Path, help="catalog for a preview bundle")
+    mode.add_argument(
+        "--stable-index", action="store_true", help="emit tagged raw rows"
+    )
     args = parser.parse_args()
     prepare(args.directory, args.source_commit, args.version, args.components)
 

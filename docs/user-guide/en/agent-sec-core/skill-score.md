@@ -8,6 +8,12 @@ Skill Score plans tasks for one Skill, executes them in controlled Docker enviro
 
 ### Install the base CLI
 
+**Stable raw release (Linux x86_64).** Once your configured raw repository lists both `sec-core` and `sec-core-skill-score` for the release, install the base with the version from the tag (omit the leading `v`):
+
+```sh
+sudo anolisa --install-mode system install sec-core --backend raw --version '<version>'
+```
+
 **Raw preview (Linux x86_64).** Verify the published checksum of `sec-core-bundle-<version>-linux-x86_64.tar.gz` and extract it into an empty directory. Unpack its `v1/anolisa-cli-<installer-version>-linux-x86_64.tar.gz` and install the `anolisa` executable in `/usr/local/bin`. Set the raw backend in `/etc/anolisa/repo.toml` to this trusted repository. Update the existing table if the configuration file already contains other backends.
 
 ```toml
@@ -32,7 +38,7 @@ The base CLI and model configuration suffice for `plan`. The scoring Python/Harb
 
 ### Enable dynamic scoring
 
-Raw users should verify the checksum of `skill-score-bundle-<version>-linux-x86_64.tar.gz` and extract it into the same directory as the base bundle. The two archives form one repository. The existing RPM already includes the runtime recipe. Provide local Docker with BuildKit/Compose, network namespaces, firewall/conntrack support and ptrace/strace, then run:
+For a local preview, verify the checksum of `skill-score-bundle-<version>-linux-x86_64.tar.gz` and extract it into the same directory as the base bundle. The two archives form one repository. The existing RPM already includes the runtime recipe. Install host Python 3.10 or newer and grant the scoring account access to the local system Docker socket. Provide Docker with BuildKit/Compose, network namespaces, firewall/conntrack support and ptrace/strace, then run:
 
 ```sh
 sudo agent-sec-cli skillsec score install-runtime
@@ -43,6 +49,8 @@ For raw, ASC uses the configured raw repository and the installed base version t
 Installation builds the work image and ASC network sidecar from the verified sources, obtains locked Python 3.12/Harbor dependencies, and checks the generated environment. The base image is pinned by digest; package managers inside the Dockerfiles still need network access. Different builds can produce different image IDs because not every system/transitive package is locked. An installation-local `image-build.json` binds the release manifest hash, actual base, tool inventory and both immutable config IDs, plus manifest IDs when present in the OCI export; readiness and execution verify that receipt. No pre-known output digest is claimed. Legacy Docker exports bind verified config IDs without inventing manifest IDs. A failed, timed-out or cancelled build reports the path to its private diagnostic log; successful builds remove that log.
 
 Both images are required for the current execution backend. The image-build subprocess has a 25-minute limit. Reserve disk for image layers and temporary local export. Reserve memory for the controller and sidecar in addition to the work container's 4096 MiB. Build/network failure aborts installation without activating an incomplete runtime. `ANOLISA_SKILL_SCORE_SOURCE_DIR` can supply verified Python/uv archives and wheels. `ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` forbids dependency-download fallback but image construction still needs a network-capable build environment; `ANOLISA_SKILL_SCORE_OFFLINE=1` refuses fresh image construction. A restored, prepared FC template does not download or rebuild.
+
+The privileged installer uses root’s local Docker configuration and the system CA store. Configure private registry access and additional trust there, or pre-pull the pinned images during template preparation.
 
 For a raw upgrade, align the base and optional recipe packages to the same release, then run `sudo agent-sec-cli skillsec score install-runtime`. RPM users run the same command after upgrading the base RPM. ASC prepares an environment by manifest digest and switches `active-manifest.json` after successful verification. A compatible active worker remains available if preparing the new one fails. Rerun the command after correcting the failure or to repair damaged generated files. `run` uses only a ready, compatible environment.
 
@@ -113,6 +121,8 @@ Report-v1 binds `content_hash` to the task and separates `decision`/`score` from
 
 After a probe times out and cleanup succeeds, a required probe can retry once. Other probes can still run within the remaining assessment budget. A probe that exhausts its attempts appears as incomplete in the report.
 
+The generated task lists files excluded from static review in `audit.omitted_sources`. These files still contribute to the execution digest. An empty list means all files fit the static review input limits. The report’s `execution` status describes probe execution and cleanup.
+
 `planning_notes` preserves unverified, non-blocking planning context. Runtime limitations, missing evidence and unsupported environments remain visible. Do not infer success by filtering limitation text. Preserve the task, report, `internal-report.json`, `evidence-catalog.json` and collected artifacts together. Evidence is bounded and read without following links; collection hashes establish integrity after collection, not independent authenticity of files writable by the evaluated container. The deployment owner controls artifact access and retention.
 
 Each `execution` item separates `execution_complete` (execution and evidence are complete) from `completed` (the business task succeeded). An Agent refusal or a Skill error can be fully assessed without making the business task successful.
@@ -124,6 +134,8 @@ ASC uses unmodified Harbor 0.22.0 through its public task Compose API. The work 
 SkillEval owns the FC template, outer instance lifecycle, model credentials, transfers and cancellation. Template builders pin one release, install the base and call `install-runtime` to prepare or stage the worker. Directly installing the raw recipe places its files only. A builder using this route must also call `install-runtime`. Restored instances activate the staged worker offline before running `plan/run`. ASC manages the inner Docker resources for the request.
 
 Skill dependencies must be available inside the ASC work image. The planner records the tools required by the Skill using the default inventory as a reference. Before each probe runs, the worker checks these prerequisites inside the selected work image. Installing a document library or office tool only in the outer FC template does not make it available to the evaluated Skill. A deployment can reuse a pinned functionality-image Dockerfile to build its business dependencies, then add the ASC Agent and observation layer. Record the recipe commit and checksum, upstream base digest, actual installed versions and resulting image identities. Rebuilding a recipe does not establish that the result is identical to an existing published image. Standalone and FC installations each retain their verified image-build receipt.
+
+For stable `sec-core/vX.Y.Z` tags containing this feature, the GitHub Release includes the existing base archive, `sec-core-skill-score-X.Y.Z-linux-x86_64.tar.gz` and `sec-core-X.Y.Z-raw-index-v2.toml`. The latter describes the two packages for that tag, including the archive and embedded contract digests. To promote them to an ANOLISA raw mirror, publish each archive under `v1/<component>/X.Y.Z/linux/x86_64/`, expose the tagged component registrations in `components-v2.toml`, then merge the two entries into the mirror’s full `index-v2.toml` while preserving other entries and versions. Leave the legacy index intact. Users of that mirror can then run `install-runtime` without extracting preview bundles.
 
 After the feature joins mainline and passes the same acceptance gates, switch the trusted release/index origin from the fork to the formal release channel. Keep the CLI, component names, model configuration and task/report contracts. OCI distribution is a future optimization, not a prerequisite for the first or formal release.
 
