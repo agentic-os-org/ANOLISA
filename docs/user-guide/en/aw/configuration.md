@@ -63,6 +63,17 @@ match:
 
 Both event and step selectors must match. Omitting `match` selects all tools. Native names are case-sensitive; scanning another tool also requires its Provider [input mapping](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider). See the [configuration reference](../../../developer-guide/en/aw/configuration.md) for selector syntax.
 
+## Select targets for a Hook
+
+When one file declares both `qoder` and `qwenpaw` in `spec.agents`, add this event under `spec.events` to enable session-start observation only for `qoder`:
+
+```yaml
+session.start:
+  enabled: true
+  match: { agents: [qoder] }
+  steps: []
+```
+
 ## Choose an Agent
 
 `--agent` selects a target name in `spec.agents`. Qoder starts in the current working directory; arguments after `--` pass to the native program.

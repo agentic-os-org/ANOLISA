@@ -158,7 +158,9 @@ impl Adapter for Codex {
         if options.profile.is_some() {
             return Err("Codex installation uses CODEX_HOME, not a native profile".into());
         }
-        installation::install(config.as_value(), cancelled)
+        let requirements = aw_config::requirements::project(config, &options.target)
+            .map_err(|_| "could not project native Hook requirements")?;
+        installation::install(&requirements, cancelled)
     }
 }
 

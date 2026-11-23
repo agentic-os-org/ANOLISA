@@ -21,11 +21,12 @@ pub(super) fn run(options: Options) -> crate::cli::Result<crate::cli::Exit> {
     let bytes =
         aw_package::config_edit::read_configuration_bytes(std::path::Path::new(&options.config))?;
     let configuration = aw_config::Validator::new()?.parse(&bytes)?;
-    let events = &configuration.as_value()["spec"]["events"];
-    let input_enabled = events["input.submit"]["enabled"] == true;
+    let requirements = aw_config::requirements::project(&configuration, &options.agent)?;
+    let input_enabled = requirements
+        .iter()
+        .any(|event| event.event == "input.submit");
     let profile = aw_adapter::deployment::profile(&options.profile, input_enabled)?;
-    let required = profile.requires_service
-        || aw_config::requirements::requires_service(&configuration, &options.agent)?;
+    let required = profile.requires_service || requirements.iter().any(|event| event.required);
     let descriptor = aw_core::descriptor::compile_with_options(
         &bytes,
         &options.agent,

@@ -42,6 +42,7 @@ Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查�
 | `events.<name>.required` | 默认 `false`；关闭事件不能标为必需 |
 | `events.<name>.budget_ms` | 可选正整数，覆盖默认事件预算 |
 | `events.<name>.steps` | 必填有序数组；空数组不调用 Provider |
+| `events.<name>.match.agents`、`steps[].match.agents` | 可选的非空目标名称列表，名称须在 `spec.agents` 中声明且互不重复。省略时，该层选择全部目标。 |
 | `events.tool.before.match.tools`、`events.tool.after.match.tools` | 可选非空选择器数组；省略表示全部原生工具，`['*']` 不与精确选择器混用 |
 | `events.tool.before.guard` | 可解析并校验对 `security.violation` 的引用；当前运行时准入拒绝，配置中请勿设置 |
 | `steps[].id`、`steps[].enabled` | ID 在事件内唯一；enabled 默认 `true` |
@@ -197,6 +198,8 @@ Adapter 支持对应事件的阻断能力（`session.start` 与 `session.end` �
 服务在准入时拒绝尚不能落实的效果与失败动作。普通 Qoder SDK 与 QwenPaw resident 启动
 为结构化 Provider 和布尔 Hook 的 After 步骤声明 `withhold_result`；reloadable
 启动和原生命令步骤拒绝该动作。
+
+事件仅对选中的目标生效。步骤还须满足自身的目标和工具选择条件。如果某个目标的所有启用步骤都被过滤，AW 会为该目标跳过整个事件。对于显式设置 `steps: []` 的启用事件，所选目标仍须支持该 Hook。
 
 工具事件及其步骤均可配置 `match.tools`；启用的 `input.submit`、`session.start`、
 `session.end` 和 `turn.stop` 事件及步骤拒绝该选择器。工具必须同时匹配事件和步骤的列表，

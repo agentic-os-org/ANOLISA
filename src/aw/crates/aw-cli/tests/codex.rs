@@ -531,6 +531,32 @@ fn schema_integer_budget_encodings_launch_the_same_chain() {
 }
 
 #[test]
+fn connect_installs_lifecycle_hooks_only_for_the_selected_target() {
+    for owner in ["codex", "other"] {
+        let f = Fixture::new();
+        let mut doc = setup(&f);
+        doc["spec"]["agents"]["other"] = doc["spec"]["agents"]["codex"].clone();
+        doc["spec"]["events"]["session.start"] =
+            json!({"enabled":true, "match":{"agents":[owner]}, "steps":[]});
+        doc["spec"]["events"]["turn.stop"] = json!({"enabled":true, "steps":[{
+            "id":"record","provider":"policy","operation":"record","effects":["observe"],
+            "on_error":"report","match":{"agents":[owner]}
+        }]});
+        f.save(&doc);
+        install(&f);
+        let installed: Value =
+            serde_json::from_slice(&fs::read(f.root.join("home/hooks.json")).unwrap()).unwrap();
+        for event in ["SessionStart", "Stop"] {
+            assert_eq!(
+                installed["hooks"].get(event).is_some(),
+                owner == "codex",
+                "{owner} {event}"
+            );
+        }
+    }
+}
+
+#[test]
 fn install_requires_reconciliation_before_noop_or_changed_retry() {
     for complete in [false, true] {
         let f = Fixture::new();

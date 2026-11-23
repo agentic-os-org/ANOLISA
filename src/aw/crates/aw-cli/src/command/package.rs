@@ -228,7 +228,7 @@ pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<cra
             let mut view = serde_json::json!({
                 "target": name,
                 "daemon": {"endpoint": spec["daemon"]["endpoint"], "state_dir": spec["daemon"]["state_dir"]},
-                "input_enabled": spec["events"]["input.submit"]["enabled"] == true,
+                "input_enabled": requirements.iter().any(|event| event.event == "input.submit"),
                 "target_requires_service": requirements.iter().any(|event| event.required),
             });
             if aw_adapter::deployment::emits_session_start_hint(adapter)

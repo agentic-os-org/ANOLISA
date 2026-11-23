@@ -191,10 +191,10 @@ impl PreparedLaunch for Prepared {
         adapter::catalog::DEEPSEEK.capabilities(&self.version, &self.profile)
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        routes(&self.input.document, steps).map(|_| ())
+        routes(&self.input.document, &self.input.target, steps).map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = routes(&self.input.document, context.steps)?;
+        let (events, hooks) = routes(&self.input.document, &self.input.target, context.steps)?;
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -275,10 +275,14 @@ impl PreparedLaunch for Prepared {
 
 fn routes(
     document: &Value,
+    target: &str,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    if document["spec"]["events"]["security.violation"]["enabled"] == true
-        && !steps.iter().any(|step| step.event == "security.violation")
+    if !steps.iter().any(|step| step.event == "security.violation")
+        && aw_config::requirements::project_document(document, target)
+            .map_err(|_| "could not project native Hook requirements")?
+            .iter()
+            .any(|requirement| requirement.event == "security.violation")
     {
         return Err("DeepSeek final security gate requires a Provider step".into());
     }
@@ -391,24 +395,43 @@ mod tests {
 
     #[test]
     fn final_security_check_is_an_independent_route() {
-        let document = json!({"spec":{"execution":{"default_event_budget_ms":1000},
-            "events":{"security.violation":{"enabled":true}}}});
-        assert!(routes(&document, &[]).is_err());
-        let step = AdmittedStep {
-            event: "security.violation".into(),
-            step_id: "final-check".into(),
-            provider: "security".into(),
-            execution: StepExecution::Provider {
-                operation: "check_final_tool_output".into(),
-                effects: vec!["observe".into(), "block".into()],
-            },
-            on_error: "block".into(),
-            event_tools: vec!["*".into()],
-            step_tools: vec!["*".into()],
-        };
-        let (events, hooks) = routes(&document, &[step]).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(hooks[0]["event"], "security.violation");
+        let step = crate::test_support::final_gate_step("enforce", "block");
+        let mut document =
+            crate::test_support::final_gate_document("deepseek-harness", json!([step]));
+        let agent = document["spec"]["agents"]["sdk"].clone();
+        document["spec"]["agents"] = json!({"dsh-final":agent, "dsh-plain":agent});
+        let capabilities = adapter::catalog::DEEPSEEK.capabilities("0.2.1-rc.5", "headless");
+        let validator = aw_config::Validator::new().unwrap();
+        for scoped_path in [
+            "/spec/events/security.violation",
+            "/spec/events/security.violation/steps/0",
+        ] {
+            let mut scoped = document.clone();
+            scoped.pointer_mut(scoped_path).unwrap()["match"] = json!({"agents":["dsh-final"]});
+            let config = validator
+                .parse(&serde_json::to_vec(&scoped).unwrap())
+                .unwrap();
+            for target in ["dsh-final", "dsh-plain"] {
+                let steps = aw_core::admission::preflight(&config, target, &capabilities).unwrap();
+                let (events, hooks) = routes(config.as_value(), target, &steps).unwrap();
+                if target == "dsh-final" {
+                    assert_eq!(events.len(), 1);
+                    assert_eq!(hooks.len(), 1);
+                    assert_eq!(hooks[0]["event"], "security.violation");
+                    assert_eq!(hooks[0]["step"], "check");
+                } else {
+                    assert!(events.is_empty() && hooks.is_empty());
+                }
+            }
+        }
+        let gate = &mut document["spec"]["events"]["security.violation"];
+        gate["steps"] = json!([]);
+        gate["match"] = json!({"agents":["dsh-final"]});
+        let error = routes(&document, "dsh-final", &[]).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "DeepSeek final security gate requires a Provider step"
+        );
         let binding = NativeContext {
             target: "dsh".into(),
             instance_id: "instance".into(),
@@ -429,7 +452,8 @@ mod tests {
     #[test]
     fn resolved_skill_check_is_rejected_for_both_failure_actions() {
         let document = json!({"spec":{"execution":{"default_event_budget_ms":1000},
-            "events":{"tool.before":{"enabled":true}}}});
+            "agents":{"dsh":{"adapter":"deepseek-harness"}},
+            "events":{"tool.before":{"enabled":true,"steps":[]}}}});
         for on_error in ["block", "report"] {
             let step = AdmittedStep {
                 event: "tool.before".into(),
@@ -444,7 +468,7 @@ mod tests {
                 step_tools: vec!["*".into()],
             };
             assert_eq!(
-                routes(&document, &[step]).err().unwrap().to_string(),
+                routes(&document, "dsh", &[step]).err().unwrap().to_string(),
                 "DeepSeek cannot check a resolved Skill object"
             );
         }

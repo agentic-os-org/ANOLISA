@@ -10,6 +10,17 @@ fn validate(fixture: &Fixture) -> Command {
     command
 }
 
+fn minimal_configuration() -> Value {
+    aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone()
+}
+
 #[test]
 fn canonical_validation_reports_success_and_scope_without_runtime_work() {
     let f = Fixture::new();
@@ -48,14 +59,7 @@ fn canonical_validation_reports_success_and_scope_without_runtime_work() {
 #[test]
 fn validation_reports_target_projection_without_private_values_or_runtime_work() {
     let f = Fixture::new();
-    let mut config = aw_config::Validator::new()
-        .unwrap()
-        .parse(include_bytes!(
-            "../../../aw-config/examples/aw.minimal.yaml"
-        ))
-        .unwrap()
-        .as_value()
-        .clone();
+    let mut config = minimal_configuration();
     config["spec"]["agents"] = json!({
         "sdk":{"adapter":"qoder-sdk", "argv":["/agent-private-argument"]},
         "app":{"adapter":"qwenpaw", "argv":["/agent-private-argument"]}
@@ -78,16 +82,26 @@ fn validation_reports_target_projection_without_private_values_or_runtime_work()
              "match":{"tools":["native:qoder-sdk:UnknownAlias"]}},
             {"id":"disabled", "enabled":false, "provider":"policy", "operation":"check",
              "effects":["observe"], "on_error":"report",
-             "match":{"tools":["native:qwenpaw:execute_shell_command"]}}
+             "match":{"tools":["native:qwenpaw:execute_shell_command"]}},
+            {"id":"sdk-only", "provider":"policy", "operation":"check",
+             "effects":["observe"], "on_error":"report", "match":{"agents":["sdk"]}}
+        ]
+    });
+    config["spec"]["events"]["tool.before"] = json!({
+        "enabled":true, "match":{"agents":["app"]}, "steps":[
+            {"id":"sdk-observe", "provider":"policy", "operation":"check",
+             "effects":["observe"], "on_error":"report"}
         ]
     });
     let bytes = serde_json::to_vec(&config).unwrap();
     fs::write(&f.config, &bytes).unwrap();
     let inode = fs::metadata(&f.config).unwrap().ino();
     let details = concat!(
-        "target app: projected out tool.after/sdk-observe (tool selectors do not overlap)\n",
-        "target app: projected out tool.after/sdk-unknown-alias (tool selectors do not overlap)\n",
-        "target sdk: projected out tool.after/app-result (tool selectors do not overlap)\n",
+        "target app: projected out tool.after/sdk-observe (excluded by target or tool selectors)\n",
+        "target app: projected out tool.after/sdk-unknown-alias (excluded by target or tool selectors)\n",
+        "target app: projected out tool.after/sdk-only (excluded by target or tool selectors)\n",
+        "target sdk: projected out tool.after/app-result (excluded by target or tool selectors)\n",
+        "target sdk: projected out tool.before/sdk-observe (excluded by target or tool selectors)\n",
     );
     for against in [false, true] {
         let mut canonical = validate(&f);
@@ -116,7 +130,9 @@ fn validation_reports_target_projection_without_private_values_or_runtime_work()
                 "projected_out_steps":[
                     {"target":"app", "event":"tool.after", "step_id":"sdk-observe"},
                     {"target":"app", "event":"tool.after", "step_id":"sdk-unknown-alias"},
-                    {"target":"sdk", "event":"tool.after", "step_id":"app-result"}
+                    {"target":"app", "event":"tool.after", "step_id":"sdk-only"},
+                    {"target":"sdk", "event":"tool.after", "step_id":"app-result"},
+                    {"target":"sdk", "event":"tool.before", "step_id":"sdk-observe"}
                 ]
             })
         );
@@ -154,14 +170,7 @@ fn validation_failures_mask_private_fields_and_keep_the_source() {
 #[test]
 fn validation_enforces_the_binding_step_limit_after_target_projection() {
     let f = Fixture::new();
-    let mut config = aw_config::Validator::new()
-        .unwrap()
-        .parse(include_bytes!(
-            "../../../aw-config/examples/aw.minimal.yaml"
-        ))
-        .unwrap()
-        .as_value()
-        .clone();
+    let mut config = minimal_configuration();
     config["spec"]["agents"] = json!({
         "sdk":{"adapter":"qoder-sdk", "argv":["/must-not-execute-agent"]},
         "app":{"adapter":"qwenpaw", "argv":["/must-not-execute-agent"]}
@@ -252,6 +261,61 @@ fn validation_enforces_the_binding_step_limit_after_target_projection() {
         json!({"tools":["native:qoder-sdk:Bash"]});
     fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
     assert_eq!(invoke(&validate(&f)).status.code(), Some(1));
+}
+
+#[test]
+fn validation_and_descriptors_apply_the_step_limit_per_named_target() {
+    let f = Fixture::new();
+    let mut config = minimal_configuration();
+    let agent = json!({"adapter":"qoder-sdk", "argv":["/must-not-execute-agent"]});
+    config["spec"]["agents"] = json!({"qoder":agent, "other":agent});
+    config["spec"]["daemon"]["state_dir"] = json!(f.state);
+    config["spec"]["providers"]["policy"] = json!({
+        "protocol":"aw-provider/v1alpha1", "config":{},
+        "transport":{"type":"stdio", "location":"agent", "argv":["/must-not-execute-provider"]},
+        "timeout_ms":1000, "max_output_bytes":4096
+    });
+    let steps: Vec<Value> = (0..65)
+        .map(|index| {
+            let target = if index < 33 { "qoder" } else { "other" };
+            json!({"id":format!("step-{index}"), "provider":"policy", "operation":"check",
+                   "effects":["observe"], "on_error":"report", "match":{"agents":[target]}})
+        })
+        .collect();
+    config["spec"]["events"] = json!({"tool.before":{"enabled":true, "steps":steps}});
+    fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::set_permissions(&f.config, fs::Permissions::from_mode(0o600)).unwrap();
+    for target in ["qoder", "other"] {
+        let descriptor = invoke(&f.edit(
+            "descriptor",
+            &["--agent", target, "--profile", "qoder-public-hooks"],
+        ));
+        assert!(
+            descriptor.status.success(),
+            "{}",
+            String::from_utf8_lossy(&descriptor.stderr)
+        );
+        let descriptor: Value = serde_json::from_slice(&descriptor.stdout).unwrap();
+        assert_eq!(descriptor["target"], target);
+    }
+    let report = invoke(validate(&f).arg("--json"));
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stdout)
+    );
+
+    config["spec"]["agents"] = json!({"qoder":agent});
+    for step in config["spec"]["events"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap()
+    {
+        step["match"] = json!({"agents":["qoder"]});
+    }
+    fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = invoke(&validate(&f));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("maximum_steps_per_binding: 64"));
 }
 
 #[test]
