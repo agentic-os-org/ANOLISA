@@ -427,10 +427,14 @@ impl SysomProvider {
                         Ok(Err(error)) => error,
                         _ => ecs_identity::IdentityError::Timeout,
                     };
-                    let kind = if error == ecs_identity::IdentityError::PermissionDenied {
-                        ProviderFailureKind::PermissionDenied
-                    } else {
-                        ProviderFailureKind::Identity
+                    let kind = match error {
+                        ecs_identity::IdentityError::PermissionDenied => {
+                            ProviderFailureKind::PermissionDenied
+                        }
+                        ecs_identity::IdentityError::SysomNotActivated => {
+                            ProviderFailureKind::ActivationRequired
+                        }
+                        _ => ProviderFailureKind::Identity,
                     };
                     return Ok(failure_stream(failure::fixed(
                         error.code(),

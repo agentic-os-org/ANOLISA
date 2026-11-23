@@ -25,6 +25,13 @@ that owns the ECS instance. Cosh checks automatically and resumes the current
 question without confirmation. Temporary credentials stay in memory and are
 refreshed before subsequent requests as expiry approaches; no AK/SK is saved.
 
+The client also recognizes `Sysom.Identity.SysomNotActivated` during credential
+exchange as requiring OS Console authorization. This requires matching server
+support and is separate from model-service activation. Restoring authorization
+does not prove model availability: Cosh still checks the model response before
+continuing. Each credential-exchange retry uses a new challenge. Generic identity
+failures, permission errors and timeouts never imply that activation is required.
+
 - `Esc` cancels the current wait. Cancelled questions are never replayed automatically.
 - `n` opens automatic access preferences for this Shell session or future sessions. Disabling
   the prompt also stops automatic model access.

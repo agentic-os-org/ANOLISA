@@ -293,6 +293,41 @@ fn activation_card_and_qr_stay_aligned_in_a_real_raw_pty() {
     session.finish();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn activation_link_and_cancel_are_reachable_in_a_small_terminal() {
+    use super::support::terminal_screen::TerminalSession;
+
+    let mut session = TerminalSession::spawn_for_shell_with_startup_env(
+        "bash",
+        "enhanced",
+        40,
+        &[
+            ("bin/trial-core", CORE),
+            (
+                ".copilot-shell/config.toml",
+                "[shell]\nadapter_default = 'cosh-core'\n",
+            ),
+        ],
+        &[
+            ("COSH_CORE_PATH", "$HOME/bin/trial-core"),
+            ("TRIAL_LOG", "$HOME/trial.log"),
+            ("COSH_SHELL_LANG", "en-US"),
+        ],
+    );
+    session.resize_to(16, 40);
+    session.send(b"?? explain load\n");
+    session.wait_screen("small terminal activation link and controls", |screen| {
+        let contents = screen.contents();
+        contents.contains("console.aliyun.com/alinux/") && contents.contains("Esc cancel")
+    });
+    session.send(b"\x03");
+    session.wait_screen("small terminal cancel restores prompt", |screen| {
+        screen.contents().trim_end().ends_with("screen$")
+    });
+    session.finish();
+}
+
 #[test]
 fn activation_continues_without_enter_and_without_a_second_user_submission() {
     let (output, requests) = run_trial(
@@ -471,6 +506,14 @@ fn kongche_terminal_failure_is_shown_once_with_the_specific_reason() {
         (
             "EcsIdentityUnavailable",
             "Unable to access the ECS identity.",
+        ),
+        (
+            "Sysom.Identity.InternalError",
+            "ECS identity service is temporarily unavailable.",
+        ),
+        (
+            "Sysom.Identity.InvalidResponse",
+            "ECS identity service returned an invalid response.",
         ),
     ] {
         for disconnect in ["0", "1"] {

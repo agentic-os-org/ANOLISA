@@ -2,6 +2,59 @@ use super::display::display_agent_error;
 use crate::i18n::I18n;
 
 #[test]
+fn identity_service_failures_explain_the_problem_without_raw_provider_prefix_or_activation() {
+    for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+        for code in [
+            "Sysom.Identity.InternalError",
+            "Sysom.Identity.ProviderNotReady",
+            "Sysom.Identity.StsUnavailable",
+            "Sysom.Identity.InvalidResponse",
+            "Sysom.Identity.StsInvalidResponse",
+            "Sysom.Identity.InvalidInstanceProof",
+            "Sysom.Identity.InvalidParameter",
+            "Sysom.Identity.UntrustedEndpoint",
+            "Sysom.Identity.MetadataUnavailable",
+            "Sysom.Identity.Throttled",
+            "Sysom.Identity.Unavailable",
+            "Sysom.Identity.Timeout",
+            "Sysom.Identity.LeaseExpired",
+            "Sysom.Identity.ChallengeNotRedeemable",
+        ] {
+            let i18n = I18n::new(language);
+            let text = display_agent_error(&format!("provider_access:{code}"), Some(code), &i18n);
+            assert!(!text.contains("provider_access:"), "{text}");
+            assert!(text.contains("/auth"), "{text}");
+            assert!(
+                !text.contains("扫码") && !text.contains("activate"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("question is retained") && !text.contains("问题已保留"),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_activation_fallback_offers_fixed_console_and_correct_account_without_raw_error() {
+    for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+        let i18n = I18n::new(language);
+        for error_code in [None, Some("Sysom.Identity.SysomNotActivated")] {
+            let text = display_agent_error(
+                "provider_access:Sysom.Identity.SysomNotActivated",
+                error_code,
+                &i18n,
+            );
+            assert!(text.contains("https://console.aliyun.com/alinux/welcome?source=cosh"));
+            assert!(text.contains("/auth"));
+            assert!(!text.contains("provider_access:"));
+            assert!(!text.contains("已开通") && !text.contains("Activated;"));
+        }
+    }
+}
+
+#[test]
 fn review_regression_permissions_explain_access_without_activation_or_retention_claims() {
     for (language, expected) in [
         (

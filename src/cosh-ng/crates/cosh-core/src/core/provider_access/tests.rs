@@ -96,6 +96,103 @@ fn activation() -> ProviderFailure {
         request_id: None,
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn identity_activation_reuses_waiting_and_keeps_the_original_model_step() {
+    let failure = ProviderFailure {
+        code: "Sysom.Identity.SysomNotActivated".into(),
+        ..activation()
+    };
+    let (provider, access, inner) = fixture(
+        vec![
+            Reply::Events(vec![GenerateEvent::ProviderFailure(failure)]),
+            events(),
+        ],
+        Arc::new(|| true),
+    );
+    let (_client, mut reader, mut writer, _) = io();
+    let result = drive(Some(&access), collect(&*provider), &mut reader, &mut writer)
+        .await
+        .unwrap();
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(&result[0], GenerateEvent::TextDelta(text) if text == "answer"));
+    let states = String::from_utf8(writer.bytes).unwrap();
+    assert!(states.contains("waiting_activation"));
+    assert!(states.contains("Sysom.Identity.SysomNotActivated"));
+    assert!(access.failure().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn identity_then_model_activation_waits_once_before_actual_model_output() {
+    let identity = ProviderFailure {
+        code: "Sysom.Identity.SysomNotActivated".into(),
+        ..activation()
+    };
+    let (provider, access, inner) = fixture(
+        vec![
+            Reply::Events(vec![GenerateEvent::ProviderFailure(identity)]),
+            Reply::Events(vec![GenerateEvent::ProviderFailure(activation())]),
+            events(),
+        ],
+        Arc::new(|| true),
+    );
+    let (_client, mut reader, mut writer, _) = io();
+    let result = drive(Some(&access), collect(&*provider), &mut reader, &mut writer)
+        .await
+        .unwrap();
+    let states: Vec<Value> = String::from_utf8(writer.bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| state["phase"] == "waiting_activation")
+            .count(),
+        1
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| state["phase"] == "ready")
+            .count(),
+        1
+    );
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(&result[0], GenerateEvent::TextDelta(text) if text == "answer"));
+    assert!(access.failure().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn identity_activation_wait_cancel_prevents_the_next_model_step() {
+    let identity = ProviderFailure {
+        code: "Sysom.Identity.SysomNotActivated".into(),
+        ..activation()
+    };
+    let (provider, access, inner) = fixture(
+        vec![
+            Reply::Events(vec![GenerateEvent::ProviderFailure(identity)]),
+            events(),
+        ],
+        Arc::new(|| true),
+    );
+    let (mut client, mut reader, mut writer, mut receiver) = io();
+    let cancel = async {
+        let waiting = next_phase(&mut receiver, "waiting_activation").await;
+        client
+            .write_all(control(&waiting, 2, "cancel").as_bytes())
+            .await
+            .unwrap();
+    };
+    let (result, _) = tokio::join!(
+        drive(Some(&access), collect(&*provider), &mut reader, &mut writer),
+        cancel,
+    );
+    assert!(result.is_err());
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(access.failure().unwrap().code, "trial_cancelled");
+}
 fn events() -> Reply {
     Reply::Events(vec![
         GenerateEvent::TextDelta("answer".into()),
@@ -227,6 +324,25 @@ async fn activation_retries_the_same_step_and_keeps_the_first_real_event() {
 #[tokio::test(start_paused = true)]
 async fn only_exact_predispatch_commercial_failures_may_poll() {
     for failure in [
+        ProviderFailure {
+            code: "Sysom.Identity.SysomNotActivated".into(),
+            dispatch: DispatchState::Unknown,
+            ..activation()
+        },
+        ProviderFailure {
+            code: "Sysom.Identity.SysomNotActivated".into(),
+            dispatch: DispatchState::Accepted,
+            ..activation()
+        },
+        ProviderFailure {
+            code: "Sysom.Identity.SysomNotActivated".into(),
+            kind: ProviderFailureKind::Identity,
+            ..activation()
+        },
+        ProviderFailure {
+            code: "Sysom.Identity.InternalError".into(),
+            ..activation()
+        },
         ProviderFailure {
             dispatch: DispatchState::Unknown,
             ..activation()
