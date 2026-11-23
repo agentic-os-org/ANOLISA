@@ -652,16 +652,16 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
             log(f"  >> Submitting {task_id}{mode_tag} ({trials} trial{'s' if trials > 1 else ''})")
 
             fut = exec_pool.submit(_execute_task_all_trials, tyaml, task_dir, trials, task_slots)
-            exec_futures[fut] = (tyaml, task_dir)
+            exec_futures[fut] = (tyaml, task_dir, task_id)
 
         # Process execution results as they complete, submit grading
         for fut in as_completed(exec_futures):
-            task_yaml, task_dir = exec_futures[fut]
+            task_yaml, task_dir, submitted_task_id = exec_futures[fut]
             try:
                 trial_results = fut.result()
             except Exception as exc:
                 log(f"[ERROR] Task execution future failed: {exc}\n{traceback.format_exc()}")
-                trial_results = [{"task_id": "?", "trial": t, "error": str(exc)}
+                trial_results = [{"task_id": submitted_task_id, "trial": t, "error": str(exc)}
                                 for t in range(1, trials + 1)]
 
             for exec_result in trial_results:
