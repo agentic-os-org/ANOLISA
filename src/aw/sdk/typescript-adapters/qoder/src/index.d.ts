@@ -1,4 +1,17 @@
-import type { Admission, Availability, Task } from "@anolisa/aw-sdk";
+import type { Admission, Availability, Capabilities, Routes, Task } from "@anolisa/aw-sdk";
+
+/** Identity used by the public-Hook deployment descriptor. */
+export const qoderProfile: Readonly<Pick<Capabilities, "adapter" | "version" | "entrypoint">>;
+export function qoderCapabilities(
+  inputEnabled: boolean,
+  sessionStartEnabled?: boolean,
+): Capabilities;
+/** Confirm negotiated routes for an Instance wired through qoderOptions. */
+export function qoderInstallRoutes(
+  routes: Routes,
+  inputEnabled: boolean,
+  sessionStartEnabled?: boolean,
+): boolean;
 
 export function qoderOptions<T extends object>(
   task: Task | Admission,

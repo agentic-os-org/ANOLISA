@@ -52,7 +52,8 @@
     "aw-cli/test/native_setup",
     "aw-cli/test/deepseek",
     "aw-cli/test/codex",
-    "aw-cli/test/sdk_protocol"
+    "aw-cli/test/sdk_protocol",
+    "aw-cli/test/deployment_descriptor"
   ],
   "cases": {
     "package-doctor-files": {
@@ -1267,6 +1268,10 @@
       "target": "aw-cli/test/sdk_protocol",
       "test": "direct_sdk_consumer_registers_executes_and_exports_native_facts"
     },
+    "qoder-public-descriptor": {
+      "target": "aw-cli/test/deployment_descriptor",
+      "test": "qoder_public_descriptor_admits_replacement_with_report_in_both_availability_modes"
+    },
     "typescript-sdk-package": {
       "target": "aw-cli/test/sdk_protocol",
       "test": "typescript_sdk_contracts_and_out_of_tree_package"
@@ -2002,7 +2007,9 @@
             "final-replacement",
             "qoder-sdk-post-drain",
             "qoder-sdk-read-result",
-            "qoder-sdk-read-pii"
+            "qoder-sdk-read-pii",
+            "qoder-public-descriptor",
+            "typescript-sdk-package"
           ]
         },
         "input.submit": {

@@ -221,5 +221,6 @@ Hook，SDK 注册的 AW callbacks 仍执行。原生改参用例记录执行前�
 明确拒绝时工具不会执行；这些用例不构成最终参数强制检查验收。
 
 配置式 Qoder SDK 接入使用原生公开 Hook 与协作 PID attach。关闭 `session.start` 和
-`input.submit` 时，模型推理可先于挂接开始，首次工具准入固定 Scope。支持输入／工具前观察和阻断、工具后
-观察；结果替换和最终检查继续沿用受管入口。见 [SDK 部署](../../../developer-guide/zh/aw/deployment/native-sdk.md#按配置接入-qoder)。
+`input.submit` 时，模型推理可先于挂接开始，首次工具准入固定 Scope。`qoder-public-hooks` 支持输入和工具前的
+观察与阻断，也支持工具后观察和替换 `PostToolUse` 的受支持文本槽。`PostToolUseFailure` 提供
+错误详情供观察。故障扣留和最终结果检查使用受管入口。见 [SDK 部署](../../../developer-guide/zh/aw/deployment/native-sdk.md#按配置接入-qoder)。

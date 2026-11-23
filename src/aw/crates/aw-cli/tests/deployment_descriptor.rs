@@ -159,6 +159,41 @@ fn descriptor_availability_uses_target_requirements_and_profile_minimum() {
 }
 
 #[test]
+fn qoder_public_descriptor_admits_replacement_with_report_in_both_availability_modes() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut document = configuration(directory.path(), "qoder-sdk");
+    document["spec"]["providers"]["policy"] = json!({
+        "protocol":"aw-provider/v1alpha1","config":{},
+        "transport":{"type":"stdio","location":"agent","argv":["/absent/provider"]},
+        "timeout_ms":1000,"max_output_bytes":4096
+    });
+    document["spec"]["events"]["tool.after"] = json!({
+        "enabled":true,"required":false,"steps":[{
+            "id":"replace","provider":"policy","operation":"scan",
+            "effects":["observe","replace_result"],"on_error":"report"
+        }]
+    });
+    for (required, availability) in [(false, "native_fallback"), (true, "required")] {
+        document["spec"]["events"]["tool.after"]["required"] = json!(required);
+        let output = invoke(directory.path(), &document, "qoder-public-hooks");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["availability"], availability);
+    }
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    let output = invoke(directory.path(), &document, "qoder-public-hooks");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failure action"));
+    assert!(!directory.path().join("state").exists());
+}
+
+#[test]
 fn descriptor_rejects_profile_mismatch_and_unsupported_empty_hooks() {
     let directory = tempfile::tempdir().unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();

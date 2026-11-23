@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { qoderCapabilities, qoderOptions } from "../../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
+import { qoderCapabilities, qoderInstallRoutes, qoderOptions } from "../src/index.mjs";
 
 const hook = {
   event: "tool.before",
@@ -21,7 +21,7 @@ const native = () => ({
 });
 const scope = (invoke) => ({
   fallback: false,
-  routes: { hooks: [hook] },
+  routes: { hooks: [hook], events: {} },
   invoke,
   abortEvent: async () => {},
 });
@@ -89,7 +89,7 @@ test("post-tool Provider failure stops the Query and does not become fallback", 
   const task = scope(async () => {
     throw Error("sdk_step_failed");
   });
-  task.routes.hooks = [{ ...hook, event: "tool.after" }];
+  task.routes = postRoutes();
   let interrupts = 0;
   const attached = qoderOptions(task);
   attached.bind({
@@ -146,4 +146,73 @@ test("native Qoder session starts are observed without changing native Hooks", a
   assert.deepEqual(await run({ hook_event_name: "SessionStart", session_id: "session", source: "startup" }), {});
   assert.deepEqual(calls, [["session.start", "session"]]);
   assert.equal(preparations, 1);
+});
+
+const post = {
+  ...payload,
+  hook_event_name: "PostToolUse",
+  tool_response: "SYNTHETIC_RAW_SECRET",
+};
+const failedPost = {
+  ...payload,
+  hook_event_name: "PostToolUseFailure",
+  error: "synthetic failure",
+};
+const replacement = {
+  hookSpecificOutput: {
+    hookEventName: "PostToolUse",
+    updatedToolOutput: "REVIEWED_SAFE_BODY",
+  },
+};
+function postRoutes() {
+  const observe = { ...hook, event: "tool.after", step: "observe", on_error: "report" };
+  return {
+    hooks: [observe, { ...observe, step: "replace", replace_result: true }],
+    events: {
+      "tool.after": {
+        steps: { observe: "report", replace: "report" },
+        replacement_step: "replace",
+      },
+    },
+  };
+}
+
+test("public Qoder install only confirms the declared final Post replacement", () => {
+  assert.deepEqual(qoderCapabilities(false).events["tool.after"], ["observe", "replace_result"]);
+  assert.equal(qoderInstallRoutes(postRoutes(), false), true);
+  for (const mutate of [
+    ({ hooks }) => hooks.reverse(),
+    ({ hooks }) => { hooks[0].replace_result = true; },
+    ({ hooks }) => { hooks[1].replace_result = "true"; },
+    ({ hooks }) => { hooks[1].replace_result = false; },
+    ({ hooks }) => { hooks[1].step = "observe"; },
+    ({ hooks }) => { hooks[1].on_error = "withhold_result"; },
+    ({ hooks }) => hooks.push({ ...hook, replace_result: true }),
+    ({ hooks }) => hooks.push({ ...hook, replace_input: true }),
+    ({ events }) => { events["tool.after"].replacement_step = "observe"; },
+    ({ events }) => { delete events["tool.after"]; },
+    ({ events }) => { events["tool.before"] = { replacement_step: "forged" }; },
+  ]) {
+    const routes = postRoutes();
+    mutate(routes);
+    assert.equal(qoderInstallRoutes(routes, false), false);
+    assert.throws(() => qoderOptions({ routes }), /invalid_qoder_sdk_routes/);
+  }
+});
+
+test("unexpected replacement from an observe step or a failed tool is refused", async () => {
+  for (const [name, input, forgedAt] of [
+    ["PostToolUse", post, "observe"],
+    ["PostToolUseFailure", failedPost, "replace"],
+  ]) {
+    const task = scope(async (selected) => ({
+      code: 0,
+      stdout: Buffer.from(JSON.stringify(selected.step === forgedAt ? replacement : {})),
+    }));
+    task.routes = postRoutes();
+    const attached = qoderOptions(task);
+    const result = await attached.options.hooks[name][0].hooks[0](input, "call");
+    assert.deepEqual(result, { continue: false, stopReason: "AW result check failed" });
+    assert.equal(attached.failure.message, "unsupported_qoder_sdk_directive");
+  }
 });

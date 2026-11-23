@@ -19,6 +19,12 @@ export const before = {
   tool_name: "Bash",
   tool_input: { command: "true" },
 };
+export const rawResult = "SYNTHETIC_RAW_SECRET";
+export const reviewedResult = "REVIEWED_SAFE_BODY";
+export const replacementOutput = {
+  hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: reviewedResult },
+};
+
 export async function fixture(required = true, input = false) {
   const root = await mkdtemp("/tmp/aw-sdk-bridge-");
   await mkdir(root + "/state", { mode: 0o700 });
@@ -100,7 +106,8 @@ export async function fixture(required = true, input = false) {
     service = undefined;
   };
   const calls = [],
-    options = [];
+    options = [],
+    postOutputs = [];
   const nativeQuery = (input) => {
     options.push(input.options);
     return {
@@ -152,15 +159,22 @@ export async function fixture(required = true, input = false) {
           }
         }
         calls.push("tool");
-        for (const group of input.options.hooks.PostToolUse)
-          await group.hooks[0](
-            {
-              ...payload,
-              hook_event_name: "PostToolUse",
-              tool_response: "ok",
-            },
-            "call",
-          );
+        const failed = input.prompt === "failure" || input.prompt === "sensitive-failure";
+        const postName = failed ? "PostToolUseFailure" : "PostToolUse";
+        const post = {
+          ...payload,
+          hook_event_name: postName,
+          ...(failed
+            ? { error: input.prompt === "failure" ? "tool error" : rawResult, is_interrupt: false }
+            : { tool_response: input.prompt === "sensitive" ? rawResult : "ok" }),
+        };
+        for (const group of input.options.hooks[postName]) {
+          for (const callback of group.hooks) {
+            const result = await callback(post, "call");
+            postOutputs.push(result);
+            if (result.continue === false) return;
+          }
+        }
         yield { type: "result" };
       },
     };
@@ -171,7 +185,28 @@ export async function fixture(required = true, input = false) {
     configuration,
     calls,
     options,
+    postOutputs,
     stopService,
+    async configureReplacement() {
+      const spec = configuration.spec;
+      spec.providers.replacement = {
+        ...spec.providers.policy,
+        config: { record_file: root + "/post.log", fail_file: root + "/fail" },
+        transport: {
+          ...spec.providers.policy.transport,
+          argv: ["/usr/bin/python3", new URL("../../../tests/fixtures/sdk-replace.py", import.meta.url).pathname],
+        },
+      };
+      spec.events["tool.after"] = {
+        enabled: true,
+        required,
+        steps: [
+          { id: "observe", provider: "replacement", operation: "record", effects: ["observe"], on_error: "report" },
+          { id: "replace", provider: "replacement", operation: "scan", effects: ["observe", "replace_result"], on_error: "report" },
+        ],
+      };
+      await writeFile(configFile, JSON.stringify(configuration));
+    },
     async bridge(extra = {}) {
       bridge = await createQoderBridge({
         configFile,

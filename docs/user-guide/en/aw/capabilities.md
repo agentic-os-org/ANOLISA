@@ -265,6 +265,9 @@ prevents execution. These cases do not certify final-argument enforcement.
 
 The configuration-driven Qoder SDK bridge uses public native Hooks and cooperative
 PID attachment. With `session.start` and `input.submit` disabled, model inference
-can begin before attachment and first-tool admission fixes the Scope. Supported checks are input/tool-before
-observation and blocking, and tool-after observation. Result replacement/final
-checks retain their managed entrypoints. See [SDK deployment](../../../developer-guide/en/aw/deployment/native-sdk.md#configuration-driven-qoder-integration).
+can begin before attachment and first-tool admission fixes the Scope.
+The `qoder-public-hooks` profile supports
+input and tool-before observation and blocking, plus tool-after observation and
+replacement of a supported `PostToolUse` text slot. `PostToolUseFailure` exposes
+error details for observation. Failure withholding and final-result checks use
+managed entrypoints. See [SDK deployment](../../../developer-guide/en/aw/deployment/native-sdk.md#configuration-driven-qoder-integration).

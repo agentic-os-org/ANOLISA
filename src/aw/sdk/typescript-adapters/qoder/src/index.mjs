@@ -6,8 +6,9 @@ import {
   qoderOptions,
   qoderProfile,
   qoderCapabilities,
+  qoderInstallRoutes,
 } from "../../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
-export { qoderOptions };
+export { qoderOptions, qoderProfile, qoderCapabilities, qoderInstallRoutes };
 
 const hookEnvironment = (environment) => {
   const copy = { ...environment };
@@ -68,10 +69,7 @@ export async function createQoderBridge({
     availability,
     reconnectMs: 100,
     capabilities,
-    install: (routes) =>
-      routes.hooks.every(
-        (hook) => supported.includes(hook.event) && !hook.skill_check,
-      ),
+    install: (routes) => qoderInstallRoutes(routes, inputEnabled, sessionStartEnabled),
   });
   // Preinstall the routes before Query creation; registration stays deployment-owned.
   instance.listen();

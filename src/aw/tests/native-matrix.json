@@ -6147,6 +6147,33 @@
           ]
         },
         {
+          "name": "public-warm-post",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_qoder_bridge.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/public-warm-post",
+            "--warm-post"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/public-warm-post/result.json",
+              "values": {
+                "status": "passed",
+                "sdk": "1.0.56",
+                "worker": "1.1.78",
+                "warm_query_replacement": true
+              }
+            }
+          ]
+        },
+        {
           "name": "sdk-types",
           "argv": [
             "{python}",
