@@ -82,6 +82,10 @@ ASC 通过已有 Anthropic 凭据通道原样传递引用的值，其中 Rust �
 
 配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；两个旧变量都必须提供且保留百炼端点约束，自定义代理必须显式使用配置文件。回滚代理路由时恢复上面的百炼配置。
 
+Judge 失败日志保留原错误码，并在 `diagnostic=` 后追加有界 JSON。字段 `stage` 标识审计、探针修复、最终裁决或严重风险复核。字段 `reason` 区分传输中断（`body_truncated`）、缺少正文（`missing_text`）、用量缺失或格式错误（`missing_usage`、`invalid_usage`），以及裁决输出的 JSON 或契约错误（`output_json`、`output_contract`）。收到响应时可记录 HTTP 状态和已知字节数。每个模型请求在既有截止时间和三次传输尝试上限内，最多重放一次中断的传输。纠正提示后会发起新的请求。探针修复返回合法 JSON 但仍未通过校验时，会记录 `probe_repair/output_contract`。缺正文或用量会终止该次调用。重发请求可能产生额外模型费用。
+
+`plan` 或 `run` 因错误退出时，标准错误中的 `[skill-score] Command failed: diagnostic=` 行记录操作、原因和已知的系统错误号，运行时就绪检查失败时，操作字段可以区分清单解析、版本核验、镜像回执核验和本地镜像检查。文件名限于预定义名称。探针未完整执行时，`report.execution[]` 可包含失败类型 `failure_kind` 和采证原因列表 `collection_errors`。业务完成情况和评分仍由原有字段表示。
+
 ## 生成计划并执行
 
 ```sh

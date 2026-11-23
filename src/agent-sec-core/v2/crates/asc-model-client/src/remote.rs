@@ -1,14 +1,37 @@
 //! Shared, explicitly selected Anthropic access; the local scanner factory remains unchanged.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
+use std::io::{ErrorKind, Read as _};
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use reqwest::blocking::{Client, Response};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
+
+/// Bounded, payload-free evidence recorded at the point a provider reply fails.
+#[derive(Debug, Default, Serialize)]
+pub struct ResponseDiagnostic {
+    /// Stable failure branch. Values are selected by ASC.
+    pub reason: &'static str,
+    /// Status received before decoding the body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Wire length for an identity-encoded response with Content-Length.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_bytes: Option<u64>,
+    /// Bytes delivered by the reader, including partial reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_bytes: Option<usize>,
+    /// Recognized request identifier; only canonical UUID labels are retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Recognized provider termination reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<&'static str>,
+}
 
 /// Failures deliberately exclude provider bodies and credentials.
 #[derive(Debug, Error)]
@@ -25,6 +48,8 @@ pub enum RemoteError {
         retryable: bool,
         /// Provider-requested delay, bounded by the caller's deadline.
         retry_after: Option<Duration>,
+        /// Sanitized evidence for this failure.
+        diagnostic: Box<ResponseDiagnostic>,
     },
 }
 
@@ -324,6 +349,27 @@ impl RemoteModel {
         ])
     }
 
+    fn response_id(&self, response: &Response) -> Option<String> {
+        ["request-id", "x-request-id"]
+            .iter()
+            .filter_map(|name| header(response, name))
+            .find(|id| {
+                id.len() == 36
+                    && !id
+                        .as_bytes()
+                        .windows(self.api_key.len())
+                        .any(|part| part.eq_ignore_ascii_case(self.api_key.as_bytes()))
+                    && id.bytes().enumerate().all(|(i, c)| {
+                        if matches!(i, 8 | 13 | 18 | 23) {
+                            c == b'-'
+                        } else {
+                            c.is_ascii_hexdigit()
+                        }
+                    })
+            })
+            .map(str::to_owned)
+    }
+
     /// Perform one bounded Messages call. Retry policy belongs to the caller's total budget.
     ///
     /// # Errors
@@ -348,10 +394,14 @@ impl RemoteModel {
                 "model request has an invalid budget or prompt",
             ));
         }
-        let agent = ureq::AgentBuilder::new()
-            .timeout(timeout)
-            .redirects(0)
-            .build();
+        // The Judge owns the request budget. Preserve the direct, HTTP/1.1-only route.
+        let agent = Client::builder()
+            .http1_only()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(|e| transport_failure(&e, e.is_connect()))?;
         let mut body = json!({"model": self.model, "max_tokens": max_tokens,
             "messages": [{"role":"user", "content": user}], "system": system});
         if self.provider != Provider::AnthropicCompatible {
@@ -360,55 +410,131 @@ impl RemoteModel {
             body["output_config"] = json!({"effort": if high_effort { "high" } else { "medium" }});
         }
         let response = agent
-            .post(&format!("{}/v1/messages", self.base_url))
-            .set("x-api-key", &self.api_key)
-            .set("anthropic-version", "2023-06-01")
-            .send_json(body)
-            .map_err(|error| match error {
-                ureq::Error::Status(status, response) => RemoteError::Provider {
-                    code: match status {
-                        401 | 403 => "authentication_failed",
-                        429 => "rate_limited",
-                        408 => "timeout",
-                        500..=599 => "server_error",
-                        _ => "request_rejected",
-                    },
-                    retryable: status == 408 || status == 429 || status >= 500,
-                    retry_after: response
-                        .header("Retry-After")
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(Duration::from_secs),
-                },
-                ureq::Error::Transport(transport) => transport_failure(&transport),
-            })?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(4_194_305)
-            .read_to_end(&mut bytes)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::TimedOut {
-                    provider_timeout()
+            .post(format!("{}/v1/messages", self.base_url))
+            .timeout(timeout)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .map_err(|e| transport_failure(&e, e.is_connect()))?;
+        self.read_response(response)
+    }
+
+    fn status_error(&self, response: &Response) -> RemoteError {
+        let status = response.status().as_u16();
+        let interrupted = status == 502
+            && header(response, "Proxy-Status")
+                == Some("localhost; error=http_response_incomplete")
+            && self.provider == Provider::AnthropicCompatible
+            && Url::parse(&self.base_url).is_ok_and(|url| url.host_str() == Some("127.0.0.1"));
+        RemoteError::Provider {
+            code: match status {
+                _ if interrupted => "invalid_response",
+                401 | 403 => "authentication_failed",
+                429 => "rate_limited",
+                408 => "timeout",
+                500..=599 => "server_error",
+                _ => "request_rejected",
+            },
+            diagnostic: Box::new(ResponseDiagnostic {
+                reason: if interrupted {
+                    "body_truncated"
                 } else {
-                    provider_shape()
-                }
-            })?;
-        if bytes.len() > 4_194_304 {
-            return Err(provider_shape());
+                    "http_status"
+                },
+                http_status: Some(status),
+                request_id: self.response_id(response),
+                ..Default::default()
+            }),
+            retryable: status == 408 || status == 429 || status >= 500,
+            retry_after: header(response, "Retry-After")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs),
         }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| provider_shape())?;
-        let content = value["content"].as_array().ok_or_else(provider_shape)?;
+    }
+
+    fn read_response(&self, response: Response) -> Result<Value, RemoteError> {
+        if response.status().as_u16() >= 400 {
+            return Err(self.status_error(&response));
+        }
+        let status = response.status().as_u16();
+        let request_id = self.response_id(&response);
+        // A compressed or chunked framing length cannot be compared to decoded bytes.
+        let declared = if !response.headers().contains_key("Transfer-Encoding")
+            && header(&response, "Content-Encoding")
+                .is_none_or(|v| v.eq_ignore_ascii_case("identity"))
+        {
+            header(&response, "Content-Length").and_then(|s| s.parse::<u64>().ok())
+        } else {
+            None
+        };
+        let mut bytes = Vec::new();
+        let read = response.take(4_194_305).read_to_end(&mut bytes);
+        let failure = |reason, stop_reason| RemoteError::Provider {
+            code: if reason == "body_timeout" {
+                "timeout"
+            } else {
+                "invalid_response"
+            },
+            retryable: matches!(reason, "body_truncated" | "body_timeout"),
+            retry_after: None,
+            diagnostic: Box::new(ResponseDiagnostic {
+                reason,
+                http_status: Some(status),
+                declared_bytes: declared,
+                received_bytes: Some(bytes.len()),
+                request_id: request_id.clone(),
+                stop_reason,
+            }),
+        };
+        if bytes.len() > 4_194_304 {
+            return Err(failure("body_too_large", None));
+        }
+        if let Err(error) = read {
+            let reason = match io_error_kind(&error) {
+                Some(ErrorKind::TimedOut) => "body_timeout",
+                Some(ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset) => "body_truncated",
+                _ => "body_read_failed",
+            };
+            return Err(failure(reason, None));
+        }
+        if declared.is_some_and(|length| length > bytes.len() as u64) {
+            return Err(failure("body_truncated", None));
+        }
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| failure("invalid_json", None))?;
+        // Only known labels may leave the provider boundary.
+        let stop = match value["stop_reason"].as_str() {
+            Some("end_turn") => Some("end_turn"),
+            Some("max_tokens") => Some("max_tokens"),
+            Some("tool_use") => Some("tool_use"),
+            Some("stop_sequence") => Some("stop_sequence"),
+            Some(_) => Some("other"),
+            None => None,
+        };
+        let content = value["content"]
+            .as_array()
+            .ok_or_else(|| failure("invalid_content", stop))?;
         let text = content
             .iter()
             .filter(|v| v["type"] == "text")
-            .map(|v| v["text"].as_str().ok_or_else(provider_shape))
+            .map(|v| {
+                v["text"]
+                    .as_str()
+                    .ok_or_else(|| failure("invalid_text", stop))
+            })
             .collect::<Result<Vec<_>, _>>()?
             .join("\n");
-        if text.trim().is_empty()
-            || value["usage"]["input_tokens"].as_u64().is_none()
+        if text.trim().is_empty() {
+            return Err(failure("missing_text", stop));
+        }
+        if value.get("usage").is_none_or(Value::is_null) {
+            return Err(failure("missing_usage", stop));
+        }
+        if value["usage"]["input_tokens"].as_u64().is_none()
             || value["usage"]["output_tokens"].as_u64().is_none()
         {
-            return Err(provider_shape());
+            return Err(failure("invalid_usage", stop));
         }
         Ok(
             json!({"text": self.redact(&text), "usage": value["usage"], "stop_reason": value["stop_reason"]}),
@@ -416,24 +542,45 @@ impl RemoteModel {
     }
 }
 
-fn transport_failure(transport: &ureq::Transport) -> RemoteError {
-    // ureq also wraps TLS InvalidData as ConnectionFailed; inspect typed causes only.
-    let mut retryable = transport.kind() == ureq::ErrorKind::ConnectionFailed;
-    let mut source = std::error::Error::source(transport);
-    while let Some(error) = source {
-        if let Some(error) = error.downcast_ref::<std::io::Error>() {
-            match error.kind() {
-                std::io::ErrorKind::TimedOut => return provider_timeout(),
-                std::io::ErrorKind::InvalidData => retryable = false,
-                _ => {}
-            }
+fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+    response.headers().get(name)?.to_str().ok()
+}
+
+// reqwest wraps HTTP framing errors in nested I/O and transport errors.
+// Inspect their types so a cleanly delivered, malformed JSON body stays non-retryable.
+fn io_error_kind(mut error: &(dyn std::error::Error + 'static)) -> Option<ErrorKind> {
+    loop {
+        if error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return Some(ErrorKind::TimedOut);
         }
-        source = error.source();
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if io.kind() != ErrorKind::Other {
+                return Some(io.kind());
+            }
+            error = io.get_ref()?;
+        } else {
+            error = error.source()?;
+        }
     }
+}
+
+fn transport_failure(error: &(dyn std::error::Error + 'static), is_connect: bool) -> RemoteError {
+    let kind = io_error_kind(error);
+    if kind == Some(ErrorKind::TimedOut) {
+        return provider_timeout();
+    }
+    let retryable = is_connect && kind != Some(ErrorKind::InvalidData);
     RemoteError::Provider {
         code: "transport_failed",
         retryable,
         retry_after: None,
+        diagnostic: Box::new(ResponseDiagnostic {
+            reason: "transport",
+            ..Default::default()
+        }),
     }
 }
 
@@ -442,14 +589,10 @@ fn provider_timeout() -> RemoteError {
         code: "timeout",
         retryable: true,
         retry_after: None,
-    }
-}
-
-fn provider_shape() -> RemoteError {
-    RemoteError::Provider {
-        code: "invalid_response",
-        retryable: false,
-        retry_after: None,
+        diagnostic: Box::new(ResponseDiagnostic {
+            reason: "transport_timeout",
+            ..Default::default()
+        }),
     }
 }
 
@@ -693,6 +836,117 @@ mod tests {
     }
 
     #[test]
+    fn local_proxy_signals_incomplete_transfer_separately_from_ordinary_502() {
+        for (header, code, reason) in [
+            (
+                "Proxy-Status: localhost; error=http_response_incomplete\r\n",
+                "invalid_response",
+                "body_truncated",
+            ),
+            (
+                "Proxy-Status: localhost; error=proxy_internal_error\r\n",
+                "server_error",
+                "http_status",
+            ),
+            ("", "server_error", "http_status"),
+        ] {
+            let (base, server) = mock_response("502 Bad Gateway", "", header);
+            let model = configured_model("anthropic-compatible", &base).expect("model");
+            let Err(RemoteError::Provider {
+                code: actual,
+                retryable: true,
+                diagnostic,
+                ..
+            }) = model.messages("system", "user", 10, false, Duration::from_secs(2))
+            else {
+                panic!("expected a classified retryable error")
+            };
+            server.join().expect("fixture");
+            assert_eq!(
+                (actual, diagnostic.reason, diagnostic.http_status),
+                (code, reason, Some(502))
+            );
+            assert_eq!(diagnostic.received_bytes, None);
+        }
+    }
+
+    #[test]
+    fn interrupted_proxy_call_retains_only_a_safe_request_id() {
+        const ID: &str = "792e4a30-f580-4389-941f-aa187a1acfaf";
+        let upper = ID.to_ascii_uppercase();
+        for (key, id, expected) in [
+            ("fixture-key", ID, Some(ID)),
+            ("fixture-key", "invalid", None),
+            (ID, ID, None),
+            (ID, upper.as_str(), None),
+        ] {
+            let header = format!(
+                "Proxy-Status: localhost; error=http_response_incomplete\r\nrequest-id: {id}\r\n"
+            );
+            let (base, server) = mock_response("502 Bad Gateway", "", &header);
+            let mut model = configured_model("anthropic-compatible", &base).expect("model");
+            model.api_key = key.into();
+            let Err(RemoteError::Provider { diagnostic, .. }) =
+                model.messages("system", "user", 10, false, Duration::from_secs(2))
+            else {
+                panic!("expected an interrupted response")
+            };
+            server.join().expect("fixture");
+            assert_eq!(diagnostic.reason, "body_truncated");
+            assert_eq!(diagnostic.request_id.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_envelopes_expose_only_bounded_response_metadata() {
+        for (body, reason) in [
+            ("{", "invalid_json"),
+            (r#"{"content":{}}"#, "invalid_content"),
+            (r#"{"content":[{"type":"text","text":12}]}"#, "invalid_text"),
+            (
+                r#"{"content":[{"type":"thinking","thinking":"opaque-test-context"}],"stop_reason":"max_tokens"}"#,
+                "missing_text",
+            ),
+            (
+                r#"{"content":[{"type":"text","text":"opaque-test-context"}],"stop_reason":"opaque-test-context"}"#,
+                "missing_usage",
+            ),
+            (
+                r#"{"content":[{"type":"text","text":"private"}],"usage":{"output_tokens":"?"}}"#,
+                "invalid_usage",
+            ),
+        ] {
+            let (base, server) = mock_response(
+                "200 OK",
+                body,
+                "request-id: opaque-test-context\r\nx-request-id: 792e4a30-f580-4389-941f-aa187a1acfaf\r\n",
+            );
+            let model = configured_model("anthropic-compatible", &base).expect("model");
+            let Err(RemoteError::Provider {
+                code: "invalid_response",
+                retryable: false,
+                diagnostic,
+                ..
+            }) = model.messages("system", "user", 10, false, Duration::from_secs(2))
+            else {
+                panic!("expected a non-retryable envelope failure")
+            };
+            server.join().expect("fixture");
+            assert_eq!(diagnostic.reason, reason);
+            assert_eq!(diagnostic.received_bytes, Some(body.len()));
+            assert_eq!(
+                diagnostic.request_id.as_deref(),
+                Some("792e4a30-f580-4389-941f-aa187a1acfaf")
+            );
+            assert!(
+                !json!(diagnostic)
+                    .to_string()
+                    .contains("opaque-test-context")
+            );
+        }
+    }
+
+    #[test]
     fn compatible_credentials_are_not_forwarded_on_redirect() {
         let forbidden = TcpListener::bind("127.0.0.1:0").expect("redirect target");
         forbidden.set_nonblocking(true).expect("nonblocking target");
@@ -718,14 +972,11 @@ mod tests {
             (std::io::ErrorKind::InvalidData, "transport_failed", false),
             (std::io::ErrorKind::Other, "transport_failed", false),
         ] {
-            let error = ureq::Error::from(std::io::Error::new(
+            let cause = std::io::Error::new(
                 kind,
                 "timeout https://secret:credential@example.invalid/?api_key=secret",
-            ));
-            let ureq::Error::Transport(transport) = error else {
-                panic!("I/O errors must be transports");
-            };
-            let classified = transport_failure(&transport);
+            );
+            let classified = transport_failure(&std::io::Error::other(cause), false);
             assert!(matches!(
                 classified,
                 RemoteError::Provider { code: actual, retryable: actual_retryable, .. }
@@ -756,25 +1007,13 @@ mod tests {
             // Keep the socket open so a reset cannot replace the TLS protocol error.
             let _ = wait.recv_timeout(Duration::from_secs(2));
         });
-        let result = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(1))
-            .build()
-            .get(&format!("https://{address}/"))
-            .call();
+        let model =
+            configured_model("anthropic-compatible", &format!("https://{address}")).expect("model");
+        let result = model.messages("system", "user", 10, false, Duration::from_secs(1));
         let _ = done.send(());
         server.join().expect("TLS fixture completed");
-        let Err(ureq::Error::Transport(transport)) = result else {
-            panic!("invalid TLS must fail before receiving HTTP");
-        };
-        assert_eq!(transport.kind(), ureq::ErrorKind::ConnectionFailed);
-        assert_eq!(
-            std::error::Error::source(&transport)
-                .and_then(|error| error.downcast_ref::<std::io::Error>())
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::InvalidData)
-        );
         assert!(matches!(
-            transport_failure(&transport),
+            result.expect_err("invalid TLS must fail before receiving HTTP"),
             RemoteError::Provider {
                 code: "transport_failed",
                 retryable: false,

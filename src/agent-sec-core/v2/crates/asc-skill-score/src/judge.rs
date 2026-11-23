@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use asc_model_client::remote::{RemoteError, RemoteModel};
+use asc_model_client::remote::{RemoteError, RemoteModel, ResponseDiagnostic};
 use serde_json::{Value, json};
 
 use crate::{Error, Result, contracts, fixtures, redaction::redact_value, source::private_json};
@@ -26,7 +26,17 @@ impl Judge {
     pub fn call_recorded(&mut self, stage: &str, payload: &Value, path: &Path) -> Result<Value> {
         let first_call = self.calls.len();
         let result = self.call(stage, payload);
-        self.persist_attempts(path, first_call)?;
+        let persisted = self.persist_attempts(path, first_call);
+        if result.is_err()
+            && let Err(ref error) = persisted
+        {
+            eprintln!(
+                "[skill-score] Judge attempts write failed: {}",
+                self.model.redact_diagnostic(&error.to_string())
+            );
+            return result;
+        }
+        persisted?;
         let value = result?;
         private_json(path, &json!({"result":value,"calls":self.calls}))?;
         Ok(value)
@@ -36,8 +46,14 @@ impl Judge {
         let attempts = self.calls[first_call..]
             .iter()
             .map(|call| {
-                json!({"code":call["code"],"seconds":call["seconds"],
-                    "reasoning_effort":call["reasoning_effort"]})
+                let mut record = json!({"code":call["code"],"seconds":call["seconds"],
+                    "reasoning_effort":call["reasoning_effort"]});
+                for key in ["diagnostic", "validation"] {
+                    if let Some(value) = call.get(key) {
+                        record[key] = value.clone();
+                    }
+                }
+                record
             })
             .collect::<Vec<_>>();
         private_json(&path.with_extension("attempts.json"), &json!(attempts))
@@ -68,7 +84,7 @@ impl Judge {
         let catalog: BTreeMap<String, String> = serde_json::from_value(payload["catalog"].clone())?;
         let mut last = String::new();
         for attempt in 1..=3 {
-            let response = self.transport(&prompt, &message, stage != "audit")?;
+            let response = self.transport(stage, &prompt, &message, stage != "audit")?;
             let raw = contracts::text(&response, "text").trim();
             let raw = if raw.starts_with("```") {
                 raw.split_once('\n')
@@ -79,6 +95,9 @@ impl Judge {
             let result = (|| {
                 let mut result: Value = serde_json::from_str(raw)?;
                 redact_value(&mut result, &self.model)?;
+                if !result.is_object() {
+                    return Err(Error::Contract("Judge output must be a JSON object".into()));
+                }
                 let candidate_probes = if stage == "audit" {
                     let candidate = result["probes"].clone();
                     result["probes"] = json!([]);
@@ -119,6 +138,15 @@ impl Judge {
                     return Ok(value);
                 }
                 Err(error) => {
+                    self.record_validation(
+                        stage,
+                        if matches!(error, Error::Json(_)) {
+                            "output_json"
+                        } else {
+                            "output_contract"
+                        },
+                        attempt,
+                    );
                     last = self.model.redact(&error.to_string());
                     let _ = write!(
                         message,
@@ -142,13 +170,14 @@ impl Judge {
         let mut candidates = contracts::array(audit, "probes").to_vec();
         let (mut valid, mut errors) =
             valid_probes(audit, &mut candidates, catalog, source_redaction)?;
-        for _ in 0..3 {
+        for attempt in 1..=3 {
             if errors.is_empty() {
                 break;
             }
             let message = json!({"objective":audit["objective"],"allowed_boundary":audit["allowed_boundary"],"findings":audit["findings"],"catalog":catalog,"source_redaction":source_redaction,"valid_probes":valid,"failed_probes":errors,"instruction":"Repair only the failed probe IDs. Keep validated tasks unchanged. Return {probes:[...]}.","probe_schema":contracts::schema("probe")?});
             let repair = (|| {
-                let response = self.transport(prompt, &message.to_string(), false)?;
+                let response =
+                    self.transport("probe_repair", prompt, &message.to_string(), false)?;
                 let mut candidate: Value =
                     serde_json::from_str(unfence(contracts::text(&response, "text")))?;
                 redact_value(&mut candidate, &self.model)?;
@@ -158,9 +187,23 @@ impl Judge {
                 Ok(()) => {
                     (valid, errors) =
                         valid_probes(audit, &mut candidates, catalog, source_redaction)?;
+                    if !errors.is_empty() {
+                        self.record_validation("probe_repair", "output_contract", attempt);
+                    }
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
+                    if matches!(error, Error::Json(_) | Error::Contract(_)) {
+                        self.record_validation(
+                            "probe_repair",
+                            if matches!(error, Error::Json(_)) {
+                                "output_json"
+                            } else {
+                                "output_contract"
+                            },
+                            attempt,
+                        );
+                    }
                     eprintln!(
                         "[skill-score] probe repair incomplete: {}",
                         self.model.redact(&error.to_string())
@@ -193,9 +236,9 @@ impl Judge {
         Ok(())
     }
 
-    fn transport(&mut self, prompt: &str, message: &str, high: bool) -> Result<Value> {
+    fn transport(&mut self, stage: &str, prompt: &str, message: &str, high: bool) -> Result<Value> {
         let client = self.model.clone();
-        self.transport_with(high, |high, timeout| {
+        self.transport_with(stage, high, |high, timeout| {
             let client = client.clone();
             let system = prompt.to_owned();
             let user = message.to_owned();
@@ -209,12 +252,14 @@ impl Judge {
 
     fn transport_with(
         &mut self,
+        stage: &str,
         mut high: bool,
         mut request: impl FnMut(
             bool,
             Duration,
         ) -> mpsc::Receiver<std::result::Result<Value, RemoteError>>,
     ) -> Result<Value> {
+        let mut replayed_truncation = false;
         for attempt in 0..3 {
             if self.cancelled.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
@@ -230,18 +275,18 @@ impl Judge {
             let receive = request(high, remaining.min(Duration::from_secs(300)));
             let response = loop {
                 if self.cancelled.load(Ordering::Relaxed) {
-                    self.record_failure(started, high, "cancelled");
+                    self.record_failure(stage, started, high, "cancelled", None);
                     return Err(Error::Cancelled);
                 }
                 if Instant::now() >= self.deadline {
-                    self.record_failure(started, high, "deadline");
+                    self.record_failure(stage, started, high, "deadline", None);
                     return Err(Error::Deadline);
                 }
                 match receive.recv_timeout(Duration::from_millis(100)) {
                     Ok(value) => break value,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(_) => {
-                        self.record_failure(started, high, "transport_terminated");
+                        self.record_failure(stage, started, high, "transport_terminated", None);
                         return Err(Error::Runtime("model transport terminated".into()));
                     }
                 }
@@ -261,18 +306,21 @@ impl Judge {
                     return Ok(value);
                 }
                 Err(error) => {
-                    let (code, retryable, retry_after) = match &error {
+                    let (code, retryable, retry_after, diagnostic) = match &error {
                         RemoteError::Provider {
                             code,
                             retryable,
                             retry_after,
-                        } => (*code, *retryable, *retry_after),
-                        RemoteError::Configuration(_) => ("configuration_error", false, None),
+                            diagnostic,
+                        } => (*code, *retryable, *retry_after, Some(diagnostic.as_ref())),
+                        RemoteError::Configuration(_) => ("configuration_error", false, None, None),
                     };
-                    self.record_failure(started, high, code);
-                    if !retryable || attempt == 2 {
+                    self.record_failure(stage, started, high, code, diagnostic);
+                    let truncated = diagnostic.is_some_and(|d| d.reason == "body_truncated");
+                    if !retryable || attempt == 2 || (truncated && replayed_truncation) {
                         return Err(Error::Model(error));
                     }
+                    replayed_truncation |= truncated;
                     if code == "timeout" {
                         high = false;
                     }
@@ -293,14 +341,30 @@ impl Judge {
         Err(Error::Runtime("model retry budget exhausted".into()))
     }
 
-    fn record_failure(&mut self, started: Instant, high: bool, code: &'static str) {
+    fn record_failure(
+        &mut self,
+        stage: &str,
+        started: Instant,
+        high: bool,
+        code: &'static str,
+        detail: Option<&ResponseDiagnostic>,
+    ) {
         let seconds = started.elapsed().as_secs_f64();
         let effort = if high { "high" } else { "medium" };
-        self.calls
-            .push(json!({"code":code,"seconds":seconds,"reasoning_effort":effort}));
+        let mut diagnostic = detail.map_or_else(|| json!({"reason":code}), |detail| json!(detail));
+        diagnostic["stage"] = json!(stage);
+        self.calls.push(json!({"code":code,"seconds":seconds,"reasoning_effort":effort,"diagnostic":diagnostic}));
         eprintln!(
-            "[skill-score] Judge call failed: code={code} seconds={seconds:.1} reasoning_effort={effort}"
+            "[skill-score] Judge call failed: code={code} seconds={seconds:.1} reasoning_effort={effort} diagnostic={diagnostic}"
         );
+    }
+
+    fn record_validation(&mut self, stage: &str, reason: &str, attempt: usize) {
+        let diagnostic = json!({"stage":stage,"reason":reason,"attempt":attempt});
+        if let Some(call) = self.calls.last_mut() {
+            call["validation"] = diagnostic.clone();
+        }
+        eprintln!("[skill-score] Judge output invalid: diagnostic={diagnostic}");
     }
 }
 
@@ -956,6 +1020,10 @@ mod tests {
             code,
             retryable,
             retry_after: Some(delay),
+            diagnostic: Box::new(ResponseDiagnostic {
+                reason: code,
+                ..Default::default()
+            }),
         }
     }
 
@@ -963,7 +1031,7 @@ mod tests {
     fn timeout_retries_reduce_effort_and_preserve_known_usage() -> Result<()> {
         let mut judge = judge(Duration::from_secs(900))?;
         let mut efforts = Vec::new();
-        let result = judge.transport_with(true, |high, timeout| {
+        let result = judge.transport_with("final", true, |high, timeout| {
             efforts.push(high);
             assert_eq!(timeout, Duration::from_secs(300));
             response(match efforts.len() {
@@ -987,10 +1055,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_attempt_write_preserves_the_judge_error() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("audit.json");
+        std::fs::create_dir(path.with_extension("attempts.json"))?;
+        let mut judge = judge(Duration::ZERO)?;
+        let result = judge.call_recorded("audit", &json!({"catalog":{}}), &path);
+        assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn exhausted_and_nonretryable_calls_keep_safe_attempts() -> Result<()> {
         for (code, retryable, count) in [("timeout", true, 3), ("transport_failed", false, 1)] {
             let mut judge = judge(Duration::from_secs(10))?;
-            let outcome = judge.transport_with(true, |_, _| {
+            let outcome = judge.transport_with("final", true, |_, _| {
                 response(Err(failure(code, retryable, Duration::ZERO)))
             });
             assert!(matches!(outcome, Err(Error::Model(_))));
@@ -1011,10 +1091,73 @@ mod tests {
     }
 
     #[test]
+    fn final_judge_persists_the_response_diagnostic_without_a_verdict() -> Result<()> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let directory = tempfile::tempdir()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let config = directory.path().join("model.json");
+        private_json(
+            &config,
+            &json!({"schemaVersion":1,"remote":{
+            "provider":"anthropic-compatible","baseUrl":base_url,
+            "defaultModel":"fixture","apiKeyEnv":"FIXTURE_KEY"}}),
+        )?;
+        let mut judge = judge(Duration::from_secs(5))?;
+        judge.model = RemoteModel::resolve(
+            &config,
+            &BTreeMap::from([("FIXTURE_KEY".into(), "fixture-secret".into())]),
+        )?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut reader = BufReader::new(&socket);
+            let mut length = None;
+            let mut header = String::new();
+            while reader.read_line(&mut header)? > 0 && header != "\r\n" {
+                if let Some((key, value)) = header.split_once(':')
+                    && key.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse::<u64>().ok();
+                }
+                header.clear();
+            }
+            let length = length.expect("loopback request has a body length");
+            assert!(length < 2_000_000);
+            assert_eq!(
+                std::io::copy(&mut reader.take(length), &mut std::io::sink())?,
+                length
+            );
+            let body = r#"{"content":[{"type":"text","text":"private-fixture-body"}],"stop_reason":"end_turn"}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        let verdict = directory.path().join("adjudication.json");
+        let result = judge.call_recorded("final", &json!({"catalog":{}}), &verdict);
+        assert!(matches!(result, Err(Error::Model(_))), "{result:?}");
+        server.join().expect("loopback server completes")?;
+        assert!(!verdict.exists());
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(verdict.with_extension("attempts.json"))?)?;
+        assert_eq!(saved.as_array().expect("attempt array").len(), 1);
+        assert_eq!(saved[0]["code"], "invalid_response");
+        let diagnostic = &saved[0]["diagnostic"];
+        assert_eq!(diagnostic["stage"], "final");
+        assert_eq!(diagnostic["reason"], "missing_usage");
+        assert_eq!(diagnostic["http_status"], 200);
+        assert_eq!(diagnostic["received_bytes"], diagnostic["declared_bytes"]);
+        assert!(!saved.to_string().contains("private-fixture-body"));
+        Ok(())
+    }
+
+    #[test]
     fn retry_delay_and_request_timeout_share_the_remaining_budget() -> Result<()> {
         let budget = Duration::from_secs(2);
         let mut judge = judge(budget)?;
-        let outcome = judge.transport_with(true, |high, timeout| {
+        let outcome = judge.transport_with("final", true, |high, timeout| {
             assert!(high);
             assert!(timeout <= budget);
             response(Err(failure("timeout", true, budget)))
@@ -1023,7 +1166,7 @@ mod tests {
         assert_eq!(judge.calls.len(), 1);
         let mut calls = 0;
         judge.deadline = Instant::now();
-        let outcome = judge.transport_with(true, |_, _| {
+        let outcome = judge.transport_with("final", true, |_, _| {
             calls += 1;
             response(Ok(json!({})))
         });
@@ -1037,7 +1180,7 @@ mod tests {
         for initial_high in [false, true] {
             let mut judge = judge(Duration::from_secs(10))?;
             let mut efforts = Vec::new();
-            let outcome = judge.transport_with(initial_high, |high, _| {
+            let outcome = judge.transport_with("final", initial_high, |high, _| {
                 efforts.push(high);
                 response(Err(failure("rate_limited", true, Duration::ZERO)))
             });

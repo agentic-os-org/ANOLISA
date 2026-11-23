@@ -64,6 +64,18 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// A component readiness or input check failed at a known location.
+    #[error("stage={stage} path={path:?}: {hint}: {source}")]
+    Check {
+        /// Stable operation name.
+        stage: &'static str,
+        /// Local path, printed only in the human-readable CLI error.
+        path: std::path::PathBuf,
+        /// Recovery guidance supplied by the controller.
+        hint: &'static str,
+        /// Original cause, including the OS error number when available.
+        source: Box<Error>,
+    },
     /// Malformed JSON at a contract boundary.
     #[error("invalid scoring JSON: {0}")]
     Json(#[from] serde_json::Error),
@@ -79,6 +91,75 @@ pub enum Error {
 }
 
 impl Error {
+    /// Bind a failed readiness or input check to its operation and recovery guidance.
+    pub fn check(
+        stage: &'static str,
+        path: &Path,
+        hint: &'static str,
+        error: impl Into<Self>,
+    ) -> Self {
+        Self::Check {
+            stage,
+            path: path.into(),
+            hint,
+            source: Box::new(error.into()),
+        }
+    }
+
+    /// Produce bounded terminal diagnostics without copying caller paths, model output or error text.
+    pub fn diagnostic(&self, phase: &'static str) -> Value {
+        let (stage, path, cause) = match self {
+            Self::File { stage, path, .. } => (*stage, Some(path), self),
+            Self::Check {
+                stage,
+                path,
+                source,
+                ..
+            } => (*stage, Some(path), source.as_ref()),
+            _ => (phase, None, self),
+        };
+        let mut event = json!({"stage":stage});
+        let reason = match cause {
+            Self::File { source, .. } | Self::Io(source) => {
+                if let Some(errno) = source.raw_os_error() {
+                    event["errno"] = errno.into();
+                }
+                "io"
+            }
+            Self::Unix(errno) => {
+                event["errno"] = errno.raw_os_error().into();
+                "io"
+            }
+            Self::Contract(_) => "invalid_contract",
+            Self::Json(_) => "invalid_json",
+            Self::Model(asc_model_client::remote::RemoteError::Configuration(_)) => {
+                "model_configuration"
+            }
+            Self::Model(_) => "model_call",
+            Self::UnsafeEvidence { .. } => "unsafe_evidence",
+            Self::Cancelled => "cancelled",
+            Self::Deadline => "deadline",
+            Self::Runtime(_) | Self::Check { .. } => "runtime_error",
+        };
+        event["reason"] = reason.into();
+        if let Some(
+            file @ ("SKILL.md"
+            | "task.json"
+            | "report.json"
+            | "ready.json"
+            | "runtime-manifest.json"
+            | "active-manifest.json"
+            | "image-build.json"
+            | ".lifecycle.lock"
+            | "worker-entry.py"
+            | "python3.12"),
+        ) = path.and_then(|p| p.file_name()?.to_str())
+        {
+            event["file"] = file.into();
+        }
+        event
+    }
+
     /// Attach a stage and path to an unlocated I/O error, preserving other error categories.
     pub fn at_path(stage: &'static str, path: &Path, error: impl Into<Self>) -> Self {
         let source = match error.into() {
@@ -296,9 +377,11 @@ pub fn run(
     let skill = Path::new(text(task, "skill_path"));
     let mut snapshot = Snapshot::create(skill)?;
     if snapshot.hash != text(task, "content_hash") {
-        return Err(Error::Contract(
-            "Skill content changed or uses the old digest scheme; create a new task with plan"
-                .into(),
+        return Err(Error::check(
+            "task.content.verify",
+            skill,
+            "Skill content changed or uses the old digest scheme; create a new task with plan",
+            Error::Contract("content hash mismatch".into()),
         ));
     }
     let runtime = worker::Runtime::installed(prefix)?;
@@ -927,8 +1010,13 @@ mod tests {
             directory.path(),
             Arc::new(AtomicBool::new(false)),
         );
-        assert!(
-            matches!(outcome,Err(Error::Runtime(message)) if message.contains("sec-core-skill-score"))
+        let error = outcome
+            .err()
+            .expect("a missing runtime must stop execution");
+        assert!(error.to_string().contains("sec-core-skill-score"));
+        assert_eq!(
+            error.diagnostic("run"),
+            json!({"stage":"runtime.prepare","reason":"io","errno":2,"file":"runtime-manifest.json"})
         );
         Ok(())
     }
@@ -964,8 +1052,13 @@ mod tests {
             directory.path(),
             Arc::new(AtomicBool::new(false)),
         );
-        assert!(
-            matches!(outcome,Err(Error::Contract(message)) if message.contains("new task with plan"))
+        let error = outcome
+            .err()
+            .expect("changed input must require a new plan");
+        assert!(error.to_string().contains("new task with plan"));
+        assert_eq!(
+            error.diagnostic("run"),
+            json!({"stage":"task.content.verify","reason":"invalid_contract"})
         );
         Ok(())
     }
