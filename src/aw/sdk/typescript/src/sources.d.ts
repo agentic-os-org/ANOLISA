@@ -178,11 +178,26 @@ export type InputMethodMap<T extends object> = {
     : never;
 };
 
+type ToolMethodName = string & {
+  readonly stream?: never;
+  readonly bufferStream?: never;
+};
+
+type BaseWrapToolOptions<
+  Args extends unknown[],
+  Result,
+  SnapshotItem,
+> = Omit<WrapToolOptions<Args, Result, SnapshotItem>, "stream" | "bufferStream">;
+
 type DefaultToolMethodMap<T extends object> = {
   [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
     ?
-        | string
-        | (WrapToolOptions<A, ImplicitToolResult<R>, ImplicitSnapshotItem<R>> & {
+        | ToolMethodName
+        | (BaseWrapToolOptions<
+            A,
+            ImplicitToolResult<R>,
+            ImplicitSnapshotItem<R>
+          > & {
             stream?: false;
             bufferStream?: false;
           })
@@ -192,9 +207,9 @@ type DefaultToolMethodMap<T extends object> = {
 type BufferedToolMethodMap<T extends object> = {
   [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
     ?
-        | string
+        | ToolMethodName
         | (HasSyncLazyResult<Awaited<R>> extends true
-            ? WrapToolOptions<
+            ? BaseWrapToolOptions<
                 A,
                 SyncBufferedToolResult<R>,
                 ImplicitSnapshotItem<R>
@@ -202,15 +217,19 @@ type BufferedToolMethodMap<T extends object> = {
                 stream?: false;
                 bufferStream: true;
               }
-            : WrapToolOptions<
+            : BaseWrapToolOptions<
                 A,
                 ImplicitToolResult<R>,
                 ImplicitSnapshotItem<R>
               > & {
                 stream?: false;
+                bufferStream?: boolean;
               })
         | (Awaited<R> extends AsyncIterable<infer Y>
-            ? WrapToolOptions<A, Y[], Y> & { stream: true }
+            ? BaseWrapToolOptions<A, Y[], Y> & {
+                stream: true;
+                bufferStream?: boolean;
+              }
             : never)
     : never;
 };
@@ -218,26 +237,38 @@ type BufferedToolMethodMap<T extends object> = {
 type DynamicToolMethodMap<T extends object> = {
   [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
     ?
-        | string
-        | (WrapToolOptions<
-            A,
-            ImplicitToolResult<R> | SyncBufferedToolResult<R>,
-            ImplicitSnapshotItem<R>
-          > & {
-            stream?: false;
-            bufferStream?: boolean;
-          })
+        | ToolMethodName
+        | (HasSyncLazyResult<Awaited<R>> extends true
+            ? BaseWrapToolOptions<
+                A,
+                ImplicitToolResult<R> | SyncBufferedToolResult<R>,
+                ImplicitSnapshotItem<R>
+              > & {
+                stream?: false;
+                bufferStream: boolean;
+              }
+            : BaseWrapToolOptions<
+                A,
+                ImplicitToolResult<R>,
+                ImplicitSnapshotItem<R>
+              > & {
+                stream?: false;
+                bufferStream?: boolean;
+              })
         | (Awaited<R> extends AsyncIterable<infer Y>
-            ? WrapToolOptions<A, Y[], Y> & { stream: true }
+            ? BaseWrapToolOptions<A, Y[], Y> & {
+                stream: true;
+                bufferStream?: boolean;
+              }
             : never)
     : never;
 };
 
 type ToolMethodOptions<A extends unknown[], R> =
-  | string
+  | ToolMethodName
   | (HasSyncLazyResult<Awaited<R>> extends true
       ?
-          | (WrapToolOptions<
+          | (BaseWrapToolOptions<
               A,
               ImplicitToolResult<R>,
               ImplicitSnapshotItem<R>
@@ -245,7 +276,7 @@ type ToolMethodOptions<A extends unknown[], R> =
               stream?: false;
               bufferStream?: false;
             })
-          | (WrapToolOptions<
+          | (BaseWrapToolOptions<
               A,
               SyncBufferedToolResult<R>,
               ImplicitSnapshotItem<R>
@@ -253,30 +284,37 @@ type ToolMethodOptions<A extends unknown[], R> =
               stream?: false;
               bufferStream: true;
             })
-          | (WrapToolOptions<
-              A,
-              ImplicitToolResult<R> | SyncBufferedToolResult<R>,
-              ImplicitSnapshotItem<R>
-            > & {
-              stream?: false;
-              bufferStream?: boolean;
-            })
-      : WrapToolOptions<
+      : BaseWrapToolOptions<
           A,
           ImplicitToolResult<R>,
           ImplicitSnapshotItem<R>
         > & {
           stream?: false;
+          bufferStream?: boolean;
         })
   | (Awaited<R> extends AsyncIterable<infer Y>
-      ? WrapToolOptions<A, Y[], Y> & { stream: true }
+      ? BaseWrapToolOptions<A, Y[], Y> & {
+          stream: true;
+          bufferStream?: boolean;
+        }
       : never);
 
-export type ToolMethodMap<T extends object> = {
-  [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
+type PickedToolMethodMap<T extends object, K extends MethodKeys<T>> = {
+  [P in K]: T[P] extends (...args: infer A) => infer R
     ? ToolMethodOptions<A, R>
     : never;
 };
+
+export type ToolMethodMap<
+  T extends object,
+  K extends MethodKeys<T> = never,
+> = [K] extends [never]
+  ? {
+      [P in MethodKeys<T>]?: T[P] extends (...args: infer A) => infer R
+        ? ToolMethodOptions<A, R>
+        : never;
+    }
+  : PickedToolMethodMap<T, K>;
 
 export interface Instrumentation {
   readonly restored: boolean;
@@ -401,6 +439,13 @@ export class SourceSession {
     options: {
       inputMethods?: readonly MethodKeys<T>[] | InputMethodMap<T>;
       toolMethods: DynamicToolMethodMap<T>;
+    },
+  ): Instrumentation;
+  instrument<T extends object, K extends MethodKeys<T>>(
+    target: T,
+    options: {
+      inputMethods?: readonly MethodKeys<T>[] | InputMethodMap<T>;
+      toolMethods: PickedToolMethodMap<T, K>;
     },
   ): Instrumentation;
   instrument<T extends object>(
