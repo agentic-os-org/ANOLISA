@@ -527,6 +527,27 @@ fn ordered_lists_number_their_items_as_a_browser_does() {
 }
 
 #[test]
+fn ordered_list_type_marks_non_decimal_as_lossy() {
+    let body = |list: &str| {
+        let html = page(&format!("<p>{PARAGRAPH}</p>{list}"));
+        HtmlExtractor.render(&html).unwrap()
+    };
+    // Decimal type and the default both render as ordinary numbered lists.
+    assert!(body(r#"<ol><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    assert!(body(r#"<ol type="1"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    // A non-decimal type still renders as decimal in full-page mode (the
+    // caller can compare against the original), but the renderer sets the
+    // internal lossy flag so fragment mode will refuse it.
+    assert!(body(r#"<ol type="a"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    assert!(body(r#"<ol type="A"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    assert!(body(r#"<ol type="i"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    assert!(body(r#"<ol type="I"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    // An invalid type falls back to decimal in browsers, so it stays clean.
+    assert!(body(r#"<ol type="x"><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+    assert!(body(r#"<ol type=""><li>a</li><li>b</li></ol>"#).output.contains("1. a"));
+}
+
+#[test]
 fn links_images_emphasis_and_admonitions_render() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><p>See <a href=\"https://x.y/z\">docs</a>, <a href=\"javascript:void(0)\">\
