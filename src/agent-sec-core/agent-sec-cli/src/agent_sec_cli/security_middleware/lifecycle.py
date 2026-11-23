@@ -13,6 +13,7 @@ from agent_sec_cli.telemetry import record_security_event_telemetry
 # ---------------------------------------------------------------------------
 
 _ACTION_CATEGORY: dict[str, str] = {
+    "authorization_receipt": "sandbox",
     "sandbox_prehook": "sandbox",
     "harden": "hardening",
     "verify": "asset_verify",
