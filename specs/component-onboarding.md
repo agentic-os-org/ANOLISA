@@ -69,7 +69,7 @@ The scaffold PR (first PR introducing the component) MUST include ALL of the fol
 |-------------|------|---------|
 | Component table row | `README.md` | Component overview table |
 | Component table row | `AGENTS.md` | §1 Project Overview table |
-| Dev commands | `AGENTS.md` | §2 Development Commands — add per-component block |
+| Dev commands | `specs/development-commands.md` | §2 Per-Component Build & Test Gates — add per-component block |
 | Scope inference | `specs/commit-message-standard.md` | §4 Scope Inference table — add `src/<name>/` → `<scope>` mapping |
 
 ### 2.4 Atomicity Rule
@@ -113,7 +113,7 @@ Include these based on the component's form and characteristics:
 
 | Condition | Deliverable | Path | Trigger |
 |-----------|-------------|------|---------|
-| Rust component | Add to §3 conventions scope list | `AGENTS.md` §3 opening line | Tech stack = Rust |
+| Rust component | Add to §3 conventions scope list | `AGENTS.md` §3 & `specs/rust-conventions.md` opening line | Tech stack = Rust |
 | Complex architecture (multi-crate, non-trivial constraints) | Scoped AGENTS.md + register in §11 | `src/<name>/AGENTS.md` + `AGENTS.md` §11 table | More than 1 crate, or has design constraints that differ from global conventions |
 | User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/<name>/index.md` | Component has CLI subcommands or user-visible behavior |
 | Agent-callable (can be invoked by cosh/agent directly) | Skill registration | `src/os-skills/<domain>/<name>/SKILL.md` | Tool is designed for agent autonomous invocation |
@@ -164,7 +164,7 @@ Copy into your PR description when introducing a new component:
 - [ ] `.github/workflows/ci.yaml` — workflow_dispatch input + detect-changes + test job
 - [ ] `README.md` — component table row added
 - [ ] `AGENTS.md` §1 — component table row added
-- [ ] `AGENTS.md` §2 — dev commands section added
+- [ ] `specs/development-commands.md` §2 — per-component dev commands added
 - [ ] `specs/commit-message-standard.md` §4 — scope inference table row added
 - [ ] License field: `license = "Apache-2.0"` in Cargo.toml / package.json
 - [ ] Quality gates: fmt + lint + test pass locally

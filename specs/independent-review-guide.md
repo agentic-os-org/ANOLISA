@@ -95,7 +95,8 @@ by what the diff touches, not as separate reviewer roles.
 
 Hard-won on this repo's CI:
 
-Baseline gates: see root AGENTS.md §3.5 (pre-commit checks) and
+Baseline gates: see [`specs/rust-conventions.md`](rust-conventions.md) §5
+(pre-commit checks, routed from root `AGENTS.md` §3) and
 `specs/commit-message-standard.md` (commit rules and commit discipline, which
 AGENTS.md §6 and §13 redirect to). This section builds on those and adds
 review-side methodology they do not cover.
@@ -119,8 +120,9 @@ review-side methodology they do not cover.
 ## Finding discipline (avoid false findings)
 
 For triaging and replying to findings raised on your own PR (verify before
-acting, reply format, common false-positive patterns), see root AGENTS.md §14
-(Responding to Review). The items below are reviewer-side methodology §14 does
+acting, reply format, common false-positive patterns), see
+[`specs/review-response-guide.md`](review-response-guide.md) (routed from root
+`AGENTS.md` §14). The items below are reviewer-side methodology it does
 not cover.
 
 Note the two-phase model: **discovery** is independent and must not carry the
