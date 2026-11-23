@@ -1192,8 +1192,8 @@ fn shell_host_bash_missing_natural_language_routes_without_command_block() {
         })
         .unwrap_or_else(|| panic!("natural-language intercept: {:?}", output.events));
 
-    assert!(intercept.command_id.is_none(), "{:?}", output.events);
-    assert!(intercept.routing.is_none(), "{:?}", output.events);
+    assert!(intercept.command_id.is_some(), "{:?}", output.events);
+    assert!(intercept.routing.is_some(), "{:?}", output.events);
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
     assert!(!ledger
@@ -1532,9 +1532,10 @@ fn shell_host_sensitive_natural_language_routes_to_agent_with_flag() {
             .unwrap_or_else(|| panic!("{shell}: sensitive NL intercept: {:?}", output.events));
         assert_eq!(intercept.input.as_deref(), Some("<redacted>"), "{shell}");
         assert!(
-            intercept.routing.as_ref().is_some_and(
-                |routing| routing.sensitive && routing.top_level_missing == (shell == "zsh")
-            ),
+            intercept
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.sensitive && routing.top_level_missing),
             "{shell}: {intercept:?}"
         );
         assert!(
@@ -1639,21 +1640,215 @@ fn shell_host_linux_bash_natural_language_routes_directly_to_agent() {
     let mut config = ShellHostConfig::new("bash-who-are-you", &work_dir);
     config.native_mode = false;
 
-    for input in ["Who are you", "Just do it"] {
+    let mut missed = Vec::new();
+    for input in [
+        "Who are you",
+        "Just do it",
+        "What is 6 multiplied by 7? Reply with only the number.",
+        r#""What is 6 multiplied by 7? Reply with only the number.""#,
+        "What is that number multiplied by 2?",
+        "你还好吗?我想问问",
+        "什么是mutex??",
+    ] {
         let output =
             run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
         let terminal = String::from_utf8_lossy(&output.terminal_output);
-
-        assert!(!terminal.contains("command not found"), "{terminal}");
-        assert!(output.events.iter().any(|event| {
+        let intercepted = output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
                 && event.input.as_deref() == Some(input)
-                && event.command_id.is_none()
                 && event.component.as_deref() == Some("natural_language")
-        }));
+        });
         let ledger = build_command_blocks(&output.events);
         assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
-        assert!(!ledger.blocks.iter().any(|block| block.command == input));
+        if !intercepted
+            || terminal.contains("command not found")
+            || ledger.blocks.iter().any(|block| block.command == input)
+        {
+            missed.push(format!("{input:?}: {terminal}"));
+        }
+    }
+    assert!(missed.is_empty(), "Inputs not routed to Agent: {missed:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn routing_question_shapes_retain_native_command_records() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+    // A whole-line-quoted string that names an existing executable runs in the
+    // shell; the classifier must not suppress its preexec record by judging the
+    // unwrapped text natural language while command-not-found never fires.
+    {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-question-record-exec-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let bin_dir = work_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let executable = bin_dir.join("What is this");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("executable");
+        make_executable(&executable);
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut config =
+            ShellHostConfig::new("question-record-exec", &work_dir).with_env("PATH", path);
+        config.native_mode = false;
+        let input = "\"What is this\"";
+        let output =
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+        }));
+        let ledger = build_command_blocks(&output.events);
+        assert!(
+            ledger.blocks.iter().any(|block| block.command == input),
+            "quoted existing command lost its native record: {:?}",
+            ledger.blocks
+        );
+    }
+    // An assignment-shaped word that really globs is rewritten by the shell
+    // before command-not-found; the veto must glob-probe it so the line stays
+    // shell-owned and keeps its failed-command record instead of being judged
+    // natural language and dropped from the ledger.
+    {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-question-record-glob-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work dir");
+        std::fs::write(work_dir.join("fo=bar"), "x").expect("glob match");
+        let mut config = ShellHostConfig::new("question-record-glob", &work_dir);
+        config.native_mode = false;
+        let cd_input = format!("cd {}", shell_arg(&work_dir));
+        let input = "What f?=bar Reply";
+        let output = run_scripted_bash(
+            &config,
+            &[
+                ScriptedInput::user_line(cd_input),
+                ScriptedInput::user_line(input),
+            ],
+        )
+        .expect("scripted bash");
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+        }));
+        let ledger = build_command_blocks(&output.events);
+        let block = ledger
+            .blocks
+            .iter()
+            .find(|block| block.command == input)
+            .expect("assignment-shaped glob lost its native record");
+        assert_eq!(block.exit_code, 127);
+    }
+}
+
+#[test]
+fn routing_quoted_command_alias_ownership() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let run = |config: &ShellHostConfig, input: &str| {
+            if shell == "bash" {
+                run_scripted_bash(config, &[ScriptedInput::user_line(input)])
+            } else {
+                run_scripted_zsh(config, &[ScriptedInput::user_line(input)])
+            }
+            .unwrap_or_else(|error| panic!("{shell}: {error}"))
+        };
+        // Quoting suppresses alias expansion, so an alias-only "why?" is a
+        // missing command and must route to the Agent rather than delegate.
+        {
+            let work_dir = std::env::temp_dir().join(format!(
+                "cosh-quoted-alias-only-{shell}-{}-{}",
+                std::process::id(),
+                unique_suffix()
+            ));
+            let home_dir = work_dir.join("home");
+            std::fs::create_dir_all(&home_dir).expect("home dir");
+            std::fs::write(
+                home_dir.join(if shell == "bash" { ".bashrc" } else { ".zshrc" }),
+                "alias 'why?=echo alias'\n",
+            )
+            .expect("shell rc");
+            let mut config = ShellHostConfig::new(format!("quoted-alias-only-{shell}"), &work_dir)
+                .with_env("HOME", home_dir.display().to_string());
+            if shell == "zsh" {
+                config = config.with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+            }
+            let input = "\"why?\"";
+            let output = run(&config, input);
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: alias-only quoted question must route to Agent: {:?}",
+                output.events
+            );
+        }
+        // When the same name also resolves to an executable, the quoted word
+        // runs it (the alias does not expand), so the line stays shell-owned
+        // and keeps its native command record.
+        {
+            let work_dir = std::env::temp_dir().join(format!(
+                "cosh-quoted-alias-exe-{shell}-{}-{}",
+                std::process::id(),
+                unique_suffix()
+            ));
+            let bin_dir = work_dir.join("bin");
+            let home_dir = work_dir.join("home");
+            std::fs::create_dir_all(&bin_dir).expect("bin dir");
+            std::fs::create_dir_all(&home_dir).expect("home dir");
+            let executable = bin_dir.join("why?");
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("executable");
+            make_executable(&executable);
+            std::fs::write(
+                home_dir.join(if shell == "bash" { ".bashrc" } else { ".zshrc" }),
+                "alias 'why?=echo alias'\n",
+            )
+            .expect("shell rc");
+            let path = format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let mut config = ShellHostConfig::new(format!("quoted-alias-exe-{shell}"), &work_dir)
+                .with_env("HOME", home_dir.display().to_string())
+                .with_env("PATH", path);
+            if shell == "zsh" {
+                config = config.with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+            }
+            let input = "\"why?\"";
+            let output = run(&config, input);
+            assert!(
+                !output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                }),
+                "{shell}: alias+executable quoted word must stay shell-owned: {:?}",
+                output.events
+            );
+            let ledger = build_command_blocks(&output.events);
+            let block = ledger
+                .blocks
+                .iter()
+                .find(|block| block.command == input)
+                .expect("alias+executable quoted command lost its native record");
+            assert_eq!(block.exit_code, 0);
+        }
     }
 }
 
