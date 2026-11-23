@@ -10,7 +10,7 @@ The selected design has two frontends and no Cedar/native JSON policy converter.
 
 Cedar admission and PAP/RPC source persistence
 are connected; tests reparse saved source through the existing `pst` interface.
-Cedar deletion/ordinary-write/exact-file read translation and deployment are connected through the existing PEP Adapter;
+Cedar deletion, ordinary-write and file read translation and deployment use the existing PEP Adapter;
 sandbox runtime authorization uses the current PAP-selected policy and schema revision 1. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
 
 Original native-policy and import-assessment baseline:
@@ -352,7 +352,7 @@ application workflows belong to the integration. See
 | PAP policy management | Store source and revision, associate Scope and retain assignment/Binding snapshots | `asc-pap` and repository manage both source formats; composition remains open |
 | PDP request decisions | Load applicable policies, receive concrete requests, obtain PIP information as needed and authorize | `asc-pdp-runtime` and daemon sandbox authorization use PAP-selected policies; HTTP credential injection stays in the Gateway compiler/data plane |
 | Deployment orchestration | Create/update Bindings, select targets and use Reconciler for installation, update, revocation and recovery | Existing Scope/Binding and `asc-pcp`; mapping authorization results to deployment inputs remains open |
-| Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Native DSL and Cedar structured deletion/ordinary-write/exact-file read translation; target capabilities checked by Client |
+| Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Native DSL and Cedar structured deletion, ordinary-write and file read translation; target capabilities checked by Client |
 | PEP and backend PDP | PEP intercepts requests and enforces decisions; some backends also contain a PDP for continuous system-operation checks | Depends on Hook, sandbox, system-call interception or other scenarios; schema support does not establish backend support |
 
 ![AgentSecCore policy management, request decisions and deployment](diagrams/CEDAR_ARCHITECTURE.png)
@@ -701,7 +701,7 @@ extension. The embedded schema rejects those actions.
 
 This is a V2 frontend and policy-management contract. PAP/RPC and source snapshots
 are connected. The existing PEP Adapter translates a Cedar forbid subset for deletion, ordinary
-writes and exact-file read denial; the Client submits structured protection rules. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
+writes and file read denial. The Client submits structured protection rules. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
 Sandbox runtime requests use schema revision 1.
 Validation establishes frontend acceptance only. Before SDK parsing, a non-recursive
 scanner bounds source to 256 KiB, nesting and consecutive prefix operators to 64,
@@ -952,7 +952,7 @@ need semantic and deployment validation for the selected backends.
 |---|---|---|
 | Types and Cedar frontend | Source union; exact embedded revisions 1 and 2; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST; revision 2 HTTP injection target uses the two-value response switch | Schema-file metadata and loading; retain common-subset diagnostics; verify the final HTTP implementation separately |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; historical file requests and three file snapshot locations remain compatible; HTTP snapshots pin pair associations and reject legacy Gateway data without migration | Preserve version and snapshot contracts |
-| Policy loading and translation | Saved Cedar source is loaded through `pst`; deletion/ordinary-write/exact-file read translation and Client deployment are connected for the existing PEP Adapter | Validate live backend enforcement within the documented limits; declare support for other targets |
+| Policy loading and translation | Saved Cedar source is loaded through `pst`. The existing PEP Adapter translates and deploys deletion, ordinary-write and file read rules. | Validate live backend enforcement within the documented limits; declare support for other targets |
 | Sandbox runtime authorization | Current PAP reads, OS authorization PDP, five-state decisions, local PEP approval/execution and checked receipts | Confirm Linux and CI results for the final revision; retain separate Binding deployment semantics |
 | Agent Hook/PIP | Not supported by the embedded schema | Define resources, actions, request fields and detection contracts separately, then publish a corresponding schema revision |
 

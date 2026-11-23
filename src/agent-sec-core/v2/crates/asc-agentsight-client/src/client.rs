@@ -223,8 +223,20 @@ where
                 if target.protections.ordinary_write && !caps.ordinary_write_protection {
                     return Err(rejected("AGENTSIGHT_ORDINARY_WRITE_PROTECTION_UNAVAILABLE"));
                 }
-                if target.protections.read && !caps.file_read_protection {
-                    return Err(rejected("AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE"));
+                if target.protections.read {
+                    let (available, code) = match target.kind {
+                        FileProtectionTargetKind::ExactFile => (
+                            caps.file_read_protection,
+                            "AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE",
+                        ),
+                        FileProtectionTargetKind::DirectoryTree => (
+                            caps.directory_tree_read_protection,
+                            "AGENTSIGHT_DIRECTORY_TREE_READ_PROTECTION_UNAVAILABLE",
+                        ),
+                    };
+                    if !available {
+                        return Err(rejected(code));
+                    }
                 }
             }
         } else if !caps.file_delete_guard {
@@ -272,6 +284,8 @@ struct EnforcementCapabilities {
     #[serde(default)]
     file_read_protection: bool,
     #[serde(default)]
+    directory_tree_read_protection: bool,
+    #[serde(default)]
     static_mount_topology: bool,
 }
 
@@ -314,8 +328,8 @@ fn valid_file_protection(policy: &FileProtectionPolicy) -> bool {
                 || target.protections.ordinary_write
                 || target.protections.read)
                 && (!target.protections.read
-                    || target.kind == FileProtectionTargetKind::ExactFile
-                        && target.exclusions.is_empty())
+                    || target.kind == FileProtectionTargetKind::DirectoryTree
+                    || target.exclusions.is_empty())
         })
 }
 

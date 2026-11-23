@@ -23,6 +23,14 @@ fn read_plan(delete: bool, write: bool) -> TargetBindingPlan {
     )
 }
 
+fn directory_read_policy() -> Value {
+    json!({"version":1,"topology_mode":"static_at_apply","targets":[{
+        "path":"/secrets","kind":"directory_tree",
+        "protections":{"delete":false,"ordinary_write":false,"read":true},
+        "exclusions":[{"path":"/secrets/public","kind":"directory_subtree"}]
+    }]})
+}
+
 fn plan_with_policy(policy: &Value) -> TargetBindingPlan {
     let mut plan = plan(7);
     let mut value: Value = serde_json::from_slice(&plan.content).unwrap();
@@ -132,6 +140,78 @@ fn unavailable_read_capability_preserves_old_protection() {
         );
         assert_eq!(wire.requests().len(), 1);
         assert_eq!(wire.requests()[0].method, AgentSightHttpMethod::Get);
+        wire.consumed();
+    }
+}
+
+#[test]
+fn missing_directory_read_capability_preserves_old_protection() {
+    for available in [None, Some(false)] {
+        let mut health = structured_health();
+        health["capabilities"]["file_read_protection"] = json!(true);
+        if let Some(available) = available {
+            health["capabilities"]["directory_tree_read_protection"] = json!(available);
+        }
+        let wire = Wire::new([Ok(response(200, &serde_json::to_vec(&health).unwrap()))]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        let input = client
+            .prepare_apply(&plan_with_policy(&directory_read_policy()))
+            .unwrap();
+        let result = client.update(&[prepared(8).target], &input);
+        assert_eq!(
+            result.error.unwrap().code,
+            "AGENTSIGHT_DIRECTORY_TREE_READ_PROTECTION_UNAVAILABLE"
+        );
+        assert_eq!(wire.requests().len(), 1);
+        assert_eq!(wire.requests()[0].method, AgentSightHttpMethod::Get);
+        wire.consumed();
+    }
+}
+
+#[test]
+fn directory_read_acknowledgement_must_preserve_the_requested_scope() {
+    let policy = directory_read_policy();
+    let input = AgentSightClient::with_dependencies(Wire::new([]), Identity::default())
+        .prepare_apply(&plan_with_policy(&policy))
+        .unwrap();
+    let request: Value = serde_json::from_slice(&request_bytes(&input)).unwrap();
+    assert_eq!(request["file_protection_policy"], policy);
+    let mut health = structured_health();
+    health["capabilities"]["file_read_protection"] = json!(true);
+    health["capabilities"]["directory_tree_read_protection"] = json!(true);
+
+    for field in [None, Some("kind"), Some("protections"), Some("exclusions")] {
+        let mut ack = request.clone();
+        let target = &mut ack["file_protection_policy"]["targets"][0];
+        match field {
+            Some("kind") => target["kind"] = json!("exact_file"),
+            Some("protections") => target["protections"]["read"] = json!(false),
+            Some("exclusions") => target["exclusions"] = json!([]),
+            _ => {}
+        }
+        let wire = Wire::new([
+            Ok(response(200, &serde_json::to_vec(&health).unwrap())),
+            Ok(response(
+                200,
+                &serde_json::to_vec(&json!({"request":ack,"state":"enforced","domain_id":1}))
+                    .unwrap(),
+            )),
+        ]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        let result = client.create(&input);
+        if field.is_none() {
+            assert!(result.error.is_none());
+            assert_eq!(result.observations[0].presence, Presence::Present);
+        } else {
+            assert_eq!(
+                result.error.unwrap().code,
+                "AGENTSIGHT_APPLY_RESPONSE_MISMATCH"
+            );
+        }
+        assert_eq!(
+            wire.requests()[1].body.as_ref().unwrap(),
+            &request_bytes(&input)
+        );
         wire.consumed();
     }
 }
@@ -256,7 +336,6 @@ fn malformed_structured_artifacts_never_prepare_a_request() {
         json!({"version":1,"topology_mode":"static_at_apply","targets":[]}),
         json!({"version":1,"topology_mode":"dynamic","targets":[]}),
         json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"exact_file","protections":{"delete":false,"ordinary_write":false},"exclusions":[]}]}),
-        json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"directory_tree","protections":{"delete":false,"ordinary_write":false,"read":true},"exclusions":[]}]}),
         json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"exact_file","protections":{"delete":false,"ordinary_write":false,"read":true},"exclusions":[{"path":"/a/b","kind":"exact_entry"}]}]}),
         json!({"version":1,"topology_mode":"static_at_apply","targets":[],"ignored_condition":"program"}),
     ] {

@@ -568,10 +568,10 @@ older policies and assignments.
 
 Policy creation success does not establish target PEP support. The current PEP
 Translator supports a Cedar `forbid` subset for deletion, ordinary-write
-restrictions and exact-file read denial. Read denial uses `file.read` with an
-exact file path and requires AgentSight's `file_read_protection` capability;
-directory-tree read denial is unsupported. See [AgentSight's read-protection
-boundaries](../agentsight/integrations.md#deny-secret-file-reads).
+restrictions and file read denial. With `file.read`, exact-file targets require
+AgentSight's `file_read_protection`, and directory-tree targets require
+`directory_tree_read_protection`. See [AgentSight's read-protection
+boundaries](../agentsight/integrations.md#deny-reads-below-a-directory-tree).
 Unsupported semantics reject the entire translation. Existing
 Scope/Binding snapshots retain their saved Policy revision and schema when a
 Policy is updated or deleted. Source can be reloaded into an in-memory PST;

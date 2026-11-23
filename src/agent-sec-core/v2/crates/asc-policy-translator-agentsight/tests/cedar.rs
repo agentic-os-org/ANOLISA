@@ -153,15 +153,33 @@ fn read_denial_preserves_exact_targets_and_merges_independent_protections() {
 }
 
 #[test]
+fn directory_read_preserves_recursive_exclusions_and_independent_protections() {
+    let scope = r#"(resource.path == "/secrets" || resource.path like "/secrets/*")
+        && !(resource.path == "/secrets/public" || resource.path like "/secrets/public/*")
+        && resource.path != "/secrets/readme""#;
+    let read = read_rule(scope);
+    let mut expected = json!({"path":"/secrets","kind":"directory_tree",
+        "protections":{"delete":false,"ordinary_write":false,"read":true},
+        "exclusions":[{"path":"/secrets/public","kind":"directory_subtree"},
+                      {"path":"/secrets/readme","kind":"exact_entry"}]});
+    assert_eq!(translate(&read)["targets"], json!([expected]));
+
+    let delete = rule(&format!(
+        "context.input.operation == SecCore::WriteOperation::\"delete\" && {scope}"
+    ));
+    expected["protections"]["delete"] = json!(true);
+    assert_eq!(
+        translate(&format!("{read}{delete}"))["targets"],
+        json!([expected])
+    );
+}
+
+#[test]
 fn unsupported_read_scopes_and_conditions_reject_the_whole_policy() {
     let supported = rule(
         r#"context.input.operation == SecCore::WriteOperation::"delete" && resource.path == "/safe""#,
     );
     for (condition, code) in [
-        (
-            r#"resource.path == "/secrets" || resource.path like "/secrets/*""#,
-            "UNSUPPORTED_READ_TARGET",
-        ),
         (r#"resource.path != "/public""#, "UNBOUNDED_PATH_SCOPE"),
         (
             r#"resource.path == "/secret" && context.input.program == "/bin/cat""#,
