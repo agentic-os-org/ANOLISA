@@ -5,7 +5,7 @@ mod paths;
 
 use asc_agentsight_protocol::{
     FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
-    FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
+    FileProtectionTopologyMode, FileProtections,
 };
 use asc_policy_types::target::TranslationRejection;
 use cedar_policy::pst::{
@@ -78,9 +78,6 @@ pub(super) fn translate(
                     return Err("UNSUPPORTED_OPERATION");
                 }
                 if let Some(mut item) = target(branch)? {
-                    if item.protections.read && item.kind != FileProtectionTargetKind::ExactFile {
-                        return Err("UNSUPPORTED_READ_TARGET");
-                    }
                     // Identical scopes may share operation bits. Different exclusions
                     // on the same root are rejected by Sight's structured protocol.
                     item.exclusions.sort_by(|a, b| a.path.cmp(&b.path));

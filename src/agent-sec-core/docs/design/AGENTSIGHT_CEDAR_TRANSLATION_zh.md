@@ -4,7 +4,7 @@
 
 本文是 AgentSight Adapter 的专属契约，涵盖 Translator、Deployment Client 与后端防护边界。
 
-AgentSecCore 将 Cedar 的文件删除、普通写入和精确文件禁读限制翻译成 AgentSight 结构化文件防护策略。
+AgentSecCore 将 Cedar 的文件删除、普通写入和文件禁读限制翻译成 AgentSight 结构化文件防护策略。
 本实现基于 `af1bc18a9` 已有的 Cedar 准入与持久化，原生 JSON 策略继续使用原有 DSL 路径。
 生产 daemon 已注册 `AgentSightTranslator` 和 `AgentSightClientFactory`，两种前端共用既有部署生命周期。
 
@@ -26,7 +26,8 @@ Client 共用。该 crate 只依赖 `serde`，固定 JSON 样例用于检查序�
 增加 payload 版本需要显式修改 Translator/Client，并验证与目标发布版本的兼容性。
 结构化请求不发送 `policy_dsl`；旧 DSL 请求保持原有序列化和重放字节。
 可选的 `protections.read` 默认为 false，为 false 时不序列化，保持原有 version 1 载荷兼容。
-禁读要求目标报告 `file_read_protection`；旧目标会在更新清理前被拒绝。
+Client 对精确文件检查 `file_read_protection`，对目录树检查
+`directory_tree_read_protection`。能力缺失时在清理旧目标前拒绝下发。
 
 此目标接收**附加 forbid 限制**：命中时阻止对应操作，未命中时本策略不增加限制。
 这里不执行 Cedar Authorizer 的默认拒绝算法。Translator 拒绝文件视图中的 permit。
@@ -43,7 +44,7 @@ revision 2 源码还可包含 HTTP 凭据 permit；`project_pst(&syntax, PolicyD
 |---|---|
 | 无约束 principal | Scope/Binding 选择进程实例及进程树 |
 | `action == SecCore::Action::"file.write"` | 支持；`action in [...]` 必须非空且只包含该 action |
-| `action == SecCore::Action::"file.read"` | 精确文件的 `read: true`；`action in [...]` 只能包含该 action。读写限制通过独立语句组合。 |
+| `action == SecCore::Action::"file.read"` | 精确文件或目录树的 `read: true`。`action in [...]` 只能包含该 action。读写限制通过独立语句组合。 |
 | 无约束 resource 或 `resource is SecCore::File` | 支持 |
 | `context.input.operation == SecCore::WriteOperation::"delete"` | `delete: true` |
 | `context.input.operation == SecCore::WriteOperation::"write"` | `ordinary_write: true` |
@@ -74,7 +75,7 @@ revision 2 源码还可包含 HTTP 凭据 permit；`project_pst(&syntax, PolicyD
 
 ## 3. 拒绝规则与允许的语义降低
 
-以下输入被拒绝：permit；未限制 action 或混合读写 action；exec/network；目录树禁读；未限制 operation 的 file.write；
+以下输入被拒绝：permit；未限制 action 或混合读写 action；exec/network；未限制 operation 的 file.write；
 create/rename/setattr；`context.input` 下的 `program`、`mode`、`ownerUid`、`ownerGid`、
 `cwd`、`arg_count`、`args` 条件；resource 身份或层级条件；
 任意 like 模式；无界补集；未支持的函数或表达式。常量 false 分支中的不支持条件也拒绝。
@@ -87,6 +88,7 @@ AgentSight 拒绝带主体约束、主体引用或注解的策略。共享前端
 | delete → 删除保护 | 还包含保持目标及祖先路径稳定、阻止移入未保护范围、覆盖和部分交换的限制；不是只拦 unlink，也不是禁止全部 rename |
 | write → 普通写保护 | 使用结构化 `file_permission / MAY_WRITE` 检查；不能承诺完整防篡改，truncate、mmap 等修改途径不由该检查完整覆盖 |
 | read → 精确文件禁读 | 保护 Apply 时持有的普通文件身份，包括别名、已有只读 FD 和新建映射。已有映射会导致 Apply 拒绝；外部替换文件或轮换密钥后须重新下发。 |
+| read → 目录树禁读 | 保护通过树内路径访问的文件内容，覆盖新增、替换和移入的文件。仍可列目录和查询元数据。参见 [AgentSight 目录树禁读边界](../../../../docs/user-guide/zh/agentsight/integrations.md#禁止读取目录树)。 |
 | 路径范围 → 文件系统目标 | Sight 在目标进程的文件系统视图解析条目、目录身份和相关别名；删除／普通写的路径范围不承诺保护该 inode 的全部硬链接 |
 | `static_at_apply` | 下发时解析挂载拓扑；目录树覆盖后续新增文件，但不保证自动适配后续任意挂载变化 |
 
@@ -153,8 +155,9 @@ when { resource.path == "/workspace/secret" };
 
 它生成 `exact_file` 目标，开关为 `{"delete":false,"ordinary_write":false,"read":true}`，
 不隐含禁止写入或删除。独立的读／写／删除语句仅在目标范围相同时合并开关。
-目录树禁读返回 `CEDAR_RULE_<index>_UNSUPPORTED_READ_TARGET`。
-后端要求 `agent-file-guard`、已启用的 BPF LSM 和对应禁读 hook。
+组合根路径相等和后代路径匹配可生成 `directory_tree` 目标。
+`unless` 可从该目标排除指定条目和子树。
+后端要求 `agent-file-guard`、已启用的 BPF LSM 和对应禁读 hook，目录树禁读还要求硬链接 hook。
 Apply 期间须保持目标访问及进程树稳定；并发下发、io_uring/AIO、进程内存访问及动态挂载
 不在保证范围内。已经读取到内存中的内容无法撤回。
 
@@ -164,7 +167,7 @@ Apply 期间须保持目标访问及进程树稳定；并发下发、io_uring/AI
 2. Scope 固定引用 Policy revision；发现进程实例后生成 Binding 快照。更新 Policy 不隐式更新已有绑定。
 3. Reconciler 调用 Translator，将 PST 条件转为结构化计划；任意不支持内容使整个 Binding 翻译失败。
 4. Client 检查 boot ID、PID namespace、进程 start time，准备准确 HTTP 字节；既有生命周期在修改目标前登记目标身份。
-5. Preflight 检查 ready/ActPlane、静态拓扑及所需的精确文件删除、目录树删除、普通写和／或 `file_read_protection` 能力。缺少字段视为无能力，在清理旧目标和 POST 前拒绝。POST 前再次检查身份，回执必须匹配请求且为带 domain 的 enforced 状态，才确认 Present。
+5. Preflight 检查 ready/ActPlane、静态拓扑及所需的精确文件删除、目录树删除、普通写和对应目标的禁读能力。缺少字段视为无能力，在清理旧目标和 POST 前拒绝。POST 前再次检查身份，回执必须匹配请求且为带 domain 的 enforced 状态，才确认 Present。
 6. Sight 校验目标存在性、类型、拓扑及实际容量并安装保护；删除 Scope 时使用已保存的目标引用撤销。
 
 V2 daemon 与 Sight 已配置时，在 `src/agent-sec-core/v2` 下运行：
@@ -204,11 +207,23 @@ Translator 测试在显式 permit 基线下，对照 Cedar 决策检查已支持
 准确字节重试、更新清理前的能力拒绝、无效策略及回执不匹配。
 PCP 的 `cedar_file_protections_flow_through_pap_sqlite_reconciler_and_http` 对删除、写入和禁读 fixture
 覆盖 PAP、SQLite、实例准入、真实 Translator/Client/Ureq、HTTP 回执、Binding Ready 与撤销。
-实例发现和远端 PEP 使用受控替身；这些测试不证明真实内核防护或完整文件防篡改。
+实例发现和远端 PEP 使用受控替身。
 
-回滚到不支持 Cedar 翻译的二进制前，应先撤销结构化部署。原有 DSL 请求字节兼容；
-Cedar 源码及快照保留[整体设计](POLICY_FRONTEND_AST_AND_TRANSLATION_zh.md)所述兼容边界。
-本次没有数据库迁移或策略源码转换。
+[真实内核测试](../../tests/v2/e2e/test_agentsight_directory_read_live.py)
+用 V2 CLI 和 daemon 连接专用的 AgentSight server 与 enforcer。使用启用 BPF LSM 的
+隔离 Linux 虚拟机，以 root 运行。将 V2 二进制加入 `PATH`，启动启用
+Dashboard 认证的 AgentSight，使用默认本地接口、默认 token 路径和
+`agent-file-guard` profile。pytest 临时目录须位于非 overlay 文件系统。从 SecCore 组件根目录执行。
+
+```sh
+ASC_TEST_AGENTSIGHT_LIVE=1 python3 -m pytest tests/v2/e2e/test_agentsight_directory_read_live.py
+```
+
+测试核对内核返回值、匹配的拦截事件及删除 Scope 后恢复访问，也覆盖精确文件禁读和目录防删除、防写入。
+
+回滚前先撤销旧版本无法翻译的部署。回滚到仅支持精确文件禁读的版本时，先撤销目录树禁读部署。
+回滚到不支持 Cedar 翻译的版本时，先撤销所有 Cedar 部署。Cedar 源码和快照的兼容边界见
+[整体设计](POLICY_FRONTEND_AST_AND_TRANSLATION_zh.md)。
 
 ## 6. 原有 JSON 策略的翻译边界
 

@@ -49,8 +49,8 @@ using SecCore's shared `asc-agentsight-protocol` types and sent as
 version 1; this is independent of the version-2 deployment plan. Existing DSL
 prepared requests retain their original bytes.
 `protections.read` defaults to false and is omitted when false. Read denial
-requires `exact_file` with no exclusions; it may be combined with deletion/write
-protection on the same target.
+supports `exact_file` and `directory_tree`. Directory trees accept target-owned
+exclusions. Read denial can be combined with deletion/write on the same target.
 
 The Client supports its HTTP request/response contract explicitly. The Translator
 and Client share payload types, the version and media type from
@@ -62,9 +62,11 @@ validation against the target release.
 
 Structured preflight requires static mount topology and the protection flags
 needed by each target: `file_entry_delete_protection`,
-`directory_tree_delete_protection`, `ordinary_write_protection`, and/or
-`file_read_protection`. Unavailable read protection rejects with
-`AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE` before old-target cleanup or POST. Missing
+`directory_tree_delete_protection`, `ordinary_write_protection`, and either
+`file_read_protection` or `directory_tree_read_protection` for the corresponding
+read target kind. Unavailable read protection rejects with
+`AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE` or
+`AGENTSIGHT_DIRECTORY_TREE_READ_PROTECTION_UNAVAILABLE` before old-target cleanup or POST. Missing
 structured capability fields default to unavailable. Legacy DSL retains the
 `file_delete_guard` check. Neither path silently falls back to the other. See the
 [Cedar mapping contract](../../../docs/design/AGENTSIGHT_CEDAR_TRANSLATION.md)

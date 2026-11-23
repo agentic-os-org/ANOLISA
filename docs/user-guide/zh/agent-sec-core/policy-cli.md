@@ -467,9 +467,9 @@ HTTP 凭据注入 `permit` 规则；这些 HTTP 规则要求 `--schema-revision 
 root。降级到不支持混合策略的版本前，先删除混合 Scope 并确认清理完成，再删除对应
 混合 Policy 记录，恢复旧策略及分配。
 
-策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除、普通写入和精确文件禁读的
-Cedar `forbid` 子集。禁读使用 `file.read` 和精确文件路径，要求 AgentSight 报告
-`file_read_protection` 能力；不支持目录树禁读。参见 [AgentSight 禁读边界](../agentsight/integrations.md#禁止读取密钥文件)。
+策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除、普通写入和文件禁读的
+Cedar `forbid` 子集。`file.read` 的精确文件目标要求 AgentSight 报告 `file_read_protection`，
+目录树目标要求 `directory_tree_read_protection`。参见 [AgentSight 禁读边界](../agentsight/integrations.md#禁止读取目录树)。
 不支持的语义使整个翻译失败。
 Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
 Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保存 AST/PST。

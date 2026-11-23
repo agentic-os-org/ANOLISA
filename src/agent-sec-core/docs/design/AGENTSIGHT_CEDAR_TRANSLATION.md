@@ -5,7 +5,7 @@
 This document defines the AgentSight Adapter contract, including its Translator,
 Deployment Client and backend enforcement limits.
 
-AgentSecCore translates Cedar file-deletion, ordinary-write and exact-file read restrictions into
+AgentSecCore translates Cedar file-deletion, ordinary-write and file read restrictions into
 AgentSight's structured file-protection payload. This extends the Cedar admission
 and persistence implementation at `af1bc18a9`; native JSON policies retain their
 existing DSL path. The production daemon already registers `AgentSightTranslator`
@@ -32,8 +32,9 @@ Adding a payload version requires an explicit Translator/Client change and
 compatibility validation against the target release. A structured request omits
 `policy_dsl`; legacy requests retain their existing serialization and replay bytes.
 The optional `protections.read` defaults to false and is omitted when false,
-preserving existing version-1 payloads. Read denial requires a target advertising
-`file_read_protection`; an older target is rejected before update cleanup.
+preserving existing version-1 payloads. The Client requires `file_read_protection`
+for exact files and `directory_tree_read_protection` for directory trees. It
+rejects missing capabilities before update cleanup.
 
 This target consumes **additional forbid constraints**. A matching rule blocks
 the covered operation; otherwise this policy adds no restriction. It does not
@@ -53,7 +54,7 @@ or general Cedar authorization service in this path.
 |---|---|
 | Unconstrained `principal` | Scope/Binding selects the process instance and process tree |
 | `action == SecCore::Action::"file.write"` | Accepted; `action in [...]` must be a nonempty list containing only that action |
-| `action == SecCore::Action::"file.read"` | `read: true` on exact files; `action in [...]` may contain only this action. Combine read and write restrictions in separate statements. |
+| `action == SecCore::Action::"file.read"` | `read: true` on exact files or directory trees. `action in [...]` may contain only this action. Combine read and write restrictions in separate statements. |
 | Unconstrained resource or `resource is SecCore::File` | Accepted |
 | `context.input.operation == SecCore::WriteOperation::"delete"` | `delete: true` |
 | `context.input.operation == SecCore::WriteOperation::"write"` | `ordinary_write: true` |
@@ -94,7 +95,7 @@ removal. These limits apply after SDK parsing, not to Cedar parser complexity.
 ## 3. Rejections and permitted semantic lowering
 
 The following are rejected: permit; unconstrained or mixed read/write actions;
-exec/network actions; directory-tree read denial; unrestricted file.write;
+exec/network actions; unrestricted file.write;
 create/rename/setattr; `context.input.program`,
 `mode`, `ownerUid`, `ownerGid`, `cwd`, `arg_count` and `args` conditions;
 resource identity/hierarchy conditions; arbitrary
@@ -110,6 +111,7 @@ Only these fixed target semantics are accepted:
 | delete → deletion protection | Also protects stable entries/ancestors against relevant renames, moves into unprotected ranges, replacement and exchanges. It is not an unlink-only filter or a blanket rename ban. |
 | write → ordinary-write protection | Uses Sight's structured `file_permission` / `MAY_WRITE` check. It is not complete content integrity protection; truncate and mmap modification paths are not fully covered by this check. |
 | read → exact-file read denial | Protects the regular-file identity held at Apply, including aliases, existing read-only descriptors and new mappings. Existing mappings reject Apply. External replacement or secret rotation requires reapplication. |
+| read → directory-tree read denial | Protects file content reached under the tree, including new, replaced or moved-in files. Directory listings and metadata remain accessible. See [AgentSight's directory-tree read boundaries](../../../../docs/user-guide/en/agentsight/integrations.md#deny-reads-below-a-directory-tree). |
 | Path ranges → filesystem targets | Sight resolves entries, directory identities and relevant aliases in the selected process's filesystem view. Deletion/ordinary-write path scopes do not promise protection of every hardlink to the inode. |
 | `static_at_apply` | Mount topology is resolved at apply time. Directory trees cover subsequently created files, but arbitrary later mount changes are outside the guarantee. |
 
@@ -182,9 +184,11 @@ when { resource.path == "/workspace/secret" };
 This produces an `exact_file` target with
 `{"delete":false,"ordinary_write":false,"read":true}`. It does not implicitly
 block writes or deletion. Separate read/write/delete statements merge their flags
-only when their target scopes are identical. Directory-tree read denial is
-rejected with `CEDAR_RULE_<index>_UNSUPPORTED_READ_TARGET`.
-The backend requires `agent-file-guard` with active BPF LSM and its read hooks.
+only when their target scopes are identical. Pair root equality and the
+descendant pattern to generate a `directory_tree` target. An `unless` clause
+can exclude entries and subtrees from that target.
+The backend requires `agent-file-guard` with active BPF LSM and its read hooks,
+plus the hard-link hook for directory-tree read denial.
 Keep target access and the process tree stable during Apply; concurrent Apply,
 io_uring/AIO, process-memory access and dynamic mounts are outside this guarantee.
 Already-read content cannot be revoked.
@@ -200,7 +204,7 @@ The shared flow is:
 4. Client checks boot ID, PID namespace and process start time and prepares the
    exact HTTP bytes. The existing lifecycle registers the target before mutation.
 5. Preflight checks ready/ActPlane, static topology and the required exact-file
-   deletion, directory-tree deletion, ordinary-write and/or `file_read_protection` capabilities. Missing
+   deletion, directory-tree deletion, ordinary-write and target-specific read capabilities. Missing
    flags mean unavailable and reject before old-target cleanup or POST. Identity is checked again
    before POST; only a matching enforced receipt with a domain confirms presence.
 6. Sight validates target existence/types, topology and capacity, then installs
@@ -253,14 +257,29 @@ malformed artifacts and mismatched acknowledgements.
 The PCP test `cedar_file_protections_flow_through_pap_sqlite_reconciler_and_http`
 exercises deletion, write and read fixture policies through PAP, SQLite, instance admission, actual
 Translator/Client/Ureq, HTTP receipt, Binding Ready and cleanup. Discovery and
-the remote PEP are controlled test doubles. This does not establish live kernel
-enforcement or full file integrity.
+the remote PEP are controlled test doubles.
 
-Rollback requires revoking structured deployments before returning to a binary
-that cannot translate Cedar. Existing native DSL request bytes remain compatible;
-Cedar source/snapshot persistence retains the compatibility limits documented in
-[the overall design](POLICY_FRONTEND_AST_AND_TRANSLATION.md). No database migration
-or policy-source conversion is introduced.
+The [live test](../../tests/v2/e2e/test_agentsight_directory_read_live.py) drives
+the V2 CLI and daemon against a dedicated AgentSight server and enforcer. In an
+isolated Linux guest with root and active BPF LSM, put the V2 binaries on
+`PATH` and start AgentSight with dashboard authentication, the default local
+endpoint and token path, and the `agent-file-guard` profile. Use a
+non-overlay filesystem for the pytest temporary directory.
+Run the test from the SecCore component root.
+
+```sh
+ASC_TEST_AGENTSIGHT_LIVE=1 python3 -m pytest tests/v2/e2e/test_agentsight_directory_read_live.py
+```
+
+The test checks kernel results, a matching violation event, and restored
+access after Scope deletion. It also exercises exact-file read and directory
+delete/write protection.
+
+Before rolling back, revoke deployments that the previous version cannot
+translate. For a version supporting only exact-file reads, revoke directory-tree
+read deployments. For a version without Cedar translation, revoke all Cedar
+deployments. Cedar source and snapshot compatibility are described in
+[the overall design](POLICY_FRONTEND_AST_AND_TRANSLATION.md).
 
 ## 6. Native JSON translation boundary
 
