@@ -301,8 +301,8 @@ const index = {
       {
         id: 'user-entrypoint',
         name: 'User Entrypoint Layer',
-        summary: 'AI-native terminal preserving Shell UX and an operational OS handbook for Agents.',
-        components: ['cosh-ng', 'os-skills'],
+        summary: 'AI-native terminal preserving Shell UX, an Omarchy desktop entrypoint, and an operational OS handbook for Agents.',
+        components: ['cosh-ng', 'os-skills', 'omarchy'],
       },
       {
         id: 'aw-unified-stack',

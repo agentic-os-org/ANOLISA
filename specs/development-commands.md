@@ -92,6 +92,15 @@ make lint
 make test          # cargo test --locked
 make smoke         # end-to-end MCP stdio smoke test
 
+# Omarchy integration (Omarchy Linux x86_64; from the repository root)
+# Use a Python 3.11.6 development environment.
+python -m pip install -r distribution/omarchy/tests/requirements.txt
+ruff check distribution/omarchy
+ruff format --check distribution/omarchy
+python -m pytest distribution/omarchy/tests -p no:cacheprovider
+python distribution/omarchy/tests/run_qml.py
+# Build and release instructions: distribution/omarchy/CONTRIBUTING.md
+
 # anolisa (Linux + macOS arm64)
 cd distribution/anolisa
 cargo fmt --all --check

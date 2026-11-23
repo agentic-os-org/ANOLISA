@@ -94,7 +94,8 @@ def expected_files(
 ) -> set[str]:
     """Return the exact four release asset names for one target."""
     extension = "zip" if target_os == "windows" else "tar.gz"
-    archive = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
+    archive_prefix = "anolisa-omarchy" if component_name == "omarchy" else component_name
+    archive = f"{archive_prefix}-{version}-{target_os}-{target_arch}.{extension}"
     return {
         archive,
         f"{archive}.sha256",
@@ -126,7 +127,8 @@ def validate_directory(
         )
 
     extension = "zip" if target_os == "windows" else "tar.gz"
-    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
+    archive_prefix = "anolisa-omarchy" if component_name == "omarchy" else component_name
+    archive_name = f"{archive_prefix}-{version}-{target_os}-{target_arch}.{extension}"
     archive = directory / archive_name
     archive_sha = sha256_file(archive)
     if read_sidecar(Path(f"{archive}.sha256"), archive.name) != archive_sha:
@@ -202,7 +204,16 @@ def validate_directory(
         or property_map.get("anolisa:target:arch") != target_arch
     ):
         die(f"SBOM target properties mismatch: {sbom}")
-    if component_name == "os-skills":
+    if component_name == "omarchy":
+        tools = metadata.get("tools")
+        if not isinstance(tools, list) or not any(
+            isinstance(tool, dict)
+            and tool.get("name") == "anolisa-omarchy-packager"
+            and tool.get("version") == "1"
+            for tool in tools
+        ):
+            die(f"SBOM does not identify anolisa-omarchy-packager 1: {sbom}")
+    elif component_name == "os-skills":
         if not skills_packager_present(metadata):
             die(f"SBOM does not identify os-skills-packager 1: {sbom}")
     elif not cargo_sbom_tool_present(metadata):

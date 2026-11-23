@@ -112,6 +112,7 @@ warning and should be justified or replaced before review.
 | `src/ws-ckpt/` | `ckpt` |
 | `src/agent-memory/` | `memory` |
 | `distribution/anolisa/` | `anolisa` |
+| `distribution/omarchy/` | `omarchy` |
 | `src/skillfs/` | `skillfs` |
 | `src/ktuner/` | `ktuner` |
 | `src/aw/` | `aw` |

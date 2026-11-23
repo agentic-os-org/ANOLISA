@@ -11,6 +11,7 @@
 | [packaging/aw](packaging/aw/README_zh.md) | 构建和组装独立的 AW core 与 Provider 归档 |
 | `Makefile` | `aw-packages` 生成归档，`aw-integration-backends` 单独构建后端验收程序 |
 | [anolisa](anolisa/README_zh.md) | ANOLISA CLI 源码、文档与交付入口 |
+| [omarchy](omarchy/README_zh.md) | Omarchy 桌面插件、独立安装脚本与使用说明 |
 
 AW Provider 扩展管理使用 `aw-package` 内部的私有文件事务引擎；运行时文件读锁
 归 `aw-exec`。这些模块不安装 core 或后端软件，也不组装产品发行。

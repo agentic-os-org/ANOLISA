@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The extracted installer and source checkout have separate verified entry points.
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+if [[ -f "$script_dir/bundle.json" ]]; then
+  exec /usr/bin/python3 -I -B "$script_dir/install.py" "$@"
+fi
+exec python3 -B "$script_dir/checkout_install.py" "$@"

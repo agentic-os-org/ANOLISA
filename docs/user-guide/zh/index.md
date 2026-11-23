@@ -20,6 +20,7 @@
 
 ## 用户入口层
 
+- [Omarchy 桌面集成](omarchy/index.md)：安装和使用桌面 AI 助手。
 - [cosh (cosh-ng)](cosh-ng/index.md)：保持现有 Shell 使用体验的 AI 原生终端，可通过自然语言完成任务，并调用工具与 Skills。
 - [OS Skills](os-skills/index.md)：面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。
 

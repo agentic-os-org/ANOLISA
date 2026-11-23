@@ -22,6 +22,7 @@ under Getting started.
 
 ## User Entrypoint Layer
 
+- [Omarchy integration](omarchy/index.md): Install and use the desktop AI assistant.
 - [cosh (cosh-ng)](cosh-ng/index.md): An AI-native terminal that preserves your existing shell experience, with natural-language tasks, tools, and Skills.
 - [OS Skills](os-skills/index.md): An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more.
 

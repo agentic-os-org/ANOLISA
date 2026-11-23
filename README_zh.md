@@ -200,6 +200,7 @@ ANOLISA 的组件分为用户入口层、统一接入层与 Agent 语义层。�
 |---|---|
 | [cosh (cosh-ng)](https://agentic-os.sh/zh/docs/user-guide/cosh-ng/) | 提供保留熟悉 Shell 交互方式的 AI 原生终端，让用户通过自然语言调用工具与 Skills、完成任务。 |
 | [OS Skills](https://agentic-os.sh/zh/docs/user-guide/os-skills/) | 面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。 |
+| [Omarchy 插件](distribution/omarchy/README_zh.md) | 待验收的桌面接入，提供 cosh、Qoder 入口和本地安全、工具内容统计。 |
 
 <a id="32-统一接入层"></a>
 

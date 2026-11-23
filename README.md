@@ -226,6 +226,7 @@ layer's role.
 |---|---|
 | [cosh (cosh-ng)](https://agentic-os.sh/docs/user-guide/cosh-ng/) | An AI-native terminal that preserves a familiar Shell experience, letting users call tools and Skills through natural language to complete tasks. |
 | [OS Skills](https://agentic-os.sh/docs/user-guide/os-skills/) | An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more. |
+| [Omarchy integration](distribution/omarchy/README.md) | Preview desktop entry points for cosh and Qoder, with local safety and tool-content views. |
 
 <a id="32-unified-integration-layer"></a>
 

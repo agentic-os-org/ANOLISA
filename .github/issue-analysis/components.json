@@ -92,5 +92,13 @@
       "benchmark/README.md"
     ],
     "notes": "Identify the reported runner, workload, metric and comparison baseline. Trace its implementation and evaluation contract. Do not infer product runtime impact from a benchmark discrepancy alone."
+  },
+  "omarchy": {
+    "architecture": "Omarchy desktop distribution integration with prebuilt native programs",
+    "entrypoints": [
+      "distribution/omarchy/runtime.py",
+      "distribution/omarchy/release.py"
+    ],
+    "notes": "Check the native popup, per-user setup, system service ownership and release input verification. Core components retain their own implementations."
   }
 }

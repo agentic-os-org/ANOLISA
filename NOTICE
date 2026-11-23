@@ -7,6 +7,14 @@ This product includes software developed at Alibaba Cloud.
 Derived Works
 =========================================================================
 
+Popup implementation (distribution/omarchy/plugin/AssistantPopup.qml)
+  Adapted from Omarchy shell/Ui/PopupCard.qml
+  Upstream: https://github.com/omacom/omarchy
+  Copyright (c) David Heinemeier Hansson
+  Licensed under the MIT License
+  The complete license is preserved in
+  distribution/omarchy/plugin/OMARCHY-LICENSE.
+
 copilot-shell (deprecated/copilot-shell/)
   Based on Qwen Code (https://github.com/QwenLM/qwen-code),
   which is itself derived from Gemini CLI.
