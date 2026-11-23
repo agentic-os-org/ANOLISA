@@ -59,15 +59,21 @@ def main() -> None:
         )
         consumer = root / "consumer.mts"
         consumer.write_text(
-            "import { query } from " + json.dumps(str(sdk / "dist/index.js")) + ";\n"
+            "import { query, startup } from " + json.dumps(str(sdk / "dist/index.js")) + ";\n"
             'import { Admission, Instance } from "@anolisa/aw-sdk";\n'
             'import { LanguageSource, SourceDenied, sourceCapabilities } from "@anolisa/aw-sdk/sources";\n'
             'import type { WrapToolOptions } from "@anolisa/aw-sdk/sources";\n'
             'import { runPiWorker } from "@anolisa/aw-sdk/pi";\n'
             'import { runPiWorker as directPiWorker } from "@anolisa/aw-sdk-pi";\n'
             'import { createQoderBridge, qoderOptions } from "@anolisa/aw-sdk/qoder";\n'
-            'import { createQoderBridge as directQoderBridge, qoderOptions as directQoderOptions } from "@anolisa/aw-sdk-qoder";\n'
+            'import { createQoderBridge as directQoderBridge, qoderOptions as directQoderOptions, qoderCapabilities, qoderProfile, qoderInstallRoutes } from "@anolisa/aw-sdk-qoder";\n'
             "export async function consumer(instance: Instance) {\n"
+            ' const caps = qoderCapabilities(false, true);\n'
+            ' const configured = new Instance({endpoint:"/tmp/aw.sock", target:"app", availability:"required",\n'
+            '   capabilities:caps, install: routes => qoderInstallRoutes(routes, false, true)});\n'
+            ' const adapter: string = qoderProfile.adapter;\n'
+            ' void adapter;\n'
+            ' await configured.close();\n'
             ' const bridge = await createQoderBridge({configFile:"/tmp/aw.yaml", query, availability:"native_fallback"});\n'
             ' const direct = await directQoderBridge({configFile:"/tmp/aw.yaml", query, availability:"native_fallback"});\n'
             ' const session = bridge.query({prompt:"text"});\n'
@@ -79,6 +85,9 @@ def main() -> None:
             " await task.acknowledge();\n"
             ' const native = qoderOptions(task).bind(query({prompt:"text"}));\n'
             ' const directNative = directQoderOptions(task).bind(query({prompt:"text"}));\n'
+            ' const options = directQoderOptions(gate, {maxTurns:3, hooks:{PostToolUse:[{hooks:[async () => ({})]}]}}).options;\n'
+            ' const warm = await startup({options});\n'
+            ' warm.close();\n'
             " await native.initializationResult();\n"
             " await directNative.initializationResult();\n"
             ' void runPiWorker({application:"/app/worker.mjs", configFile:"/tmp/aw.yaml", descriptorFile:"/tmp/d.json", automatic:true});\n'

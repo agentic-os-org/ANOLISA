@@ -23,9 +23,7 @@ const PROFILES: &[ProfileDefinition] = &[
         name: "qoder-public-hooks",
         build: || {
             let mut capabilities = catalog::QODER_SDK.capabilities("public-hooks/v1", "sdk-worker");
-            capabilities
-                .events
-                .insert("tool.after".into(), vec!["observe".into()]);
+            capabilities.events.remove("session.end");
             observe_or_block_before(&mut capabilities);
             DeploymentProfile {
                 capabilities,
@@ -128,7 +126,11 @@ mod tests {
         assert!(qoder.session_start_hint);
         assert!(emits_session_start_hint("qoder-sdk"));
         assert_eq!(qoder.capabilities.version, "public-hooks/v1");
-        assert_eq!(qoder.capabilities.events["tool.after"], ["observe"]);
+        assert_eq!(
+            qoder.capabilities.events["tool.after"],
+            ["observe", "replace_result"]
+        );
+        assert!(!qoder.capabilities.events.contains_key("session.end"));
         assert!(qoder.capabilities.failure_actions.is_empty());
         let qwenpaw = profile("qwenpaw-installed-native-hooks", true).unwrap();
         assert!(qwenpaw.requires_service);

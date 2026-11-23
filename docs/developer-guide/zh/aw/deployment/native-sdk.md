@@ -68,9 +68,12 @@ await aw.close();
 原生 Query、Hook、工具和模型继续运行。该目标适用的每个启用事件设置 `required: false`；AW 可达时，
 `on_error: block` 和明确拒绝仍然生效。该目标适用的启用事件要求 required 时，回退模式拒绝初始化。
 需要在 AW 失联时停止受保护操作，可显式传入 `availability: "required"`。
-可用性属于 SDK 生命周期选项，策略统一留在文件中。支持已配置输入的观察／阻断、工具前观察／阻断和
-工具后观察；不支持的效果和 Skill 路由在准入时拒绝。结果替换与最终结果门继续使用既有
-受管入口。
+可用性属于 SDK 生命周期选项，策略统一留在文件中。`qoder-public-hooks` 支持已配置输入和工具前的
+观察与阻断，以及工具后的观察与 `replace_result`。替换步骤使用 `on_error: report`，排在观察步骤之后。
+所有步骤接收原始工具结果。Adapter 在 `PostToolUse` 中通过 `hookSpecificOutput.updatedToolOutput`
+替换受支持的文本槽，保留结果的其他字段。`PostToolUseFailure` 提供错误详情供观察，缺少可替换的结果槽。Provider 出错时，接入层向应用
+传递错误并请求停止 Query。停止请求无法证明 Qoder 已扣留未经检查的结果。需要 `withhold_result`
+或最终结果检查时，使用已验收的受管入口。
 
 业务原生就绪后，部署方后台准备 sec-core，并以应用用户执行：
 
@@ -446,11 +449,13 @@ SDK 不启动服务或 Agent。
 `bind(query)`。每个 Query 使用独立 task，先关闭 Query，再关闭 task；应用退出时
 关闭 Instance。同一 Query 只使用一种 AW 接线方式，避免与原 AW Query factory 重复。
 
-创建 `Instance` 时显式传入 endpoint、target、capabilities 和 availability。
-`cwd`、`environment` 默认采用应用值并构成任务上下文，不同目录的原生 Query 可通过
-`instance.task({cwd, environment})` 提供独立且复制后的任务上下文。`install(routes)` 仅在应用已安装对应事件路由时
-返回 `true`；登记及每个任务的策略快照均在 Ready 确认前调用它。
-示例将所有 Query 路由到 `qoderOptions`，遇到未知事件拒绝确认。
+创建 `Instance` 时显式传入 endpoint、target 和 availability。`@anolisa/aw-sdk-qoder` 导出
+`qoderProfile` 用于加载 Descriptor，导出 `qoderCapabilities(inputEnabled, sessionStartEnabled)` 用于登记，并提供
+`qoderInstallRoutes(routes, inputEnabled, sessionStartEnabled)` 供 `install(routes)` 校验协商后的路由。使用 WarmQuery 时，每个预热
+条目创建独立的 `Admission`，启动前将它与原生选项传给 `qoderOptions`，消费条目时绑定实际 Query。
+安装回调和登记能力使用相同的启动事件开关。`install(routes)` 在登记和每个任务获取策略快照时调用，只确认
+应用已接入的路由。`cwd`、`environment` 默认采用应用值。Query 使用不同目录或环境时，在 Task 或
+Admission 选项中传入实际目录和复制后的环境。
 
 `await instance.connect()` 执行一次有界连接尝试。只有 native-fallback 下的传输不可用
 或登记尚未完成时返回 `false`。`instance.start()` 启用单一后台重连流程，通过
@@ -517,17 +522,20 @@ aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
 
 ## 已验证范围
 
-初版 Qoder 接线使用公开 `UserPromptSubmit`、`PreToolUse`、`PostToolUse` 和
-`PostToolUseFailure` 回调，效果处理复用 Adapter。原 Hook 分组保留，AW 回调追加；Worker 可以并发调度分组。AW 检查收到的回调快照，
-其他原生 Hook 后续改写参数的场景尚不具备最终输入保护保证。
+Qoder 接线使用公开 `UserPromptSubmit`、`PreToolUse`、`PostToolUse` 和
+`PostToolUseFailure` 回调。AW 保留原 Hook 分组并追加自己的回调。Worker 可以并发调度分组，
+原生观察 Hook 仍可能收到原始结果。其他 Hook 也返回替换时，需验证组合后的实际输出。
+AW 检查收到的回调快照，后续原生改写超出这个接点的覆盖范围。
 SDK 1.0.56／Worker 1.1.78 验收覆盖真实 Bash、原生 Hook 共存、Query 中途 AW 退出、
-新任务恢复接入、工具副作用恰好一次，以及 AW／原生拒绝时无工具副作用。包顶层不导入 Qoder，不读取私有 binding 文件。
+新任务恢复接入、工具副作用恰好一次，以及 AW／原生拒绝时无工具副作用。同版 SDK 和 Worker 的
+WarmQuery 在工具事件和后续模型轮次采用了 AW 替换后的 Bash 结果，已有原生 Post Hook 仍收到
+原始结果。包顶层不导入 Qoder，不读取私有 binding 文件。
 其他框架版本按声明能力协商，原生验收结论对应实际测试版本。
 
 原 resident `aw run` 路径保留更完整的托管 MCP、凭据与固定 Worker 接点。
 当前公开 Hook SDK 尚未提供这些附加托管能力。原生 MCP 配置继续由应用选项传入。
 Skill 检查沿用 Adapter resolver，并要求对应原生 Query 接口。
-输入／结果改写与 Skill／MCP 组合需要单独完成原生验收后再进入业务采用。
+输入改写与 Skill／MCP 组合需要单独完成原生验收后再进入业务采用。
 
 归属与 wire 合同见 [SDK 协议](../../../../../src/aw/docs/design/zh/runtime/native-sdk.md)；
 现有 required 入口见 [Qoder 指南](../agents/qoder-sdk.md)。

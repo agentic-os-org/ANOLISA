@@ -83,10 +83,16 @@ AW loss leaves native Queries, Hooks, tools and model execution running. Set
 still apply while AW is reachable. A conflicting required policy rejects bridge
 initialization. Choose `availability: "required"` explicitly when protected work
 must stop on AW loss. Availability is an SDK lifecycle option; policy remains in the file.
-The bridge supports input observation/blocking when configured, tool-before
-observation/blocking and tool-after observation. Unsupported policy effects or
-Skill routes fail admission; result replacement and final-result gates retain
-their existing managed entrypoints.
+The `qoder-public-hooks` profile supports configured input and tool-before
+observation and blocking, plus tool-after observation and `replace_result`.
+A replacement step uses `on_error: report` and runs last after the observation
+steps. All steps receive the original tool result. The adapter returns
+`hookSpecificOutput.updatedToolOutput` on `PostToolUse` for a supported text
+slot and preserves the rest of the tool result. `PostToolUseFailure` provides error details for observation
+and has no replacement slot. A Provider error is surfaced to the application
+and requests a native Query stop. This stop does not establish that Qoder
+withheld an unchecked result. For `withhold_result` or a final-result gate, use
+a verified managed entrypoint.
 
 After native application readiness, deployment prepares sec-core in the background
 and runs under the application user:
@@ -558,13 +564,18 @@ permissions, setting sources and Hooks. Pass its existing options to
 the Query before closing the task. Close the Instance when the application exits.
 Do not combine this integration with the existing AW Query factory on one Query.
 
-Construct `Instance` with an explicit endpoint, target, capabilities and
-availability. `cwd` and `environment` default to the application values and form
-the task context; pass the native Query directory and copied environment to
-`instance.task({cwd, environment})` when they differ. `install(routes)` must return `true`
-only when the application has installed a router for those events. It runs on
-registration and each task's policy snapshot before Ready acknowledgement.
-The example routes all Queries through `qoderOptions` and rejects unknown events.
+Construct `Instance` with an explicit endpoint, target and availability.
+`@anolisa/aw-sdk-qoder` exports `qoderProfile` for descriptor loading,
+`qoderCapabilities(inputEnabled, sessionStartEnabled)` for registration and
+`qoderInstallRoutes(routes, inputEnabled, sessionStartEnabled)` to validate the negotiated routes in
+`install(routes)`. For a WarmQuery, create an `Admission` for each entry, pass it
+and the native options to `qoderOptions` before startup, and bind the Query when
+that entry is consumed. Use the same configured startup flags when wiring callbacks
+and registering capabilities. The `install(routes)` callback runs on registration
+and again for each task's policy snapshot. Confirm only routes that the
+application wires. `cwd` and `environment` default to the application values.
+Pass the native Query directory and copied environment in the task or Admission
+options when they differ.
 Ready records the application's installation acknowledgement; it does not prove
 that each future Query has installed Hooks or adopted returned effects.
 
@@ -652,23 +663,26 @@ registration; general `aw service status` also reports SDK readiness and owner.
 
 ## Verified coverage
 
-The initial Qoder integration uses public `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse` and `PostToolUseFailure` callbacks and canonical Adapter effect
-handling. Existing Hook groups are preserved and AW callbacks are appended. The Worker may
-schedule groups concurrently. AW evaluates its callback snapshot; native Hooks
-that later rewrite arguments are outside this integration's final-input guarantee.
+The Qoder integration uses public `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse` and `PostToolUseFailure` callbacks. It preserves existing Hook
+groups and appends AW callbacks. The Worker may schedule groups concurrently,
+so native observers can still see the original result. Verify the combination
+if another Hook also returns an output replacement. AW evaluates its callback
+snapshot. Later native rewrites fall outside this Hook's coverage.
 SDK 1.0.56 / Worker 1.1.78 acceptance covers real Bash execution, native Hook
 coexistence, AW loss during a Query, recovery for a new task and exactly-once
-side effects, plus AW and native denials with no tool side effect. The package does not import Qoder at its root or access private
-binding files. Other framework versions negotiate their declared capabilities;
+side effects, plus AW and native denials with no tool side effect. The same SDK
+and Worker versions adopt a replaced Bash result in the WarmQuery tool event and
+the next model turn while an existing native Post Hook sees the original output.
+The package does not import Qoder at its root or access private binding files. Other framework versions negotiate their declared capabilities;
 native acceptance remains version-specific.
 
 The resident `aw run` path retains its broader managed MCP, credential and
 pinned Worker integration. This public-Hook SDK does not yet provide those
 additional managed seams. Keep native MCP configuration in the application's
 options. Skill checks use the canonical Adapter resolver and require its native
-query interfaces. Input/result rewriting and Skill/MCP combinations require
-their own native acceptance before business rollout.
+query interfaces. Input rewriting and Skill/MCP combinations require their own native acceptance
+before business rollout.
 
 See the [SDK protocol](../../../../../src/aw/docs/design/en/runtime/native-sdk.md)
 for ownership and wire contracts and the

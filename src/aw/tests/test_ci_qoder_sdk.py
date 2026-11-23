@@ -118,8 +118,9 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup"] + ["native"] * 33)
-                    self.assertEqual(reports.call_count, 33)
+                    case_count = 34
+                    self.assertEqual(observed, ["setup"] + ["native"] * case_count)
+                    self.assertEqual(reports.call_count, case_count)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()

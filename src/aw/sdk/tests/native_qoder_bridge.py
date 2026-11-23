@@ -10,8 +10,9 @@ p = argparse.ArgumentParser()
 p.add_argument("--bin", type=Path, required=True)
 p.add_argument("--npm", type=Path, required=True)
 p.add_argument("--output", type=Path, required=True)
+p.add_argument("--warm-post", action="store_true")
 a = p.parse_args()
-a.output.mkdir(parents=True, exist_ok=True)
+a.output.mkdir(mode=0o700, parents=True, exist_ok=True)
 sdk_root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="aw-qoder-bridge-") as directory:
     home = Path(directory)
@@ -55,7 +56,9 @@ with tempfile.TemporaryDirectory(prefix="aw-qoder-bridge-") as directory:
             str(a.bin.resolve() / "aw"),
             str(a.npm.resolve() / "node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"),
             str(app / "node_modules/@anolisa/aw-sdk-qoder/dist/index.mjs"),
+            str(app / "node_modules/@anolisa/aw-sdk/dist/client.mjs"),
             str(a.output.resolve()),
+            *(["warm-post"] if a.warm_post else []),
         ],
         env=env,
         check=True,
