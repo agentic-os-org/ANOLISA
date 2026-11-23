@@ -107,8 +107,8 @@ export type StreamResult<T> = T extends AsyncIterable<infer Y> ? Y : never;
 
 // TypeScript gives a generator declaration and a synchronous generator factory
 // the same call signature. Only an explicit stream option fixes the outer shape.
-type ImplicitResult<R> =
-  | Promise<Awaited<R>>
+type ImplicitResult<R, Resolved = Awaited<R>> =
+  | Promise<Resolved>
   | (R extends AsyncIterable<infer Y>
       ? AsyncGenerator<Y, void, unknown>
       : never);
@@ -150,6 +150,17 @@ type SyncLazyItem<T> = 0 extends 1 & T
           : never;
 
 type HasSyncLazyResult<T> = [SyncLazyItem<T>] extends [never] ? false : true;
+
+type BufferedSyncReturnOf<T> = T extends EagerIterable | AsyncIterable<unknown>
+  ? T
+  : T extends { next(): IteratorResult<unknown, unknown> } | Iterable<unknown>
+    ? T | Generator<SyncLazyItem<T>, void, unknown>
+    : T;
+
+type BufferedImplicitResult<R> = ImplicitResult<
+  R,
+  BufferedSyncReturnOf<Awaited<R>>
+>;
 
 type BufferedToolResultOf<T> = 0 extends 1 & T
   ? T
@@ -397,7 +408,7 @@ export class SourceSession {
       stream?: false;
       bufferStream: true;
     },
-  ): (...args: Args) => ImplicitResult<Result>;
+  ): (...args: Args) => BufferedImplicitResult<Result>;
   wrapTool<Args extends unknown[], Result>(
     fn: (...args: Args) => Result,
     options?: WrapToolOptions<
@@ -419,7 +430,7 @@ export class SourceSession {
       stream?: false;
       bufferStream?: boolean;
     },
-  ): (...args: Args) => ImplicitResult<Result>;
+  ): (...args: Args) => BufferedImplicitResult<Result>;
   instrument<T extends object>(
     target: T,
     options?: {

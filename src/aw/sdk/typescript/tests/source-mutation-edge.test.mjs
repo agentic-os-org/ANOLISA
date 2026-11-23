@@ -368,6 +368,81 @@ test(
 );
 
 test(
+  "Native tool.after block honors explicit async buffering",
+  { skip: !BINARY, timeout: 25000 },
+  async () => {
+    const root = mkdtempSync(path.join("/tmp", "awje-"));
+    const hook = path.join(root, "native_hook.py");
+    writeFileSync(hook, NATIVE_HOOK_SCRIPT);
+    const service = await startCustomService(root, {
+      providers: {
+        nh: {
+          protocol: "native-hook/v1alpha1",
+          transport: {
+            type: "stdio",
+            location: "agent",
+            argv: ["python3", hook],
+          },
+          timeout_ms: 2000,
+          max_output_bytes: 4096,
+          config: {},
+        },
+      },
+      afterSteps: [
+        { id: "native", provider: "nh", native: {}, on_error: "report" },
+      ],
+    });
+    try {
+      const source = LanguageSource.create({
+        endpoint: service.endpoint,
+        target: "app",
+        availability: "required",
+      });
+      await source.connect();
+      try {
+        await source.withSession(
+          { sessionId: "js-native-buffer" },
+          async (session) => {
+            await session.prepare();
+            assert.equal(session._observeAfter(), true);
+            assert.equal(session._strictAfter(), false);
+
+            async function* chunks(args) {
+              yield args.out;
+            }
+
+            for (const bufferStream of [true, false]) {
+              const wrapped = session.wrapToolStream(chunks, { bufferStream });
+              const delivered = [];
+              await assert.rejects(
+                async () => {
+                  for await (const chunk of wrapped({
+                    command: "native_block",
+                    out: "sample",
+                  })) {
+                    delivered.push(chunk);
+                  }
+                },
+                (err) =>
+                  err instanceof SourceDenied &&
+                  err.event === "tool.after" &&
+                  err.toolExecuted === true,
+              );
+              assert.deepEqual(delivered, bufferStream ? [] : ["sample"]);
+            }
+          },
+        );
+      } finally {
+        await source.close();
+      }
+    } finally {
+      await service.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Observe-only route with bufferStream: true passes chunk arrays to extractResult in wrapTool and instrument",
   { skip: !BINARY, timeout: 25000 },
   async () => {

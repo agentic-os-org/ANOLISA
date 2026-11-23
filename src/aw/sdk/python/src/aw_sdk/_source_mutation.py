@@ -25,6 +25,16 @@ from aw_sdk._source_profile import DEFAULT_MAX_STREAM_BYTES
 from aw_sdk.transport import AwError
 
 
+def _json_strict_equal(a: Any, b: Any) -> bool:
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_json_strict_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_json_strict_equal(a[key], b[key]) for key in a)
+    return a == b
+
+
 def is_lazy_result(value: Any) -> bool:
     """Return True when value is a lazy iterator, generator or async iterator."""
     return (
@@ -359,12 +369,14 @@ async def run_tool_stream(
     max_stream_bytes: int = DEFAULT_MAX_STREAM_BYTES,
     buffer_stream: bool,
 ) -> AsyncIterator[Any]:
-    """Execute a streaming tool, enforcing bounded isolated buffering on strict routes."""
+    """Execute a streaming tool with bounded buffering before audited delivery."""
     strict_after = session._strict_after()
     if strict_after and not buffer_stream:
         raise AwError("source_stream_withhold_requires_buffering")
+    observe_after = session._observe_after()
+    buffered_after = strict_after or (buffer_stream and observe_after)
     custom_extract = extract_result is not None
-    items: list[Any] | None = [] if session._observe_after() else None
+    items: list[Any] | None = [] if observe_after else None
     stream = ActiveStream(fn(*call_args, **call_kwargs))
     session._active_streams.add(stream)
 
@@ -383,7 +395,7 @@ async def run_tool_stream(
 
     with tool_executed():
         try:
-            if strict_after:
+            if buffered_after:
                 checked_items: list[Any] = []
                 buffered_bytes = 2
                 decision: dict[str, Any] | None = None
@@ -507,7 +519,8 @@ def build_tool_wrapper(
                 custom_extract=custom_extract_input,
                 snapshot_arg=snapshot_arg,
             )
-            if snapshot_tool_input(input_extractor(*call_args, **call_kwargs)) != snapshot:
+            rebuilt_input = snapshot_tool_input(input_extractor(*call_args, **call_kwargs))
+            if not _json_strict_equal(rebuilt_input, snapshot):
                 raise AwError("source_input_replace_mismatch")
         return resolved_call, snapshot, call_args, call_kwargs
 

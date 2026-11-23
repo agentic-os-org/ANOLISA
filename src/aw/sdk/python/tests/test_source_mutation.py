@@ -195,6 +195,43 @@ class CapabilityTests(unittest.TestCase):
 
 @unittest.skipUnless("AW_TEST_BINARY" in os.environ, "requires AW_TEST_BINARY")
 class LanguageSourceMutationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rewritten_input_requires_matching_json_types(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awp-", dir="/tmp") as tmp:
+            proc, endpoint, _ = start_aw_service(Path(tmp))
+            try:
+                async with LanguageSource.create(
+                    endpoint=str(endpoint),
+                    target="app",
+                    availability="required",
+                    replace_input=True,
+                    replace_result=True,
+                    withhold_result=True,
+                ) as source:
+                    async with source.session(session_id="py-rewrite-types") as session:
+                        executed: list[dict[str, object]] = []
+
+                        async def tool(args: dict[str, object]) -> None:
+                            executed.append(args)
+
+                        for approved, rebuilt in ((False, 0), (True, 1), (1, 1.0)):
+                            with self.subTest(approved=approved, rebuilt=rebuilt):
+                                wrapped = session.wrap_tool(
+                                    tool,
+                                    apply_input=lambda updated, _args, _kwargs, wrong=rebuilt: (
+                                        ({**updated, "options": [{"enabled": wrong}]},),
+                                        {},
+                                    ),
+                                )
+                                with self.assertRaisesRegex(
+                                    AwError, "^source_input_replace_mismatch$"
+                                ):
+                                    await wrapped(
+                                        {"command": "raw:types", "options": [{"enabled": approved}]}
+                                    )
+                        self.assertEqual(executed, [])
+            finally:
+                stop_service(proc)
+
     async def test_rewrite_withhold_and_streaming_boundaries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="awp-", dir="/tmp") as tmp:
             proc, endpoint, _ = start_aw_service(Path(tmp))
