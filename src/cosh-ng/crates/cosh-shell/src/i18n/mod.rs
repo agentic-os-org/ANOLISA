@@ -443,7 +443,11 @@ mod tests {
             MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize
         );
         assert_eq!(
-            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize,
+            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize + 1,
+            MessageId::ApprovalCommandOutputUnredacted as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalOutputScrollback as usize,
             MessageId::ALL.len() - 1
         );
     }

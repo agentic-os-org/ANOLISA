@@ -91,6 +91,8 @@ Check the tool name, input preview, risk, and Hook warnings. Choose **Approve** 
 
 When you approve a `shell` tool, cosh runs the command in the foreground bash or zsh. Its output and interactive prompts stay visible, and `Ctrl+C` can interrupt it. Approved foreground commands run one at a time.
 
+**Terminal output is not redacted** and may stay in your terminal's scrollback. A shell approval card shows this before execution, including before **Allow all this turn**. Redaction of model messages or audit records does not redact the live terminal. This also applies when a command runs without a card. Deny requests that could print values you do not want visible.
+
 If an approved command waits for password input, a pager, or plain terminal input, cosh can show a hint and interrupt it after 120 seconds by default. Set `shell.input_wait_timeout_secs = 0` to disable this timeout. Fullscreen TUIs and pipeline reads are exempt.
 
 Approval decisions are kept in the runtime journal. When audit logging is enabled, a redacted copy is also available in the audit timeline; see the [audit guide](../cli/audit.md).

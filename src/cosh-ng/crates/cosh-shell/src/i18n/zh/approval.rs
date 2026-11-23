@@ -154,6 +154,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseRedirectionWrite => "重定向写文件",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk 执行外部命令",
         MessageId::ApprovalRiskPhraseGitRepoConfigExecution => "可能执行仓库内嵌脚本",
+        MessageId::ApprovalCommandOutputUnredacted => "终端输出不会脱敏。",
+        MessageId::ApprovalTurnOutputUnredacted => "本轮终端输出不会脱敏。",
+        MessageId::ApprovalOutputScrollback => "输出可能留在滚屏记录中。",
         MessageId::ApprovalRiskLevelUnknown => "未知风险",
         MessageId::ApprovalTurnExtensionSubject => "Agent 轮次预算",
         MessageId::ApprovalTurnExtensionPreview => {

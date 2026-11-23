@@ -178,6 +178,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
         MessageId::ApprovalRiskPhraseGitRepoConfigExecution => "may run repo-embedded scripts",
+        MessageId::ApprovalCommandOutputUnredacted => "Terminal output is not redacted.",
+        MessageId::ApprovalTurnOutputUnredacted => "This turn's terminal output is not redacted.",
+        MessageId::ApprovalOutputScrollback => "Output may stay in scrollback.",
         MessageId::ApprovalRiskLevelUnknown => "unknown risk",
         MessageId::ApprovalTurnExtensionSubject => "Agent turn budget",
         MessageId::ApprovalTurnExtensionPreview => {
