@@ -20,12 +20,15 @@ fn context() -> ProposalContext {
     ProposalContext::new("task-1".into(), 2_000_000_000, 1800).unwrap()
 }
 fn propose(response: &Value) -> Result<ProposalOutcome, ProposalError> {
+    propose_for("Acceptance task", response)
+}
+fn propose_for(task: &str, response: &Value) -> Result<ProposalOutcome, ProposalError> {
     propose_task(
         &FakeProvider::new(response.to_string()),
         "fixture",
         &TaskInput {
             source_id: "source".into(),
-            text: "Acceptance task".into(),
+            text: task.into(),
         },
         &context(),
         Instant::now() + INTENT_BUDGET,
@@ -462,11 +465,16 @@ fn invalid_and_unsupported() {
         "permit(principal == SecCore::Subject::\"A\", action, resource);",
         "permit(principal, action, resource == SecCore::File::\"/a\");",
         "permit(principal, action, resource) when { principal == SecCore::Subject::\"A\" };",
+        // `@advice` is admitted only as the escalation contract; anything else stays unsupported.
         "@advice(\"audit\") permit(principal, action, resource);",
+        "@advice(\"{\\\"verdict\\\":\\\"warn\\\",\\\"message\\\":\\\"x\\\"}\") permit(principal, action, resource);",
         "@trusted(\"yes\") permit(principal, action, resource);",
     ] {
         assert!(
-            matches!(prepare_policy(policy), Err(PolicyError::UnsupportedPolicy)),
+            matches!(
+                prepare_policy(policy),
+                Err(PolicyError::UnsupportedPolicy | PolicyError::Advice)
+            ),
             "{policy}"
         );
     }
@@ -649,10 +657,60 @@ fn input_budgets_and_deadlines() {
     );
 }
 
+fn prompt_example(first_id: &str) -> &'static str {
+    let start = format!("@id(\"{first_id}\")");
+    include_str!("../prompts/policy-generation.md")
+        .split("\n```cedar\n")
+        .skip(1)
+        .filter_map(|block| block.split_once("\n```"))
+        .map(|(cedar, _)| cedar)
+        .find(|cedar| cedar.starts_with(&start))
+        .expect("missing Cedar example in the generation prompt")
+}
+
+#[test]
+fn generated_write_scope_preserves_exclusivity_under_a_broader_permit() {
+    // Replay the prompt's actual examples as model output through task admission.
+    let exclusive = prompt_example("goal.1");
+    let (additive, _) = exclusive.split_once("@id(\"goal.2\")").unwrap();
+    for (task, response, outside) in [
+        (
+            "Allow writes under /srv/reports.",
+            additive,
+            Decision::Allow,
+        ),
+        (
+            "Allow writes only under /srv/reports.",
+            exclusive,
+            Decision::Deny,
+        ),
+    ] {
+        let outcome = propose_for(task, &json!({"policy":response, "unresolved":[]})).unwrap();
+        let ProposalOutcome::Candidate { candidate } = outcome else {
+            panic!("expected a task candidate for {task}");
+        };
+        let alone = Judge::new(candidate.policy_text());
+        let combined = Judge::combined(candidate.policy_text());
+        for path in ["/srv/reports", "/srv/reports/nested/result.txt"] {
+            alone.write(path, "create", Decision::Allow);
+            combined.write(path, "create", Decision::Allow);
+        }
+        for path in ["/outside/result.txt", "/srv/reports-old/result.txt"] {
+            alone.write(path, "create", Decision::Deny);
+            for operation in ["create", "write", "delete", "rename", "setattr"] {
+                combined.write(path, operation, outside);
+            }
+            combined.read(path, Decision::Allow);
+        }
+    }
+}
+
 fn prompt_and_wrapper_boundaries() {
     let prompt = include_str!("../prompts/policy-generation.md");
-    let (_, constraints) = prompt.split_once("## schema 与生成约束\n").unwrap();
-    let (constraints, _) = constraints.split_once("## 路径与输入边界\n").unwrap();
+    let constraints = prompt
+        .split("\n## ")
+        .find(|section| section.starts_with("schema "))
+        .expect("the prompt must contain a schema section");
     assert!(constraints.contains("seccore.cedarschema"));
     for duplicated_term in [
         "file.read",
@@ -663,7 +721,13 @@ fn prompt_and_wrapper_boundaries() {
     ] {
         assert!(!constraints.contains(duplicated_term));
     }
-    assert!(prompt.len() <= 6000);
+    let example = prompt_example("R2");
+    let artifact = asc_intent::prepare_task_policy(example).unwrap();
+    let gates = asc_intent::human_gates(&artifact.text).unwrap();
+    assert_eq!(gates.len(), 1);
+    assert!(gates[0].paths.is_empty());
+    assert!(example.contains("SecCore::Network::\"all\""));
+    assert!(prompt.len() <= 6000, "prompt is {} bytes", prompt.len());
     for line in prompt.lines() {
         assert!(line.len() <= 100, "prompt line exceeds 100 bytes: {line}");
     }

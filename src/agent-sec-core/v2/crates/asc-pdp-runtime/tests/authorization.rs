@@ -203,6 +203,24 @@ fn effective_set_matches_agent_type_and_preserves_global_forbid_precedence() {
 }
 
 #[test]
+fn invocation_advice_uses_the_requested_working_directory() {
+    let gate = r#"@advice("{\"verdict\":\"escalate\",\"message\":\"Confirm this launch\"}")
+permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource)
+when { context.input.cwd == "/work" };"#;
+    let runtime = PdpRuntime::from_policy_set(snapshot(gate)).unwrap();
+    let mut input = request();
+    assert_eq!(
+        runtime.evaluate(&input, 100).unwrap().verdict,
+        DecisionVerdict::StepUp
+    );
+    input.context.launch.cwd = "/work/other".into();
+    assert_eq!(
+        runtime.evaluate(&input, 100).unwrap().verdict,
+        DecisionVerdict::Allow
+    );
+}
+
+#[test]
 fn effective_set_keeps_advice_network_policy_and_optional_type() {
     let files = FILES.replace("principal,", "principal is SecCore::Subject,");
     let command = r#"@advice("{\"verdict\":\"escalate\"}")

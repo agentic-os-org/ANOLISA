@@ -38,6 +38,14 @@ pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, Ce
 /// on an explicit-principal request policy.
 pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool, CedarError> {
     let (policies, _) = validation::parse_and_validate(source)?;
+    request_policy_headers(&policies)
+}
+
+/// Checks request-authorization eligibility for a parsed policy set using the PAP header rules.
+///
+/// # Errors
+/// Rejects mixed principal headers or HTTP execution annotations on request policies.
+pub fn request_policy_headers(policies: &cedar_policy::PolicySet) -> Result<bool, CedarError> {
     let mut bare = false;
     let mut explicit = false;
     for policy in policies.policies() {

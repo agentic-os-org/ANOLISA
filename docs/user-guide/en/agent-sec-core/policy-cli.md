@@ -132,12 +132,12 @@ the candidate Cedar text to a file and submit it with `policy create --file` as
 shown below; Policy admission still validates the source and schema.
 
 The LLM receives only the task text and the unified `seccore.cedarschema`,
-and directly returns `{"policy":"...","unresolved":[]}`. Rust parses the
-original Cedar, checks absolute path expressions and runs official Strict
-validation; it appends no rules. The `asc.intent.draft.v1` draft preserves the
-original response and task provenance. Neither validation nor an empty
+and directly returns `{"policy":"...","unresolved":[]}`. Rust checks absolute path expressions in the draft and runs official Cedar Strict validation.
+A malformed policy/unresolved JSON response or a repairable Cedar error gets one admission retry
+within the original deadline. The `asc.intent.draft.v1` draft preserves the original response and task provenance. Neither validation nor an empty
 `unresolved` proves complete or correct interpretation; unresolved requirements
-are model-reported.
+are model-reported. Once a draft passes validation, compatibility findings accompany its
+original rules. A confirmation that would widen a grant returns the original draft for clarification.
 CLI rebuilds the expected artifact from the draft with its embedded schema,
 in addition to checking versions, provenance, TTL and hashes. Upgrade CLI and daemon
 together. The generation instructions in
@@ -171,13 +171,13 @@ other daemon features. Automatic model selection and local-model fallback are no
 implemented; a local small model is planned to reduce cloud costs.
 
 This feature sends only the task text to a cloud model and may incur charges.
-No file contents, directory listings or Git changes are collected, and the daemon
-does not open caller paths. Absolute paths and other sensitive text inside the task
-are sent; review the task first.
+Proposal generation does not inspect host paths, link targets, file contents, directory listings or Git changes. Review the task text
+before sending it, including any absolute paths.
 
 ```bash
 agent-sec-cli intent propose \
-  --task "Allow reading and writing the src directory tree; keep config/important.txt unchanged. Do not execute programs or use the network."
+  --task "Allow writes only under /srv/reports. Ask before launching a command that requests writes to /srv/reports/final." \
+  --format cedar > task.cedar
 ```
 
 Only `--task` is required: it uses the default daemon endpoint and text output.
@@ -189,18 +189,19 @@ back to a local model.
 
 ### Policy and safety boundaries
 
-- Use only the unified schema: `file.read`, `file.write`, `file.exec` and
+- Use only the unified schema: `file.read`, `file.write`, `file.exec`, `process.spawn` and
   `network.use`. Modification requests carry `WriteOperation` values
   `write/create/delete/rename/setattr`; a delete prohibition is not immutability.
   `file.read` means content reading, not listing names or reading metadata.
-- Model output is the whole grant: no permit or forbid is appended and no model
-  rule is overridden. When a task says "do not delete a.txt", the model writes that
-  forbid itself instead of the user supplying a protection list.
+- Task candidates contain only the validated model rules. Configure shell startup and dependency
+  access for a command-mode sandbox hook in its deployment preset using
+  `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`.
 - Paths use `resource.path` and `context.input.program/cwd`, not File UIDs.
   The frontend accepts canonical absolute literals with `==`/`!=`, or `like`
   patterns whose only wildcard is the trailing directory `/*`. Dynamic and
   noncanonical path expressions, unbound templates, model-supplied Subject/File
-  identities and annotations other than optional `@id` are rejected. Path
+  identities and unknown annotations are rejected. Task permits may carry
+  `@advice` with an `escalate` verdict and a nonempty message to request confirmation. Path
   attributes must be read directly from those receivers; a record projection such
   as `{r: resource}.r.path` is rejected, and an action that cannot apply to the
   resource type fails validation, matching policy admission.
@@ -213,21 +214,31 @@ back to a local model.
   `arg_count`, and optional `mode/ownerUid/ownerGid`. Optional fields require `has`
   guards. Argument index 0 represents `argv[1]`, excluding `argv[0]`.
 - Cedar defaults to Deny without a matching permit; forbid overrides permit.
-  Ordinary permits do not restrict other policies. An exclusive requirement must
-  be expressed with native complement forbids, including its conditions; a write
-  complement must remain specific to the requested operation.
-- Pure prohibitions must not add permits. No sensitive-path blacklist, execution
-  ban or network ban is added implicitly. Inspect the actual Cedar against the task;
+  For “allow writes under a directory,” check for a scoped permit. For “allow writes
+  **only** under a directory,” also check for a forbid covering writes outside it.
+  Other active policies can grant those writes if the forbid is missing. Any
+  operation or condition limiting the requirement must also limit the forbid.
+  A prohibition within that scope can target a particular file or operation.
+- The model leaves purely prohibitive requirements without additional permits. No sensitive-path
+  blacklist, execution ban or network ban is added implicitly. Inspect the actual Cedar against the task;
   neither Strict nor model-reported `unresolved` proves that every requirement is met.
 
 ### Inspect the result
 
-Default `--format text` displays the original task, model Cedar draft, `unresolved`,
-validated Cedar, safety notes and expiry. `--format cedar`
-prints the candidate Cedar with unresolved requirements in comments; `--format json` prints
+Default `--format text` displays the task, `unresolved` and a rule-by-rule review derived from
+the validated Cedar, followed by the full Cedar and expiry. The review includes conditions and
+confirmation messages. Rules with unsupported conditions appear in Cedar. The same review is
+available in `candidate.notes` in JSON output. `--format cedar`
+includes unresolved requirements, per-requirement coverage and any confirmation
+conditions or compatibility findings as Cedar comments. Mixed principal headers are rejected.
+The complete candidate is checked against the OS PDP filesystem projection and the AgentSight
+file-policy translator. A rejection is reported without rewriting the validated rules; `--format json` prints
 the complete result. Cedar control characters are escaped only while stdout is a terminal;
-redirected or piped output keeps the model text unchanged. If the model policy is empty,
-`artifact.text` is empty. No format prompts for input or requests approval.
+redirected or piped output keeps the model text unchanged. An empty model draft grants no permissions.
+For OS requests, the PDP confirms network access at command launch; the sandbox projects an ordinary network grant to a process-wide network mode. Tasks requiring approval per connection remain unresolved.
+Review the `HUMAN GATE` notes for gated paths and whole-network access, and
+`COVERAGE` for the consumers each statement shape can support. No format prompts for
+input or requests approval.
 Communication defaults to 45 seconds; the model has at most 30 seconds, unaffected
 by increasing `--timeout-ms`. `--ttl` accepts `1..=1800` seconds, default `1800`,
 starting when the daemon receives the request, without automatic renewal.
@@ -265,9 +276,8 @@ trusted identity or interception of actual file operations.
 The exit status reports whether the command ran, not whether the task could be
 expressed; read `outcome` and `reasons` for that.
 
-This Cedar schema has only `file.read`, `file.write`, `file.exec` and `network.use`,
-not TTL or process identity. Trusted approval, specific process binding and expiry
-revocation remain downstream work. Enforcement must also normalize paths, handle
+TTL and trusted process identity are outside the task policy. Trusted approval,
+specific process binding and expiry revocation remain downstream work. Enforcement must also normalize paths, handle
 symlinks/hardlinks and namespaces, authorize both rename source and destination,
 and ensure complete argument indices consistent with `arg_count` and valid
 attribute values.

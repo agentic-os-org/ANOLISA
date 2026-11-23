@@ -531,6 +531,9 @@ name = "asc-intent"
 version = "1.3.0"
 dependencies = [
  "asc-model-client",
+ "asc-pdp-runtime",
+ "asc-policy-cedar",
+ "asc-policy-translator-agentsight",
  "cedar-policy",
  "serde",
  "serde_json",

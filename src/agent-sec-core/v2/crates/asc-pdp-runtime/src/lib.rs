@@ -67,6 +67,14 @@ impl PdpRuntime {
     }
 }
 
+/// Checks whether the OS authorizer can partition the filesystem rules in a policy set.
+///
+/// # Errors
+/// Returns the same unsupported predicate or resource error as snapshot admission.
+pub fn validate_os_policy_regions(policies: &cedar_policy::PolicySet) -> Result<(), PdpError> {
+    path_conditions::boundaries(policies).map(|_| ())
+}
+
 /// Failures admitting a snapshot or preparing an authorization result.
 #[derive(Debug, thiserror::Error)]
 pub enum PdpError {

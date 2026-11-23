@@ -20,3 +20,13 @@ pub use plan::{
     AgentSightScopePlan, AgentSightSourceBinding, FILE_PROTECTION_POLICY_MEDIA_TYPE,
 };
 pub use translate::AgentSightTranslator;
+
+/// Checks a complete projected file view with the binding translator, without attaching a policy.
+///
+/// # Errors
+/// Returns the binding translator's rejection when the view cannot be lowered to file protection.
+pub fn validate_file_protection(
+    files: &cedar_policy::pst::PolicySet,
+) -> Result<(), asc_policy_types::target::TranslationRejection> {
+    cedar::translate(files).map(|_| ())
+}

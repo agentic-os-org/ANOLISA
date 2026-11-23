@@ -109,8 +109,9 @@ CLI 要求支持 carrier 的新 daemon，应先升级 daemon。
 `policy create --file` 提交；Policy 准入仍会校验源码和 schema。
 
 LLM 只接收任务文本和统一 `seccore.cedarschema`，直接返回
-`{"policy":"...","unresolved":[]}`。Rust 解析原始 Cedar、检查绝对路径表达式
-并执行官方 Strict 校验，不追加任何规则。
+`{"policy":"...","unresolved":[]}`。Rust 检查草稿的绝对路径表达式，并执行官方 Cedar Strict 校验。
+模型返回的 JSON 格式或字段无效，或 Cedar 存在可修正的校验错误时，在原截止时间内重试一次。混用两类 principal 头部时要求模型修正。按整份策略检查 PDP 文件权限投影和 AgentSight 文件保护转换。校验通过后保留原始规则，执行端的兼容性问题随候选报告；会扩大权限的确认规则保留原始草稿并返回待澄清。
+命令启动前由 PDP 处理联网确认，sandbox 将普通网络许可投影为进程级网络模式。逐连接审批要求记入 `unresolved`。
 `asc.intent.draft.v1` 草稿保存原始响应及任务来源。校验通过或 `unresolved` 为空均不证明
 理解正确或完整；未解决要求由模型自报。CLI 使用内嵌 schema 从草稿重建预期产物，
 同时复核版本、来源、TTL 和哈希。CLI 与 daemon 须同步升级。
@@ -140,12 +141,13 @@ export ASC_INTENT_THINKING=provider
 自动选择模型和本地模型回退尚未实现；后续计划评估本地小模型以降低云端调用费用。
 
 此功能只把任务正文发送给云模型，可能产生费用。
-不采集文件正文、目录列表或 Git 变更，daemon 不打开调用方路径。
+生成候选时不访问宿主机路径、符号链接目标、文件正文、目录列表或 Git 变更。
 任务中的绝对路径和敏感文本会发送，请先检查任务内容。
 
 ```bash
 agent-sec-cli intent propose \
-  --task "Allow reading and writing the src directory tree; keep config/important.txt unchanged. Do not execute programs or use the network."
+  --task "Allow writes only under /srv/reports. Ask before launching a command that requests writes to /srv/reports/final." \
+  --format cedar > task.cedar
 ```
 
 只需要 `--task`：连接默认 daemon 端点并输出 text。
@@ -155,14 +157,14 @@ agent-sec-cli intent propose \
 
 ### Policy 和安全边界
 
-- 只使用统一 schema：`file.read`、`file.write`、`file.exec`、`network.use`。
+- 只使用统一 schema：`file.read`、`file.write`、`file.exec`、`process.spawn`、`network.use`。
   修改请求通过 `WriteOperation` 区分 `write/create/delete/rename/setattr`；禁删不等于不可变。
   `file.read` 表示内容读取，不等于仅列目录名或读取元数据。
-- 模型输出就是全部授权：程序不追加 permit/forbid，也不覆盖模型写出的规则。
-  task 要求“不删除 a.txt”时由模型自行写出对应 forbid，而不是让用户提供保护列表。
+- 候选只包含通过校验的任务规则。hook 使用动态命令权限时，部署方可通过
+  `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 单独配置启动 shell 和读取依赖所需的权限。
 - 路径使用 `resource.path`、`context.input.program/cwd`，不使用 File UID。
   前端接受规范绝对字符串的 `==`/`!=`，或仅在目录末尾含 `/*` 通配符的 `like`。
-  动态或非规范路径、未绑定模板、模型自报 Subject/File 身份及可选 `@id` 之外的注解均被拒绝。
+  动态或非规范路径、未绑定模板、模型自报 Subject/File 身份及未知注解均被拒绝。任务 permit 可带 `@id` 和请求人工确认的 `@advice`，后者须含 `escalate` 和非空消息。
   路径属性只能从上述接收者直接读取，`{r: resource}.r.path` 这类 record 投影会被拒绝；
   与资源类型不匹配的 action 也会校验失败，与 Policy admission 保持一致。
 - 提示词要求将无法表达的必要身份、条件、审批或义务保留于 `unresolved`，不能改成
@@ -170,18 +172,20 @@ agent-sec-cli intent propose \
   这是模型指令，不是确定性的完整性或冲突检查。
 - 条件可直接使用 schema 的 `program`、`cwd`、带索引的 `args` 与 `arg_count`，以及可选
   `mode/ownerUid/ownerGid`；可选字段须先用 `has` 判断。参数 index 0 对应 `argv[1]`，不含 `argv[0]`。
-- Cedar 无匹配 permit 默认 Deny，forbid 优先。普通 permit 不限制其它策略的允许。
-  排他要求须用原生补集 forbid 表达并包含条件；write 补集须限定所请求的 operation。
-- 纯禁止不应补 permit；程序不自动添加敏感路径黑名单、程序或网络禁令。
+- Cedar 无匹配 permit 默认 Deny，forbid 优先。“允许写某目录”时，核对范围内的 permit。
+  “**只允许**写某目录”时，还须核对范围外的写入 forbid，否则其他生效策略仍可授权。
+  要求若只针对某种操作或条件，禁令也须限定在同一操作或条件下。范围内可另行禁止特定文件或操作。
+- 模型不为纯禁止要求补充 permit；程序不自动添加敏感路径黑名单、程序或网络禁令。
   请结合任务核对实际 Cedar；Strict 和模型自报 `unresolved` 均不证明每项要求已经落实。
 
 ### 查看结果
 
-`--format text` 为默认值，输出原任务、模型 Cedar 草稿、`unresolved`、已校验 Cedar、
-安全提示及有效期。`--format cedar` 输出待审 Cedar，注释中附未解决要求；
+默认的 `--format text` 展示原任务和 `unresolved`，再按最终 Cedar 的语句逐条列出动作、
+适用条件和确认提示。遇到无法准确转述的条件，直接显示该条 Cedar 原文。
+核对文字之后列出完整 Cedar 和有效期；同一份核对文字也包含在 JSON 的 `candidate.notes` 中。`--format cedar` 输出待审 Cedar，注释中附未解决要求、逐项覆盖情况，以及适用的审批条件和兼容性提示；
 仅当 stdout 是终端时转义 Cedar 中的控制字符，重定向或管道输出保留模型原文；
 `--format json` 输出完整结果。
-模型 policy 为空时，`artifact.text` 为空。任何模式都不会读取键盘输入，也不发起审批。
+空草稿不授予任何权限。可在 `HUMAN GATE` 中核对要求审批的路径及整网访问，在 `COVERAGE` 中核对哪些执行端可以承接每项规则。任何模式都不会读取键盘输入，也不发起审批。
 默认通信预算为 45 秒；模型调用最多 30 秒，调大 `--timeout-ms` 不会延长模型预算。
 `--ttl` 为 `1..=1800` 秒，默认 `1800`，从 daemon 收到请求时计时，不自动续期。
 
@@ -214,8 +218,7 @@ agent-sec-cli intent propose \
 
 退出码只说明命令是否跑完，不说明任务能否表达；后一点看 `outcome` 和 `reasons`。
 
-此 Cedar schema 只有 `file.read`、`file.write`、`file.exec`、`network.use`，没有 TTL
-或进程身份。可信审批、具体进程绑定与到期撤销仍须由后段实现。执行端还须规范化路径、
+TTL 与可信进程身份由任务策略之外的机制提供。可信审批、具体进程绑定与到期撤销仍须由后段实现。执行端还须规范化路径、
 处理符号链接/硬链接和命名空间，分别裁决 rename 的源与目标，并保证参数索引和
 `arg_count` 一致、属性值有效。本命令不证明这些条件
 已经实现，因此不能声称 `rm` 已被拦截。

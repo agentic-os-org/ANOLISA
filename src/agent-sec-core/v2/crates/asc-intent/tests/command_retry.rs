@@ -86,7 +86,7 @@ fn command_prompt_includes_schema_and_a_valid_example() {
             Ok(system
                 .lines()
                 .find(|line| line.starts_with("{\"policy\":"))
-                .expect("提示词应包含 JSON 输出示例")
+                .expect("the prompt must include a JSON response example")
                 .to_owned())
         }
     }
@@ -97,7 +97,7 @@ fn command_prompt_includes_schema_and_a_valid_example() {
     };
     let outcome = propose_command(&PromptExample, "fixture", &input, deadline()).unwrap();
     let CommandPolicyOutcome::Candidate { policy, .. } = outcome else {
-        panic!("示例应通过 Cedar 校验并返回候选");
+        panic!("the example must pass Cedar validation and produce a candidate");
     };
     assert_eq!(policy, VALID.replace("a.csv", "report.csv"));
 }
@@ -144,8 +144,8 @@ fn the_retry_replays_the_local_rejection() {
     propose_command(&provider, "fixture", &input(), deadline()).unwrap();
     let payloads = provider.payloads();
     assert_eq!(payloads.len(), 2);
-    assert!(!payloads[0].contains("上次输出被本地校验拒绝"));
-    assert!(payloads[1].contains("上次输出被本地校验拒绝"));
+    assert!(!payloads[0].contains("The previous response failed local validation"));
+    assert!(payloads[1].contains("The previous response failed local validation"));
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn an_empty_policy_is_admitted_with_its_caveats() {
 
 #[test]
 fn clarification_is_not_retried() {
-    let clarification = json!({"policy": "", "unresolved": ["$DIR 未定义"]}).to_string();
+    let clarification = json!({"policy": "", "unresolved": ["$DIR is undefined"]}).to_string();
     let provider = Scripted::new(&[clarification]);
     let outcome = propose_command(&provider, "fixture", &input(), deadline()).unwrap();
     assert!(matches!(

@@ -294,3 +294,188 @@ fn set<T: PartialEq>(slot: &mut Option<T>, value: T) -> Option<()> {
         }
     }
 }
+
+/// Renders one row per validated task statement. Unsupported conditions keep their Cedar text
+/// so a reviewer never sees a partial translation with an omitted restriction.
+pub(crate) fn rule_review(text: &str) -> Result<String, crate::PolicyError> {
+    use crate::PolicyError;
+    use std::fmt::Write as _;
+
+    let policies = PolicySet::from_str(text).map_err(|_| PolicyError::Syntax)?;
+    let mut review = "Rule review (pending confirmation)".to_owned();
+    if policies.policies().next().is_none() {
+        review.push_str("\n  This candidate contains no statements and grants no permissions.");
+    }
+    for (index, policy) in policies.policies().enumerate() {
+        write!(review, "\n  #{}", index + 1).map_err(|_| PolicyError::Encoding)?;
+        if let Some(id) = policy.annotation("id") {
+            write!(review, " {id:?}").map_err(|_| PolicyError::Encoding)?;
+        }
+        let statement = policy.to_json().map_err(|_| PolicyError::Encoding)?;
+        if let Some(description) = review_statement(&statement) {
+            write!(review, "  {description}").map_err(|_| PolicyError::Encoding)?;
+            if let Some(advice) = policy.annotation("advice") {
+                let message = crate::policy_validation::escalation_message(advice)?;
+                write!(
+                    review,
+                    ". Request confirmation before command launch with the message {message:?}"
+                )
+                .map_err(|_| PolicyError::Encoding)?;
+            }
+        } else {
+            write!(review, "  Review the full Cedar statement below.\n{policy}")
+                .map_err(|_| PolicyError::Encoding)?;
+        }
+    }
+    Ok(review)
+}
+
+fn review_statement(statement: &Value) -> Option<String> {
+    let effect = match statement["effect"].as_str()? {
+        "permit" => "Allow",
+        "forbid" => "Forbid",
+        _ => return None,
+    };
+    let action = &statement["action"];
+    let principal = &statement["principal"];
+    let subject = principal["op"] == "is"
+        && principal["entity_type"] == "SecCore::Subject"
+        && principal.get("in").is_none();
+    if !(principal["op"] == "All" || subject)
+        || action["op"] != "=="
+        || action["entity"]["type"] != "SecCore::Action"
+    {
+        return None;
+    }
+    let action = ActionCategory::from_id(action["entity"]["id"].as_str()?)?;
+    let resource = &statement["resource"];
+    match resource["op"].as_str()? {
+        "All" => {}
+        "is" if resource["entity_type"] == action.resource_type()
+            && resource.get("in").is_none() => {}
+        "==" if action == ActionCategory::Network
+            && resource["entity"]["type"] == action.resource_type()
+            && resource["entity"]["id"] == "all" => {}
+        _ => return None,
+    }
+    let verb = match action {
+        ActionCategory::Read => "reading file contents",
+        ActionCategory::Write => "modifying files",
+        ActionCategory::Exec => "executing files",
+        ActionCategory::Spawn => "starting processes",
+        ActionCategory::Network => "network access",
+    };
+    let mut row = format!("{effect} {verb}");
+    if subject {
+        row.push_str(" for SecCore subjects");
+    }
+    for condition in statement["conditions"].as_array()? {
+        if condition["kind"] != "when" {
+            return None;
+        }
+        row.push_str(" when ");
+        row.push_str(&review_condition(&condition["body"])?);
+    }
+    Some(row)
+}
+
+fn review_condition(body: &Value) -> Option<String> {
+    for (operator, word) in [("||", "or"), ("&&", "and")] {
+        if let Some(pair) = body.get(operator) {
+            let (left, right) = (&pair["left"], &pair["right"]);
+            if operator == "||"
+                && let Some(paths) = review_paths(body)
+            {
+                return Some(paths);
+            }
+            return Some(format!(
+                "({} {word} {})",
+                review_condition(left)?,
+                review_condition(right)?
+            ));
+        }
+    }
+    if let Some(equal) = body.get("==") {
+        if let Some(path) = equality_path(equal) {
+            return Some(format!("the path is {path:?}"));
+        }
+        for (field, literal) in [
+            (&equal["left"], &equal["right"]),
+            (&equal["right"], &equal["left"]),
+        ] {
+            let target_program =
+                serde_json::json!({".": {"left": {"Var":"resource"}, "attr":"program"}});
+            if *field == target_program {
+                return Some(format!(
+                    "the target program is {:?}",
+                    literal["Value"].as_str()?
+                ));
+            }
+            if attribute(field) == Some(("context.input", "operation")) {
+                let op = &literal["Value"]["__entity"];
+                if op["type"] == "SecCore::WriteOperation" {
+                    let name = match op["id"].as_str()? {
+                        "create" => "creation",
+                        "write" => "writing",
+                        "delete" => "deletion",
+                        "rename" => "renaming",
+                        "setattr" => "an attribute change",
+                        _ => return None,
+                    };
+                    return Some(format!("the operation is {name}"));
+                }
+            }
+        }
+    }
+    if let Some(like) = body.get("like")
+        && attribute(&like["left"]) == Some(("resource", "path"))
+    {
+        let (path, subtree) = pattern_scope(&like["pattern"]).ok()?;
+        return Some(if subtree {
+            format!("the path is {}", descendants(&path))
+        } else {
+            format!("the path is {path:?}")
+        });
+    }
+    None
+}
+
+fn descendants(tree: &str) -> String {
+    // For the root, the trailing wildcard can also match the empty suffix of "/".
+    if tree == "/" {
+        "the root directory or a descendant".to_owned()
+    } else {
+        format!("a descendant of {tree:?}")
+    }
+}
+
+/// Flattens a union of path literals while preserving the distinction between a directory,
+/// its children, and the common pair that grants both.
+fn review_paths(body: &Value) -> Option<String> {
+    let (mut points, mut trees) = (Vec::new(), Vec::new());
+    if !crate::policy_validation::path_literals(body, &mut points, &mut trees) {
+        return None;
+    }
+    points.sort();
+    points.dedup();
+    trees.sort();
+    trees.dedup();
+    let mut scopes = Vec::new();
+    for point in &points {
+        if trees.binary_search(point).is_ok() {
+            scopes.push(format!("{point:?} or a descendant"));
+        } else {
+            scopes.push(format!("{point:?}"));
+        }
+    }
+    for tree in trees {
+        if points.binary_search(&tree).is_err() {
+            scopes.push(descendants(&tree));
+        }
+    }
+    if scopes.len() == 1 {
+        Some(format!("the path is {}", scopes[0]))
+    } else {
+        Some(format!("the path matches any of [{}]", scopes.join(", ")))
+    }
+}
