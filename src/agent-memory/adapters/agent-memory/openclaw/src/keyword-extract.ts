@@ -158,13 +158,26 @@ export function extractKeywords(text: string): string {
  * space-separated query candidates.
  */
 export function extractCjkTrigrams(text: string): string[] {
-  // Keep only CJK Unified Ideographs (U+4E00..U+9FFF), Hiragana
-  // (U+3040..U+309F), Katakana (U+30A0..U+30FF), and CJK
-  // Compatibility (U+F900..U+FAFF).
-  const cjkChars = text.replace(/[^\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uf900-\ufaff]/g, "");
+  // Keep only CJK Unified Ideographs (U+4E00..U+9FFF, Extension A
+  // U+3400..U+4DBF), Hiragana (U+3040..U+309F), Katakana
+  // (U+30A0..U+30FF), CJK Compatibility (U+F900..U+FAFF), the
+  // supplementary ideograph planes (Extensions B..I, U+20000..U+2EE5F;
+  // Extensions G..H, U+30000..U+323AF), and CJK Compatibility
+  // Supplements (U+2F800..U+2FA1F).  The `u` flag is required so the
+  // supplementary ranges match whole code points instead of lone
+  // surrogates.
+  const cjkChars = Array.from(
+    text.replace(
+      /[^\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uf900-\ufaff\u{20000}-\u{2ee5f}\u{2f800}-\u{2fa1f}\u{30000}-\u{323af}]/gu,
+      "",
+    ),
+  );
   if (cjkChars.length < 3) return [];
 
   // Extract overlapping trigrams from the CJK character sequence.
+  // cjkChars holds one code point per element, so supplementary
+  // ideographs such as 𠮷 (U+20BB7) count as a single character and
+  // never split into lone surrogates inside a trigram.
   const trigrams: string[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < cjkChars.length - 2; i++) {

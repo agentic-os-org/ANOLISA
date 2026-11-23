@@ -176,6 +176,39 @@ describe("extractCjkTrigrams", () => {
     assert.ok(trigrams.length > 0);
     assert.ok(trigrams.includes("\u79d8\u5bc6\u4ee3"));
   });
+
+  it("keeps supplementary Han ideographs in trigrams", () => {
+    // 请查阅𠮷野家最新菜单: 𠮷 (U+20BB7) is outside the BMP and must not
+    // be dropped or split into lone surrogates.
+    const trigrams = extractCjkTrigrams("请查阅𠮷野家最新菜单");
+    assert.ok(
+      trigrams.includes("𠮷野家"),
+      "should include the trigram 𠮷野家",
+    );
+    assert.ok(
+      trigrams.some((t) => t.startsWith("𠮷")),
+      "trigrams crossing 𠮷 should start at the supplementary ideograph",
+    );
+    for (const t of trigrams) {
+      for (const ch of t) {
+        const lone = ch.length === 1 && /[\uD800-\uDFFF]/.test(ch);
+        assert.ok(!lone, `trigram "${t}" must not contain lone surrogates`);
+      }
+    }
+  });
+
+  it("counts each supplementary ideograph as one character for windowing", () => {
+    // Three supplementary ideographs -> exactly one trigram, not three
+    // surrogates mis-split into two UTF-16 windows.
+    assert.deepEqual(extractCjkTrigrams("𠀀𠀁𠀂"), ["𠀀𠀁𠀂"]);
+    assert.deepEqual(extractCjkTrigrams("𠀀𠀁"), []);
+  });
+
+  it("keeps BMP name extraction unchanged", () => {
+    const trigrams = extractCjkTrigrams("请查阅吉野家最新菜单");
+    assert.ok(trigrams.includes("吉野家"), "BMP names keep working");
+    assert.equal(trigrams.length, 8, "10 BMP code points -> 8 trigrams");
+  });
 });
 
 describe("buildRecallQueries", () => {
@@ -313,6 +346,17 @@ describe("buildRecallQueries", () => {
       q.split(" ").every((t) => t.length >= 3),
     );
     assert.ok(trigramCandidate, "should have trigram candidate with all tokens >= 3 chars");
+  });
+
+  it("builds a trigram candidate containing a supplementary Han name", () => {
+    const queries = buildRecallQueries("请查阅𠮷野家最新菜单");
+    assert.ok(
+      queries.some((q) => q.split(" ").includes("𠮷野家")),
+      "the astral name must survive as a trigram token, not only inside the raw fallback",
+    );
+    for (const q of queries) {
+      assert.ok(Buffer.byteLength(q, "utf8") <= MAX_QUERY_BYTES);
+    }
   });
 
   it("includes 2-char keywords like AI and ID in candidates", () => {
