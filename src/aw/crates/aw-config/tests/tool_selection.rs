@@ -129,11 +129,34 @@ fn native_selectors_use_adapter_union_across_shared_agent_targets() {
 }
 
 #[test]
+fn agent_selectors_reject_undeclared_targets_at_event_and_step_levels() {
+    let validator = Validator::new().unwrap();
+    for path in [
+        "/spec/events/tool.before",
+        "/spec/events/tool.before/steps/0",
+    ] {
+        let mut value = document();
+        let selected = value.pointer_mut(path).unwrap();
+        selected["match"] = json!({"agents":["qoder", "typo"]});
+        let error = validator
+            .parse(&serde_json::to_vec(&value).unwrap())
+            .err()
+            .expect("unknown target must fail validation");
+        assert!(matches!(error, Error::Invariant { path: actual, .. }
+            if actual == format!("{path}/match/agents/1")));
+    }
+}
+
+#[test]
 fn invalid_selectors_are_rejected_even_on_disabled_steps() {
     let validator = Validator::new().unwrap();
     for enabled in [true, false] {
         for selector in [
             json!({}),
+            json!({"agents":[]}),
+            json!({"agents":["qoder","qoder"]}),
+            json!({"agents":["*"]}),
+            json!({"agents":"qoder"}),
             json!({"tools":[]}),
             json!({"tools":["*","bash"]}),
             json!({"tools":["bash","bash"]}),

@@ -49,6 +49,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `events.<name>.required` | Defaults to `false`; a disabled event cannot be required |
 | `events.<name>.budget_ms` | Optional positive override of the default event budget |
 | `events.<name>.steps` | Required ordered array; an empty array invokes no Provider |
+| `events.<name>.match.agents`, `steps[].match.agents` | Optional nonempty list of distinct target names declared in `spec.agents`. Omit to select every target at that level. |
 | `events.tool.before.match.tools`, `events.tool.after.match.tools` | Optional nonempty selector array; omitted means all native tools; `['*']` cannot be mixed with exact selectors |
 | `events.tool.before.guard` | Parsed and checked as a `security.violation` reference; currently rejected by runtime admission, so omit it from configurations |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
@@ -237,6 +238,11 @@ a history entry is insufficient. Required redaction must not use `report`.
 The service enforces these requirements at admission and execution. Ordinary
 Qoder SDK and QwenPaw resident launches declare `withhold_result` for structured Provider
 and boolean Hook after steps. Reloadable launches and native-command steps reject it.
+
+An event applies only to its selected targets. A step must also match its own
+target and tool selectors. If all enabled steps are filtered out for a target,
+AW omits the event for that target. An enabled event with `steps: []` still
+requires Hook support on its selected targets.
 
 Both tool events and their steps accept `match.tools`. Active `input.submit`,
 `session.start`, `session.end` and `turn.stop` events and steps reject it. A step runs only when

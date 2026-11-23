@@ -20,7 +20,8 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     // visible error if the bundled shape and semantic validator ever diverge.
     let spec = &document["spec"];
     let mut adapters = BTreeSet::new();
-    for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
+    let agents = spec["agents"].as_object().ok_or(Error::InvalidSchema)?;
+    for (name, agent) in agents {
         adapters.insert(agent["adapter"].as_str().ok_or(Error::InvalidSchema)?);
         require(
             agent.get("qoder_sdk").is_none() || agent["adapter"] == "qoder-sdk",
@@ -66,17 +67,13 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
         )?;
         let runtime_non_tool =
             matches!(name.as_str(), "session.start" | "turn.stop" | "session.end");
-        require(
-            name != "input.submit" || event.get("match").is_none(),
+        validate_match(
+            event,
             &path,
-            "input.submit has no tool selectors",
+            agents,
+            &adapters,
+            name != "input.submit" && !(enabled && runtime_non_tool),
         )?;
-        require(
-            !(enabled && runtime_non_tool && event.get("match").is_some()),
-            &path,
-            "non-tool events have no tool selectors",
-        )?;
-        validate_tools(event, &path, &adapters)?;
         let mut ids = BTreeSet::new();
         for (index, step) in event["steps"]
             .as_array()
@@ -86,17 +83,13 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
         {
             let path = format!("{path}/steps/{index}");
             let active = enabled && step_enabled(step);
-            require(
-                name != "input.submit" || step.get("match").is_none(),
+            validate_match(
+                step,
                 &path,
-                "input.submit has no tool selectors",
+                agents,
+                &adapters,
+                name != "input.submit" && !(active && runtime_non_tool),
             )?;
-            require(
-                !(active && runtime_non_tool && step.get("match").is_some()),
-                &path,
-                "non-tool events have no tool selectors",
-            )?;
-            validate_tools(step, &path, &adapters)?;
             let id = step["id"].as_str().ok_or(Error::InvalidSchema)?;
             require(ids.insert(id), &format!("{path}/id"), "duplicate step ID")?;
             let provider = step["provider"].as_str().ok_or(Error::InvalidSchema)?;
@@ -259,8 +252,28 @@ fn validate_step_mode(
     Ok(())
 }
 
-fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Result<(), Error> {
+fn validate_match(
+    value: &Value,
+    path: &str,
+    agents: &serde_json::Map<String, Value>,
+    adapters: &BTreeSet<&str>,
+    tools_allowed: bool,
+) -> Result<(), Error> {
+    if let Some(names) = value["match"]["agents"].as_array() {
+        for (index, name) in names.iter().enumerate() {
+            require(
+                agents.contains_key(name.as_str().ok_or(Error::InvalidSchema)?),
+                &format!("{path}/match/agents/{index}"),
+                "target must be declared in spec.agents",
+            )?;
+        }
+    }
     if let Some(tools) = value["match"]["tools"].as_array() {
+        require(
+            tools_allowed,
+            &format!("{path}/match/tools"),
+            "non-tool events have no tool selectors",
+        )?;
         require(
             tools.len() == 1 || !tools.iter().any(|tool| tool == "*"),
             &format!("{path}/match/tools"),

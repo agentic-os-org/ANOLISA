@@ -105,11 +105,11 @@ pub fn preflight(
         if let Some(gate) = EventGate::for_event(event_name) {
             require(
                 gate.has_tool_payload()
-                    || (event.get("match").is_none()
+                    || (event["match"].get("tools").is_none()
                         && event["steps"].as_array().is_some_and(|steps| {
-                            steps
-                                .iter()
-                                .all(|step| !step_enabled(step) || step.get("match").is_none())
+                            steps.iter().all(|step| {
+                                !step_enabled(step) || step["match"].get("tools").is_none()
+                            })
                         })),
                 "non-tool event does not support tool selectors",
             )?;

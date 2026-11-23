@@ -1,10 +1,11 @@
-//! Conservative selector intersection for a fixed Adapter, before native tool data exists.
+//! Target projection diagnostics and runtime tool selector matching.
 
-use super::rules::{string, tool_selectors};
+use super::rules::string;
 use super::AdmissionError;
-use aw_config::requirements::{matches_tool_selector, step_enabled};
+use aw_config::requirements::{matches_tool_selector, project, step_enabled};
+use std::collections::HashSet;
 
-/// An enabled step whose selectors cannot overlap for a configured target.
+/// An enabled step excluded by target or tool selectors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedOutStep {
     /// The configured event containing the step.
@@ -13,7 +14,7 @@ pub struct ProjectedOutStep {
     pub step_id: String,
 }
 
-/// Lists enabled steps excluded by the same selector intersection as [`super::preflight`].
+/// Lists enabled steps excluded by the same target projection as [`super::preflight`].
 ///
 /// Disabled events and steps are omitted. Unknown normalized/native aliases stay
 /// applicable. This offline diagnostic checks no capabilities and invokes no
@@ -25,11 +26,13 @@ pub fn projected_out_steps(
     config: &aw_config::Configuration,
     target: &str,
 ) -> Result<Vec<ProjectedOutStep>, AdmissionError> {
+    let mut applicable = HashSet::new();
+    for requirement in project(config, target)? {
+        for step in requirement.steps {
+            applicable.insert((requirement.event, step.step_id));
+        }
+    }
     let spec = &config.as_value()["spec"];
-    let agent = spec["agents"]
-        .get(target)
-        .ok_or(AdmissionError::Rejected("unknown configured Agent target"))?;
-    let adapter = string(&agent["adapter"])?;
     let events = spec["events"].as_object().ok_or(AdmissionError::Rejected(
         "configuration events must be an object",
     ))?;
@@ -38,23 +41,24 @@ pub fn projected_out_steps(
         if event["enabled"] != true {
             continue;
         }
-        let event_tools = tool_selectors(event)?;
         for step in event["steps"]
             .as_array()
             .ok_or(AdmissionError::Rejected("event steps must be an array"))?
         {
-            if step_enabled(step) && !overlap(&event_tools, &tool_selectors(step)?, adapter) {
+            if !step_enabled(step) {
+                continue;
+            }
+            let step_id = string(&step["id"])?;
+            if !applicable.contains(&(event_name.as_str(), step_id)) {
                 excluded.push(ProjectedOutStep {
                     event: event_name.clone(),
-                    step_id: string(&step["id"])?.to_owned(),
+                    step_id: step_id.to_owned(),
                 });
             }
         }
     }
     Ok(excluded)
 }
-
-pub(super) use aw_config::requirements::selectors_overlap as overlap;
 
 /// Evaluates whether event-level and step-level selectors admit the given tool identity.
 pub fn matches_tool_selectors(

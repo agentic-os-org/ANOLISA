@@ -2,6 +2,7 @@
 
 use super::{hook_command, native_event};
 use crate::Result;
+use aw_config::requirements::HookRequirement;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -137,15 +138,19 @@ pub(super) fn read_owned(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn install(config: &Value, cancelled: &AtomicBool) -> Result<()> {
+pub(super) fn install(requirements: &[HookRequirement<'_>], cancelled: &AtomicBool) -> Result<()> {
     let directory = match std::env::var_os("CODEX_HOME") {
         Some(path) => PathBuf::from(path),
         None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?).join(".codex"),
     };
-    install_in(&directory, config, cancelled)
+    install_in(&directory, requirements, cancelled)
 }
 
-fn install_in(directory: &Path, config: &Value, cancelled: &AtomicBool) -> Result<()> {
+fn install_in(
+    directory: &Path,
+    requirements: &[HookRequirement<'_>],
+    cancelled: &AtomicBool,
+) -> Result<()> {
     check_cancelled(cancelled)?;
     if !directory.is_absolute() {
         return Err("Codex home must be absolute".into());
@@ -196,7 +201,11 @@ fn install_in(directory: &Path, config: &Value, cancelled: &AtomicBool) -> Resul
         .as_object_mut()
         .ok_or("invalid Codex hooks")?;
     for &event in super::EVENTS {
-        if crate::callback::lifecycle(event) && config["spec"]["events"][event]["enabled"] != true {
+        if crate::callback::lifecycle(event)
+            && !requirements
+                .iter()
+                .any(|requirement| requirement.event == event)
+        {
             continue;
         }
         let command = hook_command(&executable, event)?;
@@ -263,7 +272,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cancelled = AtomicBool::new(true);
         let home = root.path().join("home");
-        assert!(install_in(&home, &json!({}), &cancelled)
+        assert!(install_in(&home, &[], &cancelled)
             .unwrap_err()
             .to_string()
             .contains("cancelled"));
@@ -295,7 +304,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let cancelled = AtomicBool::new(false);
-        install_in(home.path(), &json!({}), &cancelled).unwrap();
+        install_in(home.path(), &[], &cancelled).unwrap();
         let live = home.path().join("hooks.json");
         let candidate = home.path().join("candidate");
         let installed = fs::read(&live).unwrap();
@@ -304,7 +313,7 @@ mod tests {
         assert!(publish(&candidate, &live, b"original", &cancelled).is_err());
         let backup = home.path().join("hooks.json.aw-backup");
         for _ in 0..2 {
-            let error = install_in(home.path(), &json!({}), &cancelled)
+            let error = install_in(home.path(), &[], &cancelled)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("recovery review"), "{error}");
@@ -312,7 +321,7 @@ mod tests {
             assert_eq!(fs::read(&backup).unwrap(), b"concurrent user edit");
         }
         fs::rename(&backup, home.path().join("reviewed-hooks.json")).unwrap();
-        install_in(home.path(), &json!({}), &cancelled).unwrap();
+        install_in(home.path(), &[], &cancelled).unwrap();
         assert_eq!(fs::read(&live).unwrap(), installed);
     }
 

@@ -27,6 +27,43 @@ fn step(id: &str, tools: Value) -> Value {
 }
 
 #[test]
+fn target_names_scope_empty_events_and_intersect_with_step_and_tool_selectors() {
+    let mut value = document();
+    // A second target using the same Adapter must still have an independent policy.
+    value["spec"]["agents"]["second"] = value["spec"]["agents"]["qoder"].clone();
+    value["spec"]["events"] = json!({
+        "session.start": {"enabled": true, "match": {"agents": ["qoder"]}, "steps": []},
+        "input.submit": {"enabled": true, "steps": [{
+            "id": "prompt", "provider": "check", "effects": ["observe"], "on_error": "report",
+            "match": {"agents": ["second"]}
+        }]},
+        "tool.before": {"enabled": true, "match": {"agents": ["qoder", "second"], "tools": ["bash"]},
+            "steps": [
+                {"id": "shell", "provider": "check", "effects": ["observe"], "on_error": "report",
+                 "match": {"agents": ["second", "pi"], "tools": ["bash"]}},
+                {"id": "read", "provider": "check", "effects": ["observe"], "on_error": "report",
+                 "match": {"agents": ["second"], "tools": ["file_read"]}}
+            ]}
+    });
+    let config = Validator::new()
+        .unwrap()
+        .parse(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    let qoder = project(&config, "qoder").unwrap();
+    assert_eq!(qoder.len(), 1);
+    assert_eq!(qoder[0].event, "session.start");
+    assert!(qoder[0].steps.is_empty());
+    let second = project(&config, "second").unwrap();
+    assert_eq!(second.len(), 2);
+    for (event, id) in [("input.submit", "prompt"), ("tool.before", "shell")] {
+        let steps = &second.iter().find(|req| req.event == event).unwrap().steps;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, id);
+    }
+    assert!(project(&config, "pi").unwrap().is_empty());
+}
+
+#[test]
 fn service_availability_follows_target_selector_projection() {
     for (outer, steps, applicable) in [
         (json!(["*"]), json!([]), true),

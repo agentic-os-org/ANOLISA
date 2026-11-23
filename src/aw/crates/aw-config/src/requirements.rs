@@ -66,7 +66,8 @@ pub fn requires_service(config: &Configuration, target: &str) -> Result<bool, Er
 /// Projects desired requirements for one configured target without invoking it.
 ///
 /// All entry modes use this same projection. Disabled events and steps are
-/// omitted. Exact foreign native selectors and disjoint normalized selectors
+/// omitted, as are events and steps selecting other targets in `match.agents`.
+/// Exact foreign native selectors and disjoint normalized selectors
 /// are excluded; unknown normalized/native aliases remain applicable. An event
 /// with enabled steps all excluded is omitted. An applicable enabled event with
 /// no enabled steps is retained, regardless of `required`.
@@ -97,7 +98,7 @@ pub fn project_document<'a>(
     let default_budget = &spec["execution"]["default_event_budget_ms"];
     let mut requirements = Vec::new();
     for (event_name, event) in spec["events"].as_object().ok_or(Error::InvalidSchema)? {
-        if event["enabled"] != true {
+        if event["enabled"] != true || !matches_agent(event, target) {
             continue;
         }
         let event_tools = tool_selectors(event)?;
@@ -112,6 +113,9 @@ pub fn project_document<'a>(
                 continue;
             }
             has_enabled_steps = true;
+            if !matches_agent(step, target) {
+                continue;
+            }
             let step_tools = tool_selectors(step)?;
             if !selectors_overlap(&event_tools, &step_tools, adapter) {
                 continue;
@@ -250,6 +254,14 @@ fn positive(value: &Value) -> Result<u64, Error> {
 
 fn string(value: &Value) -> Result<&str, Error> {
     value.as_str().ok_or(Error::InvalidSchema)
+}
+
+fn matches_agent(value: &Value, target: &str) -> bool {
+    value["match"].get("agents").is_none_or(|agents| {
+        agents
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == target))
+    })
 }
 
 fn tool_selectors(value: &Value) -> Result<Vec<String>, Error> {

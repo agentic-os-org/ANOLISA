@@ -62,6 +62,17 @@ match:
 
 事件和步骤的选择条件须同时匹配。省略 `match` 表示全部工具。原生名称区分大小写；扫描新工具时，还需配置 Provider 的[输入映射](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)。完整选择器语法见[配置参考](../../../developer-guide/zh/aw/configuration.md)。
 
+## 为 Hook 选择目标
+
+如果同一份配置在 `spec.agents` 下声明了 `qoder` 和 `qwenpaw`，可以在 `spec.events` 下添加以下事件，仅为 `qoder` 启用会话开始观测。
+
+```yaml
+session.start:
+  enabled: true
+  match: { agents: [qoder] }
+  steps: []
+```
+
 ## 选择 Agent
 
 `--agent` 取 `spec.agents` 中的目标名称。Qoder 从当前工作目录启动，`--` 后的参数传给原生程序。

@@ -379,12 +379,12 @@ pub fn resolve_shadow_preflight(
         if ev["enabled"] == true
             && EventGate::for_event(name).is_some_and(|g| !g.has_tool_payload())
         {
-            let no_step_match = ev["steps"].as_array().is_some_and(|steps| {
+            let no_step_tools = ev["steps"].as_array().is_some_and(|steps| {
                 steps
                     .iter()
-                    .all(|s| s["enabled"] == false || s.get("match").is_none())
+                    .all(|s| s["enabled"] == false || s["match"].get("tools").is_none())
             });
-            if ev.get("match").is_some() || !no_step_match {
+            if ev["match"].get("tools").is_some() || !no_step_tools {
                 return Err(Reject("non-tool event does not support tool selectors"));
             }
         }

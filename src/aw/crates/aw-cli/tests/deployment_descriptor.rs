@@ -320,6 +320,60 @@ fn show_selects_only_one_matching_target_without_disclosing_configuration() {
 }
 
 #[test]
+fn shared_configuration_scopes_descriptor_and_sdk_hints_to_the_selected_target() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut document = configuration(directory.path(), "qoder-sdk");
+    document["spec"]["agents"] = json!({
+        "qoder": {"adapter": "qoder-sdk", "argv": ["/absent/agent"]},
+        "qwenpaw": {"adapter": "qwenpaw", "argv": ["/absent/agent"]}
+    });
+    for event in ["session.start", "input.submit"] {
+        document["spec"]["events"][event] = json!({
+            "enabled": true, "steps": [], "match": {"agents": ["qoder"]}
+        });
+    }
+    let config = directory.path().join("aw.yaml");
+    fs::write(&config, serde_yaml_ng::to_string(&document).unwrap()).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    for (target, profile, adapter, selected) in [
+        ("qoder", "qoder-public-hooks", "qoder-sdk", true),
+        (
+            "qwenpaw",
+            "qwenpaw-installed-native-hooks",
+            "qwenpaw",
+            false,
+        ),
+    ] {
+        let run = |command: &str, args: &[&str]| -> Value {
+            let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+                .args(["config", command, "--config"])
+                .arg(&config)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{target}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(&output.stdout).unwrap()
+        };
+        let descriptor = run("descriptor", &["--agent", target, "--profile", profile]);
+        let shown = run("show", &["--sdk-target", adapter]);
+        for view in [&descriptor, &shown] {
+            assert_eq!(view["target"], target);
+            assert_eq!(
+                view.get("observe_session_start"),
+                selected.then_some(json!(true)).as_ref()
+            );
+        }
+        assert_eq!(descriptor["wait_for_input_submit"], selected);
+        assert_eq!(shown["input_enabled"], selected);
+    }
+}
+
+#[test]
 fn session_start_hint_is_scoped_to_qoder_public_hooks() {
     let directory = tempfile::tempdir().unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();

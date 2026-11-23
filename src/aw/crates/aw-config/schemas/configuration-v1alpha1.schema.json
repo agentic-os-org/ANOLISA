@@ -543,6 +543,18 @@
           },
           "minItems": 0,
           "maxItems": 128
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "agents"
+          ],
+          "properties": {
+            "agents": {
+              "$ref": "#/$defs/agentSelectors"
+            }
+          }
         }
       }
     },
@@ -748,13 +760,23 @@
         }
       ]
     },
+    "agentSelectors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/name"
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true
+    },
     "toolMatch": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "tools"
-      ],
+      "minProperties": 1,
       "properties": {
+        "agents": {
+          "$ref": "#/$defs/agentSelectors"
+        },
         "tools": {
           "type": "array",
           "items": {

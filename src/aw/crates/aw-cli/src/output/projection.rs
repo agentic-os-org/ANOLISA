@@ -75,7 +75,7 @@ pub(crate) fn human(steps: &[ProjectedOutStep], output: &mut impl Write) -> std:
     for step in steps {
         writeln!(
             output,
-            "target {}: projected out {}/{} (tool selectors do not overlap)",
+            "target {}: projected out {}/{} (excluded by target or tool selectors)",
             super::terminal::escape(&step.target),
             super::terminal::escape(&step.event),
             super::terminal::escape(&step.step_id),
