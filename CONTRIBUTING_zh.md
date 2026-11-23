@@ -238,6 +238,17 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 - PR 模板记录了风险、兼容性和回滚考虑。
 - 需要同步的文档和双语对应文件都已更新。
 
+### Draft PR 与认领规则
+
+在早期探索或未完成自检时可使用 **Draft PR**（`isDraft=true`），完成准备后再点击 **Ready for review**（`isDraft=false`）进入正式评审与合入门禁：
+
+- 仅创建 Draft PR **不会**自动认领或锁定对应 Issue。如需在开发期间占锁，请先在可认领 Issue 中评论 `/claim`（见 [`.github/TRIAGE.md`](.github/TRIAGE.md#claiming-community-work)）。
+- 除非作者在评论中明确请求早期反馈，否则 Draft PR 不会进入正式代码评审。
+- 认领 Issue 后如需更多时间，请在 Issue 中简短回复进展；无法继续时请及时评论 `/unclaim`。连续 7 天无可见进展时维护者可能礼貌跟进，满 14 天无进展（仅静置 Draft PR 不计为正式提交）时维护者可评论 `/unclaim` 释放认领。
+- 当关联 Issue 已由其他正式 PR 合入解决或关闭时，未合入的正式撞车 PR 会由维护者致谢、说明结论并关闭；尚未转为 Ready for review 的 Draft PR 不阻塞原 Issue 结案。
+
+完整的生命周期矩阵与自动化规则见 [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md)（[中文评审参考](specs/issue-claim-and-pr-lifecycle_zh.md)）。
+
 ## 文档同步
 
 按[文档规范 §5 的 PR 文档更新规则](specs/documentation-standard.md#5-pr-documentation-update-rules)

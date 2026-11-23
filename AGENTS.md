@@ -375,3 +375,30 @@ Never blindly accept and fix every AI finding. Some are false positives, some ar
 - "Missing error handling" when the `?` operator already propagates
 - "Config field unused" when it's reserved for a future phase
 - "Version mismatch" referencing stale file contents from a previous push
+
+---
+
+## 15. Issue Claiming, Draft PRs, and PR Closure
+
+> **MANDATORY**: Ownership-signal precedence, Draft PR (`isDraft=true`) vs.
+> ready-for-review PR (`isDraft=false`) semantics, claim inactivity cadence,
+> competing PR resolution, and standalone PR handling are defined in
+> [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md).
+> GitHub workflow mechanics for `/claim` and `/unclaim` are documented in
+> [`.github/TRIAGE.md`](.github/TRIAGE.md).
+
+Three invariants repeated here so agents do not conflict across components:
+
+- **Check all active locks before implementing**: inspect trusted
+  `github-actions[bot]` claim markers (`<!-- anolisa-claim ... state=claimed -->`),
+  `status:in-progress`, direct non-bot `assignees`, and open **non-draft** PRs
+  (`isDraft=false`). Do not duplicate active claimed work, and do not treat an
+  unclaimed `Draft PR` as a blocking lock.
+- **Do not auto-review Draft PRs**: skip unsolicited formal reviews on
+  `isDraft=true` PRs unless the author explicitly asks for early feedback or a
+  maintainer with write access manually invokes review.
+- **Distinguish Draft vs. formal PRs at closure**: when a linked issue is
+  resolved or closed as not planned, superseded **non-draft** competing PRs
+  must be closed with a polite note linking the resolution; lingering
+  unconverted **Draft PRs** do not block closing the issue.
+

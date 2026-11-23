@@ -34,13 +34,13 @@ ANOLISA combines public human governance with Agent-assisted automation so maint
 
 1. **Direction Discovery** — Component maintainers publish candidate directions in GitHub Discussions under [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
 2. **Issue Intake & Triage** — Automated routing and Agent-assisted issue analysis help classify incoming reports, check completeness, and surface component context; human maintainers confirm scope and apply `status:accepted`, `good first issue`, or `action:helpwanted`.
-3. **Claiming & Progress** — Contributors claim eligible issues by commenting `/claim` and release them with `/unclaim` (see [Issues, Roadmap & Claiming](contribute/en/workflow.md)). Automated checks and Agent assistants may post gentle progress reminders on inactive claims.
-4. **Review & Merge** — Pull requests pass CI gates and `CODEOWNERS` review. Automated AI reviewers help surface potential issues, while human maintainers remain accountable for technical judgment and final merge decisions.
+3. **Claiming & Progress** — Contributors claim eligible issues by commenting `/claim` and release them with `/unclaim` (see [Issues, Roadmap & Claiming](contribute/en/workflow.md) and [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md)). Draft PRs do not lock issues without `/claim`, and maintainers or coordination assistants may post gentle progress check-ins on inactive claims.
+4. **Review & Merge** — Ready-for-review pull requests (`isDraft=false`) pass CI gates and `CODEOWNERS` review. Automated AI reviewers help surface potential issues, while human maintainers remain accountable for technical judgment and final merge decisions.
 
 ### Service Expectations
 
-- **Initial response**: Maintainers aim to provide an initial response (assisted by automated triage where applicable) to new issues and PRs within **5 business days**.
-- **Inactive claims**: If a claimed issue has no visible progress or reply for **14 days**, automated reminders may notify the claimant and a maintainer may politely release the claim so others can pick it up.
+- **Initial response**: Maintainers aim to provide an initial response (assisted by automated triage where applicable) to new issues and ready-for-review PRs within **5 business days**.
+- **Inactive claims**: If a claimed issue has no visible progress (no issue update and no ready-for-review PR) for **7 days**, a maintainer or coordination assistant may post a polite check-in; after **14 days** without progress (or **7 days** after a check-in), a maintainer may release the claim via `/unclaim` so others can pick it up.
 
 ## 4. Decision-Making Process
 
