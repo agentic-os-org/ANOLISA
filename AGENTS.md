@@ -3,10 +3,11 @@
 This file provides context for AI coding assistants (Qoder, Claude, etc.) working in this repository.
 
 For a directory-by-directory map, see [Repository layout](README.md#repository-layout)
-([中文](README_zh.md#仓库目录)). Start here for contribution rules, then follow the
-component paths below to any scoped `AGENTS.md`. Source location and component
-identity are separate: directory moves must preserve package names, release tags,
-and existing build and test entry points.
+([中文](README_zh.md#仓库目录)); for all detailed standards routed from this file,
+see [`specs/README.md`](specs/README.md). Start here for repository-wide rules,
+then follow the component paths below to any scoped `AGENTS.md`. Source location
+and component identity are separate: directory moves must preserve package names,
+release tags, and existing build and test entry points.
 
 ## 0. Contributor Onboarding & Governance
 
@@ -45,201 +46,32 @@ Three invariants repeated here so agents orient contributors accurately without 
 
 ## 2. Development Commands
 
+> Full unified build options, `build-all.sh` AW Provider discovery rules, and
+> per-component build/test commands are in
+> [`specs/development-commands.md`](specs/development-commands.md).
+
 ```bash
-# Unified build (Linux; six backends including sec-core V2, AW and matching Providers)
-./scripts/build-all.sh --all --no-install                         # prepare build dependencies and compile
-./scripts/build-all.sh --all                                     # prepare, compile and install system files
-./scripts/build-all.sh --all --user --supported-only               # install cosh-ng, tokenless, AW and Tokenless Provider; report skipped system-only targets
-./scripts/build-all.sh --all --user --supported-only --check-deps  # read-only check of the user subset
-./scripts/build-all.sh --all --user --no-install                   # compile all default targets; never install system dependencies by default
-./scripts/build-all.sh --component tokenless --user --install-system-deps # explicitly allow system build packages; component files stay in user paths
-./scripts/build-all.sh --component agent-sec-core --component tokenless --no-install
-./scripts/build-all.sh --all --prefix /usr --destdir "$PWD/target/pkgroot" # stage package paths without service activation
-./scripts/build-all.sh --all --check-deps                         # check build dependencies without changing the host
-./scripts/build-all.sh --component agent-sec-core --ignore-deps --no-install
-
-# Partial convenience test suites (may skip unavailable suites)
-./tests/run-all-tests.sh --filter sec     # agent-sec-core only
-./tests/run-all-tests.sh --filter sight   # agentsight only
-./tests/run-all-tests.sh --filter tokenless
-./tests/run-all-tests.sh --filter memory
-
-# cosh-ng (Linux full; macOS limited functionality, per-component)
-cd src/cosh-ng
-cargo build --workspace
-cargo fmt --all -- --check
-# Select the closest targeted test from src/cosh-ng/CONTRIBUTING.md.
-# Full gates require a large/cross-cutting change and an explicit request.
-
-# agent-sec-core (Linux only; V2 Rust CLI/daemon and sandbox, per-component)
-cd src/agent-sec-core
-make build        # V2 artifacts; no uv or fixed Python runtime required
-make test-rust-v2  # V2 Rust tests; Python-specific tests have separate requirements
-
-# agentsight (Linux full eBPF; macOS trajectory/serve only, per-component)
-cd src/agentsight
-# Linux
-make build-all
-make lint
-make test
-
-# macOS
-make build-mac
-
-# os-skills
-# From the repository root; Python 3.11 virtual environment
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
-.venv/bin/python -m unittest discover -s src/os-skills/tests -v
-# No compilation needed. Keep component tests under src/os-skills/tests/.
-
-# tokenless (per-component)
-cd src/tokenless
-make build       # tokenless + RTK + OpenClaw plugin
-make lint
-make test        # Rust + hooks + integration + adapters
-
-# agent-memory (Linux only, per-component)
-cd src/agent-memory
-make build       # cargo build --release --locked
-make fmt-check
-make lint
-make test        # cargo test --locked
-make smoke       # end-to-end MCP stdio smoke test
-
-# anolisa (per-component)
-cd distribution/anolisa
-cargo fmt --all --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
-
-# ws-ckpt (Linux only, per-component)
-cd src/ws-ckpt
-make build       # cargo build --release + openclaw plugin
-make test        # cargo test --workspace
-
-# SkillFS (Linux only, per-component)
-cd src/skillfs
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-scripts/test.sh   # FUSE smoke test; skips itself if fuse3 or /dev/fuse is unavailable
-
-# ktuner (Linux only, per-component)
-cd src/ktuner
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-
-# aw (Linux only, per-component; toolchain pinned by src/aw/rust-toolchain.toml)
-python3 src/aw/scripts/check.py   # from the repository root: CI behavior tests,
-                                  # fmt, clippy, locked tests, digest vectors, rustdoc
+./scripts/build-all.sh --all --no-install                  # Linux: prepare deps & compile all backends + AW Providers
+./scripts/build-all.sh --all --user --supported-only       # Linux user-mode subset (cosh-ng, tokenless, AW + Provider)
+./scripts/build-all.sh --component <name> --no-install     # compile a single component (+ its AW Provider)
 ```
 
-`build-all.sh` defaults to system source installation under `/usr/local`;
-`--user` defaults to `$HOME/.local`. Use `--prefix /usr` when staging distribution
-package paths. The script selects matching AW Providers automatically for selected backends.
-Selecting AW keeps core and skills and skips standalone component plugin
-bundles. If cosh-ng is also selected, the build keeps the Cosh extensions for
-the selected agent-sec-core and Tokenless backends.
-Discovery uses `providers/<canonical-backend>/Makefile` and the `aw-provider-*`
-package name from that directory's `Cargo.toml`; `sec-core` resolves to
-`agent-sec-core`, whose Provider is named `aw-provider-sec-core`. A partial build
-such as `--component tokenless` includes its Provider, while an explicitly
-selected Provider does not select its backend. In user mode, `--supported-only`
-filters backends before attaching their Providers, so skipping `agent-sec-core`
-also omits its Provider unless that Provider was explicitly selected.
+- Always run the affected component's own local gate before submitting a PR (do not rely solely on `./tests/run-all-tests.sh`, which may skip unavailable suites).
+- `build-all.sh` defaults to system paths (`/usr/local`); `--user` targets `$HOME/.local`.
 
 ## 3. Rust Common Conventions
 
-> Applies to these Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `aw`.
+> Applies to: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `aw`.
+> Full comment guidelines, rustdoc rules, and examples are in [`specs/rust-conventions.md`](specs/rust-conventions.md).
 
-### 3.1 Comment Guidelines
+Core invariants:
 
-Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) and the official style guide. Write comments that help readers understand intent faster — not comments that paraphrase code.
-
-**Comment types and placement:**
-
-- `//!` **module-level docs**: at the top of a file/module — one or two sentences describing what the module does and when to use it.
-- `///` **doc comments**: required on all public (`pub`) items — structs, enums, traits, functions, methods, significant fields, and variants. These appear in `cargo doc`.
-- `//` **inline comments**: only where the implementation needs to explain *why* something is done a certain way.
-- Do not pile `///` on private, self-explanatory helper functions.
-
-**Write "why", not "what":**
-
-- Type names, field names, and function names already say *what*; comments should explain *why* and document *invariants*.
-  - Good: `// Serialize as untagged because most providers omit the type field`
-  - Bad: `// This is an enum representing assistant content`
-- Document **invariants**, **preconditions**, **side effects**, and **protocol contracts**.
-- Never repeat facts already obvious from the signature, type, or naming.
-
-**Brevity first:**
-
-- If one line suffices, do not write two. Trivial setters need no comment or at most a single sentence.
-- Avoid polite filler: no "This function returns …". Start with an imperative or noun phrase: "Returns …", "Builds …".
-- First line is a standalone summary; expand after a blank line if needed.
-
-**Conventional rustdoc sections** (use when they add value):
-
-- `# Errors` — for functions returning `Result`: list failure conditions.
-- `# Panics` — for functions that can panic: list trigger conditions.
-- `# Safety` — for `unsafe fn`: state invariants the caller must uphold.
-- `# Examples` — typical usage in ```` ```rust ```` blocks, runnable by `cargo test --doc`.
-
-**Prohibited patterns:**
-
-- No bare `TODO` without owner and context.
-- No commented-out old code — use git history.
-- No timestamps, author names, or changelog-style comments — VCS handles that.
-- No "fixes issue #123" in comments — put that in the PR description.
-- No restating the type signature in comments.
-
-### 3.2 Module Organization: no `mod.rs`
-
-Use the Rust 2018+ recommended layout: parent modules are `.rs` files with matching directories for child modules. Never create a `mod.rs`; flag any encountered during code review.
-
-Rationale: avoids identically-named `mod.rs` files; makes editor tabs more readable; aligns with `rustfmt` and `cargo new` defaults.
-
-**Exception**: `tests/common/mod.rs` — cargo's official convention for sharing helpers across integration tests.
-
-### 3.3 Dependency Management
-
-- All third-party dependencies declare their version in `[workspace.dependencies]`; crates reference them via `dep_name = { workspace = true }` — never pin versions in sub-crates.
-- Before adding a dependency, grep `Cargo.toml` to check whether an equivalent crate already exists (e.g. do not add `simd-json` when `serde_json` is already present).
-- Do not bump a declared dependency's major version without discussion.
-- Feature flags are enabled centrally in the workspace declaration; sub-crates should not repeat `features = [...]` unless genuinely extending them.
-
-### 3.4 Error Handling
-
-- **Library crates**: define named `enum` error types with `thiserror`. Each crate owns its error enum and wraps upstream errors via `#[from]` — do not reuse error enums across crate boundaries.
-- **Binaries**: may use `anyhow::Result` for ergonomic error propagation.
-- Library code must **not** use `unwrap()` / `expect()` / `panic!()` unless a comment proves the condition is guaranteed unreachable by the type system (prefer `unreachable!()` with an explanation).
-- Error messages target developers: include failure context and relevant variable values; avoid "something went wrong" style messages.
-- Prefer `?` propagation; do not rewrite `?`-eligible code with `match` + immediate `return Err(...)`.
-
-### 3.5 Pre-commit Checks
-
-Every Rust component must pass these before committing:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo doc --workspace --no-deps   # required when changing public API or doc comments
-```
-
-- Clippy warnings are denied by default. To allow a specific lint, use `#[allow(clippy::xxx)]` at the narrowest scope with a comment explaining why.
-- Never comment out tests or remove assertions to pass checks — find and fix the root cause.
-
-### 3.6 Test Module Organization
-
-- **Unit vs. integration placement**: prefer integration tests under `tests/` whenever behavior can be verified through the public API alone (alongside runnable `# Examples` doctests for public usage); reserve white-box `#[cfg(test)] mod tests` for private internals and module-scoped invariants.
-- **No `include!()` for hand-written tests or fixtures**: reserve `include!()` for build-generated code under `OUT_DIR` (e.g., eBPF skeletons). `cargo fmt --all` does not traverse `include!()`, allowing silent formatting drift past CI and weakening IDE analysis.
-- **White-box unit tests**: keep small suites inline in `#[cfg(test)] mod tests { use super::*; ... }`; split larger suites into standard Rust 2018+ child modules (`foo.rs` declares `#[cfg(test)] mod tests;` backed by `foo/tests.rs`, further split into `foo/tests/<topic>.rs`; crate roots `lib.rs` / `main.rs` use `src/tests.rs`). Avoid `#[path]` for ordinary unit tests. `use super::*;` is the permitted glob-import exception inside test submodules, and attaching `foo/tests.rs` does not change `foo.rs`'s role as a leaf implementation module.
-- **Shared test helpers by Cargo compilation boundary**:
-  - Within one crate's unit tests (`src/`): use `#[cfg(test)] mod test_support;` (or the parent `foo/tests.rs`) rather than chaining multiple `include!()` files in one `mod tests` block.
-  - Across integration tests (`tests/*.rs`): use `tests/common/mod.rs` (see §3.2 exception), `#[path = "support/..."]`, or single-entry integration test modules.
-  - Across `src/` unit tests, `tests/` integration tests, or sibling crates (where `#[cfg(test)]` is not visible across Cargo compilation boundaries): gate shared mocks, fakes, or fixtures behind an additive bare-named `test-util` feature (enabled only in `[dev-dependencies]`, or placed in a dev-only helper crate); for small read-only helpers outside `src/` (e.g., standalone test oracles), `#[path = "..."] mod ...;` is also acceptable instead of `include!()`.
+- **No `mod.rs`**: use Rust 2018+ `foo.rs` + `foo/` layout (only exception: `tests/common/mod.rs`).
+- **Workspace dependencies**: pin third-party versions and default features in `[workspace.dependencies]` and reference via `{ workspace = true }`; check existing deps before adding new crates.
+- **Error handling**: library crates define owned `thiserror` enums and must **not** use `unwrap()` / `expect()` / `panic!()` (except type-proven `unreachable!()` with comment); binaries may use `anyhow::Result`; prefer `?`.
+- **Comments**: write *why* and invariants, not *what*; `///` on public items, `//!` at module top; no bare `TODO` or commented-out code.
+- **Pre-commit gates**: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo doc --workspace --no-deps` when changing public APIs or doc comments.
+- **Test layout**: prefer `tests/` for public API tests and Rust 2018+ child modules (`foo/tests.rs`) for white-box tests; never use `include!()` for hand-written tests or fixtures.
 
 ## 4. Python Conventions
 
@@ -341,16 +173,6 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
 | **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
 
-## 11.1 File Placement & Documentation Structure
-
-Follow [§9](#9-documentation-rules). Naming, file placement, and component file
-requirements are in §§1–4 of the documentation standard.
-
-## 12. User Guide Documentation Standards
-
-Follow [§9](#9-documentation-rules) and §4.6 of the documentation standard for
-installation paths, content boundaries, and first-use guidance.
-
 ---
 
 ## 13. Commit Discipline
@@ -369,40 +191,17 @@ intentionally does not duplicate the spec.
 
 ## 14. Responding to Review
 
-> **Recommended**: Reviewer-side methodology — deeper self-review checklists beyond CI gates — is defined in [`specs/independent-review-guide.md`](specs/independent-review-guide.md). This section covers the author side: triaging and responding to findings.
+> **Author side**: triage workflow, reply format, inline reply discipline, and
+> common AI-reviewer false positives are defined in
+> [`specs/review-response-guide.md`](specs/review-response-guide.md).
+> **Reviewer side**: deeper self-review checklists beyond CI gates are defined
+> in [`specs/independent-review-guide.md`](specs/independent-review-guide.md).
 
-### Triage before acting
+Three invariants repeated here:
 
-AI reviewers (qoderai, qoder) generate findings automatically. Before fixing:
-
-1. **Verify the claim**: Read the actual code at the cited line. AI reviewers hallucinate — they may reference wrong line numbers, misread logic, or flag non-issues.
-2. **Assess severity**: Only P0 (security) and P1 (correctness) warrant immediate code changes. P2 (style/docs) can be batched. P3+ can be deferred.
-3. **Check if pre-existing**: If the issue existed before this PR, it needs `Fixes:` attribution to the original commit. If it's a design limitation (not a bug), reply with rationale rather than patching.
-
-### Response format
-
-When replying to review findings:
-
-- **Fixed**: State what was done and which commit it landed in.
-- **Deferred**: Explain why it's out of scope for this PR and what the plan is.
-- **Not a real issue**: Explain why the finding is incorrect or not applicable. Cite specific code/design rationale.
-
-Never blindly accept and fix every AI finding. Some are false positives, some are architectural suggestions that require design discussion.
-
-### Inline reply discipline
-
-- Every inline review comment MUST receive exactly one thread reply via `in_reply_to`.
-- Reply at the same time as the code fix push — never push silently.
-- For stale comments resolved by a newer revision: reply "Resolved in latest revision" (one sentence).
-- Never duplicate replies on already-answered threads.
-- Before replying, query the API to identify which comments lack a response — avoid both omissions and repetition.
-
-### Common false positive patterns
-
-- "X is not tested" when X has a default impl that returns Err (intentional no-op)
-- "Missing error handling" when the `?` operator already propagates
-- "Config field unused" when it's reserved for a future phase
-- "Version mismatch" referencing stale file contents from a previous push
+- **Verify before fixing**: read the actual code at the cited line — AI reviewers hallucinate; never blindly patch false positives.
+- **Triage by severity**: fix P0 (security) and P1 (correctness) immediately; batch P2; defer P3+; add `Fixes:` attribution for pre-existing bugs.
+- **Reply cleanly**: send exactly one `in_reply_to` thread reply per inline comment at push time (label **Fixed** / **Deferred** / **Not a real issue**); never duplicate replies.
 
 ---
 
