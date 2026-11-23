@@ -77,7 +77,7 @@ pub(crate) fn is_diff_wrapper(prefix: &str) -> bool {
 ///
 /// Shared by the Runtime detector (which labels these `browser_snapshot`) and
 /// the compressor (which fails open on them). The compressor must reject the
-/// whole listing by shape rather than let [`pw::parse`] search it for a YAML
+/// whole listing by shape rather than let `pw::parse` search it for a YAML
 /// fence: a CDT name may embed PW-shaped rows, and compressing that fragment
 /// would both alter the CDT bytes and present literal name text as element
 /// references.
