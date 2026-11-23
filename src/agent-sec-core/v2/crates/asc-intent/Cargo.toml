@@ -10,6 +10,9 @@ publish.workspace = true
 
 [dependencies]
 asc-model-client = { workspace = true }
+asc-pdp-runtime = { workspace = true }
+asc-policy-cedar = { workspace = true }
+asc-policy-translator-agentsight = { workspace = true }
 cedar-policy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -18,12 +18,14 @@ pub use intent_extraction::{
     validate_policy_response,
 };
 pub use policy_generator::{
-    CANDIDATE_VERSION, CandidatePolicy, CommandPolicyOutcome, MAX_CANDIDATE_BYTES,
-    MAX_PROPOSAL_TTL, ProposalContext, ProposalError, ProposalOutcome, propose_command,
-    propose_task,
+    CANDIDATE_VERSION, COVERAGE_NOTE, CandidatePolicy, CommandPolicyOutcome, HUMAN_GATE_NOTE,
+    LAUNCH_VIEW_NOTE, MAX_CANDIDATE_BYTES, MAX_PROPOSAL_TTL, ProposalContext, ProposalError,
+    ProposalOutcome, RUNTIME_VIEW_NOTE, propose_command, propose_task,
 };
 pub use policy_summary::{ActionCategory, PathScope, Permission, PolicySummary, summarize};
 pub use policy_validation::{
-    Artifact, CEDAR_SCHEMA, MAX_POLICY_BYTES, PolicyError, prepare_policy,
+    Artifact, CEDAR_SCHEMA, HumanGate, MAX_POLICY_BYTES, PolicyError, confirmation_gaps,
+    human_gates, launch_view_gaps, prepare_policy, prepare_task_policy, requirement_coverage,
+    runtime_view_gaps,
 };
 pub use spec::{IntentSpec, SPEC_VERSION, SpecError, compile_spec};

@@ -92,8 +92,9 @@ pub(crate) fn generate_command_response(
     }
     let mut payload = serde_json::to_string(input).map_err(|_| IntentError::InvalidInput)?;
     if let Some(rejection) = rejection {
-        payload =
-            format!("{payload}\n上次输出被本地校验拒绝：{rejection}。请只输出修正后的 JSON。");
+        payload = format!(
+            "{payload}\nThe previous response failed local validation: {rejection}. Return only the corrected JSON."
+        );
     }
     let system = format!("{COMMAND_SYSTEM_PROMPT}\n```cedar\n{CEDAR_SCHEMA}\n```\n");
     let content = provider.complete(model, &system, &payload, deadline)?;
@@ -178,6 +179,17 @@ pub fn generate_policy_draft(
     task: &TaskInput,
     deadline: Instant,
 ) -> Result<PolicyDraft, IntentError> {
+    generate_policy_draft_after(provider, model, task, deadline, None)
+}
+
+/// `rejection` replays the local check that refused the previous draft, so a retry is not blind.
+pub(crate) fn generate_policy_draft_after(
+    provider: &dyn ModelProvider,
+    model: &str,
+    task: &TaskInput,
+    deadline: Instant,
+    rejection: Option<&str>,
+) -> Result<PolicyDraft, IntentError> {
     let deadline = deadline.min(Instant::now() + INTENT_BUDGET);
     check_deadline(deadline)?;
     if task.source_id.is_empty()
@@ -191,10 +203,15 @@ pub fn generate_policy_draft(
     {
         return Err(IntentError::InvalidInput);
     }
-    let input = json!({
+    let mut input = json!({
         "task": {"source_id": task.source_id, "text": task.text},
     })
     .to_string();
+    if let Some(rejection) = rejection {
+        input = format!(
+            "{input}\nThe previous response failed local validation: {rejection}. Return only the corrected JSON."
+        );
+    }
     let system =
         format!("{SYSTEM_PROMPT}\n## Shared type contract\n```cedar\n{CEDAR_SCHEMA}\n```\n");
     let content = provider.complete(model, &system, &input, deadline)?;

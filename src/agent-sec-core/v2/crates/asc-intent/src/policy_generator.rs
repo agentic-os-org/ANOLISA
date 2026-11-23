@@ -2,7 +2,8 @@
 //! installation into an execution backend.
 //!
 //! 1. task text + shared schema -> model Cedar draft and model-reported unresolved items.
-//! 2. official parser + canonical absolute-path check + Strict validation -> Cedar artifact.
+//! 2. draft -> official parser + canonical absolute-path check + Strict
+//!    validation -> Cedar artifact.
 //! 3. artifact + raw draft + TTL and hash -> unapproved candidate.
 //!
 //! A draft rejected as an unsupported feature or a non-canonical path becomes
@@ -20,9 +21,11 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+use crate::policy_summary::rule_review;
 use crate::{
-    Artifact, INTENT_BUDGET, IntentError, PolicyDraft, PolicyError, TaskInput,
-    generate_policy_draft, prepare_policy,
+    Artifact, HumanGate, INTENT_BUDGET, IntentError, PolicyDraft, PolicyError, TaskInput,
+    confirmation_gaps, human_gates, intent_extraction::generate_policy_draft_after, prepare_policy,
+    prepare_task_policy,
 };
 
 /// Maximum candidate TTL; it is not the lifetime of an issued grant.
@@ -31,6 +34,14 @@ pub const MAX_PROPOSAL_TTL: u32 = 1800;
 pub const MAX_CANDIDATE_BYTES: usize = 512 * 1024;
 /// Direct Cedar candidate protocol version.
 pub const CANDIDATE_VERSION: &str = "asc.intent.candidate.v1";
+/// Prefix for OS request-policy projection errors.
+pub const LAUNCH_VIEW_NOTE: &str = "LAUNCH VIEW:";
+/// Prefix for file-view translation rejections from `AgentSight`.
+pub const RUNTIME_VIEW_NOTE: &str = "RUNTIME VIEW:";
+/// Prefix of the note listing permits that stop for a human before they take effect.
+pub const HUMAN_GATE_NOTE: &str = "HUMAN GATE:";
+/// Prefix of the note naming which consumers can carry each task requirement.
+pub const COVERAGE_NOTE: &str = "COVERAGE:";
 
 /// Built from server identity and clock; matching fields in user JSON are never accepted.
 #[derive(Clone, Serialize)]
@@ -88,7 +99,7 @@ pub struct CandidatePolicy {
 }
 
 impl CandidatePolicy {
-    /// The model policy text.
+    /// Validated task policy in its original Cedar representation.
     pub fn policy_text(&self) -> &str {
         &self.content.artifact.text
     }
@@ -245,11 +256,46 @@ pub enum ProposalError {
     Policy(#[from] PolicyError),
 }
 
+/// First task draft with its local admission; a rejection the model can repair gets one retry.
+///
+/// A whole task draft fails on one malformed statement often enough that ending the proposal
+/// there is worse than one repair round with the local reason.
+fn first_task_draft(
+    provider: &dyn ModelProvider,
+    model: &str,
+    task: &TaskInput,
+    deadline: Instant,
+) -> Result<(PolicyDraft, Result<Artifact, PolicyError>), ProposalError> {
+    let rejection = match generate_policy_draft_after(provider, model, task, deadline, None) {
+        Err(IntentError::InvalidDraft) =>
+            "return a JSON object with exactly policy (a string) and unresolved (an array of nonempty reason strings)".to_owned(),
+        Err(error) => return Err(error.into()),
+        Ok(draft) => match prepare_task_policy(draft.policy()) {
+            Err(error @ (PolicyError::InvalidPath | PolicyError::WildcardLiteral
+                | PolicyError::Syntax | PolicyError::Validation | PolicyError::PrincipalHeaders | PolicyError::Advice)) => error.to_string(),
+            prepared => return Ok((draft, prepared)),
+        },
+    };
+    check_deadline(deadline)?;
+    let retry = generate_policy_draft_after(provider, model, task, deadline, Some(&rejection))?;
+    let prepared = prepare_task_policy(retry.policy());
+    Ok((retry, prepared))
+}
+
 /// Generates a Cedar candidate directly from a task.
 ///
 /// The model receives the task text only; no file contents are sent and no path metadata is
 /// accepted. The draft keeps unresolved items; Strict validation does not prove that task and
-/// policy are semantically equivalent.
+/// policy are semantically equivalent. The artifact preserves the validated draft.
+///
+/// As for command proposals, a draft rejected for its syntax, Strict typing or a path literal is
+/// retried once with the local reason. After that retry a syntax or typing failure is an error,
+/// while a persistent path rejection becomes a clarification; unsupported-policy features are
+/// never retried.
+///
+/// Once admitted, the draft is preserved. Consumer compatibility findings travel in the
+/// candidate notes. A confirmation that would widen the requested grant needs clarification.
+/// Paths are interpreted lexically; the execution boundary resolves filesystem objects.
 ///
 /// # Errors
 /// Returns no candidate when input, provider, Cedar syntax/types, budgets or the deadline fail.
@@ -264,13 +310,15 @@ pub fn propose_task(
         .min(context.started + context.ttl)
         .min(Instant::now() + INTENT_BUDGET);
     check_deadline(deadline)?;
-    let draft = generate_policy_draft(provider, model, task, deadline)?;
-    let artifact = match prepare_policy(draft.policy()) {
+    let (draft, prepared) = first_task_draft(provider, model, task, deadline)?;
+    let artifact = match prepared {
         Ok(artifact) => artifact,
         Err(
             error @ (PolicyError::InvalidPath
             | PolicyError::WildcardLiteral
-            | PolicyError::UnsupportedPolicy),
+            | PolicyError::UnsupportedPolicy
+            | PolicyError::PrincipalHeaders
+            | PolicyError::Advice),
         ) => {
             check_deadline(deadline)?;
             return Ok(ProposalOutcome::NeedsClarification {
@@ -280,7 +328,27 @@ pub fn propose_task(
         }
         Err(error) => return Err(error.into()),
     };
-    check_deadline(deadline)?;
+    let widening = confirmation_gaps(&artifact.text)?;
+    if !widening.is_empty() {
+        check_deadline(deadline)?;
+        // Local clarification reasons share the wire limits with model-reported reasons.
+        let reasons = if crate::reasons_valid(&widening) {
+            widening
+        } else {
+            vec![
+                "Review the confirmation scopes in the original draft before granting access."
+                    .into(),
+            ]
+        };
+        return Ok(ProposalOutcome::NeedsClarification {
+            draft: Box::new(draft),
+            reasons,
+        });
+    }
+    let gates = human_gates(&artifact.text)?;
+    let views = crate::policy_validation::consumer_review(&artifact.text)?;
+    let mut notes = candidate_notes(&views.launch, &views.protection, &gates, &views.coverage);
+    notes.insert(0, rule_review(&artifact.text)?);
     let payload = CandidateContent {
         format_version: CANDIDATE_VERSION,
         status: "CANDIDATE",
@@ -288,14 +356,7 @@ pub fn propose_task(
         context: context.clone(),
         artifact,
         draft,
-        notes: vec![
-            "CANDIDATE: not approved, not effective; not connected to enforcement.".into(),
-            "Cedar Strict validates syntax and types, not task completeness. Review the policy against the original task; unresolved is model-reported, not a completeness proof.".into(),
-            "Default deny without a matching permit; forbid takes precedence. A plain permit does not restrict other policies' allows.".into(),
-            "file.read is file-content read, not listing names only. There is no implicit workspace or directory grant.".into(),
-            "Enforcement must normalize paths, handle links and namespaces, and adjudicate both rename endpoints. Only the task text is sent to the model.".into(),
-            "Scope/Binding, approval, expiry revocation and execution remain downstream; executable access does not grant its sub-operations.".into(),
-        ],
+        notes,
     };
     let candidate_hash = canonical_hash(&payload)?;
     let candidate = CandidatePolicy {
@@ -313,6 +374,67 @@ pub fn propose_task(
     Ok(ProposalOutcome::Candidate {
         candidate: Box::new(candidate),
     })
+}
+
+/// Fixed review notes plus one note per finding a consumer of this revision would trip over.
+fn candidate_notes(
+    gaps: &[String],
+    refused: &[String],
+    gates: &[HumanGate],
+    coverage: &[String],
+) -> Vec<String> {
+    let mut notes: Vec<String> = vec![
+        "CANDIDATE: not approved, not effective; not connected to enforcement.".into(),
+        "Cedar Strict validates syntax and types, not task completeness. Review the policy against the original task; unresolved is model-reported, not a completeness proof.".into(),
+        "Default deny without a matching permit; forbid takes precedence. A plain permit does not restrict other policies' allows.".into(),
+        "file.read is file-content read, not listing names only.".into(),
+        "Path checks here are lexical. The execution backend must resolve links and namespaces and check both rename endpoints.".into(),
+        "Scope/Binding, approval, expiry revocation and execution remain downstream; executable access does not grant its sub-operations.".into(),
+    ];
+    if !gaps.is_empty() {
+        notes.push(format!(
+            "{LAUNCH_VIEW_NOTE} the OS authorizer rejects this policy: {}.",
+            gaps.join("; ")
+        ));
+    }
+    if !refused.is_empty() {
+        notes.push(format!(
+            "{RUNTIME_VIEW_NOTE} AgentSight rejects this policy's file view: {}.",
+            refused.join("; ")
+        ));
+    }
+    if !gates.is_empty() {
+        let mut note = format!(
+            "{HUMAN_GATE_NOTE} an eligible PDP policy requests confirmation before launching a command with the listed permissions:"
+        );
+        for gate in gates {
+            note.push_str("\n  ");
+            note.push_str(&gate.label());
+            note.push(' ');
+            // Invocation and network approvals may have no file operand.
+            if gate.paths.is_empty() {
+                note.push_str(&gate.action);
+            } else {
+                note.push_str(&gate.paths.join(" "));
+            }
+            note.push_str(" -- ");
+            note.push_str(&gate.message);
+        }
+        notes.push(note);
+    }
+    if !coverage.is_empty() {
+        // One row per requirement and carrier, aligned, so an exported header shows at a glance
+        // which execution boundary carries each requirement.
+        let mut note = format!(
+            "{COVERAGE_NOTE} potential consumers by statement shape. PDP authorization and launch approval require an eligible policy. Sandbox network projection sets the process network mode:"
+        );
+        for row in coverage {
+            note.push_str("\n  ");
+            note.push_str(row);
+        }
+        notes.push(note);
+    }
+    notes
 }
 
 fn check_deadline(deadline: Instant) -> Result<(), ProposalError> {

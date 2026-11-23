@@ -1178,7 +1178,7 @@ Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态�
 
 拒绝未知字段及版本，包括路径类字段、自报身份、
 模型配置、摘要和批准状态。完整请求含 OTel 信封、空白、转义与 LF 最多 256 KiB。
-daemon 不打开调用方路径，不采集文件正文、目录列表或 Git 变更。配置的 HTTPS 模型只接收任务
+生成草稿时 daemon 不访问宿主机路径、符号链接目标、文件正文、目录列表或 Git 变更。配置的 HTTPS 模型只接收任务
 正文和服务端生成的来源标识，并在 system 中接收统一 schema；任务中的敏感文本会发送，
 可能产生调用费用。
 
@@ -1187,22 +1187,23 @@ daemon 不打开调用方路径，不采集文件正文、目录列表或 Git �
 - `candidate`：完整 `asc.intent.candidate.v1`，保留 `asc.intent.draft.v1` 原始草稿、
   `artifact`、TTL、`notes` 及内容哈希；恒为
   `CANDIDATE` / `authorization_required=true`。`artifact` 带 language/text/schema_sha256。
-  合法策略即使包含非空 `unresolved` 也返回候选；CLI 展示后退出 2，不开放批准菜单。
-  模型 policy 为空时 text 为空；不包含 rules/mapping/back_translation、绑定或保护列表。
-- `needs_clarification`：原始草稿及 `reasons`，用于非规范路径或不受支持的模板、身份、注解，
+  合法策略即使包含非空 `unresolved` 也返回候选；CLI 正常展示后退出 0，不开放批准菜单。
+  text 为通过校验的模型草稿，空草稿不授予权限；不包含 rules/mapping/back_translation、绑定或保护列表。
+- `needs_clarification`：原始草稿及 `reasons`，用于非规范路径、不受支持的模板、身份、注解或会扩大授权的确认条件，
   没有可批准候选。Cedar 语法或 Strict 失败返回错误，不返回部分策略。
 
 `intent_extraction.rs` 的 `generate_policy_draft` 只将 task 文本和统一 schema 交给模型，
 模型仅返回 `{"policy":"...","unresolved":[]}`。草稿保存原始响应及任务来源。
 提示词从 `policy-generation.md` 编译嵌入，标记为 `cedar-policy@1`。实体、动作及字段语义
 直接复用内嵌 schema 和注释，提示词仅保留生成约束。
-`policy_validation.rs` 解析原生 Cedar、检查路径表达式并进行 Strict 校验，不追加任何规则；
-`policy_generator.rs` 封装 TTL 和完整候选哈希。
+`policy_validation.rs` 解析原生 Cedar、检查路径表达式并对原草稿进行 Strict 校验；
+`policy_generator.rs` 对无效 JSON 包装或可修正的 Cedar 错误最多重试一次，随后封装 TTL 和完整候选哈希。
+校验通过后的兼容性提示保留原规则和限制。核对文字从最终 Cedar 逐条生成，包含在候选 notes 中。
 
 链路为 task + schema → 模型 policy/unresolved → 官方 parser 与路径表达式检查 →
 官方 Strict → 未批准候选。前端不通过字符串替换重写模型语义；路径仅接受
 规范绝对字符串的 ==/!= 或目录末尾 /* 的 like，拒绝动态路径、自报 Subject/File UID、
-未绑定模板及可选 @id 之外的注解。统一 schema 来源仍是
+未绑定模板及未知注解。任务 permit 可附带带有非空消息的 escalate 类型 @advice；Cedar 导出在注释中列出审批条件、兼容性提示及逐项覆盖情况。统一 schema 来源仍是
 `asc-policy-cedar/schema/seccore.cedarschema`，本接口不生成或扩展 schema。
 CLI 复核版本、任务来源、TTL 和完整哈希，并使用内嵌 schema 从 draft.policy 重建
 预期 artifact；替换模型输出后重算哈希仍会被发现。CLI 与 daemon 必须同步升级，旧版本不适配。
@@ -1210,8 +1211,7 @@ CLI 复核版本、任务来源、TTL 和完整哈希，并使用内嵌 schema �
 
 提示词要求必要身份、条件、审批或义务无法表达时放入 unresolved，不得删掉后生成无条件
 permit；工具调用不能替换为程序执行。但 unresolved 是模型自报，不是完整性或冲突证明。
-程序不求解策略冲突。普通 permit 不排斥其它策略的允许；排他要求须在原生
-Cedar 中明确补集 forbid，write 补集须限定同一 operation。禁删不等于不可变；task 要求
+程序不求解策略冲突。普通 permit 不排斥其它策略的允许；提示词要求只向明确授权的写入位置发放 permit，范围内再按文件或操作生成 forbid。禁删不等于不可变；task 要求
 “不删除 a.txt”时由模型自行写出对应 forbid，程序不再替用户补充保护规则。
 Strict、空 unresolved 和哈希均不证明任务理解正确、全部要求已落实、可信批准或真实对象绑定。
 
@@ -1221,7 +1221,7 @@ Strict、空 unresolved 和哈希均不证明任务理解正确、全部要求�
 
 完整结果最多 512 KiB。CLI 默认等待 45 秒，真实 UDS 为该方法配置 35 秒派发预算，模型
 预算最多 30 秒且受请求期限和 TTL 进一步收紧。每 UID（含 root）最多一个实际生成，全局
-最多四个，无排队；连接取消或超时后，仍在阻塞的生成占用名额直到实际返回。失败无自动重试，
+最多四个，无排队；连接取消或超时后，仍在阻塞的生成占用名额直到实际返回。可修正的草稿拒绝与执行端兼容性提示可在原预算内触发修正请求，传输失败不自动重试，
 到期结果丢弃，不刷新有效期。
 
 错误使用封闭类别：参数/版本错误 `invalid_argument`；超量/并发占满 `resource_exhausted`；

@@ -200,10 +200,9 @@ is exactly `{"policy":"...","unresolved":[]}`. The unconfirmed draft preserves
 that response and task provenance; it does not grant authorization.
 
 The task proposal has no path inputs: its request carries only the task text and a TTL.
-No file contents, directory listings or Git changes are read, and the daemon does
-not open caller paths. The model resolves absolute paths from the task itself; a
-relative or ambiguous target goes into `unresolved`. Nothing is appended to the
-model output, so a permit written by the model is the whole grant.
+The daemon builds the candidate without reading host files, inspecting path metadata or resolving symlinks. The model resolves absolute paths from the
+task itself and reports ambiguous targets in `unresolved`. The artifact preserves the validated draft. A command-mode sandbox hook supplies its
+runtime permissions through its deployment preset. The prompt groups explicit write grants and restrictions by requirement.
 
 Enable `ASC_INTENT_ENABLED=true` and supply `DASHSCOPE_API_KEY` in the daemon startup
 environment. Cloud calls may incur charges. `deepseek-v4.1-flash` remains the default;
@@ -216,13 +215,15 @@ Rust parses the original Cedar with the official parser, checks inspectable abso
 path expressions, rejects unbound templates, model-supplied Subject/File identities
 and unsupported annotations, then runs official Strict validation against
 `asc-policy-cedar/schema/seccore.cedarschema`. It does not rewrite
-model semantics or prove task completeness. The prompt requires unresolved identities,
+model semantics or prove task completeness. Compatibility findings preserve the validated draft. OS network approval occurs at command launch; individual connections cannot be gated by that approval. The prompt requires unresolved identities,
 necessary conditions, approvals and obligations to be reported rather than silently
 removed. `unresolved` is model-reported, not a complete gap or conflict detector.
 
 Requests use `asc.intent.request.v1`, drafts `asc.intent.draft.v1` with
 `cedar-policy@1`, and candidates `asc.intent.candidate.v1`. Candidates contain the
-original `draft`, final `artifact`, TTL, hashes and `notes`.
+original `draft`, final `artifact`, TTL, hashes and `notes`, including a per-statement review
+derived from the validated Cedar. The Cedar export includes
+coverage by requirement and review notes for confirmation gates and compatibility findings.
 CLI rechecks provenance, versions, TTL and hashes, and rebuilds the expected artifact
 from `draft.policy` with its embedded schema. Upgrade CLI and daemon together;
 version mismatches fail instead of adapting.
@@ -310,6 +311,20 @@ paths, program/argument/attribute conditions, operation-specific complements,
 composition and immutable protection. Strict typing is not a substitute for
 producer invariants such as complete argument indices, normalized paths or rename
 endpoints. No task-to-policy semantic equivalence checker is implemented.
+
+From this workspace on Linux, run `cargo test --locked -p asc-intent` to
+exercise task generation with scripted model responses. To exercise the same
+proposal API with DashScope, export `DASHSCOPE_API_KEY` and run:
+
+```bash
+cargo test --locked -p asc-intent --test policy_prompt \
+  dashscope_exact_file_protection_fixture -- --ignored --exact --nocapture
+```
+
+This opt-in test prints the candidate or clarification as JSON. Set
+`ASC_INTENT_TEST_TASK` to test your own task text. The test sends that text to
+DashScope and can incur charges for generation and repair. Both test commands
+run directly against the Rust library without starting a daemon.
 
 Current-version candidates can be checked offline through the ignored
 `real_model_candidate_case` using `ASC_INTENT_CANDIDATE`, `ASC_INTENT_WORKSPACE`

@@ -39,6 +39,8 @@ impl ModelProvider for Replay {
         self.calls.fetch_add(1, Ordering::Relaxed);
         assert!(!system.contains("PRIVATE_FILE_BYTES"));
         assert!(!input.contains("PRIVATE_FILE_BYTES"));
+        // A retry appends the local rejection after the request; the request itself is unchanged.
+        let input = input.split_once('\n').map_or(input, |(request, _)| request);
         let input: Value = serde_json::from_str(input).unwrap();
         assert!(system.contains(asc_intent::CEDAR_SCHEMA));
         // Only the task text reaches the model; path bindings and protection layers are gone.
@@ -251,11 +253,12 @@ async fn formats_clarifications_and_real_peer_identity() {
     let socket = directory.0.join("daemon.sock");
     let provider = Arc::new(Replay::default());
     let server = Server::start(&socket, provider.clone(), None).await;
+    let list_names_task = "Only list names without reading content";
     for (task, resolved) in [
         ("Read report.csv", true),
         ("Read /outside/missing.csv", true),
         ("Run tests", false),
-        ("Only list names without reading content", false),
+        (list_names_task, false),
     ] {
         let output = cli(&socket, &directory.0, task)
             .args(["--format", "json"])
@@ -289,16 +292,20 @@ async fn formats_clarifications_and_real_peer_identity() {
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("not effective") || text.contains("not approved or effective"));
+        if format == "cedar" {
+            assert!(!text.contains("Rule review"));
+            asc_intent::prepare_task_policy(&text).unwrap();
+        } else {
+            assert!(
+                text.contains("Allow reading file contents") && text.contains("/work/report.csv")
+            );
+        }
     }
     let unmapped = output_json(
-        &cli(
-            &socket,
-            &directory.0,
-            "Only list names without reading content",
-        )
-        .args(["--format", "json"])
-        .output()
-        .unwrap(),
+        &cli(&socket, &directory.0, list_names_task)
+            .args(["--format", "json"])
+            .output()
+            .unwrap(),
         0,
     );
     assert!(
@@ -309,18 +316,14 @@ async fn formats_clarifications_and_real_peer_identity() {
     );
     assert_eq!(unmapped["candidate"]["artifact"]["text"], "");
     for format in ["text", "cedar"] {
-        let output = cli(
-            &socket,
-            &directory.0,
-            "Only list names without reading content",
-        )
-        .args(["--format", format])
-        .output()
-        .unwrap();
+        let output = cli(&socket, &directory.0, list_names_task)
+            .args(["--format", format])
+            .output()
+            .unwrap();
         assert_eq!(output.status.code(), Some(0));
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("unresolved") && text.contains("not modeled"));
-        assert!(!text.contains("permit("));
+        assert!(!text.contains("permit("), "{text}");
     }
     if rustix::process::geteuid().as_raw() == 0 {
         check_unprivileged_peer(&directory, &socket, &server);
@@ -396,7 +399,7 @@ async fn unsupported_task_is_a_successful_run() {
             .stdout,
     )
     .unwrap();
-    assert!(text.contains("cannot express this task"));
+    assert!(text.contains("review the draft and clarification reasons"));
     assert!(text.contains("canonical absolute"));
     assert!(text.contains("Model Cedar draft (unconfirmed)"));
     server.stop().await;
@@ -445,7 +448,8 @@ async fn request_carries_only_task_text_and_ttl() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     for expected in [
-        "Model Cedar draft (unconfirmed)",
+        "Rule review (pending confirmation)",
+        "Allow reading file contents when the path is \"/work/docs\" or a descendant",
         "Read file contents of the current directory and subdirectories",
         "resource.path like",
         "Validated Cedar",

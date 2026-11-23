@@ -3,8 +3,8 @@
 
 use asc_daemon_protocol::intent::{INTENT_RESULT_BYTES, IntentProposeResult};
 use asc_intent::{
-    Artifact, CANDIDATE_VERSION, DRAFT_VERSION, PROMPT_VERSION, prepare_policy,
-    validate_policy_response,
+    Artifact, CANDIDATE_VERSION, COVERAGE_NOTE, DRAFT_VERSION, HUMAN_GATE_NOTE, LAUNCH_VIEW_NOTE,
+    PROMPT_VERSION, RUNTIME_VIEW_NOTE, prepare_task_policy, validate_policy_response,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -63,7 +63,7 @@ pub(super) fn validate(value: &Value, task: &str, ttl: u32) -> Result<(), Intent
         serde_json::from_value(value["artifact"].clone()).map_err(|_| bad())?;
     // A digest is not a signature; only rebuilding the artifact reveals model output that was
     // swapped after its hash was recomputed.
-    let expected = prepare_policy(string(&value["draft"], "policy")?).map_err(|_| bad())?;
+    let expected = prepare_task_policy(string(&value["draft"], "policy")?).map_err(|_| bad())?;
     if artifact.language != expected.language
         || artifact.text != expected.text
         || artifact.schema_sha256 != expected.schema_sha256
@@ -116,6 +116,26 @@ pub(super) fn render(
                 "// CANDIDATE: not approved; not effective.\n// unresolved: {}",
                 terminal_json(&candidate["draft"]["unresolved"])?
             )?;
+            // The export is fed to `policy create` as is, so a revision that would authorize no
+            // launch says so in the file instead of only in the JSON notes, and so does who can
+            // carry each requirement.
+            for note in candidate["notes"]
+                .as_array()
+                .ok_or(IntentFailure::Response)?
+            {
+                let note = note.as_str().ok_or(IntentFailure::Response)?;
+                if [
+                    LAUNCH_VIEW_NOTE,
+                    RUNTIME_VIEW_NOTE,
+                    HUMAN_GATE_NOTE,
+                    COVERAGE_NOTE,
+                ]
+                .iter()
+                .any(|prefix| note.starts_with(prefix))
+                {
+                    write_note(&mut out, "// ", note)?;
+                }
+            }
             // Cedar comments may carry ESC/OSC sequences that the parser ignores but a terminal
             // executes, including clipboard writes. Only a display surface is escaped; pipes and
             // files keep the export byte-for-byte.
@@ -132,27 +152,32 @@ pub(super) fn render(
         )?,
         (Format::Text, IntentProposeResult::Candidate { candidate }) => {
             writeln!(out, "Candidate generated; not approved or effective.")?;
-            understanding(&mut out, &candidate["draft"], task)?;
-            writeln!(out, "\nValidated Cedar (not approved)")?;
-            for line in cedar_text(candidate)?.lines() {
-                writeln!(out, "{}", escape(line))?;
-            }
+            writeln!(out, "\nOriginal task\n  {}", escape(task))?;
+            writeln!(
+                out,
+                "  unresolved: {}\n",
+                terminal_json(&candidate["draft"]["unresolved"])?
+            )?;
             for note in candidate["notes"]
                 .as_array()
                 .ok_or(IntentFailure::Response)?
             {
-                writeln!(
-                    out,
-                    "  {}",
-                    escape(note.as_str().ok_or(IntentFailure::Response)?)
+                write_note(
+                    &mut out,
+                    "  ",
+                    note.as_str().ok_or(IntentFailure::Response)?,
                 )?;
+            }
+            writeln!(out, "\nValidated Cedar (not approved)")?;
+            for line in cedar_text(candidate)?.lines() {
+                writeln!(out, "{}", escape(line))?;
             }
             writeln!(out, "Expires: {} (Unix seconds)\n", expiry(candidate)?)?;
         }
         (Format::Text, IntentProposeResult::NeedsClarification { draft, reasons }) => {
             writeln!(
                 out,
-                "Candidate not generated: the current model and schema cannot express this task."
+                "Candidate not generated: review the draft and clarification reasons below."
             )?;
             understanding(&mut out, draft, task)?;
             writeln!(out, "\nReasons")?;
@@ -266,6 +291,16 @@ pub(super) fn display(text: &str, terminal: bool) -> Cow<'_, str> {
 fn direction_control(ch: char) -> bool {
     matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
+
+/// Writes a note line by line, so a multi-line note such as `COVERAGE` keeps its alignment in a
+/// Cedar header and in text output.
+fn write_note(out: &mut impl io::Write, prefix: &str, note: &str) -> io::Result<()> {
+    for line in note.lines() {
+        writeln!(out, "{prefix}{}", escape(line))?;
+    }
+    Ok(())
+}
+
 pub(super) fn escape(text: &str) -> String {
     text.chars()
         .flat_map(|ch| {
@@ -365,7 +400,7 @@ mod tests {
     #[test]
     fn tampered_artifact_hash_and_versions_are_rejected() {
         let policy = "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/work/report.csv\" };";
-        let artifact = prepare_policy(policy).unwrap();
+        let artifact = prepare_task_policy(policy).unwrap();
         let mut candidate = json!({"format_version":CANDIDATE_VERSION, "status":"CANDIDATE", "authorization_required":true,
             "draft":{"format_version":DRAFT_VERSION, "status":"DRAFT", "prompt_version":PROMPT_VERSION,
                 "source":{"source_id":"source", "kind":"task_text", "sha256":digest(b"task"), "byte_length":4},

@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use asc_intent::{
-    CEDAR_SCHEMA, DRAFT_VERSION, INTENT_BUDGET, IntentError, PROMPT_VERSION, PolicyError,
-    TaskInput, generate_policy_draft, prepare_policy, validate_policy_response,
+    CEDAR_SCHEMA, DRAFT_VERSION, INTENT_BUDGET, IntentError, PROMPT_VERSION, ProposalContext,
+    ProposalOutcome, TaskInput, generate_policy_draft, prepare_policy, propose_task,
+    validate_policy_response,
 };
 use asc_model_client::provider::{ModelProvider, OpenAiCompatibleProvider, ProviderError};
 use serde_json::{Value, json};
@@ -179,7 +180,7 @@ fn invalid_input_expiry_and_model_failures_never_return_an_old_draft() {
 }
 
 #[test]
-#[ignore = "requires DASHSCOPE_API_KEY; makes one paid call"]
+#[ignore = "requires DASHSCOPE_API_KEY; sends task text to DashScope and may incur charges"]
 fn dashscope_exact_file_protection_fixture() {
     // Reasoning tokens share `max_tokens` with the answer, so disable thinking as the daemon does.
     let provider = OpenAiCompatibleProvider::new(
@@ -188,22 +189,32 @@ fn dashscope_exact_file_protection_fixture() {
     )
     .unwrap()
     .without_thinking();
-    let draft = generate_policy_draft(
+    let mut input = task();
+    if let Some(text) = std::env::var_os("ASC_INTENT_TEST_TASK") {
+        input.text = text.into_string().expect("task text must be UTF-8");
+    }
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .try_into()
+        .unwrap();
+    let result = propose_task(
         &provider,
         "deepseek-v4.1-flash",
-        &task(),
+        &input,
+        &ProposalContext::new("intent-test".into(), created_at, 1800).unwrap(),
         Instant::now() + INTENT_BUDGET,
     )
     .unwrap();
-    // The fixture names relative targets, so a model that follows the prompt reports them instead
-    // of inventing an absolute directory; whatever Cedar it does emit must still be valid.
-    match prepare_policy(draft.policy()) {
-        Ok(_) => {}
-        Err(PolicyError::InvalidPath | PolicyError::UnsupportedPolicy) => {
-            assert!(!draft.unresolved().is_empty());
+    match &result {
+        ProposalOutcome::Candidate { candidate } => {
+            assert_eq!(
+                candidate.policy_text(),
+                serde_json::to_value(candidate).unwrap()["draft"]["policy"]
+            );
         }
-        Err(error) => panic!("unexpected policy failure: {error}"),
+        ProposalOutcome::NeedsClarification { reasons, .. } => assert!(!reasons.is_empty()),
     }
-    // This check covers types and the wrapper only; task semantics are covered by the independent
-    // adjudication matrix in policy.rs.
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
