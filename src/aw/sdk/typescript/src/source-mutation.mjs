@@ -400,15 +400,17 @@ export async function* runToolStream({
   const strictAfter = session._strictAfter();
   if (strictAfter && !bufferStream)
     throw new AwError("source_stream_withhold_requires_buffering");
+  const observeAfter = session._observeAfter();
+  const bufferedAfter = strictAfter || (bufferStream && observeAfter);
   const customExtract = Boolean(extractResult);
-  const items = session._observeAfter() ? [] : null;
+  const items = observeAfter ? [] : null;
   let bufferedBytes = 2;
   let afterDecision;
   let dispatched = false;
   function finish(close) {
     return session._runAdmittedCall(async () => {
       await close();
-      if (strictAfter && bufferedBytes > maxStreamBytes)
+      if (bufferedAfter && bufferedBytes > maxStreamBytes)
         throw new AwError("source_stream_result_too_large");
       if (session._observeAfter()) {
         afterDecision = await observeResult(
@@ -416,7 +418,7 @@ export async function* runToolStream({
           callId,
           snapshot,
           signal,
-          strictAfter
+          bufferedAfter
             ? { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true }
             : undefined,
         );
@@ -436,7 +438,7 @@ export async function* runToolStream({
   );
   try {
     for await (const item of stream) {
-      if (strictAfter) {
+      if (bufferedAfter) {
         if (items.length >= maxStreamItems)
           throw new AwError("source_stream_result_too_large");
         const isolated = isolateStrictValue(item, {
@@ -459,7 +461,7 @@ export async function* runToolStream({
         yield item;
       }
     }
-    if (strictAfter) {
+    if (bufferedAfter) {
       const deliver =
         afterDecision && Object.hasOwn(afterDecision, "replaced_result")
           ? applyStreamResult(items, afterDecision.replaced_result, {

@@ -322,6 +322,55 @@ class LanguageSourceEdgeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stop_service(proc)
 
+    async def test_native_after_block_honors_explicit_async_buffering(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awpe-", dir="/tmp") as tmp:
+            root = Path(tmp)
+            hook = root / "native_hook.py"
+            hook.write_text(NATIVE_HOOK_SCRIPT, encoding="utf-8")
+            proc, endpoint = start_custom_service(
+                root,
+                providers={
+                    "nh": {
+                        "protocol": "native-hook/v1alpha1",
+                        "transport": {
+                            "type": "stdio",
+                            "location": "agent",
+                            "argv": [sys.executable, str(hook)],
+                        },
+                        "timeout_ms": 2000,
+                        "max_output_bytes": 4096,
+                        "config": {},
+                    }
+                },
+                after_steps=[
+                    {"id": "native", "provider": "nh", "native": {}, "on_error": "report"}
+                ],
+            )
+            try:
+                async with LanguageSource.create(endpoint=str(endpoint), target="app") as source:
+                    async with source.session(session_id="py-native-buffer") as session:
+                        await session.prepare()
+                        self.assertTrue(session._observe_after())
+                        self.assertFalse(session._strict_after())
+
+                        async def chunks(args: dict[str, str]):
+                            yield args["out"]
+
+                        for buffer_stream, expected in ((True, []), (False, ["sample"])):
+                            with self.subTest(buffer_stream=buffer_stream):
+                                wrapped = session.wrap_tool(chunks, buffer_stream=buffer_stream)
+                                delivered: list[str] = []
+                                with self.assertRaises(SourceDenied) as denied:
+                                    async for chunk in wrapped(
+                                        {"command": "native_block", "out": "sample"}
+                                    ):
+                                        delivered.append(chunk)
+                                self.assertEqual(denied.exception.event, "tool.after")
+                                self.assertTrue(denied.exception.tool_executed)
+                                self.assertEqual(delivered, expected)
+            finally:
+                stop_service(proc)
+
     async def test_observe_only_sync_buffer_stream_extracts_chunk_list(self) -> None:
         with tempfile.TemporaryDirectory(prefix="awpe3-", dir="/tmp") as raw:
             root = Path(raw)
