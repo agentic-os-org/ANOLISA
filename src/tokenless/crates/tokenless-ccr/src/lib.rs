@@ -45,6 +45,7 @@ pub use tokenless_protocol::RecoveryMethod;
 /// The write errors are discarded: there is no fallback channel to
 /// report a failed warning on, and failing the command here is exactly
 /// the regression to avoid.
+#[cfg(feature = "sqlite")]
 pub(crate) fn warn_soft(message: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
