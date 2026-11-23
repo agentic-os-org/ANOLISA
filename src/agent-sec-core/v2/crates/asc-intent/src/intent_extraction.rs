@@ -64,6 +64,13 @@ impl CommandInput {
     }
 }
 
+pub(crate) fn validate_model(model: &str) -> Result<(), IntentError> {
+    if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        return Err(IntentError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// The command prompt's output wrapper; `caveats` records gaps that do not block a candidate.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -86,10 +93,6 @@ pub(crate) fn generate_command_response(
     rejection: Option<&str>,
 ) -> Result<CommandResponse, IntentError> {
     check_deadline(deadline)?;
-    input.validate()?;
-    if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
-        return Err(IntentError::InvalidInput);
-    }
     let mut payload = serde_json::to_string(input).map_err(|_| IntentError::InvalidInput)?;
     if let Some(rejection) = rejection {
         payload = format!(
@@ -197,12 +200,10 @@ pub(crate) fn generate_policy_draft_after(
         || task.source_id.chars().any(char::is_control)
         || task.text.trim().is_empty()
         || task.text.len() > 64 * 1024
-        || model.trim().is_empty()
-        || model.len() > 256
-        || model.chars().any(char::is_control)
     {
         return Err(IntentError::InvalidInput);
     }
+    validate_model(model)?;
     let mut input = json!({
         "task": {"source_id": task.source_id, "text": task.text},
     })

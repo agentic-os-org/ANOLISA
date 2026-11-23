@@ -956,3 +956,60 @@ fn command_results_are_reverified_before_rendering() {
         assert!(output.stdout.is_empty(), "{case}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_file_candidates_project_to_the_requested_os_scopes() {
+    use asc_daemon_protocol::authorization::{FileRight, LaunchSpec, RuleEffect};
+    use asc_pep_runtime::PermissionInput;
+
+    let directory = common::Directory::new();
+    let cwd = fs::canonicalize(&directory.0).unwrap();
+    let input = cwd.join("input files");
+    let output = cwd.join("out");
+    fs::create_dir(&input).unwrap();
+    fs::create_dir(&output).unwrap();
+    let existing = output.join("all.txt");
+    fs::write(&existing, b"").unwrap();
+    let socket = cwd.join("daemon.sock");
+    let server = Server::start(&socket, Arc::new(Replay::default()), None).await;
+    for (command, writable) in [
+        (
+            "cat 'input files'/*.txt > out/all.txt".to_owned(),
+            &existing,
+        ),
+        (
+            format!(
+                "tar -czf '{}/new.tar.gz' -C 'input files' .",
+                output.display()
+            ),
+            &output,
+        ),
+    ] {
+        let result = output_json(&cli_command(&socket, &cwd, &command).output().unwrap(), 0);
+        let candidate = PermissionInput::parse(result["policy"].as_str().unwrap()).unwrap();
+        let permissions = candidate
+            .resolve(&LaunchSpec {
+                program: "/bin/bash".into(),
+                resolved_program: "/usr/bin/bash".into(),
+                args: vec!["-c".into(), command],
+                cwd: cwd.to_str().unwrap().to_owned(),
+                env: std::collections::BTreeMap::new(),
+            })
+            .unwrap();
+        let rules = permissions.filesystem.rules;
+        assert!(rules.iter().all(|rule| rule.effect == RuleEffect::Allow
+            && (Path::new(&rule.path) == input || Path::new(&rule.path) == writable)));
+        assert!(
+            rules.iter().any(
+                |rule| Path::new(&rule.path) == input && rule.rights.contains(&FileRight::Read)
+            )
+        );
+        let writers: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.rights.contains(&FileRight::Write))
+            .map(|rule| Path::new(&rule.path))
+            .collect();
+        assert_eq!(writers, [writable.as_path()]);
+    }
+    server.stop().await;
+}

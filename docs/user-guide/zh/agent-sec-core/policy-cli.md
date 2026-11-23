@@ -236,6 +236,12 @@ hook 集成：只发送 hook 已有的 `command` 与 `cwd`，返回该条命令�
 `tool_input.command`；cosh-ng 另提供 `tool_name` 与会话 `cwd`，未提供 `cwd` 的宿主
 需显式传 `--cwd`。
 
+简单的 `cat src/*.txt > out/all.txt` 和 `tar -czf out/a.tgz -C src .` 由 intent 在本地解析。
+Bash 在执行时展开通配符。候选申请读取源目录，以及写入 cat 的目标文件或 tar 的输出目录。
+如果归档输出目录是工作目录或其上级目录，只申请写入归档文件。
+tar 的本地规则识别 `-C DIR` 或 `--directory DIR` 之后的 `.`。对于 `README.md` 等具名输入，
+单凭命令无法确定文件类型，交由模型生成候选。PDP 按已发布的 PAP 策略核准申请。
+
 以 cosh-ng 为例，该 hook 点目前能拿到的字段里，只有 `command` 与 `cwd` 会进入候选：
 
 | 字段 | 用途 |

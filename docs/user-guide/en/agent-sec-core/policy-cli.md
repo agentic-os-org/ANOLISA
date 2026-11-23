@@ -299,6 +299,14 @@ through it as well. These payloads supply `tool_input.command`; cosh-ng also sup
 `tool_name` and the session `cwd`, while a host without `cwd` must pass `--cwd`
 explicitly.
 
+For simple `cat src/*.txt > out/all.txt` and `tar -czf out/a.tgz -C src .` commands,
+Intent derives data permissions from literal operands locally. Bash expands the glob.
+The request covers the input directory for reading, and the existing output file (cat) or
+archive output directory (tar) for writing. If that directory is the working directory
+or an ancestor, the request covers only the archive file. For tar, the local rule recognizes `.` after
+`-C DIR` or `--directory DIR`. Named inputs such as `README.md` go to the model, since
+the command alone does not establish their file type. PDP evaluates the request against PAP.
+
 For cosh-ng, these are the fields this hook point carries today, and only `command` and
 `cwd` reach the candidate:
 
