@@ -285,10 +285,44 @@ for (const source of [
 const sourceCommit = process.env.GITHUB_SHA || git('rev-parse', 'HEAD');
 const repoUrl = repositoryUrl();
 const index = {
-  schema_version: '1.4.0',
+  schema_version: '1.5.0',
   project: {
     name: 'ANOLISA',
+    full_name: 'Agentic Nexus Operating Layer & Interface System Architecture',
     description: 'A multi-component system software stack for AI Agent workloads.',
+    positioning:
+      'Core system layer sitting between Agent applications/frameworks and existing OS kernels (Linux-first, with partial macOS support).',
+    not_a: [
+      'an Agent framework or LLM orchestrator (enhances existing Agents without replacing their UI, models, or accounts)',
+      'a from-scratch OS kernel or Linux distribution (builds on existing OS kernels)',
+      'an all-or-nothing monolith (components can be enabled individually or composed through AW)',
+    ],
+    layers: [
+      {
+        id: 'user-entrypoint',
+        name: 'User Entrypoint Layer',
+        summary: 'AI-native terminal preserving Shell UX and an operational OS handbook for Agents.',
+        components: ['cosh-ng', 'os-skills'],
+      },
+      {
+        id: 'aw-unified-stack',
+        name: 'AW Unified Stack Layer',
+        summary: 'Open protocol bus connecting Agent frameworks above with extensible system software below.',
+        components: ['aw'],
+      },
+      {
+        id: 'agent-semantic',
+        name: 'Agent Semantic Layer',
+        summary: 'Context compression, persistent memory, on-demand Skills views, workspace snapshots, OS-level security, and eBPF observability.',
+        components: ['tokenless', 'agent-memory', 'skillfs', 'ws-ckpt', 'agent-sec-core', 'agentsight'],
+      },
+      {
+        id: 'install-and-host-tooling',
+        name: 'Install & Host Tooling',
+        summary: 'Component installation/lifecycle CLI and deterministic Linux kernel parameter tuning.',
+        components: ['anolisa', 'ktuner'],
+      },
+    ],
   },
   repository: repoUrl,
   default_branch: 'main',
@@ -347,6 +381,15 @@ const indexText = [
   `Default branch: ${index.default_branch}`,
   `Source commit: ${index.source_commit}`,
   `License: ${index.license}`,
+  '',
+  '## Overview',
+  '',
+  `${index.project.name} (${index.project.full_name}): ${index.project.description}`,
+  `Positioning: ${index.project.positioning}`,
+  'Not:',
+  ...index.project.not_a.map((item) => `  - ${item}`),
+  'Layers:',
+  ...index.project.layers.map((layer) => `  - ${layer.name} [${layer.components.join(', ')}]: ${layer.summary}`),
   '',
   '## Safe setup workflow',
   '',
@@ -473,10 +516,50 @@ for (const source of changelogSources) {
 }
 await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n'));
 
-await writeGenerated(
-  'static/llms.txt',
-  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Contribute: ${siteHref('docs/contribute/')}\n- Ways to contribute: ${siteHref('docs/contribute/tracks/')}\n- Issue & claiming workflow: ${siteHref('docs/contribute/workflow/')}\n- Governance: ${siteHref('docs/contribute/governance/')}\n- Community roadmap: ${index.contribution.roadmap_url}\n- Good first issues: ${index.contribution.good_first_issue_url}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
-);
+const llmsText = [
+  '# ANOLISA',
+  '',
+  `> ${index.project.description} ${index.project.positioning}`,
+  '',
+  '## 1. What is ANOLISA?',
+  '',
+  `${index.project.name} (${index.project.full_name}) provides OS-level primitives for AI Agent workloads without replacing your existing Agent applications, models, or OS kernel:`,
+  '',
+  ...index.project.not_a.map((item) => `- **Not**: ${item}`),
+  ...index.project.layers.map((layer) => `- **${layer.name}** (${layer.components.join(', ')}): ${layer.summary}`),
+  '',
+  `- Website: ${siteHref()}`,
+  `- Source: ${index.repository}`,
+  `- Documentation: ${siteHref('docs/')}`,
+  `- Chinese documentation: ${siteHref('zh/docs/')}`,
+  '',
+  '## 2. How to use ANOLISA',
+  '',
+  `Install the ANOLISA CLI (Linux / macOS): \`${index.install.cli}\``,
+  '',
+  `- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}`,
+  `- User guide: ${siteHref('docs/user-guide/')}`,
+  `- Developer guide: ${siteHref('docs/developer-guide/')}`,
+  `- Agent setup workflow: ${siteHref('agents/')}`,
+  `- Repository index: ${siteHref('agents/repo-index.json')}`,
+  `- CLI reference: ${siteHref('agents/cli-reference.txt')}`,
+  `- Changelog: ${siteHref('agents/changelog.txt')}`,
+  `- Full English documentation: ${siteHref('llms-full.txt')}`,
+  '',
+  '## 3. How to contribute to ANOLISA',
+  '',
+  `- Contribute: ${siteHref('docs/contribute/')}`,
+  `- Ways to contribute: ${siteHref('docs/contribute/tracks/')}`,
+  `- Issue & claiming workflow: ${siteHref('docs/contribute/workflow/')}`,
+  `- Governance: ${siteHref('docs/contribute/governance/')}`,
+  `- Agent onboarding playbook: ${index.repository}/blob/main/specs/contributor-onboarding-guide.md`,
+  `- Community roadmap: ${index.contribution.roadmap_url}`,
+  `- Good first issues: ${index.contribution.good_first_issue_url}`,
+  '',
+  `- Source commit: ${sourceCommit}`,
+  '',
+].join('\n');
+await writeGenerated('static/llms.txt', llmsText);
 
 const fullDocumentation = [];
 for (const source of documentationSources) {

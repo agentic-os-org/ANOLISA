@@ -20,7 +20,12 @@ Three invariants repeated here so agents orient contributors accurately without 
 
 ## 1. Project Overview
 
-**ANOLISA** is a monorepo for an Agentic OS — a server-side operating layer designed for AI agent workloads.
+**ANOLISA** (**A**gentic **N**exus **O**perating **L**ayer & **I**nterface **S**ystem **A**rchitecture) is a multi-component system software stack for AI Agent workloads — the core system layer sitting between Agent applications/frameworks and existing OS kernels (Linux-first, with partial macOS support).
+
+- **What it is**: OS-level primitives for AI Agents organized in three layers — **User Entrypoint Layer** (`cosh-ng`, `os-skills`), **AW Unified Stack Layer** (`aw` + `providers/`, open protocol bus), and **Agent Semantic Layer** (context: `tokenless`, `agent-memory`; Skills delivery: `skillfs`; safety & recovery: `agent-sec-core`, `ws-ckpt`; observability: `agentsight`) — plus `anolisa` CLI (install/lifecycle) and `ktuner` (kernel diagnostics & tuning).
+- **What it is NOT**: not an Agent framework or LLM orchestrator (enhances Claude Code, Qoder, OpenClaw, Codex, and custom harnesses without replacing their UI, models, or accounts); not a new OS kernel or Linux distro rewrite (builds on existing OS kernels); not an all-or-nothing monolith (enable components individually or compose them via `aw`).
+- **Who uses it**: individual developers adding guardrails, Token compression, rollback, and tracing to existing Agents; Agent platforms & sandbox providers preinstalling runtime governance; OS vendors & systems developers evolving distributions into Agentic OSes or plugging custom software into `aw`.
+- **How to use**: one-line CLI install `curl -fsSL https://get.agentic-os.sh | bash` (see [`docs/user-guide/en/getting-started/quickstart.md`](docs/user-guide/en/getting-started/quickstart.md) and [`README.md#get-started`](README.md#get-started)); machine-readable index at `https://agentic-os.sh/llms.txt`.
 
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|

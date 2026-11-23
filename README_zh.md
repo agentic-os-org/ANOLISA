@@ -42,6 +42,27 @@
 > 本社区以中立、开放的方式参与这一方向的探索；
 > ANOLISA 是本社区设计的 Agentic OS 架构中的核心系统软件栈。
 
+```text
+你的 Agent 应用与框架   （Claude Code、Qoder、OpenClaw、Codex、自研 Harness 等）
+          │
+          ▼
+┌─ ANOLISA 系统软件栈 ──────────────────────────────────────────────────────────────
+│  用户入口层   · cosh-ng（AI 原生终端）· OS Skills（面向 Agent 的 OS 手册）
+│  统一接入层   · AW + Provider 协议（向上接 Agent，向下接可扩展系统软件）
+│  Agent 语义层 · 上下文：tokenless、agent-memory
+│               · 技能与恢复：skillfs（FUSE 按需视图）、ws-ckpt（btrfs 快照回滚）
+│               · 安全与观测：agent-sec-core（OS 级安全内核）、agentsight（eBPF 观测）
+│  发行与调优   · anolisa CLI（安装与生命周期）· ktuner（Linux 内核参数调优）
+└───────────────────────────────────────────────────────────────────────────────────
+          │
+          ▼
+现有操作系统内核与基础设施   （Linux 为一等公民：eBPF、FUSE、btrfs、seccomp · macOS 支持部分组件）
+```
+
+- **不是 Agent 框架**：不替代你正在使用的 Agent，保留原有界面、模型与账号，仅增强其运行环境。
+- **不是从零重写的 OS 内核或发行版**：构建在现有 Linux（及部分 macOS）内核与发行版之上。
+- **不是强绑定全家桶**：各组件可按需独立启用，也可通过 `AW` 及其开放 Provider 协议统一编排。
+
 > [!TIP]
 > **想参与 ANOLISA 协作？直接让你的 AI Coding Agent 带你入门。**
 > 在常用 Coding Agent（Claude Code、Codex、Qoder、Cursor、Antigravity 等）中加载本仓库，直接提问：
@@ -347,7 +368,8 @@ ANOLISA 基于 [Apache License 2.0](LICENSE) 发布。
 [故障排查](https://agentic-os.sh/zh/docs/user-guide/getting-started/troubleshooting/) ·
 [源码构建](https://agentic-os.sh/zh/docs/user-guide/getting-started/building/) ·
 [变更日志](https://agentic-os.sh/zh/changelog/) ·
-[Agent 入口](https://agentic-os.sh/zh/agents/)
+[Agent 入口](https://agentic-os.sh/zh/agents/) ·
+[llms.txt](https://agentic-os.sh/llms.txt)
 
 统一源码构建要求 Bash 4.4 或更高版本。受限网络环境可以配置
 `NODE_DIST_MIRROR` 和 `RUSTUP_INIT_SCRIPT_URL`，具体用法见

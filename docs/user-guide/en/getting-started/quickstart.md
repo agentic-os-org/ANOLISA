@@ -2,7 +2,7 @@
 
 [中文版](../../zh/getting-started/quickstart.md)
 
-ANOLISA is a server-side operating layer for AI Agent workloads. Install the
+ANOLISA is a multi-component system software stack for AI Agent workloads. Install the
 CLI once, then enable only the capability that delivers the first result you
 want.
 
