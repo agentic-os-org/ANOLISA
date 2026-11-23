@@ -1024,7 +1024,11 @@ impl Http2StreamAggregator {
                          MAX_CONTINUATION_BUFFER ({} bytes), dropping",
                         fragment.len()
                     );
-                    self.continuation_buffers.remove(&stream_id);
+                    if let Some(stale) = self.continuation_buffers.remove(&stream_id)
+                        && stale.direction != direction
+                    {
+                        self.reset_hpack_decoder(connection_id, stale.direction);
+                    }
                     // The peer's encoder still applied this block's
                     // dynamic-table insertions, so keeping the stale decoder
                     // would mis-resolve every later dynamic index on the
@@ -3985,5 +3989,45 @@ mod tests {
             !aggregator.streams.contains(&completed[0].stream_id),
             "retired stream must stay in closed_streams after deferred trailer completion"
         );
+    }
+
+    #[test]
+    fn oversized_headers_resets_stale_opposite_direction_hpack_decoder() {
+        let conn_id = ConnectionId {
+            pid: 830,
+            ssl_ptr: 0x8300,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut req_encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut req_encoder);
+
+        // Buffer an incomplete Request HEADERS block (does not finish with END_HEADERS).
+        let partial_req = req_encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert!(partial_req.len() <= MAX_CONTINUATION_BUFFER);
+        let req_event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        assert!(
+            aggregator
+                .process_frames(vec![create_test_frame(
+                    1,
+                    0x01,
+                    0x00,
+                    partial_req,
+                    req_event
+                )])
+                .is_empty()
+        );
+
+        // An oversized Response HEADERS on the same stream removes that stale Request
+        // buffer and must reset the Request HPACK decoder alongside Response.
+        let resp_event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 1010);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x01,
+            vec![0x88; MAX_CONTINUATION_BUFFER + 1],
+            resp_event,
+        )]);
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut req_encoder);
     }
 }
