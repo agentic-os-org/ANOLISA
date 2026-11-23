@@ -2,7 +2,7 @@
 
 [English](../../en/getting-started/quickstart.md)
 
-ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。只需安装一次 CLI，再按需
+ANOLISA 是面向 AI Agent 工作负载的多组件系统软件栈。只需安装一次 CLI，再按需
 启用能带来第一个目标结果的能力。
 
 AW Preview 包的安装步骤见[安装 AW](../aw/installation.md)。

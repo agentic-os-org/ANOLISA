@@ -16,6 +16,28 @@ if (!validate(index)) {
   process.exit(1);
 }
 
+const indexedComponentIds = new Set(index.components.map((component) => component.id));
+const layeredComponentIds = new Set();
+for (const layer of index.project.layers) {
+  for (const id of layer.components) {
+    if (!indexedComponentIds.has(id)) {
+      console.error(`project.layers.${layer.id}: unknown component "${id}" not found in components.`);
+      process.exit(1);
+    }
+    if (layeredComponentIds.has(id)) {
+      console.error(`project.layers.${layer.id}: component "${id}" is listed in more than one layer.`);
+      process.exit(1);
+    }
+    layeredComponentIds.add(id);
+  }
+}
+for (const id of indexedComponentIds) {
+  if (!layeredComponentIds.has(id)) {
+    console.error(`project.layers: component "${id}" is missing from project.layers.`);
+    process.exit(1);
+  }
+}
+
 if (index.setup_workflow.host_detection.some((command) => command.startsWith('anolisa '))) {
   console.error('Host detection must not depend on the ANOLISA CLI.');
   process.exit(1);

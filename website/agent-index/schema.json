@@ -23,10 +23,38 @@
     "project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "description"],
+      "required": ["name", "full_name", "description", "positioning", "not_a", "layers"],
       "properties": {
         "name": {"const": "ANOLISA"},
-        "description": {"type": "string", "minLength": 1}
+        "full_name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "positioning": {"type": "string", "minLength": 1},
+        "not_a": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name", "summary", "components"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+              "name": {"type": "string", "minLength": 1},
+              "summary": {"type": "string", "minLength": 1},
+              "components": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+                "uniqueItems": true
+              }
+            }
+          }
+        }
       }
     },
     "repository": {"type": "string", "pattern": "^https://"},

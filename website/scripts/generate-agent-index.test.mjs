@@ -111,7 +111,10 @@ for (const migrated of [false, true]) {
       assert.equal(components[id].source_path, sourcePath);
       assert.equal(components[id].documentation_path, `https://github.com/agentic-os-org/ANOLISA/tree/main/${sourcePath}`);
     }
-    assert.equal(index.schema_version, '1.4.0');
+    assert.equal(index.schema_version, '1.5.0');
+    assert.equal(index.project.full_name, 'Agentic Nexus Operating Layer & Interface System Architecture');
+    assert.ok(index.project.not_a.length >= 3);
+    assert.equal(index.project.layers.length, 4);
     assert.equal(index.install.cli, installCommand);
     assert.equal(index.contribution.guide_url, 'https://example.com/docs/contribute/');
     assert.equal(index.contribution.governance_url, 'https://example.com/docs/contribute/governance/');
@@ -139,6 +142,10 @@ for (const migrated of [false, true]) {
       'https://example.com/docs/user-guide/getting-started/quickstart/',
     );
     const llmsIndex = await readFile(path.join(root, 'website/.generated/static/llms.txt'), 'utf8');
+    assert.ok(llmsIndex.includes('## 1. What is ANOLISA?\n'));
+    assert.ok(llmsIndex.includes('## 2. How to use ANOLISA\n'));
+    assert.ok(llmsIndex.includes('## 3. How to contribute to ANOLISA\n'));
+    assert.ok(llmsIndex.includes(`\`${installCommand}\``));
     assert.ok(llmsIndex.includes('- Quickstart: https://example.com/docs/user-guide/getting-started/quickstart/\n'));
     assert.ok(!llmsIndex.includes('/docs/quickstart/'));
     const fullDocumentation = await readFile(path.join(root, 'website/.generated/static/llms-full.txt'), 'utf8');
@@ -164,6 +171,8 @@ for (const migrated of [false, true]) {
     assert.ok(!cli.includes('Copilot Shell'));
     assert.ok(!cli.includes('copilot-shell'));
     const textIndex = await readFile(path.join(output, 'repo-index.txt'), 'utf8');
+    assert.ok(textIndex.includes('## Overview\n'));
+    assert.ok(textIndex.includes('Positioning: '));
     for (const sourcePath of Object.values(currentPaths)) assert.ok(textIndex.includes(`  source: ${sourcePath}\n`));
     if (migrated) assert.ok(!textIndex.includes('copilot-shell'));
     const changelog = await readFile(path.join(output, 'changelog.txt'), 'utf8');
