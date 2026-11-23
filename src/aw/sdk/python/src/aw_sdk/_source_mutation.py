@@ -244,6 +244,50 @@ def _replay_buffered_sync(
             yield out
 
 
+async def _deliver_buffered_sync(
+    result: Any,
+    *,
+    session: Any,
+    snapshot: dict[str, Any],
+    call_id: str,
+    observe_result: Callable[..., Any],
+    extract_result: Callable[[Any], Any] | None,
+    apply_result: Callable[[Any, Any], Any] | None,
+    snapshot_result: Callable[[Any], Any] | None,
+    max_stream_items: int,
+    max_stream_bytes: int,
+) -> IteratorABC[Any]:
+    """Buffer, audit, and replay a synchronous lazy result."""
+    custom_extract = extract_result is not None
+    checked_items = buffer_sync_iterator(
+        result,
+        max_stream_items=max_stream_items,
+        max_stream_bytes=max_stream_bytes,
+        snapshot_result=snapshot_result,
+        custom_extract=custom_extract,
+    )
+    decision = await observe_result(
+        checked_items,
+        snapshot,
+        call_id,
+        max_bytes=max_stream_bytes,
+        isolate_for_extract=True,
+        is_stream=True,
+    )
+    if "replaced_result" in decision:
+        deliver = apply_stream_result(
+            checked_items,
+            decision["replaced_result"],
+            apply_result=apply_result,
+            custom_extract=custom_extract,
+        )
+    else:
+        deliver = [deepcopy(item) for item in checked_items]
+    if session is not None:
+        session._require_open()
+    return _replay_buffered_sync(deliver, session)
+
+
 async def deliver_strict_result(
     result: Any,
     *,
@@ -268,33 +312,18 @@ async def deliver_strict_result(
             if not buffer_stream:
                 close_lazy_result(result)
                 raise AwError("source_stream_withhold_requires_buffering")
-            checked_items = buffer_sync_iterator(
+            return await _deliver_buffered_sync(
                 result,
+                session=session,
+                snapshot=snapshot,
+                call_id=call_id,
+                observe_result=observe_result,
+                extract_result=extract_result,
+                apply_result=apply_result,
+                snapshot_result=snapshot_result,
                 max_stream_items=max_stream_items,
                 max_stream_bytes=max_stream_bytes,
-                snapshot_result=snapshot_result,
-                custom_extract=custom_extract,
             )
-            decision = await observe_result(
-                checked_items,
-                snapshot,
-                call_id,
-                max_bytes=max_stream_bytes,
-                isolate_for_extract=True,
-                is_stream=True,
-            )
-            if "replaced_result" in decision:
-                deliver = apply_stream_result(
-                    checked_items,
-                    decision["replaced_result"],
-                    apply_result=apply_result,
-                    custom_extract=custom_extract,
-                )
-            else:
-                deliver = [deepcopy(item) for item in checked_items]
-            if session is not None:
-                session._require_open()
-            return _replay_buffered_sync(deliver, session)
         isolated = isolate_strict_value(
             result,
             snapshot_result=snapshot_result,
@@ -558,6 +587,27 @@ def build_tool_wrapper(
                     max_stream_bytes=max_stream_bytes,
                 )
             if session._observe_after():
+                if (
+                    buffer_stream
+                    and is_lazy_result(result)
+                    and not (
+                        inspect.isasyncgen(result)
+                        or isinstance(result, AsyncIteratorABC)
+                    )
+                ):
+                    with tool_executed():
+                        return await _deliver_buffered_sync(
+                            result,
+                            session=session,
+                            snapshot=snapshot,
+                            call_id=resolved_call,
+                            observe_result=observe_result,
+                            extract_result=extract_result,
+                            apply_result=apply_result,
+                            snapshot_result=snapshot_result,
+                            max_stream_items=max_stream_items,
+                            max_stream_bytes=max_stream_bytes,
+                        )
                 decision = await observe_result(result, snapshot, resolved_call)
                 if "replaced_result" in decision:
                     with tool_executed():

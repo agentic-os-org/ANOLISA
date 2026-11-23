@@ -366,3 +366,128 @@ test(
     }
   },
 );
+
+test(
+  "Observe-only route with bufferStream: true passes chunk arrays to extractResult in wrapTool and instrument",
+  { skip: !BINARY, timeout: 25000 },
+  async () => {
+    const root = mkdtempSync(path.join("/tmp", "awje3-"));
+    const logPath = path.join(root, "obs.jsonl");
+    const obsScript = path.join(root, "obs_provider.py");
+    writeFileSync(
+      obsScript,
+      `import json, sys
+LOG = ${JSON.stringify(logPath)}
+r = json.load(sys.stdin)
+out = {"api_version": r["api_version"], "request_id": r["request_id"], "status": "ok"}
+if r["method"] == "describe":
+    out["operations"] = [{"name": "watch", "events": ["tool.after"], "effects": ["observe"]}]
+elif r["method"] == "invoke":
+    ev = r["event"]
+    out["input_digest"] = r["input_digest"]
+    with open(LOG, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": ev["name"], "tool": ev.get("tool")}) + "\\n")
+    out["effects"] = []
+print(json.dumps(out))
+`,
+    );
+    const service = await startCustomService(root, {
+      providers: {
+        obs: {
+          protocol: "aw-provider/v1alpha1",
+          transport: {
+            type: "stdio",
+            location: "agent",
+            argv: ["python3", obsScript],
+          },
+          timeout_ms: 2000,
+          max_output_bytes: 65536,
+          config: {},
+        },
+      },
+      afterSteps: [
+        {
+          id: "watch",
+          provider: "obs",
+          operation: "watch",
+          effects: ["observe"],
+          on_error: "report",
+        },
+      ],
+    });
+    try {
+      const source = LanguageSource.create({
+        endpoint: service.endpoint,
+        target: "app",
+        availability: "required",
+      });
+      await source.connect();
+      try {
+        await source.withSession({ sessionId: "js-obs-buf" }, async (session) => {
+          await session.prepare();
+          assert.equal(session._strictAfter(), false);
+          assert.equal(session._observeAfter(), true);
+          const extracted = [];
+          function* syncChunks() {
+            yield { text: "alpha" };
+            yield { text: "beta" };
+          }
+          const wrapped = session.wrapTool(syncChunks, {
+            name: "obs_wrap",
+            bufferStream: true,
+            extractResult: (chunks) => {
+              extracted.push(["obs_wrap", chunks]);
+              return chunks.map((c) => c.text).join(",");
+            },
+          });
+          const deliveredWrap = [...(await wrapped({ command: "ok" }))];
+          assert.deepEqual(deliveredWrap, [{ text: "alpha" }, { text: "beta" }]);
+
+          const target = { syncChunks };
+          const inst = session.instrument(target, {
+            toolMethods: {
+              syncChunks: {
+                name: "obs_inst",
+                bufferStream: true,
+                extractResult: (chunks) => {
+                  extracted.push(["obs_inst", chunks]);
+                  return chunks.map((c) => c.text).join(",");
+                },
+              },
+            },
+          });
+          try {
+            const deliveredInst = [...(await target.syncChunks({ command: "ok" }))];
+            assert.deepEqual(deliveredInst, [{ text: "alpha" }, { text: "beta" }]);
+          } finally {
+            inst.restore();
+          }
+
+          assert.deepEqual(extracted, [
+            ["obs_wrap", [{ text: "alpha" }, { text: "beta" }]],
+            ["obs_inst", [{ text: "alpha" }, { text: "beta" }]],
+          ]);
+          const observed = readProviderLog(logPath).filter(
+            (e) => e.event === "tool.after",
+          );
+          assert.equal(observed.length, 2);
+          assert.deepEqual(
+            observed.map((e) => [
+              e.tool.name,
+              e.tool.result ?? e.tool.result_projection?.text,
+            ]),
+            [
+              ["obs_wrap", "alpha,beta"],
+              ["obs_inst", "alpha,beta"],
+            ],
+          );
+        });
+      } finally {
+        await source.close();
+      }
+    } finally {
+      await service.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

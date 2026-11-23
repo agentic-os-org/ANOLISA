@@ -322,6 +322,133 @@ class LanguageSourceEdgeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stop_service(proc)
 
+    async def test_observe_only_sync_buffer_stream_extracts_chunk_list(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awpe3-", dir="/tmp") as raw:
+            root = Path(raw)
+            log_path = root / "obs.jsonl"
+            obs_script = root / "obs_provider.py"
+            obs_script.write_text(
+                "import json, sys\n"
+                f"LOG = {str(log_path)!r}\n"
+                "r = json.load(sys.stdin)\n"
+                'out = {"api_version": r["api_version"], "request_id": r["request_id"], "status": "ok"}\n'
+                'if r["method"] == "describe":\n'
+                '    out["operations"] = [{"name": "watch", "events": ["tool.after"], "effects": ["observe"]}]\n'
+                'elif r["method"] == "invoke":\n'
+                '    ev = r["event"]\n'
+                '    out["input_digest"] = r["input_digest"]\n'
+                '    with open(LOG, "a", encoding="utf-8") as fh:\n'
+                '        fh.write(json.dumps({"event": ev["name"], "tool": ev.get("tool")}) + "\\n")\n'
+                '    out["effects"] = []\n'
+                "print(json.dumps(out))\n",
+                encoding="utf-8",
+            )
+            providers = {
+                "obs": {
+                    "protocol": "aw-provider/v1alpha1",
+                    "transport": {
+                        "type": "stdio",
+                        "location": "agent",
+                        "argv": [sys.executable, str(obs_script)],
+                    },
+                    "timeout_ms": 2000,
+                    "max_output_bytes": 65536,
+                    "config": {},
+                },
+            }
+            after_steps = [
+                {
+                    "id": "watch",
+                    "provider": "obs",
+                    "operation": "watch",
+                    "effects": ["observe"],
+                    "on_error": "report",
+                },
+            ]
+            proc, endpoint = start_custom_service(root, after_steps=after_steps, providers=providers)
+            try:
+                async with LanguageSource.create(
+                    endpoint=str(endpoint),
+                    target="app",
+                    availability="required",
+                ) as source:
+                    async with source.session(session_id="py-obs-buf") as session:
+                        await session.prepare()
+                        self.assertFalse(session._strict_after())
+                        self.assertTrue(session._observe_after())
+                        extracted: list[tuple[str, list[dict[str, str]]]] = []
+
+                        def sync_chunks(_args: dict[str, str]):
+                            yield {"text": "alpha"}
+                            yield {"text": "beta"}
+
+                        def extract_wrap(chunks: list[dict[str, str]]) -> str:
+                            extracted.append(("obs_wrap", chunks))
+                            return ",".join(c["text"] for c in chunks)
+
+                        def extract_inst(chunks: list[dict[str, str]]) -> str:
+                            extracted.append(("obs_inst", chunks))
+                            return ",".join(c["text"] for c in chunks)
+
+                        wrapped = session.wrap_tool(
+                            sync_chunks,
+                            name="obs_wrap",
+                            buffer_stream=True,
+                            extract_result=extract_wrap,
+                        )
+                        self.assertEqual(
+                            list(await wrapped({"command": "ok"})),
+                            [{"text": "alpha"}, {"text": "beta"}],
+                        )
+
+                        class Agent:
+                            def run_chunks(self, _args: dict[str, str]):
+                                yield {"text": "alpha"}
+                                yield {"text": "beta"}
+
+                        agent = Agent()
+                        inst = session.instrument(
+                            agent,
+                            tool_methods={
+                                "run_chunks": {
+                                    "name": "obs_inst",
+                                    "buffer_stream": True,
+                                    "extract_result": extract_inst,
+                                }
+                            },
+                        )
+                        try:
+                            self.assertEqual(
+                                list(await agent.run_chunks({"command": "ok"})),
+                                [{"text": "alpha"}, {"text": "beta"}],
+                            )
+                        finally:
+                            inst.restore()
+
+                        self.assertEqual(
+                            extracted,
+                            [
+                                ("obs_wrap", [{"text": "alpha"}, {"text": "beta"}]),
+                                ("obs_inst", [{"text": "alpha"}, {"text": "beta"}]),
+                            ],
+                        )
+                        observed = [
+                            e for e in read_provider_log(log_path) if e["event"] == "tool.after"
+                        ]
+                        self.assertEqual(
+                            [
+                                (
+                                    e["tool"]["name"],
+                                    e["tool"].get("result")
+                                    or (e["tool"].get("result_projection") or {}).get("text"),
+                                )
+                                for e in observed
+                            ],
+                            [("obs_wrap", "alpha,beta"), ("obs_inst", "alpha,beta")],
+                        )
+            finally:
+                stop_service(proc)
+
 
 if __name__ == "__main__":
     unittest.main()
