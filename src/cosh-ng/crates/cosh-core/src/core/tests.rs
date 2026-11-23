@@ -4583,3 +4583,154 @@ async fn hook_block_releases_staged_call_with_provider_native_result() {
         "the LLM must see the blocked result exactly once"
     );
 }
+
+/// Captures the exact outbound messages handed to the provider at the real
+/// send boundary, plus the bound generation, to prove history isolation.
+struct OutboundCapturingProvider {
+    captured: Arc<Mutex<Vec<Vec<Message>>>>,
+    generation: Option<u64>,
+}
+
+#[async_trait]
+impl ContentGenerator for OutboundCapturingProvider {
+    async fn generate(
+        &self,
+        messages: &[Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        _config: &GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        self.captured.lock().unwrap().push(messages.to_vec());
+        Ok(Box::pin(futures::stream::iter(vec![
+            GenerateEvent::TextDelta("ok".to_string()),
+            GenerateEvent::MessageEnd,
+        ])))
+    }
+    fn cancel(&self) {}
+    fn auth_generation(&self) -> Option<u64> {
+        self.generation
+    }
+}
+
+fn outbound_contains_sentinel(captured: &[Vec<Message>], sentinel: &str) -> bool {
+    captured
+        .iter()
+        .any(|msgs| msgs.iter().any(|m| m.content.as_text().contains(sentinel)))
+}
+
+#[derive(Default)]
+struct MemOAuthBackend {
+    slots: Mutex<std::collections::HashMap<String, String>>,
+}
+impl crate::provider::sysom::oauth::store::OAuthSecretBackend for MemOAuthBackend {
+    fn set(
+        &self,
+        slot: &str,
+        token: &str,
+    ) -> Result<(), crate::provider::sysom::oauth::contract::OAuthError> {
+        self.slots.lock().unwrap().insert(slot.into(), token.into());
+        Ok(())
+    }
+    fn get(
+        &self,
+        slot: &str,
+    ) -> Result<Option<String>, crate::provider::sysom::oauth::contract::OAuthError> {
+        Ok(self.slots.lock().unwrap().get(slot).cloned())
+    }
+    fn delete(
+        &self,
+        slot: &str,
+    ) -> Result<(), crate::provider::sysom::oauth::contract::OAuthError> {
+        self.slots.lock().unwrap().remove(slot);
+        Ok(())
+    }
+}
+
+async fn run_send_boundary_case(
+    bound_generation: u64,
+    current_generation: u64,
+    seed_history: bool,
+) -> (Vec<Vec<Message>>, Result<(), String>) {
+    let sentinel = "SYNTH_MARKER_GEN1_ALPHA";
+    let dir = tempfile::tempdir().expect("temp config dir");
+    let backend = Arc::new(MemOAuthBackend::default());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = OutboundCapturingProvider {
+        captured: captured.clone(),
+        generation: Some(bound_generation),
+    };
+    crate::auth::oauth::TEST_CONFIG_DIR
+        .scope(dir.path().to_path_buf(), async {
+            crate::auth::oauth::TEST_BACKEND
+                .scope(backend.clone(), async {
+                    let store = crate::auth::oauth::store();
+                    for _ in 0..current_generation {
+                        let starting = store.read_state().unwrap();
+                        store
+                            .commit_login(&starting, "client-test", "refresh", None)
+                            .unwrap();
+                    }
+                    let mut core = CoshCore::new_legacy(
+                        CoreConfig::default(),
+                        Box::new(provider),
+                        ToolRegistry::new(),
+                    );
+                    if seed_history {
+                        core.messages.push(Message::user(sentinel));
+                    }
+                    core.session_auth_generation = Some(bound_generation);
+                    let (input, _open) = tokio::io::duplex(1024);
+                    let mut reader = BufReader::new(input).lines();
+                    let mut output = Vec::new();
+                    let result = core
+                        .handle_user_message("请只回复：好的", &mut reader, &mut output)
+                        .await;
+                    let captured = captured.lock().unwrap().clone();
+                    (captured, result.map(|_| ()))
+                })
+                .await
+        })
+        .await
+}
+
+#[tokio::test]
+async fn send_boundary_keeps_same_generation_history_in_outbound() {
+    let sentinel = "SYNTH_MARKER_GEN1_ALPHA";
+    let (captured, result) = run_send_boundary_case(1, 1, true).await;
+    result.expect("same-generation turn succeeds");
+    assert_eq!(captured.len(), 1, "exactly one outbound request");
+    assert!(
+        outbound_contains_sentinel(&captured, sentinel),
+        "positive control: same-generation history must reach outbound"
+    );
+}
+
+#[tokio::test]
+async fn send_boundary_excludes_old_generation_history_from_outbound() {
+    let sentinel = "SYNTH_MARKER_GEN1_ALPHA";
+    let (captured, result) = run_send_boundary_case(1, 2, true).await;
+    assert!(
+        captured.is_empty(),
+        "cross-generation turn must issue zero provider requests: {captured:?}"
+    );
+    assert!(
+        !outbound_contains_sentinel(&captured, sentinel),
+        "cross-generation old history must never reach outbound: {captured:?}"
+    );
+    let error = result.expect_err("cross-generation turn must be rejected");
+    assert!(
+        error.contains("Cosh.OAuth.GenerationChanged"),
+        "rejection must carry GenerationChanged: {error}"
+    );
+}
+
+#[tokio::test]
+async fn send_boundary_new_session_after_clear_sends_without_marker() {
+    let sentinel = "SYNTH_MARKER_GEN1_ALPHA";
+    let (captured, result) = run_send_boundary_case(2, 2, false).await;
+    result.expect("new-session turn succeeds");
+    assert_eq!(captured.len(), 1, "new session must send one request");
+    assert!(
+        !outbound_contains_sentinel(&captured, sentinel),
+        "cleared-history new session must not carry the old marker"
+    );
+}

@@ -11,6 +11,14 @@ pub(crate) use crate::provider::sysom::oauth::SourceState;
 #[cfg(test)]
 tokio::task_local! { pub(crate) static TEST_BACKEND: Arc<dyn OAuthSecretBackend>; }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TEST_CONFIG_DIR: std::path::PathBuf; }
+
+#[cfg(test)]
+fn test_config_dir() -> Option<std::path::PathBuf> {
+    TEST_CONFIG_DIR.try_with(Clone::clone).ok()
+}
+
 /// Secret backend for the current build profile (test-injectable).
 pub(crate) fn backend() -> Arc<dyn OAuthSecretBackend> {
     #[cfg(test)]
@@ -22,6 +30,10 @@ pub(crate) fn backend() -> Arc<dyn OAuthSecretBackend> {
 
 /// Effective OAuth source for the live configuration directory.
 pub(crate) fn effective(config: &CoreConfig) -> SourceState {
+    #[cfg(test)]
+    if let Some(dir) = test_config_dir() {
+        return effective_in(&dir, config.ai.active_provider.as_deref());
+    }
     effective_in(
         &crate::config::config_dir(),
         config.ai.active_provider.as_deref(),
@@ -62,6 +74,10 @@ pub(crate) fn sysom_base() -> String {
 
 /// Login-state store rooted at the live configuration directory.
 pub(crate) fn store() -> Arc<OAuthStore> {
+    #[cfg(test)]
+    if let Some(dir) = test_config_dir() {
+        return Arc::new(OAuthStore::new(&dir, backend()));
+    }
     Arc::new(OAuthStore::new(&crate::config::config_dir(), backend()))
 }
 
