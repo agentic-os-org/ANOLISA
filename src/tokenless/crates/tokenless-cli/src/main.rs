@@ -315,7 +315,10 @@ enum StatsCommands {
         /// Disable ANSI colors even when stdout is a terminal
         #[arg(long)]
         no_color: bool,
-        /// Output machine-readable JSON with structured diff hunks
+        /// Output machine-readable JSON for the selected report
+        ///
+        /// Session overviews omit diff hunks. Record and tool-use reports can
+        /// include hunks when source content is available.
         #[arg(long)]
         json: bool,
     },
