@@ -34,13 +34,13 @@ ANOLISA 将公开透明的人工治理与 Agent 辅助自动化结合起来，�
 
 1. **方向探索**：组件维护者在 GitHub Discussions 的 [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap) 发布候选方向与重点征集议题。
 2. **Issue 接入与分拣**：自动路由与 Agent 辅助分析协助完成组件归类、信息完整度检查与上下文梳理；人工维护者最终确认范围，并打上 `status:accepted`、`good first issue` 或 `action:helpwanted` 标签。
-3. **认领与推进**：贡献者在可认领的 Issue 下单独评论 `/claim` 即可锁定归属，无法继续时评论 `/unclaim` 释放（详见 [Roadmap、Issue 与认领流程](contribute/zh/workflow.md)）。自动化任务与 Agent 助手可对长期无进展的认领发出温和提醒。
-4. **评审与合入**：PR 须通过 CI 门禁与对应 `CODEOWNERS` 评审。AI 辅助评审（如 Qoder Review）用于辅助发现问题，技术判断与最终合并由人工 Maintainer 负责。
+3. **认领与推进**：贡献者在可认领的 Issue 下单独评论 `/claim` 即可锁定归属，无法继续时评论 `/unclaim` 释放（详见 [Roadmap、Issue 与认领流程](contribute/zh/workflow.md) 与 [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md)）。未执行 `/claim` 的 Draft PR 不锁定 Issue；维护者或协作助手可对长期无进展的认领发出温和跟进。
+4. **评审与合入**：转为 Ready for review（`isDraft=false`）的 PR 须通过 CI 门禁与对应 `CODEOWNERS` 评审。AI 辅助评审（如 Qoder Review）用于辅助发现问题，技术判断与最终合并由人工 Maintainer 负责。
 
 ### 响应预期
 
-- **首次响应**：维护者在自动分拣与 Agent 助手的协助下，尽力在 **5 个工作日** 内对新提交的 Issue 和 PR 给出首次响应。
-- **认领超时释放**：被认领的 Issue 若连续 **14 天** 无可见进展且沟通无回复，经自动提醒后，维护者可礼貌释放认领，方便其他贡献者接手。
+- **首次响应**：维护者在自动分拣与 Agent 助手的协助下，尽力在 **5 个工作日** 内对新提交的 Issue 和正式 PR 给出首次响应。
+- **认领超时释放**：被认领的 Issue 若连续 **7 天** 无可见进展（无进展回复且无正式 PR），维护者或协作助手可礼貌跟进；满 **14 天** 无进展（或提醒后满 **7 天** 无回复）时，维护者可通过 `/unclaim` 礼貌释放认领，方便其他贡献者接手。
 
 ## 4. 决策机制
 

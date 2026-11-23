@@ -56,14 +56,17 @@ The claim bot records ownership in a visible marker comment and updates the labe
 ### Keeping Claims Healthy
 
 - Claim one issue at a time so tasks remain available to other contributors.
-- Share a brief progress update or draft PR if an issue takes longer than expected.
-- If a claimed issue shows no visible progress or reply for **14 days**, automated reminders or maintainers may follow up and release the claim so others can pick it up.
+- Opening a Draft PR without `/claim` does **not** lock an issue; if you want to reserve an accepted issue while iterating in a Draft PR, comment `/claim` first.
+- Share a brief progress update in the issue if work takes longer than expected (an unchanged Draft PR does not extend an inactive claim indefinitely).
+- The claim workflow does not automatically expire claims on a schedule. After **7 days** without visible progress, a maintainer or coordination assistant may post a polite check-in; after **14 days** without visible progress (or **7 days** after a check-in), a maintainer may comment `/unclaim` to release the claim so others can pick it up.
 
 ## 4. Submitting and Reviewing Your PR
 
-1. Follow the local build, lint, and test gates for the affected component in the [General Contribution Guide](../../CONTRIBUTING.md).
-2. Sign off every commit with `git commit -s` (`Signed-off-by`) and follow [`specs/commit-message-standard.md`](../../specs/commit-message-standard.md).
-3. Fill out the PR template completely and link the issue (`closes #<number>`).
-4. Address feedback from CI checks, AI-assisted review comments (verify suggestions against the code), and `CODEOWNERS` reviewers.
+1. Use a **Draft PR** (`isDraft=true`) for early work-in-progress or prototype feedback, and mark it **Ready for review** (`isDraft=false`) once ready for formal code review and merge gates. Draft PRs do not enter formal review unless you explicitly ask for early feedback in a comment.
+2. Follow the local build, lint, and test gates for the affected component in the [General Contribution Guide](../../CONTRIBUTING.md).
+3. Sign off every commit with `git commit -s` (`Signed-off-by`) and follow [`specs/commit-message-standard.md`](../../specs/commit-message-standard.md).
+4. Fill out the PR template completely and link the issue (`closes #<number>`).
+5. Address feedback from CI checks, AI-assisted review comments (verify suggestions against the code), and `CODEOWNERS` reviewers.
+6. When a linked issue is resolved by another PR or closed as not planned, competing ready-for-review PRs are closed by maintainers with a courtesy note linking the resolution; lingering unconverted Draft PRs do not block issue closure.
 
-See [Community Governance](../../GOVERNANCE.md) for response expectations, decision tiers, and how sustained contributions lead to Triager, Reviewer, and Maintainer roles.
+For the full ownership-signal precedence, `/claim` × Draft PR lifecycle matrix, and AI agent rules, see [`specs/issue-claim-and-pr-lifecycle.md`](../../specs/issue-claim-and-pr-lifecycle.md). See [Community Governance](../../GOVERNANCE.md) for response expectations, decision tiers, and how sustained contributions lead to Triager, Reviewer, and Maintainer roles.

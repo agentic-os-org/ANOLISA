@@ -147,6 +147,9 @@ positives before reporting. The rules below belong to the verification phase.
 
 ## When reviewing someone else's PR
 
+- **Skip Draft PRs by default**: do not run unsolicited formal reviews on Draft
+  PRs (`isDraft=true`) unless the author explicitly asks for early feedback (see
+  [`specs/issue-claim-and-pr-lifecycle.md`](issue-claim-and-pr-lifecycle.md)).
 - **State the problem, don't prescribe the fix**: give the fact, the evidence
   (`file:line`), and the impact — let the author choose how to address it. This
   applies to blocking findings; a non-blocking suggestion may propose a concrete

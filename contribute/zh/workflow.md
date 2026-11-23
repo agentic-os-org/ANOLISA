@@ -56,14 +56,17 @@ ANOLISA 将组件归属、工作流状态与社区可认领标识拆开维护：
 ### 保持认领流转顺畅
 
 - 建议同一时间只认领 1 个 Issue，把其他任务留给更多社区伙伴。
-- 若实现周期超出预期，请在 Issue 中简短同步进展或提交 Draft PR。
-- 若被认领的 Issue 连续 **14 天** 无可见进展且沟通无回复，自动提醒或维护者会在提示后礼貌释放认领，以便他人接手。
+- 仅创建 Draft PR 而未执行 `/claim` **不会**锁定 Issue；如需在 Draft 迭代期间占锁，请先在 Issue 中评论 `/claim`。
+- 若实现周期超出预期，请在 Issue 中简短同步进展（长期静置未更新的 Draft PR 不能无限续锁）。
+- 认领工作流目前没有定时自动过期释放机制：连续 **7 天**无可见进展时，维护者或协作助手可能礼貌询问进度；满 **14 天**无进展（或提醒后满 **7 天**无回复）时，维护者可评论 `/unclaim` 礼貌释放认领，以便他人接手。
 
 ## 4. 提交 PR 与代码评审
 
-1. 按[通用贡献指南](../../CONTRIBUTING_zh.md)运行受影响组件的本地构建、lint 与测试门禁。
-2. 使用 `git commit -s` 为每个 Commit 添加 `Signed-off-by`，并遵守 [`specs/commit-message-standard.md`](../../specs/commit-message-standard.md)。
-3. 完整填写 PR 模板并关联对应 Issue（`closes #<number>`）。
-4. 响应 CI 检查、AI 辅助评审（请结合实际代码核实建议）以及 `CODEOWNERS` 维护者的反馈。
+1. 早期探索或尚未准备好正式合入时可使用 **Draft PR**（`isDraft=true`），完成准备后再点击 **Ready for review**（`isDraft=false`）进入正式评审与合入门禁；除非作者显式评论请求早期反馈，否则 Draft PR 不会触发正式评审。
+2. 按[通用贡献指南](../../CONTRIBUTING_zh.md)运行受影响组件的本地构建、lint 与测试门禁。
+3. 使用 `git commit -s` 为每个 Commit 添加 `Signed-off-by`，并遵守 [`specs/commit-message-standard.md`](../../specs/commit-message-standard.md)。
+4. 完整填写 PR 模板并关联对应 Issue（`closes #<number>`）。
+5. 响应 CI 检查、AI 辅助评审（请结合实际代码核实建议）以及 `CODEOWNERS` 维护者的反馈。
+6. 当关联 Issue 由其他正式 PR 合入解决或关闭时，未合入的正式撞车 PR 会由维护者致谢、关联结论并关闭；尚未转为 Ready for review 的 Draft PR 不阻塞原 Issue 结案。
 
-关于响应预期、分级决策机制以及向 Triager / Reviewer / Maintainer 的成长路径，请参阅[社区治理](../../GOVERNANCE_zh.md)。
+完整的所有权信号优先级、`/claim` × Draft PR 生命周期矩阵与 AI Agent 规范见 [`specs/issue-claim-and-pr-lifecycle.md`](../../specs/issue-claim-and-pr-lifecycle.md)（[中文评审参考](../../specs/issue-claim-and-pr-lifecycle_zh.md)）。关于响应预期、分级决策机制以及向 Triager / Reviewer / Maintainer 的成长路径，请参阅[社区治理](../../GOVERNANCE_zh.md)。

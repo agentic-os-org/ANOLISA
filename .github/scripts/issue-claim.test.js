@@ -19,15 +19,17 @@ function makeHarness({
   actor = 'contributor',
   association = 'NONE',
   labels = ['status:accepted'],
+  assignees = [],
   comments = [],
   failCreateComment = false,
   state = 'open',
 } = {}) {
   const calls = [];
+  const notices = [];
   const issue = {
     state,
     labels: labels.map((name) => ({ name })),
-    assignees: [],
+    assignees: assignees.map((login) => ({ login })),
   };
   const github = {
     paginate: async () => comments,
@@ -50,7 +52,7 @@ function makeHarness({
     },
   };
   const core = {
-    notice: () => {},
+    notice: (msg) => notices.push(msg),
     warning: () => {},
     summary: {
       addHeading() {
@@ -64,6 +66,7 @@ function makeHarness({
   };
   return {
     calls,
+    notices,
     core,
     github,
     env: { AUTOMATION_MODE: 'apply' },
@@ -282,4 +285,18 @@ test('release preserves workflow status and reports the issue unavailable', asyn
       false
     );
   }
+});
+
+test('unclaim does not modify a directly assigned issue without a claim marker', async () => {
+  const harness = makeHarness({
+    command: '/unclaim',
+    actor: 'maintainer',
+    association: 'MEMBER',
+    labels: ['status:in-progress'],
+    assignees: ['alice'],
+    comments: [],
+  });
+  await claim.run(harness);
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.notices, ['No active claim to release.']);
 });
