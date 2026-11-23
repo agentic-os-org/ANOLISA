@@ -653,7 +653,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | JSON 压缩测试 | `crates/tokenless-compressors/src/json/tests.rs` |
 | Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/build_log/tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
 | Browser Snapshot 压缩测试与 Fixture | `crates/tokenless-compressors/src/browser_snapshot/tests.rs`、`crates/tokenless-runtime/src/post_tool/pipeline/tests/browser_snapshot.rs`、`crates/tokenless-compressors/tests/fixtures/content/browser_*` |
-| PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
+| PostTool 集成测试 | `crates/tokenless-runtime/src/entry/tests.rs` |
 | TOON spec v4.4 回归测试 | `benchmark/l1-compressor/tests/l1_toon_spec_v44.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
 | 全量测试套件 | `tests/run-all-tests.sh` |
