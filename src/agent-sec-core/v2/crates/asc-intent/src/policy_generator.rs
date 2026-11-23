@@ -183,6 +183,16 @@ pub fn propose_command(
 ) -> Result<CommandPolicyOutcome, ProposalError> {
     let deadline = deadline.min(Instant::now() + INTENT_BUDGET);
     check_deadline(deadline)?;
+    input.validate()?;
+    crate::intent_extraction::validate_model(model)?;
+    if let Some((policy, caveats)) = crate::command_files::file_request(input) {
+        let artifact = prepare_policy(&policy)?;
+        check_deadline(deadline)?;
+        return Ok(CommandPolicyOutcome::Candidate {
+            policy: artifact.text,
+            caveats,
+        });
+    }
     let mut attempt = 1;
     let mut rejection: Option<String> = None;
     loop {
