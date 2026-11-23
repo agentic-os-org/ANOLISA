@@ -3,9 +3,46 @@ set -e
 
 # Ensure we're running from the root of the repo
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FILTER=""
 
-if [ "$1" == "--filter" ]; then
+usage() {
+    cat <<'EOF'
+Usage: tests/run-all-tests.sh [--filter NAME] [--help]
+
+Without arguments, run the aggregate suite for every component.
+With --filter NAME, run only the named component: 'shell', 'sec',
+'sight', 'tokenless', or 'memory' ('mem' is an accepted alias).
+--help prints this message. Malformed invocations are rejected
+without starting any component tests.
+EOF
+}
+
+FILTER=""
+if [ $# -gt 0 ]; then
+    if [ "$1" == "--help" ]; then
+        if [ $# -ne 1 ]; then
+            echo "--help takes no other arguments: $*" >&2
+            exit 1
+        fi
+        usage
+        exit 0
+    fi
+    if [ "$1" != "--filter" ]; then
+        echo "Unknown option: $1. Use --filter NAME or --help." >&2
+        usage >&2
+        exit 1
+    fi
+    if [ $# -lt 2 ]; then
+        echo "--filter requires a component name. Use --help for usage." >&2
+        exit 1
+    fi
+    if [ -z "$2" ]; then
+        echo "--filter requires a non-empty component name. Use --help for usage." >&2
+        exit 1
+    fi
+    if [ $# -gt 2 ]; then
+        echo "Unexpected extra arguments: $*. Use --filter NAME or --help." >&2
+        exit 1
+    fi
     FILTER="$2"
 fi
 
