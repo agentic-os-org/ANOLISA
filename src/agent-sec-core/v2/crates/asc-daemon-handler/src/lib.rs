@@ -9,7 +9,10 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod authorization;
 mod dispatcher;
+mod gateway;
+mod intent;
 mod observability;
 mod pap;
 mod pii;

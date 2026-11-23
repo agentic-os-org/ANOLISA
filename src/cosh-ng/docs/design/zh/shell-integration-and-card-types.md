@@ -37,6 +37,33 @@ Shell。Shell 进程、工作目录、变量、函数和后台任务都会保留
 Enhanced 内部的路由子状态，不等同于没有 hook 的 Native 集成。OSC marker
 仍然存在，用来证明提示符所有权并保证能够安全切回。
 
+## Bash Login 启动 PATH 交接
+
+Enhanced Bash login 由受管 Shell 自身读取 login profile，不再运行独立的 login
+PATH 探针。首轮用户 `PROMPT_COMMAND` hook 执行后、首个 Cosh prompt 边界前，
+marker 会发送一次内部 OSC 事件：
+
+```json
+{"event":"startup_environment","token":"...","session_id":"...","path":"..."}
+```
+
+Host 只接受第一条 marker token 与 session ID 都匹配的有效报告。PATH 上限为
+8 KiB，不允许控制字符，并会规范化为不重复的绝对路径项。有效值只保存一次，
+仅注入 Provider/Core 子进程，不修改 Shell 进程的全局 PATH。启动 auth 会等待
+该决议，以使用相同的子进程 PATH。
+
+首个 prompt 会关闭该门。报告缺失、格式错误、超长、身份伪造或到达过晚时，
+Provider 继续使用继承 PATH，且不会重放 profile。`shell.login_identity = false`
+保留 marker 驱动的 login profile fallback，并按相同契约上报最终 PATH。设置
+`COSH_SHELL_BOOTSTRAP_PATH=0` 会同时关闭旧 PATH 探针和这条交接。Native
+集成保持不变；Bash non-login 与 zsh 保留原有探针行为。
+
+对于 Linux 默认安装中已接纳的绝对路径 ELF Core 与 Gateway CLI，Shell 会在
+自身会话的整个生命周期内持有打开的文件描述符。即使软件包路径被原子替换，
+延迟启动仍使用已接纳的 ELF，并保留原始 `argv[0]`。相对 PATH 查找及显式配置
+的非 ELF 外部脚本保留原有行为。此保证不固定 Gateway daemon 在升级后另行
+启动的 worker 版本。
+
 ## 输入所有权与可见状态
 
 符号首先描述按下 Enter 前的输入所有者，不描述已经产生的输出。输入类型保存在
@@ -68,6 +95,10 @@ PS1/PROMPT 和 PTY 尺寸保持原值。子 Shell 从第 0 列绘制提示符，
 Bash 既有的历史隐私提交保护仍会在接受经过光标编辑、镜像无法证明不含秘密的草稿时
 添加一个前导空格。这是 accept-line 阶段的显示变化，与编辑区几何分开；参数字节和
 隐私保护逻辑保持原样。
+
+Ctrl-X 多键绑定可能不经 Enter 就接受当前行。Enhanced Bash 会在粘贴外收到
+Ctrl-X 后将输入交还 Bash，直到真实主提示符 marker 恢复；Ctrl-X Ctrl-R 配置
+重载也采用这一保守边界，不向尚未确认归属的 PS2 读取方注入私有 guard。
 
 在 Enhanced 的空主提示符处按 `Shift+Tab` 会切换到 Shell-only 并关闭 Cosh 输入拦截
 （状态符号开启时发布 `◌` 状态行），再次按下则恢复 Assisted 路由（开启时发布 `◇`），

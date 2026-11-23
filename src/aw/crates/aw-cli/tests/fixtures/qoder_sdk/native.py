@@ -21,18 +21,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--reloadable", action="store_true")
+modes = parser.add_mutually_exclusive_group()
+modes.add_argument("--reloadable", action="store_true")
+modes.add_argument("--resident-reload", action="store_true")
 args = parser.parse_args()
 evidence = args.output.resolve()
 evidence.mkdir(parents=True, exist_ok=True)
 fixture = Path(__file__).resolve().parent
 sdk = args.npm.resolve() / "node_modules/@qoder-ai/qoder-agent-sdk"
 metadata = json.loads((sdk / "package.json").read_text())
-assert metadata["version"] == "1.0.54" and metadata["qoderCliVersion"] == "1.1.74"
+assert metadata["version"] == "1.0.56" and metadata["qoderCliVersion"] == "1.1.78"
 worker = sdk / "dist/_worker/qoder-worker-runtime.obf.mjs"
 assert (
     subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip()
-    == "1.1.74"
+    == "1.1.78"
 )
 assert os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"), "Qoder native acceptance requires a PAT"
 with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
@@ -42,7 +44,8 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
     (case / "work/node_modules").symlink_to(
         args.npm.resolve() / "node_modules", target_is_directory=True
     )
-    shutil.copyfile(fixture / "native.mjs", case / "work/app.mjs")
+    application = "native-resident-policy.mjs" if args.resident_reload else "native.mjs"
+    shutil.copyfile(fixture / application, case / "work/app.mjs")
     shutil.copyfile(fixture / "native-safety.mjs", case / "work/native-safety.mjs")
     shutil.copyfile(fixture / "native-timeout.mjs", case / "work/native-timeout.mjs")
     environment = {
@@ -115,12 +118,23 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
         policy["spec"]["providers"] = {}
         policy["spec"]["events"] = {}
         save(config, policy)
+    if args.resident_reload:
+        policy = json.loads(config.read_text())
+        policy["spec"]["execution"]["default_event_budget_ms"] = 2400
+        save(case / "candidate.json", policy)
+        policy["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "withhold_result"
+        save(case / "strict.json", policy)
+        policy["spec"]["providers"] = {}
+        policy["spec"]["events"] = {}
+        save(case / "empty.json", policy)
+        save(config, policy)
     processes = Processes(case, evidence, environment)
     try:
         service = processes.start(
             "service",
             [
                 str(args.aw.resolve()),
+                "service",
                 "serve",
                 "--config",
                 str(config),

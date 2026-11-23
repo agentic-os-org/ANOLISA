@@ -334,6 +334,7 @@ mod tests {
                 filename: Some(filename.into()),
                 args: Some(args.into()),
                 exit_code: None,
+                signal: None,
             },
             session_id: None,
         }

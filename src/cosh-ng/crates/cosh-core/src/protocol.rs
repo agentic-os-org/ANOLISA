@@ -7,6 +7,9 @@ use serde_json::Value;
 use crate::brokered_profile::BrokeredCapabilityProfileIdentity;
 use crate::config::ApprovalMode;
 
+pub(crate) mod ecs_trial;
+pub(crate) use ecs_trial::{EcsTrialContext, EcsTrialControl, EcsTrialProgress};
+
 /// Exact legacy shell-to-core control protocol version supported by this binary.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 /// Exact private protocol version for the Gateway-owned execution profile.
@@ -84,6 +87,14 @@ pub enum InputMessage {
         parent_tool_use_id: Option<Value>,
         #[serde(default)]
         shell_context: Option<ShellContext>,
+        #[serde(default)]
+        ecs_trial_context: Option<EcsTrialContext>,
+    },
+
+    #[serde(rename = "ecs_trial_control")]
+    EcsTrialControl {
+        #[serde(flatten)]
+        control: EcsTrialControl,
     },
 
     #[serde(rename = "control_request")]
@@ -146,6 +157,8 @@ pub struct ClientControlCapabilities {
     pub can_handle_can_use_tool: bool,
     #[serde(default)]
     pub can_handle_host_executed_shell: bool,
+    #[serde(default)]
+    pub can_handle_ecs_trial_v1: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -280,6 +293,11 @@ pub struct HostExecutedShellResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum OutputMessage {
+    #[serde(rename = "ecs_trial_state")]
+    EcsTrialState {
+        #[serde(flatten)]
+        progress: EcsTrialProgress,
+    },
     #[serde(rename = "system")]
     System {
         subtype: String,
@@ -374,6 +392,8 @@ pub struct CoreControlResponseBody {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoreControlCapabilities {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub can_handle_ecs_trial_v1: bool,
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
     pub can_handle_shell_evidence_tool: bool,
@@ -620,6 +640,7 @@ impl OutputMessage {
                     capability_profile,
                     runtime_tools,
                     capabilities: Some(CoreControlCapabilities {
+                        can_handle_ecs_trial_v1: execution_profile.is_none(),
                         can_handle_can_use_tool: true,
                         can_handle_host_executed_shell_tool_result: execution_profile.is_none(),
                         can_handle_shell_evidence_tool,

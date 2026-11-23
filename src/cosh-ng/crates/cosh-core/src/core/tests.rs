@@ -81,6 +81,52 @@ struct CountingShellTool {
 
 struct ExternalTool;
 
+struct UnauthorizedProvider;
+
+#[async_trait]
+impl ContentGenerator for UnauthorizedProvider {
+    async fn generate(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        _config: &GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        Err("API error 401 Unauthorized".to_string())
+    }
+
+    fn cancel(&self) {}
+}
+
+#[tokio::test]
+async fn provider_401_ends_turn_without_waiting_for_auth_input() {
+    let mut core = CoshCore::new_legacy(
+        CoreConfig::default(),
+        Box::new(UnauthorizedProvider),
+        ToolRegistry::new(),
+    );
+    let (input, _open_input) = tokio::io::duplex(1024);
+    let mut reader = BufReader::new(input).lines();
+    let mut output = Vec::new();
+
+    let turn = tokio::time::timeout(
+        Duration::from_secs(5),
+        core.handle_user_message("explain the current directory", &mut reader, &mut output),
+    )
+    .await;
+    let protocol = String::from_utf8(output).unwrap();
+    assert!(
+        !protocol.contains(r#""subtype":"auth_required""#),
+        "{protocol}"
+    );
+    let error = turn.expect("turn waited for input").unwrap_err();
+    assert!(error.contains("401 Unauthorized"), "{error}");
+    assert_eq!(core.metrics.api_requests, 1);
+    assert_eq!(
+        core.messages.last().unwrap().content.as_text(),
+        "explain the current directory"
+    );
+}
+
 /// Records the `GenerateConfig` of every agent-turn request it serves.
 struct ConfigRecordingProvider {
     configs: Arc<Mutex<Vec<crate::provider::GenerateConfig>>>,
@@ -705,6 +751,7 @@ async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content()
         timeout: Some(5_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }];
     let mut core = CoshCore::new_legacy(config, Box::new(provider), ToolRegistry::new());
@@ -743,6 +790,7 @@ async fn prompt_hook_falls_back_to_content_without_raw_shell_input() {
         timeout: Some(5_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }];
     let mut core = CoshCore::new_legacy(config, Box::new(provider), ToolRegistry::new());
@@ -846,6 +894,7 @@ fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -2172,6 +2221,7 @@ fn sandbox_bypass_hook(marker: &std::path::Path) -> crate::config::HookDefinitio
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -2819,6 +2869,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
@@ -2829,6 +2880,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         ..Default::default()
@@ -4029,6 +4081,7 @@ fn ask_hook(name: &str) -> crate::config::HookDefinition {
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -4343,6 +4396,7 @@ fn trust_shell_core(calls: Arc<AtomicUsize>, provider: MockProvider) -> CoshCore
 
 fn fully_capable_client() -> ClientControlCapabilities {
     ClientControlCapabilities {
+        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
         can_handle_host_executed_shell: true,
     }
@@ -4375,6 +4429,7 @@ fn trust_classify_keeps_shell_local_without_full_capabilities() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut core = trust_shell_core(calls, MockProvider::new(vec![]));
     core.client_capabilities = ClientControlCapabilities {
+        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
         can_handle_host_executed_shell: false,
     };
@@ -4471,6 +4526,7 @@ async fn hook_block_releases_staged_call_with_provider_native_result() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         ..Default::default()

@@ -268,11 +268,39 @@ fn is_atx_heading(line: &str) -> bool {
     }
 }
 
+/// One `##` section heading: the same CommonMark shape [`is_atx_heading`]
+/// accepts (at most three spaces of indentation, then the hashes, then a
+/// space or tab), restricted to exactly two hashes. `## Parameters` and its
+/// tab-separated or up-to-three-spaces-indented spellings must all open the
+/// section, or the contract bullets under a heading the parser itself
+/// recognizes would silently vanish from structured extraction.
+fn section_heading(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let title = rest.strip_prefix("##")?;
+    let separator = title.chars().next()?;
+    if separator != ' ' && separator != '\t' {
+        return None;
+    }
+    // A closing hash sequence needs a space/tab on either side (or EOL).
+    let title = title.trim_end_matches([' ', '\t']);
+    let without_hashes = title.trim_end_matches('#');
+    let title = if without_hashes.ends_with([' ', '\t']) {
+        without_hashes
+    } else {
+        title
+    };
+    Some(title.trim())
+}
+
 fn extract_first_paragraph(body: &str) -> String {
     // Take the first non-empty paragraph. A paragraph ends at a blank
-    // line; `lines()` strips the terminator of either convention, so a
-    // CRLF file yields the same paragraph as an LF one. Leading heading
-    // lines are not paragraphs: skip every one of them before the
+    // line or at a following CommonMark ATX heading; `lines()` strips the
+    // terminator of either convention, so a CRLF file yields the same
+    // paragraph as an LF one. Leading heading lines are skipped before the
     // paragraph starts, otherwise a document whose body begins with a
     // title plus a subtitle reports the subtitle's markup ("## Subtitle")
     // as the description. The heading check runs on the raw line, before
@@ -280,8 +308,11 @@ fn extract_first_paragraph(body: &str) -> String {
     // place as the description.
     let mut paragraph = String::new();
     for line in body.lines() {
-        if paragraph.is_empty() && is_atx_heading(line) {
-            continue;
+        if is_atx_heading(line) {
+            if paragraph.is_empty() {
+                continue;
+            }
+            break;
         }
         let line = line.trim();
         if line.is_empty() {
@@ -326,11 +357,11 @@ fn split_sections(
             open_fence = Some(fence);
             continue;
         }
-        if let Some(heading) = line.strip_prefix("## ") {
+        if let Some(heading) = section_heading(line) {
             if let Some(name) = current_name.take() {
                 record_section(&mut sections, name, current_content, issues);
             }
-            current_name = Some(heading.trim().to_string());
+            current_name = Some(heading.to_string());
             current_content = String::new();
         } else if current_name.is_some() {
             current_content.push_str(line);
@@ -813,6 +844,23 @@ Search the web.
     }
 
     #[test]
+    fn test_parse_description_stops_before_following_atx_heading() {
+        let content = "---\nname: test\n---\n# Title\nDoes a thing.\n## Parameters\n- `x` (string, required): Input\n";
+        let entry = parse_skill_md(content, "test");
+        assert_eq!(entry.metadata.description, "Does a thing.");
+        assert_eq!(entry.parameters.len(), 1);
+
+        let indented = "Does a thing.\n  ## Next\nBody.\n";
+        assert_eq!(extract_first_paragraph(indented), "Does a thing.");
+
+        let non_heading = "Covers #hashtag\n    # not a heading\n";
+        assert_eq!(
+            extract_first_paragraph(non_heading),
+            "Covers #hashtag # not a heading"
+        );
+    }
+
+    #[test]
     fn test_parse_invalid_yaml() {
         let content = r#"---
 name: test
@@ -1027,6 +1075,118 @@ description: Test skill
 
         assert_eq!(entry.parameters.len(), 1);
         assert!(!entry.parameters[0].required); // default to optional
+    }
+
+    #[test]
+    fn test_parse_tab_and_indented_section_headings_open_sections() {
+        // `is_atx_heading` (used for the description fallback) accepts the
+        // CommonMark spellings of an ATX heading: up to three spaces of
+        // indentation and a tab after the hashes. The section splitter
+        // must agree, or the contract bullets under such a heading vanish
+        // from structured extraction with `ParseStatus::Ok`.
+        let content = "---\nname: test\ndescription: Test skill\n---\n\n##\tParameters\n\n- `query` (string, required): The search query\n\n  ## Returns\n\n- `result` (string, required): The result\n";
+
+        let entry = parse_skill_md(content, "test");
+
+        assert_eq!(
+            entry.parameters.len(),
+            1,
+            "tab-separated heading opens the section"
+        );
+        assert_eq!(
+            entry.parameters[0].name, "query",
+            "the bullet under a tab-separated heading is extracted"
+        );
+        assert_eq!(entry.returns.len(), 1, "indented heading opens the section");
+        assert_eq!(entry.returns[0].name, "result");
+        assert!(
+            entry.parse_status.is_ok(),
+            "a well-formed skill stays Ok, got {:?}",
+            entry.parse_status
+        );
+
+        // Deeper headings (h3+) and four-space indentation stay content.
+        let content = "---\nname: test\ndescription: Test skill\n---\n\n### Parameters\n\n- `query` (string, required): The search query\n\n    ## Returns\n\n- `result` (string, required): The result\n";
+
+        let entry = parse_skill_md(content, "test");
+
+        assert!(entry.parameters.is_empty(), "h3 is not a section heading");
+        assert!(
+            entry.returns.is_empty(),
+            "four spaces of indentation is content"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ATX Closing Sequence Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_closing_hash_headings_extract_contracts() {
+        for suffix in [" #", " ##", " ###", "\t##", "  ####### \t"] {
+            for prefix in ["## ", " ##\t", "   ## "] {
+                let content = format!(
+                    "---\nname: test\ndescription: Test skill\n---\n\
+                     {prefix}Parameters{suffix}\n\
+                     - `query` (string, required): Search query\n\
+                     {prefix}Returns{suffix}\n\
+                     - `result` (boolean, required): Search result\n"
+                );
+                for content in [content.clone(), content.replace('\n', "\r\n")] {
+                    let entry = parse_skill_md(&content, "test");
+                    assert_eq!(entry.parameters.len(), 1, "{content:?}");
+                    assert_eq!(entry.parameters[0].name, "query");
+                    assert_eq!(entry.parameters[0].param_type, ParamType::String);
+                    assert!(entry.parameters[0].required);
+                    assert_eq!(entry.returns.len(), 1, "{content:?}");
+                    assert_eq!(entry.returns[0].name, "result");
+                    assert_eq!(entry.returns[0].field_type, ParamType::Boolean);
+                    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hashes_in_heading_content_are_preserved() {
+        for title in [
+            "Parameters#",
+            "Parameters ### extra",
+            "Parameters \\###",
+            "Parameters #\\##",
+            "Parameters\u{a0}##",
+            "Parameters ##\u{a0}",
+        ] {
+            assert_eq!(section_heading(&format!("## {title}")), Some(title.trim()));
+            let content = format!(
+                "---\nname: test\ndescription: Test skill\n---\n\
+                 ## {title}\n- `query` (string, required): Search query\n"
+            );
+            let entry = parse_skill_md(&content, "test");
+            assert!(entry.parameters.is_empty(), "{title:?}");
+            assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        }
+        assert_eq!(section_heading("## C# ##"), Some("C#"));
+        assert_eq!(section_heading("## ##"), Some(""));
+    }
+
+    #[test]
+    fn test_closing_hash_headings_preserve_duplicate_contracts() {
+        let content = "---\nname: test\ndescription: Test skill\n---\n\
+                       ## Parameters\n- `first` (string, required): First\n\
+                       ## Parameters ##\n- `second` (string, optional): Second\n\
+                       ## Returns ###\n- `first` (string, required): First\n\
+                       ## Returns\n- `second` (string, required): Second\n";
+        let entry = parse_skill_md(content, "test");
+        let parameter_names: Vec<_> = entry.parameters.iter().map(|p| p.name.as_str()).collect();
+        let return_names: Vec<_> = entry.returns.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(parameter_names, ["first", "second"]);
+        assert_eq!(return_names, ["first", "second"]);
+        let ParseStatus::Degraded(issues) = entry.parse_status else {
+            panic!("duplicate contract sections must degrade the skill");
+        };
+        assert!(issues.contains("duplicate section heading: Parameters"));
+        assert!(issues.contains("duplicate section heading: Returns"));
     }
 
     // -----------------------------------------------------------------------

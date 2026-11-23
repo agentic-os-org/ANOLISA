@@ -50,7 +50,7 @@ SkillFS 是面向 agent skill 的本地 FUSE 文件系统。它解析 `SKILL.md`
 
 ## 范围
 
-- 公开 CLI 命令是 `mount`、`stop`、`classify`、`validate` 和 `list`。
+- 公开 CLI 命令是 `mount`、`stop`、`explain`、`classify`、`validate` 和 `list`。
 - skill 可见性由 `skillfs-views.toml` 控制。
 - FUSE 支持挂载期间写透传，但只有 `SKILL.md` 变化会触发 store 同步。
 - 权威 skill key 是目录名，不是 rename 后可能滞后的 frontmatter `name:`。
@@ -112,7 +112,7 @@ release environment 审批流程。
 ### 构建
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### 常用命令
@@ -126,6 +126,9 @@ cargo run -p skillfs -- list /path/to/skills
 
 # 生成或查看 skillfs-views.toml
 cargo run -p skillfs -- classify /path/to/skills
+
+# 不挂载，解释源优先级与视图归属
+cargo run -p skillfs -- explain --config /path/to/skillfs-mount.toml
 
 # 挂载 FUSE 文件系统
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
@@ -154,6 +157,10 @@ skillfs mount --config /path/to/skillfs-mount.toml --managed
 `skillfs stop <MOUNTPOINT>`，再通过 `--config ... --managed` 重新启动。
 TOML 示例、支持的参数和 OpenClaw 接入限制见
 [配置参考](../../docs/user-guide/zh/skillfs/index.md#挂载配置)。
+
+`explain` 在不挂载的情况下检查当前配置，不查询正在运行的 managed worker。
+参数、JSON 字段、exit code 和不完整结果的语义见
+[诊断参考](../../docs/user-guide/zh/skillfs/index.md#explain)。
 
 ### Managed Mount 模式
 
@@ -251,11 +258,19 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+Linux 上直接检查 `PATH` 中的可执行文件，无需额外安装 `which`。
+固定命令白名单和挂载启动时的环境快照保持不变；更改 `PATH` 或安装命令后，
+需重新挂载以刷新快照。
+
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
 - 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
-  `python -m pip` 调用。独立调用使用保守的命令位置启发式判断，
-  不是完整的 shell 语法解析。
+  `python -m pip` 调用以及带 `--user` 的安装命令，因为 uv 不支持用户目录安装。
+  挂载环境或同一行调用前的文本中出现 `PIP_USER` 时，以及使用 `--root` 等已知
+  pip 专属选项时，也保留 pip，详见[用户手册](../../docs/user-guide/zh/skillfs/index.md#读时转换)。
+  独立调用使用保守的命令位置启发式判断；未结束的
+  参数（包括续行和命令替换）保持原样。文件描述符重定向不会终止参数检查。
+  列表或散文中的行内代码片段单独处理；命令后的括号说明不会阻止改写。
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
@@ -394,7 +409,7 @@ YAML 格式错误、非法的 `direction`/`auto_apply`/`match` 值、重复或�
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
   skillfs-fuse/   FUSE 文件系统与 POSIX passthrough 层
-  skillfs-cli/    mount / stop / classify / validate / list
+  skillfs-cli/    mount / stop / explain / classify / validate / list
 container/        Sidecar 镜像：Dockerfile、entrypoint、preflight、mount probe
 deploy/kubernetes/  Kubernetes Sidecar manifest 与示例 Skill source
 docs/specs/       实现规格

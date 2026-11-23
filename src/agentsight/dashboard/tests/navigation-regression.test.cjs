@@ -129,3 +129,36 @@ test('NavBar renders the shared nav model instead of keeping its own copy', () =
   assert.doesNotMatch(source, /labelKey: 'nav\./);
   assert.doesNotMatch(source, /path: '\//);
 });
+
+// ── Enforcement evidence link (#9240) ────────────────────────────────────────
+
+test('the enforcement page only links to audit evidence it can show', () => {
+  const source = readSource('src/pages/RiskEnforcementPage.tsx');
+
+  // A constant `#/audit` promised an evidence chain and delivered an empty
+  // System Audit whenever the violation list held only file-deletion hits,
+  // which carry no case to open.
+  assert.ok(
+    !source.includes('href="#/audit"'),
+    'the header must not send operators to a bare audit route',
+  );
+  assert.ok(
+    source.includes('href={`#/audit?case_id=${firstViolationCaseId}`}'),
+    'the header link must deep-link to the correlated case',
+  );
+  assert.ok(
+    source.includes('{firstViolationCaseId && ('),
+    'the header link must be conditional on a case existing',
+  );
+});
+
+test('the audit page honours the case deep link the enforcement page emits', () => {
+  // Otherwise hiding the bare link while emitting an unhandled query string
+  // would only move the dead end one click further.
+  const source = readSource('src/pages/SystemAuditPage.tsx');
+
+  assert.ok(
+    source.includes("searchParams.get('case_id')"),
+    'the audit page must open the case named by the deep link',
+  );
+});

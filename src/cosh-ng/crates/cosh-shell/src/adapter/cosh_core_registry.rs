@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -10,6 +10,26 @@ use super::CoshCoreAdapter;
 pub(super) const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REGISTRY_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const AUTH_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(12);
+
+pub(super) fn guard_auth_params(
+    mut params: Value,
+    guarded: bool,
+) -> Result<Value, RegistryQueryError> {
+    if guarded {
+        if params.is_null() {
+            params = Value::Object(serde_json::Map::new());
+        }
+        let Some(object) = params.as_object_mut() else {
+            return Err(RegistryQueryError::Response {
+                message: "auth registry params cannot carry guarded writes".into(),
+                code: Some("guarded_writes_unsupported".into()),
+                provider_updated: false,
+            });
+        };
+        object.insert("guarded_writes".into(), Value::Bool(true));
+    }
+    Ok(params)
+}
 
 #[cfg(test)]
 type ReaderSpawnCheck = fn(u32) -> std::io::Result<()>;
@@ -29,6 +49,7 @@ pub(crate) enum RegistryQueryError {
     Response {
         message: String,
         code: Option<String>,
+        provider_updated: bool,
     },
 }
 
@@ -58,8 +79,28 @@ impl CoshCoreAdapter {
         &self,
         domain: &str,
         action: &str,
-        params: Value,
+        mut params: Value,
     ) -> Result<Value, RegistryQueryError> {
+        params = guard_auth_params(params, domain == "auth" && self.guarded_auth_writes)?;
+        if domain == "auth" && matches!(action, "set_trial_preference" | "state") {
+            return self
+                .runtime
+                .registry_idle_query(action, params.clone(), || {
+                    self.registry_query_short(domain, action, params)
+                });
+        }
+        if domain == "auth" && action == "activate" {
+            return self.runtime.registry_activation_query(params.clone(), || {
+                self.registry_query_short(domain, action, params)
+            });
+        }
+        if domain == "auth" && action == "activate_trial" {
+            return self
+                .runtime
+                .registry_idle_query(action, params.clone(), || {
+                    self.registry_query_short(domain, action, params)
+                });
+        }
         if let Some(result) = self
             .runtime
             .live_registry_query(domain, action, params.clone())
@@ -100,7 +141,7 @@ impl CoshCoreAdapter {
         let request_json = serde_json::to_string(&request)
             .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
 
-        let mut command = Command::new(&self.program);
+        let mut command = super::command_with_trusted_startup_path(&self.program);
         command
             .arg("--registry")
             .stdin(Stdio::piped())
@@ -208,13 +249,23 @@ impl CoshCoreAdapter {
         };
 
         let _ = reader_handle.join();
-        if domain == "auth" && action == "configure" {
+        // The response already arrived, so the owner operation is finished.
+        // Reaping stays bounded for every action: a core that never exits must
+        // not hold the wizard (or the shell) open after delivering its answer.
+        {
             use wait_timeout::ChildExt;
-            if !matches!(child.wait_timeout(Duration::from_millis(250)), Ok(Some(_))) {
+            let grace = if domain == "auth"
+                && matches!(
+                    action,
+                    "configure" | "activate_trial" | "set_trial_preference" | "state"
+                ) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
+            if !matches!(child.wait_timeout(grace), Ok(Some(_))) {
                 super::terminate_and_reap_process(&mut child);
             }
-        } else {
-            let _ = child.wait();
         }
 
         // Parse the response
@@ -224,7 +275,9 @@ impl CoshCoreAdapter {
         let success = resp
             .get("success")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .ok_or_else(|| {
+                RegistryQueryError::Transport("registry response has no boolean success".into())
+            })?;
         if success {
             Ok(resp.get("data").cloned().unwrap_or(Value::Null))
         } else {
@@ -235,6 +288,7 @@ impl CoshCoreAdapter {
                 .to_string();
             Err(RegistryQueryError::Response {
                 message: error,
+                provider_updated: resp["data"]["provider_updated"].as_bool() == Some(true),
                 code: resp
                     .get("data")
                     .and_then(|data| data.get("error_code"))
@@ -263,7 +317,7 @@ pub(super) fn extension_mutation_requires_reload(domain: &str, action: &str) -> 
 }
 
 pub(super) fn registry_timeout(domain: &str, action: &str) -> Duration {
-    if domain == "auth" && action == "configure" {
+    if domain == "auth" && matches!(action, "configure" | "activate_trial") {
         return AUTH_CONFIGURE_TIMEOUT;
     }
     let long_running_extension_action = extension_mutation_requires_reload(domain, action)
@@ -293,6 +347,58 @@ mod tests {
 
     thread_local! {
         static SPAWNED_PID: Cell<u32> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn trial_preference_reply_does_not_wait_for_a_lingering_short_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("trial-registry.sh");
+        std::fs::write(&script, "#!/bin/sh\nread -r request\nprintf '%s\\n' '{\"success\":true,\"data\":{\"saved\":true}}'\nexec sleep 2\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy(), false);
+        let start = std::time::Instant::now();
+        let result = adapter.registry_query_classified(
+            "auth",
+            "set_trial_preference",
+            serde_json::json!({"auto_use":false}),
+        );
+        assert_eq!(result, Ok(serde_json::json!({"saved":true})));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn ecs_builtin_activate_trial_keeps_its_reply_and_reaps_a_lingering_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("registry.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+read -r request
+printf '%s\n' "$$" > "$0.pid"
+printf '%s\n' '{"success":true,"data":{"activated":true}}'
+exec sleep 3
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy(), false);
+        let start = std::time::Instant::now();
+        let result = adapter.registry_query_classified("auth", "activate_trial", Value::Null);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(result, Ok(serde_json::json!({"activated": true})));
+        let pid: i32 = std::fs::read_to_string(dir.path().join("registry.sh.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[test]

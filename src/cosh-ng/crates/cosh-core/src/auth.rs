@@ -6,6 +6,8 @@ use crate::protocol::{AuthField, AuthProvider};
 
 mod exchange;
 mod preflight;
+pub(crate) mod trial_policy;
+pub(crate) mod trial_preferences;
 mod validation;
 
 pub(crate) use exchange::request_validated_auth;

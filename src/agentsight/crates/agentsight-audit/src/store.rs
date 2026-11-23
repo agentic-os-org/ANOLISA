@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::models::event_result;
+
 use super::{
     AuditCountBy, AuditEventFilter, AuditEventPage, AuditSession, AuditSessionPage, AuditSummary,
     RiskCase, RiskCaseDetail, RiskCaseStatus, RiskCaseSummary, RiskSeverity,
@@ -348,6 +350,11 @@ impl AuditStore {
     ///
     /// Pagination fields are ignored because aggregates describe every match.
     ///
+    /// The evidence-loss total reads the persisted enforcement state code, not
+    /// the serialized event text: an Agent display name or a policy identifier
+    /// that happens to spell the code names an identity, not lost evidence.
+    /// Malformed persisted JSON is skipped rather than failing the aggregate.
+    ///
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
@@ -360,7 +367,9 @@ impl AuditStore {
                                           AND result = 'blocked'
                                      THEN 1 ELSE 0 END), 0),
                         COALESCE(SUM(CASE WHEN event_type = 'enforcement_state'
-                                          AND event_json LIKE '%\"evidence_loss\"%'
+                                          AND json_valid(event_json)
+                                          AND json_extract(event_json, '$.event.code')
+                                              = 'evidence_loss'
                                      THEN 1 ELSE 0 END), 0)
                  FROM security_events
                  WHERE (?1 IS NULL OR occurred_at_ns >= ?1)
@@ -981,47 +990,35 @@ impl<'a> EventMetadata<'a> {
                 event_type: "file_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded {
-                    "allowed"
-                } else {
-                    "failed"
-                },
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::TaintTransition(transition) => Self {
                 event_type: "taint_transition",
                 policy_id: Some(&transition.policy_id),
                 policy_revision: Some(transition.policy_revision),
-                result: "changed",
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::NetworkAction(action) => Self {
                 event_type: "network_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded {
-                    "allowed"
-                } else {
-                    "blocked"
-                },
+                result: event_result(event),
                 destination_class: Some(destination_class(action.destination_class)),
             },
             SecurityEventKind::PolicyDecision(decision) => Self {
                 event_type: "policy_decision",
                 policy_id: Some(&decision.policy_id),
                 policy_revision: Some(decision.policy_revision),
-                result: if decision.blocked {
-                    "blocked"
-                } else {
-                    "allowed"
-                },
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::EnforcementState(state) => Self {
                 event_type: "enforcement_state",
                 policy_id: state.policy_id.as_deref(),
                 policy_revision: state.policy_revision,
-                result: if state.ready { "ready" } else { "degraded" },
+                result: event_result(event),
                 destination_class: None,
             },
         }

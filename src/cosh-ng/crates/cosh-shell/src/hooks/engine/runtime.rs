@@ -91,7 +91,7 @@ pub(super) fn run_external_hook(
         })
         .ok()?;
     #[cfg(not(unix))]
-    let mut command = Command::new(&config.path);
+    let mut command = crate::adapter::command_with_trusted_startup_path(&config.path);
 
     let mut child = command
         .stdin(Stdio::piped())
@@ -223,7 +223,7 @@ fn command_for_pinned_hook(executable: &fs::File) -> io::Result<(Command, fs::Fi
     // so the platform's descriptor path remains valid through exec.
     let inherited = unsafe { fs::File::from_raw_fd(fd) };
     Ok((
-        Command::new(format!("{PINNED_HOOK_FD_ROOT}/{fd}")),
+        crate::adapter::command_with_trusted_startup_path(format!("{PINNED_HOOK_FD_ROOT}/{fd}")),
         inherited,
     ))
 }

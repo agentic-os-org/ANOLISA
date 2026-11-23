@@ -53,6 +53,191 @@ class HookParity(unittest.TestCase):
     def test_schema_hook_matches_the_goldens(self):
         self.run_matrix("before_model", corpus.SCHEMA_HOOK, corpus.SCHEMA_AGENTS)
 
+    def test_qoder_payloads_outside_stdout_remain_untouched(self):
+        # Short or empty stdout must not make Bash metadata or stderr the
+        # compression target, regardless of their size.
+        for name in ("bash_array_truncation", "build_log_cargo_failure"):
+            with self.subTest(fixture=name):
+                source = Path(corpus.fixture_path("post_tool", name)).read_text()
+                proc = corpus.run_hook(
+                    corpus.RESPONSE_HOOK, source, corpus.RESPONSE_AGENTS["qoder-cli"]
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout), {})
+
+    def test_qoder_non_string_stdout_preserves_shell_envelope(self):
+        long_stderr = json.dumps(
+            [{"id": i, "message": "build warning"} for i in range(60)], indent=4
+        )
+        metadata = [{"id": i, "value": "structured information"} for i in range(300)]
+        for stdout in (
+            {}, {"stdout": None}, {"stdout": {"nested": "value"}},
+            {"stdout": ["value"]}, {"stdout": 0},
+        ):
+            for stderr in ("warning", long_stderr):
+                with self.subTest(stdout=stdout, stderr_length=len(stderr)):
+                    payload = {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "ls"},
+                        "tool_response": {
+                            **stdout, "stderr": stderr, "exit_code": 0, "metadata": metadata,
+                        },
+                    }
+                    proc = corpus.run_hook(
+                        corpus.RESPONSE_HOOK, json.dumps(payload),
+                        corpus.RESPONSE_AGENTS["qoder-cli"],
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(json.loads(proc.stdout), {})
+
+    def test_domain_compressors_receive_native_shell_content(self) -> None:
+        cases = {
+            "toon": json.dumps({"items": [{"id": i, "name": "repeated record"} for i in range(60)]}, indent=4),
+            "build_log_reduction": "".join(
+                f"tests/test_module_{i:03}.py ........................................ [ 75%]\n"
+                for i in range(12)
+            ) + "===================== 480 passed in 2.00s =====================\n",
+            "tabular_compaction": "id,name,description\n" + "".join(
+                f'{i},record-{i},"description without embedded delimiters number {i}"\n'
+                for i in range(40)
+            ),
+            "search_path_sharing": "".join(
+                f"/workspace/long_project_name/data/records/partition-{i}/record.json\n"
+                for i in range(60)
+            ),
+            "html_extraction": '<!DOCTYPE html><html><head><title>Report</title></head><body><nav>'
+            + '<a href="/menu">menu</a>' * 100
+            + '</nav><main><h1>Results</h1><p>' + 'Relevant report content. ' * 20
+            + '</p></main></body></html>',
+            "diff_reduction": "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n"
+            + "@@ -1,12 +1,12 @@\n" + (" " + "unchanged context " * 20 + "\n") * 10
+            + "-old\n+new\n tail\n",
+        }
+        agents = {**corpus.RESPONSE_AGENTS, "qwenwork": {"TOKENLESS_AGENT_ID": "qwenwork"},
+                  "codex": {"TOKENLESS_AGENT_ID": "codex"}}
+        with tempfile.TemporaryDirectory() as data:
+            env = {**os.environ, "TOKENLESS_DATA_DIR": data, "TOKENLESS_COMPRESSION_ENABLED": "1",
+                   "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
+                   "TOKENLESS_DIFF_COMPRESSION_ENABLED": "", "TOKENLESS_HTML_EXTRACTION_ENABLED": "1",
+                   "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "1"}
+            env.pop("TOKENLESS_STASH_DB", None)
+            env.pop("TOKENLESS_STATS_DB", None)
+            for operation, content in cases.items():
+                request = {
+                    "protocol_version": 2, "operation": "post_tool",
+                    "attribution": {"agent_id": "coverage", "session_id": "coverage", "tool_use_id": operation},
+                    "input": {"result_kind": "tool", "tool_name": "Bash", "content": content,
+                              "status": "success", "content_origin": "command_output", "output_optimization": "none",
+                              "capabilities": {"replace_output": True, "replace_with_text": True, "recovery": {"kind": "shell"}}},
+                }
+                proc = subprocess.run([corpus.DEBUG_TOKENLESS_BIN, "compress"], input=json.dumps(request),
+                                      capture_output=True, text=True, env=env, check=True)
+                expected = json.loads(proc.stdout)["result"]
+                self.assertEqual(expected["applied_operations"], [operation])
+                shell = {"stdout": content, "stderr": "", "exit_code": 0, "duration_ms": 123}
+                for agent, agent_env in agents.items():
+                    with self.subTest(operation=operation, agent=agent):
+                        response = shell
+                        if agent == "cosh-ng":
+                            response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
+                        elif agent == "opencode":
+                            response = content
+                        payload = {"tool_name": "Bash", "tool_response": response,
+                                   "session_id": "coverage", "tool_use_id": operation}
+                        actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
+                                                 extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1"})
+                        self.assertEqual(actual.returncode, 0, actual.stderr)
+                        envelope = json.loads(actual.stdout)
+                        if agent in {"codex", "qwencode"}:
+                            self.assertEqual(envelope, {})
+                            continue
+                        fields = envelope["hookSpecificOutput"]
+                        self.assertNotIn("additionalContext", fields)
+                        if agent == "cosh-ng":
+                            self.assertIsInstance(fields["updatedToolResponse"], str)
+                            replaced = json.loads(fields["updatedToolResponse"])
+                        else:
+                            replaced = fields["updatedToolOutput"]
+                        if agent in {"opencode", "qwenwork"}:
+                            self.assertEqual(replaced, expected["output"])
+                        else:
+                            self.assertEqual(replaced, {**shell, "stdout": expected["output"]})
+
+    def _assert_lossless_build_log_envelope(
+        self,
+        fixture_relpath: str,
+        command: str,
+        session_id: str,
+        expected_header: str,
+    ) -> None:
+        content = (Path(corpus.REPO_ROOT) / fixture_relpath).read_text()
+        for agent, agent_env in {**corpus.RESPONSE_AGENTS, "codex": {"TOKENLESS_AGENT_ID": "codex"}}.items():
+            for failed in (False, True):
+                with self.subTest(agent=agent, failed=failed):
+                    shell = {"stdout": content, "stderr": "diagnostic field stays exact\n", "exit_code": int(failed), "duration_ms": 123}
+                    response = shell
+                    if agent == "cosh-ng":
+                        response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
+                    elif agent == "opencode":
+                        if failed:
+                            continue  # This text-only wire shape carries no exit status.
+                        response = content
+                    payload = {"tool_name": "Bash", "tool_input": {"command": command},
+                               "tool_response": response, "session_id": session_id, "tool_use_id": session_id}
+                    actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
+                        extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
+                    self.assertEqual(actual.returncode, 0, actual.stderr)
+                    envelope = json.loads(actual.stdout)
+                    if failed or agent in {"codex", "qwencode"}:
+                        self.assertEqual(envelope, {})
+                        continue
+                    fields = envelope["hookSpecificOutput"]
+                    self.assertNotIn("additionalContext", fields)
+                    if agent == "cosh-ng":
+                        replaced = json.loads(fields["updatedToolResponse"])
+                    else:
+                        replaced = fields["updatedToolOutput"]
+                    if agent == "opencode":
+                        compact = replaced
+                    else:
+                        compact = replaced["stdout"]
+                        self.assertEqual(replaced, {**shell, "stdout": compact})
+                    self.assertLess(len(compact), len(content))
+                    self.assertIn(expected_header, compact)
+                    self.assertNotIn("tokenless retrieve", compact)
+
+    def test_maven_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt",
+            "mvn --batch-mode clean package",
+            "maven",
+            "Maven templates",
+        )
+
+    def test_gradle_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt",
+            "./gradlew build",
+            "gradle",
+            "Gradle templates",
+        )
+
+    def test_ctest_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt",
+            "ctest --output-on-failure",
+            "ctest",
+            "CTest templates",
+        )
+
+    def test_cmake_build_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt",
+            "cmake --build /work/build-ninja",
+            "cmake-build",
+            "CMake/Ninja templates",
+        )
+
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
 class PathListHooks(unittest.TestCase):
@@ -113,15 +298,22 @@ class PathListHooks(unittest.TestCase):
             "duration_ms": 123,
             "metadata": {"source": "native-find", "count": 60},
         }
-        for agent in ("qwenwork", "qoder-cli"):
-            output = self.replacement(self.run_response(source, agent=agent))
-            if agent == "qoder-cli":
-                self.assertIsInstance(output, str)
-                output = json.loads(output)
-            else:
-                self.assertIsInstance(output, dict)
-            self.assertEqual(self.restore(output["stdout"]), source["stdout"])
-            self.assertEqual({**output, "stdout": source["stdout"]}, source)
+        output = self.replacement(self.run_response(source, agent="qoder-cli"))
+        self.assertIsInstance(output, dict)
+        self.assertEqual(self.restore(output["stdout"]), source["stdout"])
+        self.assertEqual({**output, "stdout": source["stdout"]}, source)
+
+        self.assertEqual(self.run_response(source, agent="qwenwork"), {})
+        clean_shell = {
+            "stdout": self.paths(),
+            "stderr": "",
+            "exit_code": 0,
+            "interrupted": False,
+            "duration_ms": 123,
+        }
+        qwenwork_output = self.replacement(self.run_response(clean_shell, agent="qwenwork"))
+        self.assertIsInstance(qwenwork_output, str)
+        self.assertEqual(self.restore(qwenwork_output), clean_shell["stdout"])
 
     def test_files_disabled_domain_and_mixed_results_are_not_replaced(self):
         source = self.paths()

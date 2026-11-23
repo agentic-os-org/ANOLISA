@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::agent::run::ActiveAgentRun;
-use crate::approval::broker::ApprovalOutcome;
+use crate::approval::broker::{provider_deny_response, ApprovalOutcome, ProviderResponseInput};
 use crate::approval::cards::write_approval_receipt;
 use crate::approval::handoff::{queue_approved_shell_handoff, queue_interactive_shell_handoff};
 use crate::approval::panel::{
@@ -510,6 +510,68 @@ pub(crate) fn drain_unhomed_control_requests(state: &mut InlineState) {
             .approval_ledger_mut()
             .mark_responded(&run_id, &request_id);
     }
+}
+
+pub(crate) fn cancel_pending_approvals_for_failed_run<W: Write>(
+    state: &mut InlineState,
+    run_id: &str,
+    handle: &AgentRunHandle,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    let pending = state
+        .approvals
+        .requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.run_id == run_id && request.status == ApprovalRequestStatus::Pending
+        })
+        .map(|(index, request)| (index, request.id.clone()))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    if pending
+        .iter()
+        .any(|(_, id)| state.approvals.active_panel_id.as_ref() == Some(id))
+    {
+        clear_active_approval_panel(state, output)?;
+    }
+    for (index, id) in pending {
+        let decision = crate::approval::resolution::finalize_approval_decision(
+            state,
+            index,
+            ApprovalRequestStatus::Cancelled,
+            MessageId::ApprovalResolutionCancelledTitle,
+            None,
+            false,
+            "run_terminal",
+        )
+        .ok_or_else(|| std::io::Error::other("pending terminal approval disappeared"))?;
+        state
+            .approvals
+            .pending_capture_invalidations
+            .push_back(id.clone());
+        state.approvals.focus.remove(&id);
+        state.approvals.expanded_cards.remove(&id);
+        if let Some(request_id) = decision.request.request_id.as_deref() {
+            let _ = handle.respond_approval(provider_deny_response(
+                ProviderResponseInput {
+                    request_id,
+                    tool_use_id: decision.request.tool_use_id.as_deref(),
+                    tool_input: decision.request.tool_input.as_ref(),
+                },
+                "Agent run failed before approval; this request was not executed.".to_string(),
+            ));
+            state
+                .control
+                .approval_ledger_mut()
+                .mark_responded(run_id, request_id);
+        }
+    }
+    state.agent_run.needs_prompt_after_run = true;
+    state.agent_run.native_prompt_after_run = false;
+    Ok(true)
 }
 
 /// #1940 run-terminal sweep: same contract as the batch drain, for the

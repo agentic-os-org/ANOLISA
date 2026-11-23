@@ -42,9 +42,34 @@ it cannot mount SkillFS.
 # Recommended package install
 sudo anolisa --install-mode system install skillfs
 
-# Source build for developers
-cd src/skillfs
-cargo +1.86.0 build --release
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
+```
+
+| RPM | Contents |
+|---|---|
+| `skillfs` | Compatibility aggregate: exact version/release dependencies on core and skills |
+| `skillfs-core` | CLI, FUSE runtime dependencies, license, and documentation |
+| `skillfs-skills` | Bundled mount skill; requires matching core |
+
+For the CLI and filesystem alone, select `sudo yum install skillfs-core`.
+No plugin RPM is emitted. Installation does not mount a filesystem; start a
+mount explicitly as described below. Install or upgrade a local RPM set in
+one transaction, using matching version/release artifacts.
+
+### Source build (developers)
+
+From the repository root on Linux:
+
+```bash
+make -C src/skillfs build
+```
+
+The executable is `src/skillfs/target/release/skillfs`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source Layout
@@ -243,6 +268,92 @@ this mount's coverage. To roll back, stop a managed mount with
 
 ## CLI Utilities
 
+### explain
+
+Inspect an existing [mount configuration](#mount-configuration), including a
+single-source configuration, before mounting or when investigating precedence:
+
+```bash
+skillfs explain --config /path/to/skillfs-mount.toml
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo --format json
+```
+
+These commands require a build containing `explain`; check availability with
+`skillfs explain --help` when using an installed release. The configuration's
+source and mountpoint paths follow the absolute-path rules above. `--skill`
+matches the skill **directory name exactly**, not its frontmatter name; omit it
+to report all discovered skills. Text is the default; `--format json` emits one
+JSON object on stdout. Logs use stderr unless an explicit `--log-file` redirects
+them to a file.
+
+The command reads current files, not a running worker's frozen inputs or loaded
+views. It does not prove that a mount exists or that an agent loaded a skill,
+and concurrent edits are not an atomic snapshot. `--mountpoint` is not supported.
+Diagnosis does not create a mountpoint, change configuration/source/managed
+state, emit SLS operation records, or start a supervisor, watcher or FUSE session.
+An explicitly requested log file still follows the existing create/append rules.
+No stop or rollback operation is needed after diagnosis.
+
+Processing order is fixed: parse configuration, validate and normalize **all**
+sources, load skills in source order, then read the first normalized source's
+`skillfs-views.toml`. A blocker stops later phases. For example, an invalid later
+source leaves no skill-loading evidence from earlier sources. Filtering is
+applied after diagnosis and cannot hide an unrelated blocker. Earlier sources
+win whole skills; shadowed broken copies keep the existing nonblocking behavior,
+scan depth and load limits are unchanged, and canonical source aliases are
+deduplicated. Complete reports sort skills by name and shadowed copies by source
+precedence and path; incomplete reports retain only confirmed evidence.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Complete diagnosis, including a completed scan with no exact-name match |
+| `1` | Incomplete diagnosis, or an output error |
+| `2` | Command-line usage error, including `--mountpoint` |
+
+JSON schema version 1 uses the following fields. Diagnostic failures after
+argument parsing still emit the report, provided stdout can be written.
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `target`, `status` | `1`, `"configuration"`, and `"complete"` or `"incomplete"` |
+| `config_path`, `mountpoint`, `sources` | Input config path, normalized mountpoint (or `null`), and confirmed canonical source order |
+| `phase`, `blocker` | Present on incomplete reports: `config`, `source_validation`, `source_loading` or `views_loading`, with a contextual error |
+| `requested_skill`, `selection_status` | Requested exact name (or `null`); `all`, `discovered`, `not_discovered` or `unknown` |
+| `views` | First source's views `path`, `status`, and effective default view name (or `null`) |
+| `skills` | Confirmed winners, filtered only after all diagnostic work |
+| `skills[].selected`, `skills[].shadowed` | Copies with canonical `source`, `SKILL.md` `path`, `parse_status`, `parse_message` and `enabled` metadata |
+| `skills[].effective_default`, `default_reason` | Boolean membership or `"unknown"`, plus the reason below |
+| `skills[].configured_views`, `secondary_views` | All configured/secondary view names in configuration order, or `null` while unknown |
+
+Selected copies have `ok` or `degraded` parse status. Shadowed copies can also be
+`error` or `unloadable`; an unloadable copy has `enabled: null`. Parse messages
+are strings or `null`. `enabled: false` is metadata, not another visibility gate.
+A known rejected identity can be `discovered` without a confirmed winner row.
+`not_discovered` means the skill scan finished without a match, even if views
+subsequently fail; an interrupted scan without a known match yields `unknown`.
+It does not infer whether an undiscovered name was missing or ignored.
+
+Views status is `unknown` until that phase runs, then `absent`, `loaded`, or
+`invalid_or_unreadable`. Only genuine absence selects the existing no-views
+behavior. Malformed files, permission failures and dangling views symlinks make
+membership unknown and return exit 1 while preserving source evidence. This
+stricter diagnostic does not change the existing mount acceptance behavior.
+Only the first source's file contributes; later files are never fallback views.
+
+| `default_reason` | Effective default membership |
+| --- | --- |
+| `explicit` | Listed in the first view marked `default = true` |
+| `unassigned` | Listed in no configured view; included automatically, even without a default view |
+| `assigned_secondary` | Assigned only outside the effective default; excluded from its directory listing |
+| `no_views_configuration` | Views file absent; all discovered skills are included |
+| `unknown` | Diagnosis stopped before membership could be established |
+
+Membership is not exclusive: a skill may belong to the effective default and
+multiple secondary views simultaneously. Later views marked `default = true`
+remain secondary. With no default view, explicitly assigned secondary skills
+stay secondary and unassigned skills remain in the effective default.
+
 ### validate
 
 ```bash
@@ -253,6 +364,13 @@ skillfs validate /path/to/skills --format json
 `validate` reports successful, degraded, and failed skill parses. Parse
 failures are included in the status summary and produce a non-zero exit code;
 degraded-only skills are reported but keep exit code 0.
+
+In `SKILL.md`, `## Parameters` and `## Returns` headings accept an optional
+closing sequence of `#` characters, such as `## Parameters ##` or
+`## Returns #`. Separate that sequence from the title with a space or Tab;
+only spaces or Tabs may follow it. Contract entries under these headings
+are parsed normally, and malformed bullets produce a warning and a
+`degraded` status.
 
 In JSON output, error and warning entries include a `path` field so consumers
 can locate the exact offending skill file.
@@ -356,6 +474,35 @@ ordered transform pipeline before an agent sees them:
    rewrites distribution-specific literals between Ubuntu/Debian and
    Alinux/Anolis conventions.
 
+When uv is available, heuristic normalization preserves `pip install --user`
+and `pip3 install --user`: uv does not support pip's user-site installation mode.
+The flag may precede or follow package names and descriptor redirections such
+as `2>&1`. Ordinary pip installs can still be rewritten to `uv pip install`,
+including neighboring shell commands, inline code in lists or prose, and commands
+followed by parenthetical notes. Each inline code span is inspected separately.
+Interpreter-specific `python -m pip` calls remain unchanged. Unfinished arguments,
+line continuations, and command substitutions also keep the original pip invocation.
+
+Pip is also preserved when `PIP_USER` is present in the mount-startup environment
+snapshot or referenced before the invocation on the same line, including
+`PIP_USER=1 pip install requests` and `export PIP_USER=1; pip install requests`.
+This check is conservative: it preserves pip even for empty or false values and
+after overrides or `unset`, without evaluating shell state. Remount after
+changing the mount process's environment. Assignments on earlier document lines
+are outside this check.
+
+Known pip-only options `--root`, `--report`, `--platform`, `--implementation`,
+`--abi`, and `--upgrade-strategy` also preserve pip, with both `--option value`
+and `--option=value` spellings. For example, `pip install --root=/tmp/rootz requests`
+stays unchanged. These options are checked within each invocation's arguments;
+ordinary installs in neighboring commands can still use uv.
+
+When heuristic normalization selects Yarn, only a bare `npm install` is rewritten
+to `yarn install`. Install commands with package names, flags, or redirections
+remain unchanged: Yarn uses `add` for new dependencies and does not share all npm
+options. For example, `npm install lodash` stays as written; use an explicit
+Yarn command in the skill when that is required.
+
 Both stages are optional: you can run both, directive-only (the default),
 adapter-only (directive disabled), or neither — an empty pipeline serves the
 selected raw bytes unchanged. Initialization diagnostics report the actual
@@ -380,6 +527,15 @@ error (`ENOENT` at the virtual read boundary) and never retries the live source.
 `getattr` size, partial reads, and full reads always agree on the transformed
 bytes. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
 files pass through untouched.
+
+Command availability for the directive stage is captured at mount startup. On
+Linux it checks executable files on `PATH` directly, without requiring `which`
+or executing the detected commands. Executable symlinks and relative/empty
+`PATH` entries follow normal lookup locations; directories, broken links and
+files that the effective user cannot execute do not count. If `PATH` is unset,
+the platform default search path is used. The existing fixed
+command allowlist is unchanged. Remount after changing `PATH` or installing a
+command; this does not add per-read environment probing.
 
 ### Disabling the Directive Stage
 

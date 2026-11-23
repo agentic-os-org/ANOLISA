@@ -14,6 +14,7 @@ on:
       - 'skillfs/v*'
       - 'ktuner/v*'
       - 'anolisa/v*'
+      - 'aw/v*'
 
 permissions:
   contents: write
@@ -62,6 +63,7 @@ jobs:
             memory)   COMPONENT="agent-memory" ;;
             skillfs)  COMPONENT="skillfs" ;;
             ktuner)   COMPONENT="ktuner" ;;
+            aw)       COMPONENT="aw" ;;
             anolisa)  COMPONENT="anolisa" ;;
             *)
               echo "Unknown scope: $SCOPE"
@@ -103,6 +105,7 @@ jobs:
           }
 
       - name: Plan precompiled packages
+        if: steps.parse.outputs.component != 'aw'
         id: plan-prebuilt
         env:
           COMPONENT: ${{ steps.parse.outputs.component }}
@@ -111,6 +114,7 @@ jobs:
             --component "$COMPONENT" >> "$GITHUB_OUTPUT"
 
       - name: Package source archive
+        if: steps.parse.outputs.component != 'aw'
         id: package-source
         uses: ./.github/actions/package-source
         with:
@@ -122,12 +126,22 @@ jobs:
           skill-sign-public-key: ${{ vars.SKILL_SIGN_PUBLIC_KEY }}
 
       - name: Package vendor archive
+        if: steps.parse.outputs.component != 'aw'
         uses: ./.github/actions/package-vendor
         with:
           component: ${{ steps.parse.outputs.component }}
           version: ${{ steps.parse.outputs.version }}
           artifact-suffix: ''
           retention-days: 28
+
+  aw_assets:
+    needs: package
+    if: needs.package.outputs.component == 'aw'
+    uses: ./.github/workflows/aw-release.yml
+    permissions:
+      contents: read
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
 
   build_prebuilt:
     name: Build precompiled packages
@@ -303,10 +317,11 @@ jobs:
   # =========================================================================
   publish:
     name: Publish ${{ needs.package.outputs.tag }}
-    needs: [package, build_prebuilt]
+    needs: [package, build_prebuilt, aw_assets]
     if: >-
       always() &&
       needs.package.result == 'success' &&
+      (needs.package.outputs.component != 'aw' || needs.aw_assets.result == 'success') &&
       (needs.package.outputs.prebuilt-enabled != 'true' ||
        needs.build_prebuilt.result == 'success')
     permissions:
@@ -321,13 +336,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Download verified AW archives and SDKs
+        if: needs.package.outputs.component == 'aw'
+        uses: actions/download-artifact@v4
+        with:
+          name: aw-release-${{ github.sha }}
+          path: ${{ runner.temp }}/aw-release
+
+      - name: Verify AW release assets before publication
+        if: needs.package.outputs.component == 'aw'
+        working-directory: ${{ runner.temp }}/aw-release
+        run: |
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse "$GITHUB_REF^{commit}")" = "$GITHUB_SHA"
+          sha256sum --strict -c SHA256SUMS
+
       - name: Download official artifact
+        if: needs.package.outputs.component != 'aw'
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}
           path: /tmp/archives
 
       - name: Verify official artifact checksum
+        if: needs.package.outputs.component != 'aw'
         run: |
           COMPONENT="${{ needs.package.outputs.component }}"
           VERSION="${{ needs.package.outputs.version }}"
@@ -343,6 +374,7 @@ jobs:
           echo "Checksum verified: $ACTUAL"
 
       - name: Download vendor artifact (if exists)
+        if: needs.package.outputs.component != 'aw'
         id: download-vendor
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -377,6 +409,12 @@ jobs:
           merge-multiple: true
           path: /tmp/python-wheels
 
+      - name: Select Python 3.11
+        if: needs.package.outputs.component == 'tokenless'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Verify Tokenless Python wheels
         if: needs.package.outputs.component == 'tokenless'
         env:
@@ -387,6 +425,19 @@ jobs:
             --version "$VERSION" \
             --layout aggregate \
             --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
+
+      - name: Package ANOLISA distribution manifests
+        if: needs.package.outputs.component == 'anolisa'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          distribution/anolisa/scripts/package-manifests.sh "/tmp/archives/manifests-${VERSION}.tar.gz"
+          cp "/tmp/archives/manifests-${VERSION}.tar.gz" /tmp/archives/manifests-latest.tar.gz
+          (
+            cd /tmp/archives
+            sha256sum "manifests-${VERSION}.tar.gz" manifests-latest.tar.gz > SHA256SUMS-manifests.txt
+          )
 
       - name: Create GitHub Release
         env:
@@ -409,6 +460,7 @@ jobs:
             agent-memory)   PREFIX="memory/v" ;;
             skillfs)        PREFIX="skillfs/v" ;;
             ktuner)         PREFIX="ktuner/v" ;;
+            aw)             PREFIX="aw/v" ;;
             anolisa)        PREFIX="anolisa/v" ;;
           esac
 
@@ -422,7 +474,12 @@ jobs:
           # Collect all assets to upload
           ASSETS=("$ARCHIVE")
           VENDOR_ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}-vendor.tar.gz"
-          if [ -f "$VENDOR_ARCHIVE" ]; then
+          RELEASE_FLAGS=()
+          if [ "$COMPONENT" = aw ]; then
+            dir="$RUNNER_TEMP/aw-release"
+            ASSETS=("$dir"/*.tar.gz "$dir"/*.tgz "$dir"/*.whl "$dir/sdk-candidate.json" "$dir/SHA256SUMS")
+            RELEASE_FLAGS=(--verify-tag --latest=false)
+          elif [ -f "$VENDOR_ARCHIVE" ]; then
             ASSETS+=("$VENDOR_ARCHIVE")
           fi
           if [ "$PREBUILT_ENABLED" = "true" ]; then
@@ -432,6 +489,10 @@ jobs:
               find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
                 LC_ALL=C sort
             )
+          fi
+          if [ "$COMPONENT" = anolisa ]; then
+            ASSETS+=("/tmp/archives/manifests-${VERSION}.tar.gz")
+            ASSETS+=(/tmp/archives/manifests-latest.tar.gz /tmp/archives/SHA256SUMS-manifests.txt)
           fi
           if [ "$COMPONENT" = tokenless ]; then
             while IFS= read -r asset; do
@@ -449,7 +510,7 @@ jobs:
             exit 1
           fi
 
-          gh release create "$TAG" \
+          gh release create "$TAG" "${RELEASE_FLAGS[@]}" \
             --title "${COMPONENT} v${VERSION}" \
             --notes-file "$NOTES_FILE" \
             --target "$(git rev-list -n 1 $TAG)" \

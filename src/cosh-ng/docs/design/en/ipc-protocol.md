@@ -39,15 +39,25 @@ Each message consists of two parts:
 - Maximum response limit: 64 MiB (prevents OOM)
 - Default timeout: 5000ms (configurable via `CkptClient::with_timeout()`)
 
-## Request Types (WsCkptRequest)
+## Request Types (Request / WsCkptRequest)
 
 bincode serializes enums by variant index (first variant = index 0). **Variant order is the binary contract and must not be reordered.**
+
+The request, response, and error-code tables below describe the complete daemon protocol defined in `src/ws-ckpt/src/crates/common/src/lib.rs` as of ANOLISA `main` (`8e23424d5`), with fields in encoding order. At that revision, the client copies in `cosh-types` cover a shorter range:
+
+| Enum | Daemon (`ws-ckpt-common`) | Client (`cosh-types`) |
+|------|---------------------------|-----------------------|
+| Request | `Request`, indices 0-29 | `WsCkptRequest`, indices 0-25 |
+| Response | `Response`, indices 0-29 | `WsCkptResponse`, indices 0-27 |
+| Error code | `ErrorCode`, indices 0-13 | `WsCkptErrorCode`, indices 0-13 |
+
+Entries marked *daemon only* are absent from `cosh-types`: cosh-ng cannot encode those requests and fails to decode those responses. `ReloadConfigOk` also differs: `WsCkptResponse` declares only `config`, and the cosh-ng decoder skips the trailing `file` bytes.
 
 | Index | Variant | Description |
 |-------|---------|-------------|
 | 0 | `Init { workspace }` | Initialize a workspace |
 | 1 | `Checkpoint { workspace, id, message, metadata, pin }` | Create a snapshot |
-| 2 | `Rollback { workspace, to }` | Rollback to a specified snapshot |
+| 2 | `Rollback { workspace, to, num_ancestors }` | Roll back to a snapshot (`to`) or an ancestor (`num_ancestors`) |
 | 3 | `Delete { workspace, snapshot, force }` | Delete a snapshot |
 | 4 | `List { workspace, format }` | List snapshots |
 | 5 | `Diff { workspace, from, to }` | Diff between two snapshots |
@@ -55,29 +65,63 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 | 7 | `Cleanup { workspace, keep }` | Clean up old snapshots |
 | 8 | `Config` | Get daemon configuration |
 | 9 | `ReloadConfig` | Reload configuration |
-| 10 | `Recover { workspace }` | Recover a workspace |
-| 11 | `HealthAdvisory` | Health check |
+| 10 | `ReloadGlobalConfig` | Reload only the global configuration |
+| 11 | `ReloadWorkspacePolicy { workspace }` | Reload one workspace's `policy.toml` |
+| 12 | `ConfigOverview` | Get the global configuration and workspace override counts |
+| 13 | `Recover { workspace }` | Restore a workspace to a normal directory (undo init) |
+| 14 | `HealthAdvisory` | Query aggregated health metrics |
+| 15 | `GetWorkspacePolicy { workspace }` | Read the per-workspace policy |
+| 16 | `ResetWorkspacePolicy { workspace }` | Delete the per-workspace `policy.toml` and inherit global settings |
+| 17 | `PatchWorkspacePolicy { workspace, auto_cleanup, auto_cleanup_keep }` | Atomically patch per-workspace policy fields |
+| 18 | `RollbackPreview { workspace, to, num_ancestors }` | Preview the changes a rollback would make |
+| 19 | `WorkspaceIdentityV2 { registration_path }` | Resolve the stable identity of a registered workspace |
+| 20 | `GuardedCheckpointV2 { ws_id, expected_generation, checkpoint_id, operation_digest, message, metadata, pin }` | Create a snapshot guarded by workspace generation and operation identity |
+| 21 | `CheckpointEvidenceV2 { ws_id, expected_generation, checkpoint_id, operation_digest }` | Query durable evidence for a guarded checkpoint |
+| 22 | `GuardedRollbackPreviewV2 { registered_path, ws_id, expected_generation, target_snapshot_id }` | Preview an exact rollback target bound to workspace identity |
+| 23 | `GuardedRollbackV2 { registered_path, ws_id, expected_generation, target_snapshot_id, expected_diff_digest, operation_id, operation_digest }` | Revalidate a preview and roll back to its exact target |
+| 24 | `GuardedRollbackEvidenceV2 { ws_id, operation_id, operation_digest }` | Query durable evidence for a guarded rollback |
+| 25 | `Unregister { workspace }` | Remove a registration only when its live subvolume is missing |
+| 26 | `RecoverPreview { workspace }` | Resolve the recovery target and deletion scope before confirmation (*daemon only*) |
+| 27 | `RecoverConfirmed { preview }` | Recover only if the preview still describes the same target (*daemon only*) |
+| 28 | `ListOrphans { workspace }` | List snapshots recovered without their original metadata (*daemon only*) |
+| 29 | `ListPage { orphans_only, workspace, limit, cursor }` | Read one page of snapshots (*daemon only*) |
 
-## Response Types (WsCkptResponse)
+## Response Types (Response / WsCkptResponse)
 
-| Variant | Corresponding Request | Key Fields |
-|---------|----------------------|------------|
-| `InitOk { ws_id }` | Init | Workspace ID |
-| `CheckpointOk { snapshot_id }` | Checkpoint | Snapshot ID |
-| `RollbackOk { from, to }` | Rollback | Rollback source and target |
-| `DeleteOk { target }` | Delete | Deleted snapshot identifier |
-| `Error { code, message }` | Any | Error code + human-readable description |
-| `ListOk { snapshots }` | List | `Vec<SnapshotEntry>` |
-| `DiffOk { changes }` | Diff | `Vec<DiffEntry>` |
-| `StatusOk { report }` | Status | `StatusReport` |
-| `CleanupOk { removed }` | Cleanup | List of removed snapshot IDs |
-| `ConfigOk { config }` | Config | `ConfigReport` |
-| `ReloadConfigOk` | ReloadConfig | No payload |
-| `CheckpointSkipped { reason }` | Checkpoint | Skip reason (e.g., no changes) |
-| `RecoverOk { workspace }` | Recover | Recovered workspace path |
-| `HealthAdvisoryOk { ... }` | HealthAdvisory | Over-limit workspace count, disk usage |
+| Index | Variant | Corresponding Request | Key Fields |
+|-------|---------|----------------------|------------|
+| 0 | `InitOk { ws_id }` | Init | Workspace ID |
+| 1 | `CheckpointOk { snapshot_id }` | Checkpoint | Snapshot ID |
+| 2 | `RollbackOk { from, to }` | Rollback | Rollback source and target |
+| 3 | `DeleteOk { target }` | Delete | Deleted snapshot identifier |
+| 4 | `Error { code, message }` | Any | Error code + human-readable description |
+| 5 | `ListOk { snapshots }` | List, ListOrphans | `Vec<SnapshotEntry>` |
+| 6 | `DiffOk { changes }` | Diff | `Vec<DiffEntry>` |
+| 7 | `StatusOk { report }` | Status | `StatusReport` |
+| 8 | `CleanupOk { removed }` | Cleanup | List of removed snapshot IDs |
+| 9 | `ConfigOk { config }` | Config | `ConfigReport` |
+| 10 | `ReloadConfigOk { config, file }` | ReloadConfig, ReloadGlobalConfig, ReloadWorkspacePolicy | Post-reload `ConfigReport`; `Option<FileConfig>` read by the daemon, `None` for a workspace policy reload |
+| 11 | `CheckpointSkipped { reason }` | Checkpoint | Skip reason (e.g., no changes) |
+| 12 | `RecoverOk { workspace }` | Recover, RecoverConfirmed | Recovered workspace path |
+| 13 | `HealthAdvisoryOk { over_limit_workspace_count, fs_total_bytes, fs_used_bytes }` | HealthAdvisory | Over-limit workspace count, backend disk usage (`fs_total_bytes == 0` means unavailable) |
+| 14 | `WorkspacePolicyOk { ws_id, effective, local, global }` | GetWorkspacePolicy, ResetWorkspacePolicy, PatchWorkspacePolicy | Effective policy, on-disk override, global defaults |
+| 15 | `ConfigOverviewOk { config, ws_total, ws_with_override }` | ConfigOverview | `ConfigReport`, workspace counts |
+| 16 | `RollbackPreviewOk { to, changes }` | RollbackPreview | Rollback target, `Vec<DiffEntry>` |
+| 17 | `WorkspaceIdentityV2Ok { protocol_version, ws_id, registered_path, generation }` | WorkspaceIdentityV2 | Protocol version, workspace identity |
+| 18 | `GuardedCheckpointV2Ok { evidence }` | GuardedCheckpointV2 | `GuardedCheckpointEvidenceV2` |
+| 19 | `CheckpointEvidenceV2Ok { evidence }` | CheckpointEvidenceV2 | `Option<GuardedCheckpointEvidenceV2>`; `None` means no evidence |
+| 20 | `GuardedCheckpointV2Rejected { code, message }` | WorkspaceIdentityV2, GuardedCheckpointV2, CheckpointEvidenceV2 | `GuardedCheckpointRejectionCodeV2` + description |
+| 21 | `GuardedRollbackPreviewV2Ok { protocol_version, registered_path, ws_id, generation, target_snapshot_id, diff_digest, changes, caller_uid }` | GuardedRollbackPreviewV2 | Workspace identity, exact target, diff and its digest, caller UID |
+| 22 | `GuardedRollbackV2Ok { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2` proving completion |
+| 23 | `GuardedRollbackV2Uncertain { evidence }` | GuardedRollbackV2 | `GuardedRollbackEvidenceV2` for a rollback that may have started but is not confirmed complete |
+| 24 | `GuardedRollbackEvidenceV2Ok { evidence }` | GuardedRollbackEvidenceV2 | `Option<GuardedRollbackEvidenceV2>`; `None` means no evidence |
+| 25 | `GuardedRollbackV2Rejected { code, message }` | GuardedRollbackPreviewV2, GuardedRollbackV2, GuardedRollbackEvidenceV2 | `GuardedRollbackRejectionCodeV2` + description |
+| 26 | `RecoverWithWarning { workspace, warning }` | Recover, RecoverConfirmed | Recovered workspace path, warning about retained data |
+| 27 | `UnregisterOk { workspace, retained_paths }` | Unregister | Original workspace path, paths retained for manual recovery |
+| 28 | `RecoverPreviewOk { preview }` | RecoverPreview | `RecoveryPreview` (*daemon only*) |
+| 29 | `ListPageOk { snapshots, next_cursor }` | ListPage | `Vec<SnapshotListItem>`, opaque continuation token (*daemon only*) |
 
-## Error Codes (WsCkptErrorCode)
+## Error Codes (ErrorCode / WsCkptErrorCode)
 
 | Index | Variant | Description |
 |-------|---------|-------------|
@@ -92,6 +136,9 @@ bincode serializes enums by variant index (first variant = index 0). **Variant o
 | 8 | `SnapshotAlreadyExists` | Snapshot ID conflict |
 | 9 | `WriteLockConflict` | Write lock conflict |
 | 10 | `DiskSpaceInsufficient` | Insufficient disk space |
+| 11 | `CwdOccupied` | A process has its working directory inside the workspace |
+| 12 | `CwdScanFailed` | The working-directory scan failed, so occupancy is unknown |
+| 13 | `UnsupportedWorkspacePath` | A diff path cannot be represented as UTF-8 |
 
 ## Client Usage
 
@@ -121,7 +168,9 @@ let restored = client.restore("/home/user/project", "snap-001")?;
 |------------|-------------|
 | Variant order is immutable | bincode serializes enums by index; reordering breaks the wire format |
 | New additions append only | New Request/Response variants can only be added at the end |
-| Types must stay in sync | Definitions in `cosh-types` must exactly match `ws-ckpt-common` |
+| Shared variants keep their layout | Variants present in both `cosh-types` and `ws-ckpt-common` keep the same index; fields declared by the client match the daemon's leading fields in order and type |
+| Client may cover a prefix | `cosh-types` may omit trailing variants, but must decode every response and error code the daemon can return to requests the client sends |
+| Omitted fields are trailing only | A client response variant may omit only fields at the end of the encoded message, and only with verified trailing-byte tolerance in the decoder, as for `ReloadConfigOk.file` |
 | Timeout handling | Client sets read/write timeouts to avoid blocking when daemon is unresponsive |
 | Length limit | Responses exceeding 64 MiB are treated as anomalous; connection is dropped immediately |
 | Socket path | Default `/run/ws-ckpt/ws-ckpt.sock`; overridable via environment variable or CLI argument |

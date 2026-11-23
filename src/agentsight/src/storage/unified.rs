@@ -284,7 +284,6 @@ impl Storage {
                 log::trace!("Prompt token count storage not implemented, skipping");
                 Ok(0)
             }
-            AnalysisResult::Http(record) => self.http_store.insert(record),
             AnalysisResult::TokenConsumption(breakdown) => self.token_consumption_store.insert(
                 breakdown,
                 breakdown.timestamp_ns,
@@ -540,8 +539,8 @@ fn purge_report_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analyzer::HttpRecord;
     use crate::analyzer::token::TokenRecord;
+    use crate::analyzer::{HttpContext, HttpRecord};
     use agentsight_sqlite_lifecycle::SizeSnapshot;
 
     #[test]
@@ -616,7 +615,12 @@ mod tests {
 
         let record = sample_http_record();
         let id = storage
-            .store(&AnalysisResult::Http(record.clone()))
+            .store(&AnalysisResult::HttpContext(HttpContext::new(
+                true,
+                record.clone(),
+                None,
+                None,
+            )))
             .unwrap();
 
         assert!(
@@ -641,7 +645,12 @@ mod tests {
     fn test_noop_storage_drops_http_result() {
         let storage = Storage::noop().unwrap();
         let id = storage
-            .store(&AnalysisResult::Http(sample_http_record()))
+            .store(&AnalysisResult::HttpContext(HttpContext::new(
+                true,
+                sample_http_record(),
+                None,
+                None,
+            )))
             .unwrap();
         assert_eq!(id, 0);
         assert_eq!(storage.http().count().unwrap(), 0);

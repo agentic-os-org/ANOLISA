@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import sys
 import os
 from pathlib import Path
 import tempfile
@@ -16,8 +17,10 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
-SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py")
+SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py",
+    submodule_search_locations=[str(ROOT / "crates/aw-adapter/native/qwenpaw")])
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
@@ -32,6 +35,19 @@ class MiddlewareTests(unittest.IsolatedAsyncioTestCase):
             _acting_impl=tool,
             state=SimpleNamespace(session_id="native-session"),
         )
+
+    async def test_checked_input_reaches_native_tool_without_a_retry(self):
+        seen = []
+        class Probe(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload):
+                return 0, b'{"aw_updated_input":{"command":"checked","timeout":7}}', b""
+        async def tool(tool_call):
+            seen.append(json.loads(tool_call.input))
+            yield ToolResponse(content=[TextBlock(text="done")])
+        middleware = Probe({}, hook("tool.before", "last"))
+        output = [item async for item in Agent._acting(self.agent([middleware], tool), ToolCallBlock(id="call", name="bash", input='{"command":"original","timeout":7}'))]
+        self.assertEqual(seen, [{"command":"checked","timeout":7}])
+        self.assertEqual(len(output), 1)
 
     async def test_replacement_reaches_native_acting_result_and_preserves_metadata(self):
         original = ToolResponse(content=[TextBlock(text="original")], metadata={"kept": True})
@@ -563,13 +579,7 @@ class RegistrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unsafe"):
                     MODULE.AwPlugin().register(SimpleNamespace(config={}))
 
-    def test_wrong_runtime_or_disabled_plugin_never_registers(self):
-        incompatible = {"qwenpaw": "2.2.2b4", "agentscope": "2.0.8"}
-        with patch.object(MODULE, "version", side_effect=incompatible.__getitem__):
-            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.9"):
-                MODULE.AwPlugin().register(SimpleNamespace())
-        with patch.object(MODULE, "version", return_value="wrong"), self.assertRaisesRegex(RuntimeError, "requires"):
-            MODULE.AwPlugin().register(SimpleNamespace())
+    def test_disabled_plugin_never_registers(self):
         with self.assertRaisesRegex(RuntimeError, "disables"):
             MODULE.AwPlugin().register(SimpleNamespace(config={"enabled": False}))
 

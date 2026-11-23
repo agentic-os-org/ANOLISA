@@ -403,6 +403,17 @@ fn normalize_path(mut path: String) -> String {
 /// (labels, triage, evaluations) stay on the loopback path: they change what
 /// the dashboard shows, not what the host does.
 fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix("/api/ws-ckpt/") {
+        // The HEAD probe exposes workspace availability only. The usual
+        // authentication rules for reading a trajectory still apply to it.
+        let mut parts = rest.split('/');
+        return !(*method == actix_web::http::Method::HEAD
+            && matches!(
+                (parts.next(), parts.next(), parts.next(), parts.next()),
+                (Some("session" | "conversation" | "{kind}"), Some(id), Some("snapshots"), None)
+                    if !id.is_empty()
+            ));
+    }
     match *method {
         actix_web::http::Method::POST => {
             matches!(
@@ -410,6 +421,7 @@ fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> 
                 "/api/enforcement/bindings"
                     | "/api/tokenless/refresh"
                     | "/api/enforcement/file-bindings"
+                    | "/api/enforcement/file-read-bindings"
                     | "/api/enforcement/credential-bindings"
                     | "/api/optimize/config"
                     // Rewrites the hookless runtime configuration file: the
@@ -556,7 +568,12 @@ where
                         .strip_prefix("/api/token-savings/session/")
                         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
             });
-        if tokenless_query || path.matches(|value| is_credential_required_path(req.method(), value))
+        let llm_preferences = *req.method() == actix_web::http::Method::GET
+            && path.matches(|value| value == "/api/preferences")
+            && extract_query_param(req.query_string(), "llm").is_some_and(|value| value == "true");
+        if tokenless_query
+            || llm_preferences
+            || path.matches(|value| is_credential_required_path(req.method(), value))
         {
             let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
@@ -571,14 +588,23 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
-        // If auth is disabled, pass through immediately.
-        if !self.auth.enabled {
+        // If auth is disabled, pass through immediately — but a disabled token
+        // layer must not turn the API into a cross-origin data source for
+        // visited web pages: only requests that are not browser cross-origin
+        // calls keep the convenience opening. CLI tools and the dashboard's
+        // own same-origin calls carry no foreign Origin.
+        if !self.auth.enabled && !crate::http_origin::request_is_cross_origin(&req) {
             let fut = self.service.call(req);
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Localhost (loopback) requests bypass authentication.
-        if is_loopback {
+        // Localhost (loopback) requests bypass authentication — under the same
+        // condition: a loopback address is not an authorization boundary for
+        // web content, and browsers attach an `Origin` header to every
+        // cross-origin request, so a foreign web page falls through to the
+        // normal credential checks while local non-browser callers keep the
+        // bypass.
+        if is_loopback && !crate::http_origin::request_is_cross_origin(&req) {
             let fut = self.service.call(req);
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
@@ -670,16 +696,18 @@ fn is_authenticated(auth: &DashboardAuth, req: &ServiceRequest) -> bool {
 
 /// Extract a query parameter value from a query string without full parsing.
 fn extract_query_param(query: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
     for part in query.split('&') {
-        if let Some(value) = part.strip_prefix(&prefix) {
-            return Some(percent_decode(value));
+        let Some((raw_key, raw_value)) = part.split_once('=') else {
+            continue;
+        };
+        if percent_decode(raw_key) == key {
+            return Some(percent_decode(raw_value));
         }
     }
     None
 }
 
-/// Minimal percent-decoding for query values (handles `%XX` sequences).
+/// Minimal percent-decoding for query components (handles `%XX` sequences).
 fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -807,6 +835,14 @@ mod tests {
         assert_eq!(
             extract_query_param("token=hello", "token"),
             Some("hello".to_string())
+        );
+        assert_eq!(
+            extract_query_param("%6clm=true", "llm"),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            extract_query_param("%6C%6Cm=true", "llm"),
+            Some("true".to_string())
         );
         assert_eq!(extract_query_param("foo=bar", "token"), None);
     }
@@ -1041,6 +1077,10 @@ mod tests {
                     actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
                 )
                 .route(
+                    "/api/enforcement/file-read-bindings",
+                    actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
                     "/api/enforcement/bindings/{binding_id}",
                     actix_web::web::delete().to(|| async { HttpResponse::Ok().finish() }),
                 ),
@@ -1053,6 +1093,13 @@ mod tests {
             .peer_addr(loopback)
             .to_request();
         let response = actix_web::test::call_service(&app, unauthenticated_apply).await;
+        assert_eq!(response.status(), 401);
+
+        let unauthenticated_read_apply = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/file-read-bindings")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, unauthenticated_read_apply).await;
         assert_eq!(response.status(), 401);
 
         let unauthenticated_detach = actix_web::test::TestRequest::delete()
@@ -1125,6 +1172,109 @@ mod tests {
         assert_eq!(response.status(), 401);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn middleware_loopback_bypass_requires_a_same_origin_caller() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_loopback_origin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+        // A browser cross-origin call from a visited web page: the loopback
+        // bypass must not apply, and without a token the request is refused.
+        let foreign = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "https://attacker.example"))
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, foreign).await;
+        assert_eq!(
+            response.status(),
+            401,
+            "a foreign web page must not keep the loopback bypass"
+        );
+
+        // The dashboard's own same-origin call keeps the bypass.
+        let same_origin = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "http://127.0.0.1:7396"))
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, same_origin).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "a same-origin dashboard call keeps the loopback bypass"
+        );
+
+        // Local non-browser callers (no Origin header) keep the bypass.
+        let local = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, local).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "a local non-browser caller keeps the loopback bypass"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn middleware_disabled_auth_still_refuses_cross_origin_browsers() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: false },
+            Path::new("/tmp"),
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+
+        // Auth disabled: a local non-browser caller still passes.
+        let local = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .to_request();
+        let response = actix_web::test::call_service(&app, local).await;
+        assert_eq!(response.status(), 200);
+
+        // Auth disabled: a foreign web page is still refused — disabling the
+        // token layer must not turn the API into a cross-origin data source.
+        let foreign = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "https://attacker.example"))
+            .peer_addr(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                12345,
+            ))
+            .to_request();
+        let response = actix_web::test::call_service(&app, foreign).await;
+        assert_eq!(response.status(), 401);
     }
 
     #[actix_web::test]

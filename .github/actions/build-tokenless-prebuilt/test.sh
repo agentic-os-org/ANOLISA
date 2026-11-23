@@ -117,6 +117,9 @@ git archive "${HISTORICAL_SOURCE_REF}:src/tokenless" | tar -x -C "$HISTORICAL_BU
     exit 1
 }
 cp -a "$HISTORICAL_BUILD" "$HISTORICAL_DRIFT_BUILD"
+# Historical trees still ship a separate rtk binary; current trees link RTK.
+[ "$(python3 "$ACTION_DIR/packaged_executable.py" "$HISTORICAL_BUILD")" = rtk ]
+[ "$(python3 "$ACTION_DIR/packaged_executable.py" "$REPO_ROOT/src/tokenless")" = tokenless ]
 
 HISTORICAL_RTK_SETUP="$ACTION_DIR/setup-rtk.sh"
 PINNED_RTK_COMMIT="$(
@@ -125,7 +128,7 @@ PINNED_RTK_COMMIT="$(
 )"
 CURRENT_RTK_COMMIT="$(
     sed -n 's/^RTK_COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' \
-        "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh"
+        "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh"
 )"
 [ -n "$PINNED_RTK_COMMIT" ] || {
     printf 'ERROR: historical RTK setup has no pinned 40-character commit\n' >&2
@@ -225,11 +228,11 @@ grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
 
 # Current sources delegate to their component setup and can pin a newer RTK.
 CURRENT_BUILD="$TEMPORARY/current-source"
-install -d -m 0755 "$CURRENT_BUILD/scripts" "$CURRENT_BUILD/third_party/patches"
-cp "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$CURRENT_BUILD/scripts/"
-cp "$REPO_ROOT/src/tokenless/third_party/patches/rtk-tokenless-stats.patch" \
-    "$REPO_ROOT/src/tokenless/third_party/patches/rtk-pytest-error-report.patch" \
+install -d -m 0755 "$CURRENT_BUILD/packaging/build" "$CURRENT_BUILD/third_party/patches"
+cp "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$CURRENT_BUILD/packaging/build/"
+cp "$REPO_ROOT"/src/tokenless/third_party/patches/*.patch \
     "$CURRENT_BUILD/third_party/patches/"
+CURRENT_PATCH_COUNT="$(find "$CURRENT_BUILD/third_party/patches" -name '*.patch' | wc -l)"
 PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     HISTORICAL_FAKE_HEAD="$CURRENT_RTK_COMMIT" \
     HISTORICAL_GIT_LOG="$TEMPORARY/current-git.log" \
@@ -237,7 +240,7 @@ PATH="$HISTORICAL_FAKE_BIN:$PATH" \
     bash "$HISTORICAL_RTK_SETUP" "$CURRENT_BUILD"
 grep -Fq "fetch --quiet --depth 1 origin $CURRENT_RTK_COMMIT" \
     "$TEMPORARY/current-git.log"
-[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq 2 ]
+[ "$(wc -l < "$TEMPORARY/current-patch.log")" -eq "$CURRENT_PATCH_COUNT" ]
 [ "$(cat "$CURRENT_BUILD/third_party/rtk/.anolisa-rtk-commit")" = \
     "$CURRENT_RTK_COMMIT" ]
 
@@ -245,7 +248,7 @@ RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"
 printf '[package]\nname = "rtk"\nversion = "0.0.0"\n' > "$RTK_DRIFT/Cargo.toml"
 printf '%040d\n' 0 > "$RTK_DRIFT/.anolisa-rtk-commit"
-if bash "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$RTK_DRIFT" \
+if bash "$REPO_ROOT/src/tokenless/packaging/build/setup-rtk.sh" "$RTK_DRIFT" \
     >"$TEMPORARY/rtk-drift.log" 2>&1; then
     printf 'ERROR: mismatched RTK revision marker was accepted\n' >&2
     exit 1
@@ -478,6 +481,7 @@ fi
 
 python3 "$ACTION_DIR/test_verify_wheels.py"
 python3 "$ACTION_DIR/test_windows_package.py"
+python3 "$ACTION_DIR/test_windows_entrypoint.py"
 
 for project in tokenless-fixture rtk-fixture; do
     install -d -m 0755 "$TEMPORARY/$project/src"

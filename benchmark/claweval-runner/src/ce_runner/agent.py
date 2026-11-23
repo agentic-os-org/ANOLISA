@@ -145,8 +145,14 @@ def _run_first_turn_via_api(text: str,
         "stream": True,
     }
 
-    inactivity_s = float(os.environ.get("CE_RUNNER_HTTP_INACTIVITY_S", "120"))
-    max_retries = int(os.environ.get("CE_RUNNER_HTTP_MAX_RETRIES", "5"))
+    try:
+        inactivity_s = float(os.environ.get("CE_RUNNER_HTTP_INACTIVITY_S", "120"))
+    except ValueError:
+        inactivity_s = 120.0
+    try:
+        max_retries = int(os.environ.get("CE_RUNNER_HTTP_MAX_RETRIES", "5"))
+    except ValueError:
+        max_retries = 5
     payload_bytes = len(json.dumps(body))
     n_images = len(image_attachments)
     n_text = len(text_attachments)

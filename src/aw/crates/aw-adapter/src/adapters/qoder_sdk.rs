@@ -7,14 +7,29 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
+
+mod assets;
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) struct QoderSdk;
 struct Prepared {
     input: LaunchInput,
-    sdk: PathBuf,
+    sdks: std::collections::BTreeMap<String, PathBuf>,
+    policy: assets::Policy,
+    versions: std::collections::BTreeMap<String, Sdk>,
+    final_profile: Option<Value>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Sdk {
+    entry: PathBuf,
+    version: String,
+    worker_version: String,
 }
 
 impl Adapter for QoderSdk {
@@ -36,13 +51,29 @@ impl Adapter for QoderSdk {
             .args
             .first()
             .map(PathBuf::from)
-            .ok_or("Qoder SDK requires node and an absolute .mjs worker")?;
+            .ok_or("Qoder SDK requires node and an absolute .mjs or .js worker")?;
         if !application.is_absolute()
             || !application.is_file()
-            || application.extension().and_then(|s| s.to_str()) != Some("mjs")
+            || !matches!(
+                application.extension().and_then(|s| s.to_str()),
+                Some("mjs" | "js")
+            )
         {
-            return Err("Qoder SDK requires an existing absolute .mjs worker".into());
+            return Err("Qoder SDK requires an existing absolute .mjs or .js worker".into());
         }
+        let agent = &input.document["spec"]["agents"][&input.target];
+        if input.options.reloadable
+            && (agent["qoder_sdk"]["declarative_plugins"] == true
+                || agent["qoder_sdk"]["command_wrappers"]
+                    .as_array()
+                    .is_some_and(|grants| !grants.is_empty()))
+        {
+            return Err(
+                "Qoder SDK declarative plugins and command wrappers require ordinary resident mode"
+                    .into(),
+            );
+        }
+        let policy = assets::Policy::read(agent)?;
         let sdk = adapter::Probe(cancelled).version_output(
             &input.command,
             &[
@@ -51,15 +82,73 @@ impl Adapter for QoderSdk {
                 include_str!("../../native/qoder-sdk/probe.mjs").into(),
                 "--".into(),
                 application.canonicalize()?.into_os_string(),
+                serde_json::to_string(&policy.sites)?.into(),
             ],
         )?;
-        let sdk = PathBuf::from(sdk);
-        if !sdk.is_absolute() || !sdk.is_file() {
-            return Err("Qoder SDK probe did not resolve the installed package".into());
+        let versions: std::collections::BTreeMap<String, Sdk> = serde_json::from_str(&sdk)?;
+        for sdk in versions.values() {
+            crate::version::reported(&sdk.version, "Qoder SDK")?;
+            crate::version::reported(&sdk.worker_version, "Qoder Worker")?;
         }
-        Ok(Box::new(Prepared { input, sdk }))
+        let sdks: std::collections::BTreeMap<_, _> = versions
+            .iter()
+            .map(|(site, sdk)| (site.clone(), sdk.entry.clone()))
+            .collect();
+        if sdks.len() != policy.sites.len()
+            || policy.sites.iter().any(|site| !sdks.contains_key(site))
+            || sdks
+                .values()
+                .any(|sdk| !sdk.is_absolute() || !sdk.is_file())
+        {
+            return Err("Qoder SDK probe did not resolve the declared installed packages".into());
+        }
+        let final_profile =
+            super::qoder_final::profile(&input, &sdks[&policy.sites[0]], cancelled)?;
+        if final_profile.is_some()
+            && (policy.sites != ["global"]
+                || policy.declarative_plugins
+                || !policy.command_wrappers.is_empty()
+                || !policy.runtime_preloads.is_empty()
+                || !policy.runtime_launchers.is_empty())
+        {
+            return Err(
+                "Qoder final gate requires the global SDK without native extensions".into(),
+            );
+        }
+        Ok(Box::new(Prepared {
+            input,
+            sdks,
+            policy,
+            versions,
+            final_profile,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if matches!(event, "session.start" | "session.end") {
+            let name = if event == "session.start" {
+                "SessionStart"
+            } else {
+                "SessionEnd"
+            };
+            if native["hook_event_name"] != name
+                || native["cwd"].as_str() != binding.cwd.to_str()
+                || native["source"] == "compact"
+            {
+                return Err("Qoder SDK lifecycle event or cwd differs from its route".into());
+            }
+            return super::lifecycle::normalize(binding, "qoder-sdk", event, native);
+        }
+        if event == "security.violation" {
+            return super::qoder_final::normalize(binding, native);
+        }
+        if event == "input.submit" {
+            if native["hook_event_name"] != "UserPromptSubmit"
+                || native["cwd"].as_str() != binding.cwd.to_str()
+            {
+                return Err("Qoder submit callback differs from its binding".into());
+            }
+            return super::submission::normalize(binding, native, "qoder-sdk", "prompt");
+        }
         super::sdk_tools::normalize_tools(binding, event, native, "qoder-sdk")
     }
     fn reply(&self, blocked: bool) -> HookOutput {
@@ -72,9 +161,47 @@ impl Adapter for QoderSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
-        adapter::catalog::QODER_SDK.capabilities("1.0.54", "sdk-worker")
+        let mut capabilities = adapter::catalog::QODER_SDK
+            .capabilities(&self.versions[&self.policy.sites[0]].version, "sdk-worker");
+        if self.final_profile.is_some() {
+            capabilities.entrypoint = "foreground-final-worker".into();
+            capabilities.events = [
+                ("tool.before".into(), vec!["observe".into(), "block".into()]),
+                ("tool.after".into(), vec!["observe".into()]),
+                (
+                    "security.violation".into(),
+                    vec!["observe".into(), "block".into()],
+                ),
+            ]
+            .into();
+            capabilities.failure_actions.clear();
+            return capabilities;
+        }
+        if self.input.options.reloadable {
+            capabilities.events.remove("input.submit");
+            capabilities.events.remove("session.start");
+            capabilities.events.remove("session.end");
+            if let Some(effects) = capabilities.events.get_mut("tool.after") {
+                effects.retain(|effect| effect != "replace_result");
+            }
+        } else {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if self.final_profile.is_some() {
+            super::claude_final::validate(&self.input.document, steps)
+                .map_err(|_| "Qoder final gate requires structured fail-closed final steps")?;
+            if steps
+                .iter()
+                .any(|step| matches!(step.execution, aw_core::admission::StepExecution::Native))
+            {
+                return Err("Qoder final gate requires structured Provider steps".into());
+            }
+        }
         if self.input.options.reloadable {
             crate::reload::validate(
                 &self.input.document,
@@ -82,7 +209,7 @@ impl PreparedLaunch for Prepared {
                 &self.capabilities(),
             )
         } else {
-            super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+            super::sdk_tools::routes(&self.input.document, steps, "qoder-sdk").map(|_| ())
         }
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
@@ -100,7 +227,7 @@ impl PreparedLaunch for Prepared {
                     .to_vec(),
             )
         } else {
-            super::sdk_tools::routes(&self.input.document, context.steps)?
+            super::sdk_tools::routes(&self.input.document, context.steps, "qoder-sdk")?
         };
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
@@ -118,21 +245,105 @@ impl PreparedLaunch for Prepared {
             "reload.mjs",
             include_bytes!("../../native/qoder-sdk/reload.mjs"),
         )?;
+        context.files.write(
+            "final-launch.mjs",
+            include_bytes!("../../native/qoder-sdk/final-launch.mjs"),
+        )?;
+        context.files.write(
+            "final-records.mjs",
+            include_bytes!("../../native/shared/js-runtime/final-records.mjs"),
+        )?;
+        for (name, bytes) in [
+            (
+                "skills.mjs",
+                include_bytes!("../../native/qoder-sdk/skills.mjs").as_slice(),
+            ),
+            (
+                "native-configuration.mjs",
+                include_bytes!("../../native/qoder-sdk/native-configuration.mjs").as_slice(),
+            ),
+            (
+                "startup.mjs",
+                include_bytes!("../../native/qoder-sdk/startup.mjs").as_slice(),
+            ),
+            (
+                "post.mjs",
+                include_bytes!("../../native/qoder-sdk/post.mjs").as_slice(),
+            ),
+            (
+                "mcp.mjs",
+                include_bytes!("../../native/qoder-sdk/mcp.mjs").as_slice(),
+            ),
+            (
+                "daemon.mjs",
+                include_bytes!("../../native/qoder-sdk/daemon.mjs").as_slice(),
+            ),
+            (
+                "command-wrapper.mjs",
+                include_bytes!("../../native/qoder-sdk/command-wrapper.mjs").as_slice(),
+            ),
+            (
+                "native-options.mjs",
+                include_bytes!("../../native/qoder-sdk/native-options.mjs").as_slice(),
+            ),
+            (
+                "private.mjs",
+                include_bytes!("../../native/qoder-sdk/private.mjs").as_slice(),
+            ),
+            (
+                "resident.mjs",
+                include_bytes!("../../native/qoder-sdk/resident.mjs").as_slice(),
+            ),
+            (
+                "identity.mjs",
+                include_bytes!("../../native/qoder-sdk/identity.mjs").as_slice(),
+            ),
+            (
+                "scope.mjs",
+                include_bytes!("../../native/shared/scope.mjs").as_slice(),
+            ),
+            (
+                "transport.mjs",
+                include_bytes!("../../native/shared/transport.mjs").as_slice(),
+            ),
+        ] {
+            context.files.write(name, bytes)?;
+        }
+        let final_profile = self
+            .final_profile
+            .as_ref()
+            .filter(|_| events.contains_key("security.violation"));
         let config = context.files.write(
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
-                "executable":context.executable, "binding":context.binding_path, "sdk":self.sdk,
-                "reloadable":self.input.options.reloadable, "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
+                "executable":context.executable, "binding":context.binding_path, "sdk":self.sdks[&self.policy.sites[0]],
+                "sdks":self.sdks, "sdk_metadata":self.versions, "default_site":self.policy.sites[0],
+                "native_command_wrappers":self.policy.wrappers(), "native_policy":self.policy,
+                "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable && final_profile.is_none(),
+                "resident_policy_reload": !self.input.options.reloadable && final_profile.is_none(),
+                "final_profile": final_profile, "final_enforcing": super::claude_final::enforcing(&hooks),
+                "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;
         let mut command = self.input.command.clone();
         command
             .environment
             .insert("AW_QODER_SDK_BRIDGE".into(), bridge.into_os_string());
-        command
-            .environment
-            .insert("AW_QODER_SDK_CONFIG".into(), config.into_os_string());
+        command.environment.insert(
+            "AW_QODER_SDK_CONFIG".into(),
+            config.clone().into_os_string(),
+        );
         let provider_environment = command.environment.clone();
+        if final_profile.is_some() {
+            let preload = super::qoder_final::configure(context)?;
+            command.environment.insert(
+                "NODE_OPTIONS".into(),
+                format!("--import={}", preload.display()).into(),
+            );
+            command
+                .environment
+                .insert("AW_QODER_FINAL_CONFIG".into(), config.into_os_string());
+        }
         Ok(LaunchPlan {
             command,
             provider_environment,
@@ -145,5 +356,31 @@ impl PreparedLaunch for Prepared {
                 timeout: Duration::from_secs(30),
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn session_callbacks_preserve_the_native_session_end_reason() {
+        let context = NativeContext {
+            target: "qoder-sdk".into(),
+            instance_id: "instance".into(),
+            cwd: "/work".into(),
+        };
+        let mut native = json!({"hook_event_name":"SessionStart","session_id":"session","cwd":"/work","source":"startup"});
+        assert!(QoderSdk
+            .normalize(&context, "session.start", &native)
+            .is_ok());
+        native["hook_event_name"] = json!("SessionEnd");
+        native["reason"] = json!("logout");
+        assert_eq!(
+            QoderSdk
+                .normalize(&context, "session.end", &native)
+                .unwrap()["native"]["reason"],
+            "logout"
+        );
     }
 }

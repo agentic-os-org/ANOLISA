@@ -275,7 +275,7 @@ aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/anolisa.yaml" --state-dir "$AW_HOME/anolisa-state" \
   --qoder "$(command -v qodercli)" \
   --provider sec-core+tokenless --socket "$AW_SEC_SOCKET"
-aw validate --config "$AW_HOME/anolisa.yaml"
+aw config validate --config "$AW_HOME/anolisa.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/anolisa.yaml" --agent qoder
 ```
@@ -287,11 +287,11 @@ set the same `PATH` and `AW_HOME` as the terminal used to start the Agent, and r
 the following commands to inspect execution records:
 
 ```bash
-aw status --config "$AW_HOME/anolisa.yaml"
+aw service status --config "$AW_HOME/anolisa.yaml"
 aw inspect --config "$AW_HOME/anolisa.yaml" --json
 ```
 
-After exiting the Agent, run `aw stop --config "$AW_HOME/anolisa.yaml"` to stop
+After exiting the Agent, run `aw service stop --config "$AW_HOME/anolisa.yaml"` to stop
 the local AW service. Then stop the security backend with the command appropriate
 to how you started it. See the [AW user guide](https://agentic-os.sh/docs/user-guide/aw/)
 for other Agent integrations, rule configuration, and observability integration.
@@ -382,6 +382,10 @@ ANOLISA is released under the [Apache License 2.0](LICENSE).
 [Build from Source](https://agentic-os.sh/docs/user-guide/getting-started/building/) ·
 [Changelog](https://agentic-os.sh/changelog/) ·
 [For Agents](https://agentic-os.sh/agents/)
+
+The unified source build requires Bash 4.4 or newer. For restricted networks,
+configure `NODE_DIST_MIRROR` and `RUSTUP_INIT_SCRIPT_URL` as described in
+[download sources](docs/user-guide/en/getting-started/building.md#download-sources).
 
 Security references for Agent Security Core:
 [AARM registry entry (Aligned)](https://aarm.dev/builders/agentseccore-anolisa) ·

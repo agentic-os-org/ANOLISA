@@ -1,5 +1,6 @@
 //! Unified AW command presentation and orchestration over reusable framework libraries.
 
+mod audit_export;
 mod cli;
 mod command;
 mod output;
@@ -62,13 +63,24 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     }
     if matches!(
         command,
-        "run" | "hook" | "install" | "policy" | "update" | "bridge" | "scope"
+        "run"
+            | "hook"
+            | "install"
+            | "policy"
+            | "update"
+            | "bridge"
+            | "scope"
+            | "sdk-control"
+            | "qoder-bootstrap"
+            | "codex-hook"
+            | "native-setup"
+            | "native-prepare"
+            | "native-release"
     ) {
         return cli::dispatch(command, args);
     }
     let flags = &args.flags;
     let allowed: &[&str] = match command {
-        "validate" => &["--config", "--against"],
         "serve" => &["--config", "--state-dir"],
         "status" | "stop" => &["--socket", "--config"],
         "request" => &["--socket", "--timeout-ms"],
@@ -77,33 +89,15 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     args.check(allowed, false)?;
     let required = |name: &str| args.required(name);
     match command {
-        "validate" if flags.contains_key("--against") => {
-            let validator = aw_config::Validator::new()?;
-            let load = |path: &str| -> cli::Result<_> {
-                let bytes = cli::read_file(path, aw_config::MAX_DOCUMENT_BYTES)?;
-                Ok(validator.parse(&bytes)?)
-            };
-            let candidate =
-                load(required("--config")?).map_err(|error| format!("candidate: {error}"))?;
-            let baseline =
-                load(required("--against")?).map_err(|error| format!("baseline: {error}"))?;
-            baseline.validate_policy_update(&candidate)?;
-            println!("policy update scope valid; runtime activation is not checked");
-        }
-        "validate" | "serve" => {
+        "serve" => {
             let mut bytes = Vec::new();
             std::fs::File::open(required("--config")?)?
                 .take(4 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)?;
-            if command == "validate" {
-                aw_config::Validator::new()?.parse(&bytes)?;
-                println!("configuration valid");
-            } else {
-                let server = Server::bind(bytes, PathBuf::from(required("--state-dir")?))?;
-                install_stop_signals()?;
-                eprintln!("AW service listening on {}", server.socket_path().display());
-                server.run(&STOP)?;
-            }
+            let server = Server::bind(bytes, PathBuf::from(required("--state-dir")?))?;
+            install_stop_signals()?;
+            eprintln!("AW service listening on {}", server.socket_path().display());
+            server.run(&STOP)?;
         }
         _ => {
             let budget: u64 = flags

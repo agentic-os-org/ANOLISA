@@ -22,7 +22,15 @@ uuid = { workspace = true }
 actplane-ifc-compiler = { workspace = true, optional = true }
 ebpf-ifc-engine = { workspace = true, optional = true }
 
+[dev-dependencies]
+agentsight-audit = { path = "../agentsight-audit" }
+
 # Live file-delete enforcement demo; only builds with the actplane backend.
 [[example]]
 name = "enforce_unlink_demo"
+required-features = ["actplane"]
+
+# Live audit-chain demo: a real file-delete denial must reach System Audit.
+[[example]]
+name = "file_delete_audit_chain_demo"
 required-features = ["actplane"]

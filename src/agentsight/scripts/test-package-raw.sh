@@ -100,7 +100,31 @@ for member in \
     grep -Fxq "$member" "$TMP_ROOT/linux-members"
 done
 tar -xzOf "$TMP_ROOT/linux-one/$LINUX_ARTIFACT" \
-    ./.anolisa/component.toml | cmp - "$SOURCE_ROOT/.anolisa/component.toml"
+    ./.anolisa/component.toml | cmp - "$SOURCE_ROOT/packaging/anolisa/raw/component.toml"
+tar -xzOf "$TMP_ROOT/linux-one/$LINUX_ARTIFACT" \
+    ./share/anolisa/agentsight/agentsight.service | grep -Fxq 'ExecStart={bindir}/agentsight-start'
+tar -xzOf "$TMP_ROOT/linux-one/$LINUX_ARTIFACT" \
+    ./share/anolisa/agentsight/agentsight-enforcer.service | grep -Fxq 'ExecStart={bindir}/agentsight-enforcer'
+tar -xzOf "$TMP_ROOT/linux-one/$LINUX_ARTIFACT" \
+    ./bin/agentsight-start > "$TMP_ROOT/raw-launcher"
+grep -Fxq '    "$(dirname -- "$0")/agentsight" trace &' "$TMP_ROOT/raw-launcher"
+if grep -Eq '\{bindir\}|@AGENTSIGHT_COMMAND@|/usr/(local/)?bin/agentsight' "$TMP_ROOT/raw-launcher"; then
+    printf 'ERROR: raw launcher contains an unresolved or fixed worker path\n' >&2
+    exit 1
+fi
+python3 - "$SOURCE_ROOT/packaging/anolisa/raw/component.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+contract = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+files = {item["source"]: item for item in contract["component"]["layout"]["files"]}
+for unit in ("agentsight.service", "agentsight-enforcer.service"):
+    assert files[f"share/anolisa/agentsight/{unit}"]["render"] == "anolisa-paths-v1"
+assert "render" not in files["bin/agentsight-start"]
+minimum = contract["component"]["contract"]["min_anolisa_version"]
+assert tuple(map(int, minimum.split("."))) >= (0, 2, 17)
+PY
 
 printf 'stale\n' >> "$BIN_DIR/agentsight"
 if AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
@@ -187,7 +211,7 @@ if grep -Eq 'agentsight-(start|enforcer)|agentsight(-enforcer)?\.service' \
     exit 1
 fi
 tar -xzOf "$TMP_ROOT/macos/$MACOS_ARTIFACT" \
-    ./.anolisa/component.toml | cmp - "$SOURCE_ROOT/.anolisa/component.macos.toml"
+    ./.anolisa/component.toml | cmp - "$SOURCE_ROOT/packaging/anolisa/raw/component.macos.toml"
 
 if AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
     AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" \
@@ -215,7 +239,7 @@ ARM_ARTIFACT="agentsight-$VERSION-linux-aarch64.tar.gz"
 cmp "$TMP_ROOT/arm-one/$ARM_ARTIFACT" "$TMP_ROOT/arm-two/$ARM_ARTIFACT"
 tar -tzf "$TMP_ROOT/arm-one/$ARM_ARTIFACT" | cmp - "$TMP_ROOT/linux-members"
 tar -xzOf "$TMP_ROOT/arm-one/$ARM_ARTIFACT" ./.anolisa/component.toml | \
-    cmp - "$SOURCE_ROOT/.anolisa/component.toml"
+    cmp - "$SOURCE_ROOT/packaging/anolisa/raw/component.toml"
 # A valid receipt does not make a host-architecture enforcer an ARM64 binary.
 write_elf "$BIN_DIR/agentsight-enforcer"
 sha256sum "$BIN_DIR/agentsight-enforcer" | cut -d ' ' -f 1 > "$BIN_DIR/agentsight-enforcer.sha256"

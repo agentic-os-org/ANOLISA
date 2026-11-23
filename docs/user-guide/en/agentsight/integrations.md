@@ -7,7 +7,7 @@ components when they happen to be installed. Nothing on this page is required to
 
 ## Supported Agents
 
-Any process matched by a discovery rule is traced. The shipped rule set (31 rules) covers:
+Any process matched by a discovery rule is traced. The shipped rule set (36 rules) covers:
 
 | Agent | Reported name |
 |---|---|
@@ -19,6 +19,7 @@ Any process matched by a discovery rule is traced. The shipped rule set (31 rule
 | OpenClaw (gateway) | `OpenClaw` |
 | Hermes | `Hermes` |
 | AgentScope | `AgentScope` |
+| Qoder CLI | `QoderCLI` |
 | Runloop Node server | `Runloop` |
 
 Anything else works too — add a rule, as described in
@@ -31,9 +32,24 @@ Anything else works too — add a rule, as described in
   bounded nested discovery labels those sessions as `claude-code` rather than Qoder.
 - **OpenClaw** is observed through its `openclaw-gateway` daemon, not the client. If Token data is
   missing, check that the client actually reaches the gateway.
-- **Codex CLI** statically links its TLS library, so AgentSight falls back to byte-pattern matching
-  and a per-version offset table. A brand-new Codex release may need a refreshed entry in
-  `codex_offsets`.
+- **Codex CLI** statically links its TLS library. The embedded offset table includes the official
+  Linux x86_64 musl builds of 0.147.0 and 0.162.1, validated for OpenSSL-based HTTPS Responses calls.
+  Entries match the executable size and fingerprint, not just its version string. Updating
+  `codex_offsets` in a deployed config alone has no effect: the table is compiled into AgentSight,
+  so use a binary rebuilt with the new entries. Requests sent before the probe attaches may still
+  be missed. Custom CA settings such as `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE` can select rustls;
+  these OpenSSL offsets do not cover that transport or WebSocket TLS.
+- **Cline** trajectories are collected automatically from each task's
+  `api_conversation_history.json` under
+  `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` on Linux or
+  `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` on macOS.
+  The task directory name becomes the session ID. Project names come from the basename of
+  `cwdOnTaskInitialization` in `state/taskHistory.json`, matched by task `id` or `ulid`, and fall
+  back to `(default)` when metadata is missing or invalid. The sibling `ui_messages.json` is merged
+  for message timestamps, Token usage, and cost rather than collected as a separate session. The
+  local session viewer reads the same task files. When overriding
+  `features.trajectory_collection.scan_dirs`, include either the `saoudrizwan.claude-dev` directory
+  or its `tasks` child.
 - **Gemini CLI** trajectories are collected from the session files under
   `~/.gemini/tmp/<project>/chats/session-*.jsonl`, no configuration needed. Project names come from
   each project directory's `.project_root` marker. The collector replays the CLI's correction records
@@ -114,6 +130,12 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer: risk enforcement
 
+Pre-operation `block` rules for exec without argv conditions, file open/write, and connect require
+an active BPF LSM and the matching loaded hooks. Without that support, initial policies and runtime
+policy updates are rejected with a missing-hook error. A full hook profile alone cannot enable
+blocking on a kernel without BPF LSM; supported `notify` and `kill` rules remain available through
+tracepoints.
+
 `agentsight-enforcer` is the privileged daemon that can block risky Agent actions. It ships with the
 package and is started by `agentsight-enforcer.service`. When its socket
 (`/run/agentsight/enforcer.sock`) is missing, `serve` logs:
@@ -123,8 +145,28 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 ```
 
 Capture and analysis are unaffected; only the Risk Enforcement page and the
-`/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
-built from source.
+`/api/enforcement/*` endpoints disappear. Start the enforcer daemon separately.
+For source builds, see [Source build](deployment.md#source-build).
+
+ActPlane policy application supports both the host's initial PID namespace and a container's
+default PID namespace. `hostPID: true` / `--pid=host` remains supported but is not required when
+the enforcer and its target share a container PID namespace. Capture and analysis are unaffected
+by policy-application errors.
+
+Binding installation attempts to adopt pre-existing descendants in at most four passes, then checks coverage read-only.
+The check retains observed PID/start-time identities, including live descendants reparented outside the tree.
+Failed map writes preserve partial inactive state instead of deleting keys a concurrent fork may activate;
+retries reuse identical state only, and conflicting state remains a visible coverage gap.
+Generic file bindings return `Degraded` on missing coverage, map/procfs errors, or PID namespace mismatches.
+The HTTP API redacts `message`; inspect enforcer daemon logs for PID/map/procfs details.
+Credential policy application rejects partial coverage and removes the partial binding. Failed cleanup is
+persisted as `Detaching` for a detach retry; rejected credential intent is not automatically reapplied.
+Cleanup starts only after this intent is stored. If SQLite cannot store it, partial backend protection may
+remain; restore database availability so reconciliation can retry. A storage error is not a cleanup acknowledgement.
+A live child reparented to a subreaper retains its adopted protection. Adoption requires verified initial-namespace procfs PIDs;
+container-local root binding remains supported, but descendant adoption is reported as incomplete.
+Keep the tree quiescent during Apply: this is not atomic isolation. Treat `Degraded` as incomplete protection.
+Quiesce or restart the tree before detaching and applying again; detach temporarily removes protection.
 
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
@@ -136,14 +178,147 @@ $ sudo journalctl -u agentsight-enforcer
 
 The default level is `info`; add `Environment=RUST_LOG=debug` to the unit for verbose output.
 
+System-level file deletion protection is not available out of the box with the default
+profile. Even when `ready=true`, check `capabilities.file_delete_guard`; the default
+`credential-exfiltration` profile does not provide it. See
+[Enable system-level file deletion protection](deployment.md#enable-system-level-file-deletion-protection)
+for prerequisites, the mutually exclusive capability, maintenance window, and re-apply steps.
+
+For a same-container target, `root_pid` remains the namespace-local PID shown by procfs. The
+enforcer independently resolves and validates the corresponding kernel identity instead of
+translating or guessing a host PID from an `NSpid` chain. Apply fails closed when the local PID,
+PID namespace, process start time, or procfs clock cannot be validated, including stale or reused
+PIDs and inconsistent container-uptime clocks. With the `agent-file-guard` profile and active
+BPF-LSM, the same initial-or-container PID namespace support applies to `file_delete_guard`.
+
 Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
 the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
-(`bpf` listed in `/sys/kernel/security/lsm`). When a `block` rule matches on a backend that cannot
-deny that operation — for example a `block connect` rule while the `enforce_socket_connect` hook is
-not attached — the engine still reports the match as a violation with `effect=block` and
+(`bpf` listed in `/sys/kernel/security/lsm`). Plain-exec, file open/write, and connect rules with
+missing support are rejected as described above. Rules without a dedicated block feature bit retain
+degraded reporting: for example, when a `block recv` rule matches without an active
+`enforce_socket_recvmsg` hook, the engine reports the match as a violation with `effect=block` and
 `blocked=false`. Treat such degraded reports as a signal that the policy cannot actually deny;
 check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
 configuration.
+
+Protocol v5 adds a versioned `file_protection_policy` payload, mutually exclusive with
+`policy_dsl`. The mock backend still rejects structured policies. Existing DSL semantics are
+retained, but v4 clients must upgrade with the enforcer because protocol v4 frames are rejected.
+
+### Deny secret file reads
+
+On the Risk Enforcement page select **Deny secret file reads**, then enter the Agent ID, root PID,
+and absolute secret-file path. The template calls `POST /api/enforcement/file-read-bindings` with
+the same `agent_id`, `root_pid`, and `path` fields as `POST /api/enforcement/file-bindings`, producing
+a structured `exact_file` policy with `protections.read: true` and fixed `enforce` mode. The separate
+route makes an older `agentsight serve` answer 404 instead of applying an open-only policy; the
+existing file-binding route rejects `deny_read: true` with `file_read_route_required`. Omitting
+`protections.read` in old policies means false.
+Apply and detach retain Dashboard authentication: even loopback calls require a valid token or login session.
+
+- Requires the `agent-file-guard` profile and BPF LSM; health must advertise
+  `file_read_protection: true`. Older enforcers reject the new policy field instead of silently allowing access.
+- Denies reads, reads through previously opened read-only descriptors, and file mappings for the bound process
+  tree. Hard links and symlinks to the same protected file are denied too. `O_PATH` identity handles remain
+  allowed. Unbound processes are unaffected; detaching restores read access.
+- Existing private or shared file mappings reject activation; restart the affected processes. Previously
+  read memory cannot be revoked. Keep file access and process-tree changes quiescent during Apply;
+  atomic isolation for concurrent activation is not guaranteed.
+- Protects the regular-file identity held at Apply. To cover a whole directory, use
+  [directory-tree read denial](#deny-reads-below-a-directory-tree). Re-apply after external file
+  replacement or secret rotation. Read protection does not imply write or delete protection; combine
+  `ordinary_write` and `delete` independently when needed.
+- This is not a complete sandbox: io_uring/AIO, process-memory access, and dynamic mounts are outside coverage.
+
+### Deny reads below a directory tree
+
+Use this when secrets live in a directory whose contents change, such as a mounted secret volume.
+One binding covers existing files, deeper subdirectories, and files created, replaced, or moved in
+after Apply, without re-applying.
+
+Send the same request to `POST /api/enforcement/file-read-bindings` with `"kind": "directory_tree"`
+and an absolute directory path. The binding carries a structured `directory_tree` target with only
+`protections.read: true`:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"demo-agent","root_pid":<PID>,"path":"/run/asc-demo/secrets","kind":"directory_tree"}' \
+  http://127.0.0.1:7396/api/enforcement/file-read-bindings
+```
+
+To add exclusions, or to combine read denial with `delete` or `ordinary_write`, submit the
+structured target through `POST /api/enforcement/bindings`:
+
+```json
+{
+  "path": "/run/asc-demo/secrets",
+  "kind": "directory_tree",
+  "protections": { "delete": false, "ordinary_write": false, "read": true },
+  "exclusions": []
+}
+```
+
+- Health must report `directory_tree_read_protection: true`: the `agent-file-guard` profile with
+  the file read hooks and the hard-link hook. Older enforcers reject a directory-tree read target,
+  and an older `agentsight serve` ignores `kind` and rejects the directory as not a regular file;
+  neither applies a narrower policy silently. The file-binding route rejects `directory_tree` with
+  `file_read_route_required`.
+- The bound process tree cannot read, map, or read through previously opened descriptors any regular
+  file reached through a path inside the tree, including bind-mount aliases of the tree and mounts
+  below it. Directory listings, `stat`, and writes keep working. Unbound processes are unaffected,
+  and detaching restores reads. Denials are recorded as `read`; the event reason names the protected
+  tree root.
+- Coverage follows the location of the opened file: a symlink inside the tree that points outside
+  it is not protected, while a symlink from outside into the tree is. Exclusions work as they do for
+  delete and write protection.
+- A protected file that also has a hard link outside the tree could be read through that name, so
+  Apply rejects a tree holding a regular file with more than one link; remove the extra links or
+  exclude the entry. Apply also rejects trees with more than 100,000 entries to check.
+- While bound, the process tree cannot hard-link protected files to a name outside the protected
+  scope (recorded as `link`), move protected entries out of the tree or into an excluded subtree, or
+  rename, replace, or exchange the tree root or its ancestor directories (recorded as `rename`). Hard
+  links created later by unbound processes are not covered. If an unbound process replaces the tree
+  root directory itself, re-apply the binding.
+- Existing file mappings under the tree reject activation, as for exact files, including mappings
+  made through a bind-mount alias or another path to the same file; data read into memory before
+  activation cannot be revoked.
+- If a file's position cannot be established within the 256-step ancestry budget, the read is
+  allowed. Overlay filesystems that intersect the tree reject Apply. io_uring/AIO and process-memory
+  access remain outside coverage.
+
+### Structured file protection: phase-one boundaries
+
+The `file_protection_policy` payload protects exact file entries or directory trees, including
+future children, with per-target exact-entry and directory-subtree exclusions. `delete` and
+`ordinary_write` are independent protections; `read` is described in the two read-denial
+sections above. Check `/api/enforcement/health` for
+`file_entry_delete_protection`, `directory_tree_delete_protection`, `ordinary_write_protection`,
+`file_read_protection`, `directory_tree_read_protection`, and `static_mount_topology` before
+applying the corresponding policy. The ActPlane backend
+requires explicit `policy_mode: "enforce"` for structured policies; omitted mode, `audit`, and
+`observe` are rejected before topology preparation or kernel changes. This restriction does not
+change legacy DSL handling.
+
+- Ordinary-write protection blocks `write` and `pwrite` through protected paths, including
+  descriptors opened before activation. Reads and opening a writable descriptor remain allowed.
+- Ancestry walks are bounded to 256 steps each, including mount transitions. If no protection
+  can be established within that budget, classification is UNKNOWN: ordinary writes are allowed,
+  while deletion and rename fail closed only when the active domain requests delete protection.
+  Deep descendants can therefore be writable; an explicit file target or a nearby directory-tree
+  root can still establish protection at the same depth.
+- An otherwise unprotected hardlink outside the policy scope can still write the same inode and
+  change the protected file's content. Protect that alias explicitly when needed. Removing the
+  outside hardlink is allowed because it does not remove the protected directory entry.
+- `truncate`, `ftruncate`, `O_TRUNC`, shared writable `mmap`/`mprotect`, and `fallocate` hole punching
+  are outside this protection contract, even for protected files. io_uring/AIO and chmod/chown are
+  also outside the phase-one coverage guarantee; `complete_content_protection` remains false.
+- Mount topology is fixed at apply time. Existing supported bind aliases/submounts are resolved,
+  but later mount/bind/unmount changes and dynamic overlay changes are not supported.
+- Preparation and pre-activation checks re-resolve path identities, but do not atomically lock
+  pathnames through activation. Keep targets, exclusions, ancestors and the process root stable
+  until Apply returns; concurrent rename/exchange or root changes during Apply are unsupported.
+
+This is bounded operation protection, not a guarantee that protected content is immutable.
 
 ## cosh: ask in natural language
 
@@ -205,7 +380,9 @@ including loopback requests. The query deduplicates IDs and shares a 5-second, 1
 8-MiB budget across source requests. A failed or oversized refresh returns an error without saving
 a partial batch or presenting cached rows as current. Source records absent from this response are
 excluded from current totals; saved records remain available through the records API. Without
-`tokenless_api`, the existing local-database behavior is unchanged.
+`tokenless_api`, the existing local-database behavior is unchanged. If the shared configuration is
+malformed JSON, `serve` continues with embedded defaults but disables the Tokenless API integration;
+see [configuration recovery](configuration.md#verify-a-change).
 
 Historical call IDs remain available for compounding calculations. Source lookup batches at most
 128 IDs per request, so a long session with few matching records can complete without discarding
@@ -214,3 +391,18 @@ lists also require the existing AgentSight credential, including on loopback.
 
 The API-backed savings path requires the batch POST endpoint; upgrade AgentSight and the
 Tokenless query service together. Existing single-filter GET queries remain available.
+
+## ws-ckpt workspace snapshots (Linux)
+
+The [snapshot backend](data-and-storage.md#workspace-snapshot-api) combines existing
+ATIF steps with a local ws-ckpt workspace. Explicit successful tool/Bash operations
+identify the workspace; omitted arguments require an explicitly configured host
+plugin binding. Snapshots of every origin are grouped by creation time, without
+native session-ID matching or a new collection pipeline. AgentSight reads file
+changes through `ws-ckpt diff --format json` in read-only mode. With restore
+enabled, Sight displays the guarded CLI preview and rechecks its generation
+and diff digest after the operator confirms that the workspace will have no
+concurrent writes.
+See
+[configuration](configuration.md#workspace-snapshot-backend-linux) and
+[Step snapshot controls](dashboard.md#workspace-snapshots-in-execution-steps).

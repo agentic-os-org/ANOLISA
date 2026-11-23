@@ -1,0 +1,46 @@
+// Revision 2 adds HTTP requests without changing revision 1 action contracts.
+namespace SecCore {
+    entity Subject { agent_type?: String };
+    entity Process { program: String, resolved_program: String };
+    entity File { path: String };
+    entity Network enum ["all"];
+    entity WriteOperation enum ["write", "create", "delete", "rename", "setattr"];
+    entity HttpEndpoint { host: String };
+
+    type FileReadContext = { input: { program: String } };
+    type FileWriteContext = {
+        input: {
+            program: String,
+            operation: WriteOperation,
+            mode?: Long,
+            ownerUid?: Long,
+            ownerGid?: Long
+        }
+    };
+    type ProcessArgument = { index: Long, value: String };
+    type FileExecContext = {
+        input: { cwd: String, arg_count: Long, args: Set<ProcessArgument> }
+    };
+    type HttpRequestContext = {
+        input: { scheme: String, method: String, path: String }
+    };
+
+    action "file.read" appliesTo {
+        principal: Subject, resource: File, context: FileReadContext
+    };
+    action "file.write" appliesTo {
+        principal: Subject, resource: File, context: FileWriteContext
+    };
+    action "file.exec" appliesTo {
+        principal: Subject, resource: File, context: FileExecContext
+    };
+    action "process.spawn" appliesTo {
+        principal: Subject, resource: Process, context: FileExecContext
+    };
+    action "network.use" appliesTo {
+        principal: Subject, resource: Network, context: {}
+    };
+    action "network.send" appliesTo {
+        principal: Subject, resource: HttpEndpoint, context: HttpRequestContext
+    };
+}

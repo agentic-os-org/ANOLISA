@@ -115,15 +115,26 @@ struct {
 	__type(value, __u64);
 } cap_stats SEC(".maps");
 
-/* The thread that declared the next drain: userspace writes its own tid before
- * submitting to cap_req. The drain hook refuses to run for any other thread,
- * so another syscall in the process cannot consume the record concurrently.
+#define CAP_DRAIN_DECLARE_TID    (-1)
+#define CAP_DRAIN_DECLARE_FLAGS  0x41435052U
+#define CAP_DRAIN_QUERY_CMD      0
+
+/* A declaration carries a random token so an unrelated membarrier cannot claim
+ * it. The capture hook replaces the declaration with the current thread's
+ * init-namespace identity; only that thread may then drain the mailbox.
  */
+struct cap_pending_submitter {
+	__s32 tid;
+	__s32 pid;
+	__u32 token;
+	__u32 _pad;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, __s32);
+	__type(value, struct cap_pending_submitter);
 } cap_pending_submitter SEC(".maps");
 
 static __always_inline void cap_count(__u32 slot)
@@ -495,19 +506,33 @@ static __always_inline void cap_drain_mailbox(pid_t current_pid)
 		cap_count(CAP_STAT_REJECT);
 }
 
-static __always_inline void cap_drain_current(void)
+static __always_inline void cap_drain_current(__u32 cmd, __u32 flags, __u32 token)
 {
 	__u32 slot = 0;
-	__s32 *pending = bpf_map_lookup_elem(&cap_pending_submitter, &slot);
+	struct cap_pending_submitter *pending =
+		bpf_map_lookup_elem(&cap_pending_submitter, &slot);
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__s32 current_tid = (__s32)pid_tgid;
 	__s32 current_pid = pid_tgid >> 32;
 
-	if (!pending || *pending != current_tid)
+	if (!pending)
+		return;
+	if (pending->tid == CAP_DRAIN_DECLARE_TID) {
+		if (cmd != CAP_DRAIN_QUERY_CMD || flags != CAP_DRAIN_DECLARE_FLAGS ||
+		    token != pending->token)
+			return;
+		pending->tid = current_tid;
+		pending->pid = current_pid;
+		return;
+	}
+	if (pending->tid != current_tid)
 		return;
 
 	cap_drain_mailbox(current_pid);
-	*pending = 0;
+	pending->tid = 0;
+	pending->pid = 0;
+	pending->token = 0;
+	pending->_pad = 0;
 	cap_count(CAP_STAT_DRAIN);
 }
 

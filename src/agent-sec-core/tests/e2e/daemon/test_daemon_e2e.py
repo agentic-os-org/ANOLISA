@@ -577,7 +577,7 @@ def _stop_daemon(
 
 
 def _wait_for_health(socket_path: Path, process: subprocess.Popen[str]) -> None:
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     last_error: Exception | None = None
 
     while time.monotonic() < deadline:
@@ -599,7 +599,7 @@ def _wait_for_health(socket_path: Path, process: subprocess.Popen[str]) -> None:
 
 
 def _wait_for_socket(socket_path: Path, process: subprocess.Popen[str]) -> None:
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
 
     while time.monotonic() < deadline:
         _assert_process_running(process)

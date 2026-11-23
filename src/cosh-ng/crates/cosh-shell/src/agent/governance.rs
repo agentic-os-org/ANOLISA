@@ -33,6 +33,13 @@ pub fn govern_agent_events_with_language(
 
     for (idx, event) in events.iter().cloned().enumerate() {
         let (decision, policy_decision, reason, display_text, auto_execute) = match &event {
+            AgentEvent::EcsTrialState { .. } => (
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
+                "ECS trial state".into(),
+                String::new(),
+                false,
+            ),
             AgentEvent::StatusChanged { phase, message, .. } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
@@ -167,11 +174,13 @@ pub fn govern_agent_events_with_language(
                 summary.clone(),
                 false,
             ),
-            AgentEvent::AgentFailed { error, .. } => (
+            AgentEvent::AgentFailed {
+                error, error_code, ..
+            } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
                 "agent failure is display-only".to_string(),
-                display_agent_error(error, &i18n),
+                display_agent_error(error, error_code.as_deref(), &i18n),
                 false,
             ),
             AgentEvent::AgentCancelled { reason, .. } => (

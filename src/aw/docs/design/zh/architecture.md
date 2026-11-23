@@ -6,9 +6,18 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 绑定和事件，Host 调用 Provider，最后由 Adapter 将结果交还 Agent。
 模型调用、工具调度和权限审批仍由 Agent 负责。
 
+DeepSeek Harness 通过本次启动专属插件接入提交与工具事件。配置
+`security.violation` 时，Adapter 还在 Agent 进程中安装 Node 预加载；固定构建的
+Agent loop 在原生结果最终处理后、Session 提交前等待 Provider 终检。预加载注册后
+从继承的 `NODE_OPTIONS` 中移除，Provider 使用原始启动环境。该路径覆盖 DSH
+`0.2.1-rc.5` 已验证的 headless 顶层工具交付；结果身份、生命周期与排除路径见
+[Adapter 分派](adapters/adapter-dispatch.md#原生启动证据)。
+
 常驻 SDK 通过服务端的受管根 binding 和任务子 binding 接入。根策略保持不可变；
 每个任务固定独立 cwd 和环境，保留重放阻断记录到释放，所属进程退出后执行回收。
 原生工厂继续由 Adapter 负责，见[任务生命周期](runtime/local-service.md#常驻宿主与任务-scope)。
+
+业务自管进程通过 CLI `aw instance` 进入 Service 的登记事务。Service 核验 Unix peer、owner 启动身份和 Ready，复用生产准备与任务 Scope，释放时仅清理所属 AW 资源。见[独立登记机制](runtime/local-service.md#独立登记)。
 
 ## 使用流程
 
@@ -24,44 +33,54 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
-| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
-| `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
-| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
-| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
-| `aw-provider` | 校验 Provider 消息和能力准入 | config |
+| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、core、exec、host、package、provider、service |
+| `aw-service` | 本地服务、客户端、运行状态及 Instance/Scope 路由快照缓存 | adapter、config、contracts、core、exec、host、provider |
+| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、core、exec、provider |
+| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、core、exec、provider |
+| `aw-provider` | 校验 Provider 消息与视图契约 | 无 |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
-| `aw-core` | 能力计划执行器、Host/Journal 接口和 FileJournal | contracts |
-| `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
-| `aw-package` | 本地包数据库、计划、持久事务和配置 API，以及 `aw-build` | config、exec |
+| `aw-core` | Hook 策略准入、Source 求解器、纯路由编译、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
+| `aw-contracts` | Schema、规范编码、Source/计划合同和记录间一致性校验 | 无 |
+| `aw-package` | Provider 准入、私有扩展事务与 AW 配置 | config、exec |
 
-依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
-`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
-独立 `aw-package` 可执行文件已删除，Rust crate 和 `aw-build` 保留。
+依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，`aw-provider` 的测试还依赖 `aw-config`，CLI 集成测试还使用
+`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用配置与本地扩展管理 API。
+独立 `aw-package` 可执行文件已删除，Rust crate 保留。`make -C src/aw build`
+构建 AW CLI；`make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
+`distribution/packaging/aw/` 下的普通脚本组装独立归档。
+扩展记录、文件校验和持久事务位于 `aw-package` 私有 `store` 模块；
+运行时文件读锁位于 `aw-exec`，不依赖包数据库访问。
 
 公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
 调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
-和失败回复。软件安装、配置和卸载全部使用同一棵 `aw` 命令树；
+和失败回复。AW 扩展安装、配置和卸载使用同一棵 `aw` 命令树；
 移除另一个可执行文件不改变服务消息、Provider 效果或已有文件归属记录。
 
 ### 本地软件包操作
 
-`aw-cli` 调用 `aw-package::plan` 检查本地 bundle 或所选卸载内容。计划保存包与版本
+`aw-cli` 通过 `aw-package::plan` 管理已经过准入的本地 Provider 扩展或所选卸载内容。每个输入都必须使用 `package.json`，声明 `aw-provider/v1alpha1`，
+拒绝 `manifest.json`、AW core 和普通后端 bundle。封装暴露的是已经过准入的不透明计划，
+不是通用包检查或安装 API。文件引擎保留在 `aw-package` 私有模块中；通用软件
+管理权归发行方或原生包管理器。计划保存包与版本
 决定、精确文件变更和阻碍；生成计划不创建安装目录、锁或数据库。`plan::execute`
 按数据库、安装目录的顺序重新获取写锁，复查记录并调用同一事务实现。
 持久替换 `installed.json` 表示提交。中断的操作需要显式执行 `aw recover`，完成
 已提交操作的清理，或恢复之前的文件，不覆盖发生冲突的字节。
 
-新软件包信息保存在 `$XDG_STATE_HOME/aw/packages`（有 HOME 回退路径），或显式的
-root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
-`.aw-packages/aw-core.json` 标明数据库位置，查询和生成配置按此读取，无需猜测另一个
-用户的 XDG 目录。首次成功写入软件包时存档旧组件 JSON，再替换成旧安装器会拒绝的
-位置文件。移除最后一个包后保留空登记和位置文件，便于安全重装。RPM/DEB 后端和
+AW 扩展记录保留 `$XDG_STATE_HOME/aw/packages`（有 HOME 回退路径），或显式的
+root 管理 raw scope `/var/lib/aw/packages`。安装目录中的
+`.local-packages/installation.json` 标明数据库位置和管理者。AW 查询和写入拒绝其他
+管理者的位置文件，不沿指针进入它们的数据库，不自动搬库或重复登记所有权。
+外部安装的 Provider 通过显式 `transport.argv` 和进程协议接入，无需包记录。
+原生 RPM 仍由 RPM 管理；本地 raw 扩展流程不导入或替代其管理权。
+查询和生成配置按此读取，无需猜测另一个
+用户的 XDG 目录。移除最后一个包后保留空登记和位置文件，便于安全重装。RPM/DEB 后端和
 跨安装目录选择依赖不属于本次实现。
 
 `aw-exec::PackageLeases` 为已知可执行文件和参数中的字面绝对路径持有已有的安装目录
 读锁。CLI 保留自身 core 与 Agent 的锁，服务保留自身可执行文件的锁，Host 在其生命
-周期及所属进程清理期间持有 Provider 的锁。这个共用库不依赖 `aw-package`，不读取
+周期及所属进程清理期间持有 Provider 的锁。`aw-exec` 不依赖 `aw-package`，不读取
 集中清单，也不创建记录。它不能发现任意外部进程或 shell 动态生成的路径。包含无法
 核验读锁支持的旧 AW 可执行文件的目录仍拒绝卸载。见
 [本地包管理](packaging/package-management.md)。
@@ -75,7 +94,15 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 
 这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
 接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
+sec-core 覆盖测试通过仅测试依赖 host、adapter 和 package 联合验证生成配置、标准化与实际 Provider 进程。
 其他团队可独立开发、分发 Provider，见[协作指南](../../../../../docs/developer-guide/zh/aw/providers/index.md)。
+
+## 原生配置归属
+
+`aw-config` 校验有序来源引用，不解析原生内容。离线编辑器只修改 AW 自有引用。
+嵌入式 Adapter 使用 `aw-adapter::configuration` 调用原生 loader，保留其结果或存活句柄，
+再通过现有 Provider 准入取得不可变范围。原生 loader 负责优先级、相对路径、凭据和更新；
+service 继续负责运行期激活与策略代次。见[编辑合同](configuration/configuration-editing.md#原生来源归属)。
 
 ## 一次 Hook 请求
 
@@ -90,18 +117,59 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+`aw-service` 在持久 Journal 中独立生产白名单公共运行事实。配置策略的 Hook 记录
+`ExecutionEvent` 与 Provider 完成事实；Qoder SDK 和 QwenPaw 无策略工具回调也保留
+原生关联和结果状态。CLI 的 Worker 启动、结束事实不依赖 Sight。公共投影复用原始
+记录序号、摘要和持久时间；正文只计算摘要，实际效果采用与覆盖范围缺少证据时保留
+未确认状态。详见 [公共对象](runtime/public-objects.md)。
+
+Skill 校验复用 `tool.before` 与既有的 opaque `event.native` 扩展。
+Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录、来源）或
+解析错误。sec-core Provider 调用公开的只读 Ledger 检查并映射信任状态，目录授权
+和签名由后端管理员管理。Adapter 固定或刷新实际原生对象，拒绝校验期间的源文件
+变化。字段与范围见 [Skill 集成合同](../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
+
 ### 显式策略更新
 
-`aw run --reloadable` 显式预装稳定 Adapter 入口，`aw update` 定位现有实例，
+受支持的常驻工厂和已准备原生启动安装 Adapter 更新边界，`aw run --reloadable`
+选择单独的受限桥接。`aw update` 定位现有实例，
 由 `aw-service` 在请求准入门外准备新的不可变 Host，再在同一门内最终复查空闲和版本后发布。
 服务保留启动身份，每个实例持有自己的激活策略。原生 Adapter 报告请求/工具生命周期，
 保留调度与效果采纳；Provider 协议和 Core 计划执行不变。
 固定版本、busy 拒绝、进程关联及验收范围见[策略热更新](runtime/policy-reload.md)。
 
+### 业务自管原生启动
+
+`instance setup` 只在明确选择的位置安装启动资产。应用原生启动时，直接创建
+`instance prepare` 子进程，CLI 复用 Adapter 校验、配置与 Service 登记，返回私有
+桥接资产，登记仍保持待就绪状态。原 owner 在派发前确认原生就绪，从 Unix peer、
+进程启动身份到实例形成连续的所有权核验。
+
+普通 SDK 工厂和 QwenPaw 使用子任务 Scope。Qoder、OpenClaw 与 Hermes 使用已准入的
+原生根桥接，通过请求和工具生命周期约束策略更新。根生命周期调用继续核验 owner，
+原生回调须来自 owner 进程树；普通 SDK 根实例仍不能直接执行回调。预装 Qoder TUI/print
+通过 SessionStart 确认原生根；对已有 Qoder TUI 的外部 attach 仍限于首个请求之前。
+
+配置选定的服务身份保持固定，各实例拥有自己的策略版本。以修改后的配置准备实例时，
+先校验允许变化的策略范围，再复用该服务。清理释放实例所属 Provider 工作和临时资产，
+应用进程仍由业务管理。仅安装启动组件或发现进程不能证明 Ready。Provider 协议、Core
+效果准入与 Host 调用链继续共用。
+操作与回退见[业务自管接入](../../../../../docs/developer-guide/zh/aw/deployment/independent-instances.md)，
+各框架清理边界见[策略更新](../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)。
+
 ### `aw-core` 在哪里
 
-当前 Hook 路径是 `aw-service → aw-host → aw-exec`。服务复用
-`aw-core::journal::FileJournal` 保存审计，但不调用 `Core::prepare/execute`。
+Hook 策略准备经由 `aw_core::admission` 执行，路径为
+`Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`；
+Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
+[Core 准入](core-admission.md)。`aw_core::routes` 将已准入步骤与事件预算纯函数编译为
+不可变 `PreparedRoutes` 快照，由 `aw-service` 在每个 `Instance` 与子任务 `Scope`
+上缓存并随策略热更新原子刷新，使 `ScopePolicy` 与 `sdk_callback` 共享同一份预计算路由并按
+O(1) 定位事件与步骤。`aw_core::resolver` 基于配置需求投影 `HookRequirement` 与候选
+`aw_contracts::source::SourceCapability` 执行无副作用多源求解，产出单控制 Owner 的
+`aw_contracts::hook_plan::ResolvedHookPlan`（并通过离线 Shadow Plan 与
+`admission::preflight` 核对等价性）。服务同时复用 `aw-core::journal::FileJournal`
+保存审计，不调用 `Core::prepare/execute`。
 
 `aw-core::Core` 是单独的能力计划执行接口。使用它的嵌入方要提供
 `ProviderHost`、`Clock` 和 `Journal`；它依赖 `aw-contracts` 校验计划和执行记录。
@@ -120,12 +188,14 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | --- | --- |
 | `crates/aw-cli/src/bin/`、`crates/aw-cli/src/lib.rs`、`crates/aw-cli/src/cli/` | CLI 入口、通用启动与 RPC 协调 |
 | `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
-| `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
+| `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务、Instance/Scope 路由快照缓存与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
-| `crates/aw-core/src/journal.rs` | 持久审计实现 |
-| `crates/aw-package/src/{database,open_bundle,plan,transaction}.rs` | 包记录、本地包检查、预览和持久文件变更 |
+| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/admission/`、`crates/aw-core/src/resolver.rs`、`crates/aw-core/src/routes.rs`、`crates/aw-core/src/journal.rs` | Hook 策略准入规则/类型、无副作用多源 Hook 求解器、不可变 `PreparedRoutes` 纯路由编译与持久审计实现 |
+| `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | 私有扩展记录、本地校验、计划与持久文件变更 |
+| `crates/aw-package/src/configuration/`、`crates/aw-package/src/config_edit.rs` | AW 配置渲染与安全离线编辑 |
+| `../../distribution/packaging/aw/` | AW 独立归档、集成后端构建与具体配置模板 |
 | `crates/aw-exec/src/packages.rs` | 运行时对已知安装文件持有读锁 |
-| `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
+| `crates/aw-contracts/src/registry.rs`、`crates/aw-contracts/src/source.rs`、`crates/aw-contracts/src/hook_plan.rs` | 编译进程序的契约 Schema 清单，以及版本化 `SourceCapability`、`ResolvedHookPlan`、`Coverage` 与 16-Hook `CapabilityCell` 合同 |
 | `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
 | `crates/aw-adapter/src/` | 启动器与服务共用的原生方言、能力目录 |
 | `crates/aw-adapter/native/` | 随包分发的 Python/JavaScript 原生桥接资源 |
@@ -143,10 +213,16 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | 活跃能力、计划与证据 Schema | `aw-contracts/schemas/` |
 | 配置 | `aw-config/schemas/` |
 | Provider 消息与 View 协议 | `aw-provider/schemas/` |
+| 原生桥接数据 | Adapter |
 | Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
 
-`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 23 份。
-计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同。
+[Registry](../../../crates/aw-contracts/src/registry.rs) 列出活跃 Schema；
+[目录清单测试](../../../crates/aw-contracts/tests/schemas.rs) 要求每份 Schema 文件均已注册。
+计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2；离线部署 Descriptor 使用
+`deployment-descriptor-v1alpha1`（`aw-deployment/v1alpha1`）；Hook Source 能力声明
+与单控制 Owner 求解计划使用 `source-capability-v1alpha1`（`aw-source-capability/v1alpha1`）
+和 `resolved-hook-plan-v1alpha1`（`aw-resolved-hook-plan/v1alpha1`）。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 
 新增 Provider 可在现有事件和效果范围内声明操作，私有配置和后端数据由自身管理。
@@ -157,14 +233,17 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 Qoder SDK 接入通过每个 Query 的 `options.hooks` 注册回调。前台 Worker 选择
 Adapter 的 daemon 和 Query 工厂；daemon 工厂先校验启动参数并登记对象身份，
-Query 才能使用该 daemon。工具分发复用现有 CLI callback → service → Host → Provider 路径。
+Query 才能使用该 daemon。普通 Query 按自身 cwd/environment 建立已确认的子 scope；
+Adapter 在原生调度前登记模型产生的身份，等待原生命令队列和原始回调排空后回收。
+工具分发使用 CLI scope 传输 → service → Host → Provider 路径。
 应用保留 daemon 和 Query 的管理责任，不新增 SDK 专用服务操作或 Provider。
 
 可更新的 Qoder SDK Query 复用稳定分发器和服务策略准入锁。Adapter 负责消息准入与
 原生队列/关闭完成边界，CLI 通过已有桥接 RPC 传输生命周期消息。参见
 [策略更新契约](runtime/policy-reload.md#qoder-sdk-请求准入)。
 
-[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi、Claude 和普通 Qoder SDK Query 的每客户端任务准入、回调路由、fail-close 与释放边界。
+[Codex CLI Adapter](adapters/codex-adapter.md) 通过原生命令 Hook 执行有序 AW 步骤，并在启动本地会话前检查原始输入边界。
 
 [Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。
 
@@ -173,11 +252,21 @@ Query 才能使用该 daemon。工具分发复用现有 CLI callback → service
 
 ## 外部管理进程的原生接入
 
-`aw install --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
+`aw connect --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
 AssociateProcess 和稳定 dispatch。CLI 管理私有挂载记录及服务绑定；`aw-adapter`
 管理 Qoder settings 合并与确认，以及 QwenPaw 插件 API 安装和移除，有限时长的
 loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享现有进程身份帮助函数。
 
 原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
-`install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
+`aw disconnect --agent TARGET --pid PID` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
+
+语言 SDK 在 Instance／Task 上提供公共 Admission。原生 Source 安装捕获，并根据配置
+选择输入或首次工具准入。Qoder 和配置式 QwenPaw 复用此机制，QwenPaw 同时保留
+resident 结果保障。Service／Host／executor 继续负责权威策略与 Provider 执行，
+见 [SDK 归属](runtime/native-sdk.md#仅工具后的延迟任务准入)。
+
+公共审计消费者通过 `aw audit-export` → `aw-service::audit_export` →
+`aw-core::journal::reader` 读取。读取器固定所属用户的存储并验证有界源链，
+Service 投影保留的公共对象；此路径不使用控制 RPC。
+游标与缺口语义见[审计增量读取](runtime/audit-export.md)。

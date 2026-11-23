@@ -315,8 +315,8 @@ function runTokenless(binary, request, options) {
   })
 }
 
-/** Run one PostTool operation and reject malformed transport responses. */
-async function runPostTool(request, exec, config) {
+/** Run one lifecycle operation and reject malformed transport responses. */
+async function runOperation(request, exec, config) {
   try {
     const stdout = await runTokenless(tokenlessBinary(config), request, {
       timeout: positiveInteger(valueOr(config, 'timeoutMs', undefined), DEFAULT_TIMEOUT_MS),
@@ -324,6 +324,7 @@ async function runPostTool(request, exec, config) {
       encoding: 'utf8',
       windowsHide: true,
       signal: exec.signal,
+      cwd: request.operation === 'pre_tool' ? exec.agent?.session?.header?.cwd : undefined,
       env: {
         ...process.env,
         TOKENLESS_DATA_DIR: prepareTokenlessDataDir(exec),
@@ -331,7 +332,7 @@ async function runPostTool(request, exec, config) {
     })
     const response = JSON.parse(stdout)
     if (!response || typeof response !== 'object' || Array.isArray(response)) return undefined
-    if (response.protocol_version !== 2 || response.operation !== 'post_tool') return undefined
+    if (response.protocol_version !== 2 || response.operation !== request.operation) return undefined
     const result = response.result
     if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined
     return result
@@ -386,9 +387,13 @@ function postToolRequest(
   }
 }
 
-/** Register DSH's PostTool seam as a thin Tokenless lifecycle adapter. */
+/** Register DSH's tool lifecycle seams with Tokenless Core. */
 export function apply(ctx, config = {}) {
   const compressionEnabled = valueOr(config, 'responseCompressionEnabled', true) !== false
+  const rtkEnabled = valueOr(config, 'rtkEnabled', true) !== false
+  // Suggestions are scoped to the host's Agent object. The next call has a
+  // new callId, but its exact suggested command still belongs to RTK.
+  const suggestedCommands = new WeakMap()
 
   ctx.shellEnv.register({
     name: PLUGIN_NAME,
@@ -406,7 +411,46 @@ export function apply(ctx, config = {}) {
     resolve: tokenlessShellEnvironment,
   })
 
+  if (rtkEnabled) ctx.on('tools/pre-execute', async (exec, next) => {
+    const decision = await next()
+    if (decision.kind !== 'allow' || exec.signal?.aborted || exec.parent !== undefined
+      || !exec.agent || !COMMAND_TOOLS.has(exec.name.toLowerCase())
+      || typeof exec.arguments?.command !== 'string') return decision
+    const command = exec.arguments.command
+    if (suggestedCommands.get(exec.agent)?.has(command)) return decision
+    const response = await runOperation({
+      protocol_version: 2,
+      operation: 'pre_tool',
+      attribution: {
+        agent_id: String(valueOr(config, 'agentId', DEFAULT_AGENT_ID)),
+        session_id: exec.agent.id,
+        tool_use_id: exec.callId,
+      },
+      input: {
+        tool_name: exec.name.toLowerCase() === 'pwsh' ? 'PowerShell' : exec.name,
+        arguments: exec.arguments,
+        command_field: 'command',
+        capabilities: { replace_arguments: false, block_and_suggest: true },
+      },
+    }, exec, config)
+    const rewritten = response?.arguments?.command
+    if (response?.action !== 'block_and_suggest' || response.output_optimization !== 'rtk'
+      || typeof rewritten !== 'string' || rewritten === command) return decision
+    let commands = suggestedCommands.get(exec.agent)
+    if (!commands) suggestedCommands.set(exec.agent, commands = new Set())
+    commands.delete(rewritten)
+    if (commands.size >= 1024) commands.delete(commands.values().next().value)
+    commands.add(rewritten)
+    // DSH records and freezes arguments before this hook. Preserve that audit
+    // boundary and let the model submit the suggested command as a new call.
+    return { kind: 'deny', reason: `[tokenless:rewrite] Re-execute as: ${rewritten}` }
+  })
+
   ctx.on('tools/post-execute', async (exec, result, next) => {
+    // Consume even when a later policy rejects the result or the call aborts.
+    const rtkOutput = exec.agent && COMMAND_TOOLS.has(exec.name.toLowerCase())
+      && exec.parent === undefined
+      && suggestedCommands.get(exec.agent)?.delete(exec.arguments?.command)
     // DSH post-execute is a waterfall; later policies own the final projection.
     const decision = await next()
     if (decision.kind !== 'accept' || exec.signal?.aborted) return decision
@@ -430,7 +474,7 @@ export function apply(ctx, config = {}) {
         'tool',
         false,
       )
-      const response = await runPostTool(request, exec, config)
+      const response = await runOperation(request, exec, config)
       const diagnostic = response?.disposition === 'tool_error'
         ? response.additional_context
         : undefined
@@ -458,7 +502,11 @@ export function apply(ctx, config = {}) {
         retrieveResult ? 'retrieve' : 'tool',
         !retrieveResult && tokenlessRetrieveCommandAvailable(config),
       )
-      const response = await runPostTool(request, exec, config)
+      if (rtkOutput) {
+        request.input.output_optimization = 'rtk'
+        request.input.capabilities.recovery = { kind: 'none' }
+      }
+      const response = await runOperation(request, exec, config)
       if (response?.disposition !== 'applied' || typeof response.output !== 'string') {
         return decision
       }
@@ -484,7 +532,7 @@ export function apply(ctx, config = {}) {
       'tool',
       false,
     )
-    const response = await runPostTool(request, exec, config)
+    const response = await runOperation(request, exec, config)
     const diagnostic = response?.disposition === 'tool_error'
       ? response.additional_context
       : undefined

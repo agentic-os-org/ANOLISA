@@ -7,14 +7,18 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, time::Duration};
+
+// Includes interpreter startup and inherited Python instrumentation.
+pub(super) const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) struct ClaudeSdk;
 struct Prepared {
     input: LaunchInput,
+    version: String,
+    final_profile: Option<Value>,
 }
 
 impl Adapter for ClaudeSdk {
@@ -33,19 +37,68 @@ impl Adapter for ClaudeSdk {
             .first()
             .and_then(|arg| arg.to_str())
             .ok_or("Claude SDK requires a Python worker script or -m module")?;
+        if first.ends_with(".mjs") || first.ends_with(".js") {
+            return super::claude_typescript::prepare(input, cancelled);
+        }
         if (first == "-m" && args.len() < 2) || (first != "-m" && !first.ends_with(".py")) {
             return Err("Claude SDK requires a Python worker script or -m module".into());
         }
         let script = "from importlib.metadata import version; from pathlib import Path; import claude_agent_sdk, subprocess; bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'; print(version('claude-agent-sdk') + ':' + subprocess.check_output([str(bundled), '--version'], timeout=4, text=True).strip())";
-        if adapter::Probe(cancelled)
-            .version_output(&input.command, &["-c".into(), script.into()])?
-            != "0.2.88:2.1.161 (Claude Code)"
-        {
-            return Err("Claude SDK 0.2.88 with bundled CLI 2.1.161 is required".into());
-        }
-        Ok(Box::new(Prepared { input }))
+        let output = adapter::Probe(cancelled).version_output_with_timeout(
+            &input.command,
+            &["-c".into(), script.into()],
+            PYTHON_PROBE_TIMEOUT,
+        )?;
+        let (sdk, cli) = output
+            .split_once(':')
+            .ok_or("Claude SDK probe must report SDK and bundled CLI versions")?;
+        let version = crate::version::reported(sdk, "Claude SDK")?;
+        crate::version::reported(
+            cli.strip_suffix(" (Claude Code)")
+                .ok_or("Claude SDK probe must identify its bundled Claude Code CLI")?,
+            "Claude Code",
+        )?;
+        let final_profile = super::claude_final::profile(&input, &version, cli, cancelled)?;
+        Ok(Box::new(Prepared {
+            input,
+            version,
+            final_profile,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if event == "security.violation" {
+            return super::claude_final::normalize(binding, native);
+        }
+        if matches!(event, "session.start" | "session.end") {
+            let name = if event == "session.start" {
+                "AWSessionInit"
+            } else {
+                "AWSessionDisconnect"
+            };
+            if native["hook_event_name"] != name || native["cwd"].as_str() != binding.cwd.to_str() {
+                return Err("Claude lifecycle report differs from its SDK session or cwd".into());
+            }
+            return super::lifecycle::normalize(binding, "claude-sdk", event, native);
+        }
+        if event == "turn.stop" {
+            if native["hook_event_name"] != "Stop"
+                || native["cwd"].as_str() != binding.cwd.to_str()
+                || native["reason"] != "stop_requested"
+                || !native["stop_hook_active"].is_boolean()
+            {
+                return Err("Claude stop requires the native Stop event and bound cwd".into());
+            }
+            return super::lifecycle::normalize(binding, "claude-sdk", event, native);
+        }
+        if event == "input.submit" {
+            if native["hook_event_name"] != "AWInputSubmit"
+                || native["cwd"].as_str() != binding.cwd.to_str()
+                || native.get("aw_source").is_some()
+            {
+                return Err("Claude submission requires its factory route and bound cwd".into());
+            }
+            return super::submission::normalize(binding, native, "claude-sdk", "input_text");
+        }
         if native.get("aw_source").is_some() {
             return super::claude_mcp::normalize(binding, event, native);
         }
@@ -62,13 +115,23 @@ impl Adapter for ClaudeSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::CLAUDE_SDK.capabilities("0.2.88", "sdk-worker")
+        let mut capabilities =
+            super::super::adapter::catalog::CLAUDE_SDK.capabilities(&self.version, "sdk-worker");
+        if self.final_profile.is_some() {
+            capabilities.events.insert(
+                "security.violation".into(),
+                ["observe".into(), "block".into()].into(),
+            );
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+        super::claude_final::validate(&self.input.document, steps)?;
+        super::sdk_tools::routes(&self.input.document, steps, "claude-sdk").map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = super::sdk_tools::routes(&self.input.document, context.steps)?;
+        let (events, hooks) =
+            super::sdk_tools::routes(&self.input.document, context.steps, "claude-sdk")?;
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -76,6 +139,14 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "aw_claude.py",
             include_bytes!("../../native/claude-sdk/aw_claude.py"),
+        )?;
+        context.files.write(
+            "aw_submission.py",
+            include_bytes!("../../native/claude-sdk/aw_submission.py"),
+        )?;
+        context.files.write(
+            "aw_foreground.py",
+            include_bytes!("../../native/claude-sdk/aw_foreground.py"),
         )?;
         context.files.write(
             "aw_scope.py",
@@ -106,7 +177,23 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/claude-sdk/aw_transport.py"),
         )?;
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
-        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "hooks": hooks}))?)?;
+        let final_profile = events
+            .contains_key("security.violation")
+            .then_some(self.final_profile.as_ref())
+            .flatten();
+        if final_profile.is_some() {
+            super::claude_final::configure(context)?;
+        }
+        let config = context.files.write(
+            "claude-sdk-hooks.json",
+            &serde_json::to_vec(&json!({
+                "executable": context.executable, "binding": context.binding_path,
+                "ready_path": ready, "ready_token": token, "observation_enabled": observe,
+                "resident_policy_reload": self.input.options.resident_policy_reload,
+                "hooks": hooks, "final_profile": final_profile,
+                "final_enforcing": super::claude_final::enforcing(&hooks),
+            }))?,
+        )?;
         let mut command = self.input.command.clone();
         let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {
@@ -149,6 +236,152 @@ mod tests {
     }
     fn native() -> Value {
         json!({"session_id":"native-session", "cwd":"/work", "tool_use_id":"native-call", "tool_name":"Bash", "tool_input":{"command":"exit 7"}, "hook_event_name":"PreToolUse"})
+    }
+    #[test]
+    fn sdk_session_reports_require_initialized_session_and_disconnect_reason() {
+        let start =
+            json!({"hook_event_name":"AWSessionInit","session_id":"sdk-session","cwd":"/work"});
+        assert_eq!(
+            ClaudeSdk
+                .normalize(&binding(), "session.start", &start)
+                .unwrap()["session_id"],
+            "sdk-session"
+        );
+        let end = json!({"hook_event_name":"AWSessionDisconnect","session_id":"sdk-session","cwd":"/work","reason":"cancelled"});
+        assert_eq!(
+            ClaudeSdk
+                .normalize(&binding(), "session.end", &end)
+                .unwrap()["native"]["reason"],
+            "cancelled"
+        );
+        assert!(ClaudeSdk
+            .normalize(&binding(), "session.end", &start)
+            .is_err());
+    }
+
+    #[test]
+    fn stop_uses_native_session_and_the_active_sdk_turn() {
+        let native = json!({"hook_event_name":"Stop","session_id":"native-session","cwd":"/work",
+            "stop_hook_active":false,"turn_id":"turn","attempt_id":"attempt","reason":"stop_requested"});
+        let event = ClaudeSdk
+            .normalize(&binding(), "turn.stop", &native)
+            .unwrap();
+        assert_eq!(event["session_id"], "native-session");
+        assert_eq!(event["turn_id"], "turn");
+        assert_eq!(event["native"]["reason"], "stop_requested");
+        let output = json!({"status":"ok","kind":"provider","effects":[{"type":"block","text":"continue analysis"}]});
+        let reply = crate::callback::response(
+            &ClaudeSdk,
+            "turn.stop",
+            "block",
+            output,
+            "claude-sdk",
+            &native,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(reply.exit, Exit::Code(2)));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reply.stdout).unwrap(),
+            "continue analysis"
+        );
+        let mut invalid = native;
+        invalid["turn_id"] = Value::Null;
+        assert!(ClaudeSdk
+            .normalize(&binding(), "turn.stop", &invalid)
+            .is_err());
+    }
+
+    #[test]
+    fn submission_fault_recovery_retains_existing_terminal_classification() {
+        for failure in [
+            "exit",
+            "incomplete_input",
+            "provider",
+            "protocol",
+            "transport",
+        ] {
+            let fault = json!({"status":"error", "kind":"provider", "effects":[],
+                "failure":failure, "failure_detail":"deadline_exceeded", "failure_action":"report"});
+            let invoke = |value, action| {
+                crate::callback::response(
+                    &ClaudeSdk,
+                    "input.submit",
+                    action,
+                    value,
+                    "claude-sdk",
+                    &json!({}),
+                    &mut Vec::new(),
+                )
+            };
+            assert!(matches!(
+                invoke(fault.clone(), "report").unwrap().exit,
+                Exit::Code(0)
+            ));
+            let mut blocked = fault.clone();
+            blocked["failure_action"] = json!("block");
+            assert!(matches!(
+                invoke(blocked, "block").unwrap().exit,
+                Exit::Code(2)
+            ));
+            for (key, value) in [
+                ("status", json!("unknown")),
+                ("kind", json!("native")),
+                ("effects", json!([{"type":"block"}])),
+                ("failure", json!("native_environment")),
+                ("failure", json!("unknown")),
+                ("failure_action", json!("block")),
+            ] {
+                let mut invalid = fault.clone();
+                invalid[key] = value;
+                assert!(invoke(invalid, "report").is_err());
+            }
+            if failure == "transport" {
+                for detail in [
+                    Value::Null,
+                    json!("cancelled"),
+                    json!("cleanup"),
+                    json!("unknown"),
+                ] {
+                    let mut invalid = fault.clone();
+                    invalid["failure_detail"] = detail;
+                    assert!(invoke(invalid, "report").is_err());
+                }
+            }
+        }
+        assert!(crate::callback::supports_event_close("claude-sdk"));
+        assert!(crate::callback::supports_event_close("agentscope"));
+        assert!(crate::callback::supports_event_close("qoder-sdk"));
+    }
+    #[test]
+    fn submissions_preserve_text_and_reject_unbound_identity() {
+        let native = json!({"hook_event_name":"AWInputSubmit", "cwd":"/work",
+            "session_id":"session", "aw_turn_id":"turn", "input_text":" 中文 \n"});
+        let event = ClaudeSdk
+            .normalize(&binding(), "input.submit", &native)
+            .unwrap();
+        assert_eq!(event["input"]["text"], native["input_text"]);
+        assert_eq!(event["session_id"], "session");
+        assert_eq!(event["turn_id"], "turn");
+        assert!(event.get("tool").is_none());
+        for (key, value) in [
+            ("session_id", json!("")),
+            ("aw_turn_id", json!(" ")),
+            ("session_id", json!("x".repeat(513))),
+            ("input_text", json!({"text":"x"})),
+            ("cwd", json!("/other")),
+            ("hook_event_name", json!("UserPromptSubmit")),
+            ("aw_source", json!("mcp")),
+        ] {
+            let mut invalid = native.clone();
+            invalid[key] = value;
+            assert!(ClaudeSdk
+                .normalize(&binding(), "input.submit", &invalid)
+                .is_err());
+        }
+        assert!(ClaudeSdk
+            .normalize(&binding(), "tool.before", &native)
+            .is_err());
     }
     #[test]
     fn maps_success_failure_and_native_identity_without_adopting_results() {

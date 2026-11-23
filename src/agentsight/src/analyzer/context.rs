@@ -212,24 +212,29 @@ pub(super) fn resource_abandonment(result: &AggregatedResult) -> Option<Vec<Anal
         ),
         AggregatedResult::Http2StreamComplete(stream) => {
             return Some(vec![
-                AnalysisResult::Http(HttpRecord {
-                    timestamp_ns: stream.start_timestamp_ns,
-                    pid: stream.stream_id.connection_id.pid,
-                    comm: stream.comm(),
-                    method: stream.method(),
-                    path: stream.path(),
-                    status_code: stream.status_code(),
-                    request_headers: stream.request_headers_json(),
-                    response_headers: stream.response_headers_json(),
-                    request_body: None,
-                    response_body: None,
-                    duration_ns: stream
-                        .end_timestamp_ns
-                        .saturating_sub(stream.start_timestamp_ns),
-                    first_output_timestamp_ns: None,
-                    is_sse: stream.is_response_sse(),
-                    sse_event_count: 0,
-                }),
+                AnalysisResult::HttpContext(HttpContext::new(
+                    true,
+                    HttpRecord {
+                        timestamp_ns: stream.start_timestamp_ns,
+                        pid: stream.stream_id.connection_id.pid,
+                        comm: stream.comm(),
+                        method: stream.method(),
+                        path: stream.path(),
+                        status_code: stream.status_code(),
+                        request_headers: stream.request_headers_json(),
+                        response_headers: stream.response_headers_json(),
+                        request_body: None,
+                        response_body: None,
+                        duration_ns: stream
+                            .end_timestamp_ns
+                            .saturating_sub(stream.start_timestamp_ns),
+                        first_output_timestamp_ns: None,
+                        is_sse: stream.is_response_sse(),
+                        sse_event_count: 0,
+                    },
+                    None,
+                    None,
+                )),
                 AnalysisResult::Abandoned(*reason),
             ]);
         }
@@ -239,29 +244,34 @@ pub(super) fn resource_abandonment(result: &AggregatedResult) -> Option<Vec<Anal
         .map(|r| r.source_event.as_ref())
         .or_else(|| response.map(|r| r.parsed.source_event.as_ref()))?;
     Some(vec![
-        AnalysisResult::Http(HttpRecord {
-            timestamp_ns: source.timestamp_ns,
-            pid: id.pid,
-            comm: source.comm_str(),
-            method: request.map_or_else(String::new, |r| r.method.clone()),
-            path: request.map_or_else(String::new, |r| r.path.clone()),
-            status_code: response.map_or(0, |r| r.parsed.status_code),
-            request_headers: request
-                .and_then(|r| serde_json::to_string(&r.headers).ok())
-                .unwrap_or_default(),
-            response_headers: String::new(),
-            request_body: None,
-            response_body: None,
-            duration_ns: response.map_or(0, |r| {
-                r.parsed
-                    .source_event
-                    .timestamp_ns
-                    .saturating_sub(source.timestamp_ns)
-            }),
-            first_output_timestamp_ns: None,
-            is_sse,
-            sse_event_count: 0,
-        }),
+        AnalysisResult::HttpContext(HttpContext::new(
+            true,
+            HttpRecord {
+                timestamp_ns: source.timestamp_ns,
+                pid: id.pid,
+                comm: source.comm_str(),
+                method: request.map_or_else(String::new, |r| r.method.clone()),
+                path: request.map_or_else(String::new, |r| r.path.clone()),
+                status_code: response.map_or(0, |r| r.parsed.status_code),
+                request_headers: request
+                    .and_then(|r| serde_json::to_string(&r.headers).ok())
+                    .unwrap_or_default(),
+                response_headers: String::new(),
+                request_body: None,
+                response_body: None,
+                duration_ns: response.map_or(0, |r| {
+                    r.parsed
+                        .source_event
+                        .timestamp_ns
+                        .saturating_sub(source.timestamp_ns)
+                }),
+                first_output_timestamp_ns: None,
+                is_sse,
+                sse_event_count: 0,
+            },
+            None,
+            None,
+        )),
         AnalysisResult::Abandoned(*reason),
     ])
 }
@@ -283,7 +293,12 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
             };
             return Some(HttpContext {
                 retain_raw: false,
-                request: stream.request_json_body(),
+                request: stream.request_json_body().or_else(|| {
+                    super::super::MessageParser::decode_request_body(
+                        &stream.path(),
+                        stream.request_body_str()?.as_bytes(),
+                    )
+                }),
                 response,
                 http: HttpRecord {
                     timestamp_ns: stream.start_timestamp_ns,
@@ -309,7 +324,9 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
     };
     Some(HttpContext {
         retain_raw: false,
-        request: request.json_body(),
+        request: request.json_body().or_else(|| {
+            super::super::MessageParser::decode_request_body(&request.path, request.body())
+        }),
         response: response.and_then(|response| {
             if sse {
                 parse_sse.then(|| Value::Array(response.json_body()))

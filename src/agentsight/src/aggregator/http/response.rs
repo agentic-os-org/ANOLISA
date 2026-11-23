@@ -71,6 +71,43 @@ impl AggregatedResponse {
             .collect()
     }
 
+    /// Recover gateway envelopes split across reads in the raw-retention path.
+    pub(crate) fn recover_fragmented_gateway_events(&mut self) {
+        let Some(bytes) = self.sse_continuation_bytes.as_deref() else {
+            return;
+        };
+        let Some(source) = self.sse_events.last().map(ParsedSseEvent::source_event) else {
+            return;
+        };
+        let mut events = super::HttpConnectionAggregator::decode_compressed_sse(
+            bytes,
+            None,
+            super::HttpConnectionAggregator::is_chunked_response(&self.parsed),
+            None,
+            source,
+        );
+        let Some(end) = events.iter().position(ParsedSseEvent::is_done) else {
+            return;
+        };
+        events.truncate(end);
+        // The bounded continuation buffer may end early. Replace live events
+        // only for a complete stream with additional JSON, and stop at the first
+        // terminator because the raw buffer may repeat its final capture read.
+        let recovered = events
+            .iter()
+            .filter(|event| event.json_body().is_some())
+            .count();
+        let captured = self
+            .sse_events
+            .iter()
+            .filter(|event| event.json_body().is_some())
+            .count();
+        if recovered > captured {
+            self.completion_timestamp_ns = Some(self.end_timestamp_ns());
+            self.set_sse_events(events);
+        }
+    }
+
     /// Get start timestamp (first packet) in nanoseconds
     /// Derived from parsed.source_event.timestamp_ns
     pub fn start_timestamp_ns(&self) -> u64 {
@@ -488,6 +525,19 @@ mod latency_tests {
             captured_sse_event_count: None,
             sse_continuation_bytes: None,
         }
+    }
+
+    #[test]
+    fn capped_gateway_prefix_cannot_replace_later_live_events() {
+        let late = r#"{"choices":[{"delta":{"content":"late output"}}]}"#;
+        let prefix = r#"{"choices":[{"delta":{"content":"prefix"}}]}"#;
+        let mut response = response_with_sse_events(vec![sse_event(late, 30)]);
+        response.sse_continuation_bytes =
+            Some(format!("data: {prefix}\n\ndata: {prefix}\n\n").into_bytes());
+        response.recover_fragmented_gateway_events();
+        assert_eq!(response.sse_events.len(), 1);
+        assert_eq!(response.sse_events[0].data(), late.as_bytes());
+        assert_eq!(response.end_timestamp_ns(), 30);
     }
 
     #[test]

@@ -3,25 +3,25 @@
 use super::*;
 
 use crate::runtime::{EventEntry, Instance};
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{Host, ProcessContext};
-use aw_provider::admission::AdapterCapabilities;
 use std::{
     collections::BTreeMap,
     fs,
     sync::{
         atomic::{AtomicBool, AtomicU64},
-        mpsc, Mutex,
+        mpsc,
     },
 };
 
-struct Fixture {
-    runtime: Arc<Runtime>,
-    id: String,
+pub(super) struct Fixture {
+    pub(super) runtime: Arc<Runtime>,
+    pub(super) id: String,
     _directory: tempfile::TempDir,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = tempfile::Builder::new()
             .prefix("invocation-races-")
             .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
@@ -36,6 +36,7 @@ impl Fixture {
             .bind(
                 "qoder".into(),
                 crate::Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),
@@ -73,7 +74,7 @@ impl Drop for Fixture {
     }
 }
 
-fn deadline() -> Instant {
+pub(super) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
@@ -126,6 +127,7 @@ fn completed_uncorrelated_event_cannot_switch_protocol() {
         .open(
             fixture.id.clone(),
             fixture.event(),
+            None,
             None,
             deadline(),
             Arc::new(AtomicBool::new(false)),
@@ -246,6 +248,7 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
         bytes,
         "qoder",
         AdapterCapabilities {
+            failure_actions: Default::default(),
             adapter: "qoder".into(),
             version: "fixture".into(),
             entrypoint: "fixture".into(),
@@ -265,23 +268,15 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
     .unwrap();
     runtime.instances.lock().unwrap().insert(
         "fixture".into(),
-        Some(Instance {
-            bytes: bytes.to_vec(),
-            context: ProcessContext {
+        Some(Instance::prepared(
+            bytes.to_vec(),
+            ProcessContext {
                 cwd: directory.clone(),
                 environment: BTreeMap::new(),
                 stderr_bytes: 1024,
             },
-            reload: None,
-            policy_update: Arc::new(Mutex::new(())),
-            release: Arc::new(Mutex::new(())),
-            host: Arc::new(host),
-            closing: false,
-            observation: None,
-            hooks: Arc::new(Mutex::new(BTreeMap::new())),
-            hook_open: Arc::new(Mutex::new(())),
-            invocations: Arc::default(),
-        }),
+            host,
+        )),
     );
     let hooks = Arc::clone(
         &runtime.instances.lock().unwrap()["fixture"]
@@ -327,6 +322,7 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
             "fixture".into(),
             json!({}),
             None,
+            None,
             Instant::now() + Duration::from_secs(1),
             Arc::new(AtomicBool::new(false)),
         )
@@ -339,4 +335,17 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
         true
     );
     assert!(runtime.instances.lock().unwrap().is_empty());
+}
+
+#[test]
+fn stop_delivery_correlation_is_stable_when_a_later_turn_is_active() {
+    let stop = |turn: &str, delivery: &str| {
+        json!({
+            "name":"turn.stop", "session_id":"session", "turn_id":turn,
+            "native":{"delivery_id":delivery,"attempt_id":delivery}
+        })
+    };
+    let first = event_correlation(&stop("one", "delivery")).unwrap();
+    assert_eq!(first, event_correlation(&stop("two", "delivery")).unwrap());
+    assert_ne!(first, event_correlation(&stop("two", "retry")).unwrap());
 }

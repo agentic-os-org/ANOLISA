@@ -7,7 +7,7 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
 
 ## 支持的 Agent
 
-只要被发现规则命中的进程都会被追踪。随包发布的规则集（31 条）覆盖：
+只要被发现规则命中的进程都会被追踪。随包发布的规则集（36 条）覆盖：
 
 | Agent | 上报名称 |
 |---|---|
@@ -19,6 +19,7 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
 | OpenClaw（gateway） | `OpenClaw` |
 | Hermes | `Hermes` |
 | AgentScope | `AgentScope` |
+| Qoder CLI | `QoderCLI` |
 | Runloop Node 服务 | `Runloop` |
 
 其他 Agent 也能支持——按 [Agent 发现规则](configuration.md#agent-发现规则)加一条规则即可。需要注意的集成细节：
@@ -29,8 +30,19 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
   `features.trajectory_collection.scan_dirs`。有界递归发现会将这些会话正确标为 `claude-code`，不会误标为 Qoder。
 - **OpenClaw** 观测的是它的 `openclaw-gateway` 守护进程，而不是客户端。缺 Token 数据时，先确认客户端
   确实连上了 gateway。
-- **Codex CLI** 静态链接 TLS 库，AgentSight 会退化到字节模式匹配加逐版本 offset 表。刚发布的 Codex
-  版本可能需要更新 `codex_offsets` 条目。
+- **Codex CLI** 静态链接 TLS 库，内嵌 offset 表已包含官方 Linux x86_64 musl 构建的 0.147.0 和
+  0.162.1，并验证了 OpenSSL 路径的 HTTPS Responses 采集。条目按可执行文件大小和指纹匹配，
+  不仅依赖版本号。只修改部署配置中的 `codex_offsets` 无效：该表在编译期嵌入 AgentSight，
+  需要使用包含新条目的重编译二进制。探针挂载前已发出的请求仍可能漏采。
+  `CODEX_CA_CERTIFICATE` 或 `SSL_CERT_FILE` 等自定义 CA 设置可能切换到 rustls；
+  这些 OpenSSL offset 不覆盖该路径或 WebSocket TLS。
+- **Cline** 轨迹会自动从各任务目录下的 `api_conversation_history.json` 采集，标准位置为 Linux 上的
+  `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` 和 macOS 上的
+  `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks`。
+  任务目录名作为会话 ID。项目名取 `state/taskHistory.json` 中 `cwdOnTaskInitialization` 路径的最后一段，
+  通过任务 `id` 或 `ulid` 匹配；元数据缺失或无效时回退为 `(default)`。同目录的 `ui_messages.json`
+  会合并消息时间戳、Token 用量和成本，不会作为独立会话重复采集。本地会话查看器读取同一组任务文件。
+  覆盖 `features.trajectory_collection.scan_dirs` 时，需包含 `saoudrizwan.claude-dev` 目录或其 `tasks` 子目录。
 - **Gemini CLI** 轨迹直接从 `~/.gemini/tmp/<project>/chats/session-*.jsonl` 会话文件采集，无需配置。
   项目名取自各项目目录下的 `.project_root` 标记文件。采集器在转换前会重放 CLI 的修正记录
   （`$rewindTo`、`$patch`、`$set`），因此采集到的轨迹与 CLI 恢复会话时看到的对话一致；嵌套在父
@@ -95,6 +107,11 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer：风险拦截
 
+对不含 argv 条件的 exec、文件 open/write 和 connect 操作进行执行前 `block`，要求内核启用 BPF LSM，
+并加载对应的 hook。缺少这些能力时，初始策略和运行时策略更新都会被拒绝，并报告缺失的 hook。
+仅选择 full hook profile 无法让未启用 BPF LSM 的内核具备阻断能力；受支持的 `notify` 和 `kill`
+规则仍可通过 tracepoint 执行。
+
 `agentsight-enforcer` 是可以拦截高风险 Agent 动作的特权守护进程，随安装包发布，由
 `agentsight-enforcer.service` 启动。当它的 socket（`/run/agentsight/enforcer.sock`）不存在时，`serve`
 会打印：
@@ -103,8 +120,26 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 AgentSight enforcement unavailable: enforcer I/O failed: No such file or directory (os error 2)
 ```
 
-采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
-请使用 `make build-all`。
+采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。需要单独启动 enforcer 守护进程。
+源码运行见[源码构建](deployment.md#源码构建)。
+
+ActPlane 策略下发支持宿主的初始 PID namespace，也支持容器的默认 PID namespace。
+当 enforcer 与目标进程共享容器 PID namespace 时，无需设置 `hostPID: true` / `--pid=host`，
+这些 host PID 部署方式仍然受支持。策略下发错误不影响采集与分析。
+
+安装 Binding 时会尝试收养 Apply 前已存在的后代，最多扫描四轮，最后只读核验覆盖。
+核验保留已见 PID/启动时间身份，包括被接管到进程树外的存活后代。
+map 写入失败时保留未激活的部分状态，不删除可能被并发 fork 激活的 key；
+重试只复用相同状态，冲突状态仍明确报告覆盖缺口。
+普通文件 Binding 遇到漏覆盖、map/procfs 错误或 PID namespace 不匹配时返回 `Degraded`。
+HTTP API 会脱敏 `message`；具体 PID/map/procfs 诊断需查看 enforcer 守护进程日志。
+凭据策略下发会拒绝部分覆盖并清理部分 Binding；清理失败时持久化为 `Detaching`，便于重试解除，
+被拒绝的凭据意图不会自动重新 Apply。
+清理只在该意图成功保存后开始；SQLite 写入失败时，后端可能保留部分保护，需要恢复数据库可用性，
+由 reconciliation 重试。存储错误不表示清理已经完成。
+同一存活孩子被 subreaper（接管孤儿进程的祖先进程）接管后保留保护。收养要求验证 procfs 属于初始 PID namespace；
+容器内根进程绑定仍然支持，但后代收养会报告覆盖未完成。Apply 期间需暂停进程树变化，不提供原子隔离保证。
+`Degraded` 表示保护不完整；暂停或重启进程树后，解除并重新 Apply。解除期间保护暂时失效。
 
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
@@ -116,12 +151,121 @@ $ sudo journalctl -u agentsight-enforcer
 
 默认级别为 `info`；在 unit 中添加 `Environment=RUST_LOG=debug` 可获得更详细的输出。
 
+系统层文件防误删不是默认 profile 的开箱能力。即使 `ready=true`，也必须检查
+`capabilities.file_delete_guard`；默认 `credential-exfiltration` 不支持该能力。
+切换 `agent-file-guard` 的前置条件、互斥能力、维护窗口及重新 Apply 步骤，见
+[启用系统层文件防误删](deployment.md#启用系统层文件防误删)。
+
+对于同一容器内的目标，`root_pid` 保持为 procfs 显示的 namespace-local PID。enforcer 独立解析
+并校验对应的内核身份，不会通过 `NSpid` 链换算或猜测宿主 PID。当本地 PID、PID namespace、
+进程启动时间或 procfs 时钟无法校验时，包括 PID 已失效或被复用、container-uptime 时钟关系
+不一致，Apply 都会 fail-closed。启用 `agent-file-guard` profile 和 BPF-LSM 后，
+`file_delete_guard` 同样支持初始或容器默认 PID namespace。
+
 拦截能力还取决于引擎的 hook 预算：只有当引擎启动时预留了对应的 BPF LSM hook、且内核启用了
-BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。当 `block`
-规则命中在一个无法拒绝该操作的后端上——例如 `block connect` 规则命中时 `enforce_socket_connect`
-hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 violation 落账。遇到这类降级
-报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
+BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。上述不含
+argv 条件的 exec、文件 open/write 和 connect 规则在缺少支持时会按上文所述直接被拒绝。没有独立
+block feature bit 的规则仍保留降级报告行为：例如 `block recv` 规则命中时没有可用的
+`enforce_socket_recvmsg` hook，引擎仍会以 `effect=block` 且 `blocked=false` 的 violation 落账。
+遇到这类降级报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
 `ACTPLANE_PINNED_PROFILE`）与内核 LSM 配置。
+
+协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。mock 后端仍然拒绝
+结构化策略。旧 DSL 语义不变，但协议 v4 帧会被拒绝，因此客户端需与 enforcer 一起升级。
+
+### 禁止读取密钥文件
+
+在风险拦截页选择「禁止读取密钥文件」模板，填写 Agent ID、根 PID 和密钥文件绝对路径。
+该模板调用 `POST /api/enforcement/file-read-bindings`，请求字段与 `POST /api/enforcement/file-bindings`
+相同（`agent_id`、`root_pid`、`path`），生成 `protections.read: true` 的结构化 `exact_file` 策略，
+模式固定为 `enforce`。使用独立接口后，旧版 `agentsight serve` 会返回 404，而不是只下发禁止打开的策略；
+原文件拦截接口收到 `deny_read: true` 时返回 `file_read_route_required` 错误。旧策略省略
+`protections.read` 等同于 false。
+下发和解除沿用 Dashboard 身份认证，即使本机调用也需要有效令牌或登录会话。
+
+- 启用条件仍为 `agent-file-guard` profile 和 BPF LSM；健康接口必须报告
+  `file_read_protection: true`。旧 enforcer 不支持新字段时会拒绝策略，不会静默降级为放行。
+- 对绑定进程树拒绝读取、使用已有只读 FD 读取和文件映射；硬链接、软链接访问同一受保护文件也被拒绝。
+  `O_PATH` 只持有文件身份，允许使用。未绑定进程不受影响，解除策略后恢复读取。
+- 下发前已有的私有或共享文件映射会导致下发被拒绝，需重启相关进程；已经读取到内存中的内容无法撤回。
+  Apply 期间需暂停目标进程的文件访问及进程树变化，不提供并发下发的原子隔离保证。
+- 禁读按 Apply 时的普通文件身份生效；需要覆盖整个目录时使用[目录树禁读](#禁止读取目录树)。
+  外部程序替换文件或轮换密钥后需重新 Apply。
+  禁读不自动禁止写入或删除，需要时可独立组合 `ordinary_write` 和 `delete`。
+- 这不是完整沙箱：io_uring/AIO、进程内存访问及动态挂载不在覆盖保证内。
+
+### 禁止读取目录树
+
+密钥存放在内容会变化的目录中（例如挂载的密钥卷）时使用。一个 Binding 即可覆盖已有文件、
+深层子目录，以及 Apply 之后新建、替换或移入的文件，无需重新 Apply。
+
+向 `POST /api/enforcement/file-read-bindings` 发送相同请求，并加上 `"kind": "directory_tree"`
+和目录绝对路径。生成的策略为只设置 `protections.read: true` 的结构化 `directory_tree` 目标：
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"demo-agent","root_pid":<PID>,"path":"/run/asc-demo/secrets","kind":"directory_tree"}' \
+  http://127.0.0.1:7396/api/enforcement/file-read-bindings
+```
+
+需要排除项，或要把禁读与 `delete`、`ordinary_write` 组合时，通过
+`POST /api/enforcement/bindings` 提交结构化目标：
+
+```json
+{
+  "path": "/run/asc-demo/secrets",
+  "kind": "directory_tree",
+  "protections": { "delete": false, "ordinary_write": false, "read": true },
+  "exclusions": []
+}
+```
+
+- 健康接口必须报告 `directory_tree_read_protection: true`，即 `agent-file-guard` profile 已挂载
+  文件读取相关钩子和硬链接钩子。旧 enforcer 会拒绝目录树禁读目标；旧版 `agentsight serve` 会忽略
+  `kind`，并因目录不是普通文件而拒绝请求，二者都不会静默下发范围更小的策略。文件拦截接口收到
+  `directory_tree` 时返回 `file_read_route_required`。
+- 绑定进程树无法读取、映射通过目录树内路径访问到的任何普通文件，也无法通过已打开的 FD 读取；
+  目录树的 bind mount 别名及其下层挂载同样受保护。列目录、`stat` 和写入不受影响。未绑定进程不受
+  影响，解除策略后恢复读取。拒绝事件记录为 `read`，事件原因包含受保护的目录树根路径。
+- 覆盖范围以实际打开的文件位置为准：目录树内指向外部的软链接不受保护，从外部指向目录树内的
+  软链接受保护。排除项的行为与删除、写入保护一致。
+- 受保护文件若在目录树外另有硬链接，就能通过外部名称读取，因此目录树中存在链接数大于 1 的普通
+  文件时 Apply 会被拒绝；请删除多余链接或排除该目录项。需要检查的目录项超过 100,000 个时 Apply
+  也会被拒绝。
+- 绑定期间，进程树不能把受保护文件硬链接到保护范围外的名称（记录为 `link`），不能把受保护目录项
+  移出目录树或移入被排除的子树，也不能重命名、替换或交换目录树根及其祖先目录（记录为 `rename`）。
+  未绑定进程之后创建的硬链接不在覆盖范围内。未绑定进程替换目录树根目录本身后，需要重新 Apply。
+- 与精确文件相同，目录树下已有文件映射会导致下发被拒绝，通过 bind mount 别名或其他路径映射同一文件
+  也会被识别；生效前已读入内存的数据无法撤回。
+- 在 256 步祖先遍历预算内无法确定文件位置时允许读取。与目录树相交的 overlay 文件系统会导致 Apply
+  被拒绝。io_uring/AIO 和进程内存访问仍不在覆盖范围内。
+
+### 结构化文件保护：一期边界
+
+`file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项
+或子目录树。`delete` 与 `ordinary_write` 独立选择；`read` 见上文两节禁读说明。下发前通过
+`/api/enforcement/health` 检查 `file_entry_delete_protection`、`directory_tree_delete_protection`、
+`ordinary_write_protection`、`file_read_protection`、`directory_tree_read_protection`
+和 `static_mount_topology` 是否支持相应能力。ActPlane 后端要求结构化策略显式设置
+`policy_mode: "enforce"`；省略模式或设置 `audit/observe` 会在拓扑准备和内核修改前被拒绝，
+不改变旧 DSL 的处理方式。
+
+- 普通写保护阻止通过受保护路径执行的 `write/pwrite`，包括策略生效前已打开的 FD；读取和打开
+  可写 FD 仍允许。
+- 每次祖先遍历最多 256 步，挂载切换也占用步数；预算内无法确定保护时分类为 UNKNOWN，
+  普通写放行；仅当当前策略域请求删除保护时，删除和重命名才会保守拒绝。因此过深的子项
+  可能可写；同样深度下的显式文件目标或附近的目录树保护根仍可命中，并非所有深路径都会放行。
+- 策略范围外、未被其他目标保护的硬链接仍可写入同一 inode，从而改变受保护文件内容；需要保护
+  该别名时应显式加入目标。删除外部硬链接仍允许，因为它不会删除受保护的目录项。
+- 即使文件受保护，`truncate/ftruncate`、`O_TRUNC`、共享可写 `mmap/mprotect` 和 `fallocate` 打洞
+  也不在该保护契约内。io_uring/AIO 与 chmod/chown 同样不在一期覆盖保证内；
+  `complete_content_protection` 保持 false。
+- 挂载拓扑固定在 Apply 时；已有受支持的 bind 别名与子挂载会被解析，生效后的
+  mount/bind/unmount 及动态 overlay 变化不支持。
+- 准备结束和激活前会重新解析路径身份，但不会原子锁定路径直到激活完成。Apply 返回前需保持
+  目标、排除项、祖先与进程根目录稳定；Apply 期间并发 rename/exchange 或根目录变化不支持。
+
+这是限定操作范围的保护，并不保证受保护文件内容不可变。
 
 ## cosh：用自然语言提问
 
@@ -178,7 +322,9 @@ tool-call ID 刷新元数据，再计算结果，无需为这些视图额外调�
 这些查询复用现有 AgentSight 凭据，即使访问来自 loopback。查询会对 ID 去重，并让所有
 源请求共享 5 秒、1000 条记录/请求、8 MiB 的预算。刷新失败或超限时明确报错，不保存
 部分批次，也不将缓存行当作最新数据返回。本次源回复中不存在的记录不计入当前汇总；
-已保存的记录仍可通过记录 API 查询。未配置 `tokenless_api` 时保持现有本地数据库行为。
+已保存的记录仍可通过记录 API 查询。未配置 `tokenless_api` 时保持现有本地数据库行为。共享配置存在
+JSON 语法错误时，`serve` 使用内嵌默认配置继续运行，但禁用 Tokenless API 集成；详见
+[配置恢复](configuration.md#改完怎么验证)。
 
 历史调用 ID 继续参与复合节省计算。源查询每次最多批量匹配 128 个 ID，因此匹配统计较少的
 长会话可以完成查询，并保留早期压缩的节省量。所有批次及其分页共享同一个记录预算。
@@ -186,3 +332,14 @@ tool-call ID 刷新元数据，再计算结果，无需为这些视图额外调�
 
 通过 API 查询节省量需要批量 POST 接口；请一起升级 AgentSight 与 Tokenless 查询服务。
 原有按单个条件筛选的 GET 查询继续可用。
+
+## ws-ckpt 工作区快照（Linux）
+
+[快照后端](data-and-storage.md#工作区快照-api)在查询时组合现有 ATIF Step 和本机
+ws-ckpt 工作区。由成功的工具/Bash 操作确定工作区；省略参数时需显式绑定宿主插件
+配置。各来源快照统一按创建时间关联，不匹配原生 session ID，也不新增采集链路。
+AgentSight 在只读模式下通过 `ws-ckpt diff --format json` 读取文件变化。开启恢复后，
+Sight 展示 guarded CLI 预览。操作者确认回滚期间工作区没有其他写入后，Sight 会复核
+该预览的代际和差异摘要。详见
+[配置](configuration.md#工作区快照后端linux)和
+[Step 快照交互](dashboard.md#在执行-step-中查看工作区快照)。

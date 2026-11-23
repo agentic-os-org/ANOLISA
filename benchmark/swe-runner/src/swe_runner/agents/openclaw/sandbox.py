@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -40,8 +41,14 @@ _HOST_TOKENLESS_EXTRA_BIN_DIRS = (
 )
 _HOST_OPENCLAW_EXTENSIONS_DIR = Path.home() / ".openclaw" / "extensions"
 _TOKENLESS_RUNTIME_BIN_DIR = f"{_RUNNER_SUPPORT_DIR}/tokenless/bin"
-_TOKENLESS_BINARY_NAMES = ("rtk", "tokenless")
+# RTK runs as `tokenless rtk`, so Tokenless is the only helper binary.
+_TOKENLESS_BINARY_NAMES = ("tokenless",)
 _TOKENLESS_PLUGIN_ID = "tokenless"
+_HEADROOM_PLUGIN_ID = "headroom"
+# OpenClaw allows one plugin at a time in this slot. A profile that inherits a
+# stale claim from the copied base config would silently run a context engine the
+# caller never asked for, so every arm asserts the slot rather than assuming it.
+_CONTEXT_ENGINE_SLOT = "contextEngine"
 _DEFAULT_PATH_SUFFIX = f"{_TESTBED_ENV_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _PYTEST_CACHE_DIR = "/tmp/swe-runner-pytest-cache"
 _HYPOTHESIS_CACHE_DIR = "/tmp/swe-runner-hypothesis"
@@ -58,15 +65,28 @@ def build_openclaw_agent_scope_key(agent_id: str) -> str:
     return f"agent:{agent_id}:main"
 
 
-def _openclaw_stability_params() -> dict[str, object]:
+# Greedy decoding with a pinned seed makes runs byte-comparable, which is what a
+# regression harness wants. Measuring run-to-run variance needs the opposite, so
+# both values are overridable: at temperature 0 the seed is inert, meaning a
+# variance study must raise the temperature rather than only vary the seed.
+_DEFAULT_TEMPERATURE = 0
+_DEFAULT_SEED = 42
+
+
+def _openclaw_stability_params(temperature: float | None, seed: int | None) -> dict[str, object]:
     return {
-        "temperature": 0,
+        "temperature": _DEFAULT_TEMPERATURE if temperature is None else temperature,
         "top_p": 1,
-        "seed": 42,
+        "seed": _DEFAULT_SEED if seed is None else seed,
     }
 
 
-def _apply_openclaw_stability_defaults(config: dict[str, object]) -> None:
+def _apply_openclaw_stability_defaults(
+    config: dict[str, object],
+    *,
+    temperature: float | None = None,
+    seed: int | None = None,
+) -> None:
     agents = config.setdefault("agents", {})
     if not isinstance(agents, dict):
         raise RuntimeError("Invalid OpenClaw config: agents must be an object")
@@ -89,7 +109,7 @@ def _apply_openclaw_stability_defaults(config: dict[str, object]) -> None:
     defaults.pop("thinkingDefault", None)
     defaults["skipBootstrap"] = True
 
-    stability_params = _openclaw_stability_params()
+    stability_params = _openclaw_stability_params(temperature, seed)
     for key, value in stability_params.items():
         params[key] = value
 
@@ -143,41 +163,47 @@ def _iter_host_tokenless_binary_candidates(binary_name: str) -> Iterator[Path]:
 def _resolve_host_tokenless_binary(binary_name: str) -> Path:
     candidates = list(_iter_host_tokenless_binary_candidates(binary_name))
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
 
     searched = ", ".join(str(candidate) for candidate in candidates) or "<none>"
     raise RuntimeError(
-        f"Tokenless binary {binary_name!r} not found on host. "
-        f"Ensure it is on PATH or installed in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
+        f"Executable Tokenless binary {binary_name!r} not found on host. "
+        f"Ensure it is executable on PATH or in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
     )
 
 
-def _resolve_host_tokenless_extension() -> Path:
-    extension_dir = _HOST_OPENCLAW_EXTENSIONS_DIR / _TOKENLESS_PLUGIN_ID
+def _resolve_host_plugin_extension(plugin_id: str, cli_flag: str) -> Path:
+    extension_dir = _HOST_OPENCLAW_EXTENSIONS_DIR / plugin_id
     if (extension_dir / "openclaw.plugin.json").is_file() or (extension_dir / "package.json").is_file():
         return extension_dir
 
     raise RuntimeError(
-        f"Tokenless OpenClaw plugin extension not found on host: {extension_dir}. "
-        "Install the tokenless OpenClaw plugin before running with --tokenless."
+        f"OpenClaw plugin extension {plugin_id!r} not found on host: {extension_dir}. "
+        f"Install it before running with {cli_flag}."
     )
 
 
-def _expose_tokenless_plugin_extension(profile_dir: Path) -> None:
-    source = _resolve_host_tokenless_extension().resolve(strict=False)
-    target = profile_dir / "extensions" / _TOKENLESS_PLUGIN_ID
+def _expose_plugin_extension(profile_dir: Path, plugin_id: str, cli_flag: str) -> None:
+    """Link a host-installed OpenClaw plugin into one per-instance profile.
+
+    Globally installed plugins are not visible to a profile, so the extension has
+    to be linked in explicitly. That is also what keeps the arms isolated: a
+    profile without the link cannot load the plugin regardless of config leftovers.
+    """
+    source = _resolve_host_plugin_extension(plugin_id, cli_flag).resolve(strict=False)
+    target = profile_dir / "extensions" / plugin_id
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if target.is_symlink():
         if target.resolve(strict=False) == source:
             return
-        raise RuntimeError(f"OpenClaw tokenless extension link already points elsewhere: {target}")
+        raise RuntimeError(f"OpenClaw {plugin_id} extension link already points elsewhere: {target}")
     if target.exists():
-        raise RuntimeError(f"OpenClaw tokenless extension path already exists and is not a symlink: {target}")
+        raise RuntimeError(f"OpenClaw {plugin_id} extension path already exists and is not a symlink: {target}")
 
     target.symlink_to(source, target_is_directory=True)
-    logger.info("OPENCLAW_TOKENLESS_EXTENSION_LINKED source=%s target=%s", source, target)
+    logger.info("OPENCLAW_EXTENSION_LINKED plugin=%s source=%s target=%s", plugin_id, source, target)
 
 
 def _tokenless_binary_record(binary_name: str, source: Path, target: Path) -> dict[str, object]:
@@ -195,13 +221,13 @@ def _tokenless_binary_record(binary_name: str, source: Path, target: Path) -> di
 
 
 def _inject_tokenless_binaries(workspace: Path) -> None:
+    sources = {name: _resolve_host_tokenless_binary(name) for name in _TOKENLESS_BINARY_NAMES}
     tokenless_root = workspace / ".runner" / "tokenless"
     tokenless_target = tokenless_root / "bin"
     tokenless_target.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
 
-    for binary_name in _TOKENLESS_BINARY_NAMES:
-        source = _resolve_host_tokenless_binary(binary_name)
+    for binary_name, source in sources.items():
         logger.info("OPENCLAW_TOKENLESS_BINARY_RESOLVED name=%s path=%s", binary_name, source)
         target = tokenless_target / binary_name
         shutil.copy2(source, target)
@@ -213,25 +239,80 @@ def _inject_tokenless_binaries(workspace: Path) -> None:
     )
 
 
-def _enable_tokenless_plugin(config: dict[str, object]) -> None:
+def _plugins_section(config: dict[str, object]) -> dict[str, object]:
     plugins = config.setdefault("plugins", {})
     if not isinstance(plugins, dict):
         raise RuntimeError("Invalid OpenClaw config: plugins must be an object")
+    return plugins
+
+
+def _enable_plugin(config: dict[str, object], plugin_id: str) -> dict[str, object]:
+    plugins = _plugins_section(config)
 
     entries = plugins.setdefault("entries", {})
     if not isinstance(entries, dict):
         raise RuntimeError("Invalid OpenClaw config: plugins.entries must be an object")
-    tokenless_entry = entries.setdefault(_TOKENLESS_PLUGIN_ID, {})
-    if not isinstance(tokenless_entry, dict):
-        raise RuntimeError("Invalid OpenClaw config: plugins.entries.tokenless must be an object")
-    tokenless_entry["enabled"] = True
+    entry = entries.setdefault(plugin_id, {})
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"Invalid OpenClaw config: plugins.entries.{plugin_id} must be an object")
+    entry["enabled"] = True
 
     if "allow" in plugins:
         allowed_plugins = plugins["allow"]
         if not isinstance(allowed_plugins, list):
             raise RuntimeError("Invalid OpenClaw config: plugins.allow must be an array")
-        if _TOKENLESS_PLUGIN_ID not in allowed_plugins:
-            allowed_plugins.append(_TOKENLESS_PLUGIN_ID)
+        if plugin_id not in allowed_plugins:
+            allowed_plugins.append(plugin_id)
+    return entry
+
+
+def _request_verbose_markers(entry: dict[str, object]) -> None:
+    """Turn on the stdout markers the tokenless activation evidence reads.
+
+    The plugin prints its registration line and its per-call rewrite and
+    optimization lines only when ``verbose`` is set, so without it every run
+    reads as weak evidence whether or not the plugin acted.
+    """
+    plugin_config = entry.setdefault("config", {})
+    if not isinstance(plugin_config, dict):
+        raise RuntimeError(f"Invalid OpenClaw config: plugins.entries.{_TOKENLESS_PLUGIN_ID}.config must be an object")
+    plugin_config["verbose"] = True
+
+
+def _claim_context_engine_slot(config: dict[str, object], plugin_id: str) -> None:
+    plugins = _plugins_section(config)
+    slots = plugins.setdefault("slots", {})
+    if not isinstance(slots, dict):
+        raise RuntimeError("Invalid OpenClaw config: plugins.slots must be an object")
+    slots[_CONTEXT_ENGINE_SLOT] = plugin_id
+
+
+def _release_context_engine_slot(config: dict[str, object]) -> None:
+    """Drop an inherited context-engine claim so an unrequested engine cannot load.
+
+    The per-instance config is copied from the host config, which records whichever
+    plugin last claimed the slot globally. Leaving that in place would let a
+    baseline or tokenless run inherit a context engine and invalidate the comparison.
+    """
+    plugins = config.get("plugins")
+    if not isinstance(plugins, dict):
+        return
+    slots = plugins.get("slots")
+    if not isinstance(slots, dict):
+        return
+    released = slots.pop(_CONTEXT_ENGINE_SLOT, None)
+    if released is not None:
+        logger.info("OPENCLAW_CONTEXT_ENGINE_SLOT_RELEASED inherited=%s", released)
+
+
+# Subprocess bounds: these calls run while preparing sandboxes and inside
+# the cleanup callback (remove_agent_containers runs in prepared.cleanup()),
+# so an unresponsive CLI or docker daemon must fail the instance visibly
+# instead of hanging the whole batch forever. Mirrors env_checks (5s) and
+# workspace docker exec (60s).
+_SANDBOX_DOCKER_TIMEOUT_SECONDS = 30
+_SANDBOX_RECREATE_TIMEOUT_SECONDS = 120
+_SANDBOX_EXPLAIN_TIMEOUT_SECONDS = 60
 
 
 class OpenClawSandboxManager:
@@ -244,11 +325,17 @@ class OpenClawSandboxManager:
         profile: str,
         cli_path: str = "openclaw",
         tokenless: bool = False,
+        headroom: bool = False,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         self._config_path = config_path
         self._profile = profile
         self._cli_path = cli_path
         self._tokenless = tokenless
+        self._headroom = headroom
+        self._temperature = temperature
+        self._seed = seed
 
     def configure(self, spec: OpenClawSandboxSpec) -> None:
         """Write one sandbox agent entry for this profile and recreate that sandbox."""
@@ -259,13 +346,22 @@ class OpenClawSandboxManager:
         config = load_openclaw_config(self._config_path)
         _write_agents(spec.workspace_root, spec.agents_text)
         if self._tokenless:
-            _expose_tokenless_plugin_extension(self._config_path.parent)
+            _expose_plugin_extension(self._config_path.parent, _TOKENLESS_PLUGIN_ID, "--tokenless")
             _inject_tokenless_binaries(spec.workspace_root)
+        if self._headroom:
+            # Headroom is a host-side context engine; unlike tokenless it needs no
+            # in-sandbox binaries, so linking the extension is the whole injection.
+            _expose_plugin_extension(self._config_path.parent, _HEADROOM_PLUGIN_ID, "--headroom")
 
         agent_list = self._ensure_agent_list(config)
-        _apply_openclaw_stability_defaults(config)
+        _apply_openclaw_stability_defaults(config, temperature=self._temperature, seed=self._seed)
         if self._tokenless:
-            _enable_tokenless_plugin(config)
+            _request_verbose_markers(_enable_plugin(config, _TOKENLESS_PLUGIN_ID))
+        if self._headroom:
+            _enable_plugin(config, _HEADROOM_PLUGIN_ID)
+            _claim_context_engine_slot(config, _HEADROOM_PLUGIN_ID)
+        else:
+            _release_context_engine_slot(config)
 
         agent_entry = next(
             (item for item in agent_list if isinstance(item, dict) and item.get("id") == spec.agent_id),
@@ -292,6 +388,7 @@ class OpenClawSandboxManager:
         run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "recreate", "--agent", agent_id, "--force"],
             check=True,
+            timeout=_SANDBOX_RECREATE_TIMEOUT_SECONDS,
         )
         self.remove_stale_agent_containers(agent_id)
 
@@ -299,6 +396,7 @@ class OpenClawSandboxManager:
         scope_key = build_openclaw_agent_scope_key(agent_id)
         result = run_command(
             ["docker", "ps", "-aq", "--filter", f"label={_OPENCLAW_SANDBOX_SESSION_LABEL}={scope_key}"],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             logger.warning(
@@ -314,6 +412,7 @@ class OpenClawSandboxManager:
 
         remove_result = run_command(
             ["docker", "rm", "-f", *container_ids],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if remove_result.returncode != 0:
             logger.warning(
@@ -388,11 +487,15 @@ class OpenClawSandboxManager:
         result = run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "explain", "--agent", spec.agent_id, "--json"],
             check=True,
+            timeout=_SANDBOX_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}") from exc
+        # 合法 JSON 但非对象（CLI 出错/警告路径的合理输出）同样走既有错误路径
+        if not isinstance(data, dict):
+            raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}")
 
         sandbox = data.get("sandbox")
         workspace_root = sandbox.get("workspaceRoot") if isinstance(sandbox, dict) else None

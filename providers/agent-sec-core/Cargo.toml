@@ -1,10 +1,13 @@
 [package]
 name = "aw-provider-sec-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "AW Provider bridge to the public sec-core scan-code CLI"
 publish = false
+
+[features]
+testing = []
 
 [dependencies]
 aw-exec = { workspace = true }
@@ -12,19 +15,29 @@ aw-provider = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
-libc = { workspace = true }
+serde_yaml_ng = { workspace = true }
+aw-host = { workspace = true }
+aw-adapter = { workspace = true }
+aw-package = { workspace = true }
 jsonschema = { workspace = true }
 
 [workspace]
 resolver = "2"
 
 [workspace.dependencies]
+aw-host = { path = "../../src/aw/crates/aw-host" }
+aw-adapter = { path = "../../src/aw/crates/aw-adapter" }
+aw-package = { path = "../../src/aw/crates/aw-package" }
 aw-exec = { path = "../../src/aw/crates/aw-exec" }
 aw-provider = { path = "../../src/aw/crates/aw-provider" }
 jsonschema = { version = "0.53", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 thiserror = "2"
+sha2 = "0.10"

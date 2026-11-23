@@ -112,14 +112,17 @@ git -C "$SOURCE_REPO" worktree lock --reason 'agentsight prebuilt package build'
     "$FIXED_WORKTREE"
 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/agentsight"
+CONTRACT_DIR="$COMPONENT_ROOT/packaging/anolisa/raw"
+# Historical tagged sources retain their original contract directory.
+[ -d "$CONTRACT_DIR" ] || CONTRACT_DIR="$COMPONENT_ROOT/.anolisa"
 LINUX_VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/raw/verify-release.py" \
-        "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.toml" \
+        "$COMPONENT_ROOT" "$CONTRACT_DIR/component.toml" \
         --os linux --arch x86_64
 )"
 MACOS_VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/raw/verify-release.py" \
-        "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.macos.toml" \
+        "$COMPONENT_ROOT" "$CONTRACT_DIR/component.macos.toml" \
         --os macos --arch aarch64
 )"
 [ "$LINUX_VERSION" = "$MACOS_VERSION" ] || \
@@ -201,9 +204,9 @@ printf 'Source commit: %s\n' "$SOURCE_COMMIT"
 cat "$METADATA"
 
 if [ "$TARGET_OS" = macos ]; then
-    CONTRACT="$COMPONENT_ROOT/.anolisa/component.macos.toml"
+    CONTRACT="$CONTRACT_DIR/component.macos.toml"
 else
-    CONTRACT="$COMPONENT_ROOT/.anolisa/component.toml"
+    CONTRACT="$CONTRACT_DIR/component.toml"
 fi
 ARCHIVE="agentsight-$VERSION-$TARGET_OS-$TARGET_ARCH.tar.gz"
 for attempt in 1 2; do

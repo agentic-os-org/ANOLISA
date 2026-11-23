@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::context::CliContext;
-use crate::response::{CliError, render_json};
+use crate::response::{CliError, render_json, render_json_with_warnings};
 
 use self::application::{
     TelemetryApplicationOutcome, TelemetryApplied, TelemetryPreview, TelemetryRequest,
@@ -63,6 +63,13 @@ pub enum TelemetryCommands {
     /// Self-heal the ops channel without touching consent (internal, boot)
     #[command(hide = true)]
     Init,
+    /// Prepare the channel and resident unit for an image build (internal)
+    #[command(hide = true)]
+    Prepare {
+        /// Skip writing and enabling the resident systemd unit
+        #[arg(long)]
+        no_service: bool,
+    },
 }
 
 /// Dispatch `telemetry` subcommands.
@@ -92,6 +99,9 @@ fn mutation_request(command: TelemetryCommands, intent: ExecutionIntent) -> Tele
         TelemetryCommands::Unlink => TelemetryRequest::Unlink { intent },
         TelemetryCommands::Upload { loop_flag } => TelemetryRequest::Upload { loop_flag, intent },
         TelemetryCommands::Init => TelemetryRequest::Init { intent },
+        TelemetryCommands::Prepare { no_service } => {
+            TelemetryRequest::Prepare { no_service, intent }
+        }
         TelemetryCommands::Status { .. } => {
             unreachable!("status is dispatched through the read-only handler")
         }
@@ -162,35 +172,13 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
                 }
             }
             if ctx.json {
-                // Preserve these public JSON keys: scripts consume them independently
-                // of human messages and internal result variant names.
-                let data = match &result {
-                    // collection_enabled reports the resulting collection setting.
-                    TelemetryApplied::Enabled => serde_json::json!({"collection_enabled": true}),
-                    TelemetryApplied::Disabled => serde_json::json!({"collection_enabled": false}),
-                    // link/unlink report named-reporting state via linked, independently
-                    // of collection. link_id echoes the persisted ID used by the uploader;
-                    // already_linked distinguishes an idempotent no-op from ID creation.
-                    TelemetryApplied::Linked {
-                        link_id,
-                        already_linked,
-                    } => serde_json::json!({
-                        "linked": true,
-                        "link_id": link_id,
-                        "already_linked": already_linked,
-                    }),
-                    TelemetryApplied::Unlinked => serde_json::json!({"linked": false}),
-                    // loop_flag identifies whether the completed uploader ran continuously.
-                    TelemetryApplied::Uploaded { loop_flag } => {
-                        serde_json::json!({"loop_flag": loop_flag})
-                    }
-                    // initialized confirms ops-channel setup, without changing consent.
-                    TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
-                };
-                for warning in outcome.warnings() {
-                    eprintln!("warn: {warning}");
-                }
-                return render_json(result.command(), data);
+                // Warnings ride in the envelope here instead of stderr, so stdout stays
+                // the only stream a script has to parse.
+                return render_json_with_warnings(
+                    result.command(),
+                    applied_json(&result),
+                    outcome.warnings().to_vec(),
+                );
             }
             for output in applied_output(&result, outcome.warnings()) {
                 match output {
@@ -200,6 +188,40 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
             }
             Ok(())
         }
+    }
+}
+
+fn applied_json(result: &TelemetryApplied) -> serde_json::Value {
+    // Preserve these public JSON keys: scripts consume them independently
+    // of human messages and internal result variant names.
+    match result {
+        // collection_enabled reports the resulting collection setting.
+        TelemetryApplied::Enabled => serde_json::json!({"collection_enabled": true}),
+        TelemetryApplied::Disabled => serde_json::json!({"collection_enabled": false}),
+        // link/unlink report named-reporting state via linked, independently
+        // of collection. link_id echoes the persisted ID used by the uploader;
+        // already_linked distinguishes an idempotent no-op from ID creation.
+        TelemetryApplied::Linked {
+            link_id,
+            already_linked,
+        } => serde_json::json!({
+            "linked": true,
+            "link_id": link_id,
+            "already_linked": already_linked,
+        }),
+        TelemetryApplied::Unlinked => serde_json::json!({"linked": false}),
+        // loop_flag identifies whether the completed uploader ran continuously.
+        TelemetryApplied::Uploaded { loop_flag } => {
+            serde_json::json!({"loop_flag": loop_flag})
+        }
+        // initialized confirms ops-channel setup, without changing consent.
+        TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
+        // prepared reports an image-build setup; service_enabled says whether
+        // the resident unit was written and enabled for future boots.
+        TelemetryApplied::Prepared { service_enabled } => serde_json::json!({
+            "prepared": true,
+            "service_enabled": service_enabled,
+        }),
     }
 }
 
@@ -249,6 +271,17 @@ fn applied_output(result: &TelemetryApplied, warnings: &[String]) -> Vec<Telemet
             )])
             .collect(),
         TelemetryApplied::Uploaded { .. } | TelemetryApplied::Initialized => warning_lines(),
+        TelemetryApplied::Prepared { service_enabled } => warning_lines()
+            .into_iter()
+            .chain([TelemetryOutput::Stdout(format!(
+                "Telemetry channel prepared for image build (resident unit {}).",
+                if *service_enabled {
+                    "enabled, not started"
+                } else {
+                    "not enabled"
+                }
+            ))])
+            .collect(),
     }
 }
 
@@ -806,6 +839,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prepare_no_service() {
+        assert!(matches!(
+            parse(&["t", "prepare"]),
+            TelemetryCommands::Prepare { no_service: false }
+        ));
+        assert!(matches!(
+            parse(&["t", "prepare", "--no-service"]),
+            TelemetryCommands::Prepare { no_service: true }
+        ));
+    }
+
+    #[test]
     fn test_parse_upload_loop_flag() {
         assert!(matches!(
             parse(&["t", "upload", "--loop"]),
@@ -838,6 +883,16 @@ mod tests {
             ),
             TelemetryRequest::Upload {
                 loop_flag: true,
+                intent: ExecutionIntent::Apply
+            }
+        ));
+        assert!(matches!(
+            mutation_request(
+                TelemetryCommands::Prepare { no_service: true },
+                ExecutionIntent::Apply
+            ),
+            TelemetryRequest::Prepare {
+                no_service: true,
                 intent: ExecutionIntent::Apply
             }
         ));
@@ -892,6 +947,64 @@ mod tests {
                 TelemetryOutput::Stdout("Unlinked from named reporting.".to_string()),
             ]
         );
+        assert_eq!(
+            applied_output(
+                &TelemetryApplied::Prepared {
+                    service_enabled: false,
+                },
+                &warnings,
+            ),
+            vec![
+                TelemetryOutput::Stderr("warn: first warning".to_string()),
+                TelemetryOutput::Stderr("warn: second warning".to_string()),
+                TelemetryOutput::Stdout(
+                    "Telemetry channel prepared for image build (resident unit not enabled)."
+                        .to_string()
+                ),
+            ]
+        );
+    }
+
+    /// The `--json` path has to carry the same boot guidance the human path
+    /// prints: an image-build script that reads only JSON would otherwise skip
+    /// `telemetry init` and leave the image's instance snapshot empty.
+    #[test]
+    fn prepare_no_service_json_envelope_carries_boot_guidance() {
+        let warning = "anolisa-telemetry.service not written; run `anolisa telemetry init` at boot for this host's instance snapshot, then `anolisa telemetry upload --loop`".to_string();
+        let envelope = crate::response::success_envelope(
+            "telemetry prepare",
+            applied_json(&TelemetryApplied::Prepared {
+                service_enabled: false,
+            }),
+            vec![warning.clone()],
+        );
+
+        assert_eq!(envelope.warnings, vec![warning]);
+        let rendered = serde_json::to_string(&envelope).expect("envelope must serialize");
+        assert!(
+            rendered.contains("anolisa telemetry init"),
+            "boot guidance must reach the JSON envelope, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"service_enabled\":false"),
+            "prepared payload must stay unchanged, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn prepared_output_states_the_unit_is_enabled_but_not_started() {
+        assert_eq!(
+            applied_output(
+                &TelemetryApplied::Prepared {
+                    service_enabled: true,
+                },
+                &[],
+            ),
+            vec![TelemetryOutput::Stdout(
+                "Telemetry channel prepared for image build (resident unit enabled, not started)."
+                    .to_string()
+            )]
+        );
     }
 
     #[test]
@@ -911,14 +1024,13 @@ mod tests {
     }
 
     #[test]
-    fn test_unit_template_renders_exec_and_wantedby() {
+    fn test_unit_template_declares_exec_lines_and_install_target() {
         const UNIT_TEMPLATE: &str =
             include_str!("../../../../systemd/anolisa-telemetry.service.in");
-        let rendered = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", "/usr/bin/anolisa");
-        assert!(rendered.contains("ExecStartPre=/usr/bin/anolisa telemetry init"));
-        assert!(rendered.contains("ExecStart=/usr/bin/anolisa telemetry upload --loop"));
-        assert!(rendered.contains("WantedBy=multi-user.target"));
-        // Placeholder must be fully substituted.
-        assert!(!rendered.contains("@@ANOLISA_BIN@@"));
+        // The template keeps the bare placeholder; quoting belongs to the
+        // renderer (`systemd_exec_path`), so this only checks the lines exist.
+        assert!(UNIT_TEMPLATE.contains("ExecStartPre=@@ANOLISA_BIN@@ telemetry init"));
+        assert!(UNIT_TEMPLATE.contains("ExecStart=@@ANOLISA_BIN@@ telemetry upload --loop"));
+        assert!(UNIT_TEMPLATE.contains("WantedBy=multi-user.target"));
     }
 }

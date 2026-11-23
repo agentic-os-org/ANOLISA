@@ -1,4 +1,4 @@
-//! Scope commands and mutually exclusive process/cgroup selectors.
+//! Scope commands and mutually exclusive process selectors.
 
 use asc_daemon_protocol::method::{
     POLICY_SCOPES_CREATE, POLICY_SCOPES_DELETE, POLICY_SCOPES_GET, POLICY_SCOPES_LIST,
@@ -35,6 +35,9 @@ pub(crate) struct CreateScope {
     policy_id: ResourceId,
     #[arg(long, value_parser = revision, requires = "policy_id")]
     policy_revision: Revision,
+    /// Non-root process owner UID (required by credential policies).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "pid")]
+    owner_uid: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -55,9 +58,10 @@ pub(crate) struct Selector {
     /// Exact normalized absolute executable path.
     #[arg(long)]
     executable: Option<String>,
-    /// Positive cgroup ID; mutually exclusive with --pid.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    cgroup_id: Option<u64>,
+    /// Exact normalized absolute path equal to one whole /proc/PID/cmdline argument,
+    /// such as a script Agent's command path from `which`; no realpath or substring match.
+    #[arg(long, value_name = "PATH")]
+    cmdline_arg: Option<String>,
 }
 
 impl ScopeCommand {
@@ -67,6 +71,7 @@ impl ScopeCommand {
                 POLICY_SCOPES_CREATE,
                 &CreateScopeParams {
                     selector: input.selector.value(),
+                    owner_uid: input.owner_uid,
                     policy_templates: vec![PolicyReference {
                         policy_id: input.policy_id.clone(),
                         policy_revision: input.policy_revision,
@@ -100,20 +105,24 @@ impl Selector {
     fn value(&self) -> ScopeSelector {
         match (
             self.pid,
-            self.cgroup_id,
             &self.process_name,
             &self.executable,
+            &self.cmdline_arg,
         ) {
             (Some(pid), None, None, None) => ScopeSelector::Pid { pid },
-            (None, Some(cgroup_id), None, None) => ScopeSelector::CgroupId { cgroup_id },
-            (None, None, Some(name), None) => ScopeSelector::Process {
+            (None, Some(name), None, None) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Name {
                     process_name: name.clone(),
                 },
             },
-            (None, None, None, Some(path)) => ScopeSelector::Process {
+            (None, None, Some(path), None) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Executable {
                     executable: path.clone(),
+                },
+            },
+            (None, None, None, Some(path)) => ScopeSelector::Process {
+                matcher: ProcessMatcher::CmdlineArg {
+                    cmdline_arg: path.clone(),
                 },
             },
             _ => unreachable!("clap requires exactly one selector; fields are private"),

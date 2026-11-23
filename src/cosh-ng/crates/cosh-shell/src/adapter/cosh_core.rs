@@ -45,6 +45,9 @@ pub struct CoshCoreAdapter {
     /// Shell cwd tracked from the PTY host so that short-lived `--registry`
     /// processes resolve the same project root as the headless runtime.
     pub(crate) shell_cwd: Arc<Mutex<Option<String>>>,
+    /// Wizard-initiated auth writes must go through the ownership-checked
+    /// core writer; ordinary shell auth keeps its historical behavior.
+    pub(crate) guarded_auth_writes: bool,
 }
 
 impl Default for CoshCoreAdapter {
@@ -66,6 +69,7 @@ impl Default for CoshCoreAdapter {
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
             shell_cwd: Arc::new(Mutex::new(None)),
+            guarded_auth_writes: false,
         }
     }
 }
@@ -79,7 +83,15 @@ impl CoshCoreAdapter {
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
             shell_cwd: Arc::new(Mutex::new(None)),
+            guarded_auth_writes: false,
         }
+    }
+
+    /// Requests the core's ownership-checked configuration writer for every
+    /// auth registry call made through this adapter.
+    pub(crate) fn with_guarded_auth_writes(mut self) -> Self {
+        self.guarded_auth_writes = true;
+        self
     }
 
     /// Enables or disables real model process execution.
@@ -116,6 +128,23 @@ impl CoshCoreAdapter {
         if let Ok(mut guard) = self.shell_cwd.lock() {
             *guard = None;
         }
+    }
+
+    /// Resolves the workspace for short-lived MCP CLI subprocesses: the shell
+    /// cwd reported by the slash dispatch layer, falling back to the active
+    /// session's workspace scope (the same rule registry queries use). The
+    /// wrapper process cwd is not used because a PTY `cd` does not update it.
+    pub(crate) fn shell_workspace(&self) -> Option<String> {
+        self.shell_cwd
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                self.session
+                    .lock()
+                    .ok()
+                    .and_then(|session| session.active_workspace_scope().map(str::to_string))
+            })
     }
 
     /// Inspects a persisted session summary without selecting it.
@@ -331,11 +360,24 @@ impl CoshCoreAdapter {
         }
     }
 
+    pub(crate) fn trial_runtime_idle(&self) -> bool {
+        self.runtime.trial_idle()
+    }
+
     /// Starts a cancellable cosh-core turn and updates recovery state.
     pub fn start_cancellable(
         &self,
         request: AgentRequest,
         mode: CoshApprovalMode,
+    ) -> AgentRunHandle {
+        self.start_cancellable_with_trial(request, mode, None)
+    }
+
+    pub(crate) fn start_cancellable_with_trial(
+        &self,
+        request: AgentRequest,
+        mode: CoshApprovalMode,
+        trial: Option<crate::types::EcsTrialContext>,
     ) -> AgentRunHandle {
         let session_scope = session_scope_from_request(&request);
         let mut prepared = self.prepare_invocation(&request, mode);
@@ -346,10 +388,11 @@ impl CoshCoreAdapter {
 
         let resume_attempt = self.begin_resume_attempt(&mut prepared, &session_scope);
         let raw_user_input = request.user_input.clone();
-        self.runtime.start_run(
+        self.runtime.start_run_with_trial(
             request.id,
             prepared,
             raw_user_input,
+            trial,
             mode,
             Arc::clone(&self.session),
             session_scope,

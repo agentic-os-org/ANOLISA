@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 impl PapRepository for SqlitePolicyRepository {
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError> {
-        policy.validate().map_err(PapError::InvalidPolicy)?;
+        asc_pap::validate_policy_snapshot(policy)?;
         self.access(true, |tx| {
             let encoded = encode(policy)?;
             if encoded.len() > 1024 * 1024 {
@@ -68,6 +68,52 @@ impl PapRepository for SqlitePolicyRepository {
             .and_then(|s| s.current)
             .filter(|p| p.revision == revision)
             .ok_or(PapError::NotFound)
+    }
+    fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        if ids.is_empty() || ids.len() > 32 {
+            return Err(PapError::InvalidPolicy(
+                asc_policy_types::error::ValidationError::new("policyIds", "requires 1..32 IDs"),
+            ));
+        }
+        self.access(false, |tx| {
+            ids.iter()
+                .map(|id| {
+                    read_policy(tx, id)?
+                        .and_then(|state| state.current)
+                        .ok_or_else(|| PapError::NotFound.into())
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.access(false, |tx| {
+            let mut statement = tx.prepare(
+                "SELECT policy_id FROM policies WHERE current_json IS NOT NULL ORDER BY policy_id",
+            )?;
+            let keys = statement.query_map([], |row| row.get::<_, String>(0))?;
+            let mut policies = Vec::new();
+            let mut bytes = 0;
+            for key in keys {
+                let policy = read_policy(tx, &id(key?)?)?
+                    .and_then(|state| state.current)
+                    .ok_or(StoreError::Corrupt)?;
+                bytes += encode(&policy)?.len();
+                // Bound one in-process snapshot, failing closed rather than dropping members.
+                if policies.len() >= 4096 || bytes > 16 * 1024 * 1024 {
+                    return Err(PapError::InvalidPolicy(
+                        asc_policy_types::error::ValidationError::new(
+                            "authorizationPolicies",
+                            "current policy snapshot exceeds 4096 records or 16 MiB",
+                        ),
+                    )
+                    .into());
+                }
+                policies.push(policy);
+            }
+            Ok(policies)
+        })
+        .map_err(RepositoryError::pap)
     }
     fn list_policies(&self, limit: u32, offset: u32) -> Result<Page<PreparedPolicy>, PapError> {
         self.access(false, |tx| {
@@ -263,6 +309,22 @@ impl PapRepository for SqlitePolicyRepository {
             Ok(changed)
         })
         .map_err(RepositoryError::pap)
+    }
+    fn scope_execution_ready_to_release(&self, key: &ResourceId) -> Result<bool, PapError> {
+        self.access(false, |tx| {
+            let Some(scope) = read_scope(tx, key)? else {
+                return Ok(false);
+            };
+            Ok(scope.execution_pending
+                && scope.scope.status == ScopeStatus::Deleting
+                && scope.discovery_stopped
+                && binding_ids(tx, key)?.is_empty())
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn finish_scope_execution(&self, key: &ResourceId) -> Result<(), PapError> {
+        self.access(true, |tx| crate::records::confirm_scope_execution(tx, key))
+            .map_err(RepositoryError::pap)
     }
     fn sync_scope_instances(
         &self,

@@ -141,6 +141,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
 
   // Form fields
   const [apiKey, setApiKey] = useState('');
+  const [currentApiKey, setCurrentApiKey] = useState('');
   const [provider, setProvider] = useState('custom');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
@@ -211,6 +212,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   }, [provider, availableModels]);
 
   async function save(): Promise<boolean> {
+    if (loading || config === null) return false;
     setError(null);
 
     const timeoutSecs = Number(semanticSearchTimeoutSecs);
@@ -222,6 +224,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
     try {
       const body: {
         api_key?: string;
+        current_api_key?: string;
         base_url?: string;
         model?: string;
         search_timeout_secs?: number;
@@ -233,10 +236,16 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
       // Omit api_key when unchanged; keys containing masking dots are ignored by the backend.
       if (apiKey.trim()) {
         body.api_key = apiKey.trim();
+        if (currentApiKey.trim()) {
+          body.current_api_key = currentApiKey.trim();
+        }
       }
       const updated = await saveOptimizeConfig(body);
       setConfig(updated);
-      setApiKey('');
+      // Inputs remain editable while saving. Do not clear a later edit that
+      // was never included in this request.
+      setApiKey((current) => current === apiKey ? '' : current);
+      setCurrentApiKey((current) => current === currentApiKey ? '' : current);
       return true;
     } catch (e2) {
       const msg = e2 instanceof Error ? e2.message : String(e2);
@@ -329,6 +338,26 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
               {config?.api_key ? t('opt.llm.apiKey.keepUnchanged') : t('opt.llm.apiKey.hint')}
             </p>
           </div>
+
+          {config?.api_key && apiKey.trim().length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {t('opt.llm.currentApiKey.label')}
+              </label>
+              <input
+                type={showKey ? 'text' : 'password'}
+                className={inputCls}
+                value={currentApiKey}
+                onChange={(e) => setCurrentApiKey(e.target.value)}
+                placeholder={t('opt.llm.apiKey.placeholder')}
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                {t('opt.llm.currentApiKey.hint')}
+              </p>
+            </div>
+          )}
 
           {/* Semantic search deadline */}
           <div>

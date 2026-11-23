@@ -701,6 +701,9 @@ fn remote_backend_error(error: BackendError) -> RemoteError {
         BackendError::StaleProcess { .. } => "stale_process",
         BackendError::CompileFailure(_) => "compile_failure",
         BackendError::KernelFailure(_) => "kernel_failure",
+        BackendError::PreexistingWritableMap { .. } => "preexisting_writable_map",
+        BackendError::PreexistingWritableFd { .. } => "preexisting_writable_fd",
+        BackendError::UnsupportedEnvironment(_) => "unsupported_environment",
     };
     RemoteError {
         code: code.into(),
@@ -756,12 +759,28 @@ mod tests {
 
     use agentsight_enforcement_protocol::{
         ApplyCredentialPolicy, ApplyPolicy, Binding, CredentialExfiltrationPolicy,
-        DestinationScope, HealthStatus, PolicyMode, ReplacePolicy, ReplacementPolicy,
+        DestinationScope, FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy,
+        FileProtectionTarget, FileProtectionTargetKind, FileProtectionTopologyMode,
+        FileProtections, HealthStatus, PolicyMode, ReplacePolicy, ReplacementPolicy,
         ReplacementSource, SecurityEvent, ViolationEvent,
     };
 
     use super::*;
     use crate::MockBackend;
+
+    #[test]
+    fn remote_error_code_names_preexisting_writable_map() {
+        let error = remote_backend_error(BackendError::PreexistingWritableMap {
+            pid: 7,
+            path: "/protected/keep.txt".into(),
+        });
+        assert_eq!(error.code, "preexisting_writable_map");
+        let error = remote_backend_error(BackendError::PreexistingWritableFd {
+            pid: 7,
+            path: "/protected/keep.txt".into(),
+        });
+        assert_eq!(error.code, "preexisting_writable_fd");
+    }
 
     #[test]
     fn peer_driven_accept_errors_are_transient() {
@@ -821,6 +840,7 @@ mod tests {
             policy_revision: "1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: Some(PolicyMode::Audit),
+            file_protection_policy: None,
         };
         let mut target = source.clone();
         target.binding_id = Uuid::new_v4();
@@ -1045,6 +1065,56 @@ mod tests {
     }
 
     #[test]
+    fn leased_structured_apply_returns_compile_failure_without_a_binding() {
+        let backend = crate::MockBackend::new();
+        let subscriptions = RequiredSubscriptions::default();
+        let subscription_id = Uuid::new_v4();
+        let (service_stream, _peer_stream) =
+            UnixStream::pair().expect("fixture socket pair should open");
+        subscriptions
+            .install(subscription_id, &service_stream)
+            .expect("required subscription should install");
+        let mut request = replacement_policy().expected.request;
+        request.policy_dsl.clear();
+        request.file_protection_policy = Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: "/fixture/protected".into(),
+                kind: FileProtectionTargetKind::ExactFile,
+                protections: FileProtections {
+                    delete: true,
+                    ordinary_write: false,
+                    read: false,
+                },
+                exclusions: Vec::new(),
+            }],
+        });
+
+        let result = dispatch(
+            &backend,
+            &subscriptions,
+            Command::ApplyPolicyLeased {
+                request,
+                required_subscription_id: subscription_id,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code == "compile_failure"
+                    && error.message.contains("structured file protection policies")
+        ));
+        assert!(
+            backend
+                .bindings()
+                .expect("bindings should remain queryable")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn unleased_credential_apply_is_rejected() {
         let backend = crate::MockBackend::new();
         let subscriptions = RequiredSubscriptions::default();
@@ -1154,5 +1224,14 @@ mod tests {
                 "mock backend does not enforce kernel operations; security event delivery loss: dropped_events=5"
             )
         );
+    }
+
+    #[test]
+    fn remote_backend_error_maps_unsupported_environment_code() {
+        let remote = remote_backend_error(BackendError::UnsupportedEnvironment(
+            "pid-ns container".into(),
+        ));
+        assert_eq!(remote.code, "unsupported_environment");
+        assert!(remote.message.contains("pid-ns container"));
     }
 }

@@ -26,6 +26,7 @@
 //! }
 //! ```
 
+use super::ResponsesReasoningReplay;
 use super::types::{
     MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
     OpenAiSseChunk,
@@ -56,6 +57,39 @@ struct ResponseToolCall {
     name: String,
     arguments: String,
     done: bool,
+}
+
+/// Name of a Responses output item that spells a tool call.
+///
+/// `function_call` and `custom_tool_call` carry it in `name`; a Codex
+/// `local_shell_call` names the tool implicitly, the same way the collector
+/// crate and the non-streaming reader default it to `shell`.
+fn response_item_call_name(item: &serde_json::Value) -> String {
+    item.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            if item.get("type").and_then(|v| v.as_str()) == Some("local_shell_call") {
+                "shell"
+            } else {
+                ""
+            }
+        })
+        .to_owned()
+}
+
+/// Payload of a Responses output item that spells a tool call, as text.
+///
+/// `function_call`/`custom_tool_call` stream their payload as a string under
+/// `arguments` or `input`; `local_shell_call` keeps its argv in an `action`
+/// object, which the chat shape carries as its JSON text, exactly as the
+/// non-streaming reader renders it.
+fn response_item_call_arguments(item: &serde_json::Value) -> String {
+    item.get("arguments")
+        .or_else(|| item.get("input"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| item.get("action").map(|action| action.to_string()))
+        .unwrap_or_default()
 }
 
 impl ResponsesToolCalls {
@@ -95,7 +129,7 @@ impl ResponsesToolCalls {
                 let Some(item) = item else { return };
                 if !matches!(
                     item.get("type").and_then(|v| v.as_str()),
-                    Some("function_call" | "custom_tool_call")
+                    Some("function_call" | "custom_tool_call" | "local_shell_call")
                 ) {
                     return;
                 }
@@ -127,17 +161,8 @@ impl ResponsesToolCalls {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_owned(),
-                    name: item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
-                    arguments: item
-                        .get("arguments")
-                        .or_else(|| item.get("input"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
+                    name: response_item_call_name(item),
+                    arguments: response_item_call_arguments(item),
                     done: false,
                 });
                 self.current = Some(self.calls.len() - 1);
@@ -193,17 +218,13 @@ impl ResponsesToolCalls {
                 let Some(item) = item else { return };
                 if !matches!(
                     item.get("type").and_then(|v| v.as_str()),
-                    Some("function_call" | "custom_tool_call")
+                    Some("function_call" | "custom_tool_call" | "local_shell_call")
                 ) {
                     return;
                 }
                 let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let arguments = item
-                    .get("arguments")
-                    .or_else(|| item.get("input"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let name = response_item_call_name(item);
+                let arguments = response_item_call_arguments(item);
                 if let Some(p) = position {
                     // The done item is authoritative: it supersedes whatever
                     // partial deltas the capture caught, and fills identity
@@ -213,10 +234,10 @@ impl ResponsesToolCalls {
                         call.id = call_id.to_owned();
                     }
                     if !name.is_empty() {
-                        call.name = name.to_owned();
+                        call.name = name;
                     }
                     if !arguments.is_empty() {
-                        call.arguments = arguments.to_owned();
+                        call.arguments = arguments;
                     }
                     call.done = true;
                     // After a completed item, an unidentified follow-up event
@@ -249,8 +270,8 @@ impl ResponsesToolCalls {
                     index,
                     item_id: item_id.map(str::to_owned),
                     id: call_id.to_owned(),
-                    name: name.to_owned(),
-                    arguments: arguments.to_owned(),
+                    name,
+                    arguments,
                     done: true,
                 });
             }
@@ -466,37 +487,49 @@ impl OpenAIParser {
                         // user message holding their JSON dropped the whole
                         // tool interaction from the recorded request. A custom
                         // (freeform) tool is replayed the same way, with its
-                        // text in `input` instead of `arguments`.
-                        "function_call" | "custom_tool_call" => {
+                        // text in `input` instead of `arguments`. A Codex
+                        // `local_shell_call` carries its argv in an `action`
+                        // object and names the tool implicitly; the collector
+                        // crate already maps that shape, so read it here too
+                        // instead of flattening the call into a user message.
+                        "function_call" | "custom_tool_call" | "local_shell_call" => {
+                            let arguments = item
+                                .get("arguments")
+                                .or_else(|| item.get("input"))
+                                .or_else(|| item.get("action"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(if t == "local_shell_call" { "shell" } else { "" });
                             messages.push(serde_json::json!({
                                 "role": "assistant",
                                 "tool_calls": [{
                                     "id": item.get("call_id"),
                                     "type": "function",
                                     "function": {
-                                        "name": item
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default(),
-                                        "arguments": item
-                                            .get("arguments")
-                                            .or_else(|| item.get("input"))
-                                            .cloned()
-                                            .unwrap_or(serde_json::Value::Null),
+                                        "name": name,
+                                        "arguments": arguments,
                                     },
                                 }],
                             }));
                         }
-                        "function_call_output" | "custom_tool_call_output" => {
+                        "function_call_output"
+                        | "custom_tool_call_output"
+                        | "local_shell_call_output" => {
                             // `content` must be text: the chat content type is
                             // string-or-parts, so a structured output is carried
                             // as its JSON text and re-parsed by the consumer.
+                            // An explicit null carries no text at all, so it
+                            // must not become the four-character string "null".
                             let output = match item
                                 .get("output")
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Null)
                             {
                                 serde_json::Value::String(text) => text,
+                                serde_json::Value::Null => String::new(),
                                 other => other.to_string(),
                             };
                             messages.push(serde_json::json!({
@@ -712,18 +745,33 @@ impl OpenAIParser {
                 // carries its text in `input` instead of `arguments`, exactly
                 // as the replayed request of the same call does. Reading only
                 // `function_call` dropped the call from the recorded response
-                // while the request side kept it.
-                "function_call" | "custom_tool_call" => {
+                // while the request side kept it. `local_shell_call` is the
+                // shell-tool spelling of the same answer, with its argv in an
+                // `action` object; the collector crate maps it, so the recorded
+                // response must not lose it either.
+                "function_call" | "custom_tool_call" | "local_shell_call" => {
+                    // `local_shell_call` keeps its argv in an `action` object
+                    // rather than a string `arguments`; render it the way the
+                    // chat shape carries every payload, as JSON text.
                     let arguments = item
                         .get("arguments")
                         .or_else(|| item.get("input"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .map(str::to_string)
+                        .or_else(|| item.get("action").map(|action| action.to_string()))
+                        .unwrap_or_default();
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or(
+                        if item_type == "local_shell_call" {
+                            "shell"
+                        } else {
+                            ""
+                        },
+                    );
                     let tc = serde_json::json!({
                         "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "type": "function",
                         "function": {
-                            "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            "name": name,
                             "arguments": arguments,
                         }
                     });
@@ -803,7 +851,7 @@ impl OpenAIParser {
     /// answer in its `content[]` parts, the shape the token extractor's
     /// `read_output_item` reads. Reasoning items also carry text, but it is
     /// the thinking rather than the answer: they are skipped here and read
-    /// by `closing_reasoning_item_text` into the reasoning buffer, the way
+    /// through `ResponsesReasoningReplay` into the reasoning buffer, the way
     /// `read_output_item` routes them to its thinking half.
     fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
         let item = chunk.get("item")?;
@@ -840,25 +888,54 @@ impl OpenAIParser {
         (!refusal.is_empty()).then_some(refusal)
     }
 
-    /// Thinking text of a finished `reasoning` output item, or `None`.
+    /// Recover the complete output carried by a terminal `response.completed`
+    /// or `response.incomplete` event.
     ///
-    /// The closing item carries the thinking in its `content[]` parts
-    /// (dashscope `reasoning_text`) and/or `summary[]` (the o-series default),
-    /// the same two fields the token extractor's `read_output_item` routes to
-    /// its thinking half. Reading them in that order keeps this fallback
-    /// identical to the drain path.
-    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-        let item = chunk.get("item")?;
-        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-            return None;
+    /// Those events carry the whole final Response object, including its
+    /// `output[]`. A capture that attached after the deltas has no other copy
+    /// of the answer or of a tool call, so read the same fields the
+    /// per-event arms read. Deltas still win over any repeated text, and
+    /// `ResponsesToolCalls::observe` merges a terminal item into the call a
+    /// delta path already registered instead of duplicating it.
+    fn observe_terminal_output(
+        resp: &serde_json::Value,
+        calls: &mut ResponsesToolCalls,
+        saw_text_delta: bool,
+        saw_refusal_delta: bool,
+        closing_text: &mut Option<String>,
+        closing_refusal: &mut Option<String>,
+    ) {
+        let Some(output) = resp.get("output").and_then(|o| o.as_array()) else {
+            return;
+        };
+        for (index, item) in output.iter().enumerate() {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    let chunk = serde_json::json!({ "item": item });
+                    if !saw_text_delta
+                        && closing_text.is_none()
+                        && let Some(text) = Self::closing_message_item_text(&chunk)
+                    {
+                        *closing_text = Some(text);
+                    }
+                    if !saw_refusal_delta
+                        && closing_refusal.is_none()
+                        && let Some(refusal) = Self::closing_message_item_refusal(&chunk)
+                    {
+                        *closing_refusal = Some(refusal);
+                    }
+                }
+                Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                    let event = serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": item,
+                    });
+                    calls.observe(&event);
+                }
+                _ => {}
+            }
         }
-        let text: String = ["content", "summary"]
-            .iter()
-            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-            .collect();
-        (!text.is_empty()).then_some(text)
     }
 
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
@@ -867,13 +944,7 @@ impl OpenAIParser {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
-        // Reasoning items are kept aside on the same delta-wins rule as the
-        // answer, but unlike it they are not repeats of one another: an
-        // agentic response interleaves a reasoning item with each call it
-        // precedes, and every item carries different thinking. The buffer
-        // therefore accumulates them in arrival order.
-        let mut closing_reasoning_text = String::new();
-        let mut saw_reasoning_delta = false;
+        let reasoning_replay = ResponsesReasoningReplay::new(chunks);
         let mut reasoning_buf = String::new();
         let mut saw_refusal_delta = false;
         // The refusal carried by the closing message item, kept aside on the
@@ -926,10 +997,8 @@ impl OpenAIParser {
                             closing_text = Some(text);
                         }
                     }
-                    if !saw_reasoning_delta {
-                        if let Some(text) = Self::closing_reasoning_item_text(chunk) {
-                            closing_reasoning_text.push_str(&text);
-                        }
+                    if let Some(text) = reasoning_replay.closing_item_text(chunk) {
+                        reasoning_buf.push_str(&text);
                     }
                     if !saw_refusal_delta {
                         if let Some(refusal) = Self::closing_message_item_refusal(chunk) {
@@ -944,9 +1013,6 @@ impl OpenAIParser {
                 // reasoning_content delta.
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        if !delta.is_empty() {
-                            saw_reasoning_delta = true;
-                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -986,6 +1052,14 @@ impl OpenAIParser {
                                 "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                             })
                         });
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 // A capped stream terminates with response.incomplete
@@ -1023,6 +1097,14 @@ impl OpenAIParser {
                                 _ => {}
                             }
                         }
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 "response.created" => {
@@ -1044,9 +1126,6 @@ impl OpenAIParser {
             if let Some(text) = closing_text {
                 content_buf = text;
             }
-        }
-        if reasoning_buf.is_empty() {
-            reasoning_buf = closing_reasoning_text;
         }
         if refusal_buf.is_empty() {
             if let Some(refusal) = closing_refusal {
@@ -1466,15 +1545,8 @@ impl OpenAIParser {
             || path.contains("/completions")
             || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            // The Responses API's per-id sub-endpoints (GET retrieve, POST
-            // cancel, DELETE) share the /v1/responses prefix but are not
-            // inference calls: the retrieval response IS the stored
-            // response object (object=="response" + output[] + usage), so
-            // deep-parsing a poll would re-record the create call's output
-            // and re-count its usage tokens as a second llm_call. Must
-            // stay in lockstep with parser::llm::is_llm_api_path.
             || (path.contains("/v1/responses")
-                && !path.contains("/v1/responses/"))
+                && !crate::parser::llm::is_responses_sub_endpoint(path))
     }
 }
 
@@ -1503,6 +1575,39 @@ mod tests {
         let request = request.unwrap();
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 1);
+    }
+
+    /// An explicit `null` output on a replayed Responses tool result means
+    /// the tool produced no text, not the four-character string "null".
+    ///
+    /// The normalizer carries a structured output as its JSON text because the
+    /// chat content type is string-or-parts, but a null has no text to carry:
+    /// the old fallthrough made the tool message read `"null"`, which the
+    /// detectors and the grader then scanned as real output. The shared
+    /// trajectory reader maps an explicit null message to the empty string the
+    /// same way.
+    #[test]
+    fn test_responses_null_function_call_output_is_empty() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "read_log",
+                 "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": null}
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("Responses request normalizes");
+        let tool = request
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::Tool))
+            .expect("the tool result becomes a tool message");
+        assert_eq!(
+            tool.content.as_ref().map(|c| c.as_text()),
+            Some(String::new()),
+            "a null output records no text"
+        );
     }
 
     /// Modern chat clients send the output cap as `max_completion_tokens`
@@ -2104,6 +2209,97 @@ mod tests {
         assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_2"));
     }
 
+    /// A Codex shell call rides the Responses protocol as
+    /// `local_shell_call`: the item carries its argv in an `action` object
+    /// instead of `arguments`/`input`, and the reply is typed
+    /// `local_shell_call_output`. The replayed request of the same turn is the
+    /// only reader that knew `function_call`; dropping this pair flattened the
+    /// call and its output into two fake user messages, so the recorded
+    /// request held no tool interaction at all.
+    #[test]
+    fn test_parse_request_responses_local_shell_items() {
+        let json = serde_json::json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {"role": "user", "content": "list the directory"},
+                {
+                    "type": "local_shell_call",
+                    "call_id": "call_ls",
+                    "action": {"type": "exec", "command": ["ls", "-l"]}
+                },
+                {
+                    "type": "local_shell_call_output",
+                    "call_id": "call_ls",
+                    "output": "total 0\n"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the local_shell_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("shell")
+        );
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_ls"));
+    }
+
+    /// The answer side of the same turn: a whole `response` body whose output
+    /// holds a `local_shell_call`. Reading only `function_call` and
+    /// `custom_tool_call` dropped it, so the recorded response disagreed with
+    /// the request that replayed it.
+    #[test]
+    fn test_parse_response_responses_local_shell_call() {
+        let json = serde_json::json!({
+            "id": "resp_lsc001",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [
+                {
+                    "type": "local_shell_call",
+                    "id": "lsc_001",
+                    "call_id": "call_ls",
+                    "status": "completed",
+                    "action": {"type": "exec", "command": ["ls", "-l"]}
+                }
+            ],
+            "usage": {"input_tokens": 40, "output_tokens": 8, "total_tokens": 48}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("the response must parse");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the local_shell_call must become a tool call");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("shell"));
+        // The chat shape spells `function.arguments` as text, the same way the
+        // `function_call` item does; the argv object survives as its JSON
+        // spelling and the consumer re-parses it.
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("{\"type\":\"exec\",\"command\":[\"ls\",\"-l\"]}")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+    }
+
     #[test]
     fn test_parse_request_responses_role_with_typed_content() {
         let json = serde_json::json!({
@@ -2299,6 +2495,139 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 2);
+    }
+
+    /// A capture that attached after the text deltas has the complete final
+    /// Response object in `response.completed.response.output`; the terminal
+    /// arm read only model/id/usage, so the answer was lost.
+    #[test]
+    fn test_responses_terminal_event_recovers_output_text() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_term", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.completed", "response": {
+                "id": "resp_term",
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_term",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Hello "},
+                        {"type": "output_text", "text": "world"}
+                    ]
+                }],
+                "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the terminal event must aggregate");
+        assert_eq!(
+            resp.choices[0]
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .as_deref(),
+            Some("Hello world"),
+            "the terminal output is the only copy of the answer"
+        );
+        assert_eq!(resp.usage.unwrap().completion_tokens, 2);
+    }
+
+    /// The same terminal-only capture for a tool turn: `response.output`
+    /// carries the complete function_call item, but the terminal arm never
+    /// registered it, so the recorded assistant message had no tool call.
+    #[test]
+    fn test_responses_terminal_event_recovers_output_tool_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_term_tool", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.completed", "response": {
+                "id": "resp_term_tool",
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_term",
+                    "call_id": "call_term",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"/tmp/a\"}"
+                }]
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the terminal event must aggregate");
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the terminal function_call must be recovered");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], serde_json::json!("call_term"));
+        assert_eq!(calls[0]["function"]["name"], serde_json::json!("read_file"));
+        assert_eq!(
+            calls[0]["function"]["arguments"],
+            serde_json::json!("{\"path\":\"/tmp/a\"}")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+    }
+
+    /// The capped/filtered terminal event is a separate arm from
+    /// `response.completed`; it carries the same complete `output[]`. A
+    /// delta-less capture must recover the answer, refusal and tool call
+    /// there as well, while the cap still determines the finish reason.
+    #[test]
+    fn test_responses_incomplete_terminal_event_recovers_output() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_incomplete", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_incomplete",
+                "model": "gpt-5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {"type": "message", "id": "msg_text", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "partial answer"}]},
+                    {"type": "message", "id": "msg_refusal", "role": "assistant",
+                     "content": [{"type": "refusal", "refusal": "I can't continue"}]},
+                    {"type": "function_call", "id": "fc_incomplete", "call_id": "call_incomplete",
+                     "name": "read_file", "arguments": "{\"path\":\"/tmp/b\"}"}
+                ]
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the incomplete terminal event must aggregate");
+        assert_eq!(
+            resp.choices[0]
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .as_deref(),
+            Some("partial answer")
+        );
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't continue")
+        );
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the incomplete terminal function_call must be recovered");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], serde_json::json!("call_incomplete"));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("length".to_string()),
+            "the output cap still wins over the recovered tool call"
+        );
     }
 
     /// The Responses protocol streams a refusal as its own events; the
@@ -3111,6 +3440,35 @@ mod tests {
         );
     }
 
+    /// The same Codex shell turn streamed instead of replayed. The item
+    /// router in `ResponsesToolCalls` accepted only `function_call` and
+    /// `custom_tool_call`, so a `local_shell_call` item was dropped from the
+    /// streamed answer while the non-streaming reader kept it.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_local_shell_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_lsc002", "model": "gpt-5-codex"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "local_shell_call", "id": "lsc_002", "call_id": "call_ls", "action": {"type": "exec", "command": ["ls", "-l"]}}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "local_shell_call", "id": "lsc_002", "call_id": "call_ls", "status": "completed", "action": {"type": "exec", "command": ["ls", "-l"]}}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_lsc002", "model": "gpt-5-codex", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed shell call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("shell"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("{\"type\":\"exec\",\"command\":[\"ls\",\"-l\"]}")
+        );
+    }
+
     #[test]
     fn test_aggregate_responses_sse_chunks_tool_call_from_done_event() {
         // The done event carries the complete arguments. A capture that
@@ -3276,6 +3634,23 @@ mod tests {
             resp.choices[0].message.reasoning_content.as_deref(),
             Some("Check the logs. Then retry."),
             "delivered deltas supersede every closing reasoning item"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_scopes_reasoning_replay_to_the_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs_0", "summary": [{"type": "summary_text", "text": "Inspect logs. "}]}}),
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "output_index": 1, "item": {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_mixed", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("mixed closing and delta reasoning must aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Inspect logs. Then retry.")
         );
     }
 

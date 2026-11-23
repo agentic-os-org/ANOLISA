@@ -8,8 +8,8 @@
 
 use super::GenAIBuilder;
 use super::semantic::{InputMessage, LLMRequest, MessagePart, OutputMessage};
-use crate::analyzer::message::ResponsesToolCalls;
 use crate::analyzer::message::types::OpenAIChatMessage;
+use crate::analyzer::message::{ResponsesReasoningReplay, ResponsesToolCalls};
 use crate::analyzer::{HttpRecord, ParsedApiMessage};
 use std::collections::HashMap;
 
@@ -269,13 +269,27 @@ impl GenAIBuilder {
                 .or_else(|| parameters.and_then(|params| params.get(key)))
         };
 
+        // Gemini nests every sampling parameter under `generationConfig` with a
+        // camelCase key, so the two spellings `param` probes never carry one.
+        // Reading only the output cap left the recorded request's temperature,
+        // top_p, top_k, seed and the two penalties unset, and those are what
+        // `gen_ai.request.*` telemetry and the stored columns report.
+        let generation_config = obj.get("generationConfig").and_then(|v| v.as_object());
+        let generation = |key: &str| {
+            generation_config
+                .and_then(|config| config.get(key))
+                .filter(|value| !value.is_null())
+        };
+
         let tools = param("tools")
             .and_then(|v| v.as_array())
             .map(|arr| arr.to_vec());
 
         Some(LLMRequest {
             messages,
-            temperature: param("temperature").and_then(|v| v.as_f64()),
+            temperature: param("temperature")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("temperature").and_then(|v| v.as_f64())),
             // The output cap has three spellings: the legacy chat
             // `max_tokens`, the newer chat `max_completion_tokens` (the only
             // one the o-series accepts), and the Responses API
@@ -291,24 +305,42 @@ impl GenAIBuilder {
             max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
                 .iter()
                 .find_map(|key| param(key).and_then(|v| v.as_u64()))
-                .or_else(|| {
-                    obj.get("generationConfig")
-                        .and_then(|cfg| cfg.get("maxOutputTokens"))
-                        .and_then(|v| v.as_u64())
-                })
+                .or_else(|| generation("maxOutputTokens").and_then(|v| v.as_u64()))
                 .map(|v| v as u32),
-            frequency_penalty: param("frequency_penalty").and_then(|v| v.as_f64()),
-            presence_penalty: param("presence_penalty").and_then(|v| v.as_f64()),
-            top_p: param("top_p").and_then(|v| v.as_f64()),
-            top_k: param("top_k").and_then(|v| v.as_f64()),
-            seed: param("seed").and_then(|v| v.as_i64()),
-            stop_sequences: param("stop").and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
-                        .collect()
+            frequency_penalty: param("frequency_penalty")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("frequencyPenalty").and_then(|v| v.as_f64())),
+            presence_penalty: param("presence_penalty")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("presencePenalty").and_then(|v| v.as_f64())),
+            top_p: param("top_p")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("topP").and_then(|v| v.as_f64())),
+            top_k: param("top_k")
+                .and_then(|v| v.as_f64())
+                .or_else(|| generation("topK").and_then(|v| v.as_f64())),
+            seed: param("seed")
+                .and_then(|v| v.as_i64())
+                .or_else(|| generation("seed").and_then(|v| v.as_i64())),
+            stop_sequences: param("stop")
+                .and_then(|v| {
+                    v.as_str().map(|stop| vec![stop.to_string()]).or_else(|| {
+                        v.as_array().map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
+                    })
                 })
-            }),
+                .or_else(|| {
+                    generation("stopSequences")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
+                }),
             stream: obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
             tools,
             raw_body: None,
@@ -896,8 +928,8 @@ impl GenAIBuilder {
     /// Mirrors the analyzer's aggregation: text deltas → one Text part per
     /// block, thinking deltas → Reasoning, tool_use blocks (including the
     /// provider-side `server_tool_use` / `mcp_tool_use` spellings) → ToolCall
-    /// with the concatenated `input_json_delta` fragments, all in block-index
-    /// order.
+    /// with the concatenated `input_json_delta` fragments, and tool result
+    /// blocks → ToolCallResponse, all in block-index order.
     /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
     /// cannot turn one JSON field into an unbounded map. Returns `None` when
     /// no Anthropic event shape is present (caller falls back).
@@ -911,6 +943,10 @@ impl GenAIBuilder {
                 id: String,
                 name: String,
                 args_json: String,
+            },
+            ToolResult {
+                id: String,
+                response: serde_json::Value,
             },
         }
 
@@ -973,6 +1009,39 @@ impl GenAIBuilder {
                                 .unwrap_or_default()
                                 .to_string(),
                         ),
+                        Some(
+                            "tool_result"
+                            | "web_search_tool_result"
+                            | "web_fetch_tool_result"
+                            | "code_execution_tool_result"
+                            | "bash_code_execution_tool_result"
+                            | "text_editor_code_execution_tool_result"
+                            | "tool_search_tool_result"
+                            | "mcp_tool_result",
+                        ) => {
+                            let response = match (
+                                content_block.get("content").cloned(),
+                                content_block.get("is_error").and_then(|v| v.as_bool()),
+                            ) {
+                                (Some(value), Some(is_error)) => serde_json::json!({
+                                    "content": value,
+                                    "is_error": is_error,
+                                }),
+                                (Some(value), None) => value,
+                                (None, Some(is_error)) => {
+                                    serde_json::json!({ "is_error": is_error })
+                                }
+                                (None, None) => serde_json::Value::Null,
+                            };
+                            Block::ToolResult {
+                                id: content_block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                response,
+                            }
+                        }
                         // Text and any future block kind default to a text
                         // accumulator, seeded from the start block so a gateway
                         // that sends the finished text there and no deltas keeps
@@ -1083,6 +1152,12 @@ impl GenAIBuilder {
                         arguments,
                     });
                 }
+                Block::ToolResult { id, response } => {
+                    parts.push(MessagePart::ToolCallResponse {
+                        id: if id.is_empty() { None } else { Some(id) },
+                        response,
+                    });
+                }
                 _ => {}
             }
         }
@@ -1108,6 +1183,11 @@ impl GenAIBuilder {
         let mut tool_calls: Vec<MessagePart> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut saw_gemini = false;
+        // Gemini repeats a candidate's parts, calls included, as whole objects
+        // in every chunk. A call is identified by its candidate and part
+        // position; folding by value would merge two genuinely distinct calls
+        // that share name and arguments.
+        let mut call_slots: HashMap<(usize, usize), usize> = HashMap::new();
 
         for chunk in chunks {
             let Some(candidates) = chunk
@@ -1116,7 +1196,7 @@ impl GenAIBuilder {
             else {
                 continue;
             };
-            for candidate in candidates {
+            for (candidate_pos, candidate) in candidates.iter().enumerate() {
                 if let Some(reason) = candidate
                     .get("finishReason")
                     .and_then(|v| v.as_str())
@@ -1132,7 +1212,7 @@ impl GenAIBuilder {
                 else {
                     continue;
                 };
-                for part in parts {
+                for (part_pos, part) in parts.iter().enumerate() {
                     if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                         saw_gemini = true;
                         if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
@@ -1143,15 +1223,22 @@ impl GenAIBuilder {
                     }
                     if let Some(call) = part.get("functionCall") {
                         saw_gemini = true;
-                        tool_calls.push(MessagePart::ToolCall {
-                            id: None,
+                        let call = MessagePart::ToolCall {
+                            id: call.get("id").and_then(|v| v.as_str()).map(str::to_owned),
                             name: call
                                 .get("name")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
                             arguments: call.get("args").cloned(),
-                        });
+                        };
+                        if let Some(&existing) = call_slots.get(&(candidate_pos, part_pos)) {
+                            // The same whole call repeated by this chunk.
+                            tool_calls[existing] = call;
+                        } else {
+                            call_slots.insert((candidate_pos, part_pos), tool_calls.len());
+                            tool_calls.push(call);
+                        }
                     }
                 }
             }
@@ -1213,27 +1300,53 @@ impl GenAIBuilder {
         (!refusal.is_empty()).then_some(refusal)
     }
 
-    /// Thinking text of a finished `reasoning` output item, or `None`.
+    /// Recover the complete output carried by a terminal Responses event.
     ///
-    /// The closing item carries its thinking in `content[]` parts (dashscope
-    /// `reasoning_text`) and/or `summary[]` (the o-series default), the same
-    /// two fields the token extractor's `read_output_item` routes to its
-    /// thinking half. Unlike the answer, reasoning items do not repeat one
-    /// another: an agentic response interleaves one before each call it makes
-    /// and every item carries different thinking, so callers accumulate the
-    /// results in arrival order instead of replacing.
-    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-        let item = chunk.get("item")?;
-        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-            return None;
+    /// `response.completed` and `response.incomplete` carry the whole final
+    /// Response object, including `output[]`. A drained capture that attached
+    /// after the deltas has no other copy of the answer or of a tool call, so
+    /// read the same fields the per-event arms read. Deltas still win over
+    /// repeated text, and `ResponsesToolCalls::observe` merges a terminal item
+    /// into a call the delta path already registered.
+    fn observe_terminal_output(
+        resp: &serde_json::Value,
+        calls: &mut ResponsesToolCalls,
+        saw_text_delta: bool,
+        saw_refusal_delta: bool,
+        closing_text: &mut Option<String>,
+        closing_refusal: &mut Option<String>,
+    ) {
+        let Some(output) = resp.get("output").and_then(|o| o.as_array()) else {
+            return;
+        };
+        for (index, item) in output.iter().enumerate() {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    let chunk = serde_json::json!({ "item": item });
+                    if !saw_text_delta
+                        && closing_text.is_none()
+                        && let Some(text) = Self::closing_message_item_text(&chunk)
+                    {
+                        *closing_text = Some(text);
+                    }
+                    if !saw_refusal_delta
+                        && closing_refusal.is_none()
+                        && let Some(refusal) = Self::closing_message_item_refusal(&chunk)
+                    {
+                        *closing_refusal = Some(refusal);
+                    }
+                }
+                Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                    let event = serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": item,
+                    });
+                    calls.observe(&event);
+                }
+                _ => {}
+            }
         }
-        let text: String = ["content", "summary"]
-            .iter()
-            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-            .collect();
-        (!text.is_empty()).then_some(text)
     }
 
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
@@ -1269,12 +1382,7 @@ impl GenAIBuilder {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
-        // Whether a non-empty reasoning delta arrived, and the thinking a
-        // finished `reasoning` item carries. Same delta-wins rule as the text
-        // above, but the items accumulate rather than replace: each one holds
-        // different thinking.
-        let mut saw_reasoning_delta = false;
-        let mut closing_reasoning_text = String::new();
+        let reasoning_replay = ResponsesReasoningReplay::new(chunks);
         let mut reasoning_buf = String::new();
         // Whether a non-empty refusal delta arrived, and the refusal a closing
         // message item carries, on the same delta-wins rule as the text above.
@@ -1338,9 +1446,6 @@ impl GenAIBuilder {
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        if !delta.is_empty() {
-                            saw_reasoning_delta = true;
-                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -1350,6 +1455,16 @@ impl GenAIBuilder {
                 "response.completed" => {
                     saw_responses_event = true;
                     completed = true;
+                    if let Some(resp) = chunk.get("response") {
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
+                    }
                 }
                 "response.output_item.added" => {
                     saw_responses_event = true;
@@ -1396,15 +1511,17 @@ impl GenAIBuilder {
                 "response.output_item.done" => {
                     // A capture that started mid-stream may open with a done
                     // item instead of an added one; the item router recovers
-                    // the complete call from it, so a function_call done item
+                    // the complete call from it, so any call-shaped done item
                     // proves this is a Responses stream with recoverable
-                    // content.
-                    if chunk
-                        .get("item")
-                        .and_then(|i| i.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("function_call")
-                    {
+                    // content. A custom tool call or a Codex local shell call
+                    // is the same evidence as a function_call.
+                    if matches!(
+                        chunk
+                            .get("item")
+                            .and_then(|i| i.get("type"))
+                            .and_then(|t| t.as_str()),
+                        Some("function_call" | "custom_tool_call" | "local_shell_call")
+                    ) {
                         saw_responses_event = true;
                     }
                     // A finished `message` item carries the whole answer in
@@ -1418,10 +1535,8 @@ impl GenAIBuilder {
                     // A `reasoning` item carries the thinking the deltas
                     // streamed; a capture that attached after them has the
                     // item as its only copy. Every item is kept, in order.
-                    if !saw_reasoning_delta
-                        && let Some(text) = Self::closing_reasoning_item_text(chunk)
-                    {
-                        closing_reasoning_text.push_str(&text);
+                    if let Some(text) = reasoning_replay.closing_item_text(chunk) {
+                        reasoning_buf.push_str(&text);
                         saw_responses_event = true;
                     }
                     // The answer a model declines to give rides a `refusal`
@@ -1478,6 +1593,14 @@ impl GenAIBuilder {
                                 _ => {}
                             }
                         }
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 _ => {}
@@ -1492,9 +1615,6 @@ impl GenAIBuilder {
         // non-empty delta was captured.
         if !saw_text_delta && let Some(text) = closing_text {
             text_buf = text;
-        }
-        if !saw_reasoning_delta && !closing_reasoning_text.is_empty() {
-            reasoning_buf = closing_reasoning_text;
         }
         if !saw_refusal_delta && let Some(refusal) = closing_refusal {
             refusal_buf = refusal;
@@ -1766,6 +1886,101 @@ mod tests {
         assert!(req.stream);
     }
 
+    /// Parallel Gemini interactions retain call/response order in the semantic
+    /// model. Missing wire IDs stay missing so positional matching is not
+    /// confused by synthetic identifiers.
+    #[test]
+    fn gemini_parallel_tool_interaction_survives_request_parsing() {
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "list the files"}]},
+                {"role": "model", "parts": [
+                    {"text": "let me check"},
+                    {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                    {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                ]},
+                {"role": "user", "parts": [
+                    {"functionResponse": {
+                        "name": "list_dir",
+                        "response": {"entries": ["a", "b"]}
+                    }},
+                    {"functionResponse": {
+                        "name": "read_file",
+                        "response": {"content": "a body"}
+                    }}
+                ]}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.messages.len(), 4);
+        match req.messages[0].parts.as_slice() {
+            [MessagePart::Text { content }] => assert_eq!(content, "list the files"),
+            other => panic!("expected the user text, got {other:?}"),
+        }
+        assert_eq!(req.messages[1].role, "assistant");
+        match req.messages[1].parts.as_slice() {
+            [
+                MessagePart::Text { content },
+                MessagePart::ToolCall {
+                    id: first_id,
+                    name: first_name,
+                    arguments: first_arguments,
+                },
+                MessagePart::ToolCall {
+                    id: second_id,
+                    name: second_name,
+                    arguments: second_arguments,
+                },
+            ] => {
+                assert_eq!(content, "let me check");
+                assert_eq!(first_name, "list_dir");
+                assert_eq!(second_name, "read_file");
+                assert!(first_id.is_none());
+                assert!(second_id.is_none());
+                assert_eq!(
+                    first_arguments
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str()),
+                    Some("/tmp")
+                );
+                assert_eq!(
+                    second_arguments
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str()),
+                    Some("/tmp/a")
+                );
+            }
+            other => panic!("expected text + two ordered tool calls, got {other:?}"),
+        }
+
+        assert_eq!(req.messages[2].role, "tool");
+        match req.messages[2].parts.as_slice() {
+            [MessagePart::ToolCallResponse { id, response }] => {
+                assert!(id.is_none());
+                let parsed: serde_json::Value = serde_json::from_str(
+                    response.as_str().expect("response is the serialized JSON"),
+                )
+                .expect("the first response is standalone JSON");
+                assert_eq!(parsed, serde_json::json!({"entries": ["a", "b"]}));
+            }
+            other => panic!("expected the first tool response, got {other:?}"),
+        }
+        assert_eq!(req.messages[3].role, "tool");
+        match req.messages[3].parts.as_slice() {
+            [MessagePart::ToolCallResponse { id, response }] => {
+                assert!(id.is_none());
+                let parsed: serde_json::Value = serde_json::from_str(
+                    response.as_str().expect("response is the serialized JSON"),
+                )
+                .expect("the second response is standalone JSON");
+                assert_eq!(parsed, serde_json::json!({"content": "a body"}));
+            }
+            other => panic!("expected the second tool response, got {other:?}"),
+        }
+    }
+
     /// Legacy `function_call` payloads (finish_reason `function_call`) carry the
     /// tool request in the pre-`tool_calls` spelling; dropping them made the
     /// turn look like plain text.
@@ -1979,6 +2194,62 @@ mod tests {
         }"#;
         let req = GenAIBuilder::parse_request_body(body).expect("body parses");
         assert_eq!(req.max_tokens, None);
+    }
+
+    /// Gemini spells every sampling control under `generationConfig` with a
+    /// camelCase key, and `param` probes only the top level and the DashScope
+    /// `parameters` object. The output cap was added to the reach of that
+    /// helper, but the rest of the block still fell through: a Gemini request
+    /// recorded no temperature, top_p, top_k, seed or penalty value, so the
+    /// `gen_ai.request.*` telemetry and the stored columns reported defaults
+    /// for a call that had set them.
+    #[test]
+    fn test_parse_request_body_gemini_generation_config_sampling() {
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.9,
+                "topK": 40,
+                "seed": 42,
+                "frequencyPenalty": 0.1,
+                "presencePenalty": 0.2,
+                "stopSequences": ["END", "STOP"]
+            }
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.9));
+        assert_eq!(req.top_k, Some(40.0));
+        assert_eq!(req.seed, Some(42));
+        assert_eq!(req.frequency_penalty, Some(0.1));
+        assert_eq!(req.presence_penalty, Some(0.2));
+        assert_eq!(
+            req.stop_sequences,
+            Some(vec!["END".to_string(), "STOP".to_string()])
+        );
+    }
+
+    /// The top-level spelling still wins over `generationConfig`, and an
+    /// explicit null in the block is not a value: neither may shadow the
+    /// spelling a caller actually set.
+    #[test]
+    fn test_gemini_generation_config_does_not_shadow_the_top_level() {
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "temperature": 0.5,
+            "top_p": 0.6,
+            "stop": ["TOP"],
+            "generationConfig": {
+                "temperature": null,
+                "topP": 0.9,
+                "stopSequences": ["CONFIG"]
+            }
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        assert_eq!(req.temperature, Some(0.5));
+        assert_eq!(req.top_p, Some(0.6));
+        assert_eq!(req.stop_sequences, Some(vec!["TOP".to_string()]));
     }
 
     #[test]
@@ -2602,6 +2873,60 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("STOP"));
     }
 
+    /// Gemini repeats a candidate's whole `functionCall` part in every chunk.
+    /// The merger appended each copy, so the drain path described one call
+    /// several times, exactly as the token merger did before it folded the
+    /// repeats. Fold by candidate and part position so two genuinely distinct
+    /// identical calls at different positions stay distinct.
+    #[test]
+    fn test_merge_gemini_sse_chunks_folds_a_repeated_tool_call() {
+        let body = r#"[
+            {"candidates":[{"content":{"parts":[{"text":"calling"},{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"/a"}}}]},"index":0}]},
+            {"candidates":[{"content":{"parts":[{"text":" done"},{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"/a"}}}]},"finishReason":"STOP","index":0}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        let calls = parts
+            .iter()
+            .filter(|part| matches!(part, MessagePart::ToolCall { .. }))
+            .count();
+        assert_eq!(
+            calls, 1,
+            "a call repeated by the stream must be recorded once: {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("STOP"));
+    }
+
+    /// A drained capture can attach after the deltas, leaving only the
+    /// complete `response.output_item.done` event. The item router already
+    /// records a `custom_tool_call` or `local_shell_call` from that event,
+    /// but the drain gate only recognised a `function_call` done item, so
+    /// the merger returned `None` and discarded the call it had observed.
+    #[test]
+    fn test_merge_responses_sse_chunks_keeps_a_done_item_call() {
+        let body = r#"[
+            {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}},
+            {"type":"response.output_item.done","output_index":1,"item":{"type":"local_shell_call","id":"lsc_1","call_id":"call_ls","action":{"type":"exec","command":["ls","-l"]}}}
+        ]"#;
+        let (parts, finish) =
+            GenAIBuilder::extract_parts_from_sse_body(body).expect("the calls must survive");
+        let calls: Vec<_> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall { id, name, .. } => Some((
+                    id.as_deref().expect("a done item carries the wire call id"),
+                    name.as_str(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![("call_patch", "apply_patch"), ("call_ls", "shell")],
+            "both calls are complete in the captured done items: {parts:?}"
+        );
+        assert_eq!(finish, None, "no terminal event was captured");
+    }
+
     /// Gemini thinking models mark reasoning parts with `thought: true`;
     /// those must become Reasoning parts, not body text. An explicit null
     /// finishReason on a middle chunk must not be mistaken for a terminator.
@@ -2787,10 +3112,9 @@ mod tests {
     }
 
     /// A capture that attached after the reasoning deltas has only the
-    /// finished `reasoning` items. Both the live parser
-    /// (`closing_reasoning_item_text`) and the token extractor's
-    /// `read_output_item` read them; the drain merger read only the deltas and
-    /// dropped the thinking entirely.
+    /// finished `reasoning` items. The live parser and token extractor read
+    /// them through `ResponsesReasoningReplay`; the drain merger read only
+    /// the deltas and dropped the thinking entirely.
     ///
     /// An agentic turn interleaves one reasoning item per call, and each item
     /// holds different thinking, so every item must be kept in arrival order —
@@ -2832,6 +3156,105 @@ mod tests {
         assert!(
             matches!(&parts[0], MessagePart::Reasoning { content } if content == "think"),
             "deltas must win over their closing copies, got {parts:?}"
+        );
+    }
+
+    /// A drained capture that attached after the deltas has the complete final
+    /// Response object in the terminal event. The drain merger read only the
+    /// delta/closing item events, so a terminal-only body persisted no text or
+    /// tool call even though `response.output` carried both.
+    #[test]
+    fn test_responses_sse_terminal_output_recovers_text_and_tool_call() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_term","model":"gpt-5"}},
+            {"type":"response.completed","response":{
+                "id":"resp_term","model":"gpt-5","status":"completed",
+                "output":[
+                    {"type":"message","id":"msg_term","role":"assistant","content":[
+                        {"type":"output_text","text":"Hello"}
+                    ]},
+                    {"type":"function_call","id":"fc_term","call_id":"call_term",
+                     "name":"read_file","arguments":"{\"path\":\"/tmp/a\"}"}
+                ]
+            }}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the terminal output must yield parts");
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "Hello"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("call_term")
+                    && name == "read_file"
+                    && arguments.as_ref() == Some(&serde_json::json!({"path": "/tmp/a"}))),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("tool_calls"));
+    }
+
+    /// The capped/filtered terminal event is a separate arm; it carries the
+    /// same complete `output[]`. A drained delta-less capture must recover
+    /// text, refusal and the tool call there too, and the cap must still win
+    /// over the tool-call finish.
+    #[test]
+    fn test_responses_sse_incomplete_terminal_output_recovers_all_parts() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_incomplete","model":"gpt-5"}},
+            {"type":"response.incomplete","response":{
+                "id":"resp_incomplete","model":"gpt-5","status":"incomplete",
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output":[
+                    {"type":"message","id":"msg_text","role":"assistant","content":[
+                        {"type":"output_text","text":"partial answer"}
+                    ]},
+                    {"type":"message","id":"msg_refusal","role":"assistant","content":[
+                        {"type":"refusal","refusal":"I can't continue"}
+                    ]},
+                    {"type":"function_call","id":"fc_incomplete","call_id":"call_incomplete",
+                     "name":"read_file","arguments":"{\"path\":\"/tmp/b\"}"}
+                ]
+            }}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the incomplete terminal output must yield parts");
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "partial answer"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::Text { content } if content == "I can't continue"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[2], MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("call_incomplete")
+                    && name == "read_file"
+                    && arguments.as_ref() == Some(&serde_json::json!({"path": "/tmp/b"}))),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn test_responses_sse_scopes_reasoning_replay_to_the_item() {
+        let body = r#"[
+            {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[
+                {"type":"summary_text","text":"Inspect logs. "}
+            ]}},
+            {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"delta":"Then retry."},
+            {"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[
+                {"type":"summary_text","text":"Then retry."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_mixed","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("mixed closing and delta reasoning must yield output");
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content }
+                if content == "Inspect logs. Then retry."),
+            "got {parts:?}"
         );
     }
 
@@ -2923,6 +3346,27 @@ mod tests {
         assert!(matches!(
             &parts[0],
             MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(finish.as_deref(), Some("content_filter"));
+    }
+
+    #[test]
+    fn test_responses_sse_content_filter_outranks_tool_call() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_cf","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"},
+            {"type":"response.incomplete","response":{"id":"resp_cf","status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":100,"output_tokens":4,"total_tokens":104}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCall { name, .. } if name == "read_file"
         ));
         assert_eq!(finish.as_deref(), Some("content_filter"));
     }

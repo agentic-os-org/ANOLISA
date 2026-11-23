@@ -31,6 +31,7 @@ pub(super) struct PromptPresentation {
     enabled: bool,
     assistance_control: Option<AssistanceControl>,
     pending_starts: VecDeque<PromptDisplayStart>,
+    selection_surface: super::raw_relay::selection_surface::SelectionSurface,
 }
 
 impl PromptPresentation {
@@ -39,7 +40,28 @@ impl PromptPresentation {
             enabled,
             assistance_control: None,
             pending_starts: VecDeque::new(),
+            selection_surface: Default::default(),
         }
+    }
+
+    pub(super) fn selection_surface_mut(
+        &mut self,
+    ) -> &mut super::raw_relay::selection_surface::SelectionSurface {
+        &mut self.selection_surface
+    }
+
+    pub(super) fn sync_outer_winsize(
+        &mut self,
+        master_fd: i32,
+        child_pid: u32,
+        last_winsize: &mut nix::pty::Winsize,
+    ) -> std::io::Result<()> {
+        super::raw_relay::terminal_size::sync_outer_terminal_winsize(
+            master_fd,
+            child_pid,
+            last_winsize,
+            self,
+        )
     }
 
     pub(super) fn with_assistance_control(mut self, control: AssistanceControl) -> Self {

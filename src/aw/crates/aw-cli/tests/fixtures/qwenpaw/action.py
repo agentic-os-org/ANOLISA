@@ -24,7 +24,7 @@ if protocol == "provider":
         (root / (event["name"] + "-provider-env.json")).write_text(json.dumps({
             key: os.environ.get(key) for key in ["PROFILE_SECRET", "REMOVED_BY_NATIVE_HOST"]
         }))
-        reply["effects"] = [{"type": "block", "reason_code": "fixture_denial"}] if (
+        reply["effects"] = [{"type": "block", "reason_code": "fixture_denial", "text": event["tool"]["input"].get("reason", "security policy denied the tool")}] if (
             event["name"] == "tool.before" and event["tool"]["input"]["deny"]
         ) else []
     print(json.dumps(reply))

@@ -1,0 +1,319 @@
+# Claude SDK
+
+[English](../../../en/aw/agents/claude-sdk.md)
+
+从 `src/aw` 运行源码示例；先按[接入教程](../integration.md)构建 AW。
+
+## 启动 Claude SDK worker
+
+已验证基线为 Claude Agent SDK 0.2.88 及其 bundled CLI 2.1.161。其他版本沿用
+原生 client、Hook、身份与 transport 生命周期检查。Adapter 记录已安装的 SDK 版本，启动一个前台
+Python script 或 `-m` module，要求 worker 公共工厂显式使用
+`aw_claude.create_client(options)`。模型认证继续由 SDK 配置。AW 为启动的 worker
+通过 `PYTHONPATH` 提供此模块，不会自动向任意 SDK 应用注入 Hooks。
+
+源码示例从 `src/aw` 运行，先准备选定的 Python 环境。固定 MCP 版本是为了处理已
+复现的 MCP 2.x 不兼容问题：
+
+```bash
+python3 -m venv target/claude-sdk-venv
+target/claude-sdk-venv/bin/pip install -r tests/claude-sdk-requirements.txt
+```
+
+复制 `crates/aw-service/examples/aw.claude-sdk.yaml` 为自己的配置，将 Agent argv
+解释器改为 `target/claude-sdk-venv/bin/python` 的绝对路径。保留前台示例 worker 路径，
+或替换为业务 script。在公共工厂完成普通 MCP tools、权限、resume 与既有 Hooks
+配置后使用以下模式：
+
+```python
+from aw_claude import create_client
+
+async with create_client(options) as client:
+    await client.query(prompt)
+    async for message in client.receive_response():
+        handle_message(message)
+```
+
+```bash
+target/debug/aw run --config /absolute/aw.claude-sdk.yaml --agent claude -- 'Use echo to return hello.'
+target/debug/aw service status --config /absolute/aw.claude-sdk.yaml
+target/debug/aw service stop --config /absolute/aw.claude-sdk.yaml
+```
+
+Claude SDK 事件预算必须为 1..55,000 ms。每个 `input.submit`、`tool.before` 或 `tool.after` 路由
+优先使用 `events.<name>.budget_ms`，未设置时使用 `execution.default_event_budget_ms`。
+`aw run` 在静态配置校验后检查此 Adapter 专有限制。
+
+worker options cwd 必须等于启动 cwd。真实 SDK initialization 握手接受 callbacks
+后才发布 readiness。AW 在 `PreToolUse` 观察或拒绝，`PostToolUse` 与
+`PostToolUseFailure` 均供 after 观察。被拒绝工具不补造 after。既有 Hook veto 和
+原生权限继续有效。Python SDK 的既有 pre-hook `updatedInput` 或包装后的 permission
+`updated_input` 发生修改时明确拒绝。CLI 加载的 settings 和插件 Hook 独立调度，
+可以在 AW 的公共 `PreToolUse` 检查后改写普通工具参数；改写后的最终参数在执行前
+不会再经过 AW 检查。前置策略仅覆盖该 Hook 收到的输入；需要最终参数强制检查的应用
+须另行采用经过验收的执行边界。启用
+`tool.before` 时，非空 `PermissionRequest` matchers 在初始化前被拒绝；请改用
+受支持的 `PreToolUse` 或 `can_use_tool` callbacks。启用 `tool.before` 时也拒绝调用方
+指定 `permission_prompt_tool_name`；受保护 `can_use_tool` 的 SDK 内部 stdio 权限
+通道继续支持。调用方
+`cli_path` 覆盖、缺失 bundled binary 均被拒绝。worker 不得 detach，也不得在一个
+launcher binding 中运行多个 SDK clients/任务；Gunicorn 和业务部署需要自己的任务
+生命周期接线。
+
+SDK 0.2.88 + CLI 2.1.161 实测：MCP 工具失败（SDK handler 合同的
+`is_error`，映射为线上 `isError`）与原生 Bash 执行失败一样以
+`PostToolUseFailure` 到达钩子；after 观察仍不能分类所有业务失败。身份、取消与验证限制见
+[Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-sdk-adapter.md)。
+
+工厂保留 `setting_sources`（包括原生默认发现）、内联或文件形式的 `settings`、
+本地 `plugins` 和 SDK/HTTP/stdio `mcp_servers`。SDK 按原生顺序加载原始来源并发现
+项目 Skills；AW 沿用其加载逻辑，配置文件内容保持不变。上文的 callback 组合与运行时
+限制继续有效。`extra_args` 仍只允许 `strict-mcp-config: None`；settings 和 MCP 使用
+SDK 对应选项传入。模型和认证配置不变。配置兼容范围与 Hook 效果分别验收，
+Skills/plugins 内部执行的命令仍需单独核对覆盖边界。
+常驻客户端在接受 query 前读取 CLI 合并后的 settings。Anthropic Messages 中继沿用
+合并环境中的模型地址、代理和 TLS 配置，认证仍由 CLI 处理；会话内 settings 覆盖将
+模型响应路由到 AW，原配置文件保持不变。原生配置控制或中继路由确认失败时，connect
+直接失败。该路径要求已验收的 SDK 0.2.88 / bundled CLI 2.1.161 配置控制接口。
+中继在 connect 时固定上游环境；修改模型地址、代理或 TLS 配置后请创建新客户端。
+当前 sec-core Provider 提供提交、工具 PII 和 Skill 检查操作。Provider 操作和
+Adapter 能力分别准入：`scan_code` 和 `scan_tool_input` 检查 Claude callback 输入；
+`input.submit` 支持下述文本工厂路径；强制输出 `on_error: withhold_result` 仍在 worker 启动前被拒绝。
+原生 Skill 发现继续可用；sec-core `check_skill` 的解析合同目前验收于 Qoder SDK 和
+QwenPaw，Claude 尚无对应解析合同。共享配置前请核对 [Provider 指南](../providers/sec-core.md)。
+
+直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用[常驻入口](../deployment/resident.md)。
+
+当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw connect` 对该
+Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
+
+### 最终工具结果安全边界
+
+`tool.after` 观察原生 Post 结果；应用回调仍可在 AW 完成后返回
+`updatedToolOutput`。必需的 `security.violation` 策略会在 bundled CLI 内增加
+最终检查，位置是 HTTP 运行时发送序列化 Anthropic Messages 请求之前。
+
+条件 Profile 覆盖 Linux arm64、x86_64 上的 Python SDK 0.2.88／CLI 2.1.161
+和 SDK 0.2.182／CLI 2.1.325，以及 TypeScript SDK 0.3.325／CLI 2.1.325，
+并精确校验 SDK 与可执行文件指纹。使用全新前台
+`create_client`，设置 `setting_sources=[]`，不配置 settings、plugins、resume、
+自定义 agents 或运行时／Provider overrides；模型端点为 Anthropic 兼容 HTTP(S)
+base URL，支持 `/apps/anthropic` 这类网关路径前缀。必须指定模型 ID，不配置 fallback，
+拒绝 `auto`、`default`、`sonnet`、`opus`、`haiku` 等别名。其他路由上携带请求体的
+请求会被拒绝，包括令牌刷新和其他模型 API。显式设置 `tools=["Bash"]` 或 `tools=[]`，MCP 只配置进程内 SDK
+server；后台执行会被禁用。最终步骤必须配置 `on_error: block`，支持结构化 Provider 与 Boolean 策略。
+未知构建在必需策略准入时被拒绝；不支持的工厂配置在发出 query 前失败。
+
+私有 Bun preload 同时覆盖全局 `fetch` 与连接池 `FetchSession.fetch`。适配器将
+最终文本关联到原生 session、call、工具名及输入，调用既有 AW Hook 链，再发送
+不可变的已检查请求体。策略拒绝、错误、超时、身份缺失或历史结果变化均暂扣工具
+内容；未知请求结构停止请求。已经发生的工具副作用保留。仅配置普通 Post 的启动
+不安装最终 preload。
+
+原生验收覆盖 Bash、SDK MCP 的安全与后置改写用例，以及策略超时、错误，并保存
+HTTP 请求和确定性本地模型回复。另已通过 Python SDK 0.2.182 对阿里云 Token Plan
+的 `qwen3.8-flash` 做可选托管验收：捕获代理原样转发已检查的请求体，托管模型仅在
+关闭 Gate 时回显后置改写标记。此项验证使用 Qwen 模型的 Claude SDK 调用链。
+常驻会话、子 Agent、其他模型 API 和多模态交付尚未验收。该 Profile 拒绝应用 Hook 附加上下文注入；
+在模型边界之前读取结果的其他观察者仍不属于本项保护范围。
+
+### TypeScript 前台 Query
+
+在应用目录安装 `@anthropic-ai/claude-agent-sdk@0.3.325`，使用 Linux 上的
+Node.js 22+。沿用 `claude-sdk` Adapter，配置
+`argv: ["/absolute/path/to/node", "/absolute/path/to/worker.mjs"]`。
+公共工厂组合原生工具回调，在 SDK 初始化和运行时就绪后交付首条 prompt：
+
+```javascript
+const { createQuery } = await import(process.env.AW_CLAUDE_SDK_BRIDGE);
+const query = await createQuery({
+  prompt: "Run printf hello once and report its result.",
+  options: {
+    model: "claude-sonnet-4-6", settingSources: [],
+    tools: ["Bash"], allowedTools: ["Bash"], maxTurns: 2,
+  },
+});
+try {
+  for await (const message of query) console.log(JSON.stringify(message));
+} finally {
+  query.close();
+}
+```
+
+该工厂支持一个前台 Query、`tool.before` observe/block、`tool.after` observe，
+以及条件启用的最终检查。可传入 `cwd`、`env`、仅含公共 SDK server 的
+`mcpServers` 和原生工具 `hooks`；应用回调在 AW 回调完成后执行。返回对象仅提供
+异步迭代和 `close()`。TypeScript Profile 暂不支持输入替换、结果压缩、常驻热更新、
+原生命令步骤和运行时重配置。仅启用 Post 时也会拒绝未知 TypeScript SDK 指纹。
+
+### 启用 Bash PreTool 与 PostTool 优化
+
+使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
+选择 `claude` target，替换 executable、worker 与状态目录的绝对路径。源码示例
+`claude-worker.py` 除 echo 工具外显式开放并允许原生 Bash；组合业务工厂时保留应用
+自己的权限策略。Provider 安装与统计设置见 [Tokenless 指南](../../../../user-guide/zh/aw/tokenless.md)。
+
+PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
+PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
+最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
+保留原始结果。原生 HTTP MCP 工具投影模型可见字符串（structuredContent 序列化串，
+或纯文本结果的单一文本块），替换以该字符串在下一模型请求生效；多块与媒体结果
+保持原样。原生回调仍缺少可靠业务错误状态，MCP 错误分类继续依赖
+[受管 MCP 工厂](../deployment/resident.md)。
+
+固定版本原生测试由[贡献指南](../../../../../src/aw/CONTRIBUTING_zh.md)统一运行。
+常驻客户端与受管 MCP 见[常驻部署](../deployment/resident.md)。
+
+最终历史回执仅保存摘要与暂扣标记，不复制工具文本。提前拒绝、异常或取消时，会通过独立的有界清理调用关闭 AW 事件，再返回结果。
+
+## 原生启动与空闲策略更新
+
+原生 Python 宿主可以在创建受管 SDK 客户端前准备 AW。
+工作目录内的 `aw.yaml` 用 `claude` 目标指定 Python 环境与 worker 脚本。
+一次性加入下面的启动代码并重启。应用模块沿用 `aw_claude.create_client` 工厂，
+负责关闭每个客户端。以 `setsid python native_host.py` 启动独立宿主；SDK 取消无法
+确认时，AW 会终止该宿主进程组。
+
+```python
+import asyncio
+import json
+import os
+import subprocess
+import sys
+
+prepared = json.loads(subprocess.check_output(
+    ["aw", "instance", "prepare", "--agent", "claude"], text=True))
+os.environ.update(prepared["environment"])
+sys.path[:0] = prepared["environment"]["PYTHONPATH"].split(os.pathsep)
+
+from aw_resident import prepare_native
+
+async def main():
+    await prepare_native()
+    from application import run_worker
+    await run_worker()
+
+try:
+    asyncio.run(main())
+finally:
+    subprocess.run(["aw", "instance", "release", "--binding", prepared["binding"]],
+                   check=True)
+```
+
+Ready 后执行 `aw update --agent claude`，会加载同一份默认
+`aw.yaml`。已连接客户端在整个会话中保留自己的策略；更新要求全部客户端断开并
+完成清理。新客户端在连接 SDK 前获取并安装当前路由，包括原生回调组合与受管
+MCP 检查。准备和销毁期间均保留准入占用，更新无法越过这些边界。
+没有独立进程组的宿主会在 Ready 前被拒绝。
+
+## 原生 Python worker 协作式挂接
+
+在业务 Python 环境同时安装 AW Python SDK 核心 wheel（`anolisa-aw-sdk`）、可选 Claude
+适配 wheel（`anolisa-aw-sdk-claude`）和 Claude
+Agent SDK 0.2.88（兼容子路径 `aw_sdk.claude` 会在已安装该可选包时转发至 `aw_sdk_claude`），业务 worker 与 Service 使用同一用户。部署阶段用
+`claude-resident-hooks` Profile 编译 Descriptor，worker 启动时不再运行配置解析：
+
+```bash
+aw config descriptor --config /absolute/aw.yaml --agent claude \
+  --profile claude-resident-hooks > /absolute/aw-claude.descriptor.json
+```
+
+`ResidentClaude.from_config()` 读取同一份配置并按 Descriptor 选择目标、Service
+路径和输入保护；省略 `descriptor_file` 时改用 `aw config show` 离线解析。
+Profile 版本 `resident-hooks/v1` 是 Hook 合同标识，不随 Claude SDK 包版本变化。
+
+该入口始终要求 AW 可用，不支持 `native_fallback`。它复用常驻 Bridge 的失败关闭
+清理：SDK 无法确认中断、排空超时或清理状态未知时，AW 对该 worker 的进程组发送
+SIGKILL，同组的原生子进程一并退出。因此独立 worker 使用 `setsid python worker.py`
+启动；Gunicorn 在 `post_fork` 中调用 `os.setsid()`，并在 fork 后的 worker 内创建
+各自的工厂，使强制退出不影响 master 和其他 worker。没有独立会话的进程在创建
+工厂时即被拒绝。业务需要按 worker 可被替换来部署，例如由 Gunicorn 重新拉起。
+
+业务启动期间在 worker 事件循环调用 `startup()`。新客户端在 `connect()`
+等待 AW Ready，再启动原生 SDK。默认等待 5 秒，可用 `attach_timeout_ms` 调整。
+使用 `listen(automatic=True)` 可在配置的 Service 就绪时自动挂接。
+
+```python
+from aw_sdk_claude import ResidentClaude
+from claude_agent_sdk import ClaudeAgentOptions
+
+async def startup():
+    worker = ResidentClaude.from_config(
+        "/absolute/aw.yaml",
+        target="claude",
+        descriptor_file="/absolute/aw-claude.descriptor.json",
+    )
+    worker.listen()
+    return worker
+
+async def ask(worker, prompt):
+    async with worker.create_client(ClaudeAgentOptions()) as client:
+        await client.query(prompt)
+        async for message in client.receive_response():
+            yield message
+
+async def shutdown(worker):
+    await worker.close()
+```
+
+将 `WORKER_PID` 设为调用 `startup()` 的 worker PID。`aw connect` 返回
+`application_id`，断开时将该 ID 传入 `AW_SDK_INSTANCE`，`AW_SOCKET` 取
+Descriptor 的 `endpoint`。在 `aw disconnect`
+或关闭 worker 前，排空响应迭代器并断开客户端。客户端在连接期间固定策略版本，
+客户端仍持有 AW Task 时，`aw disconnect` 返回忙。
+
+```bash
+aw connect --config /absolute/aw.yaml --sdk-pid "$WORKER_PID"
+aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+```
+
+在客户端 options 中使用 `aw_sdk_claude.create_sdk_mcp_server` 创建受管的进程内 MCP
+服务。对提交检查拒绝，在 query 外层捕获 `aw_sdk_claude.SubmissionDenied`。
+协作式工厂准入已配置的 `input.submit`、含 `replace_input` 的 `tool.before` 和含
+`replace_result` 的 `tool.after`。最终工具结果安全检查沿用对应的前台入口。
+
+## 提交前检查用户文本
+
+使用 [Claude 提交配置](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)
+启用 `scan_prompt` 和 `scan_user_input`。替换程序及 socket 路径，单独启动 sec-core，
+保留应用现有 options。示例选择常驻入口；前台 worker 可以沿用原 argv。
+默认配置在原生提交前拒绝风险及扫描故障。在 `query` 或常驻 `connect(prompt)` 外捕获
+`aw_submission.SubmissionDenied`；异常返回后，同一已连接客户端可以接收下一次输入。
+拒绝的输入没有可供消费的响应流。
+
+| 启用检查后的工厂路径 | 支持的输入 |
+| --- | --- |
+| 前台 `async with create_client(options)` 后调用 `query` | 字符串或单消息异步迭代器；每个 worker 一个客户端 |
+| 常驻 `connect(prompt)` 和 `query` | 字符串或单消息异步迭代器；上一轮排空后保留会话继续使用 |
+| 异步消息 content | 字符串，或非空的 `{type: "text", text: "..."}` 文本块列表 |
+
+异步信封必须包含 `type: "user"`，以及仅包含 `role: "user"` 和 `content` 的 `message`。
+可选字段为 `session_id`、`uuid` 和空值 `parent_tool_use_id`。AW 在扫描前读完并关闭
+迭代器；拒绝多消息、媒体、未知字段、空白文本及编码后 AW 输入超过 256 KiB 的提交。
+会话标签必须非空白且不超过 512 个 UTF-8 字节。移除 `input.submit` 后沿用原有输入模式。
+
+所有步骤共享不可变快照、轮次身份和 Service 事件预算。扫描时以换行连接文本块，
+交给原生 SDK 的消息保留原始文本块；字符串原样转交。检查先于原生 `UserPromptSubmit`
+Hook，保留已有 Hook、原生拒绝和设置。这些 Hook 添加的上下文及后续改写超出本次输入
+快照范围。扫描对象为本次用户文本，覆盖范围不含完整会话或最终模型 Prompt。
+
+已审计且可恢复的 Provider 故障遵循 `on_error`：`block` 拒绝本次输入；`report` 记录
+故障，在事件预算仍可用时继续。两种故障策略下风险拒绝均有效。协议、身份、scope、
+审计故障及无法确认的清理会阻止后续提交。取消等待扫描进程和事件清理后再传播，
+清理成功后允许下一轮。已接收输入必须排空响应后再 query；输入准入期间不能接收响应。
+并发 disconnect 会取消并等待准入完成。
+
+原生 `connect(str)` 与 `can_use_tool` 并用时仍遵循 SDK 限制；先不带 Prompt 连接再
+调用 `query`，或使用受支持的异步消息。
+
+常驻客户端每次检查确认关闭后回收输入记录，保留递增序号拒绝重放，可以在同一客户端
+继续超过 1,024 次提交。前台 binding 与旧工具事件共用累计 1,024 条关联容量，
+应在达到上限前创建新 binding。每次检查后均释放活动输入事件及扫描调用。
+
+## 任务观测
+
+启用 `evidence` 后，每个已确认的托管 Session 独立持有有界观测任务。已配置的原生 Hook
+调用产生回调元数据；Session 关闭时等待在途读取结束并释放来源会话声明。证据查询失败不会
+阻断已准入的工具调用。Pi 和 Claude SDK 沿用现有来源身份范围：回调关联保持 `unverified`，
+覆盖保持 `unknown`，AW 不宣称 AgentSight 历史属于该 SDK Session。这两个 Adapter 的空工具
+策略不会额外安装合成观测回调。

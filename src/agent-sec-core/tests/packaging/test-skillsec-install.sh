@@ -9,7 +9,7 @@ fi
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BIN_DIR=${V2_BIN_BUILD_DIR:-$ROOT/target/v2/bin}
-for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health; do
+for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health asc-sandbox-docker-guard; do
     test -x "$BIN_DIR/$binary" || {
         echo "Missing $BIN_DIR/$binary; run make build-cli-v2 first" >&2
         exit 1
@@ -21,16 +21,17 @@ trap 'rm -rf -- "$TEMP"' EXIT
 STAGE=$TEMP/v2
 make -C "$ROOT" install-core-v2 DESTDIR="$STAGE" V2_BIN_BUILD_DIR="$BIN_DIR"
 
-for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health; do
+for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health asc-sandbox-docker-guard; do
     cmp "$BIN_DIR/$binary" "$STAGE/usr/bin/$binary"
     test "$(stat -c %a "$STAGE/usr/bin/$binary")" = 755
     "$STAGE/usr/bin/$binary" --help > "$TEMP/$binary-help.txt"
 done
-grep -q skill-ledger "$TEMP/agent-sec-cli-help.txt"
+grep -q skillsec "$TEMP/agent-sec-cli-help.txt"
 test ! -e "$STAGE/usr/lib/systemd/user/agent-sec-core.service"
 test ! -e "$STAGE/usr/lib/systemd/system/multi-user.target.wants/agent-sec-core.service"
 test ! -e "$STAGE/var/lib/agent-sec/skillsec/signing-key.pk8"
 test "$(stat -c %a "$STAGE/etc/agent-sec/skillsec.json")" = 600
+test "$(stat -c %a "$STAGE/etc/agent-sec/sandbox/permissions.json.template")" = 644
 test "$(stat -c %a "$STAGE/usr/lib/systemd/system/agent-sec-core.service")" = 644
 
 # Reinstallation must preserve operator-selected settings and permissions.

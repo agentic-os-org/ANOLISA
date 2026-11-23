@@ -17,6 +17,20 @@ IGNORE_ANNOTATION = re.compile(r"^\s*#\[ignore")
 TEST_FUNCTION = re.compile(
     r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+PROVISIONED_UID_TESTS = (
+    'crates/cosh-core/src/logging.rs::foreign_uid_expired_log_preserves_content',
+    'crates/cosh-core/src/logging.rs::foreign_uid_current_log_refuses_append',
+    'crates/cosh-shell/src/runtime/logging_tests.rs::foreign_uid_expired_log_preserves_content',
+    'crates/cosh-shell/src/runtime/logging_tests.rs::foreign_uid_current_log_refuses_append',
+)
+SUBPROCESS_ENTRIES = (
+    'crates/cosh-shell/src/diagnostics/health/runtime/worker/tests.rs::private_worker_child',
+    'crates/cosh-shell/src/diagnostics/health/runtime/job/tests.rs::deadline_job_child',
+    'crates/cosh-shell/src/diagnostics/health/collectors/command/tests.rs::controlling_terminal_child',
+)
+PROVISIONED_HEALTH_MATRIX = (
+    'crates/cosh-shell/src/diagnostics/health/runtime/acceptance_tests.rs::live_report_matrix'
+)
 FIELDS = (
     "rule",
     "pattern",
@@ -163,10 +177,35 @@ def main(argv=None) -> int:
         for rule in rules
         if rule.data["disposition"] == "explicit-heavy"
     )
-    if ignored_count != 3 or heavy_count != 3:
+    provisioned_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] in PROVISIONED_UID_TESTS
+        and rule.data["disposition"] == "explicit-heavy"
+    )
+    if provisioned_count not in (0, 4):
+        failures.append("provisioned foreign-UID regressions must be registered as a complete group of four")
+    helper_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] in SUBPROCESS_ENTRIES
+        and rule.data["disposition"] == "subprocess-entry"
+    )
+    if helper_count != len(SUBPROCESS_ENTRIES):
+        failures.append("supervised subprocess entries must match their exact registry set")
+    health_matrix_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] == PROVISIONED_HEALTH_MATRIX
+        and rule.data["disposition"] == "provisioned-health-matrix"
+    )
+    if health_matrix_count != 1:
+        failures.append("the provisioned health report matrix must match its exact registry entry")
+    ordinary_ignored_count = ignored_count - provisioned_count - helper_count - health_matrix_count
+    if ordinary_ignored_count != 3 or heavy_count - provisioned_count != 3:
         failures.append(
-            f"ignored tests ({ignored_count}) and explicit-heavy registry tests "
-            f"({heavy_count}) must both remain 3"
+            f"ordinary ignored tests ({ordinary_ignored_count}) and explicit-heavy registry tests "
+            f"({heavy_count - provisioned_count}) must both remain 3"
         )
 
     for failure in failures:

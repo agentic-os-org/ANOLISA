@@ -111,6 +111,12 @@ class OpenClawCaseProfileManager:
             shutil.copy2(source_config_path, target_config_path)
             return
 
+        # An explicitly requested base config carries the run's provider and plugin
+        # wiring, so falling back to an empty config would silently measure a
+        # different setup than the caller asked for.
+        if self._base_config_path is not None:
+            raise AgentEnvironmentError(f"OpenClaw base config not found: {source_config_path}")
+
         target_config_path.write_text(json.dumps({}, indent=2), encoding="utf-8")
         logger.warning("OPENCLAW_BASE_CONFIG_MISSING path=%s using_empty_config=true", source_config_path)
 

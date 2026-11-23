@@ -95,10 +95,47 @@ changing labels or assignees. Rerunning an interrupted command reconciles the
 remaining mutable state without creating another marker. During reconciliation,
 an existing `status:in-progress` is allowed only for the marker owner.
 
-A claimant should release the issue when they can no longer work on it.
-Maintainers may release abandoned claims after communicating in the issue. A
-release restores `status:accepted` only when no other workflow status remains;
+A claimant should release the issue with `/unclaim` when they can no longer
+work on it. The claim workflow does not automatically expire claims on a
+schedule; maintainers apply a manual inactivity cadence:
+
+- **7 days without visible progress** (no issue update and no ready-for-review
+  PR; an unchanged Draft PR does not count as a formal submission): a
+  maintainer may post a polite check-in asking whether the claimant is still
+  working on the issue.
+- **14 days without visible progress** (or **7 days after a maintainer
+  check-in**, whichever is later): a maintainer may release the abandoned claim
+  by posting `/unclaim` with a brief courtesy note.
+
+A release restores `status:accepted` only when no other workflow status remains;
 otherwise it preserves that status and reports that the issue is unavailable.
+`/unclaim` only releases marker-backed claims; for a directly assigned issue
+with no bot claim marker, a maintainer must remove the native GitHub assignee
+and update `status:*` labels directly.
+
+## Draft PRs, competing PRs, and issue closure
+
+ANOLISA treats a GitHub Draft PR (`isDraft=true`) as the author's personal
+work-in-progress rather than a formal submission for review or delivery:
+
+- **Claim lock**: Opening a Draft PR without an active `/claim` does **not**
+  lock the linked issue; other contributors may still `/claim` the issue and
+  submit a ready-for-review PR. Holding a `/claim` lock protects the issue
+  while active, even with a Draft PR, subject to the inactivity cadence above.
+- **Review boundary**: Maintainers and automated/AI reviewers do not start
+  formal merge-gate reviews on Draft PRs unless the author explicitly requests
+  early feedback (or a maintainer manually triggers review). Formal review
+  begins when the author marks the PR **Ready for review** (`isDraft=false`).
+- **Issue closure and competing PRs**: When a linked issue is resolved by a
+  merged PR or closed as not planned, any superseded **ready-for-review** PR
+  (`isDraft=false`) must be explicitly closed by a maintainer or component
+  owner with a polite note linking the merged PR or decision. Lingering
+  unconverted **Draft PRs** (`isDraft=true`) do not block closing the issue;
+  a brief courtesy note to the author is optional.
+
+For the full ownership-signal precedence, lifecycle matrix, standalone PR
+handling, and AI agent rules, see
+[`specs/issue-claim-and-pr-lifecycle.md`](../specs/issue-claim-and-pr-lifecycle.md).
 
 ## Automation mode
 

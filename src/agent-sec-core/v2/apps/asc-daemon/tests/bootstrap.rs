@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
 // Readiness includes real SQLite initialization on shared CI storage.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 // Match the deployment stop budget, including drain, persistence, and runtime cleanup.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -170,6 +170,62 @@ async fn request(path: &Path, payload: &[u8]) -> Value {
         .unwrap();
     assert_eq!(response.pop(), Some(b'\n'));
     serde_json::from_slice(&response).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_intent_001_configuration_failures_leave_health_available() {
+    for (enabled, endpoint, key) in [
+        ("false", "https://example.invalid", "PRIVATE_KEY_MARKER"),
+        ("invalid", "https://example.invalid", "PRIVATE_KEY_MARKER"),
+        ("true", "https://example.invalid", ""),
+        ("true", "http://127.0.0.1:1", "PRIVATE_KEY_MARKER"),
+    ] {
+        let directory = create_runtime_directory();
+        let socket_path = directory.join("daemon.sock");
+        let child = configured_command(&directory)
+            .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+            .env("ASC_INTENT_ENABLED", enabled)
+            .env("ASC_INTENT_BASE_URL", endpoint)
+            .env("ASC_INTENT_MODEL", "fixture")
+            .env("DASHSCOPE_API_KEY", key)
+            .args(["serve", "--socket"])
+            .arg(&socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr_log(&directory))
+            .spawn()
+            .unwrap();
+        let mut running = RunningBinary {
+            child,
+            directory,
+            socket_path,
+        };
+        if rejected_without_root(&mut running).await {
+            return;
+        }
+        wait_for_socket(&mut running).await;
+        let result = request(&running.socket_path, b"{\"method\":\"intent.propose\",\"params\":{\"format_version\":\"asc.intent.request.v1\",\"task\":\"PRIVATE_TASK_MARKER\",\"ttl\":1800}}\n").await;
+        assert_eq!(result["error"]["code"], "unavailable");
+        assert!(result.get("result").is_none());
+        let health = request(
+            &running.socket_path,
+            b"{\"method\":\"daemon.health\",\"params\":{}}\n",
+        )
+        .await;
+        assert_eq!(health["result"]["status"], "ok");
+        for marker in ["PRIVATE_KEY_MARKER", "PRIVATE_TASK_MARKER"] {
+            assert!(!result.to_string().contains(marker));
+            assert!(!read_stderr(&running.directory).contains(marker));
+        }
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-TERM", &running.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(wait_for_exit(&mut running).await.success());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

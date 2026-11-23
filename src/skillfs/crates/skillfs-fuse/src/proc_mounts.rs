@@ -23,6 +23,29 @@ pub fn mounts_contain_target(mounts: &[u8], target: &[u8]) -> bool {
         .any(|line| line_mounts_target(line, target))
 }
 
+/// The mount ID of the entry mounting `target` in `/proc/self/mountinfo`.
+///
+/// Field 0 is the mount ID and field 4 the mountpoint, escape-rendered
+/// exactly as in `/proc/mounts`. The mount ID identifies one mount
+/// instance, so a caller can tell its own mount from a later mount placed
+/// on the same path — which a path comparison alone cannot do.
+///
+/// When several entries share the path (over-mounts), the last one is the
+/// topmost, i.e. the mount a caller addressing that path actually reaches.
+pub fn mountinfo_id_for_target(mountinfo: &[u8], target: &[u8]) -> Option<u64> {
+    mountinfo
+        .split(|&b| b == b'\n')
+        .filter_map(|line| {
+            let path = nth_field(line, 4)?;
+            if &*unescape_mount_field(path) != target {
+                return None;
+            }
+            let id = nth_field(line, 0)?;
+            std::str::from_utf8(id).ok()?.parse().ok()
+        })
+        .next_back()
+}
+
 /// Whether one `/proc/mounts` line mounts `target`: the second
 /// whitespace-delimited field, escape-decoded, equals the target bytes.
 /// Splitting the raw line on whitespace is safe — the escaped rendering
@@ -56,6 +79,12 @@ fn unescape_mount_field(field: &[u8]) -> Cow<'_, [u8]> {
     while i < field.len() {
         if field[i] == b'\\'
             && i + 3 < field.len()
+            // \ooo encodes a single byte: the leading digit must be <= 3
+            // (3*64 + 7*8 + 7 == 255), otherwise \400..\777 would wrap when
+            // narrowed to u8 and invent unrelated bytes. The kernel never
+            // emits those, so keep them verbatim like any other malformed
+            // escape (see the malformed-escape test below).
+            && field[i + 1] <= b'3'
             && field[i + 1..i + 4]
                 .iter()
                 .all(|b| (b'0'..=b'7').contains(b))
@@ -121,6 +150,33 @@ mod tests {
     }
 
     #[test]
+    fn octal_escapes_above_377_stay_verbatim() {
+        // \400..\777 would wrap when narrowed to u8 and invent unrelated
+        // bytes (\400 -> NUL, \500 -> '@', \777 -> \xff colliding with \377);
+        // the kernel never emits them, so keep them verbatim.
+        assert_eq!(unescape_mount_field(br"/x\400y").as_ref(), br"/x\400y");
+        assert_eq!(unescape_mount_field(br"/x\500y").as_ref(), br"/x\500y");
+        assert_eq!(unescape_mount_field(br"/x\777y").as_ref(), br"/x\777y");
+        // \377 is still a real byte, and the guard must not disturb it or
+        // the values below it.
+        assert_eq!(unescape_mount_field(br"/x\377y").as_ref(), b"/x\xffy");
+        assert_eq!(unescape_mount_field(br"/x\300y").as_ref(), b"/x\xc0y");
+    }
+
+    #[test]
+    fn a_wrapping_escape_cannot_fabricate_a_mount_match() {
+        // Decoding \400 to a NUL byte would make a mounted malformed field
+        // match a target containing NUL, misleading stale-mount cleanup.
+        let mounts = b"/dev/vda1 /mnt/x\\400end ext4 rw 0 0\n";
+        assert!(!mounts_contain_target(mounts, b"/mnt/x\0end"));
+        // The real escaped path still matches.
+        assert!(mounts_contain_target(
+            b"/dev/vda1 /mnt/my\\040skills ext4 rw 0 0\n",
+            b"/mnt/my skills"
+        ));
+    }
+
+    #[test]
     fn line_match_uses_the_unescaped_second_field() {
         let line = b"/dev/vda3 /mnt/my\\040skills ext4 rw,relatime 0 0";
         assert!(line_mounts_target(line, b"/mnt/my skills"));
@@ -152,5 +208,51 @@ mod tests {
         assert!(mounts_contain_target(mounts, b"/mnt/my skills"));
         assert!(mounts_contain_target(mounts, b"/tmp"));
         assert!(!mounts_contain_target(mounts, b"/mnt/absent"));
+    }
+
+    #[test]
+    fn mountinfo_id_reads_the_first_field_of_the_matching_entry() {
+        let table = b"22 97 0:21 / /sys rw,relatime shared:2 - sysfs sysfs rw\n\
+                      431 25 0:57 / /mnt/skills rw,nosuid shared:9 - fuse.skillfs skillfs rw\n";
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/skills"), Some(431));
+        assert_eq!(mountinfo_id_for_target(table, b"/sys"), Some(22));
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/absent"), None);
+    }
+
+    #[test]
+    fn mountinfo_id_unescapes_the_mountpoint_field() {
+        let table = b"77 25 0:57 / /mnt/my\\040skills rw - fuse.skillfs skillfs rw\n";
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/my skills"), Some(77));
+        assert_eq!(mountinfo_id_for_target(table, br"/mnt/my\040skills"), None);
+    }
+
+    #[test]
+    fn mountinfo_id_of_an_over_mount_is_the_topmost_entry() {
+        // Two mounts on one path: the later entry is the one a caller
+        // addressing that path reaches, so cleanup must compare against it.
+        let table = b"77 25 0:57 / /mnt/skills rw - fuse.skillfs skillfs rw\n\
+                      88 25 0:58 / /mnt/skills rw - fuse.skillfs skillfs rw\n";
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/skills"), Some(88));
+    }
+
+    #[test]
+    fn mountinfo_id_matches_invalid_bytes_without_colliding() {
+        let table = b"77 25 0:57 / /mnt/\xff rw - fuse.skillfs skillfs rw\n";
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/\xff"), Some(77));
+        assert_eq!(
+            mountinfo_id_for_target(table, "/mnt/\u{FFFD}".as_bytes()),
+            None
+        );
+    }
+
+    #[test]
+    fn mountinfo_id_rejects_a_malformed_id_field() {
+        let table = b"not-an-id 25 0:57 / /mnt/skills rw - fuse.skillfs skillfs rw\n";
+        assert_eq!(mountinfo_id_for_target(table, b"/mnt/skills"), None);
+        // A line too short to carry a mountpoint field never matches.
+        assert_eq!(
+            mountinfo_id_for_target(b"77 25 0:57 /", b"/mnt/skills"),
+            None
+        );
     }
 }

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,25 +14,130 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use actplane_ifc_compiler::{Compiled, compile_str};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, HealthStatus,
-    NetworkAction, NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode,
-    ReplaceFailureCode, ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy,
-    SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
+    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, FileDecision,
+    FileProtectionExclusionKind, FileProtectionTargetKind, HealthStatus, NetworkAction,
+    NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, ReplaceFailureCode,
+    ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy, SecurityEvent,
+    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
     classify_public_ipv4_destination,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
     AUTH_REQUIRE_GATE, CapState, TARGET_CHILD, TARGET_SELF,
 };
-use ebpf_ifc_engine::{GLOBAL_ACTIVE_DOMAIN_ID, PinnedEngine, ReloadHandle, Violation};
+use ebpf_ifc_engine::{
+    GLOBAL_ACTIVE_DOMAIN_ID, INODE_GUARD_READ, INODE_GUARD_WRITE, PinnedEngine, ReloadHandle,
+    Violation,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::backend::validate_apply_policy_payload;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+mod file_protection_discovery;
+mod file_protection_manifest;
+mod file_protection_mountinfo;
+mod file_protection_policy;
+mod file_protection_resolver;
+mod file_protection_runtime;
+mod file_protection_topology;
+mod file_protection_tree_scan;
 mod inode_policy;
+mod preexisting_maps;
+mod process_adoption;
+use file_protection_policy::{NormalizedFileProtectionPolicy, NormalizedFileProtectionTarget};
+use file_protection_runtime::{ActiveFileProtection, PreparedFileProtection};
 use inode_policy::InodePolicy;
+
+fn normalize_actplane_policy_payload(
+    request: &ApplyPolicy,
+) -> Result<Option<NormalizedFileProtectionPolicy>, BackendError> {
+    validate_apply_policy_payload(request)?;
+    let Some(policy) = request.file_protection_policy.as_ref() else {
+        return Ok(None);
+    };
+    if request.policy_mode != Some(PolicyMode::Enforce) {
+        return Err(BackendError::CompileFailure(
+            "structured file protection requires explicit policy_mode=enforce; audit and observe are unsupported".into(),
+        ));
+    }
+    let normalized = file_protection_policy::normalize(policy)
+        .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
+    Ok(Some(normalized))
+}
+
+/// Maps structured targets onto the identities scanned in `/proc` maps before
+/// attach: exact files by device/inode, trees by path prefix minus exclusions.
+fn structured_protected_entries(
+    policy: &NormalizedFileProtectionPolicy,
+) -> Result<Vec<preexisting_maps::ProtectedEntry>, BackendError> {
+    let mut entries = Vec::new();
+    for target in &policy.targets {
+        // Structured delete-only targets leave writes genuinely unmediated,
+        // so pre-existing write access in the binding tree must not reject
+        // them. Legacy guards need no such filter: their unlink clauses
+        // lower to write-op rules and mediate writes anyway.
+        if !target.ordinary_write {
+            continue;
+        }
+        let scope = match target.kind {
+            FileProtectionTargetKind::ExactFile => {
+                let metadata = fs::metadata(&target.path).map_err(|error| {
+                    BackendError::CompileFailure(format!(
+                        "cannot stat protected path '{}': {error}",
+                        target.path
+                    ))
+                })?;
+                preexisting_maps::ProtectedScope::Exact {
+                    dev: inode_policy::userspace_dev_to_kernel(metadata.dev()),
+                    ino: metadata.ino(),
+                }
+            }
+            FileProtectionTargetKind::DirectoryTree => tree_scope(target),
+        };
+        entries.push(preexisting_maps::ProtectedEntry {
+            path: target.path.clone(),
+            scope,
+        });
+    }
+    Ok(entries)
+}
+
+/// Matches `/proc` entries lexically under a tree target minus its exclusions.
+fn tree_scope(target: &NormalizedFileProtectionTarget) -> preexisting_maps::ProtectedScope {
+    let mut subtree_prefixes = Vec::new();
+    let mut exact_entries = Vec::new();
+    for exclusion in &target.exclusions {
+        match exclusion.kind {
+            FileProtectionExclusionKind::DirectorySubtree => {
+                subtree_prefixes.push(format!("{}/", exclusion.path))
+            }
+            FileProtectionExclusionKind::ExactEntry => exact_entries.push(exclusion.path.clone()),
+        }
+    }
+    preexisting_maps::ProtectedScope::Tree {
+        subtree_prefixes,
+        exact_entries,
+    }
+}
+
+fn source_label(compiled: Option<&Compiled>) -> Result<u64, BackendError> {
+    match compiled {
+        Some(compiled) => compiled
+            .labels
+            .get("COMMAND")
+            .or_else(|| compiled.labels.get("AGENT"))
+            .copied()
+            .ok_or_else(|| {
+                BackendError::CompileFailure(
+                    "policy must declare a COMMAND or AGENT source label".into(),
+                )
+            }),
+        None => Ok(1),
+    }
+}
 
 // Compile-time guard: compiler and engine must agree on CConfig ABI size.
 // If this fails, one crate's CRule definition was modified without updating the other.
@@ -48,22 +154,26 @@ pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 struct ActiveBinding {
     binding: Binding,
     credential_policy: Option<CredentialExfiltrationPolicy>,
-    /// When the target process runs inside a PID namespace, this holds the
-    /// global kernel PID resolved by [`resolve_to_host_pid`].  `None` when
-    /// the namespace PID equals the kernel PID (root namespace).
-    kernel_pid: Option<i32>,
+    /// Init-namespace TGID resolved independently of the procfs-local request PID.
+    kernel_pid: i32,
+    /// Namespace-init ticks subtracted from descendant kernel start times.
+    procfs_start_time_bias: u64,
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
     // Retain file identities through detach, including failed cleanup retries.
     inode_policy: InodePolicy,
+    file_protection: Option<Arc<Mutex<ActiveFileProtection>>>,
 }
 
 struct PreparedBinding {
     request: ApplyPolicy,
+    kernel_pid: i32,
+    procfs_start_time_bias: u64,
     credential_policy: Option<CredentialExfiltrationPolicy>,
-    compiled: Compiled,
+    compiled: Option<Compiled>,
     inode_policy: InodePolicy,
+    file_protection: Option<PreparedFileProtection>,
 }
 
 struct RuntimeState {
@@ -105,10 +215,8 @@ pub struct ActPlaneBackend {
     stop: Arc<AtomicBool>,
     poller: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<()>,
-    /// True when the enforcer is running in the init PID namespace.
-    /// File-delete-guard requires this for correct cap_task seeding and
-    /// domain propagation.  When false, health reports file_delete_guard=false.
-    in_init_pidns: bool,
+    /// Init-namespace identity captured by BPF for control-plane map operations.
+    control_pid: i32,
 }
 
 impl ActPlaneBackend {
@@ -131,12 +239,20 @@ impl ActPlaneBackend {
                 .reload_handle()
                 .map_err(|error| kernel_error("open reload handle", error))?,
         );
+        let control_pid = reload
+            .current_process_kernel_pid()
+            .map_err(|error| kernel_error("resolve enforcer kernel pid", error))?;
         engine
-            .protect_pid(std::process::id() as i32)
+            .protect_pid(control_pid)
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
         let drained = prepare_runtime(
             || {
                 let mut errors = inode_policy::clear(&engine);
+                if let Err(error) = engine.clear_file_protection_generations() {
+                    errors.push(format!(
+                        "clear stale structured file-protection generations: {error}"
+                    ));
+                }
                 if let Err(error) = reload.clear_runtime_state() {
                     errors.push(format!("clear stale runtime state: {error}"));
                 }
@@ -167,7 +283,7 @@ impl ActPlaneBackend {
             stop,
             poller: Mutex::new(Some(poller)),
             lifecycle: Mutex::new(()),
-            in_init_pidns: is_init_pid_namespace(),
+            control_pid,
         })
     }
 
@@ -177,21 +293,20 @@ impl ActPlaneBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn cleanup_binding(
-        &self,
-        request: &ApplyPolicy,
-        id: u32,
-        kernel_pid: Option<i32>,
-    ) -> Vec<String> {
+    fn structured_delete_ready(&self) -> bool {
+        self.engine.supports_file_delete_guard() && ebpf_ifc_engine::bpf_lsm_active()
+    }
+
+    fn structured_ordinary_write_ready(&self) -> bool {
+        self.structured_delete_ready() && self.engine.supports_file_permission_guard()
+    }
+
+    fn cleanup_binding(&self, id: u32, kernel_pid: i32) -> Vec<String> {
         let mut errors = Vec::new();
-        let control_pid = std::process::id() as i32;
-        if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
+        if let Err(error) = self.engine.unbind_pid_from_domain(self.control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
-        // Use the resolved kernel PID when the target runs in a PID namespace;
-        // fall back to the namespace PID stored in the request otherwise.
-        let effective_pid = kernel_pid.unwrap_or(request.root_pid);
-        if let Err(error) = self.engine.unbind_pid_from_domain(effective_pid, id) {
+        if let Err(error) = self.engine.unbind_pid_from_domain(kernel_pid, id) {
             errors.push(format!("unbind target pid: {error}"));
         }
         if let Err(error) = self.reload.clear_runtime_state() {
@@ -203,18 +318,40 @@ impl ActPlaneBackend {
 
     fn prepare_binding(
         &self,
-        mut request: ApplyPolicy,
+        request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<PreparedBinding, BackendError> {
-        // Resolve namespace-local PID to host PID BEFORE start-time validation,
-        // so that the stale-process check reads the correct /proc/<host_pid>/stat.
-        let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
-        if host_pid != request.root_pid {
-            eprintln!(
-                "resolve_to_host_pid: namespace pid {} -> host pid {}",
-                request.root_pid, host_pid
-            );
-            request.root_pid = host_pid;
+        let normalized = normalize_actplane_policy_payload(&request)?;
+        let requires_ordinary_write = normalized
+            .as_ref()
+            .is_some_and(|policy| policy.targets.iter().any(|target| target.ordinary_write));
+        if normalized.is_some() && !self.structured_delete_ready() {
+            return Err(BackendError::CompileFailure(
+                "structured file protection requires the agent-file-guard profile and active BPF LSM"
+                    .into(),
+            ));
+        }
+        let requires_read = normalized
+            .as_ref()
+            .is_some_and(|policy| policy.targets.iter().any(|target| target.read));
+        if requires_read && !self.engine.supports_file_read_guard() {
+            return Err(BackendError::CompileFailure("file read protection requires attached file_open, file_permission, mmap_file and file_mprotect hooks".into()));
+        }
+        let requires_tree_read = normalized.as_ref().is_some_and(|policy| {
+            policy
+                .targets
+                .iter()
+                .any(|target| target.read && target.kind == FileProtectionTargetKind::DirectoryTree)
+        });
+        if requires_tree_read && !self.engine.supports_tree_read_guard() {
+            return Err(BackendError::CompileFailure(
+                "directory-tree read protection requires the attached path_link hook in addition to the file read hooks".into(),
+            ));
+        }
+        if requires_ordinary_write && !self.structured_ordinary_write_ready() {
+            return Err(BackendError::CompileFailure(
+                "ordinary write protection requires the attached file_permission hook".into(),
+            ));
         }
         let actual_start = read_process_start_time(request.root_pid)?;
         if actual_start != request.process_start_time {
@@ -222,6 +359,76 @@ impl ActPlaneBackend {
                 pid: request.root_pid,
             });
         }
+        let identity =
+            ebpf_ifc_engine::resolve_process_identity(request.root_pid, request.process_start_time)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        BackendError::StaleProcess {
+                            pid: request.root_pid,
+                        }
+                    } else {
+                        kernel_error("resolve target process kernel identity", error)
+                    }
+                })?;
+        let kernel_pid = identity.kernel_pid;
+        let procfs_start_time_bias = identity.procfs_start_time_bias;
+        if let Some(policy) = normalized {
+            // Writable shared mappings held before attach bypass every LSM
+            // hook, so refuse the binding instead of claiming coverage.
+            preexisting_maps::reject_preexisting_write_access(
+                request.root_pid,
+                &structured_protected_entries(&policy)?,
+            )?;
+            let topology = file_protection_topology::prepare(
+                &policy,
+                request.root_pid,
+                request.process_start_time,
+            )?;
+            let mut read_entries = Vec::new();
+            for record in &topology.direct_targets {
+                let target = &policy.targets[record.target_id as usize - 1];
+                if !target.read {
+                    continue;
+                }
+                let path = record.path.authored_path.clone();
+                match target.kind {
+                    FileProtectionTargetKind::ExactFile => {
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path,
+                            scope: preexisting_maps::ProtectedScope::Exact {
+                                dev: record.path.identity.dev,
+                                ino: record.path.identity.ino,
+                            },
+                        });
+                    }
+                    FileProtectionTargetKind::DirectoryTree => {
+                        // Identities catch mappings made through aliases; the
+                        // prefix still catches mapped files unlinked before the walk.
+                        let files =
+                            file_protection_tree_scan::scan_read_tree(target, &record.path)?;
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path: path.clone(),
+                            scope: preexisting_maps::ProtectedScope::Identities { files },
+                        });
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path,
+                            scope: tree_scope(target),
+                        });
+                    }
+                }
+            }
+            preexisting_maps::reject_preexisting_read_mappings(request.root_pid, &read_entries)?;
+            return Ok(PreparedBinding {
+                request,
+                kernel_pid,
+                procfs_start_time_bias,
+                credential_policy,
+                compiled: None,
+                inode_policy: InodePolicy::default(),
+                file_protection: Some(PreparedFileProtection { policy, topology }),
+            });
+        }
+
         let compiled = compile_str(&request.policy_dsl).map_err(BackendError::CompileFailure)?;
         // Surface compile-time warnings (e.g. an endpoint pattern that lowered
         // to a match-nothing matcher) so the degradation is visible instead of
@@ -232,26 +439,25 @@ impl ActPlaneBackend {
                 request.binding_id
             );
         }
-        if compiled
-            .labels
-            .get("COMMAND")
-            .or_else(|| compiled.labels.get("AGENT"))
-            .is_none()
-        {
-            return Err(BackendError::CompileFailure(
-                "policy must declare a COMMAND or AGENT source label".into(),
-            ));
-        }
+        source_label(Some(&compiled))?;
         let inode_policy = InodePolicy::prepare(
             &request.policy_dsl,
             &compiled,
             self.engine.inode_guard_mode(),
+            request.root_pid,
+        )?;
+        preexisting_maps::reject_preexisting_write_access(
+            request.root_pid,
+            &inode_policy.protected_identities(),
         )?;
         Ok(PreparedBinding {
             request,
+            kernel_pid,
+            procfs_start_time_bias,
             credential_policy,
-            compiled,
+            compiled: Some(compiled),
             inode_policy,
+            file_protection: None,
         })
     }
 
@@ -263,25 +469,80 @@ impl ActPlaneBackend {
     ) -> Result<Binding, BackendError> {
         let PreparedBinding {
             request,
+            kernel_pid,
+            procfs_start_time_bias,
             credential_policy,
             compiled,
             inode_policy,
+            file_protection,
         } = prepared;
-        let label = compiled
-            .labels
-            .get("COMMAND")
-            .or_else(|| compiled.labels.get("AGENT"))
-            .copied()
-            .ok_or_else(|| {
-                BackendError::CompileFailure(
-                    "policy must declare a COMMAND or AGENT source label".into(),
-                )
-            })?;
+        let label = source_label(compiled.as_ref())?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
+        // Exact-file ordinary-write and read protection ride the inode-guard
+        // fast path: guarded opens, reads, writes, truncates and mappings of the
+        // held inode are denied in every mediation hook without adding
+        // classification stack depth to the hooks. Identities are collected
+        // before staging, but the guards are installed only after staging
+        // succeeds: main's contract is that a staging failure returns without
+        // kernel state, and the guard stays inert until the domain is seeded
+        // below. Detach clears it with the other inode guards.
+        let guard_identities: HashMap<(u64, u32), (u32, u32)> = file_protection
+            .as_ref()
+            .map(|prepared| {
+                prepared
+                    .topology
+                    .direct_targets
+                    .iter()
+                    .filter(|record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        (target.ordinary_write || target.read)
+                            && target.kind == FileProtectionTargetKind::ExactFile
+                    })
+                    .fold(HashMap::new(), |mut guards, record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        let flags = (u32::from(target.ordinary_write) * INODE_GUARD_WRITE)
+                            | (u32::from(target.read) * INODE_GUARD_READ);
+                        let entry = guards
+                            .entry((record.path.identity.ino, record.path.identity.dev))
+                            .or_insert((record.target_id, 0));
+                        entry.1 |= flags;
+                        guards
+                    })
+            })
+            .unwrap_or_default();
+        let structured_targets: Vec<(FileProtectionTargetKind, String)> = file_protection
+            .as_ref()
+            .map(|prepared| {
+                prepared
+                    .policy
+                    .targets
+                    .iter()
+                    .map(|target| (target.kind, target.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let staged_file_protection = match file_protection {
+            Some(prepared) => Some(prepared.stage(
+                &self.engine,
+                id,
+                request.binding_id,
+                &request.policy_revision,
+            )?),
+            None => None,
+        };
+        for ((ino, dev), (target_id, flags)) in guard_identities {
+            self.engine
+                .guard_inode(ino, dev, flags, id, target_id)
+                .map_err(|error| {
+                    let cleanup = self.cleanup_binding(id, kernel_pid);
+                    let context = format!("guard exact-file inode (flags {flags:#x})");
+                    kernel_error_with_cleanup(&context, error, cleanup)
+                })?;
+        }
         self.engine
-            .seed_label_in_domain(request.root_pid, id, label)
+            .seed_label_in_domain(kernel_pid, id, label)
             .map_err(|error| {
-                let cleanup = self.cleanup_binding(&request, id, None);
+                let cleanup = self.cleanup_binding(id, kernel_pid);
                 kernel_error_with_cleanup("seed target process domain", error, cleanup)
             })?;
 
@@ -292,9 +553,9 @@ impl ActPlaneBackend {
         // domain and keep the outcome visible through the binding message.
         let migration = self
             .engine
-            .migrate_session_tree(request.root_pid, id)
+            .migrate_session_tree(kernel_pid, id)
             .map_err(|error| {
-                let cleanup = self.cleanup_binding(&request, id, None);
+                let cleanup = self.cleanup_binding(id, kernel_pid);
                 kernel_error_with_cleanup("migrate prior session tree", error, cleanup)
             })?;
         if !migration.failed_pids.is_empty() {
@@ -306,54 +567,65 @@ impl ActPlaneBackend {
             );
         }
 
-        let control_pid = std::process::id() as i32;
-        let control_state = CapState {
-            scope_id: 1,
-            labels: label,
-            authority_mask: AUTH_BIND_RULE
-                | AUTH_NARROW_SCOPE
-                | AUTH_ADD_LABEL
-                | AUTH_REQUIRE_GATE
-                | AUTH_DECLASSIFY
-                | AUTH_DELEGATE,
-            target_mask: TARGET_SELF | TARGET_CHILD,
-            gate_mask: u64::MAX,
-            label_mask: u64::MAX,
-            ..CapState::default()
-        };
-        // After prepare_binding, request.root_pid is already the host PID
-        // (resolve_to_host_pid was called there).  No separate kernel_pid needed.
-        if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "bind control process",
-                error,
-                cleanup,
-            ));
-        }
-        if let Err(error) = self
-            .reload
-            .append_policy_delta(control_pid, id, &compiled.bytes)
-        {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "append policy delta",
-                error,
-                cleanup,
-            ));
-        }
-        if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "unbind control process",
-                error,
-                cleanup,
-            ));
+        if let Some(compiled) = compiled.as_ref() {
+            let control_state = CapState {
+                scope_id: 1,
+                labels: label,
+                authority_mask: AUTH_BIND_RULE
+                    | AUTH_NARROW_SCOPE
+                    | AUTH_ADD_LABEL
+                    | AUTH_REQUIRE_GATE
+                    | AUTH_DECLASSIFY
+                    | AUTH_DELEGATE,
+                target_mask: TARGET_SELF | TARGET_CHILD,
+                gate_mask: u64::MAX,
+                label_mask: u64::MAX,
+                ..CapState::default()
+            };
+            if let Err(error) = self.engine.bind_state(self.control_pid, id, control_state) {
+                let cleanup = self.cleanup_binding(id, kernel_pid);
+                return Err(kernel_error_with_cleanup(
+                    "bind control process",
+                    error,
+                    cleanup,
+                ));
+            }
+            if let Err(error) =
+                self.reload
+                    .append_policy_delta(self.control_pid, id, &compiled.bytes)
+            {
+                let cleanup = self.cleanup_binding(id, kernel_pid);
+                return Err(kernel_error_with_cleanup(
+                    "append policy delta",
+                    error,
+                    cleanup,
+                ));
+            }
+            if let Err(error) = self.engine.unbind_pid_from_domain(self.control_pid, id) {
+                let cleanup = self.cleanup_binding(id, kernel_pid);
+                return Err(kernel_error_with_cleanup(
+                    "unbind control process",
+                    error,
+                    cleanup,
+                ));
+            }
         }
 
-        let binding = Binding {
+        let adoption = process_adoption::adopt(
+            self.engine.as_ref(),
+            request.root_pid,
+            request.process_start_time,
+            kernel_pid,
+            self.control_pid,
+            id,
+        );
+        let mut binding = Binding {
             request,
-            state: BindingState::Enforced,
+            state: if migration.failed_pids.is_empty() {
+                BindingState::Enforced
+            } else {
+                BindingState::Degraded
+            },
             message: if migration.is_empty() {
                 None
             } else {
@@ -361,21 +633,49 @@ impl ActPlaneBackend {
             },
             domain_id: Some(id),
         };
+        adoption.annotate(&mut binding);
+        let (reasons, rule_names, label_names) = match compiled {
+            Some(compiled) => (
+                compiled.reasons,
+                compiled.meta.into_iter().map(|meta| meta.name).collect(),
+                compiled
+                    .labels
+                    .into_iter()
+                    .map(|(name, mask)| (mask, name))
+                    .collect(),
+            ),
+            None => {
+                let mut reasons = vec![String::new()];
+                let mut rule_names = vec![String::new()];
+                // Tree denials report only the accessed basename, so the
+                // reason names the protected root that matched.
+                for (index, (kind, path)) in structured_targets.iter().enumerate() {
+                    let target_id = index + 1;
+                    let kind = match kind {
+                        FileProtectionTargetKind::ExactFile => "exact_file",
+                        FileProtectionTargetKind::DirectoryTree => "directory_tree",
+                    };
+                    reasons.push(format!(
+                        "structured file protection target {target_id} ({kind} {path})"
+                    ));
+                    rule_names.push(format!("file-protection-target-{target_id}"));
+                }
+                (reasons, rule_names, HashMap::new())
+            }
+        };
         let mut active = ActiveBinding {
             binding: binding.clone(),
             credential_policy,
-            kernel_pid: None,
-            reasons: compiled.reasons,
-            rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
-            label_names: compiled
-                .labels
-                .into_iter()
-                .map(|(name, mask)| (mask, name))
-                .collect(),
+            kernel_pid,
+            procfs_start_time_bias,
+            reasons,
+            rule_names,
+            label_names,
             inode_policy,
+            file_protection: None,
         };
         if let Err(error) = active.inode_policy.install(&self.engine, id) {
-            let cleanup = self.cleanup_binding(&active.binding.request, id, None);
+            let cleanup = self.cleanup_binding(id, kernel_pid);
             if !cleanup.is_empty() {
                 // Keep descriptors and the binding available for a detach retry;
                 // never allow inode reuse while a partial registration survives.
@@ -389,6 +689,17 @@ impl ActPlaneBackend {
                 cleanup,
             ));
         }
+        if let Some(staged) = staged_file_protection {
+            match staged.activate() {
+                Ok(file_protection) => {
+                    active.file_protection = Some(Arc::new(Mutex::new(file_protection)));
+                }
+                Err(error) => {
+                    let cleanup = self.cleanup_binding(id, kernel_pid);
+                    return Err(activation_error_with_cleanup(error, cleanup));
+                }
+            }
+        }
         bindings.insert(id, active);
         Ok(binding)
     }
@@ -398,6 +709,7 @@ impl ActPlaneBackend {
         request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<Binding, BackendError> {
+        let _ = normalize_actplane_policy_payload(&request)?;
         let _lifecycle = self.lifecycle();
         let mut bindings = self.state.bindings();
         if let Some(existing) = bindings
@@ -426,10 +738,11 @@ impl ActPlaneBackend {
         let result = self.install_prepared_locked(&mut bindings, prepared, None);
         match &result {
             Ok(binding) => log::info!(
-                "policy enforced: binding_id={} root_pid={} domain_id={:?}",
+                "policy applied: binding_id={} root_pid={} domain_id={:?} state={:?}",
                 binding.request.binding_id,
                 binding.request.root_pid,
-                binding.domain_id
+                binding.domain_id,
+                binding.state
             ),
             Err(error) => log::error!("policy apply failed: binding_id={binding_id}: {error}"),
         }
@@ -448,8 +761,25 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
-        let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
+        if let Some(file_protection) = active.file_protection.as_ref() {
+            let result = file_protection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deactivate_and_cleanup();
+            if let Err(error) = result {
+                if let Some(stored) = bindings.get_mut(&id) {
+                    stored.binding.state = BindingState::Degraded;
+                    stored.binding.message = Some(error.to_string());
+                }
+                return Err(error);
+            }
+        }
+        let cleanup = self.cleanup_binding(id, active.kernel_pid);
         if !cleanup.is_empty() {
+            if let Some(stored) = bindings.get_mut(&id) {
+                stored.binding.state = BindingState::Degraded;
+                stored.binding.message = Some(cleanup.join("; "));
+            }
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
         }
         bindings.remove(&id);
@@ -470,18 +800,23 @@ impl EnforcementBackend for ActPlaneBackend {
         // state so a host without an active BPF-LSM reports file_delete_guard=false
         // (fail-closed) instead of advertising a capability that silently enforces
         // nothing.
-        capabilities.file_delete_guard = self.engine.supports_file_delete_guard()
-            && ebpf_ifc_engine::bpf_lsm_active()
-            && self.in_init_pidns;
-        capabilities.file_delete_guard_mode = if capabilities.file_delete_guard {
-            if self.engine.bpf_d_path_in_lsm_available() {
-                Some("path".into())
+        let file_guard_ready = self.structured_delete_ready();
+        capabilities.file_delete_guard = file_guard_ready;
+        capabilities.file_delete_guard_mode = file_guard_ready.then(|| {
+            if self.engine.inode_guard_mode() {
+                "inode".into()
             } else {
-                Some("inode".into())
+                "path".into()
             }
-        } else {
-            None
-        };
+        });
+        capabilities.file_entry_delete_protection = file_guard_ready;
+        capabilities.directory_tree_delete_protection = file_guard_ready;
+        capabilities.ordinary_write_protection = self.structured_ordinary_write_ready();
+        capabilities.file_read_protection =
+            file_guard_ready && self.engine.supports_file_read_guard();
+        capabilities.directory_tree_read_protection =
+            file_guard_ready && self.engine.supports_tree_read_guard();
+        capabilities.static_mount_topology = file_guard_ready;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
@@ -637,19 +972,14 @@ impl Drop for ActPlaneBackend {
         let active = self
             .state
             .bindings()
-            .iter()
-            .map(|(domain_id, binding)| (*domain_id, binding.clone()))
+            .values()
+            .map(|binding| binding.binding.request.binding_id)
             .collect::<Vec<_>>();
-        for (domain_id, binding) in active {
-            let errors =
-                self.cleanup_binding(&binding.binding.request, domain_id, binding.kernel_pid);
-            if errors.is_empty() {
-                self.state.bindings().remove(&domain_id);
-            } else {
+        for binding_id in active {
+            let mut bindings = self.state.bindings();
+            if let Err(error) = self.detach_binding_locked(&mut bindings, binding_id) {
                 log::error!(
-                    "agentsight-enforcer could not clear binding {} during shutdown: {}",
-                    binding.binding.request.binding_id,
-                    errors.join("; ")
+                    "agentsight-enforcer could not clear binding {binding_id} during shutdown: {error}"
                 );
             }
         }
@@ -697,10 +1027,23 @@ fn spawn_poller(
 /// evidence ids stored in `risk_evidence_links`, so the raw violation and its
 /// normalized sink evidence must carry the same `event_id`.
 fn publish_raw_violation(raw: Violation, active: &ActiveBinding, state: &RuntimeState) {
-    let event_id = Uuid::new_v4();
+    // A file-deletion violation and the audit evidence it stands for must share
+    // one id; otherwise the violation row cannot resolve to the case built from
+    // that evidence and the UI has nothing to link to.
+    let file_evidence = file_deletion_events(&raw, active, state);
+    let event_id = file_evidence
+        .as_ref()
+        .map_or_else(Uuid::new_v4, |events| events[0].event_id);
     state
         .events
         .publish(convert_violation(raw.clone(), active, event_id));
+    if let Some(events) = file_evidence {
+        // Correlation fails closed while referenced evidence is missing, so the
+        // decision keeps its place behind the file event on the hub.
+        for event in events {
+            state.security_events.publish(event);
+        }
+    }
     if raw.op == 3
         && raw.provenance.is_some()
         && let Some(policy) = active.credential_policy.as_ref()
@@ -761,14 +1104,8 @@ fn parse_process_start_time(stat: &str) -> Result<u64, ProcessStatError> {
 
 /// Reads a `/proc` text file, decoding non-UTF-8 bytes lossily.
 ///
-/// `/proc/<pid>/stat` and `/proc/<pid>/status` embed the process name, and the
-/// kernel allows almost any non-NUL bytes in a name (`prctl(PR_SET_NAME)` sets
-/// them directly, and an executable whose name is not valid UTF-8 passes them
-/// on). `read_to_string` rejects such a file outright, which failed binding
-/// preparation (`KernelFailure`) and PID-namespace resolution for a process
-/// purely because of its name, while every field these parsers read (start
-/// time, NSpid) is plain ASCII positioned after the name. Mirrors the
-/// sibling fix in `src/enforcement/target.rs`.
+/// `/proc/<pid>/stat` embeds a process name that may contain non-UTF-8 bytes.
+/// Lossy decoding preserves the ASCII start-time field behind that name.
 fn read_proc_text_lossy(path: &str) -> std::io::Result<String> {
     fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -796,25 +1133,20 @@ fn credential_apply_request(
             policy_revision: policy.revision.to_string(),
             policy_dsl,
             policy_mode: Some(policy.mode),
+            file_protection_policy: None,
         },
         policy,
     ))
 }
 
 fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
-    match error {
-        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
-            ReplaceFailureCode::BindingConflict
-        }
-        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
-        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
-    }
+    crate::backend::backend_failure_code(error)
 }
 
 fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
     match error {
         ReplaceValidationError::CredentialPolicy(_)
+        | ReplaceValidationError::PolicyPayload(_)
         | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
         ReplaceValidationError::SameBindingId
         | ReplaceValidationError::SourceNotEnforced
@@ -1033,8 +1365,9 @@ fn convert_security_events_at(
     let sink_time = monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns);
     let source_time =
         monotonic_to_epoch_ns(provenance.timestamp_ns, monotonic_now_ns, observed_at_ns);
-    let source_start = process_start_time(active, provenance.pid);
-    let target_start = process_start_time(active, raw.pid);
+    let source_start =
+        process_start_time(active, provenance.pid, provenance.process_start_boottime);
+    let target_start = process_start_time(active, raw.pid, raw.process_start_boottime);
     let source_identity = event_identity(active, provenance.pid, None, source_start);
     let sink_identity = event_identity(active, raw.pid, Some(raw.ppid), target_start);
     let source_event_id = Uuid::new_v4();
@@ -1122,11 +1455,15 @@ fn convert_security_events_at(
     ])
 }
 
-fn process_start_time(active: &ActiveBinding, pid: i32) -> u64 {
-    if pid == active.binding.request.root_pid {
+fn process_start_time(active: &ActiveBinding, pid: i32, start_boottime: u64) -> u64 {
+    if pid == active.kernel_pid {
         active.binding.request.process_start_time
     } else {
-        read_process_start_time(pid).unwrap_or(0)
+        ebpf_ifc_engine::procfs_start_time_from_boottime(
+            start_boottime,
+            active.procfs_start_time_bias,
+        )
+        .unwrap_or(0)
     }
 }
 
@@ -1209,6 +1546,84 @@ fn trusted_endpoint_covers(trusted: &str, destination: &str) -> bool {
     destination_port.is_none_or(|port| trusted_port.is_none_or(|trusted| trusted == port))
 }
 
+/// Operations whose denial the file-deletion policy reports.
+const FILE_DELETION_OPS: [u32; 3] = [5, 6, 7];
+
+/// Builds the file event and the decision event for a file-deletion match.
+///
+/// Returns `None` for other operations and when the binding cannot yield a
+/// numeric policy revision: a violation without a case is still honest, while a
+/// case carrying an invented revision would be evidence that cannot be audited.
+fn file_deletion_events(
+    raw: &Violation,
+    active: &ActiveBinding,
+    state: &RuntimeState,
+) -> Option<[SecurityEvent; 2]> {
+    if !FILE_DELETION_OPS.contains(&raw.op) {
+        return None;
+    }
+    let policy_revision = match active.binding.request.policy_revision.parse::<u64>() {
+        Ok(revision) => revision,
+        Err(_) => {
+            let message = format!(
+                "policy revision '{}' is not numeric",
+                active.binding.request.policy_revision
+            );
+            log::error!("{message}");
+            *state.runtime_error() = Some(message);
+            return None;
+        }
+    };
+    let rule_index = raw.rule_id as usize;
+    let operation = operation_name(raw.op);
+    let observed_at_ns = now_ns();
+    let occurred_at_ns = monotonic_now_ns()
+        .map(|monotonic_now_ns| {
+            monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns)
+        })
+        .unwrap_or(observed_at_ns);
+    let identity = event_identity(
+        active,
+        raw.pid,
+        Some(raw.ppid),
+        process_start_time(active, raw.pid, raw.process_start_boottime),
+    );
+    Some(SecurityEvent::file_operation_decision(
+        identity,
+        occurred_at_ns,
+        observed_at_ns,
+        FileDecision {
+            policy_id: active.binding.request.policy_id.clone(),
+            policy_revision,
+            operation: operation.into(),
+            path: redact_home_path(&raw.target),
+            resource_class: "protected_path".into(),
+            rule_id: active
+                .rule_names
+                .get(rule_index)
+                .cloned()
+                .or_else(|| Some(raw.rule_id.to_string())),
+            // An unset product mode still records the case; only an explicit
+            // Observe skips case creation.
+            mode: active
+                .binding
+                .request
+                .policy_mode
+                .unwrap_or(PolicyMode::Audit),
+            requested_effect: effect(raw.effect),
+            blocked: raw.blocked,
+            killed: raw.killed,
+            errno: raw.blocked.then_some(libc::EPERM),
+            risk_score: if raw.blocked { 90 } else { 60 },
+            reason: active
+                .reasons
+                .get(rule_index)
+                .cloned()
+                .unwrap_or_else(|| format!("file deletion policy matched {operation}")),
+        },
+    ))
+}
+
 fn convert_violation(raw: Violation, active: &ActiveBinding, event_id: Uuid) -> ViolationEvent {
     let monotonic_now_ns = monotonic_now_ns();
     let observed_at_ns = now_ns();
@@ -1237,7 +1652,7 @@ fn convert_violation_at(
         policy_revision: active.binding.request.policy_revision.clone(),
         pid: raw.pid,
         ppid: Some(raw.ppid),
-        process_start_time: read_process_start_time(raw.pid).unwrap_or(0),
+        process_start_time: process_start_time(active, raw.pid, raw.process_start_boottime),
         operation: operation_name(raw.op).into(),
         target: raw.target,
         effect: effect(raw.effect),
@@ -1264,6 +1679,10 @@ fn operation_name(operation: u32) -> &'static str {
         4 => "recv",
         5 => "unlink",
         6 => "rename",
+        7 => "rmdir",
+        8 => "ordinary_write",
+        9 => "read",
+        10 => "link",
         _ => "unknown",
     }
 }
@@ -1317,6 +1736,22 @@ fn kernel_error(context: &str, error: std::io::Error) -> BackendError {
     BackendError::KernelFailure(format!("{context}: {error}"))
 }
 
+fn activation_error_with_cleanup(error: BackendError, cleanup: Vec<String>) -> BackendError {
+    if cleanup.is_empty() {
+        return error;
+    }
+    let diagnostic = format!("cleanup failed: {}", cleanup.join("; "));
+    match error {
+        BackendError::CompileFailure(message) => {
+            BackendError::CompileFailure(format!("{message}; {diagnostic}"))
+        }
+        BackendError::KernelFailure(message) => {
+            BackendError::KernelFailure(format!("{message}; {diagnostic}"))
+        }
+        other => BackendError::KernelFailure(format!("{other}; {diagnostic}")),
+    }
+}
+
 fn kernel_error_with_cleanup(
     context: &str,
     error: std::io::Error,
@@ -1330,130 +1765,15 @@ fn kernel_error_with_cleanup(
     BackendError::KernelFailure(message)
 }
 
-/// Resolve a potentially namespace-local PID to the global (init namespace)
-/// kernel PID that BPF `handle_fork` / `cap_fork` will use.
-///
-/// The enforcer **must** run in the init PID namespace for this to work.
-/// When it does, host `/proc/<pid>/status` exposes the full `NSpid` chain.
-///
-/// **Algorithm**:
-/// 1. Fast path: `/proc/<input_pid>/stat` exists and `start_time` matches →
-///    the PID is valid in the host namespace.  Return `NSpid[0]` (always the
-///    host PID when reading from init ns).
-/// 2. Slow path: the PID does not exist in host `/proc` or `start_time` does
-///    not match (namespace-local PID collides with a different host process).
-///    Scan `/proc/*/status` for a process whose innermost `NSpid` value equals
-///    `input_pid` and whose `start_time` matches.  Return its host PID.
-/// 3. Fallback: no match found — return `input_pid` unchanged and let the
-///    caller handle the stale-process / not-found case.
-fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
-    // Fast path: pid exists in host /proc and start_time matches.
-    if let Ok(start_time) = proc_start_time(input_pid)
-        && start_time == input_start_time
-    {
-        return first_nspid(input_pid).unwrap_or(input_pid);
-    }
-
-    // Slow path: scan /proc for a process whose innermost NSpid == input_pid
-    // and whose start_time matches.
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return input_pid,
-    };
-    for entry in proc_dir.flatten() {
-        let name = entry.file_name();
-        let Ok(host_pid) = name.to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        if host_pid <= 0 {
-            continue;
-        }
-        let nspid = read_nspid_chain(host_pid);
-        if nspid.len() < 2 {
-            continue; // not in a nested namespace
-        }
-        if *nspid.last().unwrap() != input_pid {
-            continue; // innermost ns PID doesn't match
-        }
-        if let Ok(pst) = proc_start_time(host_pid)
-            && pst == input_start_time
-        {
-            return nspid[0]; // host PID
-        }
-    }
-
-    input_pid // fallback
-}
-
-/// Read the `NSpid:` chain from `/proc/<pid>/status`.  Returns a Vec where
-/// index 0 is the outermost (host) PID and the last element is the innermost
-/// (namespace-local) PID.
-fn read_nspid_chain(pid: i32) -> Vec<i32> {
-    let Ok(status) = read_proc_text_lossy(&format!("/proc/{pid}/status")) else {
-        return vec![];
-    };
-    parse_nspid_from_status(&status)
-}
-
-/// Parse the `NSpid:` chain from a decoded `/proc/<pid>/status` payload;
-/// empty when the line is absent or carries no valid PID.
-fn parse_nspid_from_status(status: &str) -> Vec<i32> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("NSpid:") {
-            return rest
-                .split_whitespace()
-                .filter_map(|s| s.parse::<i32>().ok())
-                .collect();
-        }
-    }
-    vec![]
-}
-
-/// Return the first (host-namespace) value from the `NSpid:` line of
-/// `/proc/<pid>/status`, or `None` if unavailable.
-fn first_nspid(pid: i32) -> Option<i32> {
-    read_nspid_chain(pid).first().copied()
-}
-
-/// Read `start_time` (field 22) from `/proc/<pid>/stat`.
-fn proc_start_time(pid: i32) -> Result<u64, ()> {
-    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat")).map_err(|_| ())?;
-    let after_comm = &stat[stat.rfind(')').ok_or(())? + 2..];
-    after_comm
-        .split_ascii_whitespace()
-        .nth(19) // field 22 = index 19 after ')'
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or(())
-}
-
-/// Check whether the current process runs in the init PID namespace by
-/// comparing its pid-namespace inode with that of PID 1.
-fn is_init_pid_namespace() -> bool {
-    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
-        return false; // can't read → assume not init, fail-closed
-    };
-    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
-        return false;
-    };
-    let result = self_ns == init_ns;
-    if !result {
-        eprintln!(
-            "agentsight-enforcer: not in init PID namespace \
-             (self={}, pid1={}); file_delete_guard will be disabled",
-            self_ns.display(),
-            init_ns.display(),
-        );
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
 
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope, Effect,
-        PolicyMode, SecurityEventKind, ViolationEvent,
+        FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+        FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections, PolicyMode,
+        SecurityEventKind, ViolationEvent,
     };
     use ebpf_ifc_engine::{Provenance, Violation};
     use uuid::Uuid;
@@ -1461,6 +1781,152 @@ mod tests {
     use super::*;
 
     const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
+
+    #[test]
+    fn source_label_rejects_unrelated_dsl_labels_but_accepts_structured_policies() {
+        let unrelated = compile_str("source UNRELATED = exec \"**\"\n").expect("compile label");
+        assert!(matches!(
+            source_label(Some(&unrelated)),
+            Err(BackendError::CompileFailure(message))
+                if message == "policy must declare a COMMAND or AGENT source label"
+        ));
+        assert_eq!(source_label(None).expect("structured domain label"), 1);
+        for name in ["COMMAND", "AGENT"] {
+            let compiled = compile_str(&format!(
+                "source A = exec \"/other\"\nsource {name} = exec \"**\"\n"
+            ))
+            .expect("compile domain source");
+            assert_eq!(
+                source_label(Some(&compiled)).expect("declared source"),
+                compiled.labels[name]
+            );
+        }
+    }
+
+    fn structured_policy_request(path: &str) -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "structured-policy-test".into(),
+            session_id: None,
+            root_pid: i32::MAX,
+            process_start_time: 1,
+            policy_id: "file-protection".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![FileProtectionTarget {
+                    path: path.into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: true,
+                        ordinary_write: false,
+                        read: false,
+                    },
+                    exclusions: Vec::new(),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn structured_policies_reject_non_enforcing_modes_before_path_resolution() {
+        for mode in [None, Some(PolicyMode::Observe), Some(PolicyMode::Audit)] {
+            for (delete, ordinary_write) in [(true, false), (false, true), (true, true)] {
+                let mut request = structured_policy_request("relative/invalid");
+                request.policy_mode = mode;
+                let protections = &mut request
+                    .file_protection_policy
+                    .as_mut()
+                    .expect("policy")
+                    .targets[0]
+                    .protections;
+                protections.delete = delete;
+                protections.ordinary_write = ordinary_write;
+                assert!(matches!(
+                    normalize_actplane_policy_payload(&request),
+                    Err(BackendError::CompileFailure(message))
+                        if message.contains("requires explicit policy_mode=enforce")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_dsl_payload_validation_keeps_existing_mode_behavior() {
+        let mut request = structured_policy_request("/fixture");
+        request.file_protection_policy = None;
+        request.policy_dsl = "source AGENT = exec \"**\"\n".into();
+        for mode in [
+            None,
+            Some(PolicyMode::Observe),
+            Some(PolicyMode::Audit),
+            Some(PolicyMode::Enforce),
+        ] {
+            request.policy_mode = mode;
+            assert!(
+                normalize_actplane_policy_payload(&request)
+                    .expect("DSL mode unchanged")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn actplane_structured_delete_payload_reaches_topology_preparation() {
+        let state = RuntimeState::new();
+        let request = structured_policy_request("/fixture/protected");
+
+        let normalized = normalize_actplane_policy_payload(&request)
+            .expect("structured delete payload should pass backend validation")
+            .expect("structured policy should be retained for topology preparation");
+
+        assert_eq!(normalized.targets[0].path, "/fixture/protected");
+        assert!(normalized.targets[0].delete);
+        assert!(state.bindings().is_empty());
+    }
+
+    #[test]
+    fn actplane_preparation_rejects_invalid_normalization_before_runtime_mutation() {
+        let state = RuntimeState::new();
+        let request = structured_policy_request("relative/path");
+
+        let error = normalize_actplane_policy_payload(&request)
+            .expect_err("invalid structured path must stop ActPlane preparation");
+
+        assert!(matches!(
+            error,
+            BackendError::CompileFailure(message)
+                if message.contains("target 0")
+                    && message.contains("relative/path")
+                    && message.contains("absolute")
+        ));
+        assert!(state.bindings().is_empty());
+    }
+
+    #[test]
+    fn ordinary_write_reaches_topology_preparation_without_runtime_mutation() {
+        let state = RuntimeState::new();
+        let mut request = structured_policy_request("/fixture/protected");
+        let protections = &mut request
+            .file_protection_policy
+            .as_mut()
+            .expect("structured fixture")
+            .targets[0]
+            .protections;
+        protections.delete = false;
+        protections.ordinary_write = true;
+
+        let normalized = normalize_actplane_policy_payload(&request)
+            .expect("ordinary write should pass backend validation")
+            .expect("structured policy should reach topology preparation");
+
+        assert!(!normalized.targets[0].delete);
+        assert!(normalized.targets[0].ordinary_write);
+        assert!(state.bindings().is_empty());
+    }
 
     fn active_binding() -> ActiveBinding {
         ActiveBinding {
@@ -1475,17 +1941,20 @@ mod tests {
                     policy_revision: "revision-1".into(),
                     policy_dsl: "fixture".into(),
                     policy_mode: Some(PolicyMode::Audit),
+                    file_protection_policy: None,
                 },
                 state: BindingState::Enforced,
                 message: None,
                 domain_id: Some(7),
             },
             credential_policy: Some(credential_policy()),
-            kernel_pid: None,
+            kernel_pid: 42,
+            procfs_start_time_bias: 0,
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
             inode_policy: InodePolicy::default(),
+            file_protection: None,
         }
     }
 
@@ -1507,6 +1976,7 @@ mod tests {
             matched_labels: 1,
             provenance: None,
             timestamp_ns,
+            process_start_boottime: 9_876_500_000,
         }
     }
 
@@ -1534,7 +2004,7 @@ mod tests {
         let mut active = active_binding();
         active.reasons = compiled.reasons;
         active.rule_names = compiled.meta.into_iter().map(|meta| meta.name).collect();
-        for (op, name) in [(5, "unlink"), (6, "rename")] {
+        for (op, name) in [(5, "unlink"), (6, "rename"), (7, "rmdir")] {
             let mut raw = raw_violation(100);
             raw.op = op;
             raw.rule_id = 2;
@@ -1554,7 +2024,10 @@ mod tests {
             (2, "write"),
             (3, "connect"),
             (4, "recv"),
-            (7, "unknown"),
+            (8, "ordinary_write"),
+            (9, "read"),
+            (10, "link"),
+            (11, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }
@@ -1673,6 +2146,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 269_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.ssh/id_rsa".into(),
@@ -1724,6 +2198,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 269_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.aws/credentials".into(),
@@ -1778,6 +2253,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 269_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.aws/credentials".into(),
@@ -1817,6 +2293,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 200_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.aws/credentials".into(),
@@ -1872,6 +2349,7 @@ mod tests {
             raw.provenance = Some(Provenance {
                 label: 1,
                 timestamp_ns: 269_000_000_000,
+                process_start_boottime: 9_876_500_000,
                 pid: 43,
                 op: 1,
                 target: "/root/.aws/credentials".into(),
@@ -1912,6 +2390,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: now - 1_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.ssh/id_rsa".into(),
@@ -1941,6 +2420,97 @@ mod tests {
     }
 
     #[test]
+    fn a_file_deletion_violation_publishes_its_decision_under_one_identity() {
+        // Every operation the file-deletion policy reports must reach the audit
+        // stream, not just unlink: a rename or rmdir denial is the same product
+        // promise and used to stop at the violation hub.
+        for (op, operation) in [(5u32, "unlink"), (6, "rename"), (7, "rmdir")] {
+            let now = monotonic_now_ns().expect("monotonic clock should be readable");
+            let mut raw = raw_violation(now);
+            raw.op = op;
+            raw.target = "/root/.ssh/id_rsa".into();
+            raw.blocked = true;
+            let mut active = active_binding();
+            active.binding.request.policy_revision = "3".into();
+            let state = RuntimeState::new();
+            let violations = state
+                .events
+                .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+            let evidence = state.security_events.subscribe();
+
+            publish_raw_violation(raw, &active, &state);
+
+            let violation = violations
+                .try_recv()
+                .expect("the raw violation must be published");
+            let pair: Vec<_> = evidence.try_iter().collect();
+            assert_eq!(
+                pair.len(),
+                2,
+                "{operation}: a file-deletion match publishes the file event and its decision"
+            );
+            // Correlation fails closed while referenced evidence is missing, so
+            // the file event has to precede the decision that names it.
+            let SecurityEventKind::FileAction(action) = &pair[0].kind else {
+                panic!("{operation}: the first published event must be the file action");
+            };
+            assert_eq!(action.operation, operation);
+            assert!(
+                !action.succeeded,
+                "{operation}: the denial must be recorded"
+            );
+            let SecurityEventKind::PolicyDecision(decision) = &pair[1].kind else {
+                panic!("{operation}: the second published event must be the decision");
+            };
+            assert_eq!(
+                pair[0].event_id, violation.event_id,
+                "{operation}: the violation row resolves its case through the file \
+                 evidence id, so a separate id here leaves the UI with nothing to link to"
+            );
+            // A denied file operation has no separate taint origin, so the
+            // decision names that one file event as both source and sink.
+            assert_eq!(
+                decision.source_event_id, pair[0].event_id,
+                "{operation}: the decision must reference the file event as its source"
+            );
+            assert_eq!(
+                decision.sink_event_id, pair[0].event_id,
+                "{operation}: the decision must reference the file event as its sink"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_deletion_violation_without_a_numeric_revision_publishes_no_case() {
+        // `active_binding` keeps the non-numeric revision from the request. A
+        // case carrying an invented revision would be evidence that cannot be
+        // audited, so the decision is dropped and the error is made visible.
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        raw.op = 6;
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active_binding(), &state);
+
+        assert!(
+            violations.try_recv().is_ok(),
+            "the raw violation is still published"
+        );
+        assert!(
+            evidence.try_iter().next().is_none(),
+            "no case evidence is published without a numeric revision"
+        );
+        assert!(
+            state.runtime_error().is_some(),
+            "the dropped case must leave a visible error"
+        );
+    }
+
+    #[test]
     fn trusted_endpoints_are_compared_as_addresses_with_optional_ports() {
         assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8"));
         assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8:443"));
@@ -1961,6 +2531,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 269_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.aws/credentials".into(),
@@ -2001,6 +2572,7 @@ mod tests {
         raw.provenance = Some(Provenance {
             label: 1,
             timestamp_ns: 269_000_000_000,
+            process_start_boottime: 9_876_500_000,
             pid: 43,
             op: 1,
             target: "/root/.aws/credentials".into(),
@@ -2089,6 +2661,32 @@ mod tests {
     }
 
     #[test]
+    fn activation_failure_preserves_cleanup_diagnostics_and_error_kind() {
+        for compile_failure in [true, false] {
+            let make_error = || {
+                if compile_failure {
+                    BackendError::CompileFailure("activation failed".into())
+                } else {
+                    BackendError::KernelFailure("activation failed".into())
+                }
+            };
+            for cleanup in [vec![], vec!["unbind failed".into(), "clear failed".into()]] {
+                let failed_cleanup = !cleanup.is_empty();
+                let error = activation_error_with_cleanup(make_error(), cleanup);
+                assert_eq!(
+                    std::mem::discriminant(&error),
+                    std::mem::discriminant(&make_error())
+                );
+                assert!(error.to_string().contains("activation failed"));
+                assert_eq!(error.to_string().contains("cleanup failed"), failed_cleanup);
+                if failed_cleanup {
+                    assert!(error.to_string().contains("unbind failed; clear failed"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn prepare_runtime_skips_drain_when_cleanup_fails() {
         let drain_called = Cell::new(false);
 
@@ -2112,6 +2710,13 @@ mod tests {
         let id = Uuid::parse_str("ffffffff-0000-0000-0000-000000000000")
             .expect("fixture UUID should parse");
         assert_ne!(domain_id(id), GLOBAL_ACTIVE_DOMAIN_ID);
+    }
+
+    #[test]
+    fn root_event_start_time_uses_kernel_identity() {
+        let mut active = active_binding();
+        active.kernel_pid = 4100;
+        assert_eq!(process_start_time(&active, 4100, 0), 98765);
     }
 
     #[test]
@@ -2143,16 +2748,6 @@ mod tests {
         assert!(read_proc_text_lossy("/proc/2000000000/stat").is_err());
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_nspid_from_status_survives_a_lossy_name_line() {
-        // /proc/<pid>/status leads with `Name:`, so a non-UTF-8 comm decodes
-        // lossily in front of the NSpid line the resolver needs.
-        let status = "Name:\tqoder\u{fffd}\nPid:\t39560\nNSpid:\t39560\t1\nTgid:\t39560\n";
-        assert_eq!(parse_nspid_from_status(status), vec![39560, 1]);
-        // Missing line stays empty.
-        assert!(parse_nspid_from_status("Pid:\t39560\n").is_empty());
     }
 
     #[test]

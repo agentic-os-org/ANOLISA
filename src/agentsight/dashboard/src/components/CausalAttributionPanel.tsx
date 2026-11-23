@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { runCausalAttribution } from '../utils/apiClient';
+import { useNavigate } from 'react-router-dom';
+import { ApiRequestError, runCausalAttribution } from '../utils/apiClient';
 import { truncateText } from '../utils/text';
 import type {
   CausalAttrib,
@@ -42,8 +43,8 @@ function readHistory(
   roundIndex?: number,
   idKind?: 'session' | 'conversation',
 ): HistoryEntry[] {
-  if (typeof window === 'undefined' || !window.localStorage) return [];
   try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
     const raw = window.localStorage.getItem(historyKey(sessionId, roundIndex, idKind));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as HistoryEntry[];
@@ -59,8 +60,8 @@ function writeHistory(
   idKind: 'session' | 'conversation' | undefined,
   entries: HistoryEntry[],
 ): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
   try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
     const trimmed = entries.slice(-HISTORY_MAX_ENTRIES);
     window.localStorage.setItem(
       historyKey(sessionId, roundIndex, idKind),
@@ -86,6 +87,10 @@ function appendHistory(
   writeHistory(sessionId, roundIndex, idKind, next);
   return next;
 }
+
+type CausalError =
+  | { kind: 'llmNotConfigured' }
+  | { kind: 'failed'; details: string };
 
 interface CausalAttributionPanelProps {
   sessionId: string;
@@ -488,9 +493,10 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   idKind,
   onScrollToStep,
 }) => {
+  const navigate = useNavigate();
   const [complaint, setComplaint] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CausalError | null>(null);
   const [caseData, setCaseData] = useState<CausalCase | null>(null);
   const [cached, setCached] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -502,6 +508,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // response describes the old key and must not be rendered — or filed — as
   // the new one's result.
   const requestVersion = useRef(0);
+  const runTimerRef = useRef<number | null>(null);
 
   // Stage definitions with estimated durations (seconds)
   const stages = [
@@ -516,9 +523,15 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // any in-flight run (bump the version) and clears the previous key's case:
   // leaving it up would render the old round's verdict under the new label.
   useEffect(() => {
+    if (runTimerRef.current !== null) {
+      window.clearInterval(runTimerRef.current);
+      runTimerRef.current = null;
+    }
     requestVersion.current += 1;
     setLoading(false);
     setError(null);
+    setStageIdx(0);
+    setElapsed(0);
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
     if (past.length > 0) {
@@ -529,6 +542,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
     } else {
       setCaseData(null);
       setCached(false);
+      setComplaint('');
     }
     setSelectedAltIdx(null);
   }, [sessionId, roundIndex, idKind]);
@@ -559,6 +573,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         return next;
       });
     }, 1000);
+    runTimerRef.current = timer;
 
     try {
       const req: CausalAttributionRequest = {
@@ -587,10 +602,22 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       setHistory(next);
     } catch (e) {
       if (requestVersion.current === version) {
-        setError(e instanceof Error ? e.message : '归因失败');
+        if (
+          e instanceof ApiRequestError &&
+          e.status === 400 &&
+          e.body?.error === 'llm_not_configured'
+        ) {
+          setError({ kind: 'llmNotConfigured' });
+        } else {
+          setError({
+            kind: 'failed',
+            details: e instanceof Error ? e.message : '归因失败',
+          });
+        }
       }
     } finally {
       window.clearInterval(timer);
+      if (runTimerRef.current === timer) runTimerRef.current = null;
       if (requestVersion.current === version) setLoading(false);
     }
   };
@@ -603,8 +630,13 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   };
 
   const clearHistory = () => {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    window.localStorage.removeItem(historyKey(sessionId, roundIndex, idKind));
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage?.removeItem(historyKey(sessionId, roundIndex, idKind));
+      }
+    } catch {
+      // Optional persistence must not prevent clearing the current panel.
+    }
     setHistory([]);
     setCaseData(null);
     setCached(false);
@@ -703,8 +735,38 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
               已缓存 · 秒出
             </span>
           )}
-          {error && <span className="text-sm text-red-600">{error}</span>}
         </div>
+
+        {error?.kind === 'llmNotConfigured' && (
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+          >
+            <p>当前未配置 LLM，无法发起因果归因。请先前往「优化设置」填写 API Key 与模型后再试。</p>
+            <button
+              type="button"
+              onClick={() => navigate('/settings')}
+              className="mt-2 font-medium underline hover:text-amber-900"
+            >
+              前往优化设置
+            </button>
+          </div>
+        )}
+
+        {error?.kind === 'failed' && (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+          >
+            <p>归因失败，请稍后重试。</p>
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-red-600">查看详情</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-red-600">
+                {error.details}
+              </pre>
+            </details>
+          </div>
+        )}
 
         {loading && (
           <div className="pt-3 space-y-2">

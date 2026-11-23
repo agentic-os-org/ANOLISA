@@ -37,7 +37,7 @@ def _asset(host):
             "codex": Path("/usr/local/share/anolisa/adapters/sec-core/codex/hooks"),
             "qoder": Path("/usr/local/share/anolisa/adapters/sec-core/qoder/hooks"),
             "qwen": Path("/usr/local/share/anolisa/adapters/sec-core/qwencode/hooks"),
-            "cosh": Path("/usr/local/share/anolisa/extensions/sec-core/hooks"),
+            "cosh": Path("/usr/local/share/anolisa/extensions/agent-sec-core/hooks"),
             "hermes": Path("/usr/local/share/anolisa/adapters/sec-core/hermes"),
             "openclaw": Path(
                 "/usr/local/share/anolisa/adapters/sec-core/openclaw/dist"

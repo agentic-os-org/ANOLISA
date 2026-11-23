@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Select a prepared compiler without changing the user's rustup defaults.
+set -euo pipefail
+
+channel="${ANOLISA_BUILD_TOOLCHAIN:?Missing build toolchain fallback}"
+directory="$PWD"
+while :; do
+    if [[ -f "$directory/rust-toolchain.toml" ]]; then
+        pin="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' "$directory/rust-toolchain.toml")"
+        [[ -z "$pin" ]] || channel="$pin"
+        break
+    elif [[ -f "$directory/rust-toolchain" ]]; then
+        read -r channel < "$directory/rust-toolchain"
+        break
+    fi
+    [[ "$directory" != / ]] || break
+    directory="${directory%/*}"
+    [[ -n "$directory" ]] || directory=/
+done
+
+exec rustup run "$channel" cargo "$@"

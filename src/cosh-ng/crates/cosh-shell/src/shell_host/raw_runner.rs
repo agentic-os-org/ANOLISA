@@ -17,7 +17,9 @@ use crate::raw_input::{
 };
 use crate::types::ShellEvent;
 
-use super::bootstrap::{assistance_state_file, start_bash_session, start_zsh_session, PtySession};
+use super::bootstrap::{
+    assistance_state_file, start_bash_session, start_relay_session, start_zsh_session, PtySession,
+};
 use super::io_loop::{read_until_streaming_with_presentation, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
@@ -26,6 +28,7 @@ use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog}
 
 mod interactive;
 pub(super) mod raw_mode_guard;
+mod startup_gate;
 mod wake;
 
 pub use interactive::{
@@ -368,7 +371,7 @@ where
         Some(control) => input_classifier.with_assistance_control(control.clone()),
         None => input_classifier,
     };
-    let mut session = start_session(config)?;
+    let mut session = start_relay_session(config, &mut output, start_session)?;
     session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
     session
         .parser
@@ -389,6 +392,8 @@ where
         prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
     }
     if config.integration.uses_markers() {
+        // #7768: hold the relay until the path-routing gate is up, closing the
+        // startup window between precmd/prompt and the prompt_ready marker.
         read_until_streaming_with_presentation(
             &mut session.master,
             &mut session.child,
@@ -396,13 +401,7 @@ where
             &mut output,
             &mut prompt_presentation,
             Duration::from_secs(5),
-            |parser| {
-                if config.native_mode {
-                    parser.precmd_count() >= 1
-                } else {
-                    parser.prompt_count(config.prompt.as_bytes()) >= 1
-                }
-            },
+            |parser| startup_gate::relay_release_ready(config, parser, &main_prompt_gate),
         )?;
     }
     let input_master = session.master.try_clone()?;
@@ -433,10 +432,11 @@ where
         Arc::clone(&input_mode),
         input_generation.clone(),
         RawInputShellRoute::new(
-            main_prompt_gate,
+            main_prompt_gate.clone(),
             slash_route_enabled,
             session.zsh_path_prompt_buffering.take(),
-        ),
+        )
+        .with_native_terminal(session.terminal.try_clone()?),
         wake_writer,
     );
     let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();
@@ -471,6 +471,7 @@ where
         &mut resize_reader,
         &input_mode,
         &input_generation,
+        &main_prompt_gate,
         &mut last_winsize,
         relay_prompt,
         &session.recovery_request_file,

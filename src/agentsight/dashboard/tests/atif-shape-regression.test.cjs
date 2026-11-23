@@ -7,6 +7,14 @@ const test = require('node:test');
 const step = (extra = {}) => ({ step_id: 1, source: 'agent', message: 'message', ...extra });
 const document = (extra = {}) => ({ schema_version: 'ATIF-v1.7', session_id: 'fixture', steps: [step()], ...extra });
 
+function collapsibles(page, root, title) {
+  return page.find(root, (node) => node.type === 'button' && page.find(node, (child) =>
+    child.type === 'span' &&
+    child.props?.className === 'font-medium text-gray-700' &&
+    child.props.children === title
+  ).length > 0);
+}
+
 function viewer(locale = 'en-US') {
   const states = [], refs = [], readers = [], requests = [], downloads = [];
   let stateIndex = 0, refIndex = 0, child = false;
@@ -35,9 +43,9 @@ function viewer(locale = 'en-US') {
   function load(file, extra = '') {
     const exports = {};
     runInNewContext(readFileSync(file, 'utf8') + extra, {
-      exports, URLSearchParams, Blob,
+      exports, URLSearchParams, Blob, AbortController, setTimeout: () => 0,
       URL: { createObjectURL(blob) { downloads.push(blob); return 'blob:private'; }, revokeObjectURL() {} },
-      document: { createElement: () => ({ click() {} }) },
+      document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
       FileReader: class { constructor() { readers.push(this); } readAsText() {} },
       require(name) {
         if (name === 'react') return react;
@@ -46,22 +54,27 @@ function viewer(locale = 'en-US') {
         if (name === '../i18n') return { useI18n: () => ({ t }), useLocaleTag: () => locale };
         if (name === '../utils/trajectoryTree') return tree;
         if (name === '../utils/roundModel') return roundModel;
+        if (name === '../utils/optimizationStrategies') return require(join(output, '../utils/optimizationStrategies.js'));
         if (name === '../utils/savings') return require(join(output, '../utils/savings.js'));
         if (name === '../utils/trajectoryTextFilter') return require(join(output, '../utils/trajectoryTextFilter.js'));
+        if (name === '../utils/text') return require(join(output, '../utils/text.js'));
         if (name === '../utils/apiClient') return {
           fetchAtifBySession: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'session', args, resolve, reject })),
           fetchTrajectoryAtif: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'collected', args, resolve, reject })),
           fetchAtifByConversation: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'conversation', args, resolve, reject })),
           fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
         };
+        if (name === '../utils/wsCkpt') return { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false };
         if (modules[name]) return modules[name];
         if (name === '../components/CausalAttributionPanel') return { CausalAttributionPanel: () => null };
+        if (name === '../components/WorkspaceSnapshotDialog') return { WorkspaceSnapshotDialog: () => null };
         throw new Error(`Unexpected ATIF dependency ${name}`);
       },
     });
     return exports;
   }
   messages = load(join(output, '../i18n.js')).messages;
+  modules['../utils/download'] = load(join(output, '../utils/download.js'));
   modules['../components/SubagentGraph'] = load(join(output, '../components/SubagentGraph.js'));
   const page = load(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, '\nexports.parts = { isAtifDocument, StepCard };');
   function render() { stateIndex = 0; refIndex = 0; return page.AtifViewerPage(); }
@@ -77,6 +90,7 @@ function viewer(locale = 'en-US') {
   }
   return {
     requests, downloads, parts: page.parts, t,
+    find(root, predicate) { return nodes(root, predicate); },
     import(data) {
       const input = nodes(render(), (node) => node.type === 'input' && node.props.type === 'file')[0];
       input.props.onChange({ target: { files: [{ name: 'fixture.json' }], value: 'fixture.json' } });
@@ -86,6 +100,9 @@ function viewer(locale = 'en-US') {
       if (kind === 'conversation') nodes(render(), (node) => node.type === 'button' && node.props.children === t('atif.byConversation'))[0].props.onClick();
       nodes(render(), (node) => node.type === 'input' && node.props.type === 'text')[0].props.onChange({ target: { value: 'fixture' } });
       nodes(render(), (node) => node.type === 'button' && node.props.children === t('atif.load'))[0].props.onClick();
+    },
+    search(value) {
+      nodes(render(), (node) => node.type === 'input' && node.props.type === 'search')[0].props.onChange({ target: { value } });
     },
     error() { return nodes(render(), (node) => node.props?.className === 'bg-red-50 border border-red-200 rounded-xl p-4 text-red-600 text-sm')[0]?.props.children.at(-1); },
     session() { return nodes(render(), (node) => node.type === 'span' && node.props.className === 'text-xs text-gray-400 font-mono truncate')[0]?.props.children; },
@@ -156,6 +173,69 @@ test('omitted default tool arguments render through the real step and tool compo
   page.import(document({ steps: [value] }));
   assert.equal(page.session(), 'fixture');
   assert.doesNotThrow(() => page.renderStep(value));
+});
+
+test('an imported user observation remains searchable and expands through the real section control', () => {
+  const page = viewer();
+  const content = { output: 'user-observation-needle' };
+  page.import(document({ steps: [
+    step({
+      source: 'user',
+      message: 'mixed user input',
+      observation: { results: [{ source_call_id: 'call-user', content }] },
+    }),
+    step({ step_id: 2, source: 'user', message: 'unrelated round' }),
+  ] }));
+
+  page.search('user-observation-needle');
+  let rendered = page.renderAll();
+  assert.ok(JSON.stringify(rendered).includes(page.t('atif.matchingRounds', { matched: 1, total: 2 })));
+
+  const title = page.t('atif.observation');
+  let buttons = collapsibles(page, rendered, title);
+  assert.equal(buttons.length, 1);
+  assert.equal(page.find(buttons[0], (node) => node.props?.className?.includes('bg-gray-200') && node.props.children === 1).length, 1);
+
+  const expected = JSON.stringify(content, null, 2);
+  const contents = (root) => page.find(root, (node) => node.type === 'pre' && node.props.children === expected);
+  assert.equal(contents(rendered).length, 0, 'the observation starts collapsed');
+
+  buttons[0].props.onClick();
+  rendered = page.renderAll();
+  assert.equal(contents(rendered).length, 1);
+  assert.ok(JSON.stringify(rendered).includes(page.t('atif.callLabel', { id: 'call-user' })));
+
+  collapsibles(page, rendered, title)[0].props.onClick();
+  rendered = page.renderAll();
+  assert.equal(contents(rendered).length, 0, 'the same control collapses the observation again');
+});
+
+test('observation rendering is source-independent without exposing agent-only sections', () => {
+  const page = viewer();
+  const value = step({
+    reasoning_content: 'agent reasoning',
+    tool_calls: [{ tool_call_id: 'call-agent', function_name: 'agent-tool' }],
+    observation: { results: [{ content: 'captured result' }] },
+    metrics: { prompt_tokens: 3 },
+  });
+  const user = page.renderStep(step({ ...value, source: 'user' }));
+  assert.equal(collapsibles(page, user, page.t('atif.observation')).length, 1);
+  assert.equal(collapsibles(page, user, page.t('atif.reasoning')).length, 0);
+  assert.equal(collapsibles(page, user, page.t('atif.toolCall')).length, 0);
+  assert.ok(!JSON.stringify(user).includes('agent-tool'));
+  assert.ok(!JSON.stringify(user).includes(page.t('atif.inputLabel', { n: '3' })));
+
+  const agent = page.renderStep(value);
+  assert.equal(collapsibles(page, agent, page.t('atif.observation')).length, 1);
+  const text = JSON.stringify(agent);
+  const ordered = [
+    page.t('atif.reasoning'),
+    page.t('atif.toolCall'),
+    page.t('atif.observation'),
+    page.t('atif.inputLabel', { n: '3' }),
+  ].map((label) => text.indexOf(label));
+  assert.ok(ordered.every((index) => index >= 0));
+  assert.deepEqual(ordered, [...ordered].sort((a, b) => a - b));
 });
 
 test('cached-only step metrics remain visible in the step card', () => {
@@ -286,4 +366,60 @@ test('an embedded subagent with an empty id keeps its own key and row', () => {
       `edge ${JSON.stringify(edge.fromKey)}->${JSON.stringify(edge.toKey)} leaves the target row`,
     );
   }
+});
+
+test('external subagent ref with empty trajectory_id is preserved instead of silently dropped', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent',
+    session_id: 'parent-run',
+    steps: [{
+      step_id: 1,
+      source: 'agent',
+      message: 'spawned subagent',
+      observation: {
+        results: [{
+          subagent_trajectory_ref: [{ trajectory_id: '', session_id: 'ext-session-1' }],
+        }],
+      },
+    }],
+  }));
+  assert.ok(tree, 'tree must not be null when an external subagent ref has empty trajectory_id');
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0].externalSessionId, 'ext-session-1');
+  const found = findNodeByRef(tree, { trajectory_id: '', session_id: 'ext-session-1' });
+  assert.ok(found, 'findNodeByRef must resolve external subagent ref with empty trajectory_id');
+  assert.equal(found.externalSessionId, 'ext-session-1');
+});
+
+test('external subagent ref with explicit trajectory_id resolves via findNodeByRef', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent',
+    session_id: 'parent-run',
+    steps: [{
+      step_id: 1,
+      source: 'agent',
+      message: 'spawned two external trajectories in one session',
+      observation: {
+        results: [{
+          subagent_trajectory_ref: [
+            { trajectory_id: 'ext-traj-1', session_id: 'ext-session-2' },
+            { trajectory_id: 'ext-traj-2', session_id: 'ext-session-2' },
+          ],
+        }],
+      },
+    }],
+  }));
+  assert.ok(tree);
+  assert.equal(tree.children.length, 1, 'same external session must stay deduplicated to one node');
+  const found1 = findNodeByRef(tree, { trajectory_id: 'ext-traj-1', session_id: 'ext-session-2' });
+  const found2 = findNodeByRef(tree, { trajectory_id: 'ext-traj-2', session_id: 'ext-session-2' });
+  assert.ok(found1, 'first external trajectory_id must resolve to its external node');
+  assert.ok(found2, 'second external trajectory_id on the same session must also resolve');
+  assert.equal(found1.externalSessionId, 'ext-session-2');
+  assert.equal(found2.externalSessionId, 'ext-session-2');
+  assert.equal(
+    findNodeByRef(tree, { trajectory_id: 'unknown-traj', session_id: 'ext-session-2' }),
+    null,
+    'unreferenced trajectory_id must not falsely match an external node',
+  );
 });

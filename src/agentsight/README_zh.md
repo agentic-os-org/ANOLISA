@@ -185,8 +185,8 @@ cd src/agentsight
 # 构建前端并输出到 frontend-dist/（cargo build 前必须先执行）
 make build-frontend
 
-# 再构建包含嵌入 UI 的 Rust 二进制
-make build
+# 再单独构建包含嵌入 UI 的 Rust 二进制
+make build-binary
 
 # 或一步完成
 make build-all
@@ -317,6 +317,9 @@ sudo anolisa --install-mode system install agentsight
 AgentSight 需要 Linux system mode。该命令会一并安装 AgentSight 服务和
 `agentsight-enforcer` 服务。
 
+Enforcer 对文件 open/write 和 connect 的阻断还要求内核启用 BPF LSM，并加载对应的 hook。
+上述操作缺少阻断能力时，策略会被拒绝，详见[集成指南](../../docs/user-guide/zh/agentsight/integrations.md#agentsight-enforcer风险拦截)。
+
 ### 通过 RPM 安装
 
 ```bash
@@ -324,17 +327,20 @@ sudo yum install agentsight
 ```
 
 安装内容：
-- `/usr/local/bin/agentsight` — CLI 可执行文件
-- `/usr/local/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight` — CLI 可执行文件
+- `/usr/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight-start` — trace/serve 监督脚本
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
+- `/usr/share/agentsight/adapters/dsh/` — DSH 插件资源，来自弱依赖推荐的 `agentsight-plugins`；
+  关闭弱依赖时不会安装
 
-RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
+RPM 是 Linux system 包。两个单元会随包安装；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
 
 ### 启动服务
 
-两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+准备开始采集时，再启动主服务。
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -377,11 +383,14 @@ ActPlane enforcer，输出到每次新建的独立目录。脚本打印其绝对
 Linux 交叉构建通过 `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` 显式选择目标；不传参数时
 保持宿主构建。`CARGO` 可指定准备好的 Cross 包装入口，但必须遵守指定目标。
-两种 Linux 架构使用相同 raw 包布局及源码自有的 `.anolisa/component.toml`。
-macOS ARM64 使用 `.anolisa/component.macos.toml`，仅包含主程序。
+两种 Linux 架构使用相同 raw 包布局及源码自有的
+`packaging/anolisa/raw/component.toml`。macOS ARM64 使用
+`packaging/anolisa/raw/component.macos.toml`，仅包含主程序。
 从 Linux 交叉构建 macOS 时使用 `--no-default-features --features server`，
 以跳过可选的 `bpf-build` 宿主依赖。
 打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。
+
+> `cargo build --release` 只编译 Rust，不会重新构建内嵌的 Dashboard UI，因此面向用户的构建请使用 `make build-all`。
 
 ### GitHub 预构建产物
 
@@ -449,6 +458,14 @@ sudo agentsight trace
 ## 配置
 
 AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。
+
+默认配置包含 Qoder CLI 发现规则和旧版 `*.qoder.sh` 网关。
+在 Linux 上，现有 TLS 探针将解码后的请求、原生 session ID、工具调用及
+封装 SSE 中的 Token 用量交给观测流水线。已有配置的迁移方法和协议覆盖边界
+见[配置指南](../../docs/user-guide/zh/agentsight/configuration.md)。
+
+在 Linux 上，可通过可选的 `ws_ckpt` 配置连接本机的快照守护进程。回滚默认关闭。
+详见[工作区快照配置](../../docs/user-guide/zh/agentsight/configuration.md#工作区快照后端linux)。
 
 ### SQLite 存储（`storage`）
 
@@ -563,6 +580,7 @@ Token 解析支持多种 LLM API 格式：
 ## 批量分析并发
 
 批处理脚本可显式启用 `--jobs 1..8`（默认 1），限制并发调用数，并按原始顺序输出结果。
+`--limit` 仅接受非负整数；`0` 表示不处理文件。
 用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 项目起源

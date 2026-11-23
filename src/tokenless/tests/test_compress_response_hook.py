@@ -74,7 +74,7 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
                                "request.json"), "w") as captured:
             json.dump(operation_input, captured)
 
-        def respond(output, disposition, additional_context=None):
+        def respond(output, disposition, additional_context=None, protocol_version=2):
             result = {
                 "output": output,
                 "disposition": disposition,
@@ -89,7 +89,7 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             if additional_context:
                 result["additional_context"] = additional_context
             print(json.dumps({
-                "protocol_version": 2,
+                "protocol_version": protocol_version,
                 "operation": "post_tool",
                 "attribution": request["attribution"],
                 "result": result,
@@ -110,13 +110,24 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
 
     if behavior == "compress":
         script = prologue + textwrap.dedent("""\
+            if operation_input["capabilities"].get("replace_with_text"):
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError:
+                    respond(content[:20], "applied")
+                    sys.exit(0)
             data = json.loads(content)
             if isinstance(data, str):
                 data = json.loads(data)
-            compressed = {
-                k: (v[:20] if isinstance(v, str) and len(v) > 20 else v)
-                for k, v in data.items()
-            }
+            def truncate_strings(val):
+                if isinstance(val, str):
+                    return val[:20] if len(val) > 20 else val
+                if isinstance(val, dict):
+                    return {k: truncate_strings(v) for k, v in val.items()}
+                if isinstance(val, list):
+                    return [truncate_strings(v) for v in val]
+                return val
+            compressed = truncate_strings(data)
             respond(json.dumps(compressed, separators=(",", ":")), "applied")
         """)
     elif behavior == "compress-text":
@@ -132,13 +143,21 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         script = prologue + 'respond(content, "no_savings")\n'
     elif behavior == "passthrough":
         script = prologue + 'respond(content, "passthrough")\n'
-    elif behavior == "wrong-protocol-version":
-        script = prologue + textwrap.dedent("""\
+    elif behavior in ("wrong-protocol-version", "future-protocol-version"):
+        version = 1 if behavior == "wrong-protocol-version" else 3
+        script = prologue + f'respond(content[:40], "applied", protocol_version={version})\n'
+    elif behavior == "force-applied":
+        script = textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, sys
+            json.load(sys.stdin)
             print(json.dumps({
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "operation": "post_tool",
-                "attribution": request["attribution"],
-                "result": {},
+                "result": {
+                    "disposition": "applied",
+                    "output": json.dumps({"stdout": None, "stderr": "changed"}),
+                },
             }))
         """)
     else:
@@ -329,33 +348,29 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         return module
 
     def test_supported_install_layouts_are_covered(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
+        paths = self._hook_utils()._known_binary_paths("tokenless", "/home/alice")
         expected = (
-            "/home/alice/.local/bin/rtk",
-            "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
-            "/home/alice/.local/libexec/anolisa/tokenless/rtk",
-            "/usr/local/bin/rtk",
-            "/usr/local/libexec/anolisa/tokenless/rtk",
-            "/usr/bin/rtk",
-            "/usr/libexec/anolisa/tokenless/rtk",
-            "/usr/lib/anolisa/tokenless/rtk",
-            "/home/alice/.local/share/anolisa/tokenless/rtk",
-            "/home/alice/.local/lib/anolisa/tokenless/rtk",
+            "/home/alice/.local/bin/tokenless",
+            "/usr/local/bin/tokenless",
+            "/usr/bin/tokenless",
         )
         self.assertEqual(paths, expected)
 
-    def test_generic_binaries_skip_tokenless_helper_dirs(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("docker", "/home/alice")
-        self.assertIn("/home/alice/.local/bin/docker", paths)
-        self.assertIn("/usr/local/bin/docker", paths)
-        self.assertIn("/usr/bin/docker", paths)
-        self.assertFalse(any("tokenless" in path for path in paths))
+    def test_binaries_skip_retired_tokenless_helper_dirs(self) -> None:
+        # RTK is linked into tokenless; no layout carries a standalone helper.
+        for name in ("docker", "rtk"):
+            with self.subTest(name=name):
+                paths = self._hook_utils()._known_binary_paths(name, "/home/alice")
+                self.assertIn(f"/home/alice/.local/bin/{name}", paths)
+                self.assertIn(f"/usr/local/bin/{name}", paths)
+                self.assertIn(f"/usr/bin/{name}", paths)
+                self.assertFalse(any("tokenless" in path for path in paths))
 
     def test_user_layouts_require_an_absolute_home(self) -> None:
         hook_utils = self._hook_utils()
         for home in ("", "relative/home"):
             with self.subTest(home=home):
-                paths = hook_utils._known_binary_paths("rtk", home)
+                paths = hook_utils._known_binary_paths("tokenless", home)
                 self.assertTrue(all(os.path.isabs(path) for path in paths))
                 self.assertFalse(any(".local" in path for path in paths))
 
@@ -382,24 +397,22 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                     ("/usr/local/bin/tokenless", "/usr/bin/tokenless"),
                 )
 
-    def test_resolver_finds_makefile_user_helper_without_path(self) -> None:
+    def test_resolver_finds_user_install_without_path(self) -> None:
         hook_utils = self._hook_utils()
         with tempfile.TemporaryDirectory() as home:
-            helper_dir = os.path.join(
-                home, ".local", "libexec", "anolisa", "tokenless"
-            )
-            os.makedirs(helper_dir)
-            rtk_path = os.path.join(helper_dir, "rtk")
-            with open(rtk_path, "w", encoding="utf-8") as handle:
+            local_bin = os.path.join(home, ".local", "bin")
+            os.makedirs(local_bin)
+            tokenless_path = os.path.join(local_bin, "tokenless")
+            with open(tokenless_path, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\n")
-            os.chmod(rtk_path, 0o755)
+            os.chmod(tokenless_path, 0o755)
 
             hook_utils._resolved_cache.clear()
             with (
                 mock.patch.dict(os.environ, {"HOME": home}),
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
-                self.assertEqual(hook_utils.resolve_binary("rtk"), rtk_path)
+                self.assertEqual(hook_utils.resolve_binary("tokenless"), tokenless_path)
             hook_utils._resolved_cache.clear()
 
     def test_resolver_prefers_user_layout_to_explicit_legacy_fallback(self) -> None:
@@ -409,9 +422,9 @@ class TestBinaryFallbackPaths(unittest.TestCase):
             legacy_bin = os.path.join(home, "legacy")
             os.makedirs(local_bin)
             os.makedirs(legacy_bin)
-            user_rtk = os.path.join(local_bin, "rtk")
-            legacy_rtk = os.path.join(legacy_bin, "rtk")
-            for path in (user_rtk, legacy_rtk):
+            user_tokenless = os.path.join(local_bin, "tokenless")
+            legacy_tokenless = os.path.join(legacy_bin, "tokenless")
+            for path in (user_tokenless, legacy_tokenless):
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write("#!/bin/sh\n")
                 os.chmod(path, 0o755)
@@ -422,7 +435,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
                 self.assertEqual(
-                    hook_utils.resolve_binary("rtk", legacy_rtk), user_rtk
+                    hook_utils.resolve_binary("tokenless", legacy_tokenless), user_tokenless
                 )
             hook_utils._resolved_cache.clear()
 
@@ -631,8 +644,8 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn("additionalContext", hso,
                          "Compressed content must not be in additionalContext (duplication)")
 
-    def test_qoder_cli_uses_updated_tool_output(self):
-        """Qoder CLI should replace structured tool output without version gating."""
+    def test_qoder_cli_serializes_generic_structured_output(self):
+        """Generic structured results remain visible as JSON text in Qoder."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
@@ -657,7 +670,7 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertIsInstance(
             updated_output,
             str,
-            "Qoder CLI requires updatedToolOutput to be a string",
+            "Only a rewrapped native Bash stdout uses Qoder's object renderer",
         )
         compressed_data = json.loads(updated_output)
         self.assertEqual(compressed_data["stdout"], "x" * 20)
@@ -686,10 +699,13 @@ class TestReplacementProtocol(unittest.TestCase):
                     hso = result["hookSpecificOutput"]
                     self.assertEqual(hso["hookEventName"], "PostToolUse")
                     replacement = hso["updatedToolOutput"]
-                    self.assertIsInstance(replacement, type(response))
-                    if isinstance(replacement, str):
-                        replacement = json.loads(replacement)
-                    self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
+                    if tool == "Bash" and isinstance(response, dict):
+                        self.assertEqual(replacement, "x" * 20)
+                    else:
+                        self.assertIsInstance(replacement, type(response))
+                        if isinstance(replacement, str):
+                            replacement = json.loads(replacement)
+                        self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
                     self.assertNotIn("additionalContext", hso)
 
     def test_qwenwork_mcp_telemetry_cannot_replace_real_output(self):
@@ -1120,7 +1136,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             self.assertEqual(json.load(captured)["content"], diff)
 
-    def test_small_non_diff_and_stderr_keep_json_route(self) -> None:
+    def test_small_shell_streams_reach_core_without_domain_guessing(self) -> None:
         binary = _create_mock_tokenless(self.tmpdir, "passthrough")
         for stdout, stderr in [
             ("ordinary output\n" * 30, ""),
@@ -1137,7 +1153,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                 )
                 self.assertEqual(result, {})
                 with open(os.path.join(self.tmpdir, "request.json")) as captured:
-                    self.assertEqual(json.loads(json.load(captured)["content"]), envelope)
+                    self.assertEqual(json.load(captured)["content"], stdout or stderr)
 
     def test_largest_field_wins_and_the_other_stays_verbatim(self):
         stdout = "info: routine progress line\n" * 100
@@ -1158,7 +1174,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
         self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
 
-    def test_qoder_rewrapped_envelope_is_a_compact_json_string(self):
+    def test_qoder_rewrapped_envelope_preserves_the_object(self):
         log = "npm ERR! code ELIFECYCLE\n" + "npm verbose stack line\n" * 150
         result = _run_hook(
             {
@@ -1174,13 +1190,12 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertIsInstance(updated, str,
-                              "Qoder requires a string updatedToolOutput")
-        self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+        self.assertIsInstance(updated, dict, "Qoder must retain the structured tool result")
+        self.assertEqual(updated, self._bash_envelope(log[:40], ""))
 
-    def test_qoder_uses_text_slot_at_200_chars(self) -> None:
+    def test_qoder_uses_stdout_text_slot_even_below_compression_threshold(self) -> None:
         binary = _create_mock_tokenless(self.tmpdir, "no-savings")
-        for length in (199, 200):
+        for length in (0, 199, 200):
             with self.subTest(length=length):
                 stdout = "x" * length
                 envelope = self._bash_envelope(stdout, "")
@@ -1193,15 +1208,89 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                 self.assertEqual(result, {})
                 with open(os.path.join(self.tmpdir, "request.json")) as captured:
                     request = json.load(captured)
-                expected = stdout if length == 200 else json.dumps(
-                    envelope, separators=(",", ":"), ensure_ascii=False
-                )
-                self.assertEqual(request["content"], expected)
+                self.assertEqual(request["content"], stdout)
 
-    def test_qoder_keeps_unselected_stderr_when_both_streams_are_long(self) -> None:
+    def test_qoder_stderr_only_output_keeps_the_original_envelope(self) -> None:
+        stderr = "error: build failed\n" * 30
+        envelope = self._bash_envelope("", stderr)
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": envelope},
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertEqual(json.load(captured)["content"], "")
+        self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    def test_qoder_non_string_stdout_cannot_replace_the_envelope(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "compress")
+        for stdout in (
+            {}, {"stdout": None}, {"stdout": {"nested": "value"}},
+            {"stdout": ["value"]}, {"stdout": 0},
+        ):
+            for stderr in ("warning", "warning line\n" * 30):
+                with self.subTest(stdout=stdout, stderr_length=len(stderr)):
+                    envelope = {
+                        **stdout,
+                        "stderr": stderr,
+                        "exit_code": 0,
+                        "metadata": "trace data " * 100,
+                    }
+                    result = _run_hook(
+                        {"tool_name": "Bash", "tool_response": envelope},
+                        agent_id="qoder-cli",
+                        mock_tokenless_path=binary,
+                        isolated_home=self.isolated_home,
+                    )
+                    self.assertEqual(result, {})
+                    with open(os.path.join(self.tmpdir, "request.json")) as captured:
+                        request = json.load(captured)
+                    self.assertFalse(request["capabilities"]["replace_output"])
+                    self.assertEqual(json.loads(request["content"]), envelope)
+
+    def test_qoder_non_string_stdout_keeps_error_diagnostics(self) -> None:
+        stderr = "bash: rg: command not found"
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": {
+                "stdout": None, "stderr": stderr, "exit_code": 127,
+            }},
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            request = json.load(captured)
+        self.assertFalse(request["capabilities"]["replace_output"])
+        self.assertEqual(request["content"], stderr)
+        specific = result["hookSpecificOutput"]
+        self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+        self.assertNotIn("updatedToolOutput", specific)
+
+    def test_qoder_non_string_stdout_rejects_unexpected_applied_result(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "force-applied")
+        warnings = []
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": {
+                "stdout": None, "stderr": "warning", "exit_code": 0,
+            }},
+            agent_id="qoder-cli",
+            mock_tokenless_path=binary,
+            isolated_home=self.isolated_home,
+            stderr_sink=warnings,
+        )
+        self.assertEqual(result, {})
+        self.assertIn("non-replaceable Qoder output", "".join(warnings))
+
+    def test_qoder_compresses_only_stdout_even_when_stderr_is_longer(self) -> None:
         stdout = "build step\n" * 30
-        stderr = "warning\n" * 25
-        envelope = self._bash_envelope(stdout, stderr)
+        stderr = "warning\n" * 100
+        envelope = {
+            **self._bash_envelope(stdout, stderr),
+            "exit_code": 0,
+            "metadata": {"duration_ms": 123, "tags": ["one", "two"]},
+        }
         result = _run_hook(
             {"tool_name": "Bash", "tool_response": envelope},
             agent_id="qoder-cli",
@@ -1211,11 +1300,13 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             self.assertEqual(json.load(captured)["content"], stdout)
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertEqual(json.loads(updated), self._bash_envelope(stdout[:40], stderr))
+        self.assertEqual(updated, {**envelope, "stdout": stdout[:40]})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
         log = "npm verbose progress line\n" * 150
+        # Non-empty stderr cannot be faithfully represented in QwenWork's single
+        # text replacement slot without dropping stderr or stringifying the object.
         result = _run_hook(
             {
                 "tool_name": "Bash",
@@ -1227,8 +1318,211 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
             mock_tokenless_path=self.mock_bin,
             isolated_home=self.isolated_home,
         )
-        updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertEqual(updated, self._bash_envelope(log[:40], "warning"))
+        self.assertEqual(result, {})
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertFalse(json.load(captured)["capabilities"]["replace_output"])
+
+        clean = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, ""),
+                "session_id": "s",
+                "tool_use_id": "t-clean",
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertEqual(clean["hookSpecificOutput"]["updatedToolOutput"], log[:40])
+
+    def test_qwenwork_bash_text_slot_boundary_and_delivered_savings(self):
+        adapters_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "adapters", "tokenless")
+        )
+        hooks_dir = os.path.join(adapters_dir, "common", "hooks")
+        sys.path.insert(0, hooks_dir)
+        sys.path.insert(0, adapters_dir)
+        try:
+            import hook_dispatch
+
+            qwenwork = hook_dispatch.load_adapter("qwenwork")
+        finally:
+            sys.path.remove(adapters_dir)
+            sys.path.remove(hooks_dir)
+
+        def host_project(reply):
+            hso = reply.get("hookSpecificOutput")
+            if not isinstance(hso, dict) or "updatedToolOutput" not in hso:
+                return None
+            updated = hso["updatedToolOutput"]
+            if isinstance(updated, str):
+                return updated
+            return json.dumps(updated, separators=(",", ":"), ensure_ascii=False)
+
+        # Issue #10036 deterministic boundary: 237 original chars -> 236 candidate chars
+        # (60 -> 59 heuristic-v1 tokens) must deliver 236 chars of pure text, not 317.
+        original = json.dumps({"message": "x" * 222}, separators=(",", ":")) + "\n"
+        candidate = original[:-1]
+        data = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": original,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        tool_result = qwenwork.response(data)
+        reply = qwenwork.response_output(data, tool_result, candidate, "")
+        delivered = host_project(reply)
+        self.assertEqual(delivered, candidate)
+        self.assertEqual(len(delivered), 236)
+        self.assertNotIn("exitCode", delivered)
+
+        # 236 -> 235 ASCII chars saves 1 character but 0 heuristic-v1 tokens (59 -> 59):
+        # complete replacement has no token benefit and must preserve original output.
+        no_token_benefit_orig = json.dumps({"message": "x" * 221}, separators=(",", ":")) + "\n"
+        no_token_benefit_cand = no_token_benefit_orig[:-1]
+        data_no_benefit = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": no_token_benefit_orig,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        res_no_benefit = qwenwork.response(data_no_benefit)
+        self.assertEqual(
+            qwenwork.response_output(data_no_benefit, res_no_benefit, no_token_benefit_cand, ""),
+            {},
+        )
+
+        # Sample 1 arithmetic from #10036: 853 chars / 281 tokens -> 797 chars / 267 tokens.
+        sample_orig = "汉" * 90 + "a" * 763
+        sample_cand = "汉" * 90 + "a" * 707
+        self.assertEqual((len(sample_orig), qwenwork._estimate_tokens(sample_orig)), (853, 281))
+        self.assertEqual((len(sample_cand), qwenwork._estimate_tokens(sample_cand)), (797, 267))
+        sample_data = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": sample_orig,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        sample_reply = qwenwork.response_output(
+            sample_data, qwenwork.response(sample_data), sample_cand, ""
+        )
+        self.assertEqual(host_project(sample_reply), sample_cand)
+
+        # If adapter-delivered additionalContext erases the candidate savings, keep original.
+        heavy_context = "[tokenless:env] " + "x" * 60
+        rejected_with_context = qwenwork.response_output(
+            sample_data, qwenwork.response(sample_data), sample_cand, heavy_context
+        )
+        self.assertNotIn("updatedToolOutput", rejected_with_context["hookSpecificOutput"])
+        self.assertEqual(
+            rejected_with_context["hookSpecificOutput"]["additionalContext"], heavy_context
+        )
+
+    def test_qwenwork_unfaithful_envelopes_and_errors_preserve_native_output(self):
+        long_out = "build output line\n" * 30
+        with tempfile.TemporaryDirectory() as force_dir:
+            force_applied = _create_mock_tokenless(force_dir, "force-applied")
+            for bad_envelope in (
+                {"kind": "completed", "stdout": long_out, "stderr": "warn", "exitCode": 0},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": 1},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": False},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "interrupted": True},
+                {"stdout": long_out, "stderr": "", "isImage": True},
+                {"stdout": None, "stderr": "", "exitCode": 0},
+                {"stdout": long_out, "stderr": "", "exitCode": 0, "extra": "metadata"},
+                {"content": [{"type": "text", "text": long_out}]},
+            ):
+                with self.subTest(envelope=list(bad_envelope.keys())):
+                    warnings = []
+                    result = _run_hook(
+                        {"tool_name": "Bash", "tool_response": bad_envelope},
+                        agent_id="qwenwork",
+                        mock_tokenless_path=force_applied,
+                        isolated_home=self.isolated_home,
+                        stderr_sink=warnings,
+                    )
+                    self.assertEqual(result, {})
+
+            # Multimodal blocks on Bash or MCP tools must pass through untouched.
+            multimodal = [
+                {"type": "text", "text": long_out},
+                {"type": "image", "data": "iVBORw0KGgo=" * 40, "mimeType": "image/png"},
+            ]
+            for tool in ("Bash", "mcp__browser__capture"):
+                with self.subTest(multimodal_tool=tool):
+                    self.assertEqual(
+                        _run_hook(
+                            {"tool_name": tool, "tool_response": multimodal},
+                            agent_id="qwenwork",
+                            mock_tokenless_path=force_applied,
+                            isolated_home=self.isolated_home,
+                            stderr_sink=[],
+                        ),
+                        {},
+                    )
+
+        # Structured MCP records with list/object business `type` fields must not crash
+        # multimodal block detection and must still compress as structured JSON.
+        compress_bin = _create_mock_tokenless(self.tmpdir, "compress")
+        for structured_mcp in (
+            [
+                {"type": ["string", "null"], "description": "schema field " * 25}
+                for _ in range(10)
+            ],
+            {
+                "content": [
+                    {"type": {"kind": "record"}, "description": "schema field " * 25}
+                    for _ in range(10)
+                ]
+            },
+        ):
+            with self.subTest(mcp_shape=type(structured_mcp).__name__):
+                mcp_res = _run_hook(
+                    {
+                        "tool_name": "mcp__schema__inspect",
+                        "tool_response": structured_mcp,
+                        "session_id": "s",
+                        "tool_use_id": "t-mcp-type",
+                    },
+                    agent_id="qwenwork",
+                    mock_tokenless_path=compress_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertNotIn("_subprocess_error", mcp_res)
+                updated_mcp = mcp_res["hookSpecificOutput"]["updatedToolOutput"]
+                self.assertIsInstance(updated_mcp, type(structured_mcp))
+
+        # Failed native Bash commands keep their native output while emitting diagnostics.
+        failed = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {
+                    "kind": "completed",
+                    "stdout": "",
+                    "stderr": "bash: rg: command not found\n",
+                    "exitCode": 127,
+                    "interrupted": False,
+                },
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=compress_bin,
+            isolated_home=self.isolated_home,
+        )
+        specific = failed["hookSpecificOutput"]
+        self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+        self.assertNotIn("updatedToolOutput", specific)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -1357,26 +1651,31 @@ class TestPassthrough(unittest.TestCase):
     def test_version_skewed_response_fails_open(self):
         """A response declaring a protocol version this adapter does not
         speak must never replace model-visible output."""
-        mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
-        mock_bin = _create_mock_tokenless(mock_dir, "wrong-protocol-version")
-        _create_mock_claude(mock_dir)
-
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": _make_large_json_payload(),
-                "session_id": "s",
-                "tool_use_id": "t",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertEqual(result, {},
-                         "Version-skewed responses must fail open")
+        for behavior in (
+            "wrong-protocol-version", "future-protocol-version"
+        ):
+            with self.subTest(behavior=behavior):
+                mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+                mock_bin = _create_mock_tokenless(mock_dir, behavior)
+                _create_mock_claude(mock_dir)
+                payload = _make_large_json_payload()
+                snapshot = json.loads(json.dumps(payload))
+                result = _run_hook(
+                    {
+                        "tool_name": "Bash",
+                        "tool_response": payload,
+                        "session_id": "s",
+                        "tool_use_id": "t",
+                    },
+                    agent_id="claude-code",
+                    mock_tokenless_path=mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertNotIn("_subprocess_error", result,
+                                 f"Hook subprocess failed: {result}")
+                self.assertEqual(result, {}, "Version skew must not replace host output")
+                self.assertEqual(payload, snapshot)
+                self.assertEqual(_spawn_log_lines(mock_bin), ["compress"])
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

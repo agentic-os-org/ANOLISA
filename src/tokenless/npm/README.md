@@ -23,7 +23,6 @@ This automatically installs the correct prebuilt binary for your platform.
 | Binary | Description |
 |--------|-------------|
 | `tokenless` | Main CLI — content-aware protocol, direct compression, retrieval, and stats |
-| `rtk` | Command rewriting engine (filters CLI output noise) |
 
 TOON (Token-Oriented Object Notation) encoding is built into `tokenless`
 via the `toon-format` library — see `tokenless compress-toon` /
@@ -53,8 +52,8 @@ OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and DeepSeek H
 adapter hooks are plain bash/python scripts — OS and architecture independent —
 so they work on both Linux and macOS.
 
-DeepSeek Harness uses its dedicated `tools/post-execute` path for JSON response compression and
-environment-error attribution. It does not use the Protocol v2 PostTool Pipeline.
+DeepSeek Harness uses its dedicated `tools/post-execute` seam to call the Protocol v2
+PostTool Pipeline for response compression and environment-error attribution.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:
@@ -70,13 +69,24 @@ e.g. for Claude Code:
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ```
 
+Recognized raw pnpm output uses the existing `build_log_reduction` label for both
+layout compaction and progress reduction; both can apply together. Layout-only
+output is semantically `lossless`, needs no Stash or recovery, and retains all
+notification text, dependency facts, package counts and completion information.
+Progress omissions require recovery and report `retrievable`. Protocol v2 and SDK
+enums remain unchanged.
+Warnings, scripts and unknown text preserve the remaining suffix after existing
+SGR cleanup. `pnpm install` retains its existing PreTool RTK ownership; this is not
+a promise that every installation reaches PostTool unmodified. See
+[pnpm boundaries](../../../docs/user-guide/en/tokenless/index.md#pnpm-install-output).
+
 ## Usage
 
 ```bash
 # Run the Protocol v2 PostTool operation used by shared Agent hooks
 jq -n --rawfile content build.log \
   '{protocol_version: 2, operation: "post_tool",
-    attribution: {agent_id: "manual"},
+    attribution: {agent_id: "manual", session_id: "session-42", tool_use_id: "tool-7"},
     input: {result_kind: "tool", tool_name: "Bash", content: $content,
       status: "success", content_origin: "command_output",
       output_optimization: "none",
@@ -98,9 +108,9 @@ tokenless compress-toon -f data.json
 tokenless decompress-toon -f data.toon
 
 # Command rewriting (filters CLI output noise)
-rtk ls -la
+tokenless rtk ls -la
 # Or use rewrite subcommand
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 
 # Report the current hard-disabled Tool Ready status
 tokenless env-check --all
@@ -109,7 +119,7 @@ tokenless env-check --all
 ## Build from Source
 
 Source builds support **Linux and Windows x64**. Windows uses
-`./scripts/build-windows.ps1` from the component directory; see
+`./packaging/build/build-windows.ps1` from the component directory; see
 [Windows build instructions](../../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Windows ARM64 is unsupported. macOS users should install the prebuilt
 binaries via `npm install -g anolisa-tokenless`; the macOS CLI binaries are
@@ -128,9 +138,10 @@ make install
 ### Prerequisites
 
 - **Linux** host (glibc-based distribution)
-- **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
-- **just** — build runner for rtk setup
-- **Git** — for rtk source download
+- **Rust** toolchain >= 1.91 (required by RTK v0.49.0)
+- **just** — build runner for RTK source setup
+- **Git** and **patch** — for the pinned RTK source download
+- **Node.js 22+ and npm** — for the framework plugin build and validation
 
 ## Packaging for npm
 
@@ -138,10 +149,10 @@ The npm packer reads prebuilt native executables from this fixed layout:
 
 ```text
 target/npm-prebuilt/
-├── linux-x64/{tokenless,rtk}
-├── linux-arm64/{tokenless,rtk}
-├── darwin-x64/{tokenless,rtk}
-└── darwin-arm64/{tokenless,rtk}
+├── linux-x64/tokenless
+├── linux-arm64/tokenless
+├── darwin-x64/tokenless
+└── darwin-arm64/tokenless
 ```
 
 Validating Linux packages requires GNU `readelf` from binutils. The packer
@@ -151,7 +162,7 @@ baseline.
 Package one target:
 
 ```bash
-node npm/scripts/package-npm.js --target linux-arm64
+node packaging/npm/package-npm.js --target linux-arm64
 ```
 
 For the current host, the Make entry point can build the native executables
@@ -164,7 +175,7 @@ make npm-package
 Package the complete matrix:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 # or
 make npm-package-all
 ```

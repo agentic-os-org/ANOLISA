@@ -5,7 +5,7 @@
 [设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw` 可执行程序负责发现服务、绑定实例、前台进程生命周期和清理。每个原生适配器负责
-版本与入口准入、注册文件、事件归一化和宿主返回格式。这些接口位于 CLI 私有模块，
+版本与入口准入、注册文件、事件归一化和宿主返回格式。这些接口位于 `aw-adapter`，
 服务的 `invoke_step` 增加可选的原生命令环境快照；既有请求可以省略。
 
 原生方言、回调解释和 Python/JavaScript 资产统一位于 `crates/aw-adapter/`。
@@ -17,6 +17,12 @@ CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录�
 适配器准备原生配置并声明能力。公共启动器对配置步骤执行准入，再由适配器检查原生
 限制，之后才启动或复用服务。启动器生成私有接线文件、绑定实例、写入带适配器标识的
 回调绑定，然后以前台方式启动 Agent。Provider 使用适配器固定的启动环境。
+
+DeepSeek Harness Adapter 通过原生 `--patch` 加载本次启动专属的插件与回调文件。
+配置 `security.violation` 时，还会在 Agent 启动前将 Node 预加载加入
+`NODE_OPTIONS`。预加载注册进程级模块加载 Hook，校验已发布 Agent loop 的源码
+摘要及最终结果锚点。注册后仅移除自己追加的 `NODE_OPTIONS` 参数，工具启动的
+Node 子进程保留用户原有选项；固定的 Provider 环境也不包含 AW 预加载。
 
 退出或失败时，启动器释放自身实例、执行适配器清理并删除本次启动目录。适配器负责
 目录外临时文件的回退，保留已有 profile 数据。共享 daemon 生命周期独立。持久原生
@@ -50,12 +56,26 @@ CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录�
 进程组并报告失败；进程成功退出本身不能证明 Hook 已就绪。线程结束后才释放实例和
 清理文件。Qoder 保留现有命令 Hook 注册方式，不需要插件启动回执。
 
+DeepSeek 回执证明插件已注册。最终结果防护还要求预加载在 Agent 开始工作前
+完成指定 Agent loop 构建的插桩；构建或锚点变化、插桩缺失均使启动失败。
+顶层模型工具调用中，插件通过 `WeakMap` 将执行 token 与原生结果关联；原生
+`finalize`/`finish` 完成后、Session 提交前，Agent loop 等待进程级最终检查。
+关联缺失、Provider 阻断或终检失败会交付暂扣错误结果。插件销毁时将全局检查
+替换为拒绝函数；进程终止与私有启动文件清理由公共启动器负责。
+
+该检查覆盖 DSH `0.2.1-rc.5` 已验收的 headless Agent loop 交付路径。同进程
+`tools/result` 观察者会在终检前收到原始内容；嵌套/PTC 结果及直接调用
+`ToolRuntime.execute` 的消费者不经过该顶层提交点。Web、SDK、ACP 与自定义
+profile 的交付仍需分别验证原生采用行为，见
+[DeepSeek 接入指南](../../../../../../docs/developer-guide/zh/aw/agents/deepseek-harness.md)。
+
 ## 交付边界
 
-Qoder 要求 CLI 语义版本 >=1.1.64 并记录探测到的值；原生命令 Hook 配置与回调合同
+Qoder 记录已安装 CLI 的语义版本；原生命令 Hook 配置与回调合同
 仍需满足。OpenClaw、Hermes、QwenPaw 分别提供原生
 实现和验收证据。daemon 每实例仍最多保留 1024 个关联事件；长驻宿主必须明确该限制
 及配置的失败处理。OS 防护、通用审批和其他事件不属于本次接口提取。
 
-Pi/Claude 常驻工厂通过[递增调用生命周期](resident-sdk.md)回收完成关联，其容量按并发工作量计算。
-上文 1024 个关联边界适用于旧 binding。
+Pi/Claude 常驻工厂和普通 Qoder SDK Query 通过[递增调用生命周期](resident-sdk.md)
+回收完成关联，其容量按并发工作量计算。
+上文 1024 个关联边界适用于旧 binding，包括独立的可更新 Qoder SDK 路径。

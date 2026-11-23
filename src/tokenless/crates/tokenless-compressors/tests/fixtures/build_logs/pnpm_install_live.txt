@@ -1,0 +1,32 @@
+Progress: resolved 1, reused 0, downloaded 0, added 0
+
+   ╭──────────────────────────────────────────╮
+   │                                          │
+   │   Update available! 10.33.4 → 12.18.0.   │
+   │   Changelog: https://pnpm.io/v/12.18.0   │
+   │     To update, run: pnpm add -g pnpm     │
+   │                                          │
+   ╰──────────────────────────────────────────╯
+
+Progress: resolved 1, reused 0, downloaded 1, added 0
+Progress: resolved 2, reused 0, downloaded 2, added 0
+Progress: resolved 10, reused 0, downloaded 3, added 0
+Progress: resolved 37, reused 0, downloaded 20, added 0
+Progress: resolved 43, reused 0, downloaded 22, added 0
+Progress: resolved 50, reused 0, downloaded 27, added 0
+Progress: resolved 62, reused 0, downloaded 28, added 0
+Progress: resolved 74, reused 0, downloaded 46, added 0
+Progress: resolved 98, reused 0, downloaded 52, added 0
+Progress: resolved 102, reused 0, downloaded 53, added 0
+Progress: resolved 103, reused 0, downloaded 53, added 0
+Packages: +53
++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 104, reused 0, downloaded 53, added 53, done
+
+devDependencies:
++ @types/node 25.9.9 (26.6.6 is available)
++ esbuild 0.28.2
++ typescript 5.9.3 (7.0.2 is available)
++ vitest 3.2.7 (5.1.0 is available)
+
+Done in 13.8s using pnpm v10.33.4

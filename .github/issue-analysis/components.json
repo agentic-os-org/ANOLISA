@@ -1,0 +1,96 @@
+{
+  "anolisa": {
+    "architecture": "ANOLISA distribution CLI, installation, platform and component integration",
+    "entrypoints": [
+      "distribution/anolisa/crates/anolisa-cli/Cargo.toml"
+    ],
+    "notes": "Trace CLI dispatch into core, build and platform crates and the selected component manifest. Check supported installation mode and platform."
+  },
+  "cosh": {
+    "architecture": "Deprecated TypeScript Copilot Shell",
+    "entrypoints": [
+      "deprecated/copilot-shell/package.json"
+    ],
+    "notes": "Analyze the retained TypeScript implementation and archived contracts. Deprecation alone does not assign P3. Do not confuse this component with cosh-ng."
+  },
+  "cosh-ng": {
+    "architecture": "Rust Cosh NG shell and gateway",
+    "entrypoints": [
+      "src/cosh-ng/Cargo.toml"
+    ],
+    "notes": "Trace the reported shell or gateway entrypoint into the relevant crate. Check Linux versus limited macOS behavior and the actual execution mode."
+  },
+  "sec-core": {
+    "architecture": "SecCore V2 daemon and CLI",
+    "entrypoints": [
+      "src/agent-sec-core/v2/apps/asc-daemon/Cargo.toml",
+      "src/agent-sec-core/v2/apps/asc-cli/Cargo.toml"
+    ],
+    "notes": "Trace V2 entrypoints and shared dependencies. Source-confirmed legacy V1-only active reports use v1_only, not_applicable, no claims, and P3 backlog classification. Establish the version boundary with source evidence; do not verify the V1 defect. Unknown version scope remains unresolved."
+  },
+  "skill": {
+    "architecture": "OS Skills definitions and bundled scripts",
+    "entrypoints": [
+      "src/os-skills/README.md"
+    ],
+    "notes": "Identify the reported skill's SKILL.md, bundled scripts and declared tool prerequisites. Distinguish skill instructions from executable implementation and trace any external dependency explicitly."
+  },
+  "sight": {
+    "architecture": "AgentSight collection, storage and viewer",
+    "entrypoints": [
+      "src/agentsight/Cargo.toml"
+    ],
+    "notes": "Identify the collector or viewer entrypoint and its supported platform. Trace eBPF and trajectory paths separately and check privilege, kernel and storage prerequisites."
+  },
+  "tokenless": {
+    "architecture": "Tokenless CLI, compression runtime and framework adapters",
+    "entrypoints": [
+      "src/tokenless/crates/tokenless-cli/Cargo.toml"
+    ],
+    "notes": "Identify the CLI or adapter entrypoint, compression mode and platform. Trace runtime and protocol contracts; distinguish savings metrics from supported correctness effects."
+  },
+  "ckpt": {
+    "architecture": "Workspace checkpoint CLI, daemon and plugins",
+    "entrypoints": [
+      "src/ws-ckpt/src/crates/cli/Cargo.toml",
+      "src/ws-ckpt/src/crates/daemon/Cargo.toml"
+    ],
+    "notes": "Trace the reported CLI or plugin into daemon and common contracts. Establish checkpoint, filesystem and restore prerequisites before assessing data effects."
+  },
+  "memory": {
+    "architecture": "Agent Memory CLI, MCP and filesystem-backed storage",
+    "entrypoints": [
+      "src/agent-memory/Cargo.toml"
+    ],
+    "notes": "Trace the reported CLI or MCP operation into storage and mount behavior. Check namespace, cgroup, ownership and persistence contracts where relevant."
+  },
+  "skillfs": {
+    "architecture": "SkillFS CLI, FUSE and core contracts",
+    "entrypoints": [
+      "src/skillfs/crates/skillfs-cli/Cargo.toml",
+      "src/skillfs/crates/skillfs-fuse/Cargo.toml"
+    ],
+    "notes": "Identify FUSE operation, mount mode and security configuration. Trace core, resolver, notification and daemon boundaries only where reachable."
+  },
+  "ktuner": {
+    "architecture": "KTuner Linux tuning CLI",
+    "entrypoints": [
+      "src/ktuner/Cargo.toml"
+    ],
+    "notes": "Trace CLI options into the tuning action and its Linux prerequisites. Incubating status alone does not lower priority."
+  },
+  "aw": {
+    "architecture": "AW CLI, services, packages and provider contracts",
+    "entrypoints": [
+      "src/aw/crates/aw-cli/Cargo.toml"
+    ],
+    "notes": "Trace the selected CLI mode into its owning framework crate. Distinguish software installation, Hook connection and provider contracts. Read scoped AW instructions."
+  },
+  "benchmark": {
+    "architecture": "Benchmark runners, workloads and evaluation contracts",
+    "entrypoints": [
+      "benchmark/README.md"
+    ],
+    "notes": "Identify the reported runner, workload, metric and comparison baseline. Trace its implementation and evaluation contract. Do not infer product runtime impact from a benchmark discrepancy alone."
+  }
+}

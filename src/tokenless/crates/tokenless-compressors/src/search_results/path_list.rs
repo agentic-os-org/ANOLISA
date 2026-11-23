@@ -133,7 +133,9 @@ mod tests {
                         paths.join(ending),
                         if trailing { ending } else { "" }
                     );
-                    let candidate = compress(&input).unwrap();
+                    let candidate = super::super::SearchResultsCompressor
+                        .compress(&input)
+                        .unwrap();
                     assert_eq!(restore(&candidate), input);
                     let data: serde_json::Value =
                         serde_json::from_str(candidate.strip_prefix(HEADER).unwrap()).unwrap();

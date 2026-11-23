@@ -64,6 +64,12 @@ def hooks(name):
         payload["tool_response"] = os.environ.get("FAKE_QODER_RESULT_TEXT", {"result": "native-output"})
         if "FAKE_QODER_RESULT_BYTES" in os.environ:
             payload["tool_response"] = "x" * int(os.environ["FAKE_QODER_RESULT_BYTES"])
+    if name == "UserPromptSubmit":
+        payload = {"hook_event_name": name, "cwd": os.getcwd(),
+                   "session_id": "fixture-session", "request_set_id": "fixture-request",
+                   "prompt": "check this input", "scenario": scenario}
+        if scenario == "missing-identity":
+            del payload["request_set_id"]
     encoded = (json.dumps(payload, ensure_ascii=False, indent=1) + "\n").encode()
     (root / f"payload-{run_id}-{name}.bin").write_bytes(encoded)
     groups = settings.get("hooks", {}).get(name, [])
@@ -82,7 +88,9 @@ if scenario == "no-hooks":
     print(json.dumps({"events": [], "tool_executed": False}), flush=True)
     sys.exit(0)
 
-blocked = hooks("PreToolUse")
+blocked = hooks("UserPromptSubmit") if settings.get("hooks", {}).get("UserPromptSubmit") else False
+if not blocked:
+    blocked = hooks("PreToolUse")
 if not blocked:
     (root / f"tool-{run_id}").write_text("executed")
     hooks("PostToolUse")
@@ -94,6 +102,7 @@ if "--hold" in arguments:
             sys.exit(37)
 
         signal.signal(signal.SIGTERM, finish_shutdown)
+        signal.signal(signal.SIGINT, finish_shutdown)
     (root / f"ready-{run_id}").write_text("waiting")
     # The parent releases after assertions, possibly after another Agent starts.
     deadline = time.monotonic() + int(os.environ["FAKE_HOLD_TIMEOUT_SECONDS"])

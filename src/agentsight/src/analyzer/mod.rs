@@ -32,6 +32,7 @@ pub use result::{
 };
 
 // Re-export unified analyzer
+pub(crate) use unified::estimate_input_tokens;
 pub use unified::{
     Analyzer, RequestTokenCount, ResponseTokenCount, count_request_tokens, count_response_tokens,
 };

@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-export async function startDaemon() { return {}; }
+export async function startDaemon() { return { async stop() {} }; }
 export const gates = new Map();
 export const backgrounds = new Map();
 export function gate(name) {
@@ -18,6 +18,10 @@ export function query({ prompt, options }) {
   const messages = [];
   function emit(message) { messages.push({ ...message, session_id: session }); wake?.(); }
   const q = {
+    async request(request) {
+      if (request.type !== "get_settings") throw new Error("Unexpected fixture request");
+      return { effective: options.settings ?? {} };
+    },
     options,
     emit,
     async initializationResult() { return { capabilities: ["msg_lifecycle_v1"] }; },
@@ -90,7 +94,10 @@ export function query({ prompt, options }) {
               await turn;
             });
           }
-          if (!denied) await callback("PostToolUse", { tool_response: "native result" });
+          if (!denied) {
+            if (process.env.QODER_FAILURE) await callback("PostToolUseFailure", { error: "tool failed", is_interrupt: false });
+            else await callback("PostToolUse", { tool_response: "native result" });
+          }
           // Real Worker can emit these before turn-finally cleanup is complete.
           emit({ type: "command_lifecycle", command_uuid: message.uuid, state: "completed" });
           emit({ type: "result", denied, reason });

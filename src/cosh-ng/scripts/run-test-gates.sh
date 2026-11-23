@@ -14,7 +14,7 @@ require_test() {
   local package="$1"
   local test_name="$2"
   shift 2
-  if ! list_tests "$package" "$@" | grep -Fxq "$test_name"; then
+  if ! list_tests "$package" "$@" | grep -Fx "$test_name" >/dev/null; then
     echo "required test is missing from Cargo inventory: $test_name" >&2
     exit 1
   fi
@@ -113,9 +113,9 @@ run_raw_packaging() {
     return 1
   fi
   shellcheck \
+    packaging/payload.sh \
     packaging/raw/package.sh \
     packaging/raw/assets/bin/cosh \
-    packaging/raw/assets/bin/cosh-switch \
     scripts/managed-task-dev.sh \
     tests/test-managed-task-dev.sh \
     tests/test-package-raw.sh

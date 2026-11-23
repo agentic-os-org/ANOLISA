@@ -8,6 +8,12 @@
 /* Event-only operation codes for inode-guard denials; rules never use them. */
 #define TE_EVENT_OP_UNLINK 5
 #define TE_EVENT_OP_RENAME 6
+#define TE_EVENT_OP_RMDIR 7
+#define TE_EVENT_OP_ORDINARY_WRITE 8
+/* Read denials are reported separately from open and write denials. */
+#define TE_EVENT_OP_READ 9
+/* Hard-link creation that would expose a directory-tree read target. */
+#define TE_EVENT_OP_LINK 10
 
 #define TE_POLICY_PATH_CONTAINS (1U << 0)
 #define TE_POLICY_PATH_SUFFIX   (1U << 1)
@@ -110,6 +116,7 @@ struct event {
 	unsigned int domain_id;         /* runtime domain whose rule matched */
 	int session_root;               /* root pid for session-scoped state */
 	unsigned long long timestamp_ns;
+	unsigned long long process_start_boottime;
 	char comm[TASK_COMM_LEN];
 	char filename[MAX_FILENAME_LEN]; /* offending exe / path ("" for connect) */
 	unsigned int taint_rule_id;
@@ -119,6 +126,7 @@ struct event {
 	unsigned long long matched_labels;
 	unsigned long long prov_label;
 	unsigned long long prov_timestamp_ns;
+	unsigned long long prov_start_boottime;
 	int prov_pid;
 	unsigned int prov_op;            /* enum taint_op that introduced prov_label */
 	unsigned int prov_ip;            /* endpoint provenance, network order */

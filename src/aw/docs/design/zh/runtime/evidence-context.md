@@ -4,22 +4,20 @@
 
 ## 范围与依赖
 
-本文对应 [#7622](https://github.com/agentic-os-org/ANOLISA/issues/7622)，
-依赖 [#7626](https://github.com/agentic-os-org/ANOLISA/pull/7626) 提供的只读连接器；
-#7626 实现 #7621，现已合入。本阶段基于主线继续实现，并保留
-[#7411](https://github.com/agentic-os-org/ANOLISA/pull/7411) 合入后的主线，
-其合并提交为 `d217dd6bbab927a9820202de5944adf3d9e4a5d7`。
-
-服务为活动事件提供显式 `freeze_context` RPC，将原始候选、当前 AW 约束和选取的
-历史固定为一个不可变版本。`aw run` 不会自动发送该请求。本次不引入模型、语义
-评估、动作路由或新的 Provider operation。覆盖准入由 #7623 负责，公开增量审计
-导出由 #7624 负责，AgentSight 消费由 #7625 负责。语义评估仍属于二期。
+服务通过 `freeze_context` RPC 将活动事件的原始候选、AW 约束和选取的历史固定为不可变快照。
+正常 `aw run` 使用自动观测；显式冻结供嵌入方调用。来源数据由[只读连接器](../integrations/agentsight/agentsight-readonly.md)提供。
+后续覆盖准入、公共审计导出与语义评估见[集成规划](../integrations/agentsight/agentsight-integration.md)。
 
 ## 自动运行观测
 
 `aw run` 在绑定后、启动 Agent 前开启可选观测。`start_observation` 按配置超时探测
 查询兼容性，上限一秒。`report_run` 记录真实启动/退出或启动失败，PID 仍只是 launcher
 报告的数据。`status.observations` 只展示元数据。
+
+已准备的原生根实例在 Ready 和进程关联完成后启动观测。resident 任务 Scope 在确认后
+启动观测，未确认的任务不能探测来源。每个子实例独立持有采集任务、缓冲区和来源关联，
+释放时先排空采集任务，再释放关联。并行任务不能认领同一来源会话，冲突保留在覆盖缺口中。
+这沿用 Adapter 已有的关联规则，原生准备不新增已验证的来源类型。
 
 事件没有已准入动作时，原生注册包含内部 `$aw.observe` 回调。`observe_hook_event`
 核对原始输入，不创建 Host 动作事件，并拒绝用这条路径代替已配置动作步骤。已有
@@ -58,7 +56,7 @@ null，并原样进入证据投影与 canonical 摘要。后续审计及语义�
 默认用户态轨迹扫描在两轮之间等待 30 秒。GET 只读取已入库快照，不触发采集，
 立即再读一次也不能保证新鲜数据。本投影仍将来源时间标记为未验证。Hook 不等待
 下一轮扫描，晚到记录不能改写已固定上下文或已完成决定；及时输入与本地审计仍
-以 AW 原生回调为基础。参见[二期合同](../integrations/agentsight/agentsight-integration.md#为二期预留的语义评估合同)。
+以 AW 原生回调为基础。
 
 ## 组件归属与信任边界
 
@@ -221,7 +219,7 @@ OpenClaw replacement/completion 视图保留原始事件身份、deadline 与候
 本次不引入 eBPF 探针、进程发现、特权 worker、安装包或 AgentSight 生命周期操作。
 无 eBPF 时，可用的用户态轨迹仍能补充 AW 候选。服务/存储缺失、认证/版本失败和
 来源限额都产生显式缺口；AW Hook 和本地审计保持既有行为。合法空轨迹为
-`available`，覆盖仍未知；404 为 `unknown`，不能证明没有活动。上文的最小 `auto`/`off` 行为已实现；完整分能力 `required` 准入及 all-in-one 打包
+`available`，覆盖仍未知；404 为 `unknown`，不能证明没有活动。上文的最小 `auto`/`off` 行为已实现；完整分能力 `required` 准入
 仍属后续工作。
 
 ## 验证

@@ -15,6 +15,7 @@ use super::terminal::CrLfWriter;
 mod bootstrap;
 mod failopen;
 mod input_wait;
+mod startup_auth;
 
 use input_wait::input_wait_timeout_recovery_action;
 
@@ -29,6 +30,15 @@ fn render_raw_inline_event_view<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    if inline_state.startup_session.compact && !inline_state.rendered_startup_banner {
+        if let Some(prompt) = view.prompt_snapshot() {
+            inline_state.startup_session.prompt_snapshot = Some(prompt.clone());
+        }
+    }
+    inline_state
+        .startup_session
+        .login_invitation
+        .observe_prompt(view.prompt_snapshot());
     let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
     if let Some(audit) = inline_state.audit.as_mut() {
         let batch = snapshot.batch_since(inline_state.control.event_cursor());
@@ -50,6 +60,16 @@ fn render_raw_inline_event_view<W: Write>(
         &mut terminal_output,
     )?;
     RuntimeDispatcher::apply_actions(actions, inline_state);
+    if let Some(id) = inline_state
+        .approvals
+        .pending_capture_invalidations
+        .pop_front()
+    {
+        return Ok(RawObserverAction::InvalidateApprovalCapture(id));
+    }
+    if let Some(id) = inline_state.auth.ecs_trial.take_invalidation() {
+        return Ok(RawObserverAction::InvalidateTrialCapture(id));
+    }
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
@@ -67,11 +87,32 @@ fn render_raw_inline_event_view<W: Write>(
     if let Some(capture) = pending_card_capture(inline_state) {
         return Ok(RawObserverAction::CaptureInput(capture));
     }
+    if inline_state.auth.ecs_trial.preference_job.is_some() {
+        return Ok(RawObserverAction::HoldShellOutput);
+    }
     if inline_state.trigger_pty_prompt {
         inline_state.trigger_pty_prompt = false;
+        let ghost_route = std::mem::take(&mut inline_state.pending_input_ghost_route);
+        let suggestion_surface = match &ghost_route {
+            crate::raw_input::PromptGhostRoute::AgentSelection { candidates, .. } => {
+                let items = candidates
+                    .iter()
+                    .map(|candidate| crate::ui::guidance::SuggestionItem {
+                        id: candidate.suggestion_id.clone(),
+                        question: candidate.text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 0));
+                Some(crate::ui::guidance::suggestion_surface_payload(
+                    &items, width, height,
+                ))
+            }
+            _ => None,
+        };
         return Ok(RawObserverAction::RestorePrompt {
             ghost_text: inline_state.pending_input_ghost.take(),
-            ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
+            ghost_route,
+            suggestion_surface,
         });
     }
     let shell_busy = inline_state.control.shell_busy();
@@ -147,6 +188,7 @@ fn shell_handoff_timeout_recovery_action_with_timeout<W: Write>(
             return Ok(Some(RawObserverAction::RestorePrompt {
                 ghost_text: None,
                 ghost_route: Default::default(),
+                suggestion_surface: None,
             }));
         }
         return Ok(None);
@@ -221,6 +263,9 @@ pub(crate) fn render_inline_guidance<W: Write>(
 }
 
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
+    if let Some(capture) = crate::auth::trial::pending_capture(state) {
+        return Some(capture);
+    }
     // #1721 D13: an open draft card owns every keystroke until submit/cancel.
     if let Some(draft) = state.prompt_draft.as_ref() {
         return Some(draft.capture());
@@ -311,6 +356,7 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
                 &state.approvals.requests,
             ),
         })
+        .or_else(|| crate::runtime::startup::session::initial_question_capture(state))
 }
 
 pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool {

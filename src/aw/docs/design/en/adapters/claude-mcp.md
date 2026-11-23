@@ -120,11 +120,15 @@ outside the managed SDK tool pipeline have no AW adoption boundary.
 
 Hook/Provider failures, malformed replacement replies and unsupported result
 shapes at the transport boundary stop the resident task before returning a
-successful raw result. An unsuccessful compression invocation follows the same
-interrupt/escalation path as other callback failures. Successful unsupported-result
-classification is a normal unchanged result. Task cancellation and scope close
-retain the resident contract; remote business side effects need their own cancel
-protocol. Native and normalized inputs retain the existing one-MiB bound.
+successful raw result. A `tool.after` step configured with `on_error: report`
+is the recoverable exception: transport failures, timeouts and non-zero CLI
+exits keep the checked original result, log the fault and continue the current
+task on the same client. Identity, lifecycle and latched scope validity
+failures, `on_error: block` steps, security denial and malformed replacement
+replies still stop the task. Successful unsupported-result classification is a
+normal unchanged result. Task cancellation and scope close retain the resident
+contract; remote business side effects need their own cancel protocol. Native
+and normalized inputs retain the existing one-MiB bound.
 
 ## SYSOM and subsequent work
 
@@ -144,15 +148,17 @@ transformation and model-visible Schema adoption remain to be implemented. Retri
 requires a registered tool before recoverable output is emitted, authenticated
 model-visible markers, tenant/task storage, TTL/quota, exact original-byte return
 and bypass of recompression. These dependencies remain in the
-[full Tokenless delivery table](resident-sdk.md#delivery-slices-and-full-tokenless-dependencies)
+[full Tokenless delivery table](resident-sdk.md#acceptance-and-full-tokenless-dependencies)
 and tracking issue [#8952](https://github.com/agentic-os-org/ANOLISA/issues/8952).
 
 Native acceptance runs the real SDK/CLI and Tokenless backend. It checks adopted
 model text, policy denial, before/after errors, business errors, multi/structured
-results, exceptions, reversed parallel completions and failed compression. It also
-checks copied-server duplicate claims, source-labelled audit, child-process/port
+results, exceptions, reversed parallel completions and failed compression
+retaining the original result, including a follow-up task on the same client. It
+also checks copied-server duplicate claims, source-labelled audit, child-process/port
 cleanup, zero service bindings/events, original tool name/handler assignment,
 server-key assignment, failed-constructor retries and shared-result mutation during
-PostTool. A direct unverified-result control
-must stop before the next model request. Hosted model and production SYSOM
+PostTool. A direct unverified-result control rejects
+the smuggled result under `on_error: report`: the failure is recorded in audit
+and diagnostics while the task continues to a second model request. Hosted model and production SYSOM
 dependency acceptance are separate release gates.

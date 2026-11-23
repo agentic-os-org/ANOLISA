@@ -30,10 +30,15 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// explain further: the turn ended for a reason the enum has no specific value
 /// for, or in an unsupported language. `finish_reason_unspecified` is the
 /// enum's placeholder, reported when a gateway omits the reason altogether.
-/// None of them says the stream was cut, so none of them is truncation. Stops
-/// that carry a meaning the rule set has a better home for stay out of this
-/// list: a token cap is rule 9, a safety stop is rule 6, a malformed tool call
-/// is rule 6.5.
+/// `image_other` is the image-generation counterpart of `other`: the picture
+/// was abandoned for a reason the enum does not name, so it says nothing about
+/// the transport either. `no_image` is the stop of a request that asked for a
+/// picture and got none back — the answer was withheld, but the response
+/// arrived whole, so it is a terminal stop and not a cut stream. None of them
+/// says the stream was cut, so none of them is truncation. Stops that carry a
+/// meaning the rule set has a better home for stay out of this list: a token
+/// cap is rule 9, a safety stop is rule 6, a malformed, unexpected or
+/// over-eager tool call is rule 6.5.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     /// The stop reasons a completed turn may report. Compared ASCII
     /// case-insensitively: the casing is the provider's, not the protocol's,
@@ -51,6 +56,8 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
         "other",
         "language",
         "finish_reason_unspecified",
+        "image_other",
+        "no_image",
     ];
     reason.is_some_and(|reason| {
         NORMAL
@@ -538,7 +545,9 @@ impl InterruptionDetector {
     ///   1. AuthError       — 401/403
     ///   2. RateLimit       — 429
     ///   3. NetworkTimeout  — 408/504
-    ///   4. ServiceUnavailable — 502/503
+    ///   4. ServiceUnavailable — 502/503 / overloaded, or a provider
+    ///                        server-pressure finish reason (DeepSeek's
+    ///                        `insufficient_system_resource`)
     ///   5. ContextOverflow — keywords in error body
     ///   5.5. ResourceExhaustion — quota/billing keywords
     ///   6. SafetyFilter    — finish_reason is a provider safety stop
@@ -711,17 +720,28 @@ impl InterruptionDetector {
         }
 
         // ── 4. ServiceUnavailable (502/503 / overloaded) ──────────────────────
+        // DeepSeek reports the same server pressure as a terminal finish
+        // reason (`insufficient_system_resource`, its documented value for a
+        // server short of system resources) on an otherwise clean 200
+        // response rather than as an error body — the same shape Gemini uses
+        // for `MALFORMED_FUNCTION_CALL` — so the reason is read here,
+        // case-insensitively like the other finish-reason arms. Without this
+        // arm a streamed stop fell to rule 8 and was reported as a transport
+        // cut, and a non-streamed one produced no event at all.
         if status_code == 502
             || status_code == 503
             || combined_error.contains("overloaded")
             || combined_error.contains("service_unavailable")
             || combined_error.contains("server is overloaded")
             || combined_error.contains("model is overloaded")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("insufficient_system_resource"))
         {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
                 "error": effective_error,
+                "finish_reason": finish_reason,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ServiceUnavailable,
@@ -838,6 +858,7 @@ impl InterruptionDetector {
                     "unexpected_tool_call",
                     "missing_thought_signature",
                     "malformed_response",
+                    "too_many_tool_calls",
                 ]
                 .iter()
                 .any(|known| reason.eq_ignore_ascii_case(known))
@@ -918,7 +939,14 @@ impl InterruptionDetector {
 
         // ── 9. Token limit (output capped by max_tokens) ──────────────────────
         if is_token_limit_finish(finish_reason) {
-            if let Some(max_tokens) = call.request.max_tokens {
+            // A cap of 0 is "no cap" — a lenient gateway accepts
+            // `max_tokens: 0` and the request parser stores it verbatim —
+            // not a limit the output can be measured against: dividing by it
+            // makes the ratio +inf, which passed the threshold
+            // unconditionally and fabricated a TokenLimit whose detail
+            // serialised the ratio as JSON `null`. The same "zero disables"
+            // reading the runtime limits config uses.
+            if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                 if let Some(usage) = &call.token_usage {
                     let ratio = usage.output_tokens as f64 / max_tokens as f64;
                     if ratio >= self.config.token_limit_ratio {
@@ -949,7 +977,11 @@ impl InterruptionDetector {
         // 通过 input_tokens >> max_tokens 启发式判定（input > max_tokens * 4）
         if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("length")) {
             if let Some(usage) = &call.token_usage {
-                if let Some(max_tokens) = call.request.max_tokens {
+                // Same guard as rule 9: a zero cap means "no cap", and with
+                // no cap `input > max_tokens * 4` held for any input at all,
+                // fabricating a ContextOverflow for every `length` finish a
+                // lenient gateway answered with `max_tokens: 0`.
+                if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
                     // Widen before multiplying: a large (but legal) max_tokens
@@ -1357,6 +1389,75 @@ mod tests {
         );
     }
 
+    /// A request with `max_tokens: 0` — which a lenient gateway accepts and
+    /// the request parser stores verbatim (`openai_parse` copies the value
+    /// through `as_u64`) — means "no cap", not a cap of zero. Rule 9 divided
+    /// by it anyway: a `length` finish produced ratio `+inf`, which passed the
+    /// 0.95 threshold unconditionally and fabricated a TokenLimit whose
+    /// detail serialised the ratio as JSON `null`; rule 10's
+    /// `input > max_tokens * 4` then held for any input at all and fabricated
+    /// a ContextOverflow on top, blaming the context window for a call the
+    /// gateway simply did not cap. Zero gates both rules, the same
+    /// "zero disables" reading the runtime limits config already uses.
+    #[test]
+    fn a_zero_max_tokens_cap_limits_nothing() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(0);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "partial".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::TokenLimit),
+            "a zero cap is no cap, so no output-ratio limit can be claimed, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::ContextOverflow),
+            "a zero cap is no cap, so no input overflow can be claimed, got {events:?}"
+        );
+
+        // The same rules still fire under a real cap: an output ratio past
+        // the threshold and an input beyond four times the cap.
+        call.request.max_tokens = Some(100);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 500,
+            output_tokens: 96, // 96/100 = 0.96 >= 0.95
+            total_tokens: 596,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "a positive cap still reports the output limit, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "a positive cap still reports the input overflow heuristic, got {events:?}"
+        );
+    }
+
     /// Gemini turns a generation away with a safety-class `finishReason`
     /// instead of a `content_filter` spelling: `SAFETY` (prompt or answer
     /// blocked by a safety policy) and its siblings `RECITATION`, `BLOCKLIST`,
@@ -1479,6 +1580,7 @@ mod tests {
             "UNEXPECTED_TOOL_CALL",
             "MISSING_THOUGHT_SIGNATURE",
             "MALFORMED_RESPONSE",
+            "TOO_MANY_TOOL_CALLS",
         ] {
             let mut call = make_base_call();
             call.metadata
@@ -1506,6 +1608,61 @@ mod tests {
         }
     }
 
+    /// DeepSeek ends an otherwise successful 200 SSE stream with the finish
+    /// reason `insufficient_system_resource` — its documented value for a
+    /// server under pressure (insufficient system resources). The reason
+    /// matched no list: not a normal finish, not a token limit, not a safety
+    /// stop, so rule 8 answered `sse_truncated` (high) and blamed the
+    /// transport for a stop the provider had chosen deliberately, while the
+    /// same reason on a non-streamed response produced no event at all.
+    /// Server pressure is what rule 4 already owns for the `overloaded`
+    /// wordings, so the finish reason is read there, keyed case-insensitively
+    /// like the other finish-reason arms.
+    #[test]
+    fn test_deepseek_resource_stop_is_service_pressure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a server-pressure stop is service unavailability, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the provider ended the stream deliberately; it was not cut, got {events:?}"
+        );
+
+        // The same stop on a non-streamed response must not be dropped: the
+        // pressure is a property of the finish reason, not of the transport.
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a non-SSE response reports the same pressure stop, got {events:?}"
+        );
+    }
+
     /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
     /// provider finished the turn and declined to say more (`OTHER`), or the
     /// requested language is unsupported (`LANGUAGE`). Neither is a token cap
@@ -1519,6 +1676,36 @@ mod tests {
     #[test]
     fn test_gemini_unspecific_stop_is_not_truncation() {
         for reason in ["OTHER", "LANGUAGE", "FINISH_REASON_UNSPECIFIED"] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} is a terminal stop, not a cut stream, got {events:?}"
+            );
+        }
+    }
+
+    /// Gemini's enum also names two image-generation stops that are neither a
+    /// safety decision nor a transport cut. `IMAGE_OTHER` is the image
+    /// counterpart of the already-whitelisted `OTHER`, and `NO_IMAGE` says the
+    /// request asked for a picture and got none back on a response that
+    /// arrived whole. Both were in none of the lists, so they fell through to
+    /// rule 8 and were reported as a truncated stream (High).
+    #[test]
+    fn test_gemini_image_terminal_stops_are_not_truncation() {
+        for reason in ["IMAGE_OTHER", "NO_IMAGE"] {
             let detector = InterruptionDetector::default();
             let mut call = make_base_call();
             call.metadata

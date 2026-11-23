@@ -28,7 +28,7 @@ sudo yum install ws-ckpt
 
 ```
 # 执行脚本
-/usr/share/anolisa/adapters/ws-ckpt/scripts/install-openclaw.sh 
+/usr/share/anolisa/adapters/ws-ckpt/openclaw/install-openclaw.sh
 ```
 
 默认工作区路径 \`~/.openclaw/workspace\`，**建议使用默认工作区路径**，如需自定义，安装插件后执行下面命令：
@@ -64,7 +64,7 @@ openclaw config set plugins.entries.ws-ckpt.config.autoCheckpoint true --strict-
 
 ```
 # 执行脚本
-/usr/share/anolisa/adapters/ws-ckpt/scripts/install-hermes.sh 
+/usr/share/anolisa/adapters/ws-ckpt/hermes/install-hermes.sh
 ```
 
 必须主动配置工作区路径，安装插件后执行下面命令：
@@ -94,9 +94,9 @@ hermes config set plugins.ws-ckpt.autoCheckpoint true
 
 ##### **本地安装：**
 
--   Skill 文件路径：/usr/share/anolisa/runtime/skills/ws-ckpt/SKILL.md
+-   Skill 文件路径：/usr/share/anolisa/skills/ws-ckpt/SKILL.md
     
--   对 agent 说：**“帮我安装 /usr/share/anolisa/runtime/skills/ws-ckpt/SKILL.md 这个 skill”**
+-   对 agent 说：**“帮我安装 /usr/share/anolisa/skills/ws-ckpt/SKILL.md 这个 skill”**
     
 
 ##### **Github 源安装：**

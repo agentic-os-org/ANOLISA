@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
@@ -16,15 +16,7 @@ pub(crate) struct Exchange {
     pub result: Result<Reply, Failure>,
 }
 
-pub(crate) fn check(deadline: Instant, cancelled: &AtomicBool) -> Result<(), aw_exec::Error> {
-    if cancelled.load(Ordering::Acquire) {
-        Err(aw_exec::Error::Cancelled)
-    } else if Instant::now() >= deadline {
-        Err(aw_exec::Error::DeadlineExceeded)
-    } else {
-        Ok(())
-    }
-}
+pub(crate) use aw_exec::check_active as check;
 
 pub(crate) struct Transport<'a> {
     pub protocol: &'a Protocol,

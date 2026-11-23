@@ -140,15 +140,15 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
 /// stderr-suppressed path, where ambiguous tokens stay manual until
 /// the parser models them.
 pub(super) fn eligible_readonly_argv(argv: &[String], suppress_stderr: bool) -> bool {
-    !argv.is_empty()
-        && !argv.iter().any(|token| token.contains(['$', '`']))
-        && !(suppress_stderr
+    !(argv.is_empty()
+        || argv.iter().any(|token| token.contains(['$', '`']))
+        || (suppress_stderr
             && argv
                 .iter()
                 .any(|token| token.contains(['\\', '\n', '\r', '#'])))
-        && !CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
-        && !segment_reads_stdin(argv)
-        && broker::configured_readonly_command(argv)
+        || CONTEXT_OBSERVING_COMMANDS.contains(&argv[0].as_str())
+        || segment_reads_stdin(argv)
+        || !broker::configured_readonly_command(argv))
 }
 
 /// Runs a compound plan with bash list semantics: `&&` runs the next

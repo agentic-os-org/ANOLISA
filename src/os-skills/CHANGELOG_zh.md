@@ -9,6 +9,98 @@
 
 ## [未发布]
 
+## [0.8.0] - 2026-11-22
+
+### 新增
+
+- 引入发布目录清单 `packaging/released-skills.txt`，统一决定哪些技能目录参与源码安装、
+  raw 归档与 RPM 源码包，以及 COSH 扩展对外声明的技能集合。新技能可先留在源码树中
+  供手动试用，维护者登记后再进入默认交付（#10023）
+- 仓库内 COSH 根级与分类 `cosh-extension.json` 的技能列表由该清单生成
+  （`packaging/cosh_manifests.py --write`），与清单不一致时 CI 直接失败（#10023）
+
+### 变更
+
+- `make -C src/os-skills install` 只安装已发布的技能集合，并要求 Python 3.6 及以上；
+  写入任何文件前先校验解释器，可用 `PYTHON3=/path/to/python3` 指定（#10023）
+- 打包时按清单过滤 OpenClaw 与 Hermes 的适配注册，不再原样复制（#10023）
+
+### 修复
+
+- `setup-mcp` 技能在配置文件无法按 UTF-8 解码时拒绝合并，不再用空配置重写——此前会
+  删掉 `mcpServers` 之外的所有设置；语法非法但可解码的文件会先备份为 `<path>.bak`，
+  并保留原文件权限与符号链接目标（#9769）
+- `install-openclaw` 技能将不可解码的配置报告为 JSON 非法，对不可读的缓存配对文件与
+  device-auth 文件改为忽略（device-auth 移到一旁），不再以异常退出（#9769）
+
+## [0.7.0] - 2026-11-12
+
+### 移除
+
+- 为聚焦系统运维，将八个通用技能移出默认技能包，并结束对内置副本的常规维护。
+  仍需这些能力的用户可使用上游技能、工具或官方文档：
+  - `github` — 通用 GitHub CLI 工作流，参见 GitHub CLI 技能
+  - `humanizer` — 写作指导，按需加载上游 Humanizer 技能
+  - `image-gen` — 通用图像生成，百炼接入交由使用它的产品维护
+  - `pdf-reader` — 通用 PDF 读取，由宿主工具 / PyMuPDF 适配提供
+  - `xlsx` — 通用表格，已由 MiniMax XLSX 技能覆盖
+  - `regex-mastery` — 通用正则指南，按需加载上游指南
+  - `shell-scripting` — 通用 Shell 脚本，由上游项目提供
+  - `upgrade-alinux-kernel` — ALinux 专用内核升级，交由发行版维护方
+- 移除 `pdf-reader` 与 `xlsx` 的配套回归测试，以及不再使用的 PyMuPDF 测试依赖。
+- 从 `alinux-admin` 的依赖列表移除已退场的 `shell-scripting`；其自带的 Shell
+  参考文档保持不变。
+
+## [0.6.6] - 2026-11-12
+
+### 变更
+
+- 源码安装会把自身安装的 Skill 目录记录到安装清单中，`make uninstall` 只删除清单
+  记录的目录，手动添加或由其他安装器放入的同名 Skill 不再被静默删除；
+  `make install` 也不再覆盖未记录的同名目录，除非传入 `REPLACE_UNOWNED=1`。
+  本次发布之前安装的集合没有安装清单，首次升级需执行
+  `REPLACE_UNOWNED=1 make install`，否则安装与卸载都会报错停止 (#9886)
+- 当安装路径仍由 `HOME` 推导时，`make install INSTALL_PROFILE=user` 在 `HOME`
+  未设置、为空、为 `/` 或为相对路径时拒绝执行，不再静默写入
+  `/.copilot-shell/skills`；显式传入 `PREFIX`、`DATADIR` 和 `SKILLS_DIR` 时仍可在
+  没有家目录的环境中安装 (#9886)
+
+### 修复
+
+- `install-openclaw` Skill 以 `0600` 权限写入 `openclaw.json`（其中以明文保存 API
+  Key）、其备份、`identity/device-auth.json` 与 `devices/paired.json`，本地其他用户
+  不再能读取 operator token，重复执行也不会把加固过的配置权限降回 `0644` (#7846)
+- `aliyun-ecs` Skill 中的 `DeleteKeyPairs --KeyPairNames` 示例改为 API 要求的数组
+  形式，示例命令不再被参数校验拒绝 (#9547)
+- `kernel-dev` Skill 的 `check-env.sh` 不再把 `kernel-build-dir` 伪包混入
+  `yum install` 提示，避免 dnf 环境下整条安装事务失败；缺失的软件包与缺失的内核
+  构建目录改为分行提示 (#7922)
+
+## [0.6.5] - 2026-11-09
+
+### 变更
+
+- 从源码安装时改为按有效用户 ID 选择安装位置：root 安装到
+  `/usr/local/share/anolisa/skills`，其他用户安装到原有的
+  `~/.copilot-shell/skills` 目录，使 `build-all` 与升级继续管理同一份技能集合；
+  `make uninstall` 使用相同的布局，`make install AWPRJ=` 选择 cosh 原生的系统资源目录 (#9460)
+- `install-tokenless` Skill 说明 0.9.2 之后的 tokenless 已将 RTK 链接进二进制：
+  npm 包不再单独安装 `rtk`，RTK 以 `tokenless rtk` 运行，源码构建还需要 `git` 与 `patch` (#9461)
+
+### 修复
+
+- `setup-mcp` Skill 中的 `validate_mcp` 会拒绝同时设置多个传输字段的服务，
+  也不再接受根节点不是 `mcpServers` 对象的配置 (#4588)
+- `xlsx` Skill 可识别包含转义单引号的工作表名，引用工作表中的公式会校验到正确的表，
+  不再被误判为错误 (#4210)
+- `install-openclaw` Skill 不再将已废弃的 `ownerDisplay` 字段写入生成的 OpenClaw 配置 (#8798)
+
+## [0.6.4] - 2026-11-03
+
+### 修复
+
+- 修正本地兜底文档中的 ws-ckpt skill 和 adapter 脚本路径。
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复

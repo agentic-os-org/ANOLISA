@@ -436,7 +436,12 @@ pub struct AnthropicResponse {
     pub stop_sequence: Option<String>,
 
     /// Token usage statistics
-    #[serde(default)]
+    ///
+    /// Absent, `{}` and an explicit `null` all mean "the provider reported no
+    /// counters" in the responses compatible gateways emit. `null` is not a
+    /// struct, so a plain `default` left it to fail the whole deserialisation
+    /// and take the answer text and the id with it.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub usage: AnthropicUsage,
 }
 
@@ -579,15 +584,30 @@ pub struct AnthropicImageSource {
     pub url: Option<String>,
 }
 
+/// Read a field the provider may send as an explicit `null`.
+///
+/// Compatible gateways spell "no snapshot for this field" as `null` where the
+/// schema says object or number. The SysOM reader degrades the same way
+/// (`analyzer::message::sysom`'s `null_as_default`); a `null` must not fail
+/// the response that carries a complete answer beside it.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Anthropic token usage statistics
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicUsage {
-    /// Number of input tokens
-    #[serde(default)]
+    /// Number of input tokens. A gateway that has no count for a counter may
+    /// spell it `null`; absent and null both mean zero here.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub input_tokens: u64,
 
     /// Number of output tokens
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub output_tokens: u64,
 
     /// Input tokens used to create cache entries
@@ -753,8 +773,10 @@ pub struct AnthropicSseMessageStart {
     /// Model used
     #[serde(default)]
     pub model: String,
-    /// Initial usage statistics
-    #[serde(default)]
+    /// Initial usage statistics. A gateway may spell "no snapshot" as
+    /// `null`; the field's defaults already model every absent counter, so a
+    /// null must read the same way instead of failing the whole event.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub usage: AnthropicUsage,
     /// Content blocks (empty at start)
     #[serde(default)]
@@ -814,8 +836,9 @@ pub struct AnthropicSseUsageDelta {
     /// Output tokens. Optional like every other counter: a proxy that splits the
     /// terminal usage between `message_start` and this delta may omit it, and a
     /// required field would fail the whole event, losing the `stop_reason` and
-    /// the counters the delta did carry.
-    #[serde(default)]
+    /// the counters the delta did carry. An explicit `null` means the same as
+    /// an omitted counter.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub output_tokens: u64,
     /// Input tokens, when the provider reports them in the delta
     #[serde(default, skip_serializing_if = "Option::is_none")]

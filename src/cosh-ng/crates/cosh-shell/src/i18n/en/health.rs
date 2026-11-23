@@ -9,7 +9,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthBannerEvidenceLabel => "Evidence",
         MessageId::HealthBannerMoreFindingsLabel => "{count} more finding(s)",
         MessageId::HealthBannerUnavailableLabel => "Unavailable",
-        MessageId::HealthBannerFindingsSection => "Findings",
+        MessageId::HealthBannerFindingsSection => "Needs attention",
         MessageId::HealthBannerSuggestedPromptSection => "Suggested Prompts",
         MessageId::HealthBannerSuggestedPromptIntro => "You can type these prompts to the agent:",
         MessageId::HealthSeverityOk => "ok",
@@ -25,6 +25,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthMetricCpuPerCoreUnit => "x",
         MessageId::HealthMetricCpuUsed => "CPU used",
         MessageId::HealthMetricHost => "Host",
+        MessageId::HealthMetricUsed => "used",
         MessageId::HealthMetricMemory => "Memory",
         MessageId::HealthMetricMemoryAvailable => "Mem avail",
         MessageId::HealthMetricMemoryUsed => "Mem used",
@@ -51,52 +52,84 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthOomScopeCpuset => "cpuset/NUMA memory pressure",
         MessageId::HealthOomScopeMemoryPolicy => "memory policy pressure",
         MessageId::HealthOomScopeUnknown => "unknown OOM scope",
+        MessageId::HealthOomScopeCurrentCgroup => "current login cgroup",
+        MessageId::HealthEvidenceVolumeAvailable => "{gib} GiB available (statfs)",
+        MessageId::HealthEvidenceInodeFree => "{count} inodes free",
+        MessageId::HealthEvidenceOomCounterWindow => "{count} new OOM kills in the current group over the last {age}",
         MessageId::HealthTryAnalyzeMemoryPressure => "analyze memory pressure",
         MessageId::HealthTryCheckSwapPressure => "check active swap pressure",
         MessageId::HealthTryCheckRecentOom => "analyze latest OOM cause",
         MessageId::HealthTryInspectDiskUsage => "inspect disk usage",
-        MessageId::HealthTryInspectServiceStatus => "inspect service status",
+        MessageId::HealthTryInspectServiceStatus => "inspect {service} status",
         MessageId::HealthTryInspectHighLoad => "inspect high load",
         MessageId::HealthTryInspectProcessMemory => "inspect {process} memory",
         MessageId::HealthTryReviewUnavailableChecks => "review unavailable checks",
         MessageId::HealthPromptAnalyzeMemoryPressure => {
-            "Analyze memory pressure and identify top consumers that may affect this shell."
+            "Check memory pressure, top consumers and cgroup limits; suggest next steps."
         }
         MessageId::HealthPromptCheckSwapPressure => {
-            "Check whether swap pressure is active and which processes are driving it."
+            "Check whether swap pressure is active, available memory and related processes."
         }
         MessageId::HealthPromptCheckRecentOom => {
-            "Help me analyze the cause of the most recent OOM, focusing on the killed process, cgroup, and memory state around the event."
+            "Check recent OOM timing, scope, affected processes and memory limits."
         }
         MessageId::HealthPromptInspectDiskUsage => {
-            "Inspect the risky mount and suggest safe disk cleanup targets."
+            "Check current disk usage and major consumers; suggest next steps."
         }
         MessageId::HealthPromptInspectServiceStatus => {
-            "Inspect the configured service state and likely failure cause."
+            "Verify the current state of service {service} first, then investigate likely causes and suggest next steps."
         }
         MessageId::HealthPromptInspectHighLoad => {
-            "Analyze high load and identify CPU or IO pressure sources."
+            "Check load; distinguish CPU work, I/O waits and other causes."
         }
         MessageId::HealthPromptInspectProcessMemory => {
-            "Help me analyze why the latest OOM killed {process}, focusing on cgroup scope and memory limits."
+            "Check recent OOM impact on {process}, event timing and memory limits."
         }
         MessageId::HealthPromptReviewUnavailableChecks => {
             "Explain why startup health checks were unavailable and how to restore them."
         }
+        MessageId::HealthSessionPromptAnalyzeMemoryPressure => {
+            "Help me check memory pressure, top consumers and cgroup limits"
+        }
+        MessageId::HealthSessionPromptCheckSwapPressure => {
+            "Help me check swap pressure and available memory"
+        }
+        MessageId::HealthSessionPromptCheckRecentOom => {
+            "Help me investigate the recent OOM impact and memory limits"
+        }
+        MessageId::HealthSessionPromptInspectDiskUsage => {
+            "Help me check disk usage and its main sources"
+        }
+        MessageId::HealthSessionPromptInspectServiceStatus => {
+            "Help me verify the current state of service {service}"
+        }
+        MessageId::HealthSessionPromptInspectHighLoad => {
+            "Help me check load and separate CPU work from I/O waits"
+        }
+        MessageId::HealthSessionPromptInspectProcessMemory => {
+            "Help me check the recent OOM impact on {process} and its memory limits"
+        }
+        MessageId::SuggestionListTitle => "Ask directly",
+        MessageId::SuggestionShortcutCycle => "Shift+Tab cycle",
+        MessageId::SuggestionShortcutInsert => "Tab insert",
+        MessageId::SuggestionShortcutAsk => "Enter ask",
         MessageId::HealthInsightMemoryAvailableLow => {
-            "available memory is low; this can slow commands or make new processes fail"
+            "available memory is low"
         }
         MessageId::HealthInsightDiskHigh => {
-            "disk usage is high on the riskiest mount; writes or builds may fail soon"
+            "disk usage is high on this mount"
+        }
+        MessageId::HealthInsightMountReadonly => {
+            "mount is read-only, expected writable"
         }
         MessageId::HealthInsightRecentOom => {
-            "the latest OOM has already happened; review the killed process, cgroup, and memory state around the event"
+            "Recent OOM event"
         }
         MessageId::HealthInsightCpuLoadHigh => {
-            "load stayed high across recent windows; commands may be delayed"
+            "load stayed high across recent windows"
         }
         MessageId::HealthInsightSwapPressure => {
-            "swap usage is high with memory pressure context; paging can slow command response"
+            "swap usage is high"
         }
         MessageId::HealthInsightServiceState => {
             "service unit {service} observed {observed}, expected {expected}"
@@ -113,6 +146,55 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingMemoryAvailableLow => "available memory low",
         MessageId::HealthFindingSwapPressure => "swap pressure with context",
         MessageId::HealthFindingDiskHigh => "disk usage high",
+        MessageId::HealthFindingMountReadonly => "mount read-only deviation",
+        MessageId::HealthEvidenceMountReadonly => {
+            "mount {mount} is read-only, configured expected writable"
+        }
+        MessageId::HealthFindingCgroupMemoryPressure => "cgroup memory quota pressure",
+        MessageId::HealthInsightCgroupMemoryPressure => {
+            "cgroup memory quota is tight with sustained PSI stall"
+        }
+        MessageId::HealthEvidenceCgroupQuota => {
+            "quota {percent}% used, {remaining_mib} MiB headroom"
+        }
+        MessageId::HealthEvidenceCgroupQuotaZero => "memory.max=0, no allocable quota",
+        MessageId::HealthFindingPressureHigh => "{resource} pressure high",
+        MessageId::HealthInsightPressureHigh => {
+            "{resource} {kind} pressure stayed high across windows"
+        }
+        MessageId::HealthEvidencePressureAvg => {
+            "{resource} {kind} avg10 {avg10}% · avg60 {avg60}%"
+        }
+        MessageId::HealthFindingConntrackCapacity => "conntrack capacity near limit",
+        MessageId::HealthInsightConntrackCapacity => {
+            "connection tracking capacity is nearly exhausted"
+        }
+        MessageId::HealthEvidenceConntrack => "conntrack {count}/{max} in current netns",
+        MessageId::HealthTryInspectSystemCapacity => "Inspect system capacity limits",
+        MessageId::HealthPromptInspectSystemCapacity => {
+            "Help me check system capacity limits (file handles, conntrack) and the top consumers, then suggest safe relief"
+        }
+        MessageId::HealthTryReasonSystemCapacity => "a system capacity limit is near exhaustion",
+        MessageId::HealthFindingExt4Error => "ext4 filesystem error",
+        MessageId::HealthFindingExt4ReadonlyRemount => "ext4 read-only remount recorded",
+        MessageId::HealthTryInspectFilesystemEvent => "Investigate ext4 remount",
+        MessageId::HealthPromptInspectFilesystemEvent => {
+            "Check the mount options and recent kernel logs for {mount} ({device}) after the ext4 read-only remount. Use read-only checks."
+        }
+        MessageId::HealthInsightExt4Error => "ext4 reported an error on this filesystem",
+        MessageId::HealthFindingJournalError => "ext4 journal error",
+        MessageId::HealthInsightJournalError => "the ext4 journal aborted or hit flush errors",
+        MessageId::HealthFindingXfsShutdown => "XFS shutdown",
+        MessageId::HealthInsightXfsShutdown => "XFS shut down after an error cause chain",
+        MessageId::HealthFindingBlockIoError => "block I/O error",
+        MessageId::HealthInsightBlockIoError => "a block read/write request failed",
+        MessageId::HealthEvidenceFsDevice => "{device} ({mount})",
+        MessageId::HealthFindingHungTask => "task blocked record",
+        MessageId::HealthInsightHungTask => "a task was recorded blocked for over {seconds}s",
+        MessageId::HealthFindingSoftLockup => "soft lockup record",
+        MessageId::HealthInsightSoftLockup => "CPU#{cpu} was recorded stuck for {seconds}s",
+        MessageId::HealthEvidenceHungTask => "{process} (PID {pid})",
+        MessageId::HealthEvidenceSoftLockup => "CPU#{cpu} stuck {seconds}s",
         MessageId::HealthFindingRecentOom => "recent OOM signal",
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",

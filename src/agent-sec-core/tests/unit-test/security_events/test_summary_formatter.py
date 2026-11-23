@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.summary_formatter import format_summary
 
@@ -241,6 +242,48 @@ class TestHardeningSummary:
         assert "Latest scan failed: loongshield not found" in output
         # Latest harden failed -> needs_attention (not critical)
         assert "Needs attention" in output
+
+    @pytest.mark.parametrize(
+        ("latest_result", "older_has_stats"),
+        [
+            ("succeeded", False),
+            ("failed", False),
+            ("succeeded", True),
+            ("failed", True),
+        ],
+    )
+    def test_latest_scan_without_stats_reports_actual_status(
+        self, latest_result, older_has_stats
+    ):
+        older_result = {"mode": "scan"}
+        if older_has_stats:
+            older_result.update(passed=3, total=4)
+        older = _make_event(
+            event_type="harden",
+            category="hardening",
+            details={"result": older_result},
+            timestamp=_ts_minutes_ago(15),
+        )
+        latest = _make_event(
+            event_type="harden",
+            category="hardening",
+            result=latest_result,
+            details={
+                "result": {"mode": "scan", "total": 0},
+                "error": "scanner unavailable",
+            },
+            timestamp=_ts_minutes_ago(5),
+        )
+
+        output = format_summary([older, latest], "last 24 hours")
+
+        assert ("Latest scan failed: scanner unavailable" in output) == (
+            latest_result == "failed"
+        )
+        assert ("Most recent scan with rule statistics:" in output) == older_has_stats
+        assert ("Compliance: 3/4 rules passed (75.0%)" in output) == older_has_stats
+        assert "Latest scan result:" not in output
+        assert "Latest scan failed: unknown error" not in output
 
     def test_failed_scan_with_stats_still_shows_compliance(self):
         events = [

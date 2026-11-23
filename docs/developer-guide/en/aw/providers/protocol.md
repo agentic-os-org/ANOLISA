@@ -9,27 +9,8 @@ external policy programs and checks their messages and requested capabilities
 offline. It connects the unified configuration to a Provider contract without
 starting a process, installing an Agent Hook or establishing a runtime binding.
 Native integration belongs to `aw-adapter`, orchestrated by `aw-cli`; see the
-[component README](../../../../../src/aw/README.md#hook-support) for supported capabilities.
+[capability matrix](../../../../user-guide/en/aw/capabilities.md#hook-support-matrix) for supported capabilities.
 
-## Delivery boundary
-
-| Layer | Current responsibility |
-| --- | --- |
-| `aw-config` | Parse one configuration and check its structure and static references |
-| `aw-provider` | Validate protocol messages, correlate responses and check configured steps against supplied Provider and Adapter evidence |
-| `aw-contracts` / `aw-core` | Validate and execute their existing capability profiles through a trusted Host and Journal |
-| `aw-host` | Execute Provider commands, enforce deadlines and output limits, handle cancellation and return correlated call reports |
-| Adapter, `aw-cli` and `aw-service` | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
-
-Configuration fields are unchanged. A named object under `spec.providers`
-selects `aw-provider/v1alpha1`, a literal `transport.argv` and private `config`.
-A script, binary or CLI client of a background service can implement this
-interface. AW does not infer or install that program's dependencies.
-
-The [configuration example](../../../../../src/aw/crates/aw-config/examples/aw.yaml) illustrates
-all 16 event names and later capabilities. Static validation of that example is
-not a promise that its enabled events, guard or replacement effects pass the
-narrower admission checks described here.
 
 ## Transport contract
 
@@ -65,6 +46,12 @@ Every request carries `api_version`, `method` and a request ID. The Provider mus
 return the same version and request ID. The caller supplies the ID and remains
 responsible for its lifecycle and correlation with the chosen Provider instance.
 
+| Method | Called when | Key request fields | Key success response fields |
+| --- | --- | --- | --- |
+| `describe` | Discovery / admission | `api_version`, `method`, `request_id` | `operations[]` (`name`, `events`, `effects`, optional `event_adapters`) |
+| `validate_config` | Config admission | `config` (private JSON object) | `status: "ok"` (or `status: "error"`, `error_code`) |
+| `invoke` | Runtime Hook evaluation | `operation`, `config`, `config_revision`, `budget_ms`, `allowed_effects`, `input_digest`, `event` | `input_digest` (echoed), `effects[]` |
+
 ### `describe`
 
 ```json
@@ -78,8 +65,24 @@ responsible for its lifecycle and correlation with the chosen Provider instance.
 The description declares up to 64 operations and their supported events and
 effects. Operation names must be nonempty and unique. A declaration is supplied by the Provider; it
 cannot expand the Adapter's trusted capabilities or establish runtime identity.
-The vocabulary recognizes all 16 configuration events, while this admission
-profile permits enabled execution only at `tool.before` and `tool.after`.
+The vocabulary recognizes all 16 configuration events. Provider execution
+classifies runtime Hooks into three gate classes when the selected Adapter
+supports the event and effect: lifecycle events (`session.start`,
+`session.end`), decision gates (`input.submit`, `turn.stop`,
+`security.violation`) and slot-constrained mutation gates (`tool.before`,
+`tool.after`).
+Submission support requires a supported resident entrypoint such as Qoder SDK, QwenPaw or Pi; built-in Agent profiles declare `session.start`, `session.end` and `turn.stop` only after their native Sources are connected and verified.
+
+An operation may restrict an event to specific Adapter IDs with optional
+`event_adapters`, for example `"event_adapters":{"input.submit":["pi"]}`.
+Each key must occur in that operation's `events`; each list has 1–64 unique IDs
+of up to 128 lowercase ASCII letters, digits or hyphens, starting with a letter.
+An omitted event has no Provider-declared Adapter restriction. Admission compares
+the selected target's trusted Adapter ID with the list before native hooks become
+ready. A mismatch rejects preparation regardless of `on_error`; it never silently
+skips the step. This declaration constrains capability, not configuration selection.
+Deploy a Host that understands this field together with such a Provider; older
+Hosts reject the unknown field during discovery.
 
 ### `validate_config`
 
@@ -98,13 +101,25 @@ prove that rules were installed or authenticate the Provider executable.
 
 ### `invoke`
 
+```json
+{"api_version":"aw-provider/v1alpha1","method":"invoke","request_id":"invoke-1","operation":"check","config":{"blocked_tools":["Bash"]},"config_revision":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","budget_ms":5000,"allowed_effects":["observe","block"],"input_digest":"sha256:d1d08ad48a88a42c28b16a17b8ef9e7b22ba2021b38b8cd32f739846fa38ac13","event":{"name":"tool.before","agent":{"adapter":"qoder","binding_id":"qoder","instance_id":"inst-1"},"session_id":"sess-1","tool":{"name":"bash","native_name":"Bash","call_id":"call-1","input":{"command":"ls"},"result":null},"native":{}}}
+```
+
+```json
+{"api_version":"aw-provider/v1alpha1","request_id":"invoke-1","status":"ok","input_digest":"sha256:d1d08ad48a88a42c28b16a17b8ef9e7b22ba2021b38b8cd32f739846fa38ac13","effects":[{"type":"block","reason_code":"tool_policy"}]}
+```
+
 An invocation supplies the configured operation, private configuration,
 configuration revision, remaining budget, admitted effects, normalized event and
-an opaque input digest. A checked successful response returns that same digest
-and a list of candidate effects. An empty list imposes no additional restriction;
-`observe` requests observation and `block` requests prevention of the pending
-tool call. Both are candidate effects; the library itself writes no audit record.
-None of these responses grants native permission.
+an opaque input digest. The bundled JSON Schema checks envelope and per-event
+field shapes, while `Protocol` additionally enforces per-event gate effect
+boundaries and request-response correlation. A checked successful response
+returns that same digest and a list of candidate effects. An empty list imposes
+no additional restriction; `observe` requests observation. `block` rejects a
+pending submission, premature turn stop or tool call, or withholds a final tool
+result at an Adapter boundary that supports `security.violation`; lifecycle
+events (`session.start`, `session.end`) accept `observe` only. Candidate effects
+write no audit record in this library and grant no native permission.
 `Outcome::requests_block()` reports only whether that candidate effect is present.
 
 | Invocation field | Meaning |
@@ -114,9 +129,11 @@ None of these responses grants native permission.
 | `budget_ms` | Positive remaining execution budget supplied and enforced by the Host |
 | `allowed_effects` | Effects admitted for this operation and event |
 | `event.agent` | Adapter, configured `binding_id` and nullable runtime `instance_id` |
-| `event.session_id`, `event.tool.call_id` | Native identifiers, or null when unavailable |
-| `event.tool` | `name`, `native_name`, `call_id`, `input` and `result`; before-tool `result` must be null |
-| `event.native` | Original native JSON object, retained without inventing additional authority |
+| `event.session_id`, `event.tool.call_id` | Native identifiers; non-empty string on `session.start`, `session.end`, `input.submit` and `turn.stop`, or null when unavailable on tool events |
+| `event.tool` | `name`, `native_name`, `call_id`, `input` and `result` on tool events (`tool.before`, `tool.after`, `security.violation`); before-tool `result` must be null |
+| `event.turn_id` | Non-empty turn identity required on `input.submit` and `turn.stop`; absent on tool and session lifecycle events |
+| `event.input.text` | Submission-only complete user text; `tool` is absent |
+| `event.native` | Adapter callback snapshot; submission snapshots include an Adapter-issued `aw_turn_id` |
 | `input_digest` | Opaque binding generated for the complete invocation |
 
 The event preserves the configured Adapter and binding, native session and call
@@ -174,53 +191,51 @@ preserved; admission does not schedule distinct events or choose parallelism.
 
 | Request | Admission result |
 | --- | --- |
-| `tool.before`: `observe`, `block` | Accepted when the selected operation and Adapter both support every requested effect |
+| `session.start`, `session.end`: `observe` | Accepted with Provider and Adapter support; blocking, mutations, active tool selectors and raw native-hook steps are rejected |
+| `input.submit`: `observe`, `block` | Accepted with Provider and Adapter support; tool selectors and raw native-hook steps are rejected |
+| `turn.stop`: `observe`, `block` | Accepted with Provider and Adapter support; mutations, active tool selectors and raw native-hook steps are rejected |
+| `tool.before`: `observe`, `block`, `replace_input` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
 | `tool.after`: `replace_result` | One structured step with trusted text-replacement capability |
-| `ask`, input replacement or a block after execution | Rejected |
-| An enabled event outside the two tool events | Rejected, including when `required: false` |
-| A guard such as `security.violation` | Rejected; final-check ordering is not implemented by this profile |
-| Exact tool selectors or a guarantee beyond `native_hook` | Rejected |
+| `security.violation`: `observe`, `block` | Accepted for the DeepSeek Harness final-result boundary when both sides support it |
+| `ask`, lifecycle blocking or `tool.after` block | Rejected |
+| An enabled event without Adapter support | Rejected, including when `required: false` |
+| `events.tool.before.guard` configuration field | Rejected by runtime admission; configure pre-execution checks as `tool.before` steps |
+| Event and step `match.tools` | Accepted on tool events (`tool.before`, `tool.after`, `security.violation`); the Host invokes only tools matching both selectors |
+| A guarantee beyond `native_hook` | Rejected |
 | A missing Provider, operation, capability or matching configuration validation | Rejected with an explicit reason |
 
-Before-tool `on_error` may be `report`, or `block` when the Adapter supports
-blocking. After-tool failures support `report`. Other failure actions are rejected.
+Lifecycle events (`session.start`, `session.end`) require `on_error: report`. Decision and pre-tool gates (`input.submit`, `turn.stop`, `tool.before`, `security.violation`) allow `report`, or `block` when the Adapter supports
+blocking. After-tool failures support `report`, or `withhold_result` when the
+prepared Adapter explicitly declares that event-scoped failure action. Currently
+ordinary Qoder SDK and QwenPaw resident entrypoints declare it. Other actions are rejected.
 
 `required: false` does not authorize silently dropping an enabled unsupported
-step. All configured tools are eligible through the wildcard selector; the
-Provider can inspect tool names and arguments in its own operation. The presence
-of `permission.request` in the vocabulary does not imply support for an
-interactive approval UI in any particular framework or entrypoint.
+step. Every enabled structured Provider still supplies discovery and exact
+configuration-validation evidence before runtime tool selection.
+
+Event and step selectors intersect; omission or `["*"]` covers all tools at
+that level. Standard selectors `bash`, `file_read` and `file_write` match
+normalized `event.tool.name`. Exact `native:<adapter>:<name>` selectors match
+`event.agent.adapter` and retained `event.tool.native_name`; names are
+case-sensitive and no glob or regex patterns apply. See the
+[configuration reference](../configuration.md#events-effects-and-tool-selection).
+After normalization, binding checks and the once-only claim, an unmatched step
+returns a Host-owned skipped result with no Provider invocation or effects.
+Event validation, shared deadlines, cancellation, ordering and completion audit
+still apply. The Provider receives only selected invocations and owns its
+private tool extraction and backend policy.
+
+Native denial and pending permission requests retain precedence over neutral
+or skipped steps. Unsupported argument rewrites remain rejected; a Provider
+result grants no native permission. `permission.request` remains vocabulary
+without an AW interactive approval implementation.
 
 `aw-host` enforces timeout, event budget and output-limit fields during local
 execution. Offline admission itself cannot enforce elapsed time, process cleanup,
 native scheduling or failure handling. Passing admission is therefore only one
 prerequisite for a runnable native binding.
 
-## Relationship to Core and security enforcement
-
-The current Core profile admits four capabilities:
-`security.command.inspect/v2`, `security.code.inspect/v2`,
-`security.content.inspect/v2` and `context.projection.prepare/v2`. Its pre-tool
-plan requires a mandatory command inspection and a `required_final_guard`;
-dispatch validation additionally checks the plan's OS requirement against fresh
-native evidence. Those contracts remain unchanged.
-
-A generic native Hook Provider returning `block` does not satisfy that command
-inspection or final-guard contract. Its `describe` response is not an admitted
-`provider-descriptor-v1`, and its invocation response is not a Host-generated
-`provider-receipt-v1`. The `denied` receipt disposition represents an unavailable
-or denied capability execution, not a successful security verdict: a successful
-security inspection that rejects a command produces an output with `verdict:
-"deny"` and receipt disposition `produced`.
-
-Wiring these generic operations into Core still requires an explicitly reviewed,
-versioned native-Hook profile and authenticated Provider identity. `aw-host`
-executes transport and validates candidate effects; it does not translate a Core
-profile or create evidence for Core and Journal.
-The existing security profile retains its stronger final-dispatch requirements.
-Native readback is still required to establish that the framework adopted a
-returned effect. Neither a Provider response nor a journaled call proves that.
 
 ## Standalone stdio example
 
@@ -252,25 +267,6 @@ calls, including after-tool events, return an empty effect list. This is a sampl
 policy, not a sec-core implementation or a built-in security rule set. Running
 the example does not start an Agent or cause the AW library to execute commands.
 
-## Joint delivery with sec-core
-
-sec-core can implement the three protocol methods and private policy schema
-against these schemas and use the local Host for protocol integration. It owns built-in
-rules, custom policy evaluation and the meaning of a tool-specific safety
-verdict. A CLI wrapper may connect to a separately managed sec-core service.
-The wrapper must translate scanner outcomes into declared Provider effects and
-separate scanner failure from a successful policy block.
-
-AW provides protocol validation, admission and the local bounded Host. Later
-deliveries add service lifecycle, authenticated Adapter capabilities, native Hook
-translation and audit integration. Final `security.violation` composition and
-its relation to sec-core are part of that later enforcement design; this slice
-does not claim to supply a last, non-bypassable security check.
-
-The four-framework fixtures verify one common message shape and capability
-rejection behavior. They do not establish that all native entrypoints load Hooks,
-that a framework honors a returned block, or that execution cannot bypass a
-callback. Those claims require separate runtime acceptance.
 
 ## PostTool text replacement
 
@@ -279,6 +275,8 @@ Adapter evidence supports it. It must be the event's last enabled step; earlier
 observers, boolean Hooks and native Hooks are retained. A second replacement or
 any enabled step after replacement is rejected. Boolean Hooks cannot request
 replacement. Provider and Adapter evidence remain separately checked.
+Tool selectors preserve this admission order. An unmatched replacement step
+returns skipped and leaves the original result intact.
 Only the admitted replacement step receives the optional projection; existing
 observers keep their original event shape. The Adapter supplies `event.tool.result_projection` containing `text`,
 `status`, `content_origin` and an optional shell `command`. The original `result`
@@ -287,57 +285,16 @@ and native payload remain available and participate in the request binding.
 A `replace_result` effect requires a string `text`. A `block` effect may include
 a nonempty bounded `text` reason; all other effect types reject that field. Responses allow at most one replacement and require an input
 projection. A missing projection permits only a no-replacement result. The
-Adapter replaces its selected slot and preserves the native envelope. This is a
+Adapter replaces its authorized text slot and preserves the native envelope and
+failure status. This is a
 candidate, not proof that a model consumed it; AW's journal excludes the text.
 The schema additions retain the experimental v1alpha1 protocol. Deploy matching
-CLI, service and Providers from the same Preview build; older implementations
+CLI, service and Providers from the same validated build; older implementations
 reject unsupported projections/effects rather than ignoring them.
 
-### PreTool retry and PostTool ownership
+### Tokenless composition
 
-The Tokenless Provider admits Protocol v2 `pre_tool` on `tool.before` with the
-existing `block` effect. For supported shell tools with an object `command`, it
-requests `replace_arguments: false, block_and_suggest: true`. Only Core may select
-a rewrite. AW returns the full suggested arguments as a model-visible block
-reason, never `updatedInput`, native `modify`, approval, or a shell invocation.
-Passthrough must preserve the original arguments. A direct-replacement action,
-changes to non-command fields or an invalid response is a Provider failure.
-
-The model must submit a fresh call to use the suggestion. Both the original and
-retry traverse the existing sec-core before step and native permission pipeline;
-Tokenless neutrality cannot override a denial or a fail-closed scanner error.
-The combined template retains scanning first, appends PreTool, and retains its
-completion observer before the final PostTool step. AW does not reorder external
-Hooks. External mutating Hooks still follow their host's permission contract.
-
-A blocked attempt's call ID cannot identify the retry. The Tokenless integration
-instead recognizes the standalone attributed RTK wrapper in the arguments actually
-executed (Agent/session/data directory, absolute `rtk` executable) and supplies
-`output_optimization: rtk` to PostTool. It also passes such retries through PreTool.
-Recognition decodes quoted/escaped literals and compares state paths through their
-canonical existing ancestor without creating directories. It skips only the
-[documented execution prefix forms](tokenless.md#pretool-and-permission-behavior),
-so an attributed wrapper appearing in another command's arguments is not sufficient.
-Bare `rtk`, foreign attribution, unknown or flag-bearing wrappers and compound shell
-commands are not inferred as RTK-owned. This is an optimization hint, never authorization or recovery access.
-No persistent AW optimization/recovery store or second compression policy is added.
-RTK resolution and rewriting remain in the public Tokenless CLI; RTK is an external
-PreTool dependency, not part of the current AW package payload. CLI failures stay
-visible under `on_error: report`; sec-core retains `on_error: block`.
-
-### Lifecycle expansion boundary
-
-The bridge implements `pre_tool` by retry and `post_tool` text replacement. It does
-not implement transparent argument replacement or `before_model` Schema replacement.
-Recovery, Stash, reachable retrieval entry points and retrieval-result bypass belong
-to the Tokenless integration layer; current requests continue to declare recovery
-`none`. Merely enabling PreTool does not advertise complete Tokenless capabilities.
-
-Recovery requires a real Agent-facing entry with the native authorization and
-scope required by Tokenless, plus Retrieve-output bypass to prevent recompression.
-Schema replacement requires a model-request seam and its own recovery capability.
-OpenClaw and Hermes currently lack that schema seam in the supported native
-integration; advertise partial capabilities instead of claiming four-framework
-parity. Failed-output diagnostics also need a separate additive result contract:
-the current bridge intentionally retains failed results unchanged. Tool Ready is
-hard-disabled upstream and is not part of an active-capability completeness claim.
+PreTool can return one `replace_input` effect with an object `input` retaining every original argument key. It must be the first applicable before step and its sole effect; every before step uses `on_error: block`. Later checks see the candidate and the last successful callback publishes it under the same identity and budget, preserving native authorization. Legacy `block` retry suggestions remain supported. PostTool replaces only authorized text slots. SDK-managed MCP handler input replacement is rejected before checking the candidate; unchanged MCP calls and PostTool processing keep their existing routes.
+See the [Tokenless reference](tokenless.md) for RTK ownership, result classification and telemetry.
+Current recovery capability is `none`; Schema/BeforeModel and Retrieve seams are not available.
+See [Core execution](../../../../../src/aw/docs/design/en/core-execution.md) for the separate plan API contract.

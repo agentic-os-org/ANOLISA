@@ -397,6 +397,7 @@ jobs:
       version: ${{ needs.versions.outputs.sec-core-version }}
       arch: ${{ matrix.arch }}
       source-artifact: "agent-sec-core-${{ needs.versions.outputs.sec-core-version }}.nightly"
+      sec-core-nightly-online: true
       artifact-suffix: ".nightly"
 
   rpm-tokenless:

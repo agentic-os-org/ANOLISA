@@ -1,10 +1,14 @@
 //! Build and test log compression for PostTool command output.
 //!
-//! The compressor keeps diagnostics, summaries, phase boundaries, stack
-//! traces, and unknown lines. Only recognized runs of routine progress are
-//! reduced, with every omission backed by an in-place retrieval marker.
+//! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod cmake_build;
+mod ctest;
+mod gradle;
+mod maven;
+mod pnpm;
+mod scope;
 mod template;
 mod trace;
 
@@ -25,13 +29,19 @@ const ROUTINE_EDGE_LINES: usize = 2;
 const MAX_OMISSION_BLOCKS: usize = 8;
 const GENERIC_TEMPLATE_MIN_LINES: usize = 9;
 
+struct LayoutEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
 /// Stable operations performed inside the build-log domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildLogOperation {
     /// ANSI SGR presentation sequences were removed.
     TerminalCleanup,
-    /// Repeated routine progress was replaced by retrievable markers.
-    ProgressReduction,
+    /// Recognized layout or routine progress was reduced under the recovery policy.
+    Reduction,
 }
 
 impl BuildLogOperation {
@@ -40,7 +50,7 @@ impl BuildLogOperation {
     pub fn id(self) -> &'static str {
         match self {
             Self::TerminalCleanup => "terminal-cleanup",
-            Self::ProgressReduction => "build-log-progress-reduction",
+            Self::Reduction => "build-log-reduction",
         }
     }
 }
@@ -79,7 +89,7 @@ impl BuildLogCompressor {
     /// Detects a supported build/test log using a bounded head-and-tail sample.
     #[must_use]
     pub fn detect(input: &str) -> bool {
-        detect_format(input).is_some()
+        detect_format(input).0.is_some()
     }
 
     /// Builds the smallest valid build-log candidate under the recovery policy.
@@ -98,39 +108,190 @@ impl BuildLogCompressor {
     ) -> BuildLogOutcome {
         let cleaned = clean_terminal(input);
         let cleanup_changed = cleaned != input;
-        let cleanup_operations = cleanup_changed
+        let mut lossless_operations = cleanup_changed
             .then_some(BuildLogOperation::TerminalCleanup)
             .into_iter()
             .collect::<Vec<_>>();
-
-        let Some(store) = stash.filter(|_| recovery.is_available()) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+        let store = stash.filter(|_| recovery.is_available());
+        let (Some(mut format), sample) = detect_format(&cleaned) else {
+            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        let Some(format) = detect_format(&cleaned) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
-        };
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm
+                | BuildLogFormat::Maven
+                | BuildLogFormat::Gradle
+                | BuildLogFormat::Ctest
+                | BuildLogFormat::CmakeBuild
+        ) && store.is_none()
+        {
+            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
+        }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
+        // Preserve already-compacted Gradle, CTest, and CMake/Ninja results as terminal even when an
+        // oversized preamble pushes the template header out of the sample window.
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm
+                | BuildLogFormat::Maven
+                | BuildLogFormat::Gradle
+                | BuildLogFormat::Ctest
+                | BuildLogFormat::CmakeBuild
+        ) {
+            if gradle::is_compacted(&lines) {
+                format = BuildLogFormat::Gradle;
+            } else if ctest::is_compacted(&lines) {
+                format = BuildLogFormat::Ctest;
+            } else if cmake_build::is_compacted(&lines) {
+                format = BuildLogFormat::CmakeBuild;
+            }
+        }
+        let (maven_layouts, gradle_layouts, ctest_layouts, cmake_layouts) = match format {
+            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new(), Vec::new(), Vec::new()),
+            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines), Vec::new(), Vec::new()),
+            BuildLogFormat::Ctest => (Vec::new(), Vec::new(), ctest::plan(&lines), Vec::new()),
+            BuildLogFormat::CmakeBuild => (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                cmake_build::plan(&lines),
+            ),
+            _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        };
+        let mut maven_transfers = Vec::new();
+        if format == BuildLogFormat::Maven
+            && maven_layouts.is_empty()
+            && !maven::is_compacted(&lines)
+            && store.is_some()
+        {
+            // No-edit Maven results retain anchored Generic recovery, plus verified
+            // transfers that remain inside an active Maven scope.
+            if is_anchored(&sample) {
+                maven_transfers = maven::scoped_transfers(&lines);
+            }
+            if let Some(generic) = detect_generic(&sample) {
+                format = generic;
+            } else if maven_transfers.iter().filter(|&&ok| ok).count() >= GENERIC_TEMPLATE_MIN_LINES
+            {
+                format = BuildLogFormat::Generic;
+            }
+        } else if format == BuildLogFormat::Gradle
+            && gradle_layouts.is_empty()
+            && !gradle::is_compacted(&lines)
+            && store.is_some()
+            && let Some(generic) = detect_generic(&sample)
+        {
+            format = generic;
+        } else if format == BuildLogFormat::Ctest
+            && ctest_layouts.is_empty()
+            && !ctest::is_compacted(&lines)
+            && store.is_some()
+            && let Some(generic) = detect_generic(&sample)
+        {
+            format = generic;
+        }
         let stripped = lines
             .iter()
             .map(|line| line.trim_end_matches('\n').to_owned())
             .collect::<Vec<_>>();
-        let generic_templates = dominant_generic_templates(format, &stripped);
-        let mut roles = stripped
-            .iter()
-            .map(|line| classify(line, format, &generic_templates))
-            .collect::<Vec<_>>();
+        let (mut roles, run_starts, mut layouts) = if format == BuildLogFormat::Pnpm {
+            let plan = pnpm::plan(&lines);
+            (plan.roles, plan.run_starts, plan.layouts)
+        } else if format == BuildLogFormat::Maven {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                maven_layouts,
+            )
+        } else if format == BuildLogFormat::Gradle {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                gradle_layouts,
+            )
+        } else if format == BuildLogFormat::Ctest {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                ctest_layouts,
+            )
+        } else if format == BuildLogFormat::CmakeBuild {
+            let sub_format = if !cmake_build::is_compacted(&lines) && store.is_some() {
+                detect_scored_format(&sample).or_else(|| detect_generic(&sample))
+            } else {
+                None
+            };
+            let roles = if let Some(sub_format) = sub_format {
+                let templates = dominant_generic_templates(sub_format, &stripped);
+                let mut open_fence = None;
+                // Mirror scope::enter_line's fence and non-TAB control boundaries (including
+                // mixed-ending '\r') plus custom CMake/Ninja counter steps that parse_row
+                // cannot compact; legacy non-scoped routes continue classifying line-by-line.
+                let mut roles = stripped
+                    .iter()
+                    .map(|line| {
+                        if scope::step_fence(&mut open_fence, line)
+                            || line.chars().any(|ch| ch != '\t' && ch.is_control())
+                            || cmake_build::is_custom_counter_step(line)
+                        {
+                            LineRole::Summary
+                        } else {
+                            classify(line, sub_format, &templates)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for edit in &cmake_layouts {
+                    roles[edit.start..edit.end].fill(LineRole::Summary);
+                }
+                roles
+            } else {
+                vec![LineRole::Summary; lines.len()]
+            };
+            (roles, HashSet::new(), cmake_layouts)
+        } else {
+            let templates = dominant_generic_templates(format, &stripped);
+            (
+                stripped
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| {
+                        let role = classify(line, format, &templates);
+                        if role == LineRole::Unknown
+                            && maven_transfers.get(index).copied().unwrap_or(false)
+                        {
+                            LineRole::Routine(RoutineFamily::Generic)
+                        } else {
+                            role
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                HashSet::new(),
+                Vec::new(),
+            )
+        };
         for region in trace_regions(&stripped) {
             for role in &mut roles[region] {
                 *role = LineRole::Diagnostic;
             }
         }
-
-        let Some(plans) = omission_plans(&lines, &roles, recovery) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+        layouts.retain(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic));
+        let layout_output = render_reduced(&lines, &[], &[], recovery, &layouts);
+        let lossless = if saves_both(&cleaned, &layout_output) {
+            lossless_operations.push(BuildLogOperation::Reduction);
+            layout_output
+        } else {
+            layouts.clear();
+            cleaned.clone()
+        };
+        let Some(store) = store else {
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
+        };
+        let Some(plans) = omission_plans(&lines, &roles, &run_starts, recovery) else {
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         };
         if plans.is_empty() {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         }
 
         let mut writes = Vec::with_capacity(plans.len());
@@ -149,16 +310,18 @@ impl BuildLogCompressor {
             }
         }
         if stash_errors > 0 {
-            return lossless_outcome(cleaned, cleanup_operations, writes, stash_errors);
+            return lossless_outcome(lossless, lossless_operations, writes, stash_errors);
         }
 
-        let reduced = render_reduced(&lines, &plans, &keys, recovery);
-        if !saves_both(&cleaned, &reduced) {
-            return lossless_outcome(cleaned, cleanup_operations, writes, 0);
+        let reduced = render_reduced(&lines, &plans, &keys, recovery, &layouts);
+        if !saves_both(&lossless, &reduced) {
+            return lossless_outcome(lossless, lossless_operations, writes, 0);
         }
 
-        let mut operations = cleanup_operations;
-        operations.push(BuildLogOperation::ProgressReduction);
+        let mut operations = lossless_operations;
+        if !operations.contains(&BuildLogOperation::Reduction) {
+            operations.push(BuildLogOperation::Reduction);
+        }
         let omitted_lines = plans.iter().map(|plan| plan.end - plan.start).sum();
         BuildLogOutcome {
             output: reduced,
@@ -207,6 +370,7 @@ fn saves_both(original: &str, candidate: &str) -> bool {
 fn omission_plans(
     lines: &[&str],
     roles: &[LineRole],
+    run_starts: &HashSet<usize>,
     recovery: &RecoveryMethod,
 ) -> Option<Vec<OmissionPlan>> {
     let mut plans = Vec::new();
@@ -217,7 +381,10 @@ fn omission_plans(
             continue;
         };
         let mut end = index + 1;
-        while end < roles.len() && roles[end] == LineRole::Routine(family) {
+        while end < roles.len()
+            && roles[end] == LineRole::Routine(family)
+            && !run_starts.contains(&end)
+        {
             end += 1;
         }
         if end - index >= MIN_ROUTINE_RUN_LINES {
@@ -252,20 +419,35 @@ fn render_reduced(
     plans: &[OmissionPlan],
     keys: &[String],
     recovery: &RecoveryMethod,
+    layouts: &[LayoutEdit],
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0;
-    for (plan, key) in plans.iter().zip(keys) {
-        output.push_str(&lines[cursor..plan.start].concat());
-        output.push_str(&render_marker(
-            plan.family,
-            plan.end - plan.start,
-            key,
-            recovery,
-        ));
-        cursor = plan.end;
+    let mut omissions = plans.iter().zip(keys).peekable();
+    let mut layouts = layouts.iter().peekable();
+    while cursor < lines.len() {
+        if let Some((plan, key)) = omissions.peek()
+            && plan.start == cursor
+        {
+            output.push_str(&render_marker(
+                plan.family,
+                plan.end - plan.start,
+                key,
+                recovery,
+            ));
+            cursor = plan.end;
+            omissions.next();
+        } else if let Some(layout) = layouts.peek()
+            && layout.start == cursor
+        {
+            output.push_str(&layout.replacement);
+            cursor = layout.end;
+            layouts.next();
+        } else {
+            output.push_str(lines[cursor]);
+            cursor += 1;
+        }
     }
-    output.push_str(&lines[cursor..].concat());
     output
 }
 
@@ -282,11 +464,43 @@ fn render_marker(
     )
 }
 
-fn detect_format(input: &str) -> Option<BuildLogFormat> {
-    let sample = sample_lines(input);
+fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
+    let mut sample = sample_lines(input);
+    let maven = maven::detect(&sample);
+    let gradle = gradle::detect(&sample);
+    let ctest = ctest::detect(&sample);
+    let cmake_build = cmake_build::detect(&sample);
+    // Keep CR visible to Maven, Gradle, CTest, and CMakeBuild, whose layout grammars only handle LF records.
+    // Existing detectors retain the CRLF normalization previously done by lines().
+    for line in &mut sample {
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    if pnpm::detect(&sample) {
+        return (Some(BuildLogFormat::Pnpm), sample);
+    }
+    if maven {
+        return (Some(BuildLogFormat::Maven), sample);
+    }
+    if gradle {
+        return (Some(BuildLogFormat::Gradle), sample);
+    }
+    if ctest {
+        return (Some(BuildLogFormat::Ctest), sample);
+    }
+    if cmake_build {
+        return (Some(BuildLogFormat::CmakeBuild), sample);
+    }
+    let format = detect_scored_format(&sample).or_else(|| detect_generic(&sample));
+    (format, sample)
+}
+
+fn detect_scored_format(sample: &[String]) -> Option<BuildLogFormat> {
     let formats = [
         BuildLogFormat::Cargo,
         BuildLogFormat::Pytest,
+        BuildLogFormat::Unittest,
         BuildLogFormat::Npm,
         BuildLogFormat::Jest,
         BuildLogFormat::Go,
@@ -310,17 +524,20 @@ fn detect_format(input: &str) -> Option<BuildLogFormat> {
             winner_score = score;
         }
     }
-    winner.or_else(|| detect_generic(&sample))
+    winner
 }
 
-fn detect_generic(sample: &[String]) -> Option<BuildLogFormat> {
-    let anchored = sample.iter().any(|line| {
+fn is_anchored(sample: &[String]) -> bool {
+    sample.iter().any(|line| {
         let trimmed = line.trim();
         trimmed.starts_with("$ ")
             || trimmed.to_ascii_lowercase().starts_with("exit code:")
             || trimmed.to_ascii_lowercase().starts_with("exit status:")
-    });
-    if !anchored {
+    })
+}
+
+fn detect_generic(sample: &[String]) -> Option<BuildLogFormat> {
+    if !is_anchored(sample) {
         return None;
     }
     let mut counts = HashMap::new();
@@ -355,27 +572,40 @@ fn sample_lines(input: &str) -> Vec<String> {
     let mut sampled = Vec::new();
     let mut seen = HashSet::new();
     let mut head_bytes = 0;
-    for line in input.lines().take(SAMPLE_LINES_PER_END) {
+    let mut head_end = 0;
+    for line in input.split_terminator('\n').take(SAMPLE_LINES_PER_END) {
         if head_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
         head_bytes += line.len();
+        head_end = line.as_ptr() as usize - input.as_ptr() as usize + line.len();
         seen.insert((line.as_ptr() as usize, line.len()));
         sampled.push(clean_terminal(line));
     }
 
     let mut tail = Vec::new();
     let mut tail_bytes = 0;
-    for line in input.lines().rev().take(SAMPLE_LINES_PER_END) {
+    let mut tail_start = None;
+    for line in input
+        .split_terminator('\n')
+        .rev()
+        .take(SAMPLE_LINES_PER_END)
+    {
         if tail_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
         tail_bytes += line.len();
         if !seen.contains(&(line.as_ptr() as usize, line.len())) {
+            tail_start = Some(line.as_ptr() as usize - input.as_ptr() as usize);
             tail.push(clean_terminal(line));
         }
     }
     tail.reverse();
+    if tail_start.is_some_and(|start| !matches!(&input[head_end..start], "\n" | "\r\n")) {
+        // Multi-line detectors must not join windows or mistake a tail-only
+        // sample for the document's head when its first record exceeds the budget.
+        sampled.push("\0".into());
+    }
     sampled.extend(tail);
     sampled
 }
@@ -384,4 +614,10 @@ fn sample_lines(input: &str) -> Vec<String> {
 mod tests {
     use super::*;
     include!("tests/build_log_tests.rs");
+}
+
+#[cfg(test)]
+mod pnpm_tests {
+    use super::*;
+    include!("tests/pnpm_tests.rs");
 }

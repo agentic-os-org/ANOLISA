@@ -8,6 +8,7 @@
 use serde_json::Value;
 use structopt::StructOpt;
 
+use crate::analyzer::message::ResponsesReasoningReplay;
 use crate::chrome_trace::ChromeTraceEvent;
 use crate::tokenizer::{LlmTokenizer, get_global_tokenizer};
 
@@ -161,6 +162,23 @@ impl AnalyzeChatmlCommand {
                                         serde_json::Value::String(text) => text.clone(),
                                         other => other.to_string(),
                                     };
+                                    // SysOM's non-streaming POP response wraps
+                                    // the provider payload in
+                                    // `{"data": "<json string>"}`, the envelope
+                                    // the SysOM parser and the client both
+                                    // unwrap. Read the inner payload, or the
+                                    // wrapper is offered as the frame and
+                                    // nothing in it matches.
+                                    let payload =
+                                        serde_json::from_str::<serde_json::Value>(&payload)
+                                            .ok()
+                                            .and_then(|value| {
+                                                value
+                                                    .get("data")
+                                                    .and_then(|inner| inner.as_str())
+                                                    .map(str::to_string)
+                                            })
+                                            .unwrap_or(payload);
                                     Self::extract_response_from_sse(&[serde_json::json!({
                                         "data": payload
                                     })])
@@ -368,12 +386,12 @@ impl AnalyzeChatmlCommand {
         // text: a capture that attached after the deltas has them as its only
         // copy, while a complete capture must not count the answer twice.
         let mut saw_responses_text_delta = false;
-        let mut saw_responses_reasoning_delta = false;
         let mut responses_closing_content: Option<String> = None;
-        // Reasoning items carry different thinking rather than a repeat of
-        // one another (an agentic response interleaves one with each call it
-        // precedes), so they accumulate in arrival order instead of replacing.
-        let mut responses_closing_reasoning = String::new();
+        let responses_reasoning_replay =
+            ResponsesReasoningReplay::new(sse_events.iter().filter_map(|event| {
+                let data = event.get("data")?.as_str()?;
+                serde_json::from_str::<serde_json::Value>(data).ok()
+            }));
 
         /// Answer text of a closing `message` output item, or `None`.
         ///
@@ -396,21 +414,6 @@ impl AnalyzeChatmlCommand {
                         .or_else(|| part.get("refusal"))
                         .and_then(|t| t.as_str())
                 })
-                .collect();
-            (!text.is_empty()).then_some(text)
-        }
-
-        /// Thinking text of a closing `reasoning` output item, or `None`.
-        fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-            let item = chunk.get("item")?;
-            if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-                return None;
-            }
-            let text: String = ["content", "summary"]
-                .iter()
-                .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-                .flatten()
-                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
                 .collect();
             (!text.is_empty()).then_some(text)
         }
@@ -680,7 +683,6 @@ impl AnalyzeChatmlCommand {
                         | Some("response.reasoning_summary_text.delta") => {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
-                                    saw_responses_reasoning_delta = true;
                                     reasoning_parts.push(delta.to_string());
                                 }
                             }
@@ -695,10 +697,10 @@ impl AnalyzeChatmlCommand {
                                     responses_closing_content = Some(text);
                                 }
                             }
-                            if !saw_responses_reasoning_delta {
-                                if let Some(text) = closing_reasoning_item_text(&data_json) {
-                                    responses_closing_reasoning.push_str(&text);
-                                }
+                            if let Some(text) =
+                                responses_reasoning_replay.closing_item_text(&data_json)
+                            {
+                                reasoning_parts.push(text);
                             }
                         }
                         // The shared aggregator also treats `output_item.done`
@@ -778,7 +780,18 @@ impl AnalyzeChatmlCommand {
                                             part.get("text").and_then(|v| v.as_str())
                                         {
                                             if !text.is_empty() {
-                                                content_parts.push(text.to_string());
+                                                // Gemini marks thinking parts
+                                                // with `"thought": true`; the
+                                                // live parser and the shared
+                                                // mergers keep them out of the
+                                                // visible answer.
+                                                if part.get("thought").and_then(|v| v.as_bool())
+                                                    == Some(true)
+                                                {
+                                                    reasoning_parts.push(text.to_string());
+                                                } else {
+                                                    content_parts.push(text.to_string());
+                                                }
                                             }
                                         }
                                         if let Some(call) = part.get("functionCall") {
@@ -878,9 +891,18 @@ impl AnalyzeChatmlCommand {
                             // streamed arguments fragments by index. A message
                             // snapshot carries the complete call, so it
                             // replaces the slot instead of appending to it.
-                            if let Some(calls) =
-                                payload.get("tool_calls").and_then(|t| t.as_array())
-                            {
+                            //
+                            // SysOM's Copilot stream spells the same list
+                            // `tool_use` (the same {index, id, type, function}
+                            // items), and the shared token extractor counts
+                            // both spellings. Reading only `tool_calls` broke
+                            // a SysOM call down as zero tool-call tokens.
+                            let calls: Vec<&serde_json::Value> = ["tool_calls", "tool_use"]
+                                .into_iter()
+                                .filter_map(|field| payload.get(field).and_then(|t| t.as_array()))
+                                .flatten()
+                                .collect();
+                            if !calls.is_empty() {
                                 for (call_pos, call) in calls.iter().enumerate() {
                                     let function = call.get("function");
                                     let name = function
@@ -1039,9 +1061,6 @@ impl AnalyzeChatmlCommand {
                     content_parts.push(text);
                 }
             }
-        }
-        if !saw_responses_reasoning_delta && !responses_closing_reasoning.is_empty() {
-            reasoning_parts.push(responses_closing_reasoning);
         }
 
         let mut tool_calls: Vec<String> = {
@@ -1244,6 +1263,35 @@ mod tests {
         assert_eq!(rendered, "<|im_start|>user\nhello<|im_end|>\n");
     }
 
+    /// Exact equality with the canonical shape proves this uses conversation
+    /// text rather than the serialized-Gemini fallback, which also counts > 0.
+    #[test]
+    fn gemini_text_matches_canonical_token_count() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        });
+        let canonical = json!({
+            "messages": [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "second question"}
+            ]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("Gemini request is counted");
+        let expected = crate::analyzer::count_request_tokens(&canonical, &tokenizer, &tokenizer)
+            .expect("canonical request is counted");
+        assert_eq!(count.total_tokens, expected.total_tokens);
+        assert_eq!(count.by_role, expected.by_role);
+        assert!(!count.by_role.contains_key("model"));
+    }
+
     #[test]
     fn tool_definition_tokens_are_counted_without_tool_messages() {
         // The first request of a tool-using agent carries `tools` but no
@@ -1311,12 +1359,10 @@ mod tests {
         assert_eq!(count.per_message.len(), 1);
     }
 
-    /// Tool definitions ride along in the same fallback: a body the template
-    /// cannot render that also declares `tools` must count the definitions on
-    /// top of the raw messages (they never reached the template, and there is
-    /// no tool-role message to fold them into).
+    /// The detailed breakdown and the shared manual/drain estimator must count
+    /// unrenderable tool definitions exactly once and return the same total.
     #[test]
-    fn unrenderable_content_still_counts_tool_definitions() {
+    fn unrenderable_counters_count_tool_definitions_once() {
         let tokenizer = fixture_tokenizer();
         let with_tools = json!({
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}],
@@ -1332,18 +1378,52 @@ mod tests {
         let without_tools = json!({
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
         });
+        let tools = crate::parser::llm::extract_tools_view(&with_tools).expect("tools");
+        let expected_tool_tokens: usize = tools
+            .iter()
+            .map(|tool| {
+                let text = serde_json::to_string(tool).expect("tool serializes");
+                tokenizer.count(&text).expect("tool counts")
+            })
+            .sum();
+        assert!(expected_tool_tokens > 0);
+
         let counted = crate::analyzer::count_request_tokens(&with_tools, &tokenizer, &tokenizer)
             .expect("request is counted");
         let baseline =
             crate::analyzer::count_request_tokens(&without_tools, &tokenizer, &tokenizer)
                 .expect("request is counted");
-        assert!(
-            counted.total_tokens > baseline.total_tokens,
-            "the tool definitions must reach the fallback count: {} vs {}",
+        assert_eq!(counted.tools_tokens, expected_tool_tokens);
+        assert_eq!(
             counted.total_tokens,
-            baseline.total_tokens
+            baseline.total_tokens + expected_tool_tokens
         );
-        assert!(counted.tools_tokens > 0);
+
+        let estimate = |body: &serde_json::Value| {
+            let messages = body["messages"].as_array().expect("messages").clone();
+            crate::analyzer::estimate_input_tokens(
+                messages,
+                crate::parser::llm::extract_tools_view(body),
+                &tokenizer,
+            )
+        };
+        assert_eq!(
+            estimate(&with_tools),
+            estimate(&without_tools) + expected_tool_tokens
+        );
+        assert_eq!(estimate(&with_tools), counted.total_tokens);
+        assert_eq!(estimate(&without_tools), baseline.total_tokens);
+
+        let mut with_tool_message = with_tools.clone();
+        with_tool_message["messages"]
+            .as_array_mut()
+            .expect("messages")
+            .push(json!({"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}));
+        let folded =
+            crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
+                .expect("request with a tool message is counted");
+        assert_eq!(estimate(&with_tool_message), folded.total_tokens);
+        assert_eq!(folded.tools_tokens, expected_tool_tokens);
     }
 
     /// The Responses API repeats the whole answer in `*.done` events; folding
@@ -1460,6 +1540,31 @@ mod tests {
         event
     }
 
+    /// SysOM's non-streaming POP response wraps the provider payload in
+    /// `{"data": "<json string>"}`; the SysOM parser unwraps it and so does
+    /// the client, but the breakdown offered the envelope itself as the
+    /// frame. Nothing matched, so an answer the parser read broke down as an
+    /// empty response.
+    #[test]
+    fn a_sysom_data_envelope_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let inner = json!({
+            "choices": [{
+                "message": {"content": "hello there", "tool_use": null}
+            }]
+        })
+        .to_string();
+        let events = vec![response_event(json!({ "data": inner }), 1)];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a SysOM envelope body must still break down");
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
+        );
+    }
+
     /// The trace writer stores a non-streaming response under `body`, but the
     /// analyzer only read `sse_events`. A `stream: false` call therefore
     /// contributed no output side at all: with a request event present the
@@ -1486,6 +1591,125 @@ mod tests {
             breakdowns[0].total_tokens > 0,
             "the answer must be counted, got {:?}",
             breakdowns[0]
+        );
+    }
+
+    /// Exact canonical equality catches lost parallel responses and reordered
+    /// tool turns; a nonzero assertion would also pass for raw-JSON fallback.
+    #[test]
+    fn gemini_tool_turns_match_canonical_token_count() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hello"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                        {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"functionResponse": {
+                            "name": "list_dir",
+                            "response": {"entries": ["a", "b"]}
+                        }},
+                        {"functionResponse": {
+                            "name": "read_file",
+                            "response": {"content": "a body"}
+                        }}
+                    ]
+                }
+            ]
+        });
+        let canonical = json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"type": "function", "function": {
+                            "name": "list_dir", "arguments": {"path": "/tmp"}
+                        }},
+                        {"type": "function", "function": {
+                            "name": "read_file", "arguments": {"path": "/tmp/a"}
+                        }}
+                    ]
+                },
+                {"role": "tool", "name": "list_dir", "content": "{\"entries\":[\"a\",\"b\"]}"},
+                {"role": "tool", "name": "read_file", "content": "{\"content\":\"a body\"}"}
+            ]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("Gemini request is counted");
+        let expected = crate::analyzer::count_request_tokens(&canonical, &tokenizer, &tokenizer)
+            .expect("canonical request is counted");
+        assert_eq!(count.total_tokens, expected.total_tokens);
+        assert_eq!(count.by_role, expected.by_role);
+        let actual_messages: Vec<_> = count
+            .per_message
+            .iter()
+            .map(|message| (message.role.as_str(), message.tokens))
+            .collect();
+        let expected_messages: Vec<_> = expected
+            .per_message
+            .iter()
+            .map(|message| (message.role.as_str(), message.tokens))
+            .collect();
+        assert_eq!(actual_messages, expected_messages);
+        assert!(!count.by_role.contains_key("model"));
+    }
+
+    /// The analyze-chatml pipeline for the same shape: on main the Gemini
+    /// request event was skipped with a template warning, so a Gemini-only
+    /// trace answered "No valid http.request or http.response events found".
+    #[test]
+    fn gemini_requests_reach_the_breakdown() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![request_event(
+            json!({
+                "contents": [
+                    {"role": "user", "parts": [{"text": "hello"}]},
+                    {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}]
+                    },
+                    {
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": "list_dir",
+                                "response": {"entries": ["a", "b"]}
+                            }
+                        }]
+                    }
+                ]
+            }),
+            1,
+        )];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a Gemini request event must render");
+        assert_eq!(breakdowns.len(), 1);
+        let request_event = &breakdowns[0].events[0];
+        assert!(
+            request_event.tokens > 0,
+            "request tokens: {request_event:?}"
+        );
+        // system_prompt + the three mapped messages.
+        assert_eq!(
+            request_event.children.len(),
+            4,
+            "children: {:?}",
+            request_event
+                .children
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1578,6 +1802,37 @@ mod tests {
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
         assert_eq!(resp.content, vec!["hello there".to_string()]);
         assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    /// Gemini marks thinking parts with `"thought": true`. The breakdown read
+    /// every part's text as the visible answer, so the thinking was reported
+    /// as answer content and `reasoning_content` stayed empty.
+    #[test]
+    fn gemini_thought_parts_are_reasoning_not_answer() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "think first", "thought": true},
+                    {"text": "hello there"}
+                ]},
+                "finishReason": "STOP"
+            }]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("think first"));
+
+        let streamed = vec![
+            sse(
+                r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"think first","thought":true}]}}]}"#,
+            ),
+            sse(
+                r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hello there"}]},"finishReason":"STOP"}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&streamed);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("think first"));
     }
 
     #[test]
@@ -1889,6 +2144,29 @@ mod tests {
         );
     }
 
+    /// SysOM's Copilot stream carries its calls on
+    /// `choices[].message.tool_use` — `{index, id, type, function}` — not on
+    /// `tool_calls`. The snapshot arm read only `tool_calls`, so a SysOM
+    /// capture that made a call broke down with zero tool-call tokens while
+    /// the aggregator and the shared token extractor both counted the call.
+    #[test]
+    fn sse_sysom_tool_use_snapshot_is_extracted() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/a.md\"}"}}]}}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()],
+            "a SysOM tool_use snapshot must be read like tool_calls"
+        );
+    }
+
     /// Same story for the OpenAI Responses protocol (codex 0.137+ via
     /// /v1/responses): its `response.*` events previously produced an empty
     /// breakdown.
@@ -1995,6 +2273,28 @@ mod tests {
             resp.reasoning_content.as_deref(),
             Some("Check the logs. Then retry."),
             "delivered deltas supersede every closing reasoning item"
+        );
+    }
+
+    #[test]
+    fn sse_responses_scopes_reasoning_replay_to_the_item() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":"Inspect logs. "}]}}"#,
+            ),
+            sse(
+                r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"delta":"Then retry."}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Then retry."}]}}"#,
+            ),
+            sse(r#"{"type":"response.completed","response":{"id":"resp_mixed"}}"#),
+        ];
+
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("Inspect logs. Then retry.")
         );
     }
 

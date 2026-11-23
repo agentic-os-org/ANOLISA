@@ -45,6 +45,35 @@ recognized record arrays are not reduced and do not fall back to positional
 array truncation. Other bounded transformations retain their existing lossy,
 non-retrievable behavior where the caller permits it.
 
+## Build-log progress and layout
+
+`build_log_reduction` stashes only omitted routine-progress intervals. Recognized
+pnpm LF progress runs need at least nine consecutive records; the first and last
+two remain visible. Counter resets split runs, and `done`, package totals,
+notification/dependency boundaries and completion information remain visible.
+Each omission must save characters and estimated tokens after including the actual
+shell or static-tool recovery instruction. Retrieved progress is byte-exact relative
+to the SGR-cleaned records, not the original colored terminal stream.
+
+Layout compaction shares the same `build_log_reduction` label and can coexist with
+progress reduction. It compacts recognized pnpm notification, dependency-list and
+decorative-bar layouts, retaining all task-relevant facts. Layout-only output is
+semantically `lossless`, needs no recovery marker and writes nothing to Stash,
+including with recovery `none`; output containing progress omissions is `retrievable`.
+Semantic `lossless` does not promise reconstruction of box borders or padding. Warning,
+script and unknown text preserve the remaining suffix after SGR cleanup; non-SGR
+controls, CRLF or TAB suppress the new pnpm transformations. See the
+[pnpm contract](../../../docs/user-guide/en/tokenless/index.md#pnpm-install-output).
+
+The compressor can fall back to layout when progress omission is unprofitable or
+fails, returning all tentative writes and error counts. The Runtime still elevates
+Stash errors to operation failures; the host may therefore keep the original result,
+not the layout candidate. This uses the same final arbitration and ownership ledger
+as other domains, including dry-run and rollback.
+
+Protocol v2 and SDK enums remain unchanged; the shared operation label does not
+change either algorithm or its recovery requirements.
+
 ## No-savings rollback
 
 `JsonCompressor` returns every tentative `StashWrite` in `JsonOutcome`.

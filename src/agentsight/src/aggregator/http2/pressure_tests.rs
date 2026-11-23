@@ -244,3 +244,84 @@ fn recent_request_and_response_waiting_survive_capacity_churn() {
         }
     }
 }
+
+#[test]
+fn byte_budget_full_rejects_new_stream_without_evicting_active_sse() {
+    let mut aggregator = Http2StreamAggregator::with_capacity(4);
+    activate(&mut aggregator, 1);
+    let budget = aggregator.metrics().connection_cache_bytes;
+    assert!(budget > 0, "active fixture must retain payload bytes");
+    // Leave room for the active stream but not for the incoming one: the
+    // overshoot must reject the newcomer, not the active SSE.
+    aggregator.bytes_budget = budget + 1;
+    let before = aggregator.metrics();
+
+    let connection = ConnectionId {
+        pid: std::process::id(),
+        ssl_ptr: 1,
+    };
+    aggregator.insert_stream_state(
+        StreamId::new(connection, 3),
+        Http2StreamState::WaitingRequestData {
+            request_headers: Some(headers(3, 1)),
+            request_data_frames: Vec::new(),
+        },
+    );
+    let ready = aggregator.take_ready();
+    assert!(matches!(
+        &ready[..],
+        [AggregatedResult::Abandoned {
+            reason: RemoveReason::CapacityRejected,
+            partial,
+        }] if matches!(
+            partial.as_ref(),
+            AggregatedResult::Http2StreamComplete(stream) if stream.stream_id.stream_id == 3
+        )
+    ));
+    assert_eq!(aggregator.metrics().eviction_count, before.eviction_count);
+    assert_eq!(
+        aggregator.metrics().connection_cache_bytes,
+        before.connection_cache_bytes
+    );
+    assert!(aggregator.streams.iter().any(|(id, _)| id.stream_id == 1));
+}
+
+#[test]
+fn byte_budget_exhausted_rejects_new_stream_before_insert() {
+    let mut aggregator = Http2StreamAggregator::with_capacity(4);
+    activate(&mut aggregator, 1);
+    let budget = aggregator.metrics().connection_cache_bytes;
+    assert!(budget > 0, "active fixture must retain payload bytes");
+    // Exactly exhausted: the next new stream must be rejected before insertion.
+    aggregator.bytes_budget = budget;
+    let before = aggregator.metrics();
+
+    let connection = ConnectionId {
+        pid: std::process::id(),
+        ssl_ptr: 1,
+    };
+    aggregator.insert_stream_state(
+        StreamId::new(connection, 3),
+        Http2StreamState::WaitingRequestData {
+            request_headers: Some(headers(3, 1)),
+            request_data_frames: Vec::new(),
+        },
+    );
+    let ready = aggregator.take_ready();
+    assert!(matches!(
+        &ready[..],
+        [AggregatedResult::Abandoned {
+            reason: RemoveReason::CapacityRejected,
+            partial,
+        }] if matches!(
+            partial.as_ref(),
+            AggregatedResult::Http2StreamComplete(stream) if stream.stream_id.stream_id == 3
+        )
+    ));
+    assert_eq!(aggregator.metrics().eviction_count, before.eviction_count);
+    assert_eq!(
+        aggregator.metrics().connection_cache_bytes,
+        before.connection_cache_bytes
+    );
+    assert!(aggregator.streams.iter().any(|(id, _)| id.stream_id == 1));
+}

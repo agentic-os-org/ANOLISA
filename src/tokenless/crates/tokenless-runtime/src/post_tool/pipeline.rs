@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
-    BuildLogCompressor, BuildLogOperation, HtmlExtractor, JsonCompressionConfig,
-    JsonCompressionContext, JsonCompressor, JsonError, JsonOperation, SearchResultsCompressor,
-    TabularCompressor, TabularOperation,
+    BrowserSnapshotCompressor, BuildLogCompressor, BuildLogOperation, HtmlExtractor,
+    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonOperation,
+    SearchResultsCompressor, TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
     AppliedOperation, BYTE_ESTIMATOR_ID, ContentOrigin, ContentType, Disposition, PostToolRequest,
@@ -18,6 +18,7 @@ use tokenless_protocol::{
 
 use super::arbitration::{ArbitrationInput, Verdict, decide};
 use super::content::detect;
+use super::mixed;
 use super::stash_ledger::StashLedger;
 
 /// Policy resolved by Runtime for one PostTool call.
@@ -30,11 +31,13 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) search_path_sharing_enabled: bool,
     pub(crate) diff_compression_enabled: bool,
     pub(crate) html_extraction_enabled: bool,
+    pub(crate) browser_snapshot_enabled: bool,
     pub(crate) stash_enabled: bool,
     pub(crate) require_reversibility: bool,
     pub(crate) force_json: bool,
     pub(crate) allow_toon: bool,
     pub(crate) min_toon_chars: usize,
+    pub(crate) mixed_content_enabled: bool,
     pub(crate) json: JsonCompressionConfig,
 }
 
@@ -70,7 +73,16 @@ impl PostToolPipeline {
             return run;
         }
         let before_tokens = estimate_tokens(&request.content) as u64;
-        let content_type = detect(&request.content);
+        let detected = detect(&request.content);
+        // The kill switch gates the wire label too: passthrough responses
+        // carry the detected type, and strict parsers without a fallback
+        // variant reject unknown values. Disabled means zero new wire values.
+        let content_type =
+            if !config.browser_snapshot_enabled && detected == ContentType::BrowserSnapshot {
+                ContentType::PlainText
+            } else {
+                detected
+            };
         if request.status == ToolResultStatus::Error {
             return passthrough(request, before_tokens, content_type);
         }
@@ -84,7 +96,14 @@ impl PostToolPipeline {
         // Grep without line prefixes can return CSV matches classified as
         // Tabular. Shape detection does not remove the need to retain every
         // match; other domain compressors may drop rows or rewrite source text.
-        let search_only = request.tool_name == "Grep";
+        // Compound commands have no per-command output boundaries. Protect the
+        // complete result when any segment searches, even a quiet condition.
+        let protect_search_output = request.tool_name == "Grep"
+            || (request.content_origin == ContentOrigin::CommandOutput
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(crate::entry::is_search_command));
         // Data printed by a shell file read (`cat build.log`) compresses like
         // command output; a page printed that way is source the agent may edit,
         // so only HTML keeps it verbatim. Read tool results were excluded above.
@@ -93,45 +112,62 @@ impl PostToolPipeline {
             ContentOrigin::CommandOutput | ContentOrigin::FileRead
         );
         let diff_candidate = config.diff_compression_enabled
-            && !search_only
+            && !protect_search_output
             && content_type == ContentType::Diff
             && shell_output
             && request.capabilities.replace_with_text;
         let html_candidate = config.html_extraction_enabled
-            && !search_only
+            && !protect_search_output
             && content_type == ContentType::Html
             && request.content_origin != ContentOrigin::FileRead
             && request.capabilities.replace_with_text;
-        let json_candidate = !search_only
+        let browser_snapshot_candidate = config.browser_snapshot_enabled
+            && !protect_search_output
+            && content_type == ContentType::BrowserSnapshot
+            && request.content_origin != ContentOrigin::FileRead
+            && request.capabilities.replace_with_text;
+        let json_candidate = !protect_search_output
             && (config.force_json
                 || content_type == ContentType::Json
                 || is_wrapped_structured_json(&request.content));
         let build_log_candidate =
-            !search_only && content_type == ContentType::BuildLog && shell_output;
-        let tabular_candidate = !search_only
+            !protect_search_output && content_type == ContentType::BuildLog && shell_output;
+        let tabular_candidate = !protect_search_output
             && content_type == ContentType::Tabular
             && request.capabilities.replace_with_text;
-        let path_list_candidate = (config.search_path_sharing_enabled
-            && content_type == ContentType::SearchResults
-            && matches!(
-                request.content_origin,
-                ContentOrigin::CommandOutput | ContentOrigin::ApiResponse
-            )
-            && request.capabilities.replace_with_text)
-            .then(|| SearchResultsCompressor.compress_paths(&request.content))
-            .flatten();
         let search_candidate = config.search_path_sharing_enabled
-            && (request.content_origin == ContentOrigin::ApiResponse
-                || (request.content_origin == ContentOrigin::CommandOutput
-                    && path_list_candidate.is_some()))
-            && content_type == ContentType::SearchResults
+            && (protect_search_output
+                || (content_type == ContentType::SearchResults
+                    && (request.content_origin == ContentOrigin::ApiResponse
+                        || (request.content_origin == ContentOrigin::CommandOutput
+                            && SearchResultsCompressor.is_path_list(&request.content)))))
             && request.capabilities.replace_with_text;
-        if !diff_candidate
+        // Mixed-content routing fires only when no whole-content domain
+        // matched: standalone documents keep their existing routes and
+        // eligibility checks untouched. Per-region compression reuses the
+        // same compressors, arbitration and stash lifecycle as those routes.
+        // Tabular regions are recognized only inside explicit fences (a bare
+        // CSV block has no verifiable boundary); bare regions are JSON only.
+        // Search output stays out even when the search route itself is
+        // switched off: path-sharing off means do-not-touch, not free rein.
+        let mixed_candidate = config.mixed_content_enabled
+            && !protect_search_output
+            && !diff_candidate
             && !html_candidate
+            && !browser_snapshot_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
             && !search_candidate
+            && request.capabilities.replace_with_text;
+        if !diff_candidate
+            && !html_candidate
+            && !browser_snapshot_candidate
+            && !json_candidate
+            && !build_log_candidate
+            && !tabular_candidate
+            && !search_candidate
+            && (!mixed_candidate || !mixed::has_recognizable_regions(&request.content))
         {
             return passthrough(request, before_tokens, content_type);
         }
@@ -237,6 +273,47 @@ impl PostToolPipeline {
                     unrecoverable_truncations: None,
                 },
             }
+        } else if browser_snapshot_candidate {
+            // Same contract as the diff and HTML branches: the stash backend,
+            // not the compressor, owns the stash-failure degradation.
+            let mut stash_errors = 0;
+            let rendered = if let Some(store) = attached_store
+                && let Some(view) = BrowserSnapshotCompressor.compress(&request.content)
+            {
+                match store.stash(&request.content) {
+                    Ok(write) => Some((view, write)),
+                    Err(_) => {
+                        stash_errors = 1;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            match rendered {
+                Some((view, write)) => {
+                    let hint = tokenless_ccr::recovery_instruction(
+                        &write.key,
+                        &request.capabilities.recovery,
+                    );
+                    DomainCandidate {
+                        output: format!("{hint}\n{view}"),
+                        operations: vec![AppliedOperation::BrowserSnapshotReduction],
+                        recoverability: tokenless_compressors::Recoverability::Retrievable,
+                        stash_writes: vec![write],
+                        stash_errors: 0,
+                        unrecoverable_truncations: None,
+                    }
+                }
+                None => DomainCandidate {
+                    output: request.content.clone(),
+                    operations: Vec::new(),
+                    recoverability: tokenless_compressors::Recoverability::Lossless,
+                    stash_writes: Vec::new(),
+                    stash_errors,
+                    unrecoverable_truncations: None,
+                },
+            }
         } else if json_candidate {
             let context = JsonCompressionContext {
                 recovery: &request.capabilities.recovery,
@@ -244,6 +321,12 @@ impl PostToolPipeline {
                 allow_toon: config.allow_toon && request.capabilities.replace_with_text,
                 min_toon_chars: config.min_toon_chars,
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
+                // Rewriting a field keeps the document JSON, so text
+                // replacement is not required. Data printed from a local
+                // file may be edited, so its HTML stays verbatim exactly like
+                // a printed page; Read results never reach this point.
+                embedded_html: config.html_extraction_enabled
+                    && request.content_origin != ContentOrigin::FileRead,
             };
             let outcome = match JsonCompressor::new(config.json.clone())
                 .compress(&request.content, &context)
@@ -285,8 +368,7 @@ impl PostToolPipeline {
                 unrecoverable_truncations: None,
             }
         } else if search_candidate {
-            let output =
-                path_list_candidate.or_else(|| SearchResultsCompressor.compress(&request.content));
+            let output = SearchResultsCompressor.compress(&request.content);
             DomainCandidate {
                 operations: if output.is_some() {
                     vec![AppliedOperation::SearchPathSharing]
@@ -299,7 +381,7 @@ impl PostToolPipeline {
                 stash_errors: 0,
                 unrecoverable_truncations: None,
             }
-        } else {
+        } else if tabular_candidate {
             let outcome = TabularCompressor.compress(&request.content);
             DomainCandidate {
                 output: outcome.output,
@@ -316,6 +398,33 @@ impl PostToolPipeline {
                 stash_errors: outcome.metrics.stash_errors,
                 unrecoverable_truncations: None,
             }
+        } else {
+            // Mixed-content regions. Region recognition ran inside
+            // `mixed::compress_regions`; every rejected or unsupported region
+            // stays byte-for-byte in the candidate. `None` from
+            // `compress_regions` means no region changed, no tentative
+            // Stash write was produced, and no Stash error occurred. An
+            // unchanged result carrying writes or any storage failure
+            // reaches the arbiter without operations, so the ledger rolls
+            // back all writes before the runtime reports the error count.
+            match mixed::compress_regions(
+                &request.content,
+                config,
+                attached_store,
+                &request.capabilities.recovery,
+                config.allow_toon && request.capabilities.replace_with_text,
+                config.html_extraction_enabled && request.content_origin != ContentOrigin::FileRead,
+            ) {
+                Some(outcome) => DomainCandidate {
+                    output: outcome.output,
+                    operations: outcome.operations,
+                    recoverability: outcome.recoverability,
+                    stash_writes: outcome.stash_writes,
+                    stash_errors: outcome.stash_errors,
+                    unrecoverable_truncations: outcome.unrecoverable_truncations,
+                },
+                None => return passthrough(request, before_tokens, content_type),
+            }
         };
 
         let mut ledger = StashLedger::default();
@@ -326,8 +435,8 @@ impl PostToolPipeline {
             original: &request.content,
             candidate: &candidate.output,
             has_operations: !candidate.operations.is_empty(),
-            // Reject marginal Diff and HTML estimates after including wrapper and recovery text.
-            min_token_savings: if diff_candidate || html_candidate {
+            // Reject marginal Diff, HTML, and snapshot estimates after including wrapper and recovery text.
+            min_token_savings: if diff_candidate || html_candidate || browser_snapshot_candidate {
                 16
             } else {
                 1
@@ -446,13 +555,17 @@ fn passthrough(
     }
 }
 
-fn json_operations(operations: &[JsonOperation]) -> Vec<AppliedOperation> {
+/// Maps JSON-domain operations to their wire operation names.
+pub(super) fn json_operations(operations: &[JsonOperation]) -> Vec<AppliedOperation> {
     operations
         .iter()
         .map(|operation| match operation {
             JsonOperation::Cleanup => AppliedOperation::JsonCleanup,
             JsonOperation::RecordReduction => AppliedOperation::JsonRecordReduction,
             JsonOperation::Truncation => AppliedOperation::JsonTruncation,
+            // The response reports the JSON content type, which distinguishes
+            // an embedded fragment from a rendered page.
+            JsonOperation::EmbeddedHtml => AppliedOperation::HtmlExtraction,
             JsonOperation::Toon => AppliedOperation::Toon,
         })
         .collect()
@@ -463,7 +576,7 @@ fn build_log_operations(operations: &[BuildLogOperation]) -> Vec<AppliedOperatio
         .iter()
         .map(|operation| match operation {
             BuildLogOperation::TerminalCleanup => AppliedOperation::TerminalCleanup,
-            BuildLogOperation::ProgressReduction => AppliedOperation::BuildLogReduction,
+            BuildLogOperation::Reduction => AppliedOperation::BuildLogReduction,
         })
         .collect()
 }
@@ -490,7 +603,11 @@ mod tests {
     use super::*;
     include!("tests/tabular_pipeline_tests.rs");
     include!("tests/html_pipeline_tests.rs");
+    include!("tests/browser_snapshot_pipeline_tests.rs");
     include!("tests/path_list_pipeline_tests.rs");
+    include!("tests/embedded_html_pipeline_tests.rs");
+    use super::super::content::MAX_SCAN_BYTES;
+    include!("tests/mixed_pipeline_tests.rs");
     fn search_input() -> String {
         (1..30)
             .map(|line| format!("crates/long_directory/src/search_file.rs:{line}:  value  \r\n"))
@@ -555,7 +672,14 @@ mod tests {
                     let run = PostToolPipeline::run(&req, &config, Some(&store));
                     assert_eq!(run.response.content_type, Some(content_type));
                     assert_eq!(run.response.output, input);
-                    assert_eq!(run.response.disposition, Disposition::Passthrough);
+                    assert_eq!(
+                        run.response.disposition,
+                        if enabled {
+                            Disposition::NoSavings
+                        } else {
+                            Disposition::Passthrough
+                        }
+                    );
                     assert!(run.operations.is_empty());
                     assert!(run.response.applied_operations.is_empty());
                     assert!(run.response.stash_keys.is_empty());
@@ -573,6 +697,65 @@ mod tests {
     }
 
     #[test]
+    fn shell_search_uses_only_the_search_compressor_for_every_format() {
+        for command in [
+            "grep -n match file",
+            "cd /testbed && env LANG=C timeout 30 rg match src | sort",
+        ] {
+            for input in [
+                search_input(),
+                path_list_input(),
+                tabular_input(','),
+                record_array(100),
+                build_log(),
+                "41\n".into(),
+                String::new(),
+                "1:single-file match\n".repeat(30),
+            ] {
+                let mut req = request(&input);
+                req.tool_name = "Bash".into();
+                req.command = Some(command.into());
+                req.content_origin = ContentOrigin::CommandOutput;
+                for enabled in [false, true] {
+                    for force_json in [false, true] {
+                        let mut config = build_log_config();
+                        config.search_path_sharing_enabled = enabled;
+                        config.force_json = force_json;
+                        let concrete = Arc::new(CountingStore::default());
+                        let store: Arc<dyn StashStore> = concrete.clone();
+                        let run = PostToolPipeline::run(&req, &config, Some(&store));
+                        let candidate = enabled
+                            .then(|| SearchResultsCompressor.compress(&input))
+                            .flatten();
+                        assert_eq!(
+                            run.response.output,
+                            candidate.clone().unwrap_or_else(|| input.clone()),
+                            "{command}"
+                        );
+                        assert_eq!(
+                            run.response.disposition,
+                            if candidate.is_some() {
+                                Disposition::Applied
+                            } else if enabled {
+                                Disposition::NoSavings
+                            } else {
+                                Disposition::Passthrough
+                            }
+                        );
+                        assert!(
+                            run.response
+                                .applied_operations
+                                .iter()
+                                .all(|op| *op == AppliedOperation::SearchPathSharing)
+                        );
+                        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_grep_path_sharing_takes_precedence_over_force_json() {
         let mut req = request(&search_input());
         req.tool_name = "Grep".into();
@@ -584,6 +767,54 @@ mod tests {
             [AppliedOperation::SearchPathSharing]
         );
         assert_eq!(run.response.recoverability, Recoverability::Lossless);
+    }
+
+    #[test]
+    fn compound_search_preserves_output_without_segment_boundaries() {
+        for (command, input) in [
+            (
+                "grep -n foo src/a.py && cargo build",
+                format!("1:foo\n{}", build_log()),
+            ),
+            (
+                "grep -c '' *.log; cargo test",
+                format!("build.log:41\n{}", build_log()),
+            ),
+            ("rg -l TODO src | xargs cat", record_array(100)),
+            (
+                "cargo build 2>&1 | grep -E 'error|warning'",
+                "warning: diagnostic from the build\n".repeat(40),
+            ),
+            ("grep -q needle Cargo.toml && cargo build 2>&1", build_log()),
+            ("rg --quiet needle Cargo.toml; cargo test", build_log()),
+        ] {
+            let mut req = request(&input);
+            req.command = Some(command.into());
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(run.response.output, input, "{command}");
+            assert_eq!(run.response.disposition, Disposition::NoSavings);
+            assert!(run.response.applied_operations.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn command_search_protection_requires_command_output() {
+        let input = record_array(100);
+        for origin in [ContentOrigin::ApiResponse, ContentOrigin::FileRead] {
+            let mut req = request(&input);
+            req.tool_name = "Custom".into();
+            req.content_origin = origin;
+            let store: Arc<dyn StashStore> = Arc::new(CountingStore::default());
+            let expected = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(expected.response.disposition, Disposition::Applied);
+            req.command = Some("grep match file".into());
+            let actual = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(actual.response.output, expected.response.output);
+            assert_eq!(actual.response.disposition, expected.response.disposition);
+        }
     }
 
     #[test]
@@ -632,12 +863,28 @@ mod tests {
             "x.rs:1:a\nx.rs:2:b\nx.rs:3:c".to_owned(),
             format!("{}--\n", search_input()),
         ] {
-            let mut req = request(&input);
-            req.content_origin = ContentOrigin::ApiResponse;
-            let run = PostToolPipeline::run(&req, &build_log_config(), None);
-            assert_eq!(run.response.output, input);
-            assert_eq!(run.response.disposition, Disposition::NoSavings);
-            assert!(run.response.applied_operations.is_empty());
+            for (tool, origin, command) in [
+                ("Custom", ContentOrigin::ApiResponse, None),
+                ("Grep", ContentOrigin::ApiResponse, None),
+                (
+                    "Bash",
+                    ContentOrigin::CommandOutput,
+                    Some("grep -n match file"),
+                ),
+            ] {
+                let mut req = request(&input);
+                req.tool_name = tool.into();
+                req.content_origin = origin;
+                req.command = command.map(str::to_owned);
+                let store: Arc<dyn StashStore> = Arc::new(CountingStore::default());
+                let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+                assert_eq!(run.response.output, input);
+                assert_eq!(run.response.disposition, Disposition::NoSavings);
+                assert!(run.response.applied_operations.is_empty());
+                assert_eq!(run.stash_writes, Some(0));
+                assert_eq!(run.stash_errors, Some(0));
+                assert_eq!(run.stash_size, Some(0));
+            }
         }
     }
 
@@ -720,11 +967,13 @@ mod tests {
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            browser_snapshot_enabled: false,
             stash_enabled: true,
             require_reversibility: false,
             force_json: true,
             allow_toon: false,
             min_toon_chars: usize::MAX,
+            mixed_content_enabled: false,
             json: JsonCompressionConfig {
                 truncate_arrays_at,
                 array_tail_preserve: 0,
@@ -978,6 +1227,13 @@ mod tests {
         config
     }
 
+    fn mixed_config() -> PostToolPipelineConfig {
+        let mut config = build_log_config();
+        config.force_json = false;
+        config.mixed_content_enabled = true;
+        config
+    }
+
     fn diff_input(context_width: usize) -> String {
         format!(
             "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n@@ -1,12 +1,12 @@\n{}-old\n+new\n tail\n",
@@ -986,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_is_opt_in_and_requires_recovery_and_command_text() {
+    fn diff_respects_disable_and_requires_recovery_and_command_text() {
         let input = diff_input(100);
         for mode in 0..11 {
             let mut req = request(&input);
@@ -1117,6 +1373,399 @@ mod tests {
         assert!(run.response.stash_keys.is_empty());
         assert_eq!(run.stash_errors, Some(1));
         assert_eq!(run.stash_writes, Some(0));
+    }
+
+    const MAVEN_LOG: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt"
+    );
+
+    #[test]
+    fn maven_layout_routes_without_recovery_and_never_writes_stash() {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(MAVEN_LOG);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn maven_obeys_existing_source_status_replacement_and_acceptance_guards() {
+        for mode in 0..8 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(MAVEN_LOG);
+            let mut config = build_log_config();
+            match mode {
+                0 => req.status = ToolResultStatus::Error,
+                1 => req.capabilities.replace_output = false,
+                2 => req.content_origin = ContentOrigin::FileContent,
+                3 => req.content_origin = ContentOrigin::ApiResponse,
+                4 => config.min_input_chars = usize::MAX,
+                5 => config.compression_enabled = false,
+                6 => config.timeout = Duration::ZERO,
+                _ => req.command = Some("rg needle build.log".into()),
+            }
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
+            assert_eq!(run.response.output, MAVEN_LOG, "mode {mode}");
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            if mode == 5 {
+                assert_eq!(run.response.disposition, Disposition::DryRun);
+            }
+            if mode == 6 {
+                assert_eq!(run.response.disposition, Disposition::Timeout);
+            }
+        }
+    }
+
+    const PNPM_INSTALL: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt"
+    );
+
+    const GRADLE_LOG: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt"
+    );
+
+    const CTEST_LOG: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt"
+    );
+
+    const CMAKE_BUILD_LOG: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt"
+    );
+
+    #[test]
+    fn cmake_build_layout_routes_without_recovery_and_never_writes_stash() {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(CMAKE_BUILD_LOG);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn cmake_build_obeys_existing_source_status_replacement_and_acceptance_guards() {
+        for mode in 0..8 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(CMAKE_BUILD_LOG);
+            let mut config = build_log_config();
+            match mode {
+                0 => req.status = ToolResultStatus::Error,
+                1 => req.capabilities.replace_output = false,
+                2 => req.content_origin = ContentOrigin::FileContent,
+                3 => req.content_origin = ContentOrigin::ApiResponse,
+                4 => config.min_input_chars = usize::MAX,
+                5 => config.compression_enabled = false,
+                6 => config.timeout = Duration::ZERO,
+                _ => req.command = Some("rg needle build.log".into()),
+            }
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
+            assert_eq!(run.response.output, CMAKE_BUILD_LOG, "mode {mode}");
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            if mode == 5 {
+                assert_eq!(run.response.disposition, Disposition::DryRun);
+            }
+            if mode == 6 {
+                assert_eq!(run.response.disposition, Disposition::Timeout);
+            }
+        }
+    }
+
+    #[test]
+    fn ctest_layout_routes_without_recovery_and_never_writes_stash() {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(CTEST_LOG);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn ctest_obeys_existing_source_status_replacement_and_acceptance_guards() {
+        for mode in 0..8 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(CTEST_LOG);
+            let mut config = build_log_config();
+            match mode {
+                0 => req.status = ToolResultStatus::Error,
+                1 => req.capabilities.replace_output = false,
+                2 => req.content_origin = ContentOrigin::FileContent,
+                3 => req.content_origin = ContentOrigin::ApiResponse,
+                4 => config.min_input_chars = usize::MAX,
+                5 => config.compression_enabled = false,
+                6 => config.timeout = Duration::ZERO,
+                _ => req.command = Some("rg needle ctest.log".into()),
+            }
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
+            assert_eq!(run.response.output, CTEST_LOG, "mode {mode}");
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            if mode == 5 {
+                assert_eq!(run.response.disposition, Disposition::DryRun);
+            }
+            if mode == 6 {
+                assert_eq!(run.response.disposition, Disposition::Timeout);
+            }
+        }
+    }
+
+    #[test]
+    fn gradle_layout_routes_without_recovery_and_never_writes_stash() {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(GRADLE_LOG);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn gradle_obeys_existing_source_status_replacement_and_acceptance_guards() {
+        for mode in 0..8 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(GRADLE_LOG);
+            let mut config = build_log_config();
+            match mode {
+                0 => req.status = ToolResultStatus::Error,
+                1 => req.capabilities.replace_output = false,
+                2 => req.content_origin = ContentOrigin::FileContent,
+                3 => req.content_origin = ContentOrigin::ApiResponse,
+                4 => config.min_input_chars = usize::MAX,
+                5 => config.compression_enabled = false,
+                6 => config.timeout = Duration::ZERO,
+                _ => req.command = Some("rg needle build.log".into()),
+            }
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
+            assert_eq!(run.response.output, GRADLE_LOG, "mode {mode}");
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            if mode == 5 {
+                assert_eq!(run.response.disposition, Disposition::DryRun);
+            }
+            if mode == 6 {
+                assert_eq!(run.response.disposition, Disposition::Timeout);
+            }
+        }
+    }
+
+    #[test]
+    fn pnpm_layout_is_lossless_without_recovery_or_storage() {
+        for mode in 0..3 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(PNPM_INSTALL);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            } else if mode == 1 {
+                config.stash_enabled = false;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert_eq!(run.response.before_tokens, 332);
+            assert_eq!(run.response.after_tokens, 256);
+            assert_eq!(run.response.output.matches("Progress:").count(), 13);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn pnpm_combines_layout_and_progress_in_one_committed_candidate() {
+        for origin in [ContentOrigin::CommandOutput, ContentOrigin::FileRead] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(PNPM_INSTALL);
+            req.content_origin = origin;
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert_eq!(run.response.after_tokens, 184);
+            assert_eq!(run.response.stash_keys.len(), 1);
+            let payload = concrete
+                .retrieve(&run.response.stash_keys[0])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payload,
+                PNPM_INSTALL
+                    .lines()
+                    .skip(12)
+                    .take(7)
+                    .map(|line| format!("{line}\n"))
+                    .collect::<String>()
+            );
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(concrete.len(), 1);
+        }
+    }
+
+    #[test]
+    fn pnpm_dry_run_and_timeout_do_not_leave_persistent_omissions() {
+        for dry_run in [true, false] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut config = build_log_config();
+            if dry_run {
+                config.compression_enabled = false;
+            } else {
+                config.timeout = Duration::ZERO;
+            }
+            let run = PostToolPipeline::run(&request(PNPM_INSTALL), &config, Some(&store));
+            assert_eq!(run.response.output, PNPM_INSTALL);
+            assert_eq!(
+                run.response.disposition,
+                if dry_run {
+                    Disposition::DryRun
+                } else {
+                    Disposition::Timeout
+                }
+            );
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.len(), 0);
+            assert_eq!(
+                concrete.stash_calls.load(Ordering::Relaxed),
+                usize::from(!dry_run)
+            );
+            assert_eq!(
+                concrete.delete_calls.load(Ordering::Relaxed),
+                usize::from(!dry_run)
+            );
+            if dry_run {
+                assert_eq!(run.response.after_tokens, 184);
+            }
+        }
+    }
+
+    #[test]
+    fn pnpm_partial_stash_failure_retains_layout_and_rolls_back_progress() {
+        let concrete = Arc::new(CountingStore {
+            fail_stashes_after: 1,
+            ..CountingStore::default()
+        });
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = PNPM_INSTALL.repeat(2);
+        let run = PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert_eq!(run.response.recoverability, Recoverability::Lossless);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::BuildLogReduction]
+        );
+        assert_eq!(run.response.output.matches("Progress:").count(), 26);
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(run.stash_errors, Some(1));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(concrete.len(), 0);
     }
 
     #[test]

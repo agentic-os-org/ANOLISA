@@ -295,52 +295,103 @@ class TestHandlers:
         assert result["success"] is False
         assert "mutually exclusive" in result["error"]
 
-    def test_rollback_num_ancestors_invalid(self):
-        result = json.loads(handle_ws_ckpt_rollback({"num_ancestors": "abc"}))
-        assert result["success"] is False
-        assert "integer" in result["error"]
+    @pytest.mark.parametrize("num_ancestors", [
+        0, -1, 0.0, -1.0, 1.5, 2.9, True, False, "2", "2.0", "abc", "", [], {},
+        float("nan"), float("inf"), float("-inf"),
+    ])
+    @pytest.mark.parametrize("preview", [False, True])
+    def test_rollback_num_ancestors_invalid(self, num_ancestors, preview):
+        with (
+            patch("hermes.tools._resolve_workspace", return_value=("/ws", None)) as mock_workspace,
+            patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None),
+            patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back")) as mock_cmd,
+            patch("hermes.tools.get_manager") as mock_manager,
+        ):
+            result = json.loads(handle_ws_ckpt_rollback({
+                "num_ancestors": num_ancestors, "preview": preview,
+            }))
+        assert result == {
+            "success": False, "error": "'num_ancestors' must be an integer >= 1",
+        }
+        mock_workspace.assert_not_called()
+        mock_cmd.assert_not_called()
+        mock_manager.assert_not_called()
 
-    def test_rollback_num_ancestors_zero(self):
-        result = json.loads(handle_ws_ckpt_rollback({"num_ancestors": 0}))
-        assert result["success"] is False
-        assert ">= 1" in result["error"]
-
+    @pytest.mark.parametrize("num_ancestors, depth", [
+        (1, "1"), (2, "2"), (10, "10"), (1.0, "1"), (2.0, "2"), (2e0, "2"),
+    ])
+    @pytest.mark.parametrize("preview", [False, True])
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
-    def test_rollback_num_ancestors_success(self, _ws, _cwd, mock_cmd):
-        result = json.loads(handle_ws_ckpt_rollback({"num_ancestors": 2}))
+    def test_rollback_num_ancestors_success(
+        self, _ws, _cwd, mock_cmd, num_ancestors, depth, preview
+    ):
+        result = json.loads(handle_ws_ckpt_rollback({
+            "num_ancestors": num_ancestors, "preview": preview,
+        }))
         assert result["success"] is True
-        cmd_args = mock_cmd.call_args[0][0]
-        assert "-n" in cmd_args
-        assert "2" in cmd_args
+        expected_cmd = ["ws-ckpt", "rollback", "-w", "/ws", "-n", depth]
+        if preview:
+            expected_cmd.append("--preview")
+        mock_cmd.assert_called_once_with(expected_cmd)
+
+    @pytest.mark.parametrize("raw_json, depth", [
+        ('{"num_ancestors": 2}', "2"),
+        ('{"num_ancestors": 2.0}', "2"),
+        ('{"num_ancestors": 2e0}', "2"),
+    ])
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_json_integral_numbers(self, _ws, _cwd, mock_cmd, raw_json, depth):
+        result = json.loads(handle_ws_ckpt_rollback(json.loads(raw_json)))
+        assert result["success"] is True
+        mock_cmd.assert_called_once_with(["ws-ckpt", "rollback", "-w", "/ws", "-n", depth])
+
+    def test_rollback_json_fractional_number(self):
+        with patch("hermes.tools._run_ws_ckpt_cmd") as mock_cmd:
+            result = json.loads(handle_ws_ckpt_rollback(json.loads('{"num_ancestors": 2.9}')))
+        assert result == {
+            "success": False, "error": "'num_ancestors' must be an integer >= 1",
+        }
+        mock_cmd.assert_not_called()
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_sets_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1"})
-        assert mgr.skip_auto_checkpoint_workspaces == {"/ws"}
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1"}, session_id="conv-a", task_id="t1")
+        assert mgr.rollback_workspaces_by_session == {"conv-a": {"/ws"}}
+
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_without_session_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
+        mgr = get_manager()
+        mgr.rollback_workspaces_by_session.clear()
+        assert json.loads(handle_ws_ckpt_rollback({"target": "snap1"}))["success"]
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "preview"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_preview_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1", "preview": True})
-        assert not mgr.skip_auto_checkpoint_workspaces
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1", "preview": True}, session_id="conv-a")
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(False, "failed"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_failure_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1"})
-        assert not mgr.skip_auto_checkpoint_workspaces
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1"}, session_id="conv-a")
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview\nM  file.txt"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")
@@ -351,6 +402,28 @@ class TestHandlers:
         assert "M  file.txt" in result["output"]
         assert "--preview" in mock_cmd.call_args[0][0]
         mock_cwd.assert_not_called()
+
+    @pytest.mark.parametrize("preview", ["true", "TRUE", "1", "yes", "on"])
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview"))
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_string_preview_is_still_a_preview(self, _ws, mock_cmd, preview):
+        result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": preview}))
+        assert result["success"] is True
+        assert "--preview" in mock_cmd.call_args[0][0]
+
+    @pytest.mark.parametrize("preview", [None, "", "   ", "\t", "maybe", 2, {}])
+    def test_rollback_ambiguous_preview_is_rejected(self, preview):
+        with (
+            patch("hermes.tools._resolve_workspace", return_value=("/ws", None)) as mock_workspace,
+            patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None),
+            patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back")) as mock_cmd,
+            patch("hermes.tools.get_manager") as mock_manager,
+        ):
+            result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": preview}))
+        assert result == {"success": False, "error": "'preview' must be a boolean"}
+        mock_workspace.assert_not_called()
+        mock_cmd.assert_not_called()
+        mock_manager.assert_not_called()
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "snap1 created"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)

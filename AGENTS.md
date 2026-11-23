@@ -26,15 +26,22 @@ and existing build and test entry points.
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
 | **aw** | `src/aw/` | Rust | Linux only |
 
-> `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `aw` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
+> `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `aw` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows.
 
 ## 2. Development Commands
 
 ```bash
-# Unified build (Linux — select maintained components explicitly)
-./scripts/build-all.sh --component sec-core --component tokenless  # deps, build, and user install
-./scripts/build-all.sh --component sec-core --no-install           # install deps and build, skip component install
-./scripts/build-all.sh --component sec-core --ignore-deps          # pre-provisioned hosts: skip dependency setup and runtime verification
+# Unified build (Linux; six backends including sec-core V2, AW and matching Providers)
+./scripts/build-all.sh --all --no-install                         # prepare build dependencies and compile
+./scripts/build-all.sh --all                                     # prepare, compile and install system files
+./scripts/build-all.sh --all --user --supported-only               # install cosh-ng, tokenless, AW and Tokenless Provider; report skipped system-only targets
+./scripts/build-all.sh --all --user --supported-only --check-deps  # read-only check of the user subset
+./scripts/build-all.sh --all --user --no-install                   # compile all default targets; never install system dependencies by default
+./scripts/build-all.sh --component tokenless --user --install-system-deps # explicitly allow system build packages; component files stay in user paths
+./scripts/build-all.sh --component agent-sec-core --component tokenless --no-install
+./scripts/build-all.sh --all --prefix /usr --destdir "$PWD/target/pkgroot" # stage package paths without service activation
+./scripts/build-all.sh --all --check-deps                         # check build dependencies without changing the host
+./scripts/build-all.sh --component agent-sec-core --ignore-deps --no-install
 
 # Partial convenience test suites (may skip unavailable suites)
 ./tests/run-all-tests.sh --filter sec     # agent-sec-core only
@@ -49,11 +56,10 @@ cargo fmt --all -- --check
 # Select the closest targeted test from src/cosh-ng/CONTRIBUTING.md.
 # Full gates require a large/cross-cutting change and an explicit request.
 
-# agent-sec-core (Linux only; Python 3.11.6 + uv, per-component)
+# agent-sec-core (Linux only; V2 Rust CLI/daemon and sandbox, per-component)
 cd src/agent-sec-core
-make build-all
-uv run --project agent-sec-cli python --version  # must report 3.11.6
-make test         # Python + Rust sandbox + OpenClaw plugin tests
+make build        # V2 artifacts; no uv or fixed Python runtime required
+make test-rust-v2  # V2 Rust tests; Python-specific tests have separate requirements
 
 # agentsight (Linux full eBPF; macOS trajectory/serve only, per-component)
 cd src/agentsight
@@ -66,7 +72,11 @@ make test
 make build-mac
 
 # os-skills
-cd src/os-skills   # Skill definitions are static assets, no compilation needed
+# From the repository root; Python 3.11 virtual environment
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+# No compilation needed. Keep component tests under src/os-skills/tests/.
 
 # tokenless (per-component)
 cd src/tokenless
@@ -110,6 +120,20 @@ cargo test
 python3 src/aw/scripts/check.py   # from the repository root: CI behavior tests,
                                   # fmt, clippy, locked tests, digest vectors, rustdoc
 ```
+
+`build-all.sh` defaults to system source installation under `/usr/local`;
+`--user` defaults to `$HOME/.local`. Use `--prefix /usr` when staging distribution
+package paths. The script selects matching AW Providers automatically for selected backends.
+Selecting AW keeps core and skills and skips standalone component plugin
+bundles. If cosh-ng is also selected, the build keeps the Cosh extensions for
+the selected agent-sec-core and Tokenless backends.
+Discovery uses `providers/<canonical-backend>/Makefile` and the `aw-provider-*`
+package name from that directory's `Cargo.toml`; `sec-core` resolves to
+`agent-sec-core`, whose Provider is named `aw-provider-sec-core`. A partial build
+such as `--component tokenless` includes its Provider, while an explicitly
+selected Provider does not select its backend. In user mode, `--supported-only`
+filters backends before attaching their Providers, so skipping `agent-sec-core`
+also omits its Provider unless that Provider was explicitly selected.
 
 ## 3. Rust Common Conventions
 
@@ -200,7 +224,7 @@ Summary:
 
 - **Version**: Python 3.11.6 (pinned)
 - **Package manager**: [uv](https://docs.astral.sh/uv/)
-- **Formatting**: black + isort (`line-length = 100`)
+- **Formatting**: black (line length 88) + isort (line length 80); use `make python-code-pretty`
 - **Linting**: [ruff](https://docs.astral.sh/ruff/) (F, E, W, I, TID252, ANN, S-subset, etc.)
 - **Type annotations**: required on all function parameters and return types
 - **Imports**: absolute only (`from agent_sec_cli.xxx import yyy`); no relative imports
@@ -250,11 +274,25 @@ Use [`.github/pull_request_template.md`](.github/pull_request_template.md) as th
 
 ## 9. Documentation Rules
 
-> **MANDATORY**: All documentation rules — file naming, bilingual conventions, CHANGELOG format, file placement, user-guide standards — are defined in [`specs/documentation-standard.md`](specs/documentation-standard.md). You MUST read that file before creating, renaming, or modifying any documentation file. Non-compliance will be rejected in review.
+Before changing documentation or public behavior, you MUST read the English
+[`specs/documentation-standard.md`](specs/documentation-standard.md) and the
+scoped `AGENTS.md` for each affected component, if present. Select the scoped
+rules by subject, including when editing documentation under `docs/` or
+`contribute/`.
+
+1. Identify the reader's task, applicable version, and canonical page before
+   editing.
+2. Check changed examples and support claims against the target implementation
+   and release or Preview artifacts, as applicable. In the PR, report what was
+   checked statically, parsed, or run and any relevant gap.
+3. Update affected canonical pages and their language counterparts in the same
+   PR. If moving content, preserve public links and anchors and update affected
+   navigation and generated entry points.
 
 > **MANDATORY**: When introducing a new `src/<name>/` component, you MUST read and follow [`specs/component-onboarding.md`](specs/component-onboarding.md) before opening the scaffold PR.
 
-This section intentionally does not duplicate the spec. Do NOT invent documentation rules from memory or prior context — the spec is the single source of truth.
+The English specifications define the detailed rules; Chinese companions are
+for reference.
 
 ## 10. Code Standards (General)
 
@@ -272,17 +310,21 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **agent-sec-core** | [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md) | Python environment, ruff/black rules, hermes-plugin, capability system |
 | **anolisa** | [`distribution/anolisa/AGENTS.md`](distribution/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
+| **tokenless** | [`src/tokenless/AGENTS.md`](src/tokenless/AGENTS.md) | Build/install entrypoints, RPM ownership, ANOLISA metadata boundaries |
+| **agent-memory** | [`src/agent-memory/AGENTS.md`](src/agent-memory/AGENTS.md) | Packaging inputs, service path rendering, RPM and raw metadata ownership |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
 | **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
 | **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
 
 ## 11.1 File Placement & Documentation Structure
 
-> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §2–§4 for the complete file placement rules, bilingual naming convention, and component-level file requirements. Do NOT rely on cached or memorized rules — read the spec file directly.
+Follow [§9](#9-documentation-rules). Naming, file placement, and component file
+requirements are in §§1–4 of the documentation standard.
 
 ## 12. User Guide Documentation Standards
 
-> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §4.6 for user-guide writing standards including installation priority, content boundaries, framing principles, and bilingual language rules. You MUST comply — skipping this spec and writing docs from assumptions is a blocking review issue.
+Follow [§9](#9-documentation-rules) and §4.6 of the documentation standard for
+installation paths, content boundaries, and first-use guidance.
 
 ---
 
@@ -336,3 +378,30 @@ Never blindly accept and fix every AI finding. Some are false positives, some ar
 - "Missing error handling" when the `?` operator already propagates
 - "Config field unused" when it's reserved for a future phase
 - "Version mismatch" referencing stale file contents from a previous push
+
+---
+
+## 15. Issue Claiming, Draft PRs, and PR Closure
+
+> **MANDATORY**: Ownership-signal precedence, Draft PR (`isDraft=true`) vs.
+> ready-for-review PR (`isDraft=false`) semantics, claim inactivity cadence,
+> competing PR resolution, and standalone PR handling are defined in
+> [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md).
+> GitHub workflow mechanics for `/claim` and `/unclaim` are documented in
+> [`.github/TRIAGE.md`](.github/TRIAGE.md).
+
+Three invariants repeated here so agents do not conflict across components:
+
+- **Check all active locks before implementing**: inspect trusted
+  `github-actions[bot]` claim markers (`<!-- anolisa-claim ... state=claimed -->`),
+  `status:in-progress`, direct non-bot `assignees`, and open **non-draft** PRs
+  (`isDraft=false`). Do not duplicate active claimed work, and do not treat an
+  unclaimed `Draft PR` as a blocking lock.
+- **Do not auto-review Draft PRs**: skip unsolicited formal reviews on
+  `isDraft=true` PRs unless the author explicitly asks for early feedback or a
+  maintainer with write access manually invokes review.
+- **Distinguish Draft vs. formal PRs at closure**: when a linked issue is
+  resolved or closed as not planned, superseded **non-draft** competing PRs
+  must be closed with a polite note linking the resolution; lingering
+  unconverted **Draft PRs** do not block closing the issue.
+

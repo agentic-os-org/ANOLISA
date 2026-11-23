@@ -1,13 +1,13 @@
 //! Dispatch the versioned service control operations.
 
-use super::{Job, Runtime};
+use super::Runtime;
 use crate::{rejected, Operation, Result};
 use aw_host::ProcessContext;
 use serde_json::{json, Value};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        Arc,
     },
     time::Instant,
 };
@@ -26,18 +26,36 @@ impl Runtime {
             return Err(rejected("service_stopping"));
         }
         match operation {
+            Operation::Registration { .. } | Operation::SdkControl { .. } => {
+                Err(rejected("registration_requires_peer"))
+            }
+            Operation::SdkCallback {
+                instance_id,
+                event,
+                step_id,
+                native_input,
+                close,
+            } => self.sdk_callback(
+                &instance_id,
+                &event,
+                &step_id,
+                native_input,
+                close,
+                deadline,
+            ),
             Operation::RecentExecutions => self.audit.recent(),
             Operation::Status => {
                 let observations = self.observation_status()?;
                 let policies = self.policy_status()?;
                 let resources = self.resource_status()?;
                 Ok(
-                    json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
+                    json!({"sdk_control_protocol": crate::SDK_CONTROL_VERSION, "sdk_protocol": crate::SDK_VERSION, "registration_protocol": crate::REGISTRATION_VERSION, "pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
                 "resources": resources, "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
                 )
             }
             Operation::EnableInvocations { instance_id } => self.enable_invocations(&instance_id),
+            Operation::EnableSubmissions { instance_id } => self.enable_submissions(&instance_id),
             Operation::RegisterInvocation {
                 instance_id,
                 sequence,
@@ -50,7 +68,17 @@ impl Runtime {
                 sequence,
                 call_id,
             } => self.finish_invocation(&instance_id, sequence, &call_id, deadline),
-            Operation::AcknowledgeScope { instance_id } => self.acknowledge_scope(&instance_id),
+            Operation::WatchScope { instance_id, pid } => self.watch_scope(&instance_id, pid),
+            Operation::CheckScope {
+                instance_id,
+                pid,
+                policy_revision,
+                valid,
+            } => self.check_scope(&instance_id, pid, &policy_revision, valid),
+            Operation::ScopePolicy { instance_id } => self.scope_policy(&instance_id),
+            Operation::AcknowledgeScope { instance_id } => {
+                self.acknowledge_scope(&instance_id, deadline)
+            }
             Operation::OwnInstance { instance_id, pid } => self.own_instance(&instance_id, pid),
             Operation::OpenScope {
                 parent_id,
@@ -108,10 +136,15 @@ impl Runtime {
                 deadline,
                 cancelled,
             ),
-            Operation::OpenEvent { instance_id, event } => self.open(
+            Operation::OpenEvent {
+                instance_id,
+                event,
+                result_status,
+            } => self.open(
                 instance_id,
                 event,
                 None,
+                result_status,
                 deadline,
                 Arc::new(AtomicBool::new(false)),
             ),
@@ -125,43 +158,42 @@ impl Runtime {
                 event,
                 session_id,
                 call_id,
-            } => self.close_hook(&instance_id, &event, &session_id, &call_id, deadline),
+            } => {
+                if !matches!(
+                    event.as_str(),
+                    "tool.before" | "tool.after" | "security.violation"
+                ) {
+                    return Err(rejected("native_tool_event_required"));
+                }
+                self.close_hook(&instance_id, &event, &session_id, &call_id, deadline)
+            }
+            Operation::CloseInputEvent {
+                instance_id,
+                session_id,
+                turn_id,
+            } => self.close_hook(
+                &instance_id,
+                "input.submit",
+                &session_id,
+                &turn_id,
+                deadline,
+            ),
             Operation::InvokeStep {
                 event_id,
                 instance_id,
                 step_id,
                 native_environment,
-            } => {
-                self.check_scope_owner(&instance_id)?;
-                let (sender, cancelled) = self.event_sender(&event_id, &instance_id)?;
-                let (reply, result) = mpsc::sync_channel(1);
-                sender
-                    .try_send(Job::Invoke {
-                        step: step_id,
-                        native_environment,
-                        reply,
-                    })
-                    .map_err(|_| rejected("event_busy_or_closed"))?;
-                result
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .map_err(|_| {
-                        cancelled.store(true, Ordering::Release);
-                        rejected("event_reply_unavailable")
-                    })?
-            }
+            } => self.invoke_event_step(
+                &event_id,
+                &instance_id,
+                step_id,
+                native_environment,
+                deadline,
+            ),
             Operation::CloseEvent {
                 event_id,
                 instance_id,
-            } => {
-                let (sender, _) = self.event_sender(&event_id, &instance_id)?;
-                let (reply, result) = mpsc::sync_channel(1);
-                sender
-                    .try_send(Job::Close { reply })
-                    .map_err(|_| rejected("event_busy_or_closed"))?;
-                result
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .map_err(|_| rejected("event_reply_unavailable"))?
-            }
+            } => self.close_event(&event_id, &instance_id, deadline),
             Operation::Unbind { instance_id } => {
                 let mut instances = self
                     .instances

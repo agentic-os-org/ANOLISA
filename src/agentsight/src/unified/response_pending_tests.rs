@@ -3,6 +3,7 @@
 use super::*;
 use crate::aggregator::{AggregatedResult, ConnectionState};
 use crate::config::RuntimeLimits;
+use crate::parser::Parser;
 use crate::probes::sslsniff::SslEvent;
 use crate::storage::sqlite::PendingOrigin;
 
@@ -848,6 +849,11 @@ fn drain_fallback_counts_every_request_shape() {
             "/v1/chat/completions",
             r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}]}"#,
         ),
+        // Gemini parallel tool parts reach the same real drain fallback.
+        (
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"functionCall":{"name":"list_dir","args":{"path":"/tmp"}}},{"functionCall":{"name":"read_file","args":{"path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"list_dir","response":{"entries":["a","b"]}}},{"functionResponse":{"name":"read_file","response":{"content":"a body"}}}]}]}"#,
+        ),
         // Typed Responses content: the chat template cannot render a block
         // array, so the raw-message count is the one that must answer.
         (
@@ -928,6 +934,76 @@ fn drain_fallback_counts_dashscope_native_parameter_tools() {
         "the native tool definitions must reach the template: {counted} vs {baseline}"
     );
 }
+
+/// A dead PID must retain provider usage from an SSE event split across reads.
+#[test]
+fn drain_recovers_split_event_usage() {
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        },
+    );
+    let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+
+    let head = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    );
+    assert!(feed(&mut aggregator, 0, head.as_bytes()).is_empty());
+    assert!(feed(&mut aggregator, 0, b"data: {\"usage\":{\"input_tokens\":57").is_empty());
+    assert!(feed(&mut aggregator, 0, b",\"output_tokens\":7}}\n\n").is_empty());
+
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let removed = drained.into_iter().next().unwrap();
+    let sse_events = match &removed.state {
+        ConnectionState::SseActive { sse_events, .. } => sse_events,
+        _ => panic!("expected an active SSE stream to drain"),
+    };
+    let enrichment = GenAIBuilder::extract_sse_enrichment(sse_events).expect("enrichment");
+    assert_eq!(enrichment.input_tokens, Some(57));
+    assert_eq!(enrichment.output_tokens, Some(7));
+}
+
+/// The drain fallback's raw-message estimate used to drop the tool
+/// definitions exactly when the template render fails (a content block
+/// array, the shape multimodal clients send): the Ok path renders the
+/// definitions — the case above pins that — but the Err path summed only
+/// the serialized messages, so a tool-carrying request whose render failed
+/// was estimated without its definitions.
+#[test]
+fn drain_fallback_counts_tools_when_the_render_fails() {
+    let tokenizer = drain_fixture_tokenizer();
+    let with_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"text","text":"hello there"}]}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Look up the forecast for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}"#,
+    )
+    .unwrap();
+    let without_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"text","text":"hello there"}]}]}"#,
+    )
+    .unwrap();
+
+    // Sanity: the block-array content is the shape that fails the render,
+    // so both bodies take the fallback, not the template.
+    let fallback_without =
+        drain_request_input_tokens(&without_tools, &tokenizer).expect("fallback counts");
+    assert!(fallback_without > 0);
+
+    let counted = drain_request_input_tokens(&with_tools, &tokenizer).expect("fallback counts");
+    assert!(
+        counted > fallback_without,
+        "the tool definitions must reach the fallback estimate: {counted} vs {fallback_without}"
+    );
+}
+
 /// The #7553 clean-exit completion path: a headers-only response that the
 /// application never reads must land as a usable `complete` row through
 /// `complete_pid_partial_responses` + `persist_drained_pending`.

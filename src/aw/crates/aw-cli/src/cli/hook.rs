@@ -25,14 +25,34 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
-            if args.flags.contains_key("--close-event") {
+            if (args
+                .flags
+                .get("--adapter")
+                .is_some_and(|v| matches!(v.as_str(), "claude-sdk" | "hermes"))
+                && args
+                    .flags
+                    .get("--event")
+                    .is_some_and(|v| v == "input.submit"))
+                || (args
+                    .flags
+                    .get("--adapter")
+                    .is_some_and(|v| v == "claude-sdk")
+                    && args.flags.get("--event").is_some_and(|v| v == "turn.stop"))
+                || args.flags.contains_key("--close-event")
+                || args.flags.contains_key("--event-receipt")
+                || args
+                    .flags
+                    .get("--on-error")
+                    .is_some_and(|value| value == "withhold_result")
+            {
                 return Exit::Code(1);
             }
-            let blocked = args
-                .flags
-                .get("--event")
-                .is_some_and(|v| v == "tool.before")
-                && args.flags.get("--on-error").is_some_and(|v| v == "block");
+            let blocked = args.flags.get("--event").is_some_and(|v| {
+                matches!(
+                    v.as_str(),
+                    "input.submit" | "tool.before" | "security.violation"
+                )
+            }) && args.flags.get("--on-error").is_some_and(|v| v == "block");
             match emit(adapter.reply(blocked)) {
                 Ok(exit) => exit,
                 Err(error) => {
@@ -60,6 +80,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
             "--step",
             "--on-error",
             "--close-event",
+            "--event-receipt",
         ],
         false,
     )?;
@@ -70,23 +91,41 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
 }
 
 pub(super) fn deadline(args: &Arguments, binding: &HookBinding) -> Result<Instant> {
+    deadline_at(args, binding, Instant::now())
+}
+
+pub(super) const TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(2);
+
+pub(super) fn deadline_at(
+    args: &Arguments,
+    binding: &HookBinding,
+    started: Instant,
+) -> Result<Instant> {
     let event = args.required("--event")?;
     let route = binding
         .events
         .get(event)
         .ok_or("event is absent from binding")?;
-    if !(1..=55000).contains(&route.budget_ms) {
-        return Err("invalid event budget".into());
-    }
-    Ok(Instant::now()
-        + Duration::from_millis(if args.flags.contains_key("--close-event") {
-            2000
-        } else {
-            route.budget_ms + 2000
-        }))
+    budget_deadline(
+        started,
+        route.budget_ms,
+        args.flags.contains_key("--close-event"),
+    )
 }
 
-// Resident SDK callers keep transport/Provider errors visible and stop the task.
+fn budget_deadline(started: Instant, budget_ms: u64, close: bool) -> Result<Instant> {
+    if !(1..=55000).contains(&budget_ms) {
+        return Err("invalid event budget".into());
+    }
+    let deadline =
+        started + TRANSPORT_ALLOWANCE + Duration::from_millis(if close { 0 } else { budget_ms });
+    if deadline <= Instant::now() {
+        return Err("event transport deadline expired".into());
+    }
+    Ok(deadline)
+}
+
+// Resident SDK callers retain errors unless response adoption permits report recovery.
 // The legacy hook command retains its configured native failure reply above.
 pub(super) fn invoke_bound(
     args: &Arguments,
@@ -101,6 +140,11 @@ pub(super) fn invoke_bound(
             true
         }
         _ => return Err("unsupported event cleanup bridge".into()),
+    };
+    let receipt = match args.flags.get("--event-receipt").map(String::as_str) {
+        None => false,
+        Some("true") if binding.adapter == "claude-sdk" && !close => true,
+        _ => return Err("unsupported event receipt bridge".into()),
     };
     let event = args.required("--event")?;
     let step = args.required("--step")?;
@@ -126,26 +170,30 @@ pub(super) fn invoke_bound(
         input,
         route.replacement_step.is_some(),
     )?;
-    let client = Client::connect(&binding.socket, deadline)?;
-    if client.identity() != &binding.binding.identity {
-        return Err("stale hook binding".into());
-    }
+    let client = Client::from_identity(&binding.socket, binding.binding.identity.clone());
     if close {
-        client.call(
+        let session_id = normalized["session_id"]
+            .as_str()
+            .ok_or("missing session")?
+            .into();
+        let operation = if event == "input.submit" {
+            Operation::CloseInputEvent {
+                instance_id: binding.binding.instance_id,
+                session_id,
+                turn_id: normalized["turn_id"].as_str().ok_or("missing turn")?.into(),
+            }
+        } else {
             Operation::CloseHookEvent {
                 instance_id: binding.binding.instance_id,
                 event: event.into(),
-                session_id: normalized["session_id"]
-                    .as_str()
-                    .ok_or("missing session")?
-                    .into(),
+                session_id,
                 call_id: normalized["tool"]["call_id"]
                     .as_str()
                     .ok_or("missing call")?
                     .into(),
-            },
-            deadline,
-        )?;
+            }
+        };
+        client.call(operation, deadline)?;
         return Ok(Exit::Code(0));
     }
     if step == adapter::OBSERVE_STEP {
@@ -157,7 +205,11 @@ pub(super) fn invoke_bound(
             },
             deadline,
         )?;
-        return emit(adapter.reply(false));
+        let mut output = adapter.reply(false);
+        if receipt {
+            output.stdout = br#"{"event_complete":true}"#.to_vec();
+        }
+        return emit(output);
     }
     let handle: EventHandle = serde_json::from_value(client.call(
         Operation::OpenHookEvent {
@@ -167,31 +219,35 @@ pub(super) fn invoke_bound(
         },
         deadline,
     )?)?;
-    let result: Result<HookOutput> = client
-        .call(
-            Operation::InvokeStep {
-                event_id: handle.event_id.clone(),
-                instance_id: binding.binding.instance_id.clone(),
-                step_id: step.into(),
-                native_environment: Some(std::env::vars_os().collect()),
-            },
-            deadline,
+    let invoked = client.call(
+        Operation::InvokeStep {
+            event_id: handle.event_id.clone(),
+            instance_id: binding.binding.instance_id.clone(),
+            step_id: step.into(),
+            native_environment: Some(std::env::vars_os().collect()),
+        },
+        deadline,
+    );
+    let replayed = invoked
+        .as_ref()
+        .is_ok_and(|value| value["stop_replay"] == true);
+    let mut complete =
+        invoked.is_ok() && (replayed || handle.steps.last().map(String::as_str) == Some(step));
+    let result: Result<HookOutput> = invoked.map_err(Into::into).and_then(|output| {
+        aw_adapter::callback::response(
+            adapter,
+            event,
+            on_error,
+            output,
+            &binding.adapter,
+            &value,
+            &mut std::io::stderr(),
         )
         .map_err(Into::into)
-        .and_then(|output| {
-            aw_adapter::callback::response(
-                adapter,
-                event,
-                on_error,
-                output,
-                &binding.adapter,
-                &value,
-                &mut std::io::stderr(),
-            )
-            .map_err(Into::into)
-        });
+    });
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if event == "tool.before"
+    if !replayed
+        && matches!(event, "input.submit" | "tool.before" | "turn.stop")
         && handle.steps.last().map(String::as_str) != Some(step)
         && aw_adapter::callback::stops_before(&binding.adapter, result.as_ref().ok(), on_error)
     {
@@ -204,12 +260,35 @@ pub(super) fn invoke_bound(
         ) {
             // Cleanup failure must not turn a denial into report-mode allow.
             eprintln!("aw hook event close failed: {error}");
+            if receipt {
+                return Err(error.into());
+            }
+        } else {
+            complete = true;
         }
+    }
+    if receipt {
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("aw hook failed: {error}");
+                HookOutput {
+                    exit: Exit::Code(1),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
+            }
+        };
+        if !output.stdout.is_empty() {
+            return Err("event receipt does not support native output rewrites".into());
+        }
+        output.stdout = serde_json::to_vec(&serde_json::json!({"event_complete": complete}))?;
+        return emit(output);
     }
     emit(result?)
 }
 
-fn emit(output: HookOutput) -> Result<Exit> {
+pub(super) fn emit(output: HookOutput) -> Result<Exit> {
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&output.stderr)?;
@@ -256,6 +335,31 @@ pub(super) fn read_input(deadline: Instant) -> Result<Vec<u8>> {
         input.extend_from_slice(&buffer[..count as usize]);
         if input.len() > 1024 * 1024 {
             return Err("native hook stdin exceeds one MiB".into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_consumes_one_transport_budget_without_renewal() {
+        let started = Instant::now() - Duration::from_millis(1500);
+        for budget in [1, 1200, 55000] {
+            let deadline = budget_deadline(started, budget, false).unwrap();
+            assert_eq!(deadline - started, Duration::from_millis(budget + 2000));
+            assert!(started + TRANSPORT_ALLOWANCE < deadline);
+            assert!(deadline < started + Duration::from_millis(budget + 3000));
+        }
+        assert_eq!(
+            budget_deadline(started, 55000, true).unwrap(),
+            started + TRANSPORT_ALLOWANCE
+        );
+        let expired = Instant::now() - Duration::from_secs(60);
+        assert!(budget_deadline(expired, 55000, false).is_err());
+        for invalid in [0, 55001] {
+            assert!(budget_deadline(started, invalid, false).is_err());
         }
     }
 }

@@ -1,6 +1,8 @@
 use super::*;
 
-const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
+mod health;
+
+const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(100);
 const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
 
 pub(crate) fn render_startup_banner<W: Write>(
@@ -10,7 +12,10 @@ pub(crate) fn render_startup_banner<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if state.rendered_startup_banner || !startup_banner_enabled() {
+    if state.startup_session.compact {
+        return super::session::render_initial_question(events, adapter, state, output);
+    }
+    if state.rendered_startup_banner {
         return Ok(());
     }
 
@@ -21,6 +26,11 @@ pub(crate) fn render_startup_banner<W: Write>(
         return Ok(());
     };
 
+    state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
+    if !startup_banner_enabled() {
+        state.startup_health.rendered = true;
+        return Ok(());
+    }
     state.rendered_startup_banner = true;
     let cwd = event.cwd.as_deref().unwrap_or("<unknown>");
     let i18n = state.i18n();
@@ -29,72 +39,33 @@ pub(crate) fn render_startup_banner<W: Write>(
     write!(output, "\r\x1b[2K")?;
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
 
-    let term_width = ratatui::crossterm::terminal::size()
-        .map(|(cols, _)| cols)
-        .unwrap_or(80);
-
-    if term_width >= LOGO_MIN_WIDTH {
-        writeln!(output)?;
-        for (i, line) in LOGO_LINES.iter().enumerate() {
-            writeln!(output, "{}{}{}", LOGO_COLORS[i], line, RESET)?;
-        }
-        writeln!(output)?;
-    }
-
-    let mut body = vec![
-        i18n.format(
-            MessageId::StartupAdapterLine,
-            &[
-                ("adapter", adapter.name()),
-                ("shell", shell_label),
-                ("approval", state.approval_mode.label()),
-                ("analysis", state.analysis_mode.label()),
-            ],
-        ),
-        i18n.format(MessageId::StartupCwdLine, &[("cwd", cwd)]),
-        i18n.t(MessageId::StartupCommandsLine).to_string(),
-    ];
     state.startup_auth.wait_ready(STARTUP_AUTH_HINT_WAIT);
-    append_startup_auth_hint(state, &mut body);
-    let recommendation_notice = append_recommendation_notice(state, &mut body);
-    state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
+    let mut welcome = super::welcome::welcome_model(state, Some((shell_label, cwd)));
+    let recommendation_notice = recommendation_notice_required(state);
     let suggestions = prepare_startup_suggestions(state, cwd);
-    if let Some(report) = state.startup_health.report.as_ref() {
-        if health_uses_startup_row(report) {
-            body.push(renderer.startup_section_separator_line());
-            body.extend(renderer.health_startup_row_lines(HealthBannerModel::new(report)));
-        }
-    }
-    if let Some(markdown) = startup_hook.markdown {
-        body.push(String::new());
-        body.push(startup_hook.summary);
+    if let Some(markdown) = startup_hook {
         for line in renderer.markdown_text_lines(&markdown) {
-            body.push(line);
+            welcome.extra.push(line);
         }
     }
-    body.push(i18n.t(MessageId::StartupSwitchHint).to_string());
-    renderer.write_banner(output, i18n.t(MessageId::StartupTitle), body, None)?;
     writeln!(output)?;
+    renderer.write_welcome(output, welcome)?;
+    writeln!(output)?;
+    if recommendation_notice {
+        write_recommendation_notice(&renderer, &i18n, output)?;
+        writeln!(output)?;
+    }
     if let Some(report) = state.startup_health.report.as_ref() {
-        if !health_uses_startup_row(report) {
-            let mut facts = report.clone();
-            facts.try_items.clear();
-            renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
-            writeln!(output)?;
-        }
+        health::write_session_health_facts(report, &renderer, output)?;
         state.startup_health.rendered = true;
     }
-    write_startup_suggestion_card(
-        state,
+    write_startup_suggestions(
         &renderer,
-        suggestions.mode,
         &suggestions.candidates,
+        suggestions.mode == StartupSuggestionMode::Interactive,
         output,
     )?;
     output.flush()?;
-    if let Some(report) = state.startup_health.report.as_ref() {
-        record_visible_startup_health_recommendations(report, &suggestions.candidates);
-    }
     record_visible_personal_impressions(state, cwd);
     if recommendation_notice {
         mark_recommendation_notice_shown(state);
@@ -147,7 +118,10 @@ pub(crate) fn render_pending_upgrade_notice<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if !state.rendered_startup_banner || state.startup_upgrade.rendered {
+    if state.startup_session.compact
+        || !state.rendered_startup_banner
+        || state.startup_upgrade.rendered
+    {
         return Ok(());
     }
     state.startup_upgrade.poll_ready();
@@ -184,20 +158,16 @@ pub(crate) fn render_pending_recommendation_notice<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if state.personalization.notice_shown || !recommendation_notice_required(state) {
+    if state.startup_session.compact
+        || state.personalization.notice_shown
+        || !recommendation_notice_required(state)
+    {
         return Ok(());
     }
     let i18n = state.i18n();
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     write!(output, "\r\x1b[2K")?;
-    renderer.write_notice_panel(
-        output,
-        NoticePanelModel {
-            title: recommendations_notice_title(&i18n),
-            body: recommendation_notice_lines(&i18n),
-            footer: None,
-        },
-    )?;
+    write_recommendation_notice(&renderer, &i18n, output)?;
     writeln!(output)?;
     restore_startup_prompt(state, output)?;
     output.flush()?;
@@ -205,21 +175,19 @@ pub(crate) fn render_pending_recommendation_notice<W: Write>(
     Ok(())
 }
 
-pub(super) fn append_startup_auth_hint(state: &mut InlineState, body: &mut Vec<String>) {
-    if state.personalization.ai_disabled || !state.startup_auth.ai_unconfigured() {
-        return;
-    }
-    body.push(String::new());
-    body.push(state.i18n().t(MessageId::StartupAuthHintLine).to_string());
-}
-
-fn append_recommendation_notice(state: &mut InlineState, body: &mut Vec<String>) -> bool {
-    if !recommendation_notice_required(state) {
-        return false;
-    }
-    body.push(String::new());
-    body.extend(recommendation_notice_lines(&state.i18n()));
-    true
+fn write_recommendation_notice<W: Write>(
+    renderer: &RatatuiInlineRenderer,
+    i18n: &I18n,
+    output: &mut W,
+) -> std::io::Result<()> {
+    renderer.write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: recommendations_notice_title(i18n),
+            body: recommendation_notice_lines(i18n),
+            footer: None,
+        },
+    )
 }
 
 fn recommendation_notice_required(state: &mut InlineState) -> bool {
@@ -259,15 +227,15 @@ fn mark_recommendation_notice_shown(state: &mut InlineState) {
 fn recommendation_notice_lines(i18n: &I18n) -> Vec<String> {
     if i18n.language() == Language::ZhCn {
         vec![
-            "提示词推荐已开启，将由当前 AI 参考近期 Shell 与 Agent 使用记录生成建议。".to_string(),
-            "凭证会脱敏；用 /recommendations off 关闭，/recommendations privacy 查看详情。"
+            "推荐已开启：当前 AI 参考近期 Shell 与 Agent 记录；尝试识别并脱敏常见凭证，不能保证覆盖所有敏感信息。".to_string(),
+            "用 /recommendations off 关闭，/recommendations privacy 查看详情。"
                 .to_string(),
         ]
     } else {
         vec![
             "Prompt recommendations are on; the current AI uses recent Shell and Agent activity."
                 .to_string(),
-            "Credentials are sanitized. Use /recommendations off to disable or /recommendations privacy for details."
+            "We attempt to identify and redact common credentials, but cannot guarantee removal of all sensitive information. Use /recommendations off to disable or /recommendations privacy for details."
                 .to_string(),
         ]
     }
@@ -285,7 +253,10 @@ pub(crate) fn render_startup_health_banner<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if !state.rendered_startup_banner || state.startup_health.rendered {
+    if state.startup_session.compact
+        || !state.rendered_startup_banner
+        || state.startup_health.rendered
+    {
         return Ok(());
     }
 
@@ -302,33 +273,29 @@ pub(crate) fn render_startup_health_banner<W: Write>(
         .unwrap_or_else(|| ".".to_string());
     let suggestions = prepare_startup_suggestions(state, &cwd);
     write!(output, "\r\x1b[2K")?;
-    // Late all-green reports still surface the compact startup row here;
-    // `write_health_banner` renders the row shape for `ok` reports and the
-    // attention panel otherwise, so both stay visible after the banner.
-    let mut facts = report.clone();
-    facts.try_items.clear();
-    renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
     writeln!(output)?;
-    write_startup_suggestion_card(
-        state,
+    health::write_session_health_facts(&report, &renderer, output)?;
+    write_startup_suggestions(
         &renderer,
-        suggestions.mode,
         &suggestions.candidates,
+        suggestions.mode == StartupSuggestionMode::Interactive,
         output,
     )?;
     output.flush()?;
-    record_visible_startup_health_recommendations(&report, &suggestions.candidates);
     record_visible_personal_impressions(state, &cwd);
     restore_startup_prompt(state, output)?;
     output.flush()
 }
 
-struct PreparedStartupSuggestions {
-    mode: StartupSuggestionMode,
-    candidates: Vec<PlannerCandidate>,
+pub(super) struct PreparedStartupSuggestions {
+    pub(super) mode: StartupSuggestionMode,
+    pub(super) candidates: Vec<PlannerCandidate>,
 }
 
-fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedStartupSuggestions {
+pub(super) fn prepare_startup_suggestions(
+    state: &mut InlineState,
+    cwd: &str,
+) -> PreparedStartupSuggestions {
     let Some(report) = state.startup_health.report.clone() else {
         state.personalization.startup_suppressed = true;
         return PreparedStartupSuggestions {
@@ -336,11 +303,16 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedSt
             candidates: Vec::new(),
         };
     };
-    let mode = startup_suggestion_mode(
-        std::env::var("COSH_SHELL_ISOLATED").is_ok(),
-        std::env::var("TERM").ok().as_deref(),
-        &report,
-    );
+    state.startup_auth.poll_ready();
+    let mode = if state.startup_auth.ai_unconfigured() {
+        StartupSuggestionMode::Hidden
+    } else {
+        startup_suggestion_mode(
+            std::env::var("COSH_SHELL_ISOLATED").is_ok(),
+            std::env::var("TERM").ok().as_deref(),
+            &report,
+        )
+    };
     if mode == StartupSuggestionMode::Hidden {
         state.personalization.startup_suppressed = true;
         return PreparedStartupSuggestions {
@@ -374,8 +346,17 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedSt
         repo_id: context.as_ref().and_then(|value| value.repo_id.clone()),
         host_id: context.as_ref().and_then(|value| value.host_id.clone()),
     };
-    let planned = plan_startup_for_render(state.i18n(), Some(&report), &planner_context, &personal);
-    let visible_all = match mode {
+    let health =
+        health::prepare_session(&report, state.language, !state.personalization.ai_disabled);
+    let mut health_projection = report.clone();
+    health_projection.try_items = health::eligible_candidates(&health, &report);
+    let planned = plan_startup_for_render(
+        state.i18n(),
+        Some(&health_projection),
+        &planner_context,
+        &personal,
+    );
+    let mut visible_all = match mode {
         StartupSuggestionMode::ReadOnly => planned
             .visible_candidates
             .iter()
@@ -385,14 +366,42 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedSt
         StartupSuggestionMode::Interactive => planned.visible_candidates.clone(),
         StartupSuggestionMode::Hidden => Vec::new(),
     };
+    let session_questions = crate::ui::guidance::session_health_questions(&report, state.language);
+    for candidate in &mut visible_all {
+        if candidate.source == CandidateSource::Health {
+            if let Some(question) = session_questions
+                .iter()
+                .find(|question| question.id == candidate.candidate_id)
+            {
+                candidate.prompt_text = question.question.clone();
+            }
+        }
+    }
+    let displayed_health_ids = visible_all
+        .iter()
+        .filter(|candidate| candidate.source == CandidateSource::Health)
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let claimed = health::claim_displayed_health(&health, &report, &displayed_health_ids);
+    if !displayed_health_ids.is_empty() && claimed.len() < displayed_health_ids.len() {
+        tracing::warn!(
+            requested = displayed_health_ids.len(),
+            claimed = claimed.len(),
+            "startup health suggestion claim dropped candidates"
+        );
+    }
+    visible_all.retain(|candidate| {
+        candidate.source != CandidateSource::Health || claimed.contains(&candidate.candidate_id)
+    });
     if mode == StartupSuggestionMode::ReadOnly {
         return PreparedStartupSuggestions {
             mode,
             candidates: visible_all,
         };
     }
-    let visible_personal = visible_personal_candidates(&planned)
-        .into_iter()
+    let visible_personal = visible_all
+        .iter()
+        .filter(|candidate| candidate.source != CandidateSource::Health)
         .cloned()
         .collect::<Vec<_>>();
     state.pending_prompt_suggestion_bindings.clear();
@@ -422,6 +431,7 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedSt
         );
     }
     if !visible_all.is_empty() {
+        state.suggestion_snapshot_generation = state.suggestion_snapshot_generation.wrapping_add(1);
         let candidates = visible_all
             .iter()
             .map(|candidate| PromptGhostCandidate {
@@ -435,6 +445,7 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedSt
         state.pending_input_ghost_route = PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
+            generation: state.suggestion_snapshot_generation,
         };
         state.pending_input_ghost_binding = state
             .pending_prompt_suggestion_bindings
@@ -508,52 +519,28 @@ fn current_personal_context(
     )
 }
 
-pub(super) fn write_startup_suggestion_card<W: Write>(
-    state: &InlineState,
+pub(super) fn write_startup_suggestions<W: Write>(
     renderer: &RatatuiInlineRenderer,
-    mode: StartupSuggestionMode,
     suggestions: &[PlannerCandidate],
+    interactive: bool,
     output: &mut W,
 ) -> std::io::Result<()> {
     if suggestions.is_empty() {
         return Ok(());
     }
-    let body = suggestions
+    let items = suggestions
         .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            let source = match (state.language, candidate.source) {
-                (Language::ZhCn, CandidateSource::Health) => "异常排查",
-                (Language::ZhCn, _) => "个性化",
-                (_, CandidateSource::Health) => "Health",
-                (_, _) => "Personal",
-            };
-            format!("{}. [{source}] {}", index + 1, candidate.prompt_text)
+        .map(|candidate| crate::ui::guidance::SuggestionItem {
+            id: candidate.candidate_id.clone(),
+            question: candidate.prompt_text.clone(),
         })
-        .collect();
-    let footer = match (mode, state.language, suggestions.len() > 1) {
-        (StartupSuggestionMode::Interactive, Language::ZhCn, true) => {
-            Some("Shift+Tab 切换 · Tab 填入 · Enter 直接提问")
-        }
-        (StartupSuggestionMode::Interactive, Language::ZhCn, false) => {
-            Some("Tab 填入 · Enter 直接提问")
-        }
-        (StartupSuggestionMode::Interactive, _, true) => {
-            Some("Shift+Tab cycle · Tab insert · Enter ask")
-        }
-        (StartupSuggestionMode::Interactive, _, false) => Some("Tab insert · Enter ask"),
-        _ => None,
-    };
-    renderer.write_notice_panel(
+        .collect::<Vec<_>>();
+    renderer.write_suggestion_list(
         output,
-        NoticePanelModel {
-            title: if state.language == Language::ZhCn {
-                "可以试试"
-            } else {
-                "Suggested prompts"
-            },
-            body,
-            footer,
+        crate::ui::guidance::SuggestionListModel {
+            items: &items,
+            active: 0,
+            interactive,
         },
     )?;
     writeln!(output)
@@ -573,35 +560,6 @@ pub(crate) fn plan_startup_for_render(
         .map(|(id, prompt_text)| health_planner_candidate(id, prompt_text))
         .collect::<Vec<_>>();
     plan_startup(context, HealthResolution::Resolved(&health), personal)
-}
-
-pub(crate) fn visible_personal_candidates(
-    rendered: &crate::recommendation::personal_planner::RenderedStartupSuggestions,
-) -> Vec<&PlannerCandidate> {
-    rendered
-        .visible_candidates
-        .iter()
-        .filter(|candidate| candidate.source != CandidateSource::Health)
-        .collect()
-}
-
-fn record_visible_startup_health_recommendations(
-    report: &HealthScanReport,
-    suggestions: &[PlannerCandidate],
-) {
-    let visible_ids = suggestions
-        .iter()
-        .filter(|candidate| candidate.source == CandidateSource::Health)
-        .map(|candidate| candidate.candidate_id.clone())
-        .collect::<HashSet<_>>();
-    if visible_ids.is_empty() {
-        return;
-    }
-    let mut visible_report = report.clone();
-    visible_report
-        .try_items
-        .retain(|item| visible_ids.contains(&item.id));
-    record_startup_health_recommendations(&visible_report);
 }
 
 fn health_planner_candidate(candidate_id: String, prompt_text: String) -> PlannerCandidate {
@@ -645,5 +603,49 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("/recommendations off"));
         assert!(text.contains("/recommendations privacy"));
+    }
+
+    #[test]
+    fn review_regression_first_disclosure_limits_redaction_guarantees() {
+        for (language, required) in [
+            (Language::ZhCn, ["尝试", "常见凭证", "不能保证"]),
+            (
+                Language::EnUs,
+                ["attempt", "common credentials", "cannot guarantee"],
+            ),
+        ] {
+            let text = recommendation_notice_lines(&I18n::new(language)).join("\n");
+            for term in required {
+                assert!(text.contains(term), "missing {term}: {text}");
+            }
+            assert!(text.contains("/recommendations off"));
+            assert!(text.contains("/recommendations privacy"));
+        }
+    }
+    #[test]
+    fn known_unconfigured_auth_hides_suggestions_without_blocking_unknown_auth() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let names = ["COSH_SHELL_ISOLATED", "TERM"];
+        let saved = names.map(|name| (name, std::env::var_os(name)));
+        std::env::remove_var("COSH_SHELL_ISOLATED");
+        std::env::set_var("TERM", "xterm-256color");
+        let mut modes = Vec::new();
+        for auth in [None, Some(true), Some(false)] {
+            let mut state = InlineState::default();
+            state.startup_auth.resolved = auth;
+            state.startup_health.report = Some(HealthScanReport::new("auth-gate", 1000));
+            let prepared = prepare_startup_suggestions(&mut state, "/tmp");
+            modes.push(prepared.mode);
+            assert!(state.startup_health.report.is_some());
+        }
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        assert_ne!(modes[0], StartupSuggestionMode::Hidden);
+        assert_ne!(modes[1], StartupSuggestionMode::Hidden);
+        assert_eq!(modes[2], StartupSuggestionMode::Hidden);
     }
 }

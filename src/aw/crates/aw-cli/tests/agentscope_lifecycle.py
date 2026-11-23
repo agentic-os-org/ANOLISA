@@ -109,7 +109,10 @@ def main() -> None:
                 {
                     "version": 1,
                     "mode": "block",
-                    "tools": {"exec": {"language": "bash", "input_pointer": "/command"}},
+                    "tools": {
+                        name: {"language": "bash", "input_pointer": "/command"}
+                        for name in ["exec", "fixture_api"]
+                    },
                 },
             ),
             (
@@ -188,7 +191,7 @@ def main() -> None:
             AW_TEST_ROOT=str(root), TOKENLESS_STATS_ENABLED="0", TOKENLESS_SLS_ENABLED="0"
         )
         with process(
-            [str(aw), "serve", "--config", str(path), "--state-dir", str(state)],
+            [str(aw), "service", "serve", "--config", str(path), "--state-dir", str(state)],
             root,
             output,
             "serve",
@@ -219,7 +222,8 @@ def main() -> None:
             retry = executed[0]
             assert "TOKENLESS_AGENT_ID=sdk " in retry["command"]
             assert retry in permissions and retry["command"] in scans
-            assert len(permissions) == 8 and len(scans) == 3, (permissions, scans)
+            assert len(permissions) == 8 and len(scans) == 7, (permissions, scans)
+            assert scans.count("git status") == 5, scans
             observed, native, late = records("observe"), records("native"), records("late")
             assert len(observed) == len(native) == len(late) == 7
             for before, user, after in zip(observed, native, late):
@@ -239,7 +243,7 @@ def main() -> None:
                     assert len(final) < len(raw) and json.loads(final) == json.loads(raw)
             status = json.loads(
                 subprocess.check_output(
-                    [str(aw), "status", "--socket", str(state / "aw.sock")], timeout=5
+                    [str(aw), "service", "status", "--socket", str(state / "aw.sock")], timeout=5
                 )
             )["result"]
             assert status["events"] == status["bindings"] == 0, status

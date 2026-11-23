@@ -13,8 +13,8 @@ use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
 use tokenless_compressors::{JsonCompressionConfig, numbers_are_exact};
 use tokenless_protocol::{
     Attribution as ProtocolAttribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
-    OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, PreToolRequest,
-    PreToolResponse, ResultKind, RetrieveRequest, RetrieveResponse, ToolResultStatus,
+    OutputOptimization, PostToolCapabilities, PostToolRequest, PostToolResponse, ResultKind,
+    RetrieveRequest, RetrieveResponse, ToolResultStatus,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -27,10 +27,7 @@ mod post_tool;
 mod taxonomy;
 
 pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
-use entry::{
-    before_model_with_store, post_tool_with_outcomes, pre_tool_with_rtk,
-    retrieve_authorized_with_store,
-};
+use entry::{before_model_with_store, post_tool_with_outcomes, retrieve_authorized_with_store};
 use post_tool::{PostToolPipeline, PostToolPipelineConfig};
 
 /// Why a compression attempt did or did not replace the input: the protocol
@@ -66,10 +63,17 @@ pub struct RuntimeConfig {
     pub compression_enabled: bool,
     /// Whether search records and non-file path lists share paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
-    /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
+    /// Whether command-output Git diffs may omit context with original recovery. Enabled by default.
     pub diff_compression_enabled: bool,
-    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
+    /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
+    /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether browser accessibility snapshots are re-encoded as record tables
+    /// with original recovery. Enabled by default.
+    pub browser_snapshot_enabled: bool,
+    /// Whether structured regions inside mixed tool outputs may be compressed
+    /// individually. Disabled by default.
+    pub mixed_content_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -80,8 +84,10 @@ impl Default for RuntimeConfig {
             sls_enabled: false,
             compression_enabled: true,
             search_path_sharing_enabled: true,
-            diff_compression_enabled: false,
+            diff_compression_enabled: true,
             html_extraction_enabled: true,
+            browser_snapshot_enabled: true,
+            mixed_content_enabled: false,
         }
     }
 }
@@ -242,39 +248,12 @@ pub enum RuntimeError {
     /// The PostTool domain compressor failed.
     #[error("{0}")]
     Pipeline(String),
-    /// PreTool was requested without a resolved RTK executable.
-    #[error("RTK executable is unavailable")]
-    RtkUnavailable,
+    /// PreTool was requested without the executable that runs rewritten RTK commands.
+    #[error("Tokenless executable for RTK commands is unavailable")]
+    RtkLauncherUnavailable,
     /// PreTool was requested without the state directory required by RTK.
     #[error("RTK state directory is unavailable")]
     RtkDataDirectoryUnavailable,
-    /// RTK could not be started.
-    #[error("failed to start RTK at '{}': {source}", path.display())]
-    RtkSpawn {
-        /// Executable selected by the caller.
-        path: PathBuf,
-        /// Process spawn failure.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Waiting for RTK failed.
-    #[error("failed while waiting for RTK: {0}")]
-    RtkWait(std::io::Error),
-    /// Reading RTK output failed.
-    #[error("failed to read RTK output: {0}")]
-    RtkOutput(std::io::Error),
-    /// RTK exceeded the lifecycle timeout.
-    #[error("RTK rewrite timed out after 5 seconds")]
-    RtkTimeout,
-    /// RTK terminated without an exit code.
-    #[error("RTK rewrite terminated without an exit code")]
-    RtkTerminated,
-    /// RTK returned a code outside its documented protocol.
-    #[error("RTK rewrite exited with unexpected code {code}")]
-    RtkUnexpectedExit {
-        /// Unexpected process exit code.
-        code: i32,
-    },
 }
 
 /// Stateful Tokenless service for in-process callers.
@@ -419,8 +398,10 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            browser_snapshot_enabled: self.config.browser_snapshot_enabled,
+            mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
@@ -435,21 +416,6 @@ impl TokenlessRuntime {
             self.config.sls_enabled,
         );
         Ok(outcome.response)
-    }
-
-    /// Runs the PreTool RTK rewrite service with a caller-resolved executable.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RuntimeError`] when RTK cannot run or violates its exit-code
-    /// contract.
-    pub fn pre_tool(
-        &self,
-        request: &PreToolRequest,
-        attribution: &ProtocolAttribution,
-        rtk_path: &Path,
-    ) -> Result<PreToolResponse, RuntimeError> {
-        pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
     }
 
     /// Runs PostTool routing and the content-domain pipeline.
@@ -467,8 +433,10 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            browser_snapshot_enabled: self.config.browser_snapshot_enabled,
+            mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: Some(self.data_dir.clone()),
         };
         let outcome =
@@ -887,11 +855,13 @@ pub fn compress_response_with_store(
             search_path_sharing_enabled: false,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            browser_snapshot_enabled: false,
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,
             force_json: true,
             allow_toon: false,
             min_toon_chars: MIN_TOON_CHARS,
+            mixed_content_enabled: false,
             json: json_config(options),
         },
         stash_store,
@@ -1733,6 +1703,134 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_sessions_keep_embedded_html_rows_and_attribution_apart() {
+        // Four hook processes sharing one state directory: each session's
+        // document repeats one shared fragment and carries its own, so the
+        // shared row is created by one session and refreshed by the others.
+        let directory = tempfile::tempdir().unwrap();
+        let fragment = |label: &str| {
+            format!(
+                "<div style=\"font-family: Arial, sans-serif; color: #333333\">\
+                 <p style=\"margin: 0 0 8px 0\"><span style=\"font-weight: normal\">{label}: \
+                 approve the refund before</span> <strong>2024-06-01</strong>.</p>\
+                 <ul style=\"padding-left: 16px; margin: 0\"><li style=\"margin: 0\">\
+                 <a href=\"https://example.com/{label}\" target=\"_blank\" \
+                 rel=\"noopener noreferrer\">Reference</a></li></ul></div>"
+            )
+        };
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for session in 0..4 {
+                let (directory, barrier) = (directory.path(), &barrier);
+                scope.spawn(move || {
+                    let runtime = TokenlessRuntime::new(RuntimeConfig {
+                        data_dir: Some(directory.to_path_buf()),
+                        stats_enabled: true,
+                        ..RuntimeConfig::default()
+                    })
+                    .unwrap();
+                    let attribution = ProtocolAttribution {
+                        agent_id: "qwenwork".to_owned(),
+                        session_id: Some(format!("session-{session}")),
+                        tool_use_id: Some(format!("call-{session}")),
+                    };
+                    let own = fragment(&format!("session-{session}"));
+                    let content = serde_json::to_string(&serde_json::json!({
+                        "session": session,
+                        "shared": fragment("shared"),
+                        "own": own,
+                    }))
+                    .unwrap();
+                    barrier.wait();
+                    let response = runtime
+                        .post_tool(
+                            &PostToolRequest {
+                                result_kind: ResultKind::Tool,
+                                tool_name: "fetch_record".to_owned(),
+                                content,
+                                status: ToolResultStatus::Success,
+                                content_origin: ContentOrigin::ApiResponse,
+                                command: None,
+                                output_optimization: OutputOptimization::None,
+                                capabilities: PostToolCapabilities {
+                                    replace_output: true,
+                                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                                    replace_with_text: false,
+                                },
+                            },
+                            &attribution,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        response.applied_operations,
+                        [tokenless_protocol::AppliedOperation::HtmlExtraction]
+                    );
+                    let output: serde_json::Value = serde_json::from_str(&response.output).unwrap();
+                    assert_eq!(output["session"], session);
+                    for (field, expected) in [("shared", fragment("shared")), ("own", own)] {
+                        let text = output[field].as_str().unwrap();
+                        let hash = tokenless_ccr::recovery_hashes(
+                            text,
+                            &tokenless_protocol::RecoveryMethod::Shell,
+                        )[0];
+                        let restored = runtime
+                            .retrieve_authorized(
+                                &RetrieveRequest {
+                                    hash_or_marker: hash.to_owned(),
+                                    visible_markers: vec![text.to_owned()],
+                                },
+                                &attribution,
+                            )
+                            .unwrap();
+                        assert_eq!(restored.payload, expected);
+                    }
+                });
+            }
+        });
+
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        for session in 0..4 {
+            let records = recorder
+                .records_by_session(&format!("session-{session}"), None)
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].tool_use_id.as_deref(),
+                Some(format!("call-{session}").as_str())
+            );
+            assert_eq!(records[0].content_type.as_deref(), Some("json"));
+            assert_eq!(
+                records[0].applied_operations,
+                Some(vec!["html_extraction".to_owned()])
+            );
+        }
+        let connection = rusqlite::Connection::open(directory.path().join("stats.db")).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id, tool_use_id, COUNT(*) FROM retrieve_events \
+                 WHERE outcome = 'hit' GROUP BY session_id, tool_use_id ORDER BY session_id",
+            )
+            .unwrap();
+        let events = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events,
+            (0..4)
+                .map(|session| (format!("session-{session}"), format!("call-{session}"), 2))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn schema_compression_is_reversible_and_attributed() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = TokenlessRuntime::new(RuntimeConfig {
@@ -1872,17 +1970,20 @@ mod tests {
             search_path_sharing_enabled: config.search_path_sharing_enabled,
             diff_compression_enabled: config.diff_compression_enabled,
             html_extraction_enabled: config.html_extraction_enabled,
+            browser_snapshot_enabled: config.browser_snapshot_enabled,
+            mixed_content_enabled: config.mixed_content_enabled,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: None,
         }
     }
 
     #[test]
-    fn html_rendering_is_on_and_diff_cropping_off_by_default() {
+    fn html_rendering_and_diff_cropping_are_on_by_default() {
         let config = RuntimeConfig::default();
         assert!(config.html_extraction_enabled);
-        assert!(!config.diff_compression_enabled);
+        assert!(config.diff_compression_enabled);
+        assert!(config.browser_snapshot_enabled);
     }
 
     #[test]

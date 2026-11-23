@@ -55,7 +55,7 @@ pub const STRATEGIES: &[CostStrategyDef] = &[
         id: "user_prompt",
         name: "提示词压缩（Prompt Compression）",
         admission: "看长输入列表（token/重放占比）：重放开销大且被实际引用的部分少即适用",
-        not_recommended: "整段输入都是待分析对象本身",
+        not_recommended: "整段输入都是待分析对象本身；M3 缓存命中率高时压缩输入同样会使缓存失效，净收益需折算",
         method: "优化提示词：长材料转文件引用，模板去冗余",
         judge_hint: "用户粘贴的长输入若含大量无关内容可压缩或引导转为文件提供",
         needs_confirm: true,

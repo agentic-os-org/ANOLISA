@@ -65,8 +65,10 @@ ID 的作用域是工作空间。未传入 `--workspace <path>` 时，工作空�
 成功轮次以类似下面的 result 结束：
 
 ```json
-{"type":"result","subtype":"success","is_error":false,"result":"completed","session_id":"...","duration_ms":1234}
+{"type":"result","subtype":"success","is_error":false,"session_id":"...","duration_ms":1234}
 ```
+
+成功时省略可选的 `result` 字段。
 
 失败结果使用 `is_error: true` 并包含 `errors`；会话加载或持久化失败还会包含 `session_error_code` 和 `session_error_phase`。无效 JSONL 输入会输出错误 result，并以非零状态退出。stdout 只保留协议消息，诊断信息写入其他日志。
 

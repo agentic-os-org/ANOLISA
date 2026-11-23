@@ -2,10 +2,11 @@
 
 [中文版](../../zh/adapters/openclaw-adapter.md)
 
-The adapter launches OpenClaw 2026.9.6 as a new foreground Gateway and registers
+The adapter launches OpenClaw as a new foreground Gateway and registers
 AW steps at `before_tool_call` and `after_tool_call`. The same `aw.yaml` selects
 Providers and tool-event policies; OpenClaw retains its model configuration,
-credentials, native plugins and conversation state.
+credentials, native plugins and conversation state. The verified baseline is
+2026.9.6; other releases must retain the native plugin and Gateway lifecycle interfaces.
 
 ## Launch and ownership
 
@@ -17,7 +18,7 @@ aw run --config aw.yaml --agent openclaw \
 
 The configured Agent `argv` must select `openclaw gateway run`. A Node executable
 followed by the official `openclaw.mjs` entrypoint is also accepted. The adapter
-checks the OpenClaw version before connecting the launch to the service.
+records the OpenClaw version before connecting the launch to the service.
 `--force`, reset and profile-switching options are rejected. AW does not attach
 to an existing Gateway or stop one to obtain its port.
 
@@ -58,6 +59,11 @@ plugins' returned argument replacements are merged by OpenClaw and are not
 passed through successive AW steps as new event snapshots. AW retains this
 native behavior. It does not claim that its check observes every plugin's final
 argument rewrite.
+
+An earlier `requireApproval` result can freeze parameters and discard AW's later
+replacement. This version therefore admits `observe` and `block` before effects,
+while Tokenless PreTool uses block-and-retry. PostTool result replacement remains
+available.
 
 Callbacks carry the original `{hook, event, context}` JSON. Structured Providers
 receive the normalized event plus this native payload. `sessionId`, `runId` and

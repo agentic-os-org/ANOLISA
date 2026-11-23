@@ -1013,8 +1013,11 @@ Scope update、Binding mutation 返回 `unknown_method`；Scope revision 参数�
 Scope 返回 `scopeId`、`selector`、`policySnapshots`（完整 PreparedPolicy）和 `status:ACTIVE`；
 没有 revision，不可 update。模板更新/删除不影响该 Scope 或未来实例。
 
-`match` 必须且只能包含 `processName` 或 `executable`。名称精确匹配 `/proc/PID/comm`
-（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；不做 glob/前缀匹配。
+`match` 必须且只能包含 `processName`、`executable` 或 `cmdlineArg`。名称精确匹配
+`/proc/PID/comm`（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；
+`cmdlineArg` 为规范化绝对路径，`/proc/PID/cmdline` 按 NUL 切分后任一参数逐字节相等即命中，
+不解析符号链接、不推断参数位置。单进程 cmdline 最多读取 64 KiB，被截断的末尾参数不参与
+匹配。均不做 glob/子串/前缀匹配。
 PID selector 固定首次观察到的实例；当前拒绝 cgroup assignment。未配置发现、调度不可用或
 32 个 discovery jobs 容量耗尽时返回 unavailable。
 
@@ -1054,3 +1057,315 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 历史未知归属使用 `unknown_SessionId`；未重名的 ID 保持原样。组合名称仍有歧义时拒绝；原始存储 ID 和安全关联不变，详见查询设计 §4.1。
 内部 `DaemonDispatcher::handle` 使用命名的 5 秒 convenience budget；真实 UDS dispatch
 使用 transport 配置生成的 `DispatchControl`，不受该默认值替代。
+
+## 18. [TARGET V2] Secret Gateway 管理
+
+`gateway.*` 是 V2 method family。设计见 [V2 Secret Gateway 设计](V2_SECRET_GATEWAY_DESIGN_zh.md)，
+进程与权限见 [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)。
+Cedar HTTP 网关六个方法的清单、
+分发与访问级别由 `asc-daemon-protocol` 和 `pap_contract.rs` 对照；
+`gateway.key.add`/KeyAdd、`gateway.credentials`/CredentialGrant 删除，旧名称无别名。
+
+| method | 访问级别 | params | result |
+| --- | --- | --- | --- |
+| `gateway.enable` | UID 0 | 无 | `{}` |
+| `gateway.disable` | UID 0 | 无 | `{}` |
+| `gateway.status` | LocalUser，owner UID 隔离 | 无 | `GatewayStatus` |
+| `gateway.key.remove` | UID 0 | `{pairid}` | `KeyOutcome` |
+| `gateway.key.list` | UID 0 | 无 | `KeyList` |
+| `gateway.ca` | LocalUser，认证本机 peer，无 owner 限制 | 无 | `{caBundlePath}` |
+
+- 无参数方法只接受省略、`null` 或 `{}`；有参数方法拒绝未知字段。
+- 管理方法要求内核认证的 UDS peer UID 0，非 root PolicyAdministrator 不获得凭据管理权。
+  ownerUid 是 assignment 的目标身份约束，不替代 peer 身份。共享公开 CA 不是秘密，
+  `gateway.ca` 不接受 Scope/UID 参数，不返回 fake/Token/环境变量映射，也不表示 Scope CA 隔离。
+- `pairid` 是 Store 分配的 opaque pair ID，不是 `github`、文件路径或秘密摘要。
+  `key.remove` 全局退役该配对及引用授权，不影响其他配对；旧 fake 永久退役不可重导入复活。
+  real/fake 在 root 提交 Cedar Policy 后自动登记，不提供单独 key add。
+- `policy.templates.create/update` 仍接收 `PolicySource`。HTTP Cedar 引用精确
+  `seccore.system@2`，注入 permit 的 `@modify`、`@real_token_file`、`@fake_token_file`、
+  `@inject_header`、`@inject_format`、`@response_rewrite` 均必填；最后一个仅接受精确
+  `"true"` / `"false"` 字符串并降低为 bool，不接受旧 `buffered/none` 或缺省值。
+  两个 token_file 是 daemon 主机的不同规范绝对路径，CLI/RPC 原样传递；相对、
+  home/env 展开、NUL、`.`/`..` 在读文件前拒绝。先纯校验及 root 授权，再安全读取
+  private/root-owned/regular/single-link 文件；Store 原子登记，策略只保存可信非秘密
+  规则→pair ID 关联，作者不能提交派生关联。生成/登记共用等长整串至少 80% 差异校验。
+- 原生 JSON 文件策略、schema revision 1 和既有 OS PDP 不变；原生凭据执行删除。
+  HTTP 不接入 OS PDP。发现旧 Gateway 数据明确拒绝，不迁移、不覆盖、不推断转换。
+  只有凭据 Policy/Scope 额外要求 root，普通 file 用法、权限及快照不变；不同 file/credential
+  Policy 可在同一个 Scope 分别执行，单 Policy 不混合。
+- 凭据 Scope 固定 Policy revision 和 pair 关联、非 root ownerUid 与持续 process selector。
+  无进程时也可准备已登记 fake/port/plan。先 enable、查询共享 CA、自行加载 fake 文件
+  后再启动 Agent；discovery 自动建立 Binding，不保证 first packet。查询不迁移或修改环境。
+- 多 Scope 可显式共用指定 fake；删除一个仅撤销该 Scope 授权，其他 Active Scope 仍有效。
+  最后 Active Scope 删除全局永久 tombstone，包括空 Scope；实例退出不退役。
+  恢复全量核对 canonical Scope/Binding/关联及身份，不单凭 PID 或重读源文件恢复。
+- `agent-sec-cli key generate-fake --real-token-file ... --output ... --format auto`
+  为批准的纯本地入口（默认 auto），没有 RPC、不登记或授权。未知启发式明确失败，
+  以 O_EXCL 创建 0600 输出，不打印 Token；不是 daemon 失联 fallback。
+- `agent-sec-cli inject-credential --builtin github ...` 是 root 一步入口，不新增 RPC：
+  依次调用既有 `policy.scopes.list`、`policy.templates.create`、`policy.scopes.create`，
+  可选 `policy.bindings.list`，以及 `gateway.status`/`gateway.ca`；不调用 `gateway.enable`。
+  模板读取、fake 生成和文件交付在 CLI 本地完成，见
+  [网关设计 §2.2](V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)。
+
+本节是未开放 Gateway 的内部终态契约，以 ANOLISA `89fe4fec0` 为基线，结合
+`46738d58d` Cedar 注入设计；响应算法沿用 `46e2a8682`。完整语义见
+[网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)：开启时重写实际注入响应
+的 headers、未压缩连续正文及 trailers，跨 chunk 匹配有界；gzip 等压缩 body 原样透传，
+仍可能把 real 返回 Agent。关闭时三者均不改写，请求注入独立。
+Cedar 注解是 `"true"` / `"false"` 字符串，Plan/Decision 是必填 JSON bool，拒绝缺失、null、
+数字及字符串，不混用两者。保留固定队列限制、EOF/framing 和故障 fail-closed 边界，
+不恢复整包缓存，不增加可配置参数，也不保证已发响应可撤回。
+
+这是旧 Gateway 内嵌数据的不兼容修订：旧 `PreparedPolicy`、Scope `policySnapshots`、
+Binding 内嵌 Policy、pinnedScope、Store/Plan/投影及旧注解模式均明确拒绝；旧原生凭据
+规则即使含 bool，也不是新 Cedar 配对策略。本次无旧数据迁移或滚动升级支持，不推断
+转换、不丢弃秘密/tombstone，也不覆盖不可变快照；仅更新 latest Policy 不会更新 Scope。
+内部旧环境先备份、在旧版本按生命周期撤销和清理，再显式登记新配对及新 Policy/Scope。
+回退边界见 [网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+响应验收使用内部 mock，外部 API 不作为验收条件；源码检查或测试矩阵不证明最终安装
+制品通过，不提供旧数据已迁移的保证。
+
+批准的 result 契约使用 camelCase：
+
+- `gateway.enable`、`gateway.disable` 成功返回 `{}`；失败仍明确返回错误。
+- `GatewayStatus`：`{enabled: bool, ready: bool, scopes: ScopeStatusView[]}`。`ready` 必须同时满足
+  enabled、cgroup v2 检查通过、代理 unit active、loaded generation 与内部当前 generation
+  匹配、CA 可用。已启用时每次查询重新只读检查 cgroup，失败返回 `ready=false`，不改变状态。
+  网关 ready 不替代实例 Binding `READY` 与引流完成的等待。
+- `ScopeStatusView`：`{scopeId, bindings}`。bindings 为绑定责任 ID 数组；空数组不代表 Scope
+  无授权，其 fake/plan 可先于进程准备。
+- remove 成功结果：`{pairid}`，值为 opaque pair ID。
+- list 成功结果：`{pairids: string[]}`，只列 active opaque pair IDs，不输出秘密或摘要。
+- CA 查询：仅 `{caBundlePath: string}`，为各 Scope 共用的公开 CA bundle 绝对路径。
+  每次重新检查 enabled、cgroup v2、unit、loaded generation 与 CA ready；未就绪明确失败，
+  不需要 active Scope 或凭据 owner，不返回部分环境配置。
+
+cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SUPER_MAGIC`，
+且 daemon 自身 `/proc/self/cgroup` 视图有 `0::` 条目；证据不可读或非 v2 时失败。
+`gateway.enable` 在改变 enabled 前检查，apply 在每次发布前检查（含已启用状态恢复）。
+默认关闭恢复不运行此预检，不会仅因 cgroup v2 不可用而失败；不自动降级为 v1、不改挂载。
+这不是完整内核/nft 能力预检：不独立探测 nft `socket cgroupv2`，实际规则应用仍可能失败。
+
+内部保留 generation、撤销 fence 和永久 tombstone，用于发布、恢复与拒绝旧 fake；这些状态
+不构成管理查询的展示字段。
+
+| code | 场景 |
+| --- | --- |
+| `invalid_argument` | 参数、pair ID、Scope ID、Cedar 注解或配对文件不合格 |
+| `not_found` | canonical Scope 或 pair 不存在 |
+| `conflict` | canonical Scope 已关闭或快照/关联/执行身份不一致；fake/real/tombstone 冲突 |
+| `permission_denied` | 非 root 凭据管理或越过 owner UID 的 status 查询；公开 CA 无 owner 限制 |
+| `resource_exhausted` | 监听端口或 fake 等有界容量耗尽 |
+| `unavailable` | gateway 未配置/禁用、账户缺失、cgroup 不可检查或非 v2、unit/CA/generation 未 ready |
+| `internal` | 数据面 generation 拒绝、存储损坏或宿主操作失败 |
+
+gateway dispatch 预算为 45 秒，CLI 默认 60 秒，generation 加载最长 20 秒。错误可以含路径、
+Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态与协议运行验收。
+
+## 19. [TARGET V2，已实现] Intent 任务策略候选
+
+新增 `intent.propose`，使用 V2 `{method,params}` / `{requestId,result|error}` 信封。
+方法按 `LocalUser` 授权，UID 来自内核 peer credentials，不接受调用者声明身份。
+这是初次任务提案接口，不改变 CURRENT V1 清单，也不调用 PAP、批准或下发接口。
+
+| `params` 必填字段 | 契约 |
+|---|---|
+| `format_version` | 精确字符串 `asc.intent.request.v1` |
+| `task` | 非空 UTF-8 正文，最多 64 KiB |
+| `ttl` | 整数 1–1800 秒，从 daemon 接受生成请求时起算 |
+
+拒绝未知字段及版本，包括路径类字段、自报身份、
+模型配置、摘要和批准状态。完整请求含 OTel 信封、空白、转义与 LF 最多 256 KiB。
+daemon 不打开调用方路径，不采集文件正文、目录列表或 Git 变更。配置的 HTTPS 模型只接收任务
+正文和服务端生成的来源标识，并在 system 中接收统一 schema；任务中的敏感文本会发送，
+可能产生调用费用。
+
+`result.outcome` 有且只有以下两种状态：
+
+- `candidate`：完整 `asc.intent.candidate.v1`，保留 `asc.intent.draft.v1` 原始草稿、
+  `artifact`、TTL、`notes` 及内容哈希；恒为
+  `CANDIDATE` / `authorization_required=true`。`artifact` 带 language/text/schema_sha256。
+  合法策略即使包含非空 `unresolved` 也返回候选；CLI 展示后退出 2，不开放批准菜单。
+  模型 policy 为空时 text 为空；不包含 rules/mapping/back_translation、绑定或保护列表。
+- `needs_clarification`：原始草稿及 `reasons`，用于非规范路径或不受支持的模板、身份、注解，
+  没有可批准候选。Cedar 语法或 Strict 失败返回错误，不返回部分策略。
+
+`intent_extraction.rs` 的 `generate_policy_draft` 只将 task 文本和统一 schema 交给模型，
+模型仅返回 `{"policy":"...","unresolved":[]}`。草稿保存原始响应及任务来源。
+提示词从 `policy-generation.md` 编译嵌入，标记为 `cedar-policy@1`。实体、动作及字段语义
+直接复用内嵌 schema 和注释，提示词仅保留生成约束。
+`policy_validation.rs` 解析原生 Cedar、检查路径表达式并进行 Strict 校验，不追加任何规则；
+`policy_generator.rs` 封装 TTL 和完整候选哈希。
+
+链路为 task + schema → 模型 policy/unresolved → 官方 parser 与路径表达式检查 →
+官方 Strict → 未批准候选。前端不通过字符串替换重写模型语义；路径仅接受
+规范绝对字符串的 ==/!= 或目录末尾 /* 的 like，拒绝动态路径、自报 Subject/File UID、
+未绑定模板及可选 @id 之外的注解。统一 schema 来源仍是
+`asc-policy-cedar/schema/seccore.cedarschema`，本接口不生成或扩展 schema。
+CLI 复核版本、任务来源、TTL 和完整哈希，并使用内嵌 schema 从 draft.policy 重建
+预期 artifact；替换模型输出后重算哈希仍会被发现。CLI 与 daemon 必须同步升级，旧版本不适配。
+历史候选保持原版本；不能重新标记为新候选，须重新生成。
+
+提示词要求必要身份、条件、审批或义务无法表达时放入 unresolved，不得删掉后生成无条件
+permit；工具调用不能替换为程序执行。但 unresolved 是模型自报，不是完整性或冲突证明。
+程序不求解策略冲突。普通 permit 不排斥其它策略的允许；排他要求须在原生
+Cedar 中明确补集 forbid，write 补集须限定同一 operation。禁删不等于不可变；task 要求
+“不删除 a.txt”时由模型自行写出对应 forbid，程序不再替用户补充保护规则。
+Strict、空 unresolved 和哈希均不证明任务理解正确、全部要求已落实、可信批准或真实对象绑定。
+
+模型 JSON 最多 16 KiB；unresolved 最多 128 个非空项，每项最多 4096 字节且不含控制字符。
+最终 Cedar 最多 1024 条策略、256 KiB，超限不进入 Strict。
+预算超限返回 `resource_exhausted`，无候选，不截断策略。
+
+完整结果最多 512 KiB。CLI 默认等待 45 秒，真实 UDS 为该方法配置 35 秒派发预算，模型
+预算最多 30 秒且受请求期限和 TTL 进一步收紧。每 UID（含 root）最多一个实际生成，全局
+最多四个，无排队；连接取消或超时后，仍在阻塞的生成占用名额直到实际返回。失败无自动重试，
+到期结果丢弃，不刷新有效期。
+
+错误使用封闭类别：参数/版本错误 `invalid_argument`；超量/并发占满 `resource_exhausted`；
+未启用、配置或模型响应无效 `unavailable`；取消/超时/到期 `deadline_exceeded`；内部编码或
+Cedar 校验失败 `internal`。诊断不包含任务正文、原始模型响应或密钥。
+
+配置于 daemon 启动时读取：`ASC_INTENT_ENABLED=true`、`DASHSCOPE_API_KEY`，可选
+`ASC_INTENT_MODEL`、`ASC_INTENT_BASE_URL`、`ASC_INTENT_THINKING=disabled|provider`。
+保留默认 `deepseek-v4.1-flash`，推荐作为速度优先的选择，不要求显式配置模型。可切换其它
+可用模型和 OpenAI-compatible HTTPS 服务，响应协议及 Cedar 校验不绑定模型名称；切换服务时
+API key 使用所选服务的凭据。不支持 DashScope 思考扩展的服务须设置 thinking=provider。
+自动选择模型和本地回退尚未实现。
+禁用并重启即可关闭模型入口；候选及批准请求不持久化，没有 Intent 状态迁移或部署回滚。
+CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务无法表达时照常输出 `reasons` 并以退出码 `0` 结束。
+
+可执行契约位于 `v2/crates/asc-intent/tests/{policy_prompt,policy}.rs`、
+`v2/apps/asc-cli/tests/intent.rs`，以及协议、handler、core 的 Intent 单元测试。
+覆盖参数/版本拒绝、原始响应和任务哈希绑定、原生 Cedar 组合裁决、模型输出重建与篡改检查，
+以及失败隔离、并发名额、过期及输出检查。
+实际进程、路径别名、rename 两端与参数索引等事实仍由未来执行端保证；这些测试不是执行拦截证据。
+
+### 19.1 [TARGET V2，已实现] 单次命令 Cedar API
+
+`intent.propose_command` 面向 hook 集成方，仅从已有的 `tool_input.command` 和 `cwd`
+推导单次命令所需权限的 Cedar 候选。它不是 `intent.propose` 的 task/TTL 接口，也不是
+基于 base policy 的更新接口；不改变 CURRENT V1 清单。
+
+```json
+{"method":"intent.propose_command","params":{"format_version":"asc.intent.command.request.v1","command":"read -r line < report.csv","cwd":"/work"}}
+```
+
+`params` 仅接受这三个必填字段，拒绝未知字段与版本。`command` 为非空 UTF-8 shell 文本，
+最多 64 KiB，不含 NUL；`cwd` 为最多 4096 字节的规范绝对路径，不含控制字符、反斜杠、
+`.`/`..` 路径分量、重复 `/` 或非根尾部 `/`。cwd 是路径解释基准，不是允许访问的范围。
+不要求宿主增加 task context，不采集文件正文、路径元数据或环境变量。
+
+沿用 V2 `{requestId,result|error}` 信封，`result` 只有以下两种结构：
+
+```json
+{"outcome":"candidate","policy":"permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/work/report.csv\" };","caveats":[]}
+```
+
+```json
+{"outcome":"needs_clarification","reasons":["需要确认运行依赖"]}
+```
+
+示例仅演示结构，不承诺模型对该命令一定返回相同策略。`policy` 是 Cedar 文本，不是
+`permission.json` 或完整候选信封；命令很短也应有策略，只有命令完全没有文件、进程、网络
+动作（如 `true`、`:`、`pwd`、`echo`、`date`）时才是空文本。程序沿用原生 parser、路径检查与 Strict 校验 ，不追加规则。
+
+`caveats` 是候选已知但未覆盖的部分，例如 PATH 未解析导致 `file.exec` 目标无法确定、
+脚本内部行为未知或管道数据流无法推导；它不阻断候选，但审批与后续 PDP 映射必须一并查看，
+不得当成已授权。空 `policy` 是合法候选：命令没有文件、进程、网络动作时授权为空，
+`caveats` 随候选返回，沙箱只差运行依赖。任何模型 `unresolved` 仍转成 `needs_clarification`
+并丢弃部分策略；只有命令语义本身无法表达、给不出任何有意义权限时才使用它。非规范路径或
+不支持的身份、模板、注解同样要求澄清。语法或类型错误返回 `internal`。空 `unresolved`
+和 Strict 均不能证明需求完整、最小权限或审批。提示词要求可确定部分照常输出、不确定部分
+写入 `caveats`，不得以根目录、整个 cwd 或全网络权限兜底；没有语义完备性证明器。
+
+Rust 入口为 `asc_intent::propose_command(provider, model, &CommandInput, deadline)`。
+调用链为 dispatcher → `asc_daemon_core::intent::IntentService::propose_command` → 意图模块。
+认证、模型配置及错误分类沿用本节规则；与 `intent.propose` 共享每 UID 一个、全局四个实际执行额度。
+完整请求含 LF 最多 256 KiB；模型响应最多 16 KiB，原因最多 128 项，每项最多 4096 字节。
+超限不截断。UDS 派发预算 35 秒，模型及校验最多 30 秒，并受调用方更早期限限制。
+没有 TTL、策略 revision、base policy 或候选持久化；取消或过期后丢弃结果。
+
+需在 daemon 启动环境显式启用 Intent 并配置本节的模型凭据。command/cwd 会发往该模型服务，
+可能包含敏感信息并产生费用。本接口不读取或改写 PAP/base policy，不计算 effective，也不执行命令。
+PDP 仍负责将申请权限限制在 PAP 管理的 Cedar 策略授权范围内；CLI 的
+`--format cedar` 输出未审批候选原文，审批与执行不在本接口范围内。程序、cwd 与 loader
+不在候选中，需执行侧显式补齐，CLI 不做隐式补齐。
+停用 Intent 并重启可关闭入口，无状态迁移或策略回滚需求。
+
+候选是**命令自身**的需求集，不是完整沙箱视图：程序、loader 与 PATH 目录不在候选中，
+`sandbox run` 要求 program 与 cwd 显式可读，需执行侧补齐。最终由 PDP 计算
+`effective = 请求 ∩ PAP 策略授权`，默认 deny、deny 优先。程序和运行依赖须同时在申请中
+声明并获 Cedar 授权；候选不列出这些路径不代表它们已获准，缺少授权会在 PDP 阶段拒绝。
+
+CLI 不再提供 `--format permission` 投影。
+
+CLI 通过 `agent-sec-cli intent propose-command --command <文本> [--cwd <目录>]
+[--format json|text|cedar]` 暴露该 RPC。它只发送这两个业务字段；`--cwd` 缺省为 CLI
+进程的当前工作目录，并在本地解析为规范绝对路径，不读取命令目标。默认输出 JSON 便于 hook 解析；
+`--format text` 汇总权限并列出未覆盖项，`--format cedar` 把 `caveats` 写成注释，澄清时只输出注释；
+CLI 在渲染前对返回的 Cedar 重新执行一次本地校验。两种结果退出码为 `0`，
+本地可判定为非法的输入退出 `2` 且不发出请求。该子命令不执行命令，也不接入 sandbox。
+
+可执行契约为 `v2/crates/asc-daemon-handler/src/intent.rs` 中的两个 `command_api_*` 测试和
+`v2/apps/asc-cli/tests/intent.rs` 中的 `command_*` 测试：分别使用内存 fake provider，
+经实际 dispatcher 和实际 CLI/UDS 链路，覆盖输入透传、两种结果、
+版本/字段/路径/预算拒绝、异常模型响应、客户端复核及取消/过期结果丢弃。
+测试不调用真实模型或执行 sandbox，不构成模型推导质量或完整运行链路的证据。
+
+## V2 sandbox 授权扩展
+
+`authorization.evaluate`、`authorization.claim` 与 `authorization.report` 使用现有 UDS、JSON 信封和 peer UID，
+不修改 V1 oracle。这些方法面向已准入的运行时调用者，不接受调用方上传 Cedar 策略。
+授权 `request_id`、`context.execution_id` 位于 params 内，与传输层生成的 request ID 分开。
+
+| method | params / data | 处理 |
+|---|---|---|
+| `authorization.evaluate` | `OsAuthorizationRequest` → `Decision` | 读取一个有效策略版本、求值；不启动进程、不等待 ask。 |
+| `authorization.claim` | `DecisionClaim` → `ClaimResponse` | accept 在期限内接收；execute 向同 UID 一次性转交原请求、决定与已固定的执行状态；abandon 关闭未执行交接。不重新授权。 |
+| `authorization.report` | `ExecutionReceipt` → `ReceiptAck` | 校验当前 peer 对决策的归属和执行引用，确认日志持久化；不重新授权或执行。 |
+
+类型定义见 [`authorization.rs`](../../v2/crates/asc-daemon-protocol/src/authorization.rs)。
+公共 `AuthorizationRequest<C>` 是 PARC 信封，字段为 request_id、
+principal、action、resource、context。三个实体引用均为 `{type, id}`；完整信封参与摘要。
+OS 特化 `OsAuthorizationRequest` 的 context 包含 execution_id、agent、launch、
+requested_permissions；launch 仅含 program、resolved_program、args、cwd。
+OS 适配器固定 principal 为 `SecCore::Subject::"request"`，action 为
+`SecCore::Action::"process.spawn"`，resource 为与 launch.program 一致的 `SecCore::Process`。
+agent 只含可选 agent_type。未知 action、绑定不一致、未知字段和原 type=os 载荷拒绝。
+通用 context 可供其它 consumer 定义；当前 RPC 只处理 OS 请求，未提供通用非 OS 决策端。
+PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。
+execute 和 abandon 只传标识与阶段。daemon 与授权客户端须同步升级。
+Decision 返回最终命令、有效权限、策略版本、接收期限和 warnings。仅当路径条件要求区分文件与目录时，require_files 列出须由执行侧核实为文件的路径。
+`approval_requirements` 是 V2 sandbox 决定附带的展示来源，缺省为空，空列表不序列化。
+每项包含 `target` 与可选的策略 `message`：target.kind 为 execution、filesystem 或 network。
+execution 的 `original_request` 区分最终执行要求与改写前保留的审批要求；filesystem 包含规范路径
+`path`、`right`（read/write）和 `excluded_paths`，表示不含更具体子区域的最终权限区域；network
+表示完整宿主网络。PDP 将代表性子路径探测映射回真实区域，保留对应审批文案，不输出内部探测路径。
+只记录 escalate 触发的事项；它们不新增授权、不代替 effective_permissions，也不是独立审批开关。
+改写前的事项转为 original_request=true 的执行要求；最终资源项仅来自对最终命令的重新求值。
+PEP 从已固定的路径事实及只用于标签的本地查询区分文件与目录，不根据命令或原因文字猜测权限。
+新客户端可读取缺少该字段的旧决定并回退为整体原因。旧版严格解码器不接受非空新字段，因此本次
+未发布的 V2 扩展应连同 daemon 与 CLI 一起更新；不改变 V1 oracle。对应 fixture 为
+`asc-daemon-protocol/tests/authorization_display.rs` 和 `asc-pdp-runtime/tests/authorization.rs`。
+公共信封和 OS 类型拒绝未知字段。daemon 默认启用授权，从 PAP 同一事务读取当前适用
+策略集；策略更新成功后供下一次授权使用，空集返回 DENY，读取或加载失败不回退旧版本。
+
+MODIFY 携带 PDP 已完整授权的最终命令与权限，绑定原请求摘要；PEP 本地核验后直接执行。
+DEFER 没有执行权，PEP 停止并回执。STEP_UP 的本地确认通过后
+直接执行绑定动作，不再 evaluate。PEP 须在签发后 60 秒的 expires_at 前一次性接收决定；接收后的审批等待和执行不再检查该期限。report 只接受同一 peer UID 的决策，包含 approval、
+installed/started、exit_code/signal/cancel_signal、错误和记录时间。
+已成功报告的决策拒绝重复回执，包括 DEFER。未通过 claim 接收的决策保留到 expires_at 后 24 小时；已接收交接保留到回执或 daemon 重启，仍受全局和每 UID 容量限制；它不限制已接收决定的执行。回执事件中的 warnings 来自 daemon 保存的 Decision。
+
+领域 DENY 是成功 RPC 中的决策。默认 daemon 不再因缺少授权配置返回 `unavailable`。
+错误使用既有目录：嵌入式 dispatcher 未接入授权服务时返回 `unavailable`，
+非法载荷 `invalid_argument`，跨 UID `permission_denied`，过期/引用冲突 `conflict`，
+容量不足 `resource_exhausted`，存储或内部失败 `internal`。只有所有配置的 SQLite/JSONL
+记录成功后才 Ack；部分写入失败返回错误，不承诺跨存储事务或自动重试。
+身份字段描述逻辑 Agent，由接入方提供；peer UID 约束决策与回执归属，不认证自报 agent_type。
+
+fixture：`asc-daemon-handler/src/authorization.rs`、`asc-daemon-core/src/authorization.rs`、
+`tests/e2e/linux-sandbox/authorized_cli.py`。部署和后端边界见
+[Sandbox 主设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。

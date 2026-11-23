@@ -407,6 +407,34 @@ mod tests {
     }
 
     #[test]
+    fn output_requirement_is_preserved_and_fingerprinted() {
+        let root = package_root();
+        for source in [
+            v1_hook_manifest(""),
+            r#"{"name":"legacy-ext","hooks":{"PreToolUse":[{"hooks":[{
+                "type":"command","name":"guard","command":"echo guard"
+            }]}]}}"#
+                .to_owned(),
+        ] {
+            let original = parse_manifest(&source, root.path()).unwrap();
+            let mut document: Value = serde_json::from_str(&source).unwrap();
+            let hooks = &mut document["hooks"]["PreToolUse"][0]["hooks"][0];
+            hooks["require_output_when_env"] = json!("GUARD_ENABLED");
+            let updated = parse_manifest(&document.to_string(), root.path()).unwrap();
+            assert_eq!(
+                updated.config.hooks.pre_tool_use[0].hooks[0]
+                    .require_output_when_env
+                    .as_deref(),
+                Some("GUARD_ENABLED")
+            );
+            assert_ne!(
+                original.capability_fingerprint,
+                updated.capability_fingerprint
+            );
+        }
+    }
+
+    #[test]
     fn v1_rejects_path_escape() {
         let root = package_root();
         let error = parse_manifest(

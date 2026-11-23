@@ -1,5 +1,249 @@
 # Changelog
 
+## 1.3.0
+
+**Breaking Changes**
+
+- Replaced the native credential execution contract with explicit Cedar policy:
+  `gateway key add` and `gateway credentials` are removed, HTTP credential policies
+  need `--schema-revision 2`, pair administration uses opaque IDs, and existing
+  gateway state must be re-registered. (#9836)
+- Made `responseRewrite` a required boolean in authored policies, gateway plans and
+  addon decisions; existing string values such as `"buffered"` are rejected and must
+  be rewritten as `true` or `false`. (#9854)
+- Made raw Cedar the default `policy create/update --file` input and removed
+  `policy default --cedar`; callers that still pass JSON envelopes must add
+  `--language json`. (#9858)
+- Removed `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` in favor of the installed
+  `sandbox/permissions.json.template`, and gated all-shell authorization behind
+  `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`. (#9954)
+- Dropped the deployment authorization configuration: `baseline_policy`,
+  `task_policy`, `environment_permissions` and the configurable TTL are rejected, and
+  the daemon authorizes every ordinary startup from the current PAP policy set with a
+  fixed 60-second decision window. (#10053)
+- Skipped Gateway startup by default; deployments that use the Gateway must start
+  `agent-sec-daemon serve --enable-gateway` or add the flag to their unit. (#10220)
+- Moved the Gateway Binding payload to `agent-sec-gateway-binding/v2` without the
+  authored mixed Policy text, so daemon and gateway must be upgraded together. (#10258)
+
+**Cedar Policy Engine**
+
+- Resolved request authorization from PAP-maintained policies instead of configured
+  baseline/task Policy IDs, caching one compiled set and failing closed on read or
+  compilation errors. (#9902)
+- Added `intent propose-command` so a PreToolUse hook can turn a rewritten shell
+  command and cwd into a validated Cedar candidate without the original task text. (#9879)
+- Added the local `agent-sec-cli intent init` subcommand, which compiles explicit
+  allow/deny rules into validated Cedar without a model or network. (#9915)
+- Added `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` to generate the sandbox
+  permission request from the original command and canonical cwd. (#9918)
+- Mapped missing-path `create` grants onto write access for the existing parent
+  directory, so commands such as `mkdir -p a/b` run under a directory write grant. (#10241)
+
+**Sandbox Backends**
+
+- Added the `asc-sandbox-docker` crate and `agent-sec-cli sandbox run --backend docker`,
+  translating only the exactly expressible permission subset onto one container and
+  failing closed as `Unsupported` for anything containers cannot express. (#9906)
+- Added optional `excluded_paths` on deny rules, so a granted child directory stays
+  usable beneath a denied parent while parent enumeration and siblings remain
+  inaccessible. (#10255)
+
+**Credential Protection**
+
+- Added `agent-sec-cli inject-credential --builtin github` to generate the fake,
+  register the packaged GitHub Policy and assign the Scope in one command. (#10184)
+- Released the credential store `flock` explicitly on drop, so reopening the store
+  succeeds even when child processes inherited the descriptor. (#10273)
+
+**Runtime Stability**
+
+- Retired previous-boot Bindings after a reboot by filtering recovery instances through
+  the current boot ID before discovery. (#10191)
+- Isolated torn JSONL tails so an interrupted record no longer absorbs the next event
+  written by the Rust event log. (#10202)
+- Reported the actual latest hardening scan outcome in `agent-sec-cli events --summary`
+  and labeled measurements from older scans as historical. (#10108)
+- Percent-encoded SQLite read-only URIs so event and observability readers open data
+  directories whose paths contain URI delimiters or percent escapes. (#9993)
+
+**Scanner & Policy Engine**
+
+- Rejected non-object JSON in `scan-prompt` multi-turn mode with a usage error instead
+  of an attribute failure. (#8800)
+- Scanned large Bash scripts with linear start detection and bounded verification, so
+  benign near-matches no longer exhaust the regex budget before the relevant command. (#10107)
+
+**Build & Packaging**
+
+- Aligned `make uninstall` file paths with `make install`, so the systemd unit and the
+  five adapter payloads installed by the public target are also removed. (#10131)
+
+**Testing & CI**
+
+- Replaced the time-budget-dependent PII report case with a deterministic report unit
+  test. (#9917)
+- Aligned the gateway recovery fixture with the boolean `responseRewrite` schema. (#9960)
+- Copied the CLI through a child process in tests to avoid `ETXTBSY` from inherited
+  descriptors. (#9961)
+- Split sec-core validation into component, V2 and Linux E2E coverage producers behind
+  one coverage gate. (#10019)
+
+## 1.2.1
+
+**Breaking Changes**
+
+- Moved the maintained source-build entrypoint onto the unified stack build: the
+  default build now prepares and stages all maintained backends, AW and its providers,
+  and the script requires Bash 4.4 or newer. Legacy `/etc` service units that shadow the
+  new prefix layout must be migrated with the administrator-reviewed steps in the
+  sec-core guide. (#9657)
+
+**Cedar Policy Engine**
+
+- Accepted raw Cedar and Cedar source envelopes as permission input for sandbox
+  launches and PDP requests, binding file boundaries before policy canonicalization and
+  rejecting writable-ancestor and hardlinked file aliases. (#9794)
+- Deployed supported `file.read` forbids as exact-file read denial through the existing
+  Scope and Binding path, rejecting unsupported backends before old targets are removed. (#9895)
+
+**Sandbox Authorization**
+
+- Warned on stderr when a restricted sandbox starts with a read-only root and writable
+  mounts, making the accepted hardlink boundary visible without rejecting legitimate
+  workspaces. (#9868)
+
+**Credential Protection**
+
+- Rejected Scopes that reference globally retired credentials instead of admitting them
+  as `ACTIVE`, while startup recovery restores mixed Scopes tolerantly. (#9793)
+- Added `--cmdline-arg` process matching for Scopes, so script Agents such as
+  npm-installed CLIs can be selected without capturing every interpreter process of the
+  owner UID. (#9894)
+- Isolated gateway Binding faults so a forking or exiting descendant no longer stops the
+  proxy, nftables routing and runtime for every Scope; the failed Binding retries on its
+  own. (#9896)
+
+**Scanner & Policy Engine**
+
+- Detected structured PII tokens directly adjacent to Chinese, Japanese and Korean text
+  and advanced the Rust scanner semantics version to 2.1.2. (#9867)
+- Rejected blank `agent-sec-cli scan-prompt --text` input with a usage error and exit
+  code 1 instead of reporting success with no verdict. (#9786)
+
+**Build & Packaging**
+
+- Made the `agent-sec-core` RPM `Recommends` the `agent-sec-plugins` and
+  `agent-sec-skills` subpackages at the exact version, so default installs bring the
+  adapter resources and weak-dependency-disabled installs keep the previous behavior. (#9766)
+
+**Testing & CI**
+
+- Stabilized the SQLite policy repository lock tests by probing SHM locks out of process
+  and moving the crash scenario into its own test binary. (#9635)
+- Accepted `ESRCH` in the Linux gateway cleanup test helper. (#9883)
+- Joined the retention task before asserting its periodic completion log. (#9900)
+- Checked real descriptor and memory access denial in the helper isolation test, with a
+  non-root pass followed by a root Strict-profile pass. (#9903)
+
+## 1.2.0
+
+**Breaking Changes**
+
+- Defaulted source installations to the shared `anolisa` namespace across the
+  component installers; existing independent layouts are left in place and must be
+  migrated with the original path overrides followed by `make uninstall AWPRJ=`, or
+  kept on the previous layout by continuing to pass `AWPRJ=`. (#9462)
+
+**Cedar Policy Engine**
+
+- Added a Cedar policy frontend that validates source against the application schema
+  and stores the original source through the policy create and update paths. (#9298)
+- Deployed supported Cedar file-protection policies through the existing Scope, Binding
+  and reconciliation lifecycle, rejecting translations that exceed the supported subset. (#9442)
+- Added `agent-sec-cli policy default`, printing a restrictive baseline policy for
+  Scopes without a bound policy. (#9522)
+- Added `agent-sec-cli intent propose` to generate reviewable Cedar candidates from a
+  task description through the optional `intent.propose` daemon method. (#9450)
+- Added a self-contained `policy-authoring` skill with intent disambiguation, rule
+  formalization, worked examples and a self-check checklist. (#9463)
+
+**Sandbox Authorization**
+
+- Added `agent-sec-cli sandbox run` to execute a command under an explicit OS
+  permission set without a policy service. (#9311)
+- Routed Cosh sandbox hooks through Cedar authorization, native approval and receipts,
+  and showed only the resource operations that require confirmation. (#9379)
+- Split OS permission, invocation and lifecycle contracts into dedicated sandbox
+  contract crates shared by the standalone sandbox and policy paths. (#9456)
+
+**Credential Protection**
+
+- Added an opt-in secret gateway that replaces Scope-specific fake credentials with
+  real values for authorized GitHub REST and HTTPS Git traffic. (#9265)
+
+**Scanner & Policy Engine**
+
+- Retained outer Bash findings when an inline interpreter payload is scanned, merging
+  findings per rule and de-duplicating identical evidence. (#9418)
+- Hardened prompt-scan and code-scan verdict parsing against echoed verdict lines and
+  verdict words embedded in larger words. (#9446)
+- Sped up PII boundary matching for near-limit scans while preserving exact spans and
+  redacted output. (#9453)
+
+**Codex & OpenClaw Hook Integrations**
+
+- Blocked native OpenClaw plugin disable and uninstall of `agent-sec` through the Code
+  Scanner hook, including in observe mode. (#9491)
+
+**Build & Packaging**
+
+- Preserved service enablement and activity state when rolling back split RPMs to the
+  legacy package layout. (#9472)
+
+**Raw Packaging**
+
+- Preserved distribution-owned discovery contracts during ANOLISA raw install, repair,
+  update, rollback and uninstall; new archives now require ANOLISA 0.3.21 or later. (#9351)
+
+**Testing & CI**
+
+- Measured the full V2 workspace in the incremental coverage gate instead of a fixed
+  package allowlist. (#9502)
+- Stabilized daemon startup and UDS admission tests across the SecCore E2E, Rust and
+  packaging CI targets. (#9323)
+
+## [1.1.2] - Unreleased
+
+### Changed
+
+- Install the security runtime, framework integrations and skills through separate RPMs.
+
+## 1.1.1
+
+**Breaking Changes**
+
+- Removed the unsupported `--cgroup-id` flag from `scope create`; cgroup assignment
+  was never accepted by PAP or the AgentSight Adapter, and the flag now fails locally
+  with exit code 2. Select target processes with `--pid`, `--process-name`, or
+  `--executable` instead. (#9134)
+
+**Code Scanning**
+
+- Evaluated command strings passed to Python process APIs (`os.system`, `os.popen`,
+  `subprocess`) against the existing Shell rules, with native rule IDs, severity, and
+  evidence retained; dynamically built commands and argv arrays remain uninferred.
+  (#9128)
+
+**Skill Ledger Runtime**
+
+- Added `skillsec` as the primary `agent-sec-cli` command group name, retaining
+  `skill-ledger` as a compatible alias with identical arguments, output, and exit
+  codes. (#8907)
+- Escaped the YAML-sensitive characters that JSON quoting leaves literal in a pending
+  Skill placeholder, so accepted Skill names containing control characters or Unicode
+  separators survive publication and frontmatter parsing unchanged. (#8948)
+
 ## 1.1.0
 
 **Breaking Changes**

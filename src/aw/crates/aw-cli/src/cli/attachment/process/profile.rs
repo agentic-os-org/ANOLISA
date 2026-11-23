@@ -87,7 +87,7 @@ pub(super) fn qwenpaw(environment: &BTreeMap<OsString, OsString>, cwd: &Path) ->
         return Ok(cwd.join(expand(Path::new(profile), environment)?));
     }
     let legacy = cwd.join(expand(Path::new("~/.copaw"), environment)?);
-    // QwenPaw 2.2.2b4 prefers an existing legacy directory, including symlinks.
+    // QwenPaw 2.2.2.post1 prefers an existing legacy directory, including symlinks.
     if legacy.try_exists()? {
         Ok(legacy)
     } else {

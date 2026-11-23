@@ -15,12 +15,11 @@ SEMVER = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 REQUIRED_SOURCES = {
-    ".anolisa/component.toml",
     "bin/cosh-cli",
     "bin/cosh",
-    "bin/cosh-switch",
     "libexec/anolisa/cosh-ng/cosh-core",
     "libexec/anolisa/cosh-ng/cosh-shell",
+    "libexec/anolisa/cosh-ng/resources.conf",
     "share/doc/cosh-ng/LICENSE",
     "share/doc/cosh-ng/README.md",
 }
@@ -32,7 +31,7 @@ def read_toml(path: Path) -> dict[str, object]:
     try:
         with path.open("rb") as stream:
             return tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
 
 

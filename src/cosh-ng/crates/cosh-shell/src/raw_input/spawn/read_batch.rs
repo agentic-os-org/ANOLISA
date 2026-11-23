@@ -18,6 +18,7 @@ pub(super) enum InputRead {
         ownership_changed_during_read: bool,
         pending_shell_submits: u16,
     },
+    CaptureInvalidated,
     Eof,
     Error(io::Error),
 }

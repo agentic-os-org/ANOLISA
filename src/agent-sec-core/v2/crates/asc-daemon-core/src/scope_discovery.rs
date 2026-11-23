@@ -4,6 +4,7 @@
 //! deduplication. The worker submits selected instances to PAP for Binding admission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use asc_policy_types::Validate;
@@ -23,6 +24,10 @@ pub struct ProcessFingerprint {
     pub device: u64,
     /// Executable inode number.
     pub inode: u64,
+    /// Verified kernel UID; absent when credentials could not be safely observed.
+    pub uid: Option<u32>,
+    /// Whole `/proc/PID/cmdline` arguments; empty unless the selector matches them.
+    pub arguments: Vec<OsString>,
 }
 
 /// One verified process snapshot supplied by the procfs adapter.
@@ -53,6 +58,7 @@ pub struct ScanResult {
 /// One job's state. The owning daemon worker serializes all access.
 pub struct ScopeDiscoveryState {
     selector: ScopeSelector,
+    owner_uid: Option<u32>,
     pinned_pid: Option<ProcessIdentity>,
     checked: BTreeMap<u32, CheckedProcess>,
     instances: BTreeMap<u32, ProcessIdentity>,
@@ -84,6 +90,10 @@ impl ScopeDiscoveryState {
             return Err("cgroup discovery is unsupported");
         }
         Ok(Self {
+            owner_uid: scope
+                .uses_credentials()
+                .then_some(scope.owner_uid)
+                .flatten(),
             selector: scope.selector,
             pinned_pid: pinned_process,
             checked: BTreeMap::new(),
@@ -94,9 +104,24 @@ impl ScopeDiscoveryState {
         })
     }
 
+    /// Whether the procfs adapter must verify UID facts for this credential selection.
+    pub fn requires_owner_uid(&self) -> bool {
+        self.owner_uid.is_some()
+    }
+
+    /// Whether the procfs adapter must read `/proc/PID/cmdline` arguments.
+    pub fn requires_arguments(&self) -> bool {
+        matches!(
+            self.selector,
+            ScopeSelector::Process {
+                matcher: ProcessMatcher::CmdlineArg { .. }
+            }
+        )
+    }
+
     /// Applies a scan. `present` includes PIDs whose metadata could not be read.
-    /// Only a complete enumeration may remove absent processes. A failed read
-    /// never erases a selected instance or its deduplication key.
+    /// File selections survive failed reads and prune absence only on complete scans.
+    /// Credential selections require current verified ownership before submission.
     pub fn reconcile(
         &mut self,
         observations: Vec<ProcessObservation>,
@@ -104,11 +129,27 @@ impl ScopeDiscoveryState {
         complete: bool,
     ) -> ScanResult {
         let mut result = ScanResult::default();
+        if self.owner_uid.is_some() {
+            // Credentials are admitted only from this scan's verified owner facts.
+            // File selections deliberately retain their historic unreadable-instance semantics.
+            self.instances.retain(|_, identity| {
+                observations.iter().any(|observation| {
+                    observation.identity == *identity
+                        && observation.fingerprint.uid == self.owner_uid
+                })
+            });
+        }
         for observation in observations {
             let ProcessObservation {
                 identity,
-                fingerprint,
+                mut fingerprint,
             } = observation;
+            if self.owner_uid.is_none() {
+                fingerprint.uid = None;
+            }
+            if !self.requires_arguments() {
+                fingerprint.arguments.clear();
+            }
             // A successfully observed replacement proves the previous instance exited.
             if self
                 .instances
@@ -132,6 +173,12 @@ impl ScopeDiscoveryState {
                     ScopeSelector::Process {
                         matcher: ProcessMatcher::Executable { executable },
                     } => fingerprint.executable.as_os_str() == std::ffi::OsStr::new(executable),
+                    ScopeSelector::Process {
+                        matcher: ProcessMatcher::CmdlineArg { cmdline_arg },
+                    } => fingerprint
+                        .arguments
+                        .iter()
+                        .any(|argument| argument == std::ffi::OsStr::new(cmdline_arg)),
                     ScopeSelector::Pid { pid } => {
                         let selected = *pid == identity.pid
                             && self.pinned_pid.as_ref().is_none_or(|p| p == &identity);
@@ -142,6 +189,10 @@ impl ScopeDiscoveryState {
                     }
                     ScopeSelector::CgroupId { .. } => false,
                 };
+                let matches = matches
+                    && self
+                        .owner_uid
+                        .is_none_or(|uid| fingerprint.uid == Some(uid));
                 self.checked.insert(
                     identity.pid,
                     CheckedProcess {
@@ -195,6 +246,7 @@ mod tests {
         use asc_policy_types::identifiers::ResourceId;
         PreparedScope {
             scope_id: ResourceId::new("scope-one").unwrap(),
+            owner_uid: None,
             status: asc_policy_types::scope::ScopeStatus::Active,
             selector: ScopeSelector::Process {
                 matcher: ProcessMatcher::Executable {
@@ -218,8 +270,69 @@ mod tests {
                 process_name: "agent".to_owned(),
                 device: 1,
                 inode: 2,
+                uid: None,
+                arguments: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn credential_owner_changes_invalidate_matches_without_changing_file_selection() {
+        let mut assigned = scope();
+        assigned.owner_uid = Some(1000);
+        assigned.policy_snapshots[0].template = serde_json::from_value(serde_json::json!({
+            "language": "cedar", "content": {
+                "schema": {"schemaId": "seccore.system", "revision": 2},
+                "text": r#"@id("owner-selection")
+@modify("inject_credential")
+@real_token_file("/tmp/asc-discovery-real")
+@fake_token_file("/tmp/asc-discovery-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when { resource.host == "api.github.com" && context.input.scheme == "https" };"#
+            }
+        }))
+        .unwrap();
+        assigned.policy_snapshots[0].credential_bindings =
+            vec![asc_policy_types::policy::CredentialBinding {
+                rule_id: "owner-selection".into(),
+                pair_id: "pair-owner-selection".into(),
+            }];
+        let mut credentials = ScopeDiscoveryState::for_scope(assigned).unwrap();
+        let mut file = state();
+        let present = BTreeSet::from([10]);
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.uid = Some(1000);
+        credentials.reconcile(vec![process_with_uid(1000)], &present, true);
+        file.reconcile(vec![observation], &present, true);
+        assert_eq!(credentials.instances().count(), 1);
+        assert_eq!(
+            credentials
+                .reconcile(vec![process_with_uid(2000)], &present, true)
+                .matched_checks,
+            1
+        );
+        assert_eq!(credentials.instances().count(), 0);
+        assert_eq!(
+            file.reconcile(vec![process_with_uid(2000)], &present, true)
+                .cached,
+            1
+        );
+        assert_eq!(file.instances().count(), 1);
+        credentials.reconcile(vec![process_with_uid(1000)], &present, true);
+        assert_eq!(credentials.instances().count(), 1);
+        credentials.reconcile(Vec::new(), &present, false);
+        assert_eq!(credentials.instances().count(), 0);
+        credentials.reconcile(vec![process(10, 1, "/bin/agent")], &present, true);
+        assert_eq!(credentials.instances().count(), 0);
+    }
+
+    fn process_with_uid(uid: u32) -> ProcessObservation {
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.uid = Some(uid);
+        observation
     }
 
     #[test]
@@ -266,6 +379,7 @@ mod tests {
         let policy = policy();
         let scope = PreparedScope {
             scope_id: policy.policy_id.clone(),
+            owner_uid: None,
             status: asc_policy_types::scope::ScopeStatus::Active,
             selector: ScopeSelector::Process {
                 matcher: ProcessMatcher::Name {
@@ -304,6 +418,62 @@ mod tests {
             1
         );
         assert_eq!(state.instances().next().unwrap().start_time, 2);
+    }
+
+    fn with_arguments(pid: u32, arguments: &[&str]) -> ProcessObservation {
+        let mut observation = process(pid, 1, "/usr/bin/node-24");
+        observation.fingerprint.arguments = arguments.iter().map(OsString::from).collect();
+        observation
+    }
+
+    #[test]
+    fn cmdline_arg_matches_one_whole_argument_at_any_position() {
+        let mut assigned = scope();
+        assigned.selector = ScopeSelector::Process {
+            matcher: ProcessMatcher::CmdlineArg {
+                cmdline_arg: "/usr/local/bin/qodercli".to_owned(),
+            },
+        };
+        let mut state = ScopeDiscoveryState::for_scope(assigned).unwrap();
+        assert!(state.requires_arguments());
+        assert!(!self::state().requires_arguments());
+        let present = BTreeSet::from([10, 20, 30, 40, 50]);
+        let scan = || {
+            vec![
+                with_arguments(10, &["node", "/usr/local/bin/qodercli", "chat"]),
+                with_arguments(20, &["node", "/opt/other.js"]),
+                with_arguments(30, &["node", "/usr/local/bin/qodercli-other"]),
+                with_arguments(40, &["node", "--require=/usr/local/bin/qodercli"]),
+                with_arguments(50, &["python3", "-u", "/usr/local/bin/qodercli"]),
+            ]
+        };
+        let first = state.reconcile(scan(), &present, true);
+        assert_eq!(first.instances_selected, 2);
+        assert_eq!(
+            state.instances().map(|i| i.pid).collect::<Vec<_>>(),
+            vec![10, 50]
+        );
+        assert_eq!(state.reconcile(scan(), &present, true).cached, 5);
+        let replaced = state.reconcile(
+            vec![with_arguments(10, &["node", "/opt/other.js"])],
+            &BTreeSet::from([10]),
+            true,
+        );
+        assert_eq!(replaced.matched_checks, 1);
+        assert_eq!(state.instances().count(), 0);
+    }
+
+    #[test]
+    fn non_cmdline_selectors_ignore_argument_changes() {
+        let mut state = state();
+        let present = BTreeSet::from([10]);
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.arguments = vec!["agent".into()];
+        state.reconcile(vec![observation], &present, true);
+        let mut changed = process(10, 1, "/bin/agent");
+        changed.fingerprint.arguments = vec!["agent".into(), "--other".into()];
+        assert_eq!(state.reconcile(vec![changed], &present, true).cached, 1);
+        assert_eq!(state.instances().count(), 1);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::PapService;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
@@ -32,6 +32,18 @@ use uuid::Uuid;
 mod support;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+struct UnavailableReconciliation;
+
+impl asc_pap::BindingReconcileEnqueuer for UnavailableReconciliation {
+    fn check_ready(&self) -> Result<(), asc_pap::PapError> {
+        Err(asc_pap::PapError::Unavailable)
+    }
+
+    fn enqueue(&self, _: &ResourceId) -> Result<(), asc_pap::EnqueueError> {
+        Err(asc_pap::EnqueueError::Stopped)
+    }
+}
 
 struct RunningPapDaemon {
     directory: PathBuf,
@@ -164,6 +176,7 @@ impl RecordingAdministration {
             scope_id: self.binding.spec.scope.scope_id.clone(),
             selector: self.binding.spec.scope.selector.clone(),
             policy_snapshots: vec![self.policy()],
+            owner_uid: None,
             status: asc_policy_types::scope::ScopeStatus::Active,
         }
     }
@@ -174,7 +187,7 @@ impl PolicyAdministration for RecordingAdministration {
         &self,
         principal: &Principal,
         _policy_name: &str,
-        _template: &PolicyTemplate,
+        _template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         self.record(principal, "policy.templates.create")?;
         Ok(self.policy())
@@ -185,7 +198,7 @@ impl PolicyAdministration for RecordingAdministration {
         principal: &Principal,
         _policy_id: &ResourceId,
         _policy_name: &str,
-        _template: &PolicyTemplate,
+        _template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         self.record(principal, "policy.templates.update")?;
         Ok(self.policy())
@@ -229,7 +242,11 @@ impl PolicyAdministration for RecordingAdministration {
         principal: &Principal,
         _selector: &asc_policy_types::scope::ScopeSelector,
         _policies: &[asc_policy_types::scope::PolicyReference],
+        owner_uid: Option<u32>,
     ) -> Result<PreparedScope, PolicyAdministrationError> {
+        if owner_uid.is_some() {
+            return Err(PolicyAdministrationError::Unavailable);
+        }
         self.record(principal, "policy.scopes.create")?;
         Ok(self.scope())
     }
@@ -542,6 +559,7 @@ enum ParamKind {
     PolicyTemplate,
     ScopeSelector,
     PolicyReferences,
+    OwnerUid,
     Limit,
     Offset,
 }
@@ -615,6 +633,11 @@ fn method_param_specs(method: &str) -> Vec<ParamSpec> {
             ParamSpec {
                 name: "policyTemplates",
                 kind: ParamKind::PolicyReferences,
+                required: false,
+            },
+            ParamSpec {
+                name: "ownerUid",
+                kind: ParamKind::OwnerUid,
                 required: false,
             },
         ],
@@ -747,6 +770,10 @@ fn invalid_param_values(kind: ParamKind) -> Vec<(&'static str, Value, &'static s
             ),
             ("null", Value::Null, "invalid type: null, expected u32"),
         ],
+        ParamKind::OwnerUid => invalid_param_values(ParamKind::Offset)
+            .into_iter()
+            .filter(|(label, _, _)| *label != "null")
+            .collect(),
         ParamKind::Offset => vec![
             (
                 "negative",
@@ -1188,6 +1215,7 @@ async fn real_uds_distinguishes_stale_references_and_closed_scope_admission() {
                 policy_id: original.policy_id.clone(),
                 policy_revision: original.revision,
             }],
+            None,
         )
         .unwrap();
     let instance = RecordingAdministration::new().binding.spec.scope.process;
@@ -1317,15 +1345,18 @@ async fn real_uds_scheduling_rejection_and_get_list_match_frozen_wire() {
 async fn unavailable_preflight_returns_wire_error_without_creating_binding() {
     let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let pap = PapService::new(repo)
-        .with_reconcile_enqueuer(Arc::new(asc_daemon::UnavailableReconciliation))
+        .with_reconcile_enqueuer(Arc::new(UnavailableReconciliation))
         .with_scope_discovery(Arc::new(Discovery));
+    let policy = pap
+        .create_policy("file", &file_policy(vec!["/protected".into()]))
+        .unwrap();
     let daemon = RunningPapDaemon::start_with_application(
         PrincipalRole::PolicyAdministrator,
         4 * 1024 * 1024,
         pap,
     )
     .await;
-    let response = support::request_json(&daemon.socket_path, &json!({"method":"policy.scopes.create","params":{"selector":{"kind":"pid","pid":4242},"policyTemplates":[{"policyId":"missing","policyRevision":1}]}})).await;
+    let response = support::request_json(&daemon.socket_path, &json!({"method":"policy.scopes.create","params":{"selector":{"kind":"pid","pid":4242},"policyTemplates":[{"policyId":policy.policy_id,"policyRevision":policy.revision}]}})).await;
     assert_eq!(
         response["error"],
         json!({"code":"unavailable", "message":"reconciliation runtime is unavailable"})
@@ -1338,6 +1369,239 @@ async fn unavailable_preflight_returns_wire_error_without_creating_binding() {
     .await;
     assert_eq!(response["result"], json!({"items":[], "total":0}));
     daemon.stop().await;
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the authorization sequence preserves captured policy and scope identities across permitted and denied mutations"
+)]
+fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_authority() {
+    struct Execution(Arc<AtomicU64>);
+    impl asc_pap::CredentialRegistration for Execution {
+        fn register(
+            &self,
+            _: &asc_policy_types::cedar::CedarPolicySource,
+        ) -> Result<Vec<asc_policy_types::policy::CredentialBinding>, asc_pap::PapError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![asc_policy_types::policy::CredentialBinding {
+                rule_id: "credential-auth".into(),
+                pair_id: "pair-auth".into(),
+            }])
+        }
+    }
+    impl asc_pap::ScopeExecution for Execution {
+        fn validate(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+        fn prepare(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+        fn restore(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+        fn revoke(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+        fn release(&self, _: &ResourceId) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+    }
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let registrations = Arc::new(AtomicU64::new(0));
+    let execution = Arc::new(Execution(registrations.clone()));
+    let pap = PapService::new(repository.clone())
+        .with_credential_registration(execution.clone())
+        .with_scope_execution(execution)
+        .with_scope_discovery(Arc::new(Discovery));
+    let handler = DaemonDispatcher::new(
+        pap,
+        Arc::new(FixedRolePolicy(PrincipalRole::PolicyAdministrator)),
+        asc_daemon::scan_application(
+            asc_action_runtime::testing::discarding_finalizer(),
+            Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        ),
+    );
+    let call = |uid, method: &str, params| {
+        serde_json::to_value(handler.handle(
+            RequestId::new("credential-auth").unwrap(),
+            PeerCredentials::new(uid, 100, 4242),
+            serde_json::from_value(json!({"method":method,"params":params})).unwrap(),
+        ))
+        .unwrap()
+    };
+    let root = std::env::temp_dir().join("asc-protocol-credential-fixture");
+    let text = format!(
+        r#"@id("credential-auth")
+@modify("inject_credential")
+@real_token_file({real})
+@fake_token_file({fake})
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when {{ resource.host == "api.github.com" && context.input.scheme == "https" }};"#,
+        real = serde_json::to_string(&root.join("real")).unwrap(),
+        fake = serde_json::to_string(&root.join("fake")).unwrap()
+    );
+    let template = json!({"language":"cedar", "content": {
+        "schema":{"schemaId":"seccore.system", "revision":2}, "text": text
+    }});
+    let file = serde_json::to_value(file_policy(vec!["/protected".into()])).unwrap();
+    assert_eq!(
+        call(
+            1000,
+            "policy.templates.create",
+            json!({"policyName":"credential","template":template})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(registrations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        asc_pap::PapRepository::list_policies(repository.as_ref(), 100, 0)
+            .unwrap()
+            .total,
+        0
+    );
+    let mut malformed = template.clone();
+    malformed["content"]["text"] = json!("// @modify(\"inject_credential\")\nnot Cedar");
+    for uid in [0, 1000] {
+        assert_eq!(
+            call(
+                uid,
+                "policy.templates.create",
+                json!({"policyName":"invalid","template":malformed})
+            )["error"]["code"],
+            "invalid_argument"
+        );
+    }
+    assert_eq!(registrations.load(Ordering::SeqCst), 0);
+    let created = call(
+        0,
+        "policy.templates.create",
+        json!({"policyName":"credential","template":template}),
+    );
+    let id = created["result"]["policyId"].as_str().unwrap();
+    assert_eq!(registrations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        created["result"]["credentialBindings"],
+        json!([{"ruleId":"credential-auth", "pairId":"pair-auth"}])
+    );
+    for replacement in [file.clone(), template.clone()] {
+        assert_eq!(
+            call(
+                1000,
+                "policy.templates.update",
+                json!({"policyId":id,"policyName":"changed","template":replacement})
+            )["error"]["code"],
+            "permission_denied"
+        );
+    }
+    assert_eq!(
+        call(
+            1000,
+            "policy.templates.delete",
+            json!({"id":id,"revision":1})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(
+        call(1000, "policy.templates.get", json!({"id":id,"revision":1}))["result"],
+        created["result"]
+    );
+    let selector = json!({"kind":"process","match":{"processName":"agent"}});
+    let refs = json!([{"policyId":id,"policyRevision":1}]);
+    assert_eq!(
+        call(
+            0,
+            "policy.scopes.create",
+            json!({"selector":selector,"policyTemplates":refs})
+        )["error"]["code"],
+        "invalid_argument"
+    );
+    assert_eq!(
+        call(
+            1000,
+            "policy.scopes.create",
+            json!({"selector":selector,"policyTemplates":refs,"ownerUid":1000})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    let scope = call(
+        0,
+        "policy.scopes.create",
+        json!({"selector":selector,"policyTemplates":refs,"ownerUid":1000}),
+    );
+    let scope_id = scope["result"]["scopeId"].as_str().unwrap();
+    assert_eq!(scope["result"]["ownerUid"], 1000);
+    let downgraded = call(
+        0,
+        "policy.templates.update",
+        json!({"policyId":id,"policyName":"file now","template":file}),
+    );
+    assert!(downgraded.get("result").is_some());
+    assert_eq!(
+        call(1000, "policy.scopes.get", json!({"id":scope_id}))["result"]["policySnapshots"],
+        json!([created["result"]])
+    );
+    for method in ["policy.scopes.delete", "policy.scopes.retry"] {
+        assert_eq!(
+            call(1000, method, json!({"id":scope_id}))["error"]["code"],
+            "permission_denied"
+        );
+    }
+    assert_eq!(
+        call(0, "policy.scopes.delete", json!({"id":scope_id}))["result"]["completed"],
+        true
+    );
+    assert!(
+        call(
+            0,
+            "policy.templates.delete",
+            json!({"id":id,"revision":downgraded["result"]["revision"]})
+        )
+        .get("result")
+        .is_some()
+    );
+    let created = call(
+        1000,
+        "policy.templates.create",
+        json!({"policyName":"file","template":file}),
+    );
+    let file_id = created["result"]["policyId"].as_str().unwrap();
+    assert_eq!(
+        call(
+            1000,
+            "policy.templates.update",
+            json!({"policyId":file_id,"policyName":"credential","template":template})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    let scope = call(
+        1000,
+        "policy.scopes.create",
+        json!({"selector":{"kind":"pid","pid":4242},"policyTemplates":[{"policyId":file_id,"policyRevision":1}]}),
+    );
+    assert!(scope["result"].get("ownerUid").is_none());
+    let file_scope = scope["result"]["scopeId"].as_str().unwrap();
+    assert!(
+        call(1000, "policy.scopes.retry", json!({"id":file_scope}))
+            .get("result")
+            .is_some()
+    );
+    assert_eq!(
+        call(1000, "policy.scopes.delete", json!({"id":file_scope}))["result"]["completed"],
+        true
+    );
+    assert!(
+        call(
+            1000,
+            "policy.templates.delete",
+            json!({"id":file_id,"revision":1})
+        )
+        .get("result")
+        .is_some()
+    );
 }
 
 struct Discovery;

@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 TRACE = "11111111111111111111111111111111"
 PARENT = "2222222222222222"
 CANARY = "DO_NOT_EXPORT_SECRET_PAYLOAD"
@@ -76,7 +78,7 @@ class OtelEnvironment:
             stdout=subprocess.PIPE,
             stderr=self.log if stderr is None else stderr,
         )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not self.socket.exists():
             assert self.daemon.poll() is None
             assert time.monotonic() < deadline
@@ -352,6 +354,9 @@ def test_same_trace_requests_keep_distinct_unsampled_log_anchors(otel):
     requests = {}
     for record in otel.records():
         fields = record["fields"]
+        # Process startup and maintenance records have no request context.
+        if fields["reason"] in {"startup_stage", "retention_stage"}:
+            continue
         correlation = json.loads(fields["correlation"])
         assert correlation["trace_id"] == TRACE
         assert correlation["span_id"] == correlation["request_span_id"]
@@ -406,9 +411,10 @@ def test_maximum_unicode_baggage_with_full_business_frame(otel):
 @contextmanager
 def blocked_stderr():
     read_fd, write_fd = os.pipe()
-    with os.fdopen(read_fd, "rb", buffering=0), os.fdopen(
-        write_fd, "wb", buffering=0
-    ) as stderr:
+    with (
+        os.fdopen(read_fd, "rb", buffering=0),
+        os.fdopen(write_fd, "wb", buffering=0) as stderr,
+    ):
         os.set_blocking(stderr.fileno(), False)
         try:
             while True:

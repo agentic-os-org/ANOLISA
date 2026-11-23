@@ -4,13 +4,16 @@ use crate::runtime::prelude::RawInputCapture;
 use crate::runtime::state::InlineState;
 
 use super::delete_confirm::DELETE_CONFIRM_OPTION_COUNT;
-use super::menu::management_entry_count;
+use super::menu::hosted_entry_count;
 use super::provider_management::{provider_action_options, ExistingProvider};
 use super::runtime::{AuthPhase, RuntimeAuthState};
 
 pub(super) fn auth_capture_id(auth: &RuntimeAuthState) -> String {
     let scope = match &auth.phase {
         AuthPhase::ManagingProviders => "manage".to_string(),
+        AuthPhase::ProviderAction { provider_idx } if auth.field_capture_revision != 0 => {
+            format!("action-{provider_idx}-{}", auth.field_capture_revision)
+        }
         AuthPhase::ProviderAction { provider_idx } => format!("action-{provider_idx}"),
         AuthPhase::ConfirmDelete { provider_idx } => format!("delete-{provider_idx}"),
         AuthPhase::SelectingProvider => "select".to_string(),
@@ -36,7 +39,11 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
     match &auth.phase {
         AuthPhase::ManagingProviders => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
-            option_count: management_entry_count(&auth.sysom, auth.existing_providers.len()),
+            option_count: hosted_entry_count(
+                state.auth.host,
+                &auth.sysom,
+                auth.existing_providers.len(),
+            ),
             selected: auth.selected_provider,
             allow_free_text: false,
             multiple: false,

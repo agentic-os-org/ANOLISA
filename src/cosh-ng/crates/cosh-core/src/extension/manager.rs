@@ -108,11 +108,12 @@ impl ExtensionManager {
         for system_dir in canonical_unique_roots(system_dirs) {
             self.scan_directory(&system_dir, ExtensionSourceKind::System, &mut candidates);
         }
-        if let Some(user_dir) = self
+        let user_dirs = self
             .user_dir_override
             .clone()
-            .or_else(super::user_extensions_dir)
-        {
+            .map(|directory| vec![directory])
+            .unwrap_or_else(super::user_extensions_dirs);
+        for user_dir in canonical_unique_roots(user_dirs) {
             self.scan_managed_directory(&user_dir.join(MANAGED_DIR), &mut candidates);
             self.scan_directory(&user_dir, ExtensionSourceKind::Legacy, &mut candidates);
         }
@@ -439,6 +440,14 @@ impl ExtensionManager {
             .find(|extension| extension.name == name)
             .cloned()
             .ok_or_else(|| format!("extension not found after source selection: {name}"))
+    }
+
+    /// Releases a matching adapter-owned user selection, including after removal.
+    pub fn clear_user_source(&mut self, name: &str, source_identity: &str) -> Result<(), String> {
+        state::clear_user_source(name, source_identity, self.state_dir_override.as_deref())
+            .map_err(|error| error.to_string())?;
+        self.refresh();
+        Ok(())
     }
 
     /// Returns hook local names for compatibility cleanup in hook state.

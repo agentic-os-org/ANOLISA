@@ -77,13 +77,42 @@ pub(super) fn flush_pending_deadlines(
         input_classifier,
         input_mode,
         state,
-    )
+    )?;
+    if matches!(
+        current_raw_input_mode(input_mode),
+        RawInputMode::Draining { .. }
+    ) || state.capture_owned_input.has_pending_replay()
+    {
+        let mut card = std::mem::take(&mut state.card_state);
+        let mut quarantine = std::mem::take(&mut state.capture_owned_input);
+        let mut relay =
+            super::input_relay_context(master, input_classifier, input_events, input_mode, state);
+        let result = super::drain_abandoned_capture(&mut card, &mut quarantine, &mut relay);
+        state.card_state = card;
+        state.capture_owned_input = quarantine;
+        result?;
+    }
+    Ok(())
 }
 
 pub(super) fn receive_input(
     receiver: &Receiver<InputRead>,
     state: &mut RawInputRelayState,
 ) -> Result<InputRead, RecvTimeoutError> {
+    if !matches!(
+        state.deferred_input,
+        Some(InputRead::Eof | InputRead::Error(_))
+    ) {
+        if let Some(input) = state.deferred_input.take() {
+            return Ok(input);
+        }
+    }
+    if let Some(input) = state.pending_replay_input.pop_front() {
+        if let InputRead::Bytes { bytes, .. } = &input {
+            state.pending_replay_input_bytes -= bytes.len();
+        }
+        return Ok(input);
+    }
     if let Some(input) = state.deferred_input.take() {
         return Ok(input);
     }

@@ -1,7 +1,7 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_provider::admission::AdapterCapabilities as Capabilities;
+use aw_core::admission::AdapterCapabilities as Capabilities;
 
 pub(crate) struct Profile {
     pub name: &'static str,
@@ -9,14 +9,10 @@ pub(crate) struct Profile {
     pub events: &'static [(&'static str, &'static [&'static str])],
 }
 
-const TOOL_EVENTS: &[(&str, &[&str])] = &[
-    ("tool.before", &["observe", "block"]),
-    ("tool.after", &["observe", "replace_result"]),
-];
-
 impl Profile {
     pub fn capabilities(&self, version: &str, entrypoint: &str) -> Capabilities {
         Capabilities {
+            failure_actions: Default::default(),
             adapter: self.name.into(),
             version: version.into(),
             entrypoint: entrypoint.into(),
@@ -34,59 +30,143 @@ impl Profile {
     }
 }
 
+pub(crate) const SDK: Profile = Profile {
+    name: "sdk",
+    adapter: &super::super::adapters::sdk::Sdk,
+    events: &[
+        ("session.start", &["observe"]),
+        ("turn.stop", &["observe", "block"]),
+        ("session.end", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe"]),
+    ],
+};
+
 pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
-    events: TOOL_EVENTS,
+    events: &[
+        ("session.start", &["observe"]),
+        ("session.end", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QODER_SDK: Profile = Profile {
     name: "qoder-sdk",
     adapter: &super::super::adapters::qoder_sdk::QoderSdk,
     events: &[
-        ("tool.before", &["observe", "block"]),
-        ("tool.after", &["observe"]),
+        ("session.start", &["observe"]),
+        ("session.end", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
     ],
 };
 
 pub(crate) const OPENCLAW: Profile = Profile {
     name: "openclaw",
     adapter: &super::super::adapters::openclaw::OpenClaw,
-    events: TOOL_EVENTS,
+    events: &[
+        ("session.start", &["observe"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+        ("turn.stop", &["observe"]),
+        ("session.end", &["observe"]),
+    ],
+};
+
+pub(crate) const DEEPSEEK: Profile = Profile {
+    name: "deepseek-harness",
+    adapter: &super::super::adapters::deepseek::DeepSeek,
+    events: &[
+        ("session.start", &["observe"]),
+        ("turn.stop", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+        ("security.violation", &["observe", "block"]),
+    ],
 };
 
 pub(crate) const HERMES: Profile = Profile {
     name: "hermes",
     adapter: &super::super::adapters::hermes::Hermes,
-    events: TOOL_EVENTS,
+    events: &[
+        ("session.start", &["observe"]),
+        ("turn.stop", &["observe"]),
+        ("session.end", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QWENPAW: Profile = Profile {
     name: "qwenpaw",
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
-    events: TOOL_EVENTS,
+    events: &[
+        ("turn.stop", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PI: Profile = Profile {
     name: "pi",
     adapter: &super::super::adapters::pi::Pi,
-    events: TOOL_EVENTS,
+    events: &[
+        ("session.start", &["observe"]),
+        ("turn.stop", &["observe"]),
+        ("session.end", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const CLAUDE_SDK: Profile = Profile {
     name: "claude-sdk",
     adapter: &super::super::adapters::claude_sdk::ClaudeSdk,
-    events: TOOL_EVENTS,
+    events: &[
+        ("session.start", &["observe"]),
+        ("session.end", &["observe"]),
+        ("turn.stop", &["observe", "block"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const AGENTSCOPE: Profile = Profile {
     name: "agentscope",
     adapter: &super::super::adapters::agentscope::AgentScope,
-    events: TOOL_EVENTS,
+    events: &[
+        ("turn.stop", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
+};
+
+pub(crate) const CODEX: Profile = Profile {
+    name: "codex",
+    adapter: &super::super::adapters::codex::Codex,
+    events: &[
+        ("session.start", &["observe"]),
+        ("turn.stop", &["observe"]),
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PROFILES: &[Profile] = &[
-    QODER, QODER_SDK, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+    SDK, QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, CODEX,
 ];
 
 #[cfg(test)]

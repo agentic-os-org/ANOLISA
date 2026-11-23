@@ -24,6 +24,8 @@ export interface TrajNode {
   promptTokens: number;
   /** Set when the subagent is referenced by session id but not embedded. */
   externalSessionId?: string;
+  /** Non-embedded trajectory ids that resolved to this external session node. */
+  externalTrajectoryIds?: string[];
   children: TrajNode[];
 }
 
@@ -93,15 +95,29 @@ function buildNode(doc: AtifDocument, path: string[], depth: number): TrajNode {
     if (sub.trajectory_id) embeddedIds.add(sub.trajectory_id);
     if (sub.session_id) embeddedIds.add(sub.session_id);
   });
-  const seenExternal = new Set<string>();
+  const usedSegments = new Set(children.map(c => c.path[c.path.length - 1]));
+  const externalBySession = new Map<string, TrajNode>();
   for (const ref of collectRefs(doc)) {
-    const refId = ref.trajectory_id ?? ref.session_id;
+    // Match `subagentKey` and `findNodeByRef`: an empty trajectory_id counts as absent.
+    const refId = ref.trajectory_id || ref.session_id;
     if (!refId || embeddedIds.has(refId)) continue;
-    if (!ref.session_id || seenExternal.has(ref.session_id)) continue;
-    seenExternal.add(ref.session_id);
-    children.push({
-      path: [...path, ref.session_id],
-      key: encodeNodePath([...path, ref.session_id]),
+    if (!ref.session_id) continue;
+    const existing = externalBySession.get(ref.session_id);
+    if (existing) {
+      if (ref.trajectory_id) {
+        existing.externalTrajectoryIds ??= [];
+        if (!existing.externalTrajectoryIds.includes(ref.trajectory_id)) {
+          existing.externalTrajectoryIds.push(ref.trajectory_id);
+        }
+      }
+      continue;
+    }
+    const segment = usedSegments.has(ref.session_id) ? refId : ref.session_id;
+    usedSegments.add(segment);
+    const nodePath = [...path, segment];
+    const extNode: TrajNode = {
+      path: nodePath,
+      key: encodeNodePath(nodePath),
       label: shortLabel(ref.session_id),
       // Data only — the display layer localizes external-node tooltips
       // via `externalSessionId`.
@@ -111,8 +127,11 @@ function buildNode(doc: AtifDocument, path: string[], depth: number): TrajNode {
       stepCount: 0,
       promptTokens: 0,
       externalSessionId: ref.session_id,
+      ...(ref.trajectory_id ? { externalTrajectoryIds: [ref.trajectory_id] } : {}),
       children: [],
-    });
+    };
+    externalBySession.set(ref.session_id, extNode);
+    children.push(extNode);
   }
 
   return {
@@ -183,9 +202,10 @@ export function findNodeByRef(root: TrajNode, ref: SubagentTrajectoryRef): TrajN
   while (stack.length > 0) {
     const node = stack.pop()!;
     const last = node.path[node.path.length - 1];
-    // Session ids are run-scoped; an explicit trajectory id identifies the document.
+    // Session ids are run-scoped; an explicit trajectory id identifies the document
+    // (or the external node created for that referenced trajectory).
     const ids = ref.trajectory_id
-      ? [node.doc?.trajectory_id]
+      ? [node.doc?.trajectory_id, ...(node.externalTrajectoryIds ?? [])]
       : [last, node.doc?.session_id, node.externalSessionId];
     if (ids.includes(wanted)) return node;
     stack.push(...node.children);

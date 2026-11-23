@@ -50,7 +50,7 @@ pub enum L2Error {
     /// The headroom worker failed to start or refused the handshake.
     #[error("headroom worker unavailable: {0}")]
     HeadroomUnavailable(String),
-    /// No runnable rtk binary was found ($RTK_BIN, vendored build, PATH).
+    /// No runnable tokenless was found ($TOKENLESS_BIN, release build, PATH).
     #[error("rtk unavailable: {0}")]
     RtkUnavailable(String),
     /// The worker replied with something outside the line-JSON protocol.

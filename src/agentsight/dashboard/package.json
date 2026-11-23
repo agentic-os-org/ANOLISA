@@ -15,6 +15,7 @@
     "test:stale-load": "node tests/run-stale-load-regression.cjs",
     "test:dashboard-controls": "node tests/run-dashboard-controls-regression.cjs",
     "test:agent-sessions-subagent-count": "node tests/run-agent-sessions-subagent-count-regression.cjs",
+    "test:agent-sessions-opt-run-merge": "node tests/run-agent-sessions-opt-run-merge-regression.cjs",
     "test:product-branding": "node --test tests/product-branding-regression.test.cjs",
     "test:agent-health-notifier": "node --test tests/agent-health-notifier-regression.test.cjs",
     "test:crash-episodes": "node --test tests/crash-episode-regression.test.cjs",

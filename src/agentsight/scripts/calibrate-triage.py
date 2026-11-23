@@ -25,12 +25,24 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 #: Default answer-length ceiling below which a tool-less single-turn session is
 #: considered to carry nothing reusable. Deliberately a parameter, not a
 #: constant: §5.2 of the design requires it to be set from measured data.
 DEFAULT_MAX_AGENT_LEN = 2000
+
+
+def message_length(message: object) -> int:
+    """Measure the shared ATIF reader's string, null and content-part forms."""
+    if message is None:
+        return 0
+    if isinstance(message, str):
+        return len(message)
+    # agentsight_atif::de_message preserves structured messages as compact
+    # JSON text. Counting the input array measures parts instead of characters.
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
 
 
 def measure(atif_json):
@@ -42,7 +54,11 @@ def measure(atif_json):
         "n_user_turns": sum(1 for s in steps if s.get("source") == "user"),
         "n_tool_calls": sum(len(s.get("tool_calls") or []) for s in steps),
         "max_agent_len": max(
-            (len(s.get("message") or "") for s in steps if s.get("source") == "agent"),
+            (
+                message_length(s.get("message"))
+                for s in steps
+                if s.get("source") == "agent"
+            ),
             default=0,
         ),
     }
@@ -54,11 +70,15 @@ def classify(m, max_agent_len):
     # trajectory with neither agent text nor tool calls recorded nothing.
     # Tool-only transcripts are work (71 steps / 84 calls / zero agent text in
     # the corpus the Rust comment documents), not emptiness.
-    if m["n_steps"] <= 1 or (m["max_agent_len"] == 0 and m["n_tool_calls"] == 0):
+    if m["max_agent_len"] == 0 and m["n_tool_calls"] == 0:
         return "empty"
     # More than one user turn means the topic was carried forward, which the
     # design treats as evidence of value regardless of the other inputs.
-    if m["n_tool_calls"] == 0 and m["n_user_turns"] <= 1 and m["max_agent_len"] < max_agent_len:
+    if (
+        m["n_tool_calls"] == 0
+        and m["n_user_turns"] <= 1
+        and m["max_agent_len"] < max_agent_len
+    ):
         return "useless"
     return "substantive"
 
@@ -70,37 +90,39 @@ def main():
     ap.add_argument("--samples", type=int, default=25, help="excluded rows to print")
     args = ap.parse_args()
 
-    try:
-        uri = Path(args.db).resolve().as_uri() + "?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
-        rows = conn.execute(
-            "SELECT session_id, first_user_message, atif_json FROM collected_trajectories"
-        ).fetchall()
-    except sqlite3.Error as e:
-        print(f"cannot read {args.db}: {e}", file=sys.stderr)
-        return 1
-
     buckets = Counter()
     excluded = []
     tool_dist = Counter()
     unparsable = 0
+    total = 0
 
-    for _session_id, first_msg, atif_json in rows:
-        try:
-            m = measure(atif_json)
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            unparsable += 1
-            continue
+    try:
+        uri = Path(args.db).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            rows = conn.execute(
+                "SELECT session_id, first_user_message, atif_json FROM collected_trajectories"
+            )
+            for _session_id, first_msg, atif_json in rows:
+                total += 1
+                try:
+                    m = measure(atif_json)
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    unparsable += 1
+                    continue
 
-        bucket = classify(m, args.max_agent_len)
-        buckets[bucket] += 1
-        if bucket != "substantive":
-            excluded.append((bucket, m, (first_msg or "")[:70]))
+                bucket = classify(m, args.max_agent_len)
+                buckets[bucket] += 1
+                if bucket != "substantive":
+                    excluded.append((bucket, m, (first_msg or "")[:70]))
 
-        n = m["n_tool_calls"]
-        tool_dist["0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"] += 1
+                n = m["n_tool_calls"]
+                tool_dist[
+                    "0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"
+                ] += 1
+    except sqlite3.Error as e:
+        print(f"cannot read {args.db}: {e}", file=sys.stderr)
+        return 1
 
-    total = len(rows)
     if total == 0:
         print("database has no collected trajectories", file=sys.stderr)
         return 1

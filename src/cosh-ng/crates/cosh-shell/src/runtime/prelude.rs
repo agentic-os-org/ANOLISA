@@ -64,10 +64,10 @@ pub(crate) use crate::types::{
 };
 pub(crate) use crate::ui::AgentHooksView;
 pub(crate) use crate::ui::{
-    health_uses_startup_row, hook_warning_icon, render_transcript, ActivityDetailsPanelModel,
-    ActivityPanelModel, ActivityRowModel, ActivityToolRowModel, AgentStatusAnimation,
-    ApprovalActionSet, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
-    ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
+    hook_warning_icon, render_transcript, ActivityDetailsPanelModel, ActivityPanelModel,
+    ActivityRowModel, ActivityToolRowModel, AgentStatusAnimation, ApprovalActionSet,
+    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
+    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
     CommandAssessmentSummaryModel, HealthBannerModel, HelpPanelEntry, HelpPanelGroup,
     HelpPanelModel, HookEntryView, HookEventGroup, HookStatusPanelModel, HookWarningView,
     MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,

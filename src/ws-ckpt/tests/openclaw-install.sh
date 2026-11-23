@@ -22,7 +22,7 @@ mkdir -p "$PLUGIN_SRC/dist/src"
 touch "$PLUGIN_SRC/package.json" \
     "$PLUGIN_SRC/openclaw.plugin.json" \
     "$PLUGIN_SRC/dist/src/index.js"
-mkdir -p "$FAKE_TARGET_DIR/share/anolisa/runtime/ws-ckpt/plugins/openclaw"
+mkdir -p "$FAKE_TARGET_DIR/share/anolisa/plugins/ws-ckpt/openclaw"
 
 export ANOLISA_DRY_RUN=1
 export ANOLISA_TARGET_DIR="$FAKE_TARGET_DIR"
@@ -536,7 +536,7 @@ grep -Fq "$CUSTOM_CONFIG uses \$include" "$STDERR_LOG"
 
 DISCOVERY_TARGET="$TMPDIR_TEST/discovery-target"
 DISCOVERY_PROJECT="$TMPDIR_TEST/discovery-project"
-PARTIAL_OPENCLAW="$DISCOVERY_TARGET/share/anolisa/runtime/ws-ckpt/plugins/openclaw"
+PARTIAL_OPENCLAW="$DISCOVERY_TARGET/share/anolisa/plugins/ws-ckpt/openclaw"
 COMPLETE_OPENCLAW="$DISCOVERY_PROJECT/src/ws-ckpt/src/plugins/openclaw"
 mkdir -p "$PARTIAL_OPENCLAW" "$COMPLETE_OPENCLAW/dist/src"
 touch "$PARTIAL_OPENCLAW/package.json" "$PARTIAL_OPENCLAW/openclaw.plugin.json"
@@ -554,7 +554,7 @@ if [ "$resolved_plugin" != "$COMPLETE_OPENCLAW" ]; then
     exit 1
 fi
 
-PARTIAL_HERMES="$DISCOVERY_TARGET/share/anolisa/runtime/ws-ckpt/plugins/hermes"
+PARTIAL_HERMES="$DISCOVERY_TARGET/share/anolisa/plugins/ws-ckpt/hermes"
 COMPLETE_HERMES="$DISCOVERY_PROJECT/src/ws-ckpt/src/plugins/hermes"
 mkdir -p "$PARTIAL_HERMES" "$COMPLETE_HERMES"
 touch "$PARTIAL_HERMES/plugin.yaml"
@@ -570,7 +570,7 @@ if [ "$resolved_plugin" != "$COMPLETE_HERMES" ]; then
     exit 1
 fi
 
-PARTIAL_SKILL="$DISCOVERY_TARGET/share/anolisa/runtime/skills/ws-ckpt"
+PARTIAL_SKILL="$DISCOVERY_TARGET/share/anolisa/skills/ws-ckpt"
 COMPLETE_SKILL="$DISCOVERY_PROJECT/src/ws-ckpt/src/skills/ws-ckpt"
 mkdir -p "$PARTIAL_SKILL" "$COMPLETE_SKILL"
 touch "$COMPLETE_SKILL/SKILL.md"

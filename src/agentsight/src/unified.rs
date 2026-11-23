@@ -55,7 +55,7 @@ use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{
     DetectorConfig, InterruptionDetector, ProcessExitStatus, recover_oom_events,
 };
-use crate::parser::Parser;
+use crate::pipeline_core::PipelineCore;
 use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent};
 #[cfg(not(test))]
 use crate::probes::{Probes, ProbesPoller};
@@ -66,6 +66,20 @@ use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryRe
 use crate::tokenizer::LlmTokenizer;
 #[cfg(test)]
 use capture_runtime_tests::{TestPoller as ProbesPoller, TestProbes as Probes};
+
+/// Minimal SSL-attach surface used by [`AgentSight::attach_if_agent_name_unknown`].
+///
+/// Implemented for the real probe manager and, in tests, for stubs so the
+/// "unknown agent name" decision can be exercised without kernel probes.
+pub(crate) trait SslProbe {
+    fn attach_ssl(&mut self, pid: i32);
+}
+
+impl SslProbe for Probes {
+    fn attach_ssl(&mut self, pid: i32) {
+        let _ = self.attach_unclassified_process(pid);
+    }
+}
 
 /// Main AgentSight struct for tracing AI agent activity
 ///
@@ -79,12 +93,8 @@ use capture_runtime_tests::{TestPoller as ProbesPoller, TestProbes as Probes};
 pub struct AgentSight {
     /// BPF probes manager
     probes: Probes,
-    /// Message parser (unified)
-    parser: Parser,
-    /// Event aggregator (unified)
-    aggregator: Aggregator,
-    /// Unified analyzer
-    analyzer: Analyzer,
+    /// Probe-independent parsing, correlation, and analysis.
+    core: PipelineCore,
     /// GenAI semantic builder
     genai_builder: GenAIBuilder,
     /// Pluggable GenAI event exporters (JSONL, SLS, etc.)
@@ -453,7 +463,7 @@ impl AgentSight {
             // ensure_default_agents_config handles both cases:
             // - File missing: creates it with the embedded default.
             // - File exists: checks schema_version; if outdated, backs up and
-            //   overwrites with the current default.
+            //   shallow-merges user top-level sections over the current defaults.
             let load_result = match crate::config::ensure_default_agents_config(&path) {
                 Ok(()) => config.load_from_file(&path),
                 Err(e) => Err(e),
@@ -548,6 +558,11 @@ impl AgentSight {
         // `ProcTrace::run` / `SslSniff::run` paths read the same global); the
         // poll threads read it via `crate::config::poll_timeout_ms()`.
         crate::config::set_poll_timeout_ms(config.poll_timeout_ms);
+        // Publish the learned static-SSL offset cache location before probes
+        // are built: `SslSniff::build` loads the cache so the first discovery
+        // of a previously scanned binary attaches its uprobes synchronously
+        // instead of racing an asynchronous whole-binary scan (#9762).
+        crate::config::set_ssl_offsets_learned_path(config.storage.ssl_offsets_learned_path());
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
@@ -561,6 +576,8 @@ impl AgentSight {
             &config.runtime_limits,
         )
         .context("Failed to create probes")?;
+        let cpu_budget =
+            maintenance::configure_cpu_budget(&probes, config.runtime_limits.cpu_budget_percent)?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -618,6 +635,10 @@ impl AgentSight {
                 result.pid,
                 agent_name.as_deref().unwrap_or("unknown"),
             );
+            // Best-effort attach for processes without a recognized agent name:
+            // the first TLS connection may arrive before a later connection
+            // scan identifies the agent.
+            Self::attach_if_agent_name_unknown(&mut probes, agent_name.as_deref(), result.pid);
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -836,12 +857,6 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
-        let cpu_budget = (config.runtime_limits.cpu_budget_percent != 0)
-            .then(|| {
-                crate::utils::cpu_budget::CpuBudget::new(config.runtime_limits.cpu_budget_percent)
-            })
-            .transpose()?
-            .map(Arc::new);
         // Global capacity budget shared by every maintenance job: each job
         // re-evaluates its effective size limit right before running.
         let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
@@ -1035,15 +1050,7 @@ impl AgentSight {
 
         Ok(AgentSight {
             probes,
-            // The configured header cap governs which HTTP/1 messages the
-            // parser accepts; messages beyond the cap fall to the raw-data
-            // path instead of being parsed. The aggregator gets the same cap
-            // so its re-parse sites (1xx chains, byte assembly) never hold
-            // assembled messages to a limit the parser already accepted.
-            parser: Parser::with_max_headers(config.max_headers),
-            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits)
-                .with_http_max_headers(config.max_headers),
-            analyzer,
+            core: PipelineCore::new(&config, analyzer),
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
@@ -1134,6 +1141,25 @@ impl AgentSight {
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
     }
 
+    /// Attach SSL probes best-effort when the process has no recognized agent
+    /// name yet.
+    ///
+    /// Reaching here for every exec on the host is the point -- the first TLS
+    /// connection can precede the scan that classifies the process -- so the
+    /// probe side only claims a `traced_processes` slot once the uprobe
+    /// actually attached (see `Probes::attach_unclassified_process`). The
+    /// decision lives in this helper so it stays unit-testable without live
+    /// eBPF probes: the surrounding scan loops still need a real `Probes`.
+    fn attach_if_agent_name_unknown<P: SslProbe>(
+        probes: &mut P,
+        agent_name: Option<&str>,
+        pid: u32,
+    ) {
+        if agent_name.is_none() {
+            probes.attach_ssl(pid as i32);
+        }
+    }
+
     fn register_resource_targets(
         targets: &Arc<RwLock<HashMap<u32, String>>>,
         pid: u32,
@@ -1190,7 +1216,12 @@ impl AgentSight {
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
         if let Err(e) = probes.add_traced_pid(pid) {
-            log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
+            // Unregistered pids are dropped by the BPF `is_pid_traced()` gate,
+            // so this is the whole agent going uncaptured, not one lost event.
+            log::error!(
+                "agent {agent_name} (pid {pid}) could not be registered in the traced_processes \
+                 filter: {e}; its LLM traffic will not be captured"
+            );
         }
         // Register descendant PIDs so child processes spawned by wrapper-style
         // agents are admitted by the BPF `traced_processes` filter even when
@@ -1322,6 +1353,7 @@ impl AgentSight {
             return None;
         }
 
+        self.check_pending_logtail();
         self.tick();
         let event = self.probes.try_recv()?;
         self.process_event(event)
@@ -1385,9 +1417,11 @@ impl AgentSight {
                 );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
-                } else if let Some(agent_name) =
-                    Self::conn_scan_agent_name(&self.scanner, dns_event.pid)
-                {
+                }
+                // Resolve/register the agent name regardless of the attach
+                // result so the resource target is recorded even when the
+                // uprobe attach degrades.
+                if let Some(agent_name) = Self::conn_scan_agent_name(&self.scanner, dns_event.pid) {
                     self.pid_agent_name_cache
                         .put(dns_event.pid, agent_name.clone());
                     if let Ok(mut targets) = self.resource_targets.write() {
@@ -1431,18 +1465,7 @@ impl AgentSight {
             return Some(self.event_count);
         }
 
-        if let Event::Ssl(ref ssl) = event {
-            if let Some(results) = self.aggregator.process_sse_capture(ssl) {
-                self.process_aggregated_results(results);
-                return Some(self.event_count);
-            }
-        }
-        // Parse the event
-        let result = self.parser.parse_event(event);
-
-        // Process messages through aggregator
-        let aggregated_results = self.aggregator.process_result(result);
-
+        let aggregated_results = self.core.process_event(event);
         self.process_aggregated_results(aggregated_results);
 
         Some(self.event_count)
@@ -1468,24 +1491,29 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
+                    return;
                 }
+                // Unknown process: attach best-effort so a first TLS connection
+                // is captured before any scan classifies it.
+                Self::attach_if_agent_name_unknown(&mut self.probes, None, *pid);
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
                 self.flush_completions_for_pid(*pid);
                 if let Ok(mut targets) = self.resource_targets.write() {
                     targets.remove(pid);
                 }
+                // Unknown-process scans also retain inode references until exit.
+                self.probes.detach_ssl_probes(*pid);
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                 } else {
                     self.flush_deferred_genai_for_pid(*pid);
-                    let removed = self.aggregator.drain_connections_for_pid(*pid);
-                    self.aggregator.queue_removed(removed);
+                    let removed = self.core.aggregator_mut().drain_connections_for_pid(*pid);
+                    self.core.aggregator_mut().queue_removed(removed);
                 }
-                let results = self.aggregator.tick(std::time::Instant::now());
+                let results = self.core.tick(std::time::Instant::now());
                 self.process_aggregated_results(results);
             }
         }
@@ -1524,10 +1552,8 @@ impl AgentSight {
 
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
-            // Rate-limited internally, and deliberately outside the idle branch:
-            // a saturated byte budget keeps the queue non-empty, which is exactly
-            // when the watermarks matter most.
-            self.tick();
+            // try_process ticks before receiving, including on a busy channel.
+            // Publish watermarks even when that channel never becomes idle.
             self.maybe_log_buffer_watermarks();
             self.maybe_export_runtime_metrics();
             if let Some(result) = self.try_process() {
@@ -1543,7 +1569,7 @@ impl AgentSight {
 
         self.flush_completions();
         // On shutdown, flush all remaining pending events with fallback session_id
-        let abandoned = self.aggregator.drain_pending();
+        let abandoned = self.core.drain_pending();
         self.process_aggregated_results(abandoned);
         self.flush_completions();
         self.flush_all_pending_genai();
@@ -1565,7 +1591,7 @@ impl AgentSight {
         }
         // Flush all pending GenAI events before exit
         self.flush_completions();
-        let abandoned = self.aggregator.drain_pending();
+        let abandoned = self.core.drain_pending();
         self.process_aggregated_results(abandoned);
         self.flush_completions();
         self.flush_all_pending_genai();
@@ -1608,7 +1634,8 @@ impl AgentSight {
     /// `pub(crate)` because `FfiEventSender` is a crate-internal type and the
     /// only caller lives in this crate's FFI layer.
     pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
-        self.aggregator
+        self.core
+            .aggregator_mut()
             .set_compact_sse(!sender.raw_https_enabled() && !self.runtime_limits.retain_raw_sse);
         self.ffi_sender = Some(sender);
     }
@@ -1849,12 +1876,16 @@ impl AgentSight {
         // path lands usable `complete` rows; a crashed process skips this and
         // keeps the interrupted-evidence drain below untouched.
         if ProcessExitStatus::decode(raw_exit_code).is_clean() {
-            for pair in self.aggregator.complete_pid_partial_responses(pid) {
+            for pair in self
+                .core
+                .aggregator_mut()
+                .complete_pid_partial_responses(pid)
+            {
                 self.complete_drained_pair(&pair);
             }
         }
 
-        let drained = self.aggregator.drain_connections_for_pid(pid);
+        let drained = self.core.aggregator_mut().drain_connections_for_pid(pid);
 
         // 2. Persist drained connections as pending calls
         if let Some(ref store) = self.genai_sqlite_store {
@@ -1878,7 +1909,7 @@ impl AgentSight {
             }
         }
 
-        self.aggregator.queue_removed(drained);
+        self.core.aggregator_mut().queue_removed(drained);
 
         // 3. Query all pending calls for this PID (including any persisted earlier)
         let Some(pending_calls) =
@@ -1925,15 +1956,17 @@ impl AgentSight {
         let builder = &self.genai_builder;
         let mapper = &self.response_mapper;
         let cache = &self.pid_agent_name_cache;
-        self.aggregator.snapshot_idle_connections(|id, request| {
-            let mut pending = builder.build_pending_from_request(request, id, mapper, cache)?;
-            pending.pending_origin = crate::storage::sqlite::PendingOrigin::IdleDrain;
-            if let Err(error) = store.insert_pending(&pending) {
-                log::warn!("[IdleDrain] Failed to persist pending call: {error}");
-                return None;
-            }
-            Some(())
-        });
+        self.core
+            .aggregator_mut()
+            .snapshot_idle_connections(|id, request| {
+                let mut pending = builder.build_pending_from_request(request, id, mapper, cache)?;
+                pending.pending_origin = crate::storage::sqlite::PendingOrigin::IdleDrain;
+                if let Err(error) = store.insert_pending(&pending) {
+                    log::warn!("[IdleDrain] Failed to persist pending call: {error}");
+                    return None;
+                }
+                Some(())
+            });
     }
 
     /// Drain aggregator connections whose PID is no longer alive and persist
@@ -1945,12 +1978,12 @@ impl AgentSight {
         }
         self.last_drain_check = std::time::Instant::now();
 
-        let drained = self.aggregator.drain_dead_pid_connections();
+        let drained = self.core.aggregator_mut().drain_dead_pid_connections();
         if drained.is_empty() {
             return;
         }
         if self.genai_sqlite_store.is_none() {
-            self.aggregator.queue_removed(drained);
+            self.core.aggregator_mut().queue_removed(drained);
             return;
         }
 
@@ -2131,7 +2164,7 @@ impl AgentSight {
             }
         }
 
-        self.aggregator.queue_removed(drained);
+        self.core.aggregator_mut().queue_removed(drained);
 
         // ── OOM detection for dead PIDs ──────────────────────────────────────
         // After persisting pending calls for dead PIDs, check if any were OOM-killed.
@@ -2297,7 +2330,7 @@ impl AgentSight {
     /// session_id falls back to the response_id-derived id, exactly like the
     /// deferred-timeout flush.
     fn complete_drained_pair(&mut self, agg_result: &AggregatedResult) {
-        let analysis_results = self.analyzer.analyze_aggregated(agg_result);
+        let analysis_results = self.core.analyze_aggregated(agg_result);
         let (output, mut pending_info) = self.genai_builder.build_with_pending(
             &analysis_results,
             &self.response_mapper,
@@ -2337,17 +2370,17 @@ impl AgentSight {
 
     /// Get reference to aggregator
     pub fn aggregator(&self) -> &Aggregator {
-        &self.aggregator
+        self.core.aggregator()
     }
 
     /// Get mutable reference to aggregator
     pub fn aggregator_mut(&mut self) -> &mut Aggregator {
-        &mut self.aggregator
+        self.core.aggregator_mut()
     }
 
     /// Get reference to analyzer
     pub fn analyzer(&self) -> &Analyzer {
-        &self.analyzer
+        self.core.analyzer()
     }
 
     /// Get reference to storage
@@ -2461,7 +2494,7 @@ impl AgentSight {
 
     fn runtime_metrics(&self) -> Result<RuntimeMetrics> {
         let channel = self.probes.channel_watermarks();
-        let connections = self.aggregator.connection_metrics();
+        let connections = self.core.aggregator().connection_metrics();
         Ok(RuntimeMetrics {
             event_channel_bytes: channel.in_flight_bytes as u64,
             event_channel_budget_bytes: channel.budget_bytes as u64,
@@ -3173,41 +3206,11 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
     if let Some(system) = instructions.filter(|text| !text.is_empty()) {
         messages.insert(0, serde_json::json!({"role": "system", "content": system}));
     }
-    // Parse tool_calls.arguments from string to object
-    for msg in messages.iter_mut() {
-        if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-            for tc in tcs.iter_mut() {
-                if let Some(f) = tc.get_mut("function") {
-                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
-                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
-                            f["arguments"] = p;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // DashScope/Bailian native requests nest their tool definitions under
-    // "parameters" (the OpenAI-compatible spelling is top level), the same
-    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
-    // this the drained call is estimated without tools the template renders.
-    let tools_json: Option<Vec<serde_json::Value>> = body
-        .get("tools")
-        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
-        .and_then(|t| t.as_array())
-        .map(|a| a.to_vec());
-    let count =
-        match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
-            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-            Err(_) => {
-                // Fallback: raw message count
-                messages
-                    .iter()
-                    .filter_map(|m| serde_json::to_string(m).ok())
-                    .map(|s| tokenizer.count(&s).unwrap_or(0))
-                    .sum()
-            }
-        };
+    let count = crate::analyzer::estimate_input_tokens(
+        messages,
+        crate::parser::llm::extract_tools_view(body),
+        tokenizer,
+    );
     if count > 0 { Some(count as i64) } else { None }
 }
 
@@ -3233,6 +3236,10 @@ fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, St
     report.push_str(&format!(", pending_genai {pending_genai} entries"));
     (needs_attention, report)
 }
+
+#[cfg(test)]
+#[path = "unified/attach_early_tests.rs"]
+mod attach_early_tests;
 
 #[cfg(test)]
 mod response_pending_tests;
@@ -4041,6 +4048,120 @@ mod tests {
             Box::new(RecordingExporter::new("logtail-file-dynamic")),
         );
         assert_eq!(exporters.len(), 1, "same name → replace");
+    }
+
+    #[test]
+    fn pending_logtail_activation_to_default_path_neither_drops_nor_duplicates_records() {
+        let _guard = crate::genai::logtail::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::genai::logtail::set_dynamic_logtail_path("");
+        crate::genai::logtail::clear_last_batch_write();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_pending_logtail_handoff_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("agentsight.jsonl");
+        std::fs::write(&target, "").unwrap();
+
+        let default_exporter = LogtailExporter::new_with_path_dynamic(
+            target.to_str().unwrap(),
+            None,
+            true,
+            false,
+            true,
+        );
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(default_exporter)];
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let sls_activated = AtomicBool::new(false);
+
+        // Watcher activates dynamic path pointing at the same file (via a `..` alias)
+        // and deposits the new exporter into `mailbox` before the main loop drains it.
+        let sub = tmp.join("alias");
+        std::fs::create_dir_all(&sub).unwrap();
+        let alias_path = sub.join("..").join("agentsight.jsonl");
+        let cfg_json = serde_json::json!({
+            "runtime": { "sls_logtail_path": alias_path.to_str().unwrap() }
+        })
+        .to_string();
+        crate::background::handle_config_event(
+            &cfg_json,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+
+        let count_llm_records = |path: &std::path::Path| -> usize {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty() && !l.contains("gen_ai.interruption"))
+                .count()
+        };
+
+        // Event arriving before `register_pending_logtail` drains the mailbox must not be lost.
+        let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-pre-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event));
+        }
+        let pre_drain_lines = count_llm_records(&target);
+        assert_eq!(
+            pre_drain_lines, 1,
+            "record exported before pending_logtail is drained must still be written by default exporter"
+        );
+
+        // Drain the mailbox and export a second event; it must be written once, not duplicated.
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+        let event_post = GenAISemanticEvent::LLMCall(make_test_llm_call("call-post-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event_post));
+        }
+        let post_drain_lines = count_llm_records(&target);
+        assert_eq!(
+            post_drain_lines, 2,
+            "record exported after draining pending_logtail must be written once"
+        );
+
+        // Deactivate and then re-activate while the previous dynamic exporter
+        // remains in `exporters` and the newly created replacement is still
+        // queued in `mailbox`: exporting in that window must still write once,
+        // not twice.
+        crate::background::handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":""}}"#,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+        crate::background::handle_config_event(
+            &cfg_json,
+            &sls_activated,
+            || "ecs-uid".to_string(),
+            None,
+            true,
+            &mailbox,
+        );
+        let event_reactivate_window =
+            GenAISemanticEvent::LLMCall(make_test_llm_call("call-reactivate-pre-drain"));
+        for exporter in &exporters {
+            exporter.export(std::slice::from_ref(&event_reactivate_window));
+        }
+        let reactivate_lines = count_llm_records(&target);
+        assert_eq!(
+            reactivate_lines, 3,
+            "exporting after reactivation before mailbox drain must write once, not duplicate"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+        crate::genai::logtail::set_dynamic_logtail_path("");
+        crate::genai::logtail::clear_last_batch_write();
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {

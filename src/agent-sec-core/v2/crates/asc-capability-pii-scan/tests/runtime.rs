@@ -151,7 +151,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     assert!(completed.success);
     assert_eq!(completed.exit_code, 0);
     assert_eq!(completed.data["verdict"], "deny");
-    assert_eq!(completed.data["summary"]["scanner_version"], "2.1.0");
+    assert_eq!(completed.data["summary"]["scanner_version"], "2.1.2");
     assert_eq!(completed.data["summary"]["coverage"]["status"], "complete");
     assert!(
         completed.data["redacted_text"]
@@ -183,7 +183,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     assert!(!failed.success);
     assert_eq!(failed.exit_code, 1);
     assert_eq!(failed.data["verdict"], "error");
-    assert_eq!(failed.data["summary"]["scanner_version"], "2.1.0");
+    assert_eq!(failed.data["summary"]["scanner_version"], "2.1.2");
     assert_eq!(failed.data["summary"]["coverage"]["status"], "unavailable");
     assert_eq!(failed.data["summary"]["scanned_bytes"], 0);
     assert_eq!(
@@ -202,7 +202,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     for record in &records[..3] {
         assert_eq!(
             record.details["result"]["summary"]["scanner_version"],
-            "2.1.0"
+            "2.1.2"
         );
     }
     for record in &*records {
@@ -393,12 +393,9 @@ fn bounded_report_keeps_tail_deny_totals_full_redaction_and_one_terminal_event()
 
 #[test]
 fn oversized_single_raw_finding_retains_its_classification_without_raw_evidence() {
-    let rules = PiiRuleSet::from_yaml(
-        b"- type: large_secret\n  regex: 'BEGIN[A-Z]+END'\n  severity: deny\n",
-    )
-    .unwrap();
+    let rules = PiiRuleSet::builtin().unwrap();
     let request = PiiScanRequest {
-        text: format!("BEGIN{}END", "Q".repeat(600 * 1024)),
+        text: format!("Bearer {}", "Q".repeat(600 * 1024)),
         options: PiiScanOptions {
             raw_evidence: true,
             ..Default::default()
@@ -410,6 +407,7 @@ fn oversized_single_raw_finding_retains_its_classification_without_raw_evidence(
     assert_eq!(outcome.data["summary"]["total"], 1);
     assert_eq!(outcome.data["summary"]["findings_truncated"], true);
     let finding = &outcome.data["findings"][0];
+    assert_eq!(finding["type"], "bearer_token");
     assert_eq!(finding["severity"], "deny");
     assert_eq!(finding["metadata"]["evidence_omitted"], true);
     assert!(finding.get("raw_evidence").is_none());

@@ -5,7 +5,7 @@ use agentsight_opt::perf::compute_stats;
 use std::path::Path;
 use std::process::Command;
 
-fn analyzed_error(flag: Option<bool>, content: &str) -> bool {
+fn analyzed_error(flags: serde_json::Value, content: &str) -> bool {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/batch-analyze.py");
     let fixture = r#"
 import importlib.util, json, pathlib, sys, tempfile
@@ -13,9 +13,7 @@ spec = importlib.util.spec_from_file_location("batch", sys.argv[1])
 batch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(batch)
 reply = {"type": "tool_result", "tool_use_id": "a", "content": sys.argv[3]}
-flag = json.loads(sys.argv[2])
-if flag is not None:
-    reply["is_error"] = flag
+reply.update(json.loads(sys.argv[2]))
 events = [
     {"type": "assistant", "timestamp": "2026-01-01T00:00:00Z", "message": {
         "role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]}},
@@ -31,7 +29,7 @@ with tempfile.TemporaryDirectory() as directory:
     let output = Command::new("python3")
         .args(["-c", fixture])
         .arg(script)
-        .arg(serde_json::to_string(&flag).unwrap())
+        .arg(serde_json::to_string(&flags).unwrap())
         .arg(content)
         .output()
         .expect("python3 must be available for the batch converter");
@@ -49,18 +47,52 @@ with tempfile.TemporaryDirectory() as directory:
 
 #[test]
 fn batch_failure_flag_reaches_the_analysis_result() {
-    assert!(analyzed_error(Some(true), "Command exited with status 1"));
+    assert!(analyzed_error(
+        serde_json::json!({"is_error": true}),
+        "Command exited with status 1"
+    ));
 }
 
 #[test]
 fn batch_explicit_success_overrides_error_words() {
     assert!(!analyzed_error(
-        Some(false),
+        serde_json::json!({"is_error": false}),
         "Error: recovered; operation completed"
     ));
 }
 
 #[test]
 fn batch_unknown_status_keeps_the_text_fallback() {
-    assert!(analyzed_error(None, "Error: request timed out"));
+    assert!(analyzed_error(
+        serde_json::json!({}),
+        "Error: request timed out"
+    ));
+}
+
+#[test]
+fn batch_alternate_success_flags_override_error_words() {
+    for fields in [
+        serde_json::json!({"isError": false}),
+        serde_json::json!({"success": true}),
+    ] {
+        assert!(!analyzed_error(
+            fields,
+            "Error: recovered; operation completed"
+        ));
+    }
+    assert!(!analyzed_error(
+        serde_json::json!({}),
+        r#"{"success":true,"output":"Error: recovered"}"#
+    ));
+}
+
+#[test]
+fn batch_declared_failures_reach_statistics_without_error_words() {
+    for fields in [
+        serde_json::json!({"isError": true}),
+        serde_json::json!({"success": false}),
+        serde_json::json!({"is_error": false, "status": "ERROR"}),
+    ] {
+        assert!(analyzed_error(fields, "Operation finished"));
+    }
 }

@@ -9,6 +9,145 @@
 
 ## [未发布]
 
+## [0.4.2] - 2026-11-20
+
+### 变更
+
+- 通过 AW 运行 sec-core 或 Tokenless 时，`anolisa status <component>` 和
+  `anolisa adapter status [component]` 的文本输出提示使用
+  `aw inspect --config /path/to/aw.yaml --json` 查看 Provider 状态和最近的执行记录。
+  适配器状态也会在有记录时显示启用时间，JSON 输出字段为 `enabled_at`
+  ([#10377](https://github.com/agentic-os-org/ANOLISA/pull/10377))。
+- 将组件目录更新到 Agent Memory `0.2.16`、AgentSight `0.16.2`、cosh-ng `0.30.0`、
+  agent-sec-core `1.3.0`、SkillFS `0.5.8`、Tokenless `0.9.6` 和 ws-ckpt `0.7.3`。
+
+### 移除
+
+- 从内置的 cosh-ng 安装契约中移除 `cosh-switch`，与 `0.30.0` 的安装包一致。
+  升级 cosh-ng 前，请移除脚本中对 `cosh-switch` 的调用
+  ([#9968](https://github.com/agentic-os-org/ANOLISA/pull/9968))。
+
+### 修复
+
+- 内置 RPM 仓库改用 `mirrors-ssl.aliyuncs.com` 的 HTTPS 地址，通过 TLS 下载元数据
+  和软件包。如果升级后 `/etc/anolisa/repo.toml` 仍指向旧镜像，请手动更新 RPM 地址
+  ([#10312](https://github.com/agentic-os-org/ANOLISA/pull/10312))。
+
+## [0.4.1] - 2026-11-12
+
+### 变更
+
+- 将组件目录更新到 Agent Memory `0.2.15`、cosh-ng `0.29.1`、OS Skills `0.7.0`、
+  agent-sec-core `1.2.1`、SkillFS `0.5.7` 和 ws-ckpt `0.7.1`。
+
+### 修复
+
+- `anolisa telemetry prepare` 现在拒绝重定位的 `--prefix` 值和
+  `--install-mode user`，dry-run 也适用，避免将 systemd 无法使用的服务报告为
+  已准备就绪。应在镜像根目录内使用 system 范围执行准备；`--prefix /` 仍可使用。
+  该命令的帮助不再展示被拒绝的选项
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951))。
+- 使用 `--json` 时，将遥测操作的警告写入 JSON 响应的 `warnings` 数组，
+  包括 `anolisa telemetry prepare --no-service` 的启动指导，以及启用或禁用时
+  的服务失败警告。原先从 stderr 读取这些警告的脚本需改为读取 JSON 数组；
+  面向用户的文本输出保持不变
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951))。
+- 为生成的遥测 systemd 单元中的可执行文件路径添加引号并转义，确保包含空格、
+  引号、反斜杠或百分号的路径能启动正确的程序。非 UTF-8 路径现在会被拒绝，
+  不再写入无法使用的单元。已有单元不会自动重写：镜像准备时需重新运行
+  `anolisa telemetry prepare`，需要采集的宿主则重新运行
+  `anolisa telemetry enable`
+  ([#9952](https://github.com/agentic-os-org/ANOLISA/pull/9952))。
+
+## [0.4.0] - 2026-11-08
+
+### 新增
+
+- 为镜像构建新增内部命令 `anolisa telemetry prepare`。该命令准备遥测文件，
+  并为下次启动启用常驻 systemd 单元，不启动采集，也不记录构建宿主的实例快照。
+  实际执行需要 root 权限和 system 安装范围；已有退出采集标记或服务配置失败时
+  会停止准备。使用 `--no-service` 可跳过单元配置，随后需在启动时先执行
+  `anolisa telemetry init`，再运行 `anolisa telemetry upload --loop`。
+  现有 RPM 和镜像构建流程不会自动切换到该命令
+  ([#9412](https://github.com/agentic-os-org/ANOLISA/pull/9412))。
+
+### 变更
+
+- 在 `anolisa --help` 中提供组件安装和适配器连接的快速上手步骤。
+  `anolisa adapter --help` 现在说明前置条件、发现、启用、状态检查，以及
+  在 Agent 框架内验证集成的步骤
+  ([#9661](https://github.com/agentic-os-org/ANOLISA/pull/9661))。
+- 将组件目录更新至 AgentSight `0.16.0`、cosh-ng `0.29.0`、agent-sec-core `1.2.0`、
+  SkillFS `0.5.6`、Tokenless `0.9.4` 和 ws-ckpt `0.7.0`。
+- 更新随 CLI 提供的安装契约，按所选布局记录 cosh-ng 的资源位置，并包含
+  Tokenless 的宿主分发器和适配器资源。Tokenless 契约不再安装独立的 `rtk`
+  可执行文件或符号链接；当前 Tokenless 包通过 `tokenless rtk` 提供该功能。
+
+### 修复
+
+- 启用 QwenWork 适配器时，不再因缺少独立 RTK 可执行文件而提示命令改写不可用。
+  当前 Tokenless 使用 `tokenless rtk`；Tokenless `0.9.2` 及更早版本仍需要独立
+  可执行文件，但此预检查不再报告该文件缺失
+  ([#9454](https://github.com/agentic-os-org/ANOLISA/pull/9454))。
+
+## [0.3.21] - 2026-11-02
+
+### 新增
+
+- 执行 `anolisa adapter enable <component> cosh` 时，通过 cosh 原生注册表激活
+  托管扩展。状态检查验证所选用户来源和启用状态；禁用时只释放匹配的来源选择，
+  保留系统扩展和用户编辑过的文件。需要使用支持按身份条件清理来源选择的
+  cosh-ng 构建，并在启用或禁用后重启已有 cosh 会话；常驻会话的加载状态仍为
+  `unknown` ([#9352](https://github.com/agentic-os-org/ANOLISA/pull/9352))。
+
+### 变更
+
+- 由 ANOLISA 的 RPM、预构建归档、npm 平台包和安装器数据包提供组件发现及集成
+  配置。RPM 安装和接管会保存这些配置供适配器管理使用，并能识别独立核心包。
+  移动安装目录时需将 CLI 的 `bin/` 和 `share/` 目录一起保留。通过 RPM 升级时，
+  需在同一次 DNF/Yum 事务中联合升级 ANOLISA 与所有已安装且仍拥有注册表文件的
+  旧组件包。已启用的仓库必须同时提供相互兼容的 CLI、组件包及其所需子包。
+  回滚时需恢复相互匹配的组件包和注册表数据
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222))。
+- 按所选安装布局渲染 Agent Memory MCP 的命令路径，支持含引号或反斜杠的路径，
+  同时保留其他 JSON 字段。Agent Memory `0.2.13` 的 Raw 包需要 ANOLISA
+  `0.3.21` 或更高版本
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222))。
+- 将组件目录更新至 Agent Memory `0.2.13`、AgentSight `0.15.1`、cosh-ng `0.28.1`、
+  OS Skills `0.6.4`、agent-sec-core `1.1.2`、SkillFS `0.5.5`、Tokenless `0.9.2`
+  和 ws-ckpt `0.6.1`。
+
+### 修复
+
+- 在 Raw 安装、更新、回滚、修复和卸载过程中保留 ANOLISA 的组件发现文件。
+  现有归档可在注册表已存在时正常安装；过时的文件归属记录不再将注册表变化
+  误判为组件损坏，也不会在清理时删除注册表。恢复隔离记录时同样适用。
+  不再安装注册表文件的新 Raw 包需要 ANOLISA `0.3.21` 或更高版本
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351))。
+
+## [0.3.20] - 2026-10-29
+
+### 新增
+
+- 为 Raw 制品的 `anolisa install` 新增 `--no-deps` 选项，支持与 `--all`
+  一起使用，让自行管理运行时依赖的用户跳过依赖检查与安装。安装成功后向
+  stderr 输出提醒，`--quiet` 下不显示；批量安装只要有组件实际安装成功，
+  就输出一次提醒。RPM 后端拒绝此选项，默认依赖处理行为不变
+  ([#9126](https://github.com/agentic-os-org/ANOLISA/pull/9126))。
+
+### 变更
+
+- 将组件目录更新至 Agent Memory `0.2.11`、AgentSight `0.15.0`、
+  SkillFS `0.5.4` 和 Tokenless `0.9.0`。
+
+### 修复
+
+- 当适配器状态查询或禁用（包括 dry-run）因路径超出框架允许目录而被拒绝时，
+  提供恢复指引。人类可读输出和 JSON 错误现在会提示检查框架目录配置与祖先
+  目录符号链接，并在目录被重定向时恢复原目录后重试。边界检查、安装记录保留
+  行为和退出码不变
+  ([#9220](https://github.com/agentic-os-org/ANOLISA/pull/9220))。
+
 ## [0.3.19] - 2026-10-25
 
 ### 变更

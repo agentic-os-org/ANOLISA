@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::language::apply_language_value;
@@ -22,11 +25,72 @@ pub fn load_config() -> CoshConfig {
     config
 }
 
+pub(crate) fn load_guidance_config() -> CoshConfig {
+    let mut config = guidance_config_at(config_read_file_path().as_deref());
+    apply_env_overrides(&mut config);
+    config
+}
+
+fn guidance_config_at(path: Option<&Path>) -> CoshConfig {
+    let mut config = CoshConfig::default();
+    if let Some(content) = path.and_then(|path| read_config_text(path).ok()) {
+        parse_simple_config(&content, &mut config);
+        parse_toml_config(&content, &mut config);
+    }
+    config
+}
+
+#[cfg(test)]
+library_tests! {
+    mod guidance_tests {
+        use super::*;
+
+        #[test]
+        fn guidance_config_bounds_reads_without_changing_supported_values() {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("config.toml");
+            let content = "[logging]\nlevel = 'trace'\n[shell.recommendations]\nenabled = false\n";
+            std::fs::write(&path, content).unwrap();
+            let config = guidance_config_at(Some(&path));
+            assert_eq!(config.log_level, "trace");
+            assert!(!config.recommendations.enabled);
+            std::fs::write(&path, format!("{content}#{}", "x".repeat(256 * 1024))).unwrap();
+            let config = guidance_config_at(Some(&path));
+            assert_eq!(config.log_level, "info");
+            assert_eq!(config.recommendations.enabled, CoshConfig::default().recommendations.enabled);
+            std::fs::remove_file(&path).unwrap();
+            nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR).unwrap();
+            assert_eq!(guidance_config_at(Some(&path)).log_level, "info");
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+            assert_eq!(guidance_config_at(Some(&path)).log_level, "info");
+        }
+    }
+}
+
 pub(super) fn load_config_file_into(path: &Path, config: &mut CoshConfig) {
     if let Ok(content) = std::fs::read_to_string(path) {
         parse_simple_config(&content, config);
         parse_toml_config(&content, config);
     }
+}
+
+pub(super) fn read_config_text(path: &Path) -> io::Result<String> {
+    const LIMIT: u64 = 256 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return Err(io::Error::from_raw_os_error(nix::libc::EFBIG));
+    }
+    let mut content = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut content)?;
+    if content.len() as u64 > LIMIT {
+        return Err(io::Error::from_raw_os_error(nix::libc::EFBIG));
+    }
+    Ok(content)
 }
 
 pub(super) fn config_file_path() -> Option<PathBuf> {

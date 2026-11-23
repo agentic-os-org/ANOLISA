@@ -36,6 +36,22 @@ impl Default for ConnectionOptions {
     }
 }
 
+/// Backoff for the one-time journal-mode conversion.
+///
+/// SQLite rejects `PRAGMA journal_mode=WAL` with `SQLITE_BUSY` while another
+/// connection holds the schema lock, and the busy timeout does not cover this
+/// schema-level operation. Retrying past a short-lived writer keeps a
+/// concurrent trace/serve startup from losing its store.
+const WAL_CONVERSION_BACKOFF: [Duration; 7] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+    Duration::from_millis(640),
+];
+
 /// Opens a SQLite database with explicit lifecycle behavior.
 ///
 /// # Errors
@@ -74,7 +90,14 @@ pub fn open_connection(
 
     connection.busy_timeout(options.busy_timeout)?;
     if options.enable_wal && options.mode != ConnectionMode::ReadOnlyExisting {
-        connection.execute_batch("PRAGMA journal_mode=WAL;")?;
+        retry_with_backoff(
+            || {
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL;")
+                    .map_err(LifecycleError::from)
+            },
+            &WAL_CONVERSION_BACKOFF,
+        )?;
     }
 
     Ok(connection)
@@ -87,6 +110,17 @@ pub enum CheckpointOutcome {
     Completed,
     /// Another connection prevented the checkpoint from completing.
     Busy,
+}
+
+/// Frame counts returned by a passive checkpoint, including reader-pinned backlog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointStats {
+    /// Whether every frame visible to this checkpoint was copied.
+    pub outcome: CheckpointOutcome,
+    /// Frames in the WAL; zero when SQLite reports no WAL.
+    pub frames: u64,
+    /// Frames already copied to the main database.
+    pub copied: u64,
 }
 
 /// Flushes WAL frames and reports whether lock contention prevented truncation.
@@ -123,14 +157,33 @@ pub fn disable_auto_checkpoint(connection: &Connection) -> Result<(), LifecycleE
 ///
 /// Returns an error when SQLite cannot execute the checkpoint query.
 pub fn checkpoint_passive(connection: &Connection) -> Result<CheckpointOutcome, LifecycleError> {
+    Ok(checkpoint_passive_stats(connection)?.outcome)
+}
+
+/// Copies available WAL frames and reports backlog without waiting for readers.
+///
+/// The operation can copy the entire available WAL in one call; frame counts
+/// describe its result and do not impose a work or time limit.
+///
+/// # Errors
+///
+/// Returns an error when SQLite cannot execute the checkpoint query.
+pub fn checkpoint_passive_stats(
+    connection: &Connection,
+) -> Result<CheckpointStats, LifecycleError> {
     let (busy, frames, copied): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
-    Ok(if busy == 0 && copied >= frames {
+    let outcome = if busy == 0 && copied >= frames {
         CheckpointOutcome::Completed
     } else {
         CheckpointOutcome::Busy
+    };
+    Ok(CheckpointStats {
+        outcome,
+        frames: frames.max(0) as u64,
+        copied: copied.max(0) as u64,
     })
 }
 
@@ -257,6 +310,46 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// Converting a fresh database to WAL takes a schema-level write lock. A
+    /// second process opening the same database at that moment used to lose
+    /// the store with SQLITE_BUSY even though the holder released it shortly
+    /// after; the open must retry transient lock contention.
+    #[test]
+    fn wal_conversion_retries_while_another_connection_holds_a_write_lock() {
+        let path = test_path("wal-retry");
+        let options = |enable_wal| ConnectionOptions {
+            enable_wal,
+            busy_timeout: Duration::from_millis(20),
+            ..ConnectionOptions::default()
+        };
+        let setup = open_connection(&path, options(false)).unwrap();
+        setup
+            .execute_batch("CREATE TABLE records (value INTEGER); INSERT INTO records VALUES (1);")
+            .unwrap();
+        drop(setup);
+
+        let holder = open_connection(&path, options(false)).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            holder.execute_batch("COMMIT;").unwrap();
+        });
+
+        let result = open_connection(&path, options(true));
+        release.join().unwrap();
+
+        let connection = result.expect("a transient writer must not fail the open");
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+
+        drop(connection);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     #[test]
     fn managed_checkpoint_preserves_durability_and_yields_to_readers() {
         let path = test_path("managed-checkpoint");
@@ -297,6 +390,9 @@ mod tests {
             checkpoint_passive(&writer).unwrap(),
             CheckpointOutcome::Busy
         );
+        let pinned = checkpoint_passive_stats(&writer).unwrap();
+        assert_eq!(pinned.outcome, CheckpointOutcome::Busy);
+        assert!(pinned.frames > pinned.copied);
         writer
             .execute("INSERT INTO records VALUES (zeroblob(8192))", [])
             .unwrap();
@@ -305,6 +401,8 @@ mod tests {
             checkpoint_passive(&writer).unwrap(),
             CheckpointOutcome::Completed
         );
+        let released = checkpoint_passive_stats(&writer).unwrap();
+        assert_eq!(released.frames, released.copied);
         drop(reader);
         drop(writer);
         fs::remove_file(path).unwrap();

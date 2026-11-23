@@ -1,7 +1,8 @@
-//! Public routing aliases preserve legacy failures without executing an Agent.
+//! Public command routes reject removed spellings without executing an Agent.
 #![cfg(target_os = "linux")]
 
 use std::{
+    os::unix::fs::PermissionsExt,
     path::Path,
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
@@ -28,14 +29,11 @@ fn invoke(arguments: &[&str], cwd: &Path) -> aw_exec::Output {
 }
 
 #[test]
-fn native_connect_and_legacy_install_preserve_the_same_validation_failure() {
+fn removed_spellings_fail_before_native_dispatch() {
     let directory = tempfile::tempdir().unwrap();
-    let old = invoke(
-        &["install", "--config", "missing.yaml", "--agent", "hermes"],
-        directory.path(),
-    );
-    let new = invoke(
-        &[
+    for arguments in [
+        vec!["install", "--config", "missing.yaml", "--agent", "hermes"],
+        vec![
             "agent",
             "connect",
             "--config",
@@ -43,12 +41,48 @@ fn native_connect_and_legacy_install_preserve_the_same_validation_failure() {
             "--agent",
             "hermes",
         ],
+        vec!["instance", "update", "--instance", "one"],
+        vec!["instance", "attach", "--sdk-instance", "one"],
+        vec!["instance", "attach", "--agent", "qoder", "--pid", "1"],
+        vec!["instance", "detach", "--sdk-instance", "one"],
+        vec!["connect", "--agent", "qoder", "--pid", "1", "--remove"],
+        vec!["serve", "--config", "missing.yaml"],
+        vec!["status", "--config", "missing.yaml"],
+        vec!["stop", "--config", "missing.yaml"],
+        vec!["validate", "--config", "missing.yaml"],
+    ] {
+        let output = invoke(&arguments, directory.path());
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("unexpected") || error.contains("unrecognized"),
+            "{error}"
+        );
+    }
+    let connected = invoke(
+        &["connect", "--config", "missing.yaml", "--agent", "hermes"],
         directory.path(),
     );
-    assert_eq!(old.status.code(), Some(1));
-    assert_eq!(old.status.code(), new.status.code());
-    assert_eq!(old.stderr, new.stderr);
-    assert!(old.stdout.is_empty() && new.stdout.is_empty());
+    assert_eq!(connected.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&connected.stderr).contains("Usage:"));
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn update_defaults_to_the_same_shared_configuration_without_a_socket() {
+    let directory = tempfile::tempdir().unwrap();
+    for selector in ["--agent", "--instance"] {
+        let implicit = invoke(&["update", selector, "one"], directory.path());
+        let explicit = invoke(
+            &["update", "--config", "aw.yaml", selector, "one"],
+            directory.path(),
+        );
+        assert_eq!(implicit.status.code(), Some(1));
+        assert_eq!(implicit.stderr, explicit.stderr);
+        assert!(!String::from_utf8_lossy(&implicit.stderr).contains("Usage:"));
+        assert!(implicit.stdout.is_empty() && explicit.stdout.is_empty());
+    }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
@@ -60,18 +94,24 @@ fn help_separates_software_installation_from_native_agent_connection() {
     let text = String::from_utf8(output.stdout).unwrap();
     for expected in [
         "install",
-        "agent",
+        "connect",
+        "disconnect",
         "config",
-        "manifest.json or package.json",
-        "Compatibility: aw install --config",
+        "package.json",
+        "Use aw connect",
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
+    assert!(!text.contains("manifest.json"));
     for (path, options) in [
         (vec!["install", "--help"], vec!["--prefix", "--bundle"]),
         (
-            vec!["agent", "connect", "--help"],
-            vec!["--config", "--agent"],
+            vec!["connect", "--help"],
+            vec!["--config", "--agent", "--sdk-instance", "--sdk-pid"],
+        ),
+        (
+            vec!["disconnect", "--help"],
+            vec!["--config", "--agent", "--pid", "--sdk-instance"],
         ),
         (
             vec!["config", "init", "--help"],
@@ -94,20 +134,17 @@ fn help_separates_software_installation_from_native_agent_connection() {
 }
 
 #[test]
-fn service_aliases_keep_legacy_errors_without_side_effects() {
+fn service_commands_reject_missing_configuration_without_side_effects() {
     let directory = tempfile::tempdir().unwrap();
     for command in ["serve", "status", "stop"] {
-        let mut arguments = vec![command, "--config", "missing.yaml"];
+        let mut arguments = vec!["service", command, "--config", "missing.yaml"];
         if command == "serve" {
             arguments.extend(["--state-dir", "/uncreated/state"]);
         }
-        let old = invoke(&arguments, directory.path());
-        arguments.insert(0, "service");
-        let new = invoke(&arguments, directory.path());
-        assert_eq!(old.status.code(), Some(1));
-        assert_eq!(new.status.code(), old.status.code());
-        assert_eq!(new.stderr, old.stderr);
-        assert!(new.stdout.is_empty() && old.stdout.is_empty());
+        let output = invoke(&arguments, directory.path());
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Usage:"));
     }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
@@ -122,8 +159,8 @@ fn every_public_level_has_help_without_accessing_files_or_services() {
         "completion",
         "install",
         "uninstall",
-        "agent",
-        "agent connect",
+        "connect",
+        "disconnect",
         "config",
         "config init",
         "config show",
@@ -141,10 +178,6 @@ fn every_public_level_has_help_without_accessing_files_or_services() {
         "inspect",
         "request",
         "policy",
-        "serve",
-        "status",
-        "stop",
-        "validate",
     ] {
         for flag in ["--help", "-h"] {
             let mut arguments: Vec<_> = command.split_whitespace().collect();
@@ -188,7 +221,6 @@ fn malformed_queries_and_unsupported_output_flags_never_succeed() {
         "--json service status",
         "run --version",
         "inspect --config /missing",
-        "uninstall --prefix /missing --dry-run",
         "install --bundle /missing",
         "request --socket /missing --timeout-ms 0",
     ] {
@@ -204,6 +236,31 @@ fn malformed_queries_and_unsupported_output_flags_never_succeed() {
         String::from_utf8(version.stdout).unwrap(),
         format!("aw {}\n", env!("CARGO_PKG_VERSION"))
     );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn missing_uninstall_dry_run_reports_only_stderr_without_writes() {
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let prefix = directory.path().join("missing");
+    let output = invoke(
+        &[
+            "uninstall",
+            "--prefix",
+            prefix.to_str().unwrap(),
+            "--dry-run",
+        ],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("not_installed"));
+    assert!(!prefix.exists());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 

@@ -163,6 +163,7 @@ impl AnthropicParser {
                 name: String,
                 input_json: String,
             },
+            ToolResult(AnthropicContentBlock),
         }
         let mut current_block: Option<CurrentBlock> = None;
         // Finish a streamed block, pushing it when it carries content. Called
@@ -202,6 +203,7 @@ impl AnthropicParser {
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 out.push(AnthropicContentBlock::ToolUse { id, name, input });
             }
+            CurrentBlock::ToolResult(block) => out.push(block),
         };
 
         for event_value in events {
@@ -250,6 +252,9 @@ impl AnthropicParser {
                             }),
                             AnthropicContentBlock::Text { text, .. } => {
                                 Some(CurrentBlock::Text { text: text.clone() })
+                            }
+                            AnthropicContentBlock::ToolResult { .. } => {
+                                Some(CurrentBlock::ToolResult(content_block.clone()))
                             }
                             _ => {
                                 // Any other block type
@@ -584,6 +589,33 @@ mod tests {
         assert_eq!(response.id, "msg_empty_usage");
         assert_eq!(response.usage.input_tokens, 0);
         assert_eq!(response.usage.output_tokens, 0);
+    }
+
+    /// A compatible gateway may spell "no counters reported" as an explicit
+    /// `"usage": null` instead of `{}` or an absent key. The response is
+    /// otherwise complete, so failing the whole deserialization dropped the
+    /// answer text and id along with the counters.
+    #[test]
+    fn test_parse_response_with_null_usage_keeps_the_answer() {
+        let json = serde_json::json!({
+            "id": "msg_null_usage",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "the answer"}],
+            "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
+            "usage": null
+        });
+
+        let response = AnthropicParser::parse_response(&json)
+            .expect("a null usage must not fail the whole response");
+        assert_eq!(response.id, "msg_null_usage");
+        assert_eq!(response.usage.input_tokens, 0);
+        assert_eq!(response.usage.output_tokens, 0);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicContentBlock::Text { text, .. } if text == "the answer"
+        ));
     }
 
     /// A response that omits `usage` entirely (as likely as `"usage": {}`
@@ -1225,6 +1257,64 @@ mod tests {
         );
         assert_eq!(resp.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(resp.usage.cache_read_input_tokens, Some(24576));
+    }
+
+    /// A compatible gateway that spells "no usage snapshot" as an explicit
+    /// JSON null on `message_start` must not lose the event's identity. The
+    /// typed event required a usage struct, serde failed the whole event, and
+    /// the aggregated response fell back to an empty id and model even though
+    /// the stream carried both.
+    #[test]
+    fn test_aggregate_sse_null_message_start_usage_keeps_identity() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_null", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [], "usage": null}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.id, "msg_null",
+            "a null usage must not discard the message_start event"
+        );
+        assert_eq!(resp.model, "claude-sonnet-4-5");
+        assert_eq!(resp.usage.input_tokens, 0);
+        assert_eq!(resp.usage.output_tokens, 0);
+    }
+
+    /// A terminal `message_delta` whose `output_tokens` is an explicit null
+    /// carries the stop reason and any other counters it reports. Treating
+    /// the null as a type error dropped the entire event, so the call lost
+    /// `end_turn` and the counters beside it.
+    #[test]
+    fn test_aggregate_sse_null_output_tokens_keeps_stop_reason() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_delta_null", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"input_tokens": 1111, "output_tokens": null}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.stop_reason.as_deref(),
+            Some("end_turn"),
+            "a null output_tokens must not discard the message_delta event"
+        );
+        assert_eq!(resp.usage.input_tokens, 1111);
+        assert_eq!(resp.usage.output_tokens, 0);
     }
 
     /// Anthropic-compatible gateways may emit several `message_delta` events

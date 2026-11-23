@@ -142,6 +142,7 @@ mod tests {
             cmd: cmd.to_string(),
             err,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }

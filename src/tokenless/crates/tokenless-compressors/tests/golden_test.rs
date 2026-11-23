@@ -13,8 +13,9 @@ use tokenless_ccr::{
     InMemoryStore, RecoveryMethod, StashStore, compute_key, is_valid_hash, recovery_instruction,
 };
 use tokenless_compressors::{
-    BuildLogCompressor, BuildLogOperation, BuildLogOutcome, HtmlExtractor, JsonCompressionContext,
-    JsonCompressor, JsonOperation, SearchResultsCompressor, TabularCompressor, TabularOperation,
+    BrowserSnapshotCompressor, BuildLogCompressor, BuildLogOperation, BuildLogOutcome,
+    HtmlExtractor, JsonCompressionContext, JsonCompressor, JsonOperation, SearchResultsCompressor,
+    TabularCompressor, TabularOperation,
 };
 
 const FIXTURES: &[&str] = &[
@@ -203,10 +204,7 @@ fn every_compressing_fixture_actually_saves() {
         let input = load(&format!("{name}.txt"));
         let store = InMemoryStore::new();
         let (cleaned, outcome) = run_chain(&input, &store);
-        if outcome
-            .operations
-            .contains(&BuildLogOperation::ProgressReduction)
-        {
+        if outcome.operations.contains(&BuildLogOperation::Reduction) {
             assert!(
                 outcome.output.chars().count() < cleaned.chars().count(),
                 "{name}: markers without net savings"
@@ -342,6 +340,7 @@ fn json_goldens() {
                         allow_toon: operation == Some(JsonOperation::Toon),
                         min_toon_chars: 0,
                         allow_unrecoverable: false,
+                        embedded_html: false,
                     },
                 )
                 .unwrap();
@@ -461,6 +460,34 @@ fn tabular_goldens() {
             check(name, &source, &output);
         }
     }
+}
+
+#[test]
+fn browser_snapshot_goldens() {
+    for (name, retained) in [
+        ("browser_pw_basic", "\te3\t"),
+        ("browser_pw_edges", "f2e38"),
+    ] {
+        let source = input(&format!("{name}.txt"));
+        let output = BrowserSnapshotCompressor.compress(&source).unwrap();
+        assert_eq!(
+            output,
+            BrowserSnapshotCompressor.compress(&source).unwrap(),
+            "{name}: non-deterministic output"
+        );
+        assert!(output.contains(retained), "{name}: reference lost");
+        check(name, &source, &output);
+    }
+}
+
+#[test]
+fn browser_snapshot_malformed_input_fails_open() {
+    let name = "browser_pw_malformed";
+    let source = input(&format!("{name}.txt"));
+    assert!(
+        BrowserSnapshotCompressor.compress(&source).is_none(),
+        "{name}: malformed snapshot must pass through"
+    );
 }
 
 #[test]

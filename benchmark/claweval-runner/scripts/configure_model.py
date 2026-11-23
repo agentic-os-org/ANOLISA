@@ -83,27 +83,45 @@ def update_config_file(path: Path, model: dict, judge: dict,
     """Update a single YAML config file with new model settings."""
     data = load_yaml(path)
 
-    data["model"] = {
-        "api_key": model["api_key"],
-        "base_url": model["base_url"],
-        "model_id": model["model_id"],
-        "input_modalities": ["text", "image"],
-    }
+    # YAML aliases can share mappings across roles; each update needs its own copy.
+    model_config = data.get("model")
+    model_config = dict(model_config) if isinstance(model_config, dict) else {}
+    model_config.update(
+        {
+            "api_key": model["api_key"],
+            "base_url": model["base_url"],
+            "model_id": model["model_id"],
+        }
+    )
+    model_config.setdefault("input_modalities", ["text", "image"])
+    data["model"] = model_config
 
-    data["judge"] = {
-        "api_key": judge["api_key"],
-        "base_url": judge["base_url"],
-        "model_id": judge["model_id"],
-        "enabled": data.get("judge", {}).get("enabled", True),
-    }
+    judge_config = data.get("judge")
+    judge_config = dict(judge_config) if isinstance(judge_config, dict) else {}
+    judge_config.update(
+        {
+            "api_key": judge["api_key"],
+            "base_url": judge["base_url"],
+            "model_id": judge["model_id"],
+        }
+    )
+    judge_config.setdefault("enabled", True)
+    data["judge"] = judge_config
 
     if user_agent_model:
         if "user_agent_model" in data or path.name in ("config.yaml", "config_user_agent.yaml"):
-            data["user_agent_model"] = {
-                "api_key": user_agent_model["api_key"],
-                "base_url": user_agent_model["base_url"],
-                "model_id": user_agent_model["model_id"],
-            }
+            user_agent_config = data.get("user_agent_model")
+            user_agent_config = (
+                dict(user_agent_config) if isinstance(user_agent_config, dict) else {}
+            )
+            user_agent_config.update(
+                {
+                    "api_key": user_agent_model["api_key"],
+                    "base_url": user_agent_model["base_url"],
+                    "model_id": user_agent_model["model_id"],
+                }
+            )
+            data["user_agent_model"] = user_agent_config
 
     save_yaml(path, data)
 

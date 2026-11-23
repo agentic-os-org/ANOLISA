@@ -122,6 +122,19 @@ Clap command
 
 不要在 `cosh-shell/src/` 根目录新增实现文件。保持模块边界清晰，并在结构改动后运行 `crates/cosh-shell/scripts/check-layout.sh`。
 
+## 活动会话刷新
+
+Core 在下一次 provider 请求前，仅接受同一会话、较新的持久化 generation 和压缩
+revision，且脱敏 transcript digest 一致的后台压缩。活动 transcript 始终为准，
+拒绝的证据不改变当前请求投影。
+
+成功的活动认证切换会重新构建 provider、model 和 extra parameters。Shell 将认证
+激活与首次运行准入串行化：短 registry 进程持有独占逻辑预留直到结束，活动 registry
+请求则把预留交给 service；调用方超时不能释放 service 仍持有的预留。取消的运行
+可以排队一个继任请求，但不能穿透认证激活预留。激活失败会保留认证面板和原模型
+观察值以便重试，仅成功后清除旧 provider 观察值。此机制不增加 provider 备选策略，
+也不保证运行忙碌期间可以激活。
+
 ## 兼容性和安全契约
 
 - `CoshResponse<T>` 是稳定的自动化信封。

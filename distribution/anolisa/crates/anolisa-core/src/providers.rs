@@ -108,7 +108,7 @@ impl<'a> DelegatedProvider<'a> {
 /// single-instance violation. The backend reports it as `UnexpectedOutput`
 /// with detail `"N installed versions"`; `N == 0` is a genuine output
 /// anomaly (rpm exited 0 with no rows) and stays an error.
-fn is_multiple_versions(err: &PackageQueryError) -> bool {
+pub fn is_multiple_versions(err: &PackageQueryError) -> bool {
     match err {
         PackageQueryError::UnexpectedOutput { detail, .. } => detail
             .strip_suffix(" installed versions")

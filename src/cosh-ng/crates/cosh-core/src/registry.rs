@@ -20,6 +20,8 @@ mod auth;
 mod extensions;
 
 use auth::handle_auth;
+#[cfg(test)]
+pub(crate) use auth::TEST_ECS_PROBE;
 use extensions::handle_extensions;
 
 /// Bridge from registry mutations into the generation controller of a live core process.
@@ -272,7 +274,18 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
         .iter()
         .filter_map(|p| expand_path(p))
         .collect();
-    let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
+    let system_paths = config
+        .skills
+        .system_paths
+        .iter()
+        .filter_map(|path| expand_path(path))
+        .collect();
+    let skill_manager = SkillManager::new(
+        project_root,
+        custom_paths,
+        ext_manager.skill_dirs(),
+        system_paths,
+    );
     if !args.bare {
         skill_manager.refresh().await;
     }

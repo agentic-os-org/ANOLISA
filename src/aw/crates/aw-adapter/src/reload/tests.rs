@@ -1,7 +1,7 @@
 //! Native policy updates retain scheduling and vetoes independently of service state.
 
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn document(adapter: &str) -> Value {
     json!({"spec":{"agents":{"target":{"adapter":adapter}},"events":{},"execution":{"default_event_budget_ms":1000}}})
@@ -14,6 +14,8 @@ fn steps(event: &str, replacement: bool) -> Vec<AdmittedStep> {
             event: event.into(),
             step_id: id.into(),
             provider: id.into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
             on_error: "report".into(),
             execution: StepExecution::Provider {
                 operation: "record".into(),
@@ -83,9 +85,61 @@ fn empty_initial_policy_still_registers_both_stable_routes() {
     for route in routes.values() {
         assert!(route.steps.contains_key(DISPATCH));
     }
-    let empty = plan(&document("qwenpaw"), "target", &[], "tool.before").unwrap();
-    assert!(empty.groups.is_empty());
-    assert_eq!(empty.budget_ms, 1000);
+    for adapter in ["qoder", "qwenpaw", "qoder-sdk"] {
+        for event in ["tool.before", "tool.after"] {
+            let empty = plan(&document(adapter), "target", &[], event).unwrap();
+            assert!(empty.groups.is_empty());
+            assert_eq!(empty.budget_ms, 1000);
+            assert_eq!(empty.observe, adapter != "qoder", "{adapter}: {event}");
+        }
+    }
+}
+
+#[test]
+fn native_routes_use_only_the_targets_admitted_steps() {
+    let validator = aw_config::Validator::new().unwrap();
+    let mut value = validator
+        .parse(include_bytes!(
+            "../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    value["spec"]["agents"] = json!({
+        "sdk":{"adapter":"qoder-sdk","argv":["/bin/true"]},
+        "app":{"adapter":"qwenpaw","argv":["/bin/true"]}
+    });
+    value["spec"]["providers"]["hook"] = json!({
+        "transport":{"type":"stdio","location":"agent","argv":["/bin/true"]},
+        "timeout_ms":1000,"max_output_bytes":4096
+    });
+    value["spec"]["events"]["tool.after"]["steps"] = json!([
+        {"id":"app","provider":"hook","effects":["observe"],
+         "on_error":"withhold_result","match":{"tools":["native:qwenpaw:tool"]}},
+        {"id":"sdk","provider":"hook","effects":["observe"],
+         "on_error":"report","match":{"tools":["native:qoder-sdk:Bash"]}}
+    ]);
+    let config = validator
+        .parse(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    let capabilities = AdapterCapabilities {
+        adapter: "qoder-sdk".into(),
+        version: "1.0.56".into(),
+        entrypoint: "sdk-worker".into(),
+        events: BTreeMap::from([
+            ("tool.before".into(), vec!["observe".into(), "block".into()]),
+            ("tool.after".into(), vec!["observe".into()]),
+        ]),
+        failure_actions: BTreeMap::new(),
+    };
+    let selected = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
+    let native = adapter::native_steps(config.as_value(), &selected, "tool.after", false);
+    assert_eq!(native.len(), 1);
+    assert_eq!(native[0].step_id, "sdk");
+    let dynamic = plan(config.as_value(), "sdk", &selected, "tool.after").unwrap();
+    assert_eq!(dynamic.groups.len(), 1);
+    assert_eq!(dynamic.groups[0][0].id, "sdk");
+    assert!(!dynamic.replacement);
 }
 
 #[test]
@@ -326,5 +380,304 @@ fn qoder_sdk_reload_preserves_the_first_denial_reason() {
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         reason
+    );
+}
+
+#[test]
+fn policy_updates_use_native_entrypoints_across_framework_releases() {
+    for (adapter, entrypoint) in [
+        ("qoder", "tui"),
+        ("qwenpaw", "app"),
+        ("qoder-sdk", "sdk-worker"),
+    ] {
+        for version in ["1.0.55", "1.0.57", "3.0.0-preview", "2026.10.29"] {
+            let mut capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: version.into(),
+                entrypoint: entrypoint.into(),
+                events: BTreeMap::new(),
+                failure_actions: BTreeMap::new(),
+            };
+            assert!(supported(&capabilities).is_ok());
+            assert_eq!(
+                resident_supported(&capabilities).is_ok(),
+                adapter != "qoder"
+            );
+            capabilities.entrypoint = "unsupported".into();
+            assert!(supported(&capabilities).is_err());
+        }
+    }
+}
+
+#[test]
+fn hermes_native_json_veto_survives_later_approval() {
+    for field in ["action", "decision"] {
+        for status in [0, 3] {
+            let veto = adopt_step(
+                "hermes",
+                "tool.before",
+                "report",
+                HookOutput {
+                    exit: NativeExit::Code(status),
+                    stdout: serde_json::to_vec(&json!({field:"block","message":"native veto"}))
+                        .unwrap(),
+                    stderr: vec![],
+                },
+            )
+            .unwrap();
+            assert!(matches!(veto.exit, NativeExit::Code(2)));
+            let output = combine(
+                "hermes",
+                vec![
+                    veto,
+                    HookOutput {
+                        exit: NativeExit::Code(0),
+                        stdout: br#"{"action":"approve"}"#.to_vec(),
+                        stderr: vec![],
+                    },
+                ],
+            )
+            .unwrap();
+            assert!(matches!(output.exit, NativeExit::Code(2)));
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value[field], "block");
+            assert_eq!(value["message"], "native veto");
+        }
+    }
+}
+
+#[test]
+fn hermes_success_keeps_the_submission_json_envelope() {
+    let output = combine(
+        "hermes",
+        vec![HookOutput {
+            exit: NativeExit::Code(0),
+            stdout: b"{}".to_vec(),
+            stderr: vec![],
+        }],
+    )
+    .unwrap();
+    assert!(matches!(output.exit, NativeExit::Code(0)));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn hermes_skill_plan_selects_only_matching_checks_and_preserves_budget() {
+    let mut value = document("hermes");
+    value["spec"]["execution"]["default_event_budget_ms"] = json!(55000);
+    let mut selected = steps("tool.before", false);
+    for step in &mut selected {
+        step.execution = StepExecution::Provider {
+            operation: "check_skill".into(),
+            effects: vec!["observe".into(), "block".into()],
+        };
+        step.step_tools = vec!["native:hermes:skill_view".into()];
+    }
+    assert_eq!(
+        plan(&value, "target", &[], "tool.before")
+            .unwrap()
+            .skill_check,
+        None
+    );
+    let report = plan(&value, "target", &selected, "tool.before").unwrap();
+    assert_eq!(report.skill_check.as_deref(), Some("report"));
+    assert_eq!(report.budget_ms, 55000);
+    selected[0].on_error = "block".into();
+    assert_eq!(
+        plan(&value, "target", &selected, "tool.before")
+            .unwrap()
+            .skill_check
+            .as_deref(),
+        Some("block")
+    );
+    selected[0].step_tools = vec!["native:hermes:terminal".into()];
+    assert_eq!(
+        plan(&value, "target", &selected, "tool.before")
+            .unwrap()
+            .skill_check
+            .as_deref(),
+        Some("report")
+    );
+    value["spec"]["execution"]["default_event_budget_ms"] = json!(55001);
+    assert!(plan(&value, "target", &selected, "tool.before").is_err());
+}
+
+#[test]
+fn openclaw_dispatch_preserves_first_denial_and_tokenless_fresh_arguments() {
+    let arguments = json!({"command":"rtk git status --short","cwd":"/work tree"});
+    let retry = format!(
+        "[tokenless:rewrite] Retry this tool with arguments: {}",
+        serde_json::to_string(&arguments).unwrap()
+    );
+    for reason in ["Custom security refusal".to_owned(), retry.clone()] {
+        let mut veto = HookOutput {
+            exit: NativeExit::Code(0),
+            stdout: br#"{"block":true,"nativeMetadata":"retained"}"#.to_vec(),
+            stderr: vec![],
+        };
+        adapter::block_reason("openclaw", &mut veto, &reason).unwrap();
+        let output = combine(
+            "openclaw",
+            vec![
+                adopt_step("openclaw", "tool.before", "block", veto).unwrap(),
+                HookOutput {
+                    exit: NativeExit::Code(0),
+                    stdout: br#"{"block":false,"blockReason":"later approval"}"#.to_vec(),
+                    stderr: vec![],
+                },
+                HookOutput {
+                    exit: NativeExit::Code(2),
+                    stdout: br#"{"block":true,"blockReason":"later denial"}"#.to_vec(),
+                    stderr: vec![],
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(output.exit, NativeExit::Code(0)));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["block"], true);
+        assert_eq!(value["blockReason"], reason);
+        assert_eq!(value["nativeMetadata"], "retained");
+        assert!(value.get("params").is_none());
+        if reason == retry {
+            let corrected = reason
+                .strip_prefix("[tokenless:rewrite] Retry this tool with arguments: ")
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(corrected).unwrap(), arguments);
+        }
+    }
+}
+
+#[test]
+fn openclaw_dispatch_failure_without_a_native_reason_keeps_a_block_envelope() {
+    for stdout in [
+        vec![],
+        b"invalid".to_vec(),
+        br#"{"blockReason":" "}"#.to_vec(),
+    ] {
+        let output = combine(
+            "openclaw",
+            vec![HookOutput {
+                exit: NativeExit::Code(2),
+                stdout,
+                stderr: vec![],
+            }],
+        )
+        .unwrap();
+        assert!(matches!(output.exit, NativeExit::Code(0)));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["block"], true);
+        assert_eq!(value["blockReason"], "Tool blocked by AW policy");
+    }
+}
+
+#[test]
+fn native_execution_claims_match_each_bridges_lifecycle_identity() {
+    let native = json!({"native":{"context":{"sessionId":"session","runId":"run"},
+        "event":{"runId":"run"}}});
+    assert_eq!(
+        execution_claim("openclaw", "gateway", &native).unwrap(),
+        ExecutionClaim::Request(tool_key("session", "run").unwrap())
+    );
+    let mut fallback = native.clone();
+    fallback["native"]["context"]
+        .as_object_mut()
+        .unwrap()
+        .remove("runId");
+    assert_eq!(
+        execution_claim("openclaw", "gateway", &fallback).unwrap(),
+        ExecutionClaim::Request(tool_key("session", "run").unwrap())
+    );
+    let mut mismatch = native.clone();
+    mismatch["native"]["event"]["runId"] = json!("another-run");
+    assert!(execution_claim("openclaw", "gateway", &mismatch).is_err());
+    for identity in [Value::Null, json!(""), json!("x".repeat(513))] {
+        let mut invalid = native.clone();
+        invalid["native"]["context"]["sessionId"] = identity;
+        assert!(execution_claim("openclaw", "gateway", &invalid).is_err());
+    }
+    assert_eq!(
+        execution_claim(
+            "qoder",
+            "print",
+            &json!({"name":"input.submit","session_id":"session"})
+        )
+        .unwrap(),
+        ExecutionClaim::Request("session".into())
+    );
+    for event in ["tool.before", "tool.after"] {
+        assert_eq!(
+            execution_claim(
+                "qoder",
+                "print",
+                &json!({"name":event,"session_id":"session",
+            "tool":{"call_id":"call"}})
+            )
+            .unwrap(),
+            ExecutionClaim::Tool(tool_key("session", "call").unwrap())
+        );
+    }
+    assert!(execution_claim(
+        "qoder",
+        "print",
+        &json!({"name":"tool.before","session_id":"session"})
+    )
+    .is_err());
+    assert_eq!(
+        execution_claim("hermes", "chat", &json!({})).unwrap(),
+        ExecutionClaim::SerialRequest
+    );
+    assert!(execution_claim("hermes", "gateway", &json!({})).is_err());
+    assert!(execution_claim("unsupported", "application", &native).is_err());
+}
+
+#[test]
+fn scope_routes_match_scope_policy_and_reject_mismatched_targets() {
+    let doc = document("pi");
+    let capabilities = AdapterCapabilities {
+        adapter: "pi".into(),
+        version: "1.5.2".into(),
+        entrypoint: "sdk".into(),
+        events: BTreeMap::from([(
+            "tool.after".into(),
+            vec!["observe".into(), "replace_result".into()],
+        )]),
+        failure_actions: BTreeMap::new(),
+    };
+    let admitted = steps("tool.after", true);
+    let prepared = scope_routes(&doc, "target", &admitted, &capabilities).unwrap();
+    assert_eq!(
+        prepared.to_policy_value(),
+        scope_policy(&doc, "target", &admitted, &capabilities).unwrap()
+    );
+    assert_eq!(
+        prepared.event("tool.after").unwrap().replacement_step(),
+        Some("compress")
+    );
+    assert!(scope_routes(&doc, "missing", &admitted, &capabilities).is_err());
+    let mut invalid_sdk = crate::adapter::catalog::SDK.capabilities("v0", "application");
+    invalid_sdk.version = "v0".into();
+    assert_eq!(
+        scope_routes(&doc, "target", &[], &invalid_sdk)
+            .unwrap_err()
+            .to_string(),
+        "resident policy adapter differs from its target"
+    );
+    let mut null_budget = document("qoder");
+    null_budget["spec"]["execution"]["default_event_budget_ms"] = Value::Null;
+    assert_eq!(
+        plan(
+            &null_budget,
+            "target",
+            &steps("tool.after", true),
+            "tool.after"
+        )
+        .err()
+        .unwrap()
+        .to_string(),
+        "invalid event budget"
     );
 }

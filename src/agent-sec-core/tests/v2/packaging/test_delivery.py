@@ -1,0 +1,1029 @@
+"""Install V2 products from a standalone component source tree without compiling."""
+
+import ast
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+class DeliveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name).resolve()
+        self.source = self.base / "source"
+        for name in (
+            "Makefile",
+            "LICENSE",
+            "packaging/build.mk",
+            "packaging/install.mk",
+            "packaging/raw.mk",
+            "packaging/delivery.mk",
+            "packaging/validate-stage.py",
+            "packaging/systemd/agent-sec-core-v2.service.in",
+            "packaging/systemd/skillsec.json",
+            "packaging/sandbox/permissions.json.template",
+        ):
+            destination = self.source / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, destination)
+        self.build = self.source / "target"
+        for name in (
+            "v2/bin/agent-sec-cli",
+            "v2/bin/agent-sec-daemon",
+            "v2/bin/agent-sec-daemon-health",
+            "v2/bin/asc-sandbox-docker-guard",
+            "linux-sandbox",
+        ):
+            self.artifact(name, "#!/bin/sh\nexit 0\n", executable=True)
+        for name in (
+            "cosh-extension/cosh-extension.json",
+            "cosh-extension/hooks/sandbox-guard.py",
+            "codex-plugin/install.sh",
+            "qoder-plugin/install.sh",
+            "qoder-plugin/hooks/fixture.py",
+            "openclaw-plugin/openclaw.plugin.json",
+            "openclaw-plugin/package.json",
+            "openclaw-plugin/dist/index.js",
+            "openclaw-plugin/scripts/deploy.sh",
+            "hermes-plugin/src/plugin.yaml",
+            "hermes-plugin/scripts/deploy.sh",
+            "qwen-code-extension/scripts/deploy.sh",
+            "qwen-code-extension/hooks/observability_hook.py",
+            "qwen-code-extension/hooks/skill_ledger_hook.py",
+            "skills/demo/SKILL.md",
+            "gateway/asc_gateway_addon.py",
+            "gateway/asc_gateway_policy.py",
+            "gateway/mitmproxy.provenance",
+            "gateway/github.cedar",
+        ):
+            self.artifact(name, "fixture\n")
+        self.artifact(
+            "cosh-extension/hooks/sandbox_paths.py",
+            (ROOT / "cosh-extension/hooks/sandbox_paths.py").read_text(),
+        )
+        self.artifact(
+            "gateway/install-mitmproxy.sh",
+            "#!/bin/sh\nexit 91\n",
+            executable=True,
+        )
+        for name in ("agent-sec-gateway.service.in", "gateway.conf"):
+            shutil.copy2(
+                ROOT / "packaging/gateway" / name, self.build / "gateway" / name
+            )
+
+    def test_sandbox_template_install_preserves_edits_and_matches_hook_layout(self):
+        template_path = "srv/config/sandbox/permissions.json.template"
+        hook_path = "usr/share/anolisa/extensions/agent-sec-core/hooks/sandbox_paths.py"
+        for target in ("install", "install-core-and-skills-with-cosh"):
+            with self.subTest(target=target):
+                stage = self.base / target
+                args = (target, f"DESTDIR={stage}", "CONFIGDIR=/srv/config")
+                result = self.make(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                template = stage / template_path
+                self.assertEqual(
+                    template.read_bytes(),
+                    (ROOT / "packaging/sandbox/permissions.json.template").read_bytes(),
+                )
+                self.assertEqual(template.stat().st_mode & 0o777, 0o644)
+                hook = stage / hook_path
+                self.assertEqual(
+                    ast.literal_eval(ast.parse(hook.read_text()).body[1].value),
+                    f"/{template_path}",
+                )
+                template.write_text("administrator configuration")
+                template.chmod(0o600)
+                result = self.make(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(template.read_text(), "administrator configuration")
+                self.assertEqual(template.stat().st_mode & 0o777, 0o600)
+
+    def test_sandbox_install_renders_literal_paths(self) -> None:
+        stage = self.base / "quoted-stage"
+        for config in ("/srv/a&b", "/srv/a'b", '/srv/a"b', "/srv/a\\b| c"):
+            with self.subTest(config=config):
+                result = self.make(
+                    "install-source-v2-cosh-extension",
+                    "install-sandbox-permissions",
+                    f"DESTDIR={stage}",
+                    "EXTENSIONDIR=/extensions/agent-sec-core",
+                    f"SYSTEM_SEC_CORE_CONFIG_DIR={config}",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                hook = stage / "extensions/agent-sec-core/hooks/sandbox_paths.py"
+                self.assertEqual(
+                    ast.literal_eval(ast.parse(hook.read_text()).body[1].value),
+                    f"{config}/sandbox/permissions.json.template",
+                )
+                self.assertEqual(
+                    (
+                        stage / config.lstrip("/") / "sandbox/permissions.json.template"
+                    ).read_bytes(),
+                    (ROOT / "packaging/sandbox/permissions.json.template").read_bytes(),
+                )
+
+    def artifact(self, name, contents, executable=False):
+        destination = self.build / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(contents)
+        if executable:
+            destination.chmod(0o755)
+
+    def make(self, *arguments, env_overrides=None, source=None):
+        environment = os.environ.copy()
+        for name in (
+            "MAKEFLAGS",
+            "MFLAGS",
+            "MAKEOVERRIDES",
+            "AWPRJ",
+            "PREFIX",
+            "DESTDIR",
+            "BINDIR",
+            "LIBDIR",
+            "LIBEXECDIR",
+            "DATADIR",
+            "ADAPTERDIR",
+            "EXTENSIONDIR",
+            "SKILLDIR",
+            "UNITDIR",
+            "SYSCONFDIR",
+            "CONFIGDIR",
+            "BUILD_DIR",
+            "INSTALL_PROFILE",
+            "SYSTEMD_SKILLSEC_CONFIG",
+            "SYSTEMD_SKILLSEC_CONFIG_ARGS",
+        ):
+            environment.pop(name, None)
+        if env_overrides:
+            environment.update(env_overrides)
+        # Installation fixtures explicitly exercise system-package /usr paths.
+        if (
+            any(
+                arg
+                in {
+                    "install",
+                    "install-core",
+                    "install-plugins",
+                    "install-skills",
+                    "install-core-and-skills-with-cosh",
+                }
+                for arg in arguments
+            )
+            and not any(arg.startswith("PREFIX=") for arg in arguments)
+            and not (env_overrides and "PREFIX" in env_overrides)
+        ):
+            arguments = (*arguments, "PREFIX=/usr")
+        return subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-C",
+                str(source if source is not None else self.source),
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    def test_root_layout_ignores_legacy_file_defaults_but_honors_explicit_inputs(
+        self,
+    ):
+        result = self.make("layout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PREFIX=/usr/local\n", result.stdout)
+        self.assertIn("LIBDIR=/usr/local/lib/anolisa/agent-sec-core\n", result.stdout)
+        self.assertIn("SKILLDIR=/usr/local/share/anolisa/skills\n", result.stdout)
+        self.assertNotIn("overriding recipe", result.stderr)
+        result = self.make(
+            "layout",
+            env_overrides={
+                "PREFIX": "/opt/env",
+                "AWPRJ": "suite",
+                "ADAPTERDIR": "/env/hooks",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DATADIR=/opt/env/share/suite/agent-sec-core\n", result.stdout)
+        self.assertIn("ADAPTERDIR=/env/hooks\n", result.stdout)
+        self.assertIn("SKILLDIR=/opt/env/share/suite/skills\n", result.stdout)
+        result = self.make("layout", "PREFIX=/usr", "AWPRJ=anolisa")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SKILLDIR=/usr/share/anolisa/skills\n", result.stdout)
+        self.assertIn(
+            "EXTENSIONDIR=/usr/share/anolisa/extensions/agent-sec-core\n",
+            result.stdout,
+        )
+        result = self.make("layout", "AWPRJ=anolisa", "DATADIR=/srv/data")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SKILLDIR=/srv/data/skills\n", result.stdout)
+        self.assertIn("EXTENSIONDIR=/srv/data/adapters/cosh\n", result.stdout)
+        result = self.make("layout", "AWPRJ=anolisa", "SKILLDIR=/srv/skills")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SKILLDIR=/srv/skills\n", result.stdout)
+        for name in (
+            "PREFIX",
+            "BINDIR",
+            "LIBDIR",
+            "LIBEXECDIR",
+            "DATADIR",
+            "ADAPTERDIR",
+            "EXTENSIONDIR",
+            "SKILLDIR",
+            "UNITDIR",
+            "SYSCONFDIR",
+            "CONFIGDIR",
+        ):
+            self.assertNotEqual(self.make("layout", f"{name}=").returncode, 0)
+            self.assertNotEqual(
+                self.make("layout", env_overrides={name: ""}).returncode, 0
+            )
+        self.assertEqual(self.make("layout", "AWPRJ=").returncode, 0)
+        for profile in ("", "user"):
+            self.assertNotEqual(
+                self.make("layout", f"INSTALL_PROFILE={profile}").returncode, 0
+            )
+            self.assertNotEqual(
+                self.make(
+                    "layout", env_overrides={"INSTALL_PROFILE": profile}
+                ).returncode,
+                0,
+            )
+
+    def test_legacy_stage_skills_keeps_its_build_directory_contract(self):
+        source = self.source / "skills/legacy/SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("legacy fixture\n")
+        result = self.make("stage-skills", "BUILD_DIR=legacy-build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (self.source / "legacy-build/skills/legacy/SKILL.md").read_text(),
+            "legacy fixture\n",
+        )
+        default = self.make()
+        self.assertEqual(default.returncode, 0, default.stderr)
+        self.assertIn("Show this help message", default.stdout)
+        self.assertNotIn("cargo build", default.stdout)
+
+    def test_stage_products_without_distribution_or_component_manifest(self):
+        stage = self.base / "stage"
+        result = self.make("install", f"DESTDIR={stage}", "AWPRJ=")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in (
+            "agent-sec-cli",
+            "agent-sec-daemon",
+            "agent-sec-daemon-health",
+            "asc-sandbox-docker-guard",
+            "linux-sandbox",
+        ):
+            self.assertTrue((stage / "usr/bin" / name).stat().st_mode & 0o111)
+        unit = (stage / "usr/lib/systemd/system/agent-sec-core.service").read_text()
+        self.assertIn(
+            'ExecStart="/usr/bin/agent-sec-daemon" serve --skillsec-config "/etc/agent-sec/skillsec.json"',
+            unit,
+        )
+        self.assertNotIn(str(stage), unit)
+        self.assertTrue((stage / "etc/agent-sec/skillsec.json").is_file())
+        self.assertTrue(
+            (stage / "usr/share/agent-sec-core/adapters/codex/install.sh").is_file()
+        )
+        self.assertTrue(
+            (stage / "usr/share/agent-sec-core/skills/demo/SKILL.md").is_file()
+        )
+        self.assertFalse(
+            (
+                stage
+                / "etc/systemd/system/multi-user.target.wants/agent-sec-core.service"
+            ).exists()
+        )
+        self.assertFalse(any(path.name == "anolisa" for path in stage.rglob("*")))
+        self.assertFalse((self.source / ".anolisa").exists())
+        self.assertFalse((self.source / "packaging/anolisa").exists())
+
+    def test_checkout_license_installs_as_a_regular_file(self):
+        license_path = ROOT / "LICENSE"
+        original_link = license_path.readlink() if license_path.is_symlink() else None
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                destination = self.base / (
+                    "checkout-stage" if staged else "checkout-prefix"
+                )
+                arguments = (
+                    ("PREFIX=/usr", f"DESTDIR={destination}")
+                    if staged
+                    else (f"PREFIX={destination}",)
+                )
+                result = self.make(
+                    "install",
+                    *arguments,
+                    f"BUILD_DIR={self.build}",
+                    source=ROOT,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                prefix = destination / "usr" if staged else destination
+                installed = prefix / "share/anolisa/agent-sec-core/LICENSE"
+                self.assertFalse(installed.is_symlink())
+                self.assertEqual(installed.read_bytes(), license_path.read_bytes())
+                if original_link is not None:
+                    self.assertEqual(license_path.readlink(), original_link)
+
+    def test_broken_license_link_is_rejected_before_writing(self):
+        license_path = self.source / "LICENSE"
+        license_path.unlink()
+        license_path.symlink_to(self.base / "missing-license-input")
+        stage = self.base / "missing-license"
+
+        result = self.make("install", f"DESTDIR={stage}")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(stage.exists())
+
+    def test_license_destination_symlink_is_rejected_before_writing(self):
+        stage = self.base / "license-link"
+        license_path = stage / "usr/share/anolisa/agent-sec-core/LICENSE"
+        license_path.parent.mkdir(parents=True)
+        outside = self.base / "outside-license"
+        outside.write_text("leave unchanged\n")
+        license_path.symlink_to(outside)
+
+        result = self.make("install", f"DESTDIR={stage}")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr)
+        self.assertEqual(outside.read_text(), "leave unchanged\n")
+        self.assertFalse((stage / "usr/bin").exists())
+
+    def test_namespace_and_independent_binary_resource_roots(self):
+        stage = self.base / "custom"
+        result = self.make(
+            "install",
+            f"DESTDIR={stage}",
+            "AWPRJ=work",
+            "PREFIX=/opt/vendor",
+            "BINDIR=/srv/bin",
+            "ADAPTERDIR=/srv/adapters",
+            "SKILLDIR=/srv/skills",
+            "UNITDIR=/srv/units",
+            "CONFIGDIR=/srv/config",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(
+            (stage / "opt/vendor/share/work/agent-sec-core/LICENSE").is_file()
+        )
+        self.assertTrue((stage / "srv/adapters/openclaw/dist/index.js").is_file())
+        self.assertTrue((stage / "srv/skills/demo/SKILL.md").is_file())
+        self.assertIn(
+            "/srv/bin/agent-sec-daemon",
+            (stage / "srv/units/agent-sec-core.service").read_text(),
+        )
+        self.assertTrue((stage / "srv/config/skillsec.json").is_file())
+        gateway = stage / "opt/vendor/share/work/agent-sec-core/gateway"
+        self.assertTrue((gateway / "github.cedar").is_file())
+        gateway_unit = (stage / "srv/units/agent-sec-gateway.service").read_text()
+        self.assertIn(
+            "-s /opt/vendor/share/work/agent-sec-core/gateway/asc_gateway_addon.py",
+            gateway_unit,
+        )
+        self.assertNotIn(str(stage), gateway_unit)
+        self.assertTrue(
+            (stage / "srv/units/agent-sec-core.service.d/gateway.conf").is_file()
+        )
+        self.assertIn(
+            '--skillsec-config "/srv/config/skillsec.json"',
+            (stage / "srv/units/agent-sec-core.service").read_text(),
+        )
+        self.assertNotIn(
+            str(stage), (stage / "srv/units/agent-sec-core.service").read_text()
+        )
+
+    def test_native_system_unit_preserves_default_configuration_resolution(
+        self,
+    ):
+        stage = self.base / "native-system"
+        result = self.make("install-systemd-system", f"DESTDIR={stage}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        template = (
+            self.source / "packaging/systemd/agent-sec-core-v2.service.in"
+        ).read_text()
+        self.assertEqual(
+            (stage / "usr/lib/systemd/system/agent-sec-core.service").read_text(),
+            template.replace("{bindir}", "/usr/bin"),
+        )
+
+    def test_v2_copy_targets_keep_rpm_and_source_destinations_separate(self):
+        stage = self.base / "binary-copy"
+        result = self.make(
+            "install-cli-v2",
+            "install-cli-v2-source",
+            f"DESTDIR={stage}",
+            "PREFIX=/opt/ignored",
+            "BINDIR=/srv/source-bin",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for directory in (stage / "usr/bin", stage / "srv/source-bin"):
+            self.assertEqual(
+                {path.name for path in directory.iterdir()},
+                {
+                    "agent-sec-cli",
+                    "agent-sec-daemon",
+                    "agent-sec-daemon-health",
+                    "asc-sandbox-docker-guard",
+                },
+            )
+            self.assertTrue(
+                all(path.stat().st_mode & 0o111 for path in directory.iterdir())
+            )
+        self.assertFalse((stage / "opt").exists())
+
+    def test_stage_requires_safe_destdir_before_writing(self):
+        for arguments in (
+            ("install", "DESTDIR=/"),
+            ("install", "DESTDIR=//"),
+            ("install", "DESTDIR=///"),
+            ("install", f"DESTDIR={self.base}/bad", "AWPRJ=../escape"),
+        ):
+            result = self.make(*arguments)
+            self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.base / "bad").exists())
+
+    def test_stage_does_not_follow_destination_or_resource_links(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        linked = self.base / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        for destination in (linked, linked / "nested"):
+            result = self.make("install", f"DESTDIR={destination}")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlink", result.stderr)
+        stage = self.base / "stage-links"
+        stage.mkdir()
+        (stage / "usr").symlink_to(outside, target_is_directory=True)
+        result = self.make("install", f"DESTDIR={stage}")
+        self.assertNotEqual(result.returncode, 0)
+        (self.build / "codex-plugin/escape").symlink_to(
+            outside, target_is_directory=True
+        )
+        result = self.make("install", f"DESTDIR={self.base}/plugins")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(outside.iterdir()))
+
+    def test_legacy_raw_rejects_a_namespace_it_cannot_describe(self):
+        for namespace in ("", "work"):
+            result = subprocess.run(
+                ["bash", str(ROOT / "packaging/raw/package.sh"), "stage"],
+                env={**os.environ, "AWPRJ": namespace},
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("raw packages require AWPRJ=anolisa", result.stderr)
+
+    def test_direct_prefix_install_never_builds_registers_or_activates(self):
+        prefix = self.base / "direct"
+        tools = self.base / "tools"
+        tools.mkdir()
+        for name in ("cargo", "npm", "systemctl", "setcap", "uv"):
+            command = tools / name
+            command.write_text("#!/bin/sh\nexit 91\n")
+            command.chmod(0o755)
+        result = self.make(
+            "install",
+            f"PREFIX={prefix}",
+            "AWPRJ=suite",
+            env_overrides={"PATH": str(tools) + os.pathsep + os.environ["PATH"]},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((prefix / "bin/agent-sec-cli").is_file())
+        self.assertTrue((prefix / "etc/agent-sec/skillsec.json").is_file())
+        self.assertTrue(
+            (prefix / "lib/systemd/system/agent-sec-core.service").is_file()
+        )
+        unit = (prefix / "lib/systemd/system/agent-sec-core.service").read_text()
+        command = next(
+            line.removeprefix("ExecStart=")
+            for line in unit.splitlines()
+            if line.startswith("ExecStart=")
+        )
+        self.assertEqual(
+            shlex.split(command),
+            [
+                str(prefix / "bin/agent-sec-daemon"),
+                "serve",
+                "--skillsec-config",
+                str(prefix / "etc/agent-sec/skillsec.json"),
+            ],
+        )
+        self.assertTrue((prefix / "share/suite/agent-sec-core/LICENSE").is_file())
+        self.assertNotIn("overriding recipe", result.stderr)
+        self.assertNotIn("cargo build", result.stdout)
+
+    def test_install_preflights_missing_inputs_before_any_file_write(self):
+        missing = self.build / "openclaw-plugin/dist/index.js"
+        missing.unlink()
+        stage = self.base / "missing"
+        result = self.make("install", f"DESTDIR={stage}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing prebuilt input", result.stderr)
+        self.assertFalse(stage.exists())
+
+    def test_shared_destdir_ignores_other_components_symlinks(self):
+        stage = self.base / "shared"
+        stage.mkdir()
+        (stage / "another-component").symlink_to(self.base / "unrelated")
+        result = self.make("install", f"DESTDIR={stage}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((stage / "another-component").is_symlink())
+
+    def test_core_install_does_not_require_or_copy_plugin_and_skill_inputs(
+        self,
+    ):
+        for name in (
+            "cosh-extension",
+            "codex-plugin",
+            "qoder-plugin",
+            "openclaw-plugin",
+            "hermes-plugin",
+            "qwen-code-extension",
+            "skills",
+        ):
+            shutil.rmtree(self.build / name)
+        stage = self.base / "core-only"
+        result = self.make("install-core", f"DESTDIR={stage}", "AWPRJ=suite")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((stage / "usr/bin/agent-sec-cli").is_file())
+        self.assertTrue((stage / "usr/bin/linux-sandbox").is_file())
+        self.assertTrue(
+            (stage / "usr/lib/systemd/system/agent-sec-core.service").is_file()
+        )
+        self.assertTrue((stage / "etc/agent-sec/skillsec.json").is_file())
+        self.assertTrue((stage / "usr/share/suite/agent-sec-core/LICENSE").is_file())
+        self.assertTrue(
+            (stage / "usr/share/suite/agent-sec-core/gateway/github.cedar").is_file()
+        )
+        self.assertTrue(
+            (stage / "usr/lib/systemd/system/agent-sec-gateway.service").is_file()
+        )
+        self.assertFalse((stage / "opt/agent-sec-gateway").exists())
+        self.assertFalse((stage / "run/agent-sec-gateway").exists())
+        self.assertFalse((stage / "usr/share/suite/agent-sec-core/adapters").exists())
+        self.assertFalse((stage / "usr/share/suite/agent-sec-core/skills").exists())
+        self.assertNotIn("overriding recipe", result.stderr)
+
+    def test_plugins_install_requires_no_core_or_skill_inputs(self):
+        shutil.rmtree(self.build / "v2")
+        (self.build / "linux-sandbox").unlink()
+        shutil.rmtree(self.build / "skills")
+        (self.source / "LICENSE").unlink()
+        shutil.rmtree(self.source / "packaging/systemd")
+        stage = self.base / "plugins-only"
+        result = self.make("install-plugins", f"DESTDIR={stage}", "AWPRJ=suite")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        adapters = stage / "usr/share/suite/agent-sec-core/adapters"
+        self.assertEqual(
+            {path.name for path in adapters.iterdir()},
+            {"codex", "qoder", "openclaw", "hermes", "qwencode"},
+        )
+        self.assertTrue(
+            (
+                stage / "usr/share/suite/extensions/agent-sec-core/cosh-extension.json"
+            ).is_file()
+        )
+        self.assertTrue((adapters / "openclaw/dist/index.js").is_file())
+        self.assertFalse((stage / "usr/bin").exists())
+        self.assertFalse((stage / "etc").exists())
+        self.assertFalse((adapters.parent / "LICENSE").exists())
+        self.assertFalse((adapters.parent / "skills").exists())
+
+        result = self.make(
+            "uninstall", f"DESTDIR={stage}", "AWPRJ=suite", "PREFIX=/usr"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
+
+    def test_uninstall_rejects_invalid_layout_before_any_removal(self):
+        stage = self.base / "reject-uninstall"
+        for jobs in ("-j1", "-j8"):
+            for name in ("ADAPTERDIR", "UNITDIR", "BINDIR", "SKILLDIR"):
+                for value in ("relative", "/srv/one two", "/srv/*", "/srv/../bad"):
+                    with self.subTest(jobs=jobs, name=name, value=value):
+                        installed = self.make("install", f"DESTDIR={stage}")
+                        self.assertEqual(installed.returncode, 0, installed.stderr)
+                        before = {
+                            path.relative_to(stage): path.read_bytes()
+                            for path in stage.rglob("*")
+                            if path.is_file()
+                        }
+                        result = self.make(
+                            "uninstall",
+                            jobs,
+                            "PREFIX=/usr",
+                            f"DESTDIR={stage}",
+                            f"{name}={value}",
+                        )
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        after = {
+                            path.relative_to(stage): path.read_bytes()
+                            for path in stage.rglob("*")
+                            if path.is_file()
+                        }
+                        self.assertEqual(before, after)
+
+    def test_parallel_uninstall_waits_for_failed_validation(self):
+        stage = self.base / "parallel"
+        result = self.make("install", f"DESTDIR={stage}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before = {
+            path.relative_to(stage): path.read_bytes()
+            for path in stage.rglob("*")
+            if path.is_file()
+        }
+        # Delay the failure so a sibling removal prerequisite would have time
+        # to run. Validation must gate the entire recursive removal graph.
+        with (self.source / "Makefile").open("a") as makefile:
+            makefile.write(
+                "\n.PHONY: fail-uninstall-validation\n"
+                "delivery-validate-uninstall: fail-uninstall-validation\n"
+                "fail-uninstall-validation:\n\t@sleep 0.2; exit 1\n"
+            )
+        result = self.make("uninstall", "-j8", "PREFIX=/usr", f"DESTDIR={stage}")
+        self.assertNotEqual(result.returncode, 0)
+        after = {
+            path.relative_to(stage): path.read_bytes()
+            for path in stage.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(before, after)
+
+    def test_uninstall_rejects_unsafe_destdir_and_shell_input(self):
+        marker = self.base / "injected"
+        values = (
+            "relative",
+            "/",
+            "//",
+            str(self.base / "stage space"),
+            f"{self.base}/stage*",
+            f"{self.base}/../bad",
+            f"{self.base}/`touch {marker}`",
+            f"{self.base}/$$(touch {marker})",
+            f"{self.base}/a'`touch {marker}`",
+            f"{self.base}/a'$$(touch {marker})",
+            f'{self.base}/";touch {marker};#',
+            f"{self.base}/'quoted",
+        )
+        for name in ("DESTDIR", "ADAPTERDIR", "UNITDIR"):
+            for value in values:
+                # Root is a valid system layout path, but not a staging root.
+                if name != "DESTDIR" and value in ("/", "//"):
+                    continue
+                with self.subTest(name=name, value=value):
+                    result = self.make(
+                        "uninstall",
+                        "-j8",
+                        f"DESTDIR={self.base}/safe",
+                        f"{name}={value}",
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(marker.exists())
+
+    def test_uninstall_uses_environment_layout(self):
+        source_skill = self.source / "skills/demo/SKILL.md"
+        source_skill.parent.mkdir(parents=True)
+        source_skill.write_text("demo skill\n")
+        stage = self.base / "environment"
+        environment = {
+            "PREFIX": "/opt/suite",
+            "AWPRJ": "work",
+            "DESTDIR": str(stage),
+            "BINDIR": "/srv/bin",
+            "ADAPTERDIR": "/srv/adapters",
+            "UNITDIR": "/srv/units",
+            "SKILLDIR": "/srv/skills",
+        }
+        installed = self.make("install", env_overrides=environment)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        removed = self.make("uninstall", "-j8", env_overrides=environment)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        for path in (
+            "srv/bin/agent-sec-cli",
+            "srv/bin/agent-sec-daemon",
+            "srv/units/agent-sec-core.service",
+            "srv/adapters/codex",
+            "srv/skills/demo",
+        ):
+            self.assertFalse((stage / path).exists(), path)
+        self.assertTrue((stage / "opt/suite/etc/agent-sec/skillsec.json").is_file())
+        self.assertTrue(
+            (stage / "opt/suite/share/work/agent-sec-core/LICENSE").is_file()
+        )
+
+    def test_uninstall_removes_matching_units_and_adapters(self):
+        for prefix, namespace, overrides in (
+            ("/usr/local", "anolisa", ()),
+            ("/opt/sec-core", "suite", ()),
+            (
+                "/srv/sec-core",
+                "",
+                ("UNITDIR=/srv/units", "ADAPTERDIR=/srv/adapters"),
+            ),
+        ):
+            with self.subTest(prefix=prefix, namespace=namespace):
+                stage = self.base / (namespace or "standalone")
+                args = (
+                    f"DESTDIR={stage}",
+                    f"PREFIX={prefix}",
+                    f"AWPRJ={namespace}",
+                    *overrides,
+                )
+                layout = self.make("layout", *args)
+                self.assertEqual(layout.returncode, 0, layout.stderr)
+                paths = dict(line.split("=", 1) for line in layout.stdout.splitlines())
+                installed = self.make("install", *args)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                unit_dir = stage / paths["UNITDIR"].lstrip("/")
+                adapter_dir = stage / paths["ADAPTERDIR"].lstrip("/")
+                unit = unit_dir / "agent-sec-core.service"
+                adapters = [
+                    adapter_dir / name
+                    for name in ("codex", "hermes", "openclaw", "qoder", "qwencode")
+                ]
+                self.assertTrue(unit.is_file())
+                for adapter in adapters:
+                    self.assertTrue(adapter.is_dir())
+                retained = [
+                    stage / "etc/systemd/system/agent-sec-core.service",
+                    unit_dir / "unrelated.service",
+                    adapter_dir / "unrelated/plugin.json",
+                    stage / paths["CONFIGDIR"].lstrip("/") / "skillsec.json",
+                    stage
+                    / paths["CONFIGDIR"].lstrip("/")
+                    / "sandbox/permissions.json.template",
+                ]
+                # Legacy installation paths are not owned by this layout.
+                retained.extend(
+                    stage / prefix.lstrip("/") / "lib/anolisa/sec-core" / name / "keep"
+                    for name in (
+                        "codex-plugin",
+                        "hermes-plugin",
+                        "openclaw-plugin",
+                        "qoder-plugin",
+                        "qwen-code-extension",
+                    )
+                )
+                for path in retained:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("administrator or unrelated content\n")
+                removed = self.make("uninstall", *args)
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+                self.assertFalse(unit.exists())
+                for adapter in adapters:
+                    self.assertFalse(adapter.exists())
+                for path in retained:
+                    self.assertEqual(
+                        path.read_text(), "administrator or unrelated content\n"
+                    )
+
+    def test_core_skills_and_cosh_install_does_not_require_other_plugins(self):
+        for name in (
+            "codex-plugin",
+            "qoder-plugin",
+            "openclaw-plugin",
+            "hermes-plugin",
+            "qwen-code-extension",
+        ):
+            shutil.rmtree(self.build / name)
+        stage = self.base / "core-skills-cosh"
+        result = self.make(
+            "install-core-and-skills-with-cosh", "-j4", f"DESTDIR={stage}"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((stage / "usr/bin/agent-sec-cli").is_file())
+        self.assertTrue((stage / "usr/bin/linux-sandbox").is_file())
+        data = stage / "usr/share/anolisa"
+        self.assertTrue((data / "skills/demo/SKILL.md").is_file())
+        extension = data / "extensions/agent-sec-core"
+        self.assertTrue((extension / "cosh-extension.json").is_file())
+        self.assertTrue((extension / "hooks/sandbox-guard.py").is_file())
+        self.assertFalse((data / "agent-sec-core/adapters").exists())
+
+    def test_core_skills_and_cosh_install_preflights_all_groups_before_writing(self):
+        for name in (
+            "v2/bin/agent-sec-daemon",
+            "skills/demo/SKILL.md",
+            "cosh-extension/hooks/sandbox-guard.py",
+            "cosh-extension/hooks/sandbox_paths.py",
+        ):
+            with self.subTest(name=name):
+                missing = self.build / name
+                saved = self.base / "saved-input"
+                missing.replace(saved)
+                stage = self.base / "missing-core-skills-cosh"
+                try:
+                    result = self.make(
+                        "install-core-and-skills-with-cosh", "-j4", f"DESTDIR={stage}"
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("missing", result.stderr)
+                    self.assertIn(missing.name, result.stderr)
+                    self.assertFalse(stage.exists())
+                finally:
+                    saved.replace(missing)
+
+    def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(
+        self,
+    ):
+        commands = self.base / "commands"
+        commands.mkdir()
+        systemctl = commands / "systemctl"
+        systemctl.write_text("#!/bin/sh\nexit 0\n")
+        systemctl.chmod(0o755)
+        calls = self.base / "calls"
+        for failure in (True, False):
+            prefix = self.base / ("failed" if failure else "success")
+            layout = self.make("layout", f"PREFIX={prefix}")
+            self.assertEqual(layout.returncode, 0, layout.stdout + layout.stderr)
+            paths = dict(line.split("=", 1) for line in layout.stdout.splitlines())
+            result = self.make("install-core", f"PREFIX={prefix}")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cli = prefix / "bin/agent-sec-cli"
+            unit = prefix / "lib/systemd/system/agent-sec-gateway.service"
+            addon = Path(paths["DATADIR"]) / "gateway/asc_gateway_addon.py"
+            cli.write_text(
+                "#!/bin/sh\n"
+                f"test -f {shlex.quote(str(unit))} || exit 92\n"
+                f"test -f {shlex.quote(str(addon))} || exit 93\n"
+                f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
+                f"exit {1 if failure else 0}\n"
+            )
+            cli.chmod(0o755)
+            result = self.make(
+                "uninstall",
+                "-j4",
+                f"PREFIX={prefix}",
+                f"SOURCE_SYSTEMD_SYSTEM_UNIT_DIR={prefix}/lib/systemd/system",
+                env_overrides={"PATH": str(commands) + os.pathsep + os.environ["PATH"]},
+            )
+            self.assertEqual(
+                result.returncode == 0, not failure, result.stdout + result.stderr
+            )
+            self.assertEqual(cli.exists(), failure)
+            self.assertEqual(unit.exists(), failure)
+            self.assertEqual(addon.exists(), failure)
+        self.assertEqual(
+            calls.read_text().splitlines(), ["gateway disable", "gateway disable"]
+        )
+
+    def test_skills_install_requires_no_core_or_plugin_inputs(self):
+        for path in self.build.iterdir():
+            if path.name != "skills":
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+        (self.source / "LICENSE").unlink()
+        shutil.rmtree(self.source / "packaging/systemd")
+        self.artifact("skills/demo/run.sh", "#!/bin/sh\nexit 0\n")
+        prefix = self.base / "skills-prefix"
+        result = self.make("install-skills", f"PREFIX={prefix}", "AWPRJ=suite")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        skills = prefix / "share/suite/skills"
+        self.assertTrue((skills / "demo/SKILL.md").is_file())
+        self.assertEqual((skills / "demo/run.sh").stat().st_mode & 0o777, 0o755)
+        self.assertFalse((prefix / "bin").exists())
+        self.assertFalse((prefix / "etc").exists())
+        self.assertEqual({path.name for path in skills.parent.iterdir()}, {"skills"})
+        self.assertNotIn("overriding recipe", result.stderr)
+
+    def test_namespaced_skills_install_uses_shared_root(self):
+        stage = self.base / "anolisa-skills"
+        result = self.make("install-skills", f"DESTDIR={stage}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((stage / "usr/share/anolisa/skills/demo/SKILL.md").is_file())
+        self.assertFalse((stage / "usr/share/anolisa/agent-sec-core/skills").exists())
+
+    def test_uninstall_skills_uses_matching_layout(self):
+        source_skill = self.source / "skills/demo/SKILL.md"
+        source_skill.parent.mkdir(parents=True)
+        source_skill.write_text("fixture\n")
+        for namespace, relative in (
+            ("", "usr/local/share/agent-sec-core/skills"),
+            ("anolisa", "usr/local/share/anolisa/skills"),
+        ):
+            stage = self.base / (namespace or "standalone")
+            args = (
+                f"DESTDIR={stage}",
+                "PREFIX=/usr/local",
+                f"AWPRJ={namespace}",
+            )
+            installed = self.make("install-skills", *args)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            skill = stage / relative / "demo/SKILL.md"
+            self.assertTrue(skill.is_file())
+            untouched = stage / "usr/share/anolisa/skills/demo/SKILL.md"
+            untouched.parent.mkdir(parents=True, exist_ok=True)
+            untouched.write_text("unrelated\n")
+            removed = self.make("uninstall", *args)
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(skill.exists())
+            self.assertEqual(untouched.read_text(), "unrelated\n")
+
+    def test_each_group_preflights_its_inputs_before_any_write(self):
+        for group, name in (
+            ("core", "v2/bin/agent-sec-daemon"),
+            ("core", "gateway/github.cedar"),
+            ("plugins", "openclaw-plugin/dist/index.js"),
+            ("skills", "skills/demo/SKILL.md"),
+        ):
+            missing = self.build / name
+            saved = self.base / "saved-input"
+            missing.replace(saved)
+            stage = self.base / (group + "-missing")
+            try:
+                result = self.make("install-" + group, f"DESTDIR={stage}")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("missing", result.stderr)
+                self.assertFalse(stage.exists())
+            finally:
+                saved.replace(missing)
+
+    def test_skills_without_any_skill_definition_fail_before_writing(self):
+        (self.build / "skills/demo/SKILL.md").unlink()
+        self.artifact("skills/demo/README.md", "This is not a skill definition.\n")
+        stage = self.base / "no-skill-definition"
+        result = self.make("install-skills", f"DESTDIR={stage}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("skills/*/SKILL.md", result.stderr)
+        self.assertFalse(stage.exists())
+
+    def test_build_and_grouped_installs_exclude_retired_stage_entrypoints(self):
+        for target in ("build", "build-core", "build-core-with-cosh"):
+            for layout, gateway in (
+                (
+                    ("PREFIX=/opt/vendor", "AWPRJ=suite"),
+                    "/opt/vendor/share/suite/agent-sec-core/gateway",
+                ),
+                (("DATADIR=/srv/assets",), "/srv/assets/gateway"),
+            ):
+                with self.subTest(target=target, layout=layout):
+                    result = self.make("-n", target, *layout)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("cd v2 &&", result.stdout)
+                    self.assertIn("cargo build --release --locked", result.stdout)
+                    self.assertIn(f'ASC_GATEWAY_DATADIR="{gateway}"', result.stdout)
+                    self.assertNotIn("maturin", result.stdout)
+        for target in (
+            "stage-package",
+            "stage-package-core",
+            "stage-package-plugin",
+            "stage-package-skills",
+        ):
+            result = self.make(target)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("No rule to make target", result.stderr)
+
+    def test_direct_install_checks_written_paths_without_scanning_shared_parents(
+        self,
+    ):
+        prefix = self.base / "direct-links"
+        bindir = prefix / "bin"
+        bindir.mkdir(parents=True)
+        outside = self.base / "outside-file"
+        outside.write_text("leave unchanged\n")
+        (bindir / "unrelated-link").symlink_to(outside)
+        result = self.make("install", f"PREFIX={prefix}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (bindir / "agent-sec-cli").unlink()
+        (bindir / "agent-sec-cli").symlink_to(outside)
+        result = self.make("install", f"PREFIX={prefix}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr)
+        self.assertEqual(outside.read_text(), "leave unchanged\n")
+
+    def test_shared_skill_root_only_checks_and_chmods_this_components_files(
+        self,
+    ):
+        prefix = self.base / "shared-prefix"
+        skills = prefix / "shared-skills"
+        other = skills / "other"
+        other.mkdir(parents=True)
+        untouched = other / "private.sh"
+        untouched.write_text("leave unchanged\n")
+        untouched.chmod(0o600)
+        (other / "legal-link").symlink_to(untouched)
+        self.artifact("skills/demo/run.sh", "#!/bin/sh\nexit 0\n")
+        result = self.make("install", f"PREFIX={prefix}", f"SKILLDIR={skills}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(untouched.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((skills / "demo/run.sh").stat().st_mode & 0o777, 0o755)
+
+
+if __name__ == "__main__":
+    unittest.main()

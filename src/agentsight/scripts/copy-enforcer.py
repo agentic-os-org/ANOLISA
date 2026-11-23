@@ -3,14 +3,14 @@
 
 import hashlib
 import os
-from pathlib import Path
 import re
 import stat
 import sys
 import tempfile
+from pathlib import Path
 
 
-def copy_enforcer(source: Path, destination: Path) -> None:
+def verified_enforcer(source: Path) -> bytes:
     # Receipts contain only a digest, not a path that could redirect verification.
     expected = Path(str(source) + ".sha256").read_text(encoding="ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -23,6 +23,11 @@ def copy_enforcer(source: Path, destination: Path) -> None:
     if hashlib.sha256(binary).hexdigest() != expected:
         raise ValueError(f"enforcer SHA256 receipt mismatch: {source}")
 
+    return binary
+
+
+def copy_enforcer(source: Path, destination: Path) -> None:
+    binary = verified_enforcer(source)
     # Publish only the checked buffer, not a second copy from a mutable input path.
     temporary = None
     try:
@@ -41,8 +46,11 @@ def copy_enforcer(source: Path, destination: Path) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        sys.exit(f"usage: {sys.argv[0]} <enforcer> <destination>")
+        sys.exit(f"usage: {sys.argv[0]} <enforcer> <destination> | --verify <enforcer>")
     try:
-        copy_enforcer(Path(sys.argv[1]), Path(sys.argv[2]))
+        if sys.argv[1] == "--verify":
+            verified_enforcer(Path(sys.argv[2]))
+        else:
+            copy_enforcer(Path(sys.argv[1]), Path(sys.argv[2]))
     except (OSError, ValueError) as error:
         sys.exit(f"cannot copy attested enforcer: {error}")

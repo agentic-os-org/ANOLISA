@@ -26,6 +26,28 @@ class NativeTests(GateFixture):
         super().setUp()
         self.manifest = load(AW)
 
+    def test_hermes_source_install_copies_under_hardlink_environment(self) -> None:
+        row = self.manifest["agents"]["hermes-0.23.1"]
+        evidence = self.root / "evidence"
+        work = self.root / "work"
+        evidence.mkdir()
+        work.mkdir()
+        commands = Commands(evidence, {})
+        observed = []
+
+        def command(argv, _cwd, timeout=600, **_kwargs):
+            observed.append(argv)
+            return row["source"]["revision"] if argv[:3] == ["git", "rev-parse", "HEAD"] else "{}"
+
+        with patch.dict(os.environ, {"UV_LINK_MODE": "hardlink"}), patch.object(
+            commands, "run", side_effect=command
+        ):
+            native_acceptance.setup(row, work, commands)
+        installs = [argv for argv in observed if argv[:2] == ["uv", "pip"]]
+        self.assertEqual(len(installs), 2)
+        for argv in installs:
+            self.assertEqual(argv[argv.index("--link-mode") + 1], "copy")
+
     def test_setup_reports_survive_relative_and_absolute_output_paths(self) -> None:
         run = Commands.run
         row = self.manifest["agents"]["qoder"]
@@ -87,7 +109,7 @@ class NativeTests(GateFixture):
                 )
 
     def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n", 1
         )[1].split("      - name: Validate native coverage", 1)[0]
@@ -121,13 +143,17 @@ class NativeTests(GateFixture):
             (release, "refs/heads/main", False),
             (head, "refs/heads/feature", False),
             (head, "refs/tags/release", False),
+            (head, "refs/tags/aw/v1.0.0", True),
+            (base, "refs/tags/aw/v1.0.0", False),
+            (feature, "refs/tags/aw/v1.0.0", False),
         ):
             with self.subTest(candidate=candidate, ref=ref):
                 git("checkout", "--detach", candidate)
                 result = subprocess.run(
                     ["bash", "-euo", "pipefail", "-c", script],
                     cwd=self.root,
-                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref},
+                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref,
+                         "WORKFLOW_SHA": feature if candidate == feature else head, "EVENT_NAME": "push"},
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -145,6 +171,19 @@ class NativeTests(GateFixture):
                 ["bash", "-euc", script], env={**os.environ, "PLAN_RESULT": outcome}, timeout=5
             )
             self.assertEqual(result.returncode == 0, outcome == "success")
+
+    def test_native_workers_can_use_uploaded_binaries_after_a_package_test_failure(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        packages = jobs.split("  packages:\n", 1)[1].split("\n  native:\n", 1)[0]
+        self.assertIn("native_artifact: ${{ steps.upload-native.outputs.artifact-id }}", packages)
+        self.assertLess(packages.index("id: upload-native"), packages.index("Verify installed packages"))
+        for name in ("native", "resident-image"):
+            job = jobs.split(f"\n  {name}:\n", 1)[1].split("    name:", 1)[0]
+            self.assertIn("needs: [plan, packages]", job)
+            self.assertIn("!cancelled() && needs.plan.result == 'success' && "
+                          "needs.packages.outputs.native_artifact != ''", job)
+        self.assertIn("PACKAGE_RESULT: ${{ needs.packages.result }}", jobs)
 
     def test_new_agent_requires_native_accounting(self) -> None:
         (self.root / "tests").mkdir()
@@ -180,6 +219,27 @@ class NativeTests(GateFixture):
 
             with self.subTest(mode=mode), patch.object(Path, "read_text", read):
                 with self.assertRaises(ValueError):
+                    load(AW)
+
+    def test_pi_release_baselines_remain_scheduled(self) -> None:
+        original = Path.read_text
+        for mode in ("fixture", "case"):
+            manifest = copy.deepcopy(self.manifest)
+            row = manifest["agents"]["pi"]
+            if mode == "fixture":
+                del row["npm_fixtures"]["legacy"]
+            else:
+                row["cases"] = [
+                    case for case in row["cases"] if case["name"] != "strict-output-latest"
+                ]
+
+            def read(path: Path, *args: object, **kwargs: object) -> str:
+                if path == AW / "tests/native-matrix.json":
+                    return json.dumps(manifest)
+                return original(path, *args, **kwargs)
+
+            with self.subTest(mode=mode), patch.object(Path, "read_text", read):
+                with self.assertRaisesRegex(ValueError, "pi: retain"):
                     load(AW)
 
     def test_qoder_reload_pin_entrypoint_and_cases_are_required(self) -> None:
@@ -293,6 +353,11 @@ class NativeTests(GateFixture):
         for names in ([], ["allow", "allow"]):
             case["results"][0]["cases"]["names"] = names
             with self.assertRaises(ValueError):
+                validate_case(case)
+        for result in (None, {"file": ["report.json"]}):
+            case = copy.deepcopy(self.manifest["agents"]["pi"]["cases"][0])
+            case["results"] = [result]
+            with self.subTest(result=result), self.assertRaisesRegex(ValueError, "file"):
                 validate_case(case)
 
     def test_custom_suites_reject_missing_empty_or_malformed_results(self) -> None:
@@ -509,7 +574,6 @@ class NativeTests(GateFixture):
             "aw-provider-tokenless",
             "aw-provider-sec-core",
             "tokenless",
-            "rtk",
             "policy",
             "agent-sec-cli",
             "agent-sec-daemon",

@@ -714,7 +714,7 @@ pub async fn get_token_savings(
 
     // FIX(#2): strategy = operation key (for frontend color lookup),
     //           label = Chinese display name
-    let strategy_breakdown: Vec<StrategyBreakdown> = grand_strategy_map
+    let mut strategy_breakdown: Vec<StrategyBreakdown> = grand_strategy_map
         .into_iter()
         .map(
             |(strategy_key, (label, saved, compounded_saved))| StrategyBreakdown {
@@ -725,6 +725,15 @@ pub async fn get_token_savings(
             },
         )
         .collect();
+    // Biggest compounded saving first, then strategy key. The grouping map's
+    // order is arbitrary, so two identical requests returned the same slices
+    // in different positions and the dashboard's pie legend changed order
+    // between refreshes. Every sibling breakdown endpoint orders its array.
+    strategy_breakdown.sort_by(|a, b| {
+        b.compounded_saved
+            .cmp(&a.compounded_saved)
+            .then_with(|| a.strategy.cmp(&b.strategy))
+    });
 
     HttpResponse::Ok().json(TokenSavingsResponse {
         stats_available,
@@ -803,6 +812,15 @@ pub async fn get_session_savings(
         .unwrap_or_default();
 
     let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    // The turn map skips a NULL call_id row, so `request_count` — which counts
+    // that row — is not the session's horizon. Take it from the map, falling
+    // back to the count when no call is mapped.
+    let session_total_turns = turn_indices
+        .values()
+        .filter(|info| info.session_id == session_id)
+        .map(|info| info.turn_index as i64)
+        .max()
+        .unwrap_or(request_count);
     // The per-session endpoint's denominator spans the session's whole
     // history, so its numerator stays unbounded to match.
     let (stats_available, rows) =
@@ -835,7 +853,7 @@ pub async fn get_session_savings(
                 .get(&row.tool_use_id)
                 .map(|info| info.turn_index)
                 .unwrap_or(1) as i64;
-            let compounding_turns = (request_count - turn_index).max(1);
+            let compounding_turns = (session_total_turns - turn_index).max(1);
             let compounded = saved * compounding_turns;
             total_compounded_saved += compounded;
 
@@ -962,6 +980,71 @@ mod tests {
             [],
         ).unwrap();
         stats_path
+    }
+
+    /// Same schema as [`setup_stats_db`], with one row per strategy so the
+    /// grouping map has to order five slices.
+    fn setup_multi_strategy_stats_db(dir: &std::path::Path) -> std::path::PathBuf {
+        let stats_dir = dir.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        let stats_path = stats_dir.join("stats.db");
+        let conn = rusqlite::Connection::open(&stats_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_tokens INTEGER,
+                after_tokens INTEGER,
+                before_text TEXT,
+                after_text TEXT,
+                operation TEXT
+            );",
+        )
+        .unwrap();
+        for (tool_use_id, before, after, operation) in [
+            ("tc-1", 2000, 500, "compress-response"),
+            ("tc-2", 1000, 300, "compress-schema"),
+            ("tc-3", 900, 600, "rewrite-command"),
+            ("tc-4", 800, 700, "compress-toon"),
+            ("tc-5", 700, 650, "unknown-operation"),
+        ] {
+            conn.execute(
+                "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+                 VALUES ('sess-1', ?1, ?2, ?3, 'long text', 'short', ?4)",
+                rusqlite::params![tool_use_id, before, after, operation],
+            )
+            .unwrap();
+        }
+        stats_path
+    }
+
+    /// Five LLM calls in one session, each mapping one tool id used by
+    /// [`setup_multi_strategy_stats_db`].
+    fn setup_multi_strategy_genai_db(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("genai_events.db");
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (call, tool, start) in [
+            ("call-1", "tc-1", 100_000_000i64),
+            ("call-2", "tc-2", 200_000_000),
+            ("call-3", "tc-3", 300_000_000),
+            ("call-4", "tc-4", 400_000_000),
+            ("call-5", "tc-5", 500_000_000),
+        ] {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+                 VALUES ('llm_call', 'sess-1', ?1, 'test-agent', 'gpt-4', 1000, 500, ?2, '{}', ?3)",
+                rusqlite::params![call, start, format!("[\"{tool}\"]")],
+            )
+            .unwrap();
+        }
+        db_path
     }
 
     fn make_app_state(db_path: std::path::PathBuf) -> AppState {
@@ -1496,6 +1579,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// The breakdown was collected straight out of a HashMap, so two identical
+    /// requests returned the same strategies in different array positions and
+    /// the dashboard legend changed order between refreshes. The array must be
+    /// deterministic (largest compounded saving first, then strategy key).
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn strategy_breakdown_order_is_stable_across_requests() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_strategy_order_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_multi_strategy_genai_db(&tmp);
+        let _stats_path = setup_multi_strategy_stats_db(&tmp);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let expected = serde_json::json!([
+            "compress-response",
+            "compress-schema",
+            "rewrite-command",
+            "compress-toon",
+            "other"
+        ]);
+        for attempt in 0..8 {
+            let req = actix_test::TestRequest::get()
+                .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
+                .to_request();
+            let resp = actix_test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200);
+            let body: serde_json::Value = actix_test::read_body_json(resp).await;
+            let strategies: Vec<&str> = body["summary"]["strategy_breakdown"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| entry["strategy"].as_str())
+                .collect();
+            assert_eq!(
+                serde_json::json!(strategies),
+                expected,
+                "request {attempt} returned an unstable order"
+            );
+        }
+
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The rate fields document "a fraction in [0.0, 1.0]", but the ratio is
     /// `saved / total` against the COMPRESSED run's token total: tokenless
     /// shortens a tool output before it ever enters the prompt, so the saved
@@ -1707,6 +1851,65 @@ mod tests {
         assert!((rate - 2200.0 / 2700.0).abs() < 1e-9, "got {rate}");
 
         // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The per-session horizon must come from the turn map, not from the raw
+    /// row count: the turn reader skips a NULL `call_id` row, so counting that
+    /// row as a turn gave every item one extra compounding turn.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn session_savings_horizon_ignores_a_null_call_id_row() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_sess_null_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let _stats_path = setup_stats_db(&tmp);
+        {
+            // Fixture-only raw insert: a foreign writer's malformed row,
+            // timestamped before both real calls.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', 'sess-1', NULL, 'test-agent', 'gpt-4', 0, 0, 50000000, '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-1")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        // Two real calls: tc-1 compounds over one later turn, tc-2 over none.
+        // Counting the skipped row as a turn reported 3700 instead.
+        assert_eq!(body["total_compounded_saved"], 2200);
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },

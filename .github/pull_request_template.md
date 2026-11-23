@@ -26,8 +26,11 @@ For a genuinely trivial change, use `no-issue: <brief reason>`. -->
 
 ## Validation
 
-<!-- List the relevant tests, commands, environments, or manual checks. -->
+<!-- List relevant tests, commands, and environments. For documentation changes,
+state the applicable version or commit and platform where relevant. Distinguish
+static checks and parsing from examples you ran, and note any relevant gaps. -->
 
 ## Documentation and rollback
 
-<!-- What documentation changed? How can this be reverted or disabled? -->
+<!-- For documentation changes, name the reader and task and link to the
+canonical page. Explain rollback or how to disable the change, when applicable. -->

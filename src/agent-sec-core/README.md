@@ -5,7 +5,8 @@
 **OS-level security kernel for AI Agents.** Provides defense in depth for Agent
 workloads: prompt injection detection, code scanning, PII detection, skill
 integrity tracking, sandbox isolation, and a local security event store.
-Everything runs locally with no Token cost. Applicable to
+Security scanning runs locally with no Token cost; optional Intent proposals
+use a cloud model and may incur charges. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
@@ -14,6 +15,27 @@ listed below.
 **AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
 
 AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
+
+Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- command`
+for local execution with explicit filesystem and network permissions, without a
+daemon. `--permissions` accepts the existing OS permission JSON or Cedar source;
+Cedar is projected to coarse process-tree permissions. The same input can generate
+each PDP permission request through `PermissionInput` or the Cosh sandbox Hook.
+See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
+for the permission format, runtime requirements and isolation boundaries.
+Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
+using PAP-managed Cedar policies. The daemon enables authorization by default;
+an empty applicable policy set denies requests.
+Successful Policy updates apply to subsequent authorization requests.
+Cosh opts into this flow with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, using its native
+approval UI and the installed default permission template. Every hooked `shell` /
+`run_shell_command` call is authorized, including ordinary Python scripts and original
+`sudo` commands. The switch defaults off; see the sandbox guide for configuration,
+permission boundaries and failure handling.
+Set `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` with an explicit Cedar
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` preset to generate permission requests
+from each original command and cwd. Candidates never update PAP; clarification,
+generation and conversion failures block execution.
 
 ## Background
 
@@ -37,7 +59,7 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
-| **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
+| **Sandbox** | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) | `agent-sec-cli sandbox run` |
 
 The V2 source build installs `agent-sec-daemon` as the host-level
 `agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
@@ -45,7 +67,11 @@ CLI command and integration capability surface through Rust implementations.
 
 ## V2 SkillSec and Policy CLI
 
-The Rust V2 core adds **SkillSec** behind the existing `skill-ledger` command: local scanners,
+Use `agent-sec-cli skillsec status` or `agent-sec-cli skillsec --help`. The previous
+`skill-ledger` command remains a compatibility alias with identical behavior. Existing Hook
+capability IDs, environment variables and stored data are unchanged.
+
+The Rust V2 core exposes **SkillSec** through `agent-sec-cli skillsec`: local scanners,
 system-key signing, version history, decisions, rollback and SkillFS activation share one root
 daemon. All local users may manage all Skills within the enabled defaults, administrator-configured
 directories or authenticated SkillFS mounts. Default system directories and standard Skill directories
@@ -82,15 +108,58 @@ The default Policy database can fall back to `/var/lib/agent-sec/policy` when it
 Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
 [Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
-PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
-currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
-own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
-the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+PolicyTemplates are reusable policies with general rules; the PEP Translator
+supports native JSON file-deletion block rules. Policy create/update reads raw Cedar files by
+default and saves them with an exact schema reference; `--language json` keeps native JSON
+templates and Cedar source envelopes. Cedar admission and source persistence are
+available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed.
+Native JSON file-policy requests and saved snapshots retain their format.
+Scopes save immutable Policy snapshots and
+own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI
+callers, configure the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+
+**Breaking change:** `scope create --cgroup-id` has been removed because cgroup
+assignments were not supported. Update scripts to select the intended processes
+with `--pid`, `--process-name`, `--executable`, or `--cmdline-arg`.
+The last selector matches a complete command-line argument for interpreter-hosted processes.
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
 bounded correlation records on stderr. See [context examples and logging limits](v2/README.md#native-opentelemetry-tracing).
+
+`agent-sec-cli intent propose` generates an unapproved Cedar candidate from
+composable read, write-operation, execution and whole-network rules.
+The command takes only `--task` and `--ttl`: no path metadata is collected,
+and the program adds no permits or forbids of its own, so the model's
+policy is the whole authorization.
+Enable `ASC_INTENT_ENABLED=true` and configure `DASHSCOPE_API_KEY` in the daemon
+environment. Task text goes to the cloud; file contents are not read or sent.
+The model writes native Cedar from draft v1 without per-field evidence; Rust
+parses and validates it without rewriting its meaning. Pure prohibitions add no
+permissions; unsupported constraints are rejected.
+Upgrade CLI and daemon together for request v1/candidate v1; other versions are
+incompatible. Candidates do not approve, install or enforce policies. See the
+[Intent reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task).
+
+For hook integration, the source-tree V2 API `intent.propose_command` accepts
+`command` and `cwd`, returning a Cedar candidate or clarification reasons; the
+`agent-sec-cli intent propose-command` subcommand exposes it to hook callers. Neither
+updates base policies, maps OS permissions or executes commands. The opt-in Cosh
+Hook combines candidates with an explicit runtime preset and uses the existing
+PDP/sandbox lifecycle. See the [Command Cedar API](v2/README.md#command-cedar-api).
+
+`agent-sec-cli intent init` generates validated Cedar locally from explicit
+rules, with no daemon, model or network:
+
+```bash
+agent-sec-cli intent init --deny-network
+agent-sec-cli intent init --allow-read '/data/**' --allow-write '/data/out/**' --deny-network
+```
+
+The output is an unapproved preview: forbid overrides permit, and anything no
+permit names stays denied by default. See the
+[Intent init reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-init-generate-cedar-locally-from-explicit-rules).
 
 ## Security Architecture
 
@@ -152,7 +221,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
 ├── docs/design/               # Design documents
 ├── tests/                     # Unit, integration, packaging, and e2e tests
-├── .anolisa/component.toml    # ANOLISA component contract
+├── packaging/anolisa/         # ANOLISA component contract
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM packaging spec template
@@ -234,7 +303,7 @@ agent-sec-cli --version
 `agent-sec-core`:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -248,16 +317,28 @@ Developers building from source should use the repository-level entry point:
 ./scripts/build-all.sh --component sec-core
 ```
 
-Before installing files, the source-build entry point checks Node.js 20 or
-newer, Python 3, bubblewrap, GnuPG, and `jq`. It installs the Rust CLI, sandbox,
-and host-level daemon with `sudo`, while default-mode integration resources
-remain in user paths. Agent hooks use the host `python3`; the Qoder plugin
-installer currently requires Python >= 3.11, < 3.12. User mode reports all missing system runtime packages with one
-install command and exits; install them and rerun the same command.
-`--ignore-deps` bypasses this verification for pre-provisioned hosts.
+The wrapper prepares Node.js 22 or newer and system `python3` for build helpers,
+then checks declared runtime dependencies before host installation. The backend
+supports system file installation only; `--no-install` builds without installing.
+`--ignore-deps` skips dependency preparation and verification on a provisioned
+host. Agent hooks use the host `python3`; the Qoder installer requires
+Python >= 3.11, < 3.12.
+
+The default source layout uses `PREFIX=/usr/local` and `AWPRJ=anolisa`: programs
+are under `/usr/local/bin`, and framework resources under
+`/usr/local/share/anolisa/agent-sec-core/adapters`. File installation does not
+start the daemon or change framework user configuration. For an existing source
+installation, first review the
+[legacy systemd unit migration](../../docs/user-guide/en/agent-sec-core/index.md#migrate-a-legacy-source-installed-service)
+to preserve administrator settings and retire an older `/etc/systemd/system`
+override. Then follow
+[daemon startup and health verification](../../docs/user-guide/en/agent-sec-core/index.md#start-the-source-installed-daemon)
+before deploying an integration. Custom prefixes and namespaces follow the
+layout reported by `make -C src/agent-sec-core layout` from the repository root.
 
 The source build does not register the component in ANOLISA state. Use the
-installed integration scripts instead of `anolisa adapter enable`; see
+installed integration scripts as the framework's user, without `sudo`, instead
+of `anolisa adapter enable`; see
 [Source-build Integration](../../docs/user-guide/en/agent-sec-core/index.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.
@@ -384,7 +465,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
-V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.0.0"`;
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.1.2"`;
 a `pass` result with partial coverage does not establish complete detection. This phase preserves
 Hook contracts without switching live hosts or adding PDP enforcement.
 The shared CLI `--trace-context` adapter propagates attribution through the top-level OTel
@@ -394,6 +475,9 @@ OpenClaw records model-entry scans as `source=model_input` on stable `>=2026.5.1
 this input hook scans only the current `prompt`, excluding system prompts and history.
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
+
+Fixture words such as `test` lower confidence only when matched as whole words.
+`latest 13812345678` retains its phone finding; `test-only` keeps its existing fixture treatment.
 
 Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 
@@ -544,8 +628,13 @@ Details: [Observability User Guide](../../docs/user-guide/en/agent-sec-core/inde
 
 ## Security Events
 
-Security events are written both as JSONL and into a SQLite store. Query the store
-with `agent-sec-cli events`:
+Security events are written both as JSONL and into a SQLite store.
+
+If a JSONL file ends without a newline after an interrupted append, the writer
+preserves those bytes and separates the next record with a newline. It does not
+repair malformed records; the independent SQLite store is unchanged.
+
+Query the store with `agent-sec-cli events`.
 
 V2 queries use the UDS peer UID: ordinary users read their own events and root reads
 all UIDs. Filter with the original session ID; root receives matching events from all UIDs.

@@ -14,14 +14,48 @@ fn ask(command: &str) -> CommandAssessment {
     )
 }
 
+// Lib-only so the exact lib/bin overlap ceiling stays unchanged.
+library_tests! {
+    #[test]
+    fn command_risk_printenv_is_not_auto_approved() {
+        for command in [
+            "printenv",
+            "printenv SECRET_P38",
+            "printenv PATH",
+            "printenv HOME SECRET_P38",
+            "printenv --null SECRET_P38",
+        ] {
+            let assessment = auto(command);
+            assert_ne!(
+                assessment.execution,
+                ExecutionDecision::AutoAllow,
+                "{command}"
+            );
+            assert_eq!(assessment.auto_allow, None, "{command}");
+        }
+    }
+
+    #[test]
+    fn command_risk_printenv_forms_route_to_approval() {
+        for command in [
+            "printenv",
+            "printenv SECRET_P38",
+            "printenv HOME SECRET_P38",
+            "printenv --null SECRET_P38",
+        ] {
+            let assessment = auto(command);
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+        }
+    }
+}
+
 #[test]
 fn command_risk_assessment_direct_readonly_and_diagnostics() {
-    for command in [
-        "pwd",
-        "df -h",
-        "git status --short",
-        "ps -Ao pid,pcpu,pmem,comm -r",
-    ] {
+    for command in ["pwd", "df -h", "uptime", "ps -Ao pid,pcpu,pmem,comm -r"] {
         let assessment = auto(command);
         assert_eq!(
             assessment.execution,
@@ -62,7 +96,7 @@ fn command_risk_assessment_current_auto_policy_routes_only_direct_readonly() {
     let policy = AutoExecutionPolicy::current_runtime();
 
     let direct = assess_shell_command(
-        "git status --short",
+        "pwd",
         policy.assessment_policy(AssessmentSource::ProviderShellTool),
     );
     assert_eq!(
@@ -437,7 +471,7 @@ fn semantics_signature(assessment: &CommandAssessment) -> String {
 const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (true, "pwd", "AutoAllow|Low|High|Some(DirectReadonlyBroker)|None|[Unknown]|bounded-readonly,unknown-command"),
     (true, "df -h", "AutoAllow|Low|High|Some(DirectReadonlyBroker)|None|[None]|bounded-readonly,safe-diagnostic-family"),
-    (true, "git status --short", "AutoAllow|Low|High|Some(DirectReadonlyBroker)|None|[Unknown]|bounded-readonly,unknown-command"),
+    (true, "pwd", "AutoAllow|Low|High|Some(DirectReadonlyBroker)|None|[Unknown]|bounded-readonly,unknown-command"),
     (true, "ps aux --sort=-%mem", "AutoAllow|Low|High|Some(GuardedDiagnostic)|None|[None]|safe-diagnostic-family"),
     (true, "top", "AutoAllow|Low|High|Some(GuardedDiagnostic)|TtyRequired|[None]|safe-diagnostic-family,streaming-diagnostic"),
     (false, "top", "ForegroundHandoffRequired|Medium|High|None|TtyRequired|[None]|safe-diagnostic-family,streaming-diagnostic"),
@@ -451,7 +485,8 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (false, "kill 1234", "AskUser|High|High|None|None|[ProcessControl]|process-control"),
     (false, "ps aux | head -5", "AskUser|Medium|Medium|None|None|[None, None]|diagnostic-pipeline-heuristic,pipeline-not-auto-executable"),
     (false, "ps aux | awk '{print $1}'", "AskUser|Medium|Medium|None|None|[None, None]|pipeline-not-auto-executable"),
-    (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,bounded-readonly,unknown-command"),
+    (false, "cd /tmp && pwd", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,bounded-readonly,unknown-command"),
+    (false, "cd /tmp && git status", "AskUser|High|Low|None|None|[Unknown]|and-or-list-not-auto-executable,git-repo-config-execution,unknown-command"),
     (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation, Unknown]|and-or-list-not-auto-executable,bounded-readonly,privilege-escalation,unknown-command"),
     (false, "echo hi && rm -rf /tmp/x", "AskUser|High|Medium|None|None|[Unknown, FilesystemDelete]|and-or-list-not-auto-executable,bounded-readonly,filesystem-delete,unknown-command"),
     (false, "echo hi; ls -la", "AskUser|Low|Medium|None|None|[Unknown]|bounded-readonly,sequence-not-auto-executable,unknown-command"),
@@ -482,9 +517,16 @@ fn command_risk_semantics_unchanged_from_baseline() {
 #[test]
 fn command_risk_primary_reason_prefers_structural_verdict() {
     // R1: fallback observation from the first stage yields to the structural verdict.
-    let and_or = ask("cd /tmp && git status");
+    let and_or = ask("cd /tmp && pwd");
     assert_eq!(and_or.primary_reason(), "and-or-list-not-auto-executable");
     assert!(and_or.reasons.contains(&"unknown-command"));
+
+    // R1b: a high-risk explanation outranks the structural verdict.
+    let git_and_or = ask("cd /tmp && git status");
+    assert_eq!(git_and_or.primary_reason(), "git-repo-config-execution");
+    assert!(git_and_or
+        .reasons
+        .contains(&"and-or-list-not-auto-executable"));
 
     // R2: sequences follow the same rule.
     let sequence = ask("echo hi; ls -la");
@@ -639,9 +681,20 @@ fn compound_high_risk_tails_survive_null_redirection_stripping() {
     assert!(!benign.reasons.contains(&"filesystem-delete"));
 
     // Counter-case: an all-readonly compound is not escalated.
-    let readonly = ask("cd /tmp && git status 2>/dev/null");
+    let readonly = ask("cd /tmp && pwd 2>/dev/null");
     assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
     assert!(readonly.reasons.contains(&"output-suppressed"));
+
+    // Repo-config disclosure survives stderr suppression on the git family.
+    let git_readonly = ask("cd /tmp && git status 2>/dev/null");
+    assert_eq!(
+        git_readonly.impact,
+        RiskImpact::High,
+        "{:?}",
+        git_readonly.reasons
+    );
+    assert!(git_readonly.reasons.contains(&"git-repo-config-execution"));
+    assert!(git_readonly.reasons.contains(&"output-suppressed"));
 }
 
 #[test]
@@ -772,8 +825,16 @@ fn compound_without_null_redirection_assesses_all_segments() {
 
     // C1/C3: all-readonly compounds do not escalate, and the fully
     // whitelisted pair aggregates to Low without any auto-allow evidence.
-    let readonly = ask("cd /tmp && git status");
+    let readonly = ask("cd /tmp && pwd");
     assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
+    let git_readonly = ask("cd /tmp && git status");
+    assert_eq!(
+        git_readonly.impact,
+        RiskImpact::High,
+        "{:?}",
+        git_readonly.reasons
+    );
+    assert!(git_readonly.reasons.contains(&"git-repo-config-execution"));
     let whitelisted = ask("pwd && df -h");
     assert_eq!(
         whitelisted.impact,
@@ -794,7 +855,7 @@ fn compound_without_null_redirection_assesses_all_segments() {
         "cat < input 2>/dev/null && rm -rf /tmp/x",
         "wc -l < notes.txt",
         "wc -l < notes.txt 2>/dev/null",
-        "cd /tmp && git status",
+        "cd /tmp && pwd",
         "pwd && df -h",
     ] {
         let assessment = ask(command);
@@ -1222,7 +1283,7 @@ fn compound_readonly_auto_executes_fully_whitelisted_compounds() {
         "pwd && df -h",
         "pwd || df -h",
         "pwd; df -h",
-        "pwd && df -h; git status --short",
+        "pwd && df -h; uptime",
         // Token-rebuild fidelity extremes: the parser collapses runs of
         // spaces/tabs at token boundaries the same way bash word
         // splitting does, so the rebuilt text stays argv-faithful and
@@ -1295,16 +1356,16 @@ fn compound_readonly_fails_closed_outside_the_eligible_envelope() {
     // Issue #1882 design §3 ASK rows: every non-eligible form keeps the
     // pre-fix AskUser boundary even in auto mode.
     for command in [
-        "cd /tmp && git status",      // M4: segment without evidence
+        "cd /tmp && pwd",             // M4: segment without evidence
         "touch /tmp/a && pwd",        // M4: mutating segment
         "ps aux --sort=-%mem && pwd", // M5: guarded-diagnostic-only segment
         "ps aux | head -5 && pwd",    // M6: pipeline segment
         "pwd && df -h 2>/dev/null",   // M7: stripped null redirection
         "wc -l < notes.txt && pwd",   // M8: read redirection shape
         "pwd && echo $(id)",          // M9: command substitution
-        "git status \"foo\" && pwd",  // re-anchored: the quoted token
-        // parses fine, but the git readonly rule rejects the
-        // positional pathspec (condition 4 defers to the allowlist)
+        "pwd \"foo\" && pwd",         // re-anchored: the quoted token
+        // parses fine, but the pwd readonly rule rejects the
+        // positional argument (condition 4 defers to the allowlist)
         "pwd && echo $HOME",   // M11: bare expansion in a segment
         "echo `pwd` && df -h", // M11: backtick substitution
         "pwd && df\\ -h",      // re-anchored (design §3 M10b):

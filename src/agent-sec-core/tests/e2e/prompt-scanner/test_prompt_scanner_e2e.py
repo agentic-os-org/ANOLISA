@@ -17,7 +17,7 @@ The test suite:
   C. Rule coverage — key injection & jailbreak rules exercised end-to-end
   D. Mode variants (fast / standard / strict)
   E. JSON output format validation
-  F. Error handling (invalid mode, invalid format, empty --text)
+  F. Error handling (invalid mode, invalid format, blank --text)
 
 Everything defaults to ``--mode fast`` (L1 rules only) so the suite needs no
 model service.  The standard/strict cases in D do reach L2 and are gated on
@@ -67,6 +67,14 @@ from telemetry_jsonl import (  # noqa: E402
 
 _CLI_BIN = shutil.which("agent-sec-cli")
 _CLI_MODE = "binary" if _CLI_BIN else "python -m"
+
+# A blank ``--text`` is a per-runtime contract: the V2 Rust CLI rejects it as a
+# usage error so exit 0 always carries a verdict, while the V1 Python CLI still
+# treats it as "nothing to scan". The installed V2 lanes export
+# ``PROMPT_SCANNER_E2E_RUNTIME=v2`` from ``test-e2e-rpm-v2``; every other lane is
+# V1. Both expectations stay asserted rather than one runtime imposing its
+# contract on the other.
+_V2 = os.environ.get("PROMPT_SCANNER_E2E_RUNTIME") == "v2"
 
 # Turns the "L2 backend unavailable" skip into a failure, for environments
 # that are supposed to serve the model.
@@ -140,6 +148,21 @@ def _run_events(trace_id: str) -> subprocess.CompletedProcess:
         timeout=30,
         env=os.environ.copy(),
     )
+
+
+def _assert_blank_text_contract(proc: subprocess.CompletedProcess) -> None:
+    """Assert the blank ``--text`` outcome of the resolved runtime.
+
+    V2 fails before any daemon traffic: exit 1, empty stdout, and a usage error
+    that names the rejected channel. V1 keeps its documented no-op.
+    """
+    if _V2:
+        assert proc.returncode == 1, f"V2 rejects a blank --text: {proc.stderr}"
+        assert proc.stdout == ""
+        assert "--text is empty" in proc.stderr
+        return
+    assert proc.returncode == 0, f"V1 no-ops on a blank --text: {proc.stderr}"
+    assert proc.stdout.strip() == ""
 
 
 def _parse_result(proc: subprocess.CompletedProcess) -> dict:
@@ -280,11 +303,9 @@ def events_cli() -> None:
 class TestBasicScan:
     """Verify fundamental scan-prompt behaviour."""
 
-    def test_empty_text_produces_no_output(self) -> None:
-        """--text '' exits successfully without invoking a scan path."""
-        proc = _run_scan("")
-        assert proc.returncode == 0
-        assert proc.stdout.strip() == ""
+    def test_empty_text_input_contract(self) -> None:
+        """--text '' is rejected on V2 and a no-op on V1."""
+        _assert_blank_text_contract(_run_scan(""))
 
     def test_safe_prompt_passes(self) -> None:
         """Benign greeting should pass with no findings."""
@@ -741,11 +762,9 @@ class TestJsonOutputFormat:
 class TestErrorHandling:
     """Validate CLI behaviour on bad inputs and invalid option values."""
 
-    def test_empty_text_produces_no_output(self) -> None:
-        """--text '' does not crash; CLI outputs nothing."""
-        proc = _run_scan("")
-        assert proc.returncode == 0
-        assert proc.stdout.strip() == ""
+    def test_empty_text_input_contract(self) -> None:
+        """--text '' is rejected on V2 and a no-op on V1."""
+        _assert_blank_text_contract(_run_scan(""))
 
     def test_invalid_mode_exits_1(self) -> None:
         proc = _run_scan("hello", mode="turbo")
@@ -757,11 +776,9 @@ class TestErrorHandling:
         assert proc.returncode == 1
         assert "Invalid format" in proc.stderr or "invalid" in proc.stderr.lower()
 
-    def test_whitespace_only_text_produces_no_output(self) -> None:
-        """--text '   ' does not crash; CLI outputs nothing."""
-        proc = _run_scan("   ")
-        assert proc.returncode == 0
-        assert proc.stdout.strip() == ""
+    def test_whitespace_only_text_input_contract(self) -> None:
+        """--text '   ' is rejected on V2 and a no-op on V1."""
+        _assert_blank_text_contract(_run_scan("   "))
 
     def test_text_format_outputs_verdict_line(self) -> None:
         """--format text should print a human-readable Verdict line."""

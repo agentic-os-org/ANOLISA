@@ -50,6 +50,14 @@ pub use mount::{
 pub enum FuseError {
     #[error("mount failed: {0}")]
     MountFailed(String),
+    /// The background mount did not become ready within its readiness
+    /// budget: distinct from `MountFailed` so callers can tell a failed
+    /// mount from a still-pending one. The mounting thread keeps running; a
+    /// session that comes up within the cleanup window is torn down again,
+    /// and the thread is then cancelled so it cannot create an unmanaged
+    /// mount after that window.
+    #[error("background mount pending: {0}")]
+    MountPending(String),
     #[error("unmount failed: {0}")]
     UnmountFailed(String),
     #[error("invalid mount point: {0}")]
@@ -163,6 +171,21 @@ impl MountHandle {
     }
 
     /// Check if the mount is still active.
+    ///
+    /// On Linux this is authoritative: the mountpoint must currently appear
+    /// in `/proc/mounts`. `std::fs::metadata` succeeds for *any* existing
+    /// directory — and even for a dead FUSE endpoint — so it cannot
+    /// distinguish a live mount from the plain underlying directory.
+    #[cfg(target_os = "linux")]
+    pub fn is_mounted(&self) -> bool {
+        Self::path_is_mounted(&self.mountpoint)
+    }
+
+    /// Check if the mount is still active.
+    ///
+    /// Without `/proc/mounts` there is no authoritative mount-table probe,
+    /// so this keeps the historical metadata check.
+    #[cfg(not(target_os = "linux"))]
     pub fn is_mounted(&self) -> bool {
         std::fs::metadata(&self.mountpoint).is_ok()
     }
@@ -180,6 +203,16 @@ impl MountHandle {
             return false;
         };
         crate::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
+    }
+
+    /// The mount ID currently mounted at `path`, from the authoritative
+    /// mount table. Identifies one mount instance, so a caller can tell its
+    /// own mount from a later mount placed on the same path.
+    #[cfg(target_os = "linux")]
+    fn path_mount_id(path: &std::path::Path) -> Option<u64> {
+        use std::os::unix::ffi::OsStrExt;
+        let mountinfo = std::fs::read("/proc/self/mountinfo").ok()?;
+        crate::proc_mounts::mountinfo_id_for_target(&mountinfo, path.as_os_str().as_bytes())
     }
 
     /// The unmount invocations for `mountpoint`, in escalation order: plain
@@ -502,5 +535,24 @@ mod tests {
             session: None,
         };
         drop(handle);
+    }
+
+    /// `is_mounted` must consult the authoritative mount table: a plain
+    /// directory that was never a mountpoint reads as `false`. The metadata
+    /// probe it replaced returned `true` for any existing directory, so a
+    /// handle around a never-mounted (or already-unmounted) path lied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_mounted_is_false_for_a_directory_that_was_never_mounted() {
+        let dir = std::env::temp_dir().join("skillfs-is-mounted-plain-directory");
+        std::fs::create_dir_all(&dir).expect("create probe directory");
+        let handle = MountHandle {
+            mountpoint: dir,
+            session: None,
+        };
+        assert!(
+            !handle.is_mounted(),
+            "a plain directory that was never mounted must not read as mounted"
+        );
     }
 }

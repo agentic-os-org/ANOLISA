@@ -8,7 +8,7 @@ use aes_gcm::{
 };
 use scrypt::{scrypt, Params};
 
-use crate::config::config_dir;
+use crate::config::{config_dir, lock_user_config, replace_user_config};
 
 /// AES-256-GCM with 16-byte nonce (matching Node.js crypto.createCipheriv behavior).
 type Aes256Gcm16 = AesGcm<Aes256, U16>;
@@ -25,6 +25,17 @@ fn try_migrate_from_dir(dir: &Path) {
     let settings_path = dir.join("settings.json");
     let config_path = dir.join("config.toml");
 
+    if config_path.exists() || (!settings_path.exists() && !dir.join("aliyun_creds.json").exists())
+    {
+        return;
+    }
+    let _lock = match lock_user_config(dir, false) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!("Migration warning: {error} (continuing with defaults)");
+            return;
+        }
+    };
     if config_path.exists() {
         return;
     }
@@ -77,10 +88,13 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         .as_str()
         .filter(|token| !token.is_empty());
 
-    let mut existing = if config_path.exists() {
-        std::fs::read_to_string(config_path).unwrap_or_default()
-    } else {
-        String::new()
+    let mut existing = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            tracing::warn!("cannot read config for credential migration: {error}");
+            return;
+        }
     };
 
     if !existing.contains("[ai]") {
@@ -107,18 +121,8 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
     provider.push_str("model = \"qwen3.7-plus\"\n");
     upsert_provider_section(&mut existing, "[ai.providers.aliyun]", &provider);
 
-    let pid = std::process::id();
-    let tmp_path = cfg_dir.join(format!("config.toml.tmp.{pid}"));
-    if std::fs::write(&tmp_path, &existing).is_err() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
-    }
-    if std::fs::rename(&tmp_path, config_path).is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+    if let Err(error) = replace_user_config(cfg_dir, config_path, &existing, false) {
+        tracing::warn!("cannot save migrated credentials: {error}");
         return;
     }
 
@@ -215,16 +219,7 @@ fn migrate_settings(
         output_language,
     });
 
-    std::fs::write(config_path, toml.as_bytes())
-        .map_err(|e| format!("failed to write config.toml: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(config_path, std::fs::Permissions::from_mode(0o600));
-    }
-
-    Ok(())
+    replace_user_config(cfg_dir, config_path, &toml, false)
 }
 
 fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {

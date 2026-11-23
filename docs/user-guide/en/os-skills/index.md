@@ -20,6 +20,65 @@ OS Skills covers three main areas:
 anolisa install os-skills
 ```
 
+Source installation requires Python 3.6 or newer and GNU Make. The release
+catalog selects the default collection; the installer uses only the Python
+standard library. From a source checkout, install the collection for cosh:
+
+```bash
+make -C src/os-skills install
+```
+
+If `python3` is unavailable or too old, pass `PYTHON3=/path/to/python3` to the
+same command. Installation checks the interpreter before changing files.
+
+For a regular user, this keeps the existing `~/.copilot-shell/skills/`
+directory; root installs to `/usr/local/share/anolisa/skills/`.
+`AWPRJ` defaults to `anolisa` for system resources and can be overridden.
+Use `SKILLS_DIR=/absolute/path` to select another collection directory;
+use the same value when uninstalling. Start a new cosh session and run
+`/skills` to check the installed collection.
+
+`INSTALL_PROFILE=user` derives its default paths from `HOME`; when `HOME` is
+unset, empty, relative or `/`, the install fails instead of writing under `/`.
+Pass `PREFIX`, `DATADIR` and `SKILLS_DIR` explicitly to install without a home
+directory.
+
+Local system copies take precedence over RPM copies in
+`/usr/share/anolisa/skills/` when their skill names match. Use one delivery
+method for the collection; when managing an older source installation,
+set `SKILLS_DIR` to its original directory.
+
+`make uninstall` removes only the skill directories recorded by
+`make install` in `<datadir>/anolisa/components/os-skills/install-manifest`.
+A collection without that manifest is left untouched and the target exits
+non-zero, so it never removes a same-name skill directory that os-skills did
+not install. `make install` follows the same rule in the other direction: a
+same-name directory it did not create is refused unless you pass
+`REPLACE_UNOWNED=1`, which replaces it and records it for later removal. Only
+`1` enables this; `0` or an unset value keeps the refusal, and any other value
+is rejected before anything changes. An
+installation made before the manifest existed therefore needs one
+`REPLACE_UNOWNED=1 make install` before it can be removed. Recorded directories
+are managed as a whole and replaced on every install, so keep personal files out
+of them and give your own skills a different name. If an install fails or is
+interrupted, it puts the previous skills back and leaves the manifest unchanged.
+An interruption after the manifest has recorded the new skills keeps them
+installed instead and asks you to run `make install` again to finish.
+When it cannot undo a step, for example because the collection directory
+became read-only, the error names what is left: a new copy it could not remove,
+or the `.os-skills.*/.old` directory that still holds a previous skill. Names
+recorded by earlier installs stay in the manifest, so a skill dropped from a
+newer release is removed as well. RPM installations are removed by the package
+manager and raw
+`anolisa install` deployments by `anolisa uninstall os-skills`, not by
+`make uninstall`.
+
+A receipt belongs to a single collection: `make install` refuses a directory
+that the receipt does not record, and `make uninstall` removes the receipt
+together with the skills, so pass a separate `MANIFEST=` for each collection
+you keep. Uninstalling one collection keeps the receipts and shared component
+metadata of the others.
+
 ---
 
 ## Quick Start

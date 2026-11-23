@@ -69,6 +69,7 @@ impl std::fmt::Display for PreferenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyInput => write!(f, "no user turns to analyze"),
+            Self::Llm(e) if f.alternate() => write!(f, "LLM preference analysis failed: {e:#}"),
             Self::Llm(e) => write!(f, "LLM preference analysis failed: {e}"),
         }
     }
@@ -241,6 +242,22 @@ mod tests {
     fn empty_turns_produce_empty_input() {
         assert!(build_analysis_input(&[]).is_empty());
         assert!(build_analysis_input(&["   ".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn llm_error_alternate_display_includes_the_source_chain() {
+        let error = PreferenceError::Llm(
+            anyhow::Error::msg("operation timed out").context("Completion failed"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "LLM preference analysis failed: Completion failed"
+        );
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("Completion failed: operation timed out"),
+            "the source chain must survive alternate Display: {rendered}"
+        );
     }
 
     #[test]

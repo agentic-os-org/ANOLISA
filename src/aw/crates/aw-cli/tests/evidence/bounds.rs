@@ -79,10 +79,11 @@ fn item_byte_and_source_limits_report_gaps_without_truncating_the_candidate() {
 fn original_event_deadline_caps_a_later_context_request() {
     let fixture = Fixture::new();
     let source = Source::new(&fixture, trajectory(1));
-    *source.delay.lock().unwrap() = Duration::from_secs(1);
+    // Allow CI startup and audit I/O while keeping HTTP slower than the event budget.
+    *source.delay.lock().unwrap() = Duration::from_secs(3);
     let mut document = fixture.document();
     source.configure(&mut document);
-    document["spec"]["execution"]["default_event_budget_ms"] = json!(250);
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(1000);
     document["spec"]["agents"]["target"]["evidence"]["query_timeout_ms"] = json!(5000);
     let service = Running::start(&fixture, &document);
     let binding = fixture.bind(&service.client);
@@ -96,15 +97,20 @@ fn original_event_deadline_caps_a_later_context_request() {
         .client
         .call(freeze(&handle), Instant::now() + TIMEOUT)
         .is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert!(service
         .client
         .call(freeze(&handle), Instant::now() + TIMEOUT)
         .is_err());
-    assert!(service
+    let result = service
         .client
         .call(invoke(&handle, "check"), Instant::now() + TIMEOUT)
-        .is_err());
+        .unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["failure_detail"], "deadline_exceeded");
+    assert_eq!(result["failure_action"], "block");
+    assert_eq!(result["effects"], json!([]));
+    assert!(fixture.calls("invoke").is_empty());
     assert!(!audit(&service.client, &handle.event_id)
         .to_string()
         .contains("context_frozen"));
@@ -141,9 +147,12 @@ fn shorter_query_timeout_freezes_an_explicit_gap_and_preserves_hook_budget() {
 fn concurrent_freeze_and_closure_do_not_wait_for_http_or_publish_late_evidence() {
     let fixture = Fixture::new();
     let source = Source::new(&fixture, trajectory(1));
-    *source.delay.lock().unwrap() = Duration::from_millis(700);
+    // Leave room for CI scheduling while keeping HTTP slower than event closure.
+    *source.delay.lock().unwrap() = Duration::from_secs(5);
     let mut document = fixture.document();
     source.configure(&mut document);
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(10000);
+    document["spec"]["agents"]["target"]["evidence"]["query_timeout_ms"] = json!(8000);
     let service = Running::start(&fixture, &document);
     let binding = fixture.bind(&service.client);
     let handle = hook(
@@ -164,7 +173,11 @@ fn concurrent_freeze_and_closure_do_not_wait_for_http_or_publish_late_evidence()
             .is_err());
         let started = Instant::now();
         close(&service.client, &handle);
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "event closure took {:?} while HTTP was pending",
+            started.elapsed()
+        );
         assert!(pending.join().unwrap().is_err());
     });
     let chain = audit(&service.client, &handle.event_id);

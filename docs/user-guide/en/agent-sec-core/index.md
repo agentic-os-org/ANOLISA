@@ -5,8 +5,14 @@
 AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, and sandbox isolation.
 
 For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
-Release installation and the Agent integrations below describe V1; source builds
-install the V2 Rust CLI and daemon.
+The RPM package selection below describes the V2 Rust CLI and daemon. Agent
+integration resources retain their existing host interfaces; consult the V2
+guide for the backend command and service contracts.
+
+Use `agent-sec-cli sandbox run` to run a command with explicit filesystem and
+network permissions. The [sandbox guide](sandbox.md) covers this local command
+and its runtime requirements, plus application integration with policy authorization,
+local approval and execution receipts.
 
 ## Overview
 
@@ -16,7 +22,7 @@ install the V2 Rust CLI and daemon.
 | Code Scanner | Static analysis of bash/python code for dangerous operations (verdict: pass/warn/deny/error) |
 | Skill Ledger | Ed25519-signed integrity tracking with 6-state lifecycle (pass/none/drifted/warn/deny/tampered) |
 | PII Checker | Detects personal information and credentials in text (email, phone, ID, JWT, AccessKey, etc.) |
-| Sandbox | Syscall-level isolation for cosh command execution (seccomp + namespace) |
+| Sandbox | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) |
 | Observability | Interactive event review with 4-level drill-down TUI |
 | Security Events | Local event store for querying and aggregating security findings |
 
@@ -46,11 +52,20 @@ sudo anolisa status sec-core
 agent-sec-cli --version
 ```
 
-`sec-core` is the ANOLISA component name. The RPM keeps its existing package
-name, `agent-sec-core`:
+`sec-core` is the ANOLISA component name. The V2 RPMs separate the backend,
+host integrations, and skills. `agent-sec-core` recommends the matching
+`agent-sec-plugins` and `agent-sec-skills`, so a default installation includes
+all three:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+# Backend, host integrations and security skills (weak dependencies enabled).
+sudo yum install agent-sec-core
+
+# Backend, sandbox, configuration and system service only.
+sudo yum install --setopt=install_weak_deps=False agent-sec-core
+
+# Optional: use ANOLISA to manage the installed framework integrations.
+sudo yum install anolisa
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -58,24 +73,188 @@ Installing the CLI from YUM makes it available on sudo's system path. Adoption
 records the RPM in system state so the adapter manager can read the installed
 component contract.
 
-Developers building from source should use the repository-level entry point:
+The plugin and skill packages are weak dependencies. They are skipped when
+`install_weak_deps` is disabled, when they are excluded, or when the repository
+has no build of the same version; in those cases install them explicitly with
+`sudo yum install agent-sec-plugins agent-sec-skills` and confirm with
+`rpm -q agent-sec-core agent-sec-plugins agent-sec-skills`. Either subpackage
+can be removed without removing `agent-sec-core`. `agent-sec-plugins` contains
+all six existing host integrations; register the selected framework as its
+owning user after installation.
+The existing ANOLISA raw archive remains a combined delivery.
+
+The repository convenience workflow remains available:
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
 
-Before installing files, the source-build entry point checks Node.js 20 or
-newer, Python 3, bubblewrap, GnuPG, and `jq`. It uses `sudo` to install the
-Rust CLI, sandbox, and host-level daemon; default-mode integration resources
-remain in user paths. Python hooks use the host `python3`; the Qoder plugin
-installer currently requires Python >= 3.11, < 3.12. User mode reports all
-missing system runtime packages with one install command and exits; install
-them and rerun the same command. `--ignore-deps` bypasses this verification for
-pre-provisioned hosts.
+Alternatively, use the component targets from the repository root:
+
+```bash
+make -C src/agent-sec-core build
+sudo make -C src/agent-sec-core install
+```
+
+The repository script prepares Node.js 22 or newer and system `python3` for
+build helpers, then checks declared runtime dependencies before host
+installation. The agent-sec-core backend supports system file installation
+only; `--no-install` builds without installing files. `--ignore-deps` skips
+dependency preparation and verification on a pre-provisioned host. Python hooks
+use the host `python3`; the Qoder plugin installer requires Python >= 3.11, < 3.12.
+
+Both entry points default to `PREFIX=/usr/local` and `AWPRJ=anolisa`. Programs
+are installed under `/usr/local/bin`, and framework resources under
+`/usr/local/share/anolisa/agent-sec-core/adapters`. File installation does not
+start the daemon or modify framework user configuration. Start and verify the
+daemon before deploying an integration.
 
 The source build does not register `sec-core` in ANOLISA state. Do not follow
 it with `anolisa adapter enable`; use the source integration scripts documented
 below.
+
+### Migrate a legacy source-installed service
+
+Older versions of `build-all.sh` installed a complete unit at
+`/etc/systemd/system/agent-sec-core.service`. That file takes precedence over
+the new unit under `PREFIX/lib/systemd/system`; reloading or starting the
+service alone does not switch it. New installations can skip this section.
+
+Inspect the active unit, overrides and enablement state first. Use the actual
+`UNITDIR` reported by `make layout` if installation paths were customized:
+
+```bash
+ASC_PREFIX=/usr/local
+ASC_UNIT_FILE="$ASC_PREFIX/lib/systemd/system/agent-sec-core.service"
+make -C src/agent-sec-core layout PREFIX="$ASC_PREFIX" AWPRJ=anolisa
+systemd-analyze unit-paths
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+systemctl is-enabled agent-sec-core.service || true
+sudo systemctl cat agent-sec-core.service
+```
+
+If it is `masked` or `masked-runtime`, stop here and have the administrator
+decide whether to change that policy. If the active fragment already resolves
+to `ASC_UNIT_FILE`, no unit retirement is needed. Continue below only after
+confirming that the `/etc` file or link is the obsolete source-install override.
+
+Back it up before changing it. These commands preserve both a link and its
+contents, plus existing administrator drop-ins:
+
+```bash
+ASC_BACKUP_DIR="/var/backups/agent-sec-core/source-unit-$(date +%Y%m%d-%H%M%S)"
+sudo install -d -m 0700 "$ASC_BACKUP_DIR"
+sudo cp -a /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit"
+sudo cp -Lp /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit.contents"
+if sudo test -d /etc/systemd/system/agent-sec-core.service.d; then
+  sudo cp -a /etc/systemd/system/agent-sec-core.service.d "$ASC_BACKUP_DIR/"
+fi
+sudo diff -u /etc/systemd/system/agent-sec-core.service "$ASC_UNIT_FILE" || true
+```
+
+Also back up the configuration actually used by the old service. Review and
+merge its settings into the reported `CONFIGDIR/skillsec.json`, or deliberately
+retain its path in a reviewed override. Preserve administrator drop-in files
+and review every `DropInPaths` entry: an override that resets `ExecStart` can
+still select the old binary or omit the new `--skillsec-config` argument.
+Move required full-unit customizations into a reviewed drop-in with
+`sudo systemctl edit agent-sec-core.service` before continuing.
+
+After the comparison, configuration merge and administrator review are complete,
+stop the service and move only the obsolete `/etc` override into the backup:
+
+```bash
+sudo systemctl stop agent-sec-core.service
+sudo mv /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/retired-override"
+```
+
+If it was enabled and should remain enabled, refresh its existing boot links
+using the absolute new unit path **before** linking it. Skip this command for
+a previously disabled service; use `--runtime` for runtime-only enablement:
+
+```bash
+sudo systemctl reenable "$ASC_UNIT_FILE"
+```
+
+If the new `UNITDIR` is outside the unit search paths printed above, link it
+now. Otherwise skip this command: linking a same-named unit back into its own
+search path can create a unit alias loop.
+
+```bash
+sudo systemctl link "$ASC_UNIT_FILE"
+```
+
+Reload and restart the reviewed unit:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agent-sec-core.service
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+```
+
+Confirm that `FragmentPath` resolves to the intended unit and `ExecStart` uses
+the intended daemon and configuration. Keep the backup and run the health wait
+below before deploying integrations. The installer performs none of these
+migration actions automatically.
+
+### Start the source-installed daemon
+
+Use the prefix selected during installation:
+
+```bash
+ASC_PREFIX=/usr/local
+export PATH="$ASC_PREFIX/bin:$PATH"
+sudo systemctl daemon-reload
+sudo systemctl start agent-sec-core.service
+sudo timeout 60 sh -c '
+  until AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 "$1/bin/agent-sec-daemon-health"; do
+    sleep 1
+  done
+' sh "$ASC_PREFIX"
+```
+
+The health wait allows up to 60 seconds for the daemon RPC endpoint. Continue
+after it exits successfully. If it times out, inspect the service diagnostics:
+
+```bash
+sudo systemctl status agent-sec-core.service --no-pager
+sudo journalctl -u agent-sec-core.service -n 80 --no-pager
+```
+
+For a custom prefix, namespace or path override, inspect the installed layout
+using the same Make values as the installation:
+
+```bash
+make -C src/agent-sec-core layout PREFIX=/usr/local AWPRJ=anolisa
+```
+
+Use the reported `ADAPTERDIR` and `EXTENSIONDIR` below. If the reported `UNITDIR`
+is outside systemd's unit search paths, link its `agent-sec-core.service` with
+`sudo systemctl link /absolute/path/to/agent-sec-core.service` before reloading
+and starting it.
+
+### Remove a source installation
+
+Run `make -C src/agent-sec-core uninstall` with the same public layout values
+used for installation (`PREFIX`, `AWPRJ`, and any path overrides). Use the same
+`DESTDIR` when removing a staged installation. Like installation, uninstall
+rejects staging paths containing spaces or shell metacharacters before removing
+files. Layout validation completes before any removal, including with `make -j`.
+
+Before removing a live installation, withdraw active gateway routing with
+`agent-sec-cli gateway disable`, then stop and disable `agent-sec-core.service`.
+After removal, run `systemctl daemon-reload`. Uninstall retains the gateway
+withdrawal guard; it does not stop or disable the core service for you.
+
+Keep `ADAPTERDIR` private to sec-core: uninstall removes the complete `codex`,
+`qoder`, `openclaw`, `hermes`, and `qwencode` subdirectories. It preserves
+configuration, `DATADIR/LICENSE`, and unrelated sibling resources. The default
+public layout does not clean up legacy
+`/etc/systemd/system/agent-sec-core.service` or
+`PREFIX/lib/anolisa/sec-core/*-plugin` installations; use the matching legacy
+removal procedure or manual migration for those paths. If a legacy location was
+explicitly selected as part of the public layout, uninstall follows that layout
+and removes its owned files there.
 
 ## Quick Start
 
@@ -402,9 +581,11 @@ agent-sec-cli capabilities --agent hermes --capability code-scan
 agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 ```
 
-Supported capability names are exactly `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes only `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
+Supported capability names are `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, `observability`, and `sandbox` (Cosh only); plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes only `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
 
-The configured L2 backend is the one deliberate exception: a model name is only useful verbatim, so `PROMPT_SCANNER_L2_MODEL` is reported case-preserved (escaped and length-capped) as an `env` entry of `prompt-scan`. Its `default` — and the `effective` value when the variable is unset — is the default backend reported by the native scanner engine, and a name no backend supports is reported as configured plus a diagnostic, because the engine rejects it at construction and scans then fail rather than falling back. Because host hooks are fail-open on a failed scan, this diagnostic is usually the only place the misconfiguration is visible before prompts start flowing unscanned. It has no table column, so read it with `--capability prompt-scan --output json`.
+The configured L2 backend is a deliberate exception: a model name is only useful verbatim, so `PROMPT_SCANNER_L2_MODEL` is reported case-preserved (escaped and length-capped) as an `env` entry of `prompt-scan`. Its `default` — and the `effective` value when the variable is unset — is the default backend reported by the native scanner engine, and a name no backend supports is reported as configured plus a diagnostic, because the engine rejects it at construction and scans then fail rather than falling back. Because host hooks are fail-open on a failed scan, this diagnostic is usually the only place the misconfiguration is visible before prompts start flowing unscanned. It has no table column, so read it with `--capability prompt-scan --output json`.
+
+`sandbox` reports `MODE=all-shell` for `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` or `true`, `dangerous` when unset or `0`/`false`, and `blocked` for invalid values. Case and surrounding whitespace are ignored for this switch. `ENABLED` describes the guard, not this switch. JSON also reports the permission source (default `fixed`) and dynamic Cedar runtime preset literally; it does not validate those settings, read permission files or check authorization readiness. `TIMEOUT(s)=55` covers generation and prepare; finish uses 10 seconds. See [Cosh sandbox authorization](sandbox.md#enable-authorization-in-cosh-ng) for installation and failure behavior.
 
 View source and limits:
 
@@ -415,7 +596,7 @@ View source and limits:
 
 ## Agent Hook Environment Variables
 
-Every host reads `<CAPABILITY>_HOOK_ENABLED` (`true` / `false`, case-insensitive,
+The scanner, ledger and observability hooks read `<CAPABILITY>_HOOK_ENABLED` (`true` / `false`, case-insensitive,
 surrounding whitespace ignored). An unset or invalid value keeps the hook
 enabled. For capabilities that use the shared hook policy parser,
 `<CAPABILITY>_MODE` selects how findings are surfaced; `debug` is an alias for
@@ -446,6 +627,9 @@ adapter code actually reads (✓ = read by that host, ✗ = not read):
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` | `false` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE` | `fixed` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` | unset | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 `PROMPT_SCANNER_L2_MODEL` is marked `✓*` because no adapter reads it directly:
 every host shells out to `agent-sec-cli scan-prompt`, which resolves the L2
@@ -494,26 +678,45 @@ the other packaged integrations.
 
 ### Source-build Integration
 
-The default source build installs the Cosh-NG extension directly under
-`~/.copilot-shell/extensions/agent-sec-core`, so no separate adapter enable step
-is needed. Deploy another integration with its installed user-path script:
+Choose the integration you use and run its script as the user who owns that
+framework's configuration, without `sudo`. Set these values to the installation
+prefix and namespace. If you override `ADAPTERDIR`, use the path reported by
+`make layout`:
 
 ```bash
+ASC_PREFIX=/usr/local
+ASC_AWPRJ=anolisa
+ASC_ADAPTER_DIR="$ASC_PREFIX/share/$ASC_AWPRJ/agent-sec-core/adapters"
+export PATH="$ASC_PREFIX/bin:$PATH"
+
 # OpenClaw
-bash ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/openclaw/scripts/deploy.sh"
 
 # Hermes
-bash ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/hermes/scripts/deploy.sh"
 
 # Qwen Code
-bash ~/.local/lib/anolisa/sec-core/qwen-code-extension/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/qwencode/scripts/deploy.sh"
 
 # Codex
-bash ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/codex/install.sh"
 
 # Qoder
-bash ~/.local/lib/anolisa/sec-core/qoder-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/qoder/install.sh"
 ```
+
+The default Cosh-NG extension is staged under
+`/usr/local/share/anolisa/extensions/agent-sec-core`. File installation does not
+write Cosh's user configuration. At the Cosh prompt, inspect and enable it:
+
+```text
+/extensions list
+/extensions enable agent-sec-core
+/extensions reload
+```
+
+For custom extension locations or an existing same-named user copy, follow
+[Cosh extension discovery and source selection](../cosh-ng/core/extensions.md).
 
 ### OpenClaw
 
@@ -700,8 +903,8 @@ CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 
 ### Cosh-NG
 
-Cosh-NG uses the adapter ID `cosh` and loads extensions from the existing
-`.copilot-shell` directory.
+Cosh-NG uses the adapter ID `cosh` and discovers both user and system extension
+directories.
 
 For a package install, enable the adapter in the target user's configuration:
 
@@ -713,6 +916,7 @@ Hooks are loaded when Cosh-NG starts.
 
 Extension path:
 - User install: `~/.copilot-shell/extensions/agent-sec-core/`
+- Default source install: `/usr/local/share/anolisa/extensions/agent-sec-core/`
 - RPM install: `/usr/share/anolisa/extensions/agent-sec-core/`
 
 ## FAQ

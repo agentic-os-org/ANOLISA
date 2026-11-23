@@ -104,12 +104,13 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         ctx,
         &mut output,
     )?;
-    render_application_outcome(ctx, outcome)
+    render_application_outcome(ctx, outcome, args.no_deps)
 }
 
 fn render_application_outcome(
     ctx: &CliContext,
     outcome: BatchApplicationOutcome,
+    no_deps: bool,
 ) -> Result<(), CliError> {
     let dry_run = outcome.is_preview();
     if outcome.items.is_empty() {
@@ -195,6 +196,9 @@ fn render_application_outcome(
                 items,
             },
         )?;
+        if no_deps && installed > 0 {
+            super::render_no_deps_notice(ctx);
+        }
         return if failed > 0 {
             Err(CliError::BatchPartial {
                 command: "install --all".to_string(),
@@ -245,6 +249,9 @@ fn render_application_outcome(
         }
     }
 
+    if no_deps && installed > 0 {
+        super::render_no_deps_notice(ctx);
+    }
     if failed > 0 {
         Err(CliError::BatchPartial {
             command: "install --all".to_string(),
@@ -300,6 +307,7 @@ fn per_component_args(name: &str, args: &InstallArgs) -> InstallArgs {
         component: Some(name.to_string()),
         all: false,
         fail_fast: false,
+        no_deps: args.no_deps,
         version: None,
         backend: args.backend.clone(),
         repo: args.repo.clone(),
@@ -955,6 +963,7 @@ mod tests {
             component: None,
             all: true,
             fail_fast: false,
+            no_deps: false,
             version: None,
             backend: Some("rpm".to_string()),
             repo: None,
@@ -990,6 +999,7 @@ mod tests {
                     artifact: None,
                 },
                 requested_version: None,
+                no_deps: false,
             },
             plan: Plan::Execute {
                 steps: steps.clone(),

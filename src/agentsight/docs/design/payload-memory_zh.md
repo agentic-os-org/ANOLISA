@@ -8,6 +8,16 @@ AgentSight 为保留的捕获 payload 设置限额，并在配对提前结束时
 
 ## 所有权边界
 
+耗时的静态 SSL 特征探测由一个 worker 执行，最多保留 32 个在途 executable 文件，包含已完成结果。
+整文件 marker 预筛仅用于未识别 exe-probe 候选，同样在 worker 上执行，事件消费线程不再读取可执行
+文件内容；已知静态输入（例如静态 OpenSSL/Codex）跳过 BoringSSL marker 预筛，直接扫描 prologue。
+任务持有打开的文件描述符，并在每个 4 MiB 窗口之间共享配置的进程 CPU 预算。事件所属线程在安装
+全局 uprobe 前重新 fstat 钉住的描述符并检查进程引用，然后为所有仍存活的受影响 PID 注册过滤器
+槽位；符号和已知 offset 快路径继续同步执行。队列满的重试由 runtime tick 调度，不再依赖下一次
+discovery。关停时取消并等待 worker 退出。首次遇到的静态 binary 在扫描期间仍是 best-effort 探测。
+SSL executable 扫描使用 SIMD 子串搜索，按 4 MiB 有界窗口保留特征重叠区。重叠匹配与跨窗口的
+起始位置均保持原有语义；inode 缓存与符号选择规则不变。
+
 ```mermaid
 flowchart LR
     Probe[Probe payload] --> Capture[按条数和字节限额的队列]
@@ -52,11 +62,23 @@ SQLite 为唯一活跃 sink 时也跳过 payload 延迟等待：完成的 captur
 映射的调用只在已有的 retroactive fix-up registry 中保留 call ID；后续文件写入同时修正 session 列
 和完成事件 JSON。FFI 与活跃的非 SQLite exporter 继续延迟投递，因为已经发给这些消费者的事件无法修正。
 
+Raw completion 与延迟 GenAI 调用共用配置中的 pending 字节及数量上限。Raw 队列最多使用共享字节额度
+的一半，为延迟投递与 SQLite 本地重试保留容量；FFI 与活跃的非 SQLite exporter 已投递的事件无法
+修正，因此需要这项保留。代价是等待 CPU 准入时会更早对事件接收施加同步背压。真正达到共享硬上限，
+以及单个超大任务等待准入时，仍同步施加背压，保留有界所有权与 FIFO 投递。
+Standalone 循环每次接收尝试只执行一次 tick，FFI 轮询沿用同一维护入口。
+`completion_backpressure` 阶段记录 Raw 队列达到保留份额或共享硬上限时同步准入及投递的耗时。
+
 已注册的 sink 会报告当前是否活跃；未知 exporter 默认按活跃处理。默认 Logtail 的路径选择和实际写入
 复用同一组目标文件存在性及 telemetry sentinel 检查。动态 sink 每次重新读取当前路径，因此暂停后
 恢复不需要重新注册。立即投递仍会调用不活跃 sink 的原有写入门控：落库过程中启用时不会丢弃当前
 调用，该调用可能带有 fallback session metadata；后续调用面对活跃的外部 sink 时继续使用原有解析
 等待窗口。
+
+GenAI session 与 conversation 解析每个调用只准备一次 lookup key，供 turn 驱逐与 crash drain 复用。
+相同的第一条及最后一条用户文本共享未完成的 SHA-256 状态。重复长文本通过完整字节比较复用前缀，
+缓存最多保留 2 MiB、64 个 entry；缓存驱逐不改变 anchor。Anchor 保存 domain-separated ID 与
+二进制 lookup digest，保持外部 ID 字节、进程及消息数量隔离和滑动 TTL 行为不变。
 
 SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储列的 `octet_length`，读取字节长度，
 避免持锁加载并逐字扫描整份 payload。投递仍为同步执行；这些修改缩短其临界区，不增加持久化队列。
@@ -69,6 +91,12 @@ GenAI 维护通过注册路径打开独立连接，不等待写锁，也不触�
 批次之间让出执行机会，写锁冲突时将剩余工作延后。checkpoint 先通过 passive 模式复制 WAL 页面，再
 尝试不等待的截断；未完成 checkpoint 时停止后续容量淘汰。按时间清理、容量清理与 checkpoint 分别计时，
 用于区分维护耗时来源。
+启用 CPU 预算的 worker 每 20 ms 检查 WAL，增长 1 MiB 或距上次 checkpoint 达到 50 ms 时安排
+passive checkpoint，分批清理期间也执行。实际执行仍取决于共享 CPU 预算，这些调度目标不保证 WAL
+大小或 checkpoint 耗时上限。容量清理使用 SQLite 当前 live page 数量，排除 freelist 和可复用 WAL
+空间；只在清理开始和结束时截断，每批之间保留 passive checkpoint 和读锁阻塞检查。
+指标记录 WAL 字节数、总页面数、已复制及待复制页面数、checkpoint 结果，以及 passive/truncate
+各自耗时。PASSIVE 单次仍可能复制全部可用 WAL，不能按分片操作理解。
 
 FFI 将调用和 HTTP 记录 move 到 boxed 队列条目。字节 reservation 在出队后持续到 callback 返回，
 发送失败或 receiver 销毁时自动扣回。大 JSON 字段直接序列化为带 NUL 结尾的字节 buffer，长度不包含

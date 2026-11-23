@@ -273,11 +273,23 @@ fn summarize_hardening(events: &[Value]) -> String {
         ));
     }
 
-    let latest_scan = scans
-        .iter()
-        .copied()
-        .find(|event| has_hardening_stats(event));
-    if let Some(latest_scan) = latest_scan {
+    let stats_index = scans.iter().position(|event| has_hardening_stats(event));
+    if let Some(latest_run) = scans
+        .first()
+        .filter(|event| stats_index != Some(0) && str_of(event, "result") == "failed")
+    {
+        let error = details_str(latest_run, "error");
+        let error_msg = if error.is_empty() {
+            "unknown error"
+        } else {
+            error.as_str()
+        };
+        lines.push(String::new());
+        lines.push(format!("  Latest scan failed: {error_msg}"));
+    }
+
+    if let Some(index) = stats_index {
+        let latest_scan = scans[index];
         let passed = result_u64(latest_scan, "passed");
         let total = result_u64(latest_scan, "total");
         let has_failures = result_of(latest_scan)
@@ -296,7 +308,12 @@ fn summarize_hardening(events: &[Value]) -> String {
             #[allow(clippy::cast_precision_loss)]
             let pct = effective_passed as f64 / total as f64 * 100.0;
             lines.push(String::new());
-            lines.push("  Latest scan result:".to_owned());
+            let heading = if index == 0 {
+                "  Latest scan result:"
+            } else {
+                "  Most recent scan with rule statistics:"
+            };
+            lines.push(heading.to_owned());
             if fixed_count > 0 {
                 lines.push(format!(
                     "    Compliance: {effective_passed}/{total} rules passed ({passed} passed + {fixed_count} fixed, {pct:.1}%)"
@@ -311,15 +328,6 @@ fn summarize_hardening(events: &[Value]) -> String {
                     .push("    Check system status using `agent-sec-cli harden --scan`".to_owned());
             }
         }
-    } else if !scans.is_empty() {
-        let latest_error = scans[0];
-        let error_msg = if details_str(latest_error, "error").is_empty() {
-            "unknown error".to_owned()
-        } else {
-            details_str(latest_error, "error")
-        };
-        lines.push(String::new());
-        lines.push(format!("  Latest scan failed: {error_msg}"));
     }
 
     lines.join("\n")
@@ -874,15 +882,15 @@ fn compute_suggestions(
         const LEDGER_HINTS: [(&str, &str); 3] = [
             (
                 "tampered",
-                "agent-sec-cli skill-ledger check <dir>    Investigate tampered skills",
+                "agent-sec-cli skillsec check <dir>    Investigate tampered skills",
             ),
             (
                 "drifted",
-                "agent-sec-cli skill-ledger scan <dir>     Re-scan drifted skills",
+                "agent-sec-cli skillsec scan <dir>     Re-scan drifted skills",
             ),
             (
                 "none",
-                "agent-sec-cli skill-ledger scan <dir>     Scan unchecked skills",
+                "agent-sec-cli skillsec scan <dir>     Scan unchecked skills",
             ),
         ];
         for (status_key, hint) in LEDGER_HINTS {
@@ -953,7 +961,7 @@ mod tests {
         assert!(text.contains("Tampered (1):"), "{text}");
         assert!(text.contains("demo — signature mismatch"), "{text}");
         assert!(
-            text.contains("agent-sec-cli skill-ledger check <dir>"),
+            text.contains("agent-sec-cli skillsec check <dir>"),
             "{text}"
         );
     }
@@ -969,6 +977,52 @@ mod tests {
         assert!(text.contains("System Status: Good"), "{text}");
         assert!(text.contains("--- Code Scanning ---"), "{text}");
         assert!(text.contains("Verdict: pass: 1"), "{text}");
+    }
+
+    #[test]
+    fn latest_scan_without_stats_reports_actual_status() {
+        for (latest_result, older_has_stats) in [
+            ("succeeded", false),
+            ("failed", false),
+            ("succeeded", true),
+            ("failed", true),
+        ] {
+            let older_result = if older_has_stats {
+                json!({"mode": "scan", "passed": 3, "total": 4})
+            } else {
+                json!({"mode": "scan"})
+            };
+            let mut older = scan_event("hardening", "succeeded", &json!({"result": older_result}));
+            older["timestamp"] = json!("2026-01-01T00:00:00+00:00");
+            let latest = scan_event(
+                "hardening",
+                latest_result,
+                &json!({"result": {"mode": "scan", "total": 0}, "error": "scanner unavailable"}),
+            );
+
+            let text = format_summary(&[older, latest], "last 24 hours");
+
+            assert_eq!(
+                text.contains("Latest scan failed: scanner unavailable"),
+                latest_result == "failed",
+                "{text}"
+            );
+            assert_eq!(
+                text.contains("Most recent scan with rule statistics:"),
+                older_has_stats,
+                "{text}"
+            );
+            assert_eq!(
+                text.contains("Compliance: 3/4 rules passed (75.0%)"),
+                older_has_stats,
+                "{text}"
+            );
+            assert!(!text.contains("Latest scan result:"), "{text}");
+            assert!(
+                !text.contains("Latest scan failed: unknown error"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

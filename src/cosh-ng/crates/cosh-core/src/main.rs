@@ -18,6 +18,7 @@ mod logging;
 mod loop_detect;
 mod metrics;
 mod migrate;
+mod parent_watch;
 mod paths;
 mod process;
 mod protocol;
@@ -56,6 +57,9 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     }
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
+        if resolved.auth_source.as_deref() == Some("ecs_identity") {
+            return headless::auth::unconfigured_provider_for("EcsTrialInteractionRequired");
+        }
         if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
             return Box::new(provider::sysom::SysomProvider::from_ecs_ram_role(
                 &resolved.sysom_endpoint,
@@ -100,8 +104,22 @@ fn needs_auth(config: &CoreConfig) -> bool {
     config.resolve_provider().auth_required()
 }
 
+// cosh-shell executes Core through `/proc/self/fd/<n>` so the verified inode is
+// the one executed, and the kernel names the process after that path. Restore
+// the executable identity so `ps -C`, `pgrep -x` and OOM accounting still see
+// `cosh-core`; the descriptor admission itself is unchanged.
+#[cfg(target_os = "linux")]
+fn restore_process_name() {
+    if let Err(error) = nix::sys::prctl::set_name(c"cosh-core") {
+        eprintln!("[cosh-core] failed to restore process name: {error}");
+    }
+}
+
 #[cfg(unix)]
 fn main() {
+    #[cfg(target_os = "linux")]
+    restore_process_name();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -274,6 +292,22 @@ mod tests {
         let mut full = vec!["cosh-core"];
         full.extend_from_slice(args);
         cli::CliArgs::try_parse_from(full).unwrap()
+    }
+
+    #[tokio::test]
+    async fn generic_factory_does_not_activate_ecs_identity_or_return_mock_text() {
+        let config: CoreConfig = toml::from_str(
+            "[ai]\nactive_provider = 'trial'\n[ai.providers.trial]\ntype = 'aliyun'\nauth_source = 'ecs_identity'\n",
+        ).unwrap();
+        assert!(
+            !needs_auth(&config),
+            "identity is not a static credential form"
+        );
+        let provider = create_provider(&config);
+        let result = provider
+            .generate(&[], &[], &provider::GenerateConfig::default())
+            .await;
+        assert!(matches!(result, Err(code) if code == "EcsTrialInteractionRequired"));
     }
 
     #[test]

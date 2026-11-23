@@ -79,17 +79,23 @@ impl LineSubmitCounter {
         positions
     }
 
+    pub(super) fn has_untracked_readline_prefix(&self, bytes: &[u8]) -> bool {
+        let mut scanner = self.clone();
+        scanner.scan(bytes, false, |_| {}).2
+    }
+
     fn scan(
         &mut self,
         bytes: &[u8],
         stop_after_first: bool,
         mut on_submission: impl FnMut(usize),
-    ) -> (usize, Option<usize>) {
+    ) -> (usize, Option<usize>, bool) {
         let pending_len = self.pending_delimiter.len();
         let mut scan = std::mem::take(&mut self.pending_delimiter);
         scan.extend_from_slice(bytes);
         let mut submits = 0;
         let mut first = None;
+        let mut untracked_readline_prefix = false;
         let mut idx = 0;
         while idx < scan.len() {
             let rest = &scan[idx..];
@@ -107,7 +113,10 @@ impl LineSubmitCounter {
                 // Keep the partial delimiter for the next write; ESC-sequence
                 // prefixes never contain CR/LF, so nothing is under-counted.
                 self.pending_delimiter = rest.to_vec();
-                return (submits, first);
+                return (submits, first, untracked_readline_prefix);
+            }
+            if scan[idx] == 0x18 && !self.in_bracketed_paste {
+                untracked_readline_prefix = true;
             }
             if matches!(scan[idx], b'\r' | b'\n' | CTRL_O) && !self.in_bracketed_paste {
                 let position = idx - pending_len;
@@ -115,12 +124,12 @@ impl LineSubmitCounter {
                 first.get_or_insert(position);
                 on_submission(position);
                 if stop_after_first {
-                    return (submits, first);
+                    return (submits, first, untracked_readline_prefix);
                 }
             }
             idx += 1;
         }
-        (submits, first)
+        (submits, first, untracked_readline_prefix)
     }
 }
 
@@ -164,6 +173,25 @@ mod tests {
         assert_eq!(counter.count(b"ls -la\r"), 1);
         assert_eq!(counter.count(b"\r\r"), 2);
         assert_eq!(counter.count(b"abc"), 0);
+    }
+
+    #[test]
+    fn untracked_readline_prefix_does_not_invent_a_submission() {
+        let mut counter = LineSubmitCounter::default();
+        assert!(counter.has_untracked_readline_prefix(b"printf '%s' '\x18\x01"));
+        assert_eq!(counter.count(b"printf '%s' '\x18\x01"), 0);
+        assert!(!counter.has_untracked_readline_prefix(b"\x01"));
+    }
+
+    #[test]
+    fn pasted_ctrl_x_does_not_revoke_primary_prompt_evidence() {
+        let mut counter = LineSubmitCounter::default();
+        assert!(!counter.has_untracked_readline_prefix(b"\x1b[200~\x18\x1b[201~"));
+        assert_eq!(counter.count(b"\x1b[20"), 0);
+        assert!(!counter.has_untracked_readline_prefix(b"0~\x18"));
+        assert_eq!(counter.count(b"0~\x18"), 0);
+        assert!(!counter.has_untracked_readline_prefix(b"\x1b[201~"));
+        assert!(counter.has_untracked_readline_prefix(b"\x1b[201~\x18"));
     }
 
     #[test]

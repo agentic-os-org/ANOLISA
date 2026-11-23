@@ -47,14 +47,24 @@ from aw_invocations import Invocations, dispatch
 class Scope:
     invocation_limit = 8
 
-    def __init__(self, deny=False, hold=False):
+    def __init__(self, deny=False, hold=False, fail_before=None, fail_after=None,
+                 identity_after_before=False):
         self.handle = {"binding": {"instance_id": "task"}}
         self.deny, self.hold = deny, hold
+        self.fail_before, self.fail_after = fail_before, fail_after
+        self.identity_after_before = identity_after_before
+        self.identity = False
+        self.failed = False
         self.events = []
         self.entered, self.release = asyncio.Event(), asyncio.Event()
 
     def check(self):
-        pass
+        if self.identity:
+            self.failed = True
+            raise RuntimeError("fixture scope identity failure")
+
+    async def validate(self):
+        self.check()
 
     async def register(self, sequence, call_id, name, arguments):
         pass
@@ -64,6 +74,18 @@ class Scope:
 
     async def invoke(self, hook, payload):
         self.events.append(copy_json(payload))
+        if payload["event"] == "tool.before" and self.identity_after_before:
+            self.identity = True
+            self.failed = True
+        if payload["event"] == "tool.before" and self.fail_before is not None:
+            return self.fail_before, b""
+        if payload["event"] == "tool.after" and self.fail_after is not None:
+            if self.fail_after == "raise":
+                raise asyncio.TimeoutError()
+            if self.fail_after == "validity":
+                self.failed = True
+                raise RuntimeError("fixture scope validity failure")
+            return self.fail_after, b""
         if (payload["event"] == "tool.before" and self.deny
                 and (payload["server"], payload["tool_name"]) == ("local", "touch")):
             return 2, b'"Blocked by policy"'
@@ -73,10 +95,11 @@ class Scope:
         return 0, b"{}"
 
 
-def claim(tool, scope):
+def claim(tool, scope, on_error="report"):
     managed = mcp.create_sdk_mcp_server("business", tools=[tool])
     bridge = SimpleNamespace(scope=scope, failure=None, mcp_servers=set(), config={"hooks": [
-        {"event": name, "replace_result": False} for name in ("tool.before", "tool.after")
+        {"event": "tool.before", "step": "check", "on_error": "block", "replace_result": False},
+        {"event": "tool.after", "step": "record", "on_error": on_error, "replace_result": False},
     ]})
 
     async def stop():
@@ -254,6 +277,47 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         pending.cancel()
                     await asyncio.gather(pending, return_exceptions=True)
                     managed.release()
+
+    async def test_report_faults_keep_the_checked_result_and_client(self):
+        for fault in (3, "raise"):
+            with self.subTest(fault=fault):
+                async def business(arguments):
+                    return {"content": [{"type": "text", "text": "checked"}]}
+
+                scope = Scope(fail_after=fault)
+                managed, invoke = claim(SdkMcpTool("touch", "Shared result", {}, business), scope)
+                bridge = managed.bridge
+                result = await invoke({})
+                self.assertEqual(result["content"][0]["text"], "checked")
+                self.assertEqual([event["event"] for event in scope.events],
+                                 ["tool.before", "tool.after"])
+                self.assertIsNone(bridge.failure)
+                managed.release()
+
+    async def test_block_before_identity_and_validity_faults_still_stop_the_task(self):
+        for on_error, fault, scope, ran in (
+            ("block", "after-exit", Scope(fail_after=3), True),
+            ("report", "before-exit", Scope(fail_before=3), False),
+            ("report", "identity", Scope(identity_after_before=True), False),
+            ("report", "validity", Scope(fail_after="validity"), True),
+        ):
+            with self.subTest(fault=fault):
+                calls = []
+
+                async def business(arguments):
+                    calls.append(arguments)
+                    return {"content": [{"type": "text", "text": "checked"}]}
+
+                managed, invoke = claim(SdkMcpTool("touch", "Business closure", {}, business),
+                                        scope, on_error=on_error)
+                bridge = managed.bridge
+                # Identity faults surface as RuntimeError before the hook loop;
+                # hook faults surface as the stopping CallbackFailure.
+                with self.assertRaises((bridge_module.CallbackFailure, RuntimeError)):
+                    await invoke({"value": "fixture"})
+                self.assertEqual(bridge.failure, "stopped")
+                self.assertEqual(calls, [{"value": "fixture"}] if ran else [])
+                managed.release()
 
 
 if __name__ == "__main__":

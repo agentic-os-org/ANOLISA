@@ -7,13 +7,16 @@ import unittest
 
 sys.dont_write_bytecode = True
 
+from native_admission import AdmissionTests
 from native_guard import GuardTests
 from native_hooks import HooksTests
+from native_submission import SubmissionTests
 from native_reload import ReloadTests
 from native_support import NativeFixture
+from native_skill import SkillTests
 
 # Export the test classes for unittest discovery through this stable entrypoint.
-__all__ = ["GuardTests", "HooksTests", "ReloadTests"]
+__all__ = ["AdmissionTests", "GuardTests", "HooksTests", "ReloadTests", "SkillTests", "SubmissionTests"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -22,4 +25,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     NativeFixture.plugin_path = args.plugin
     sys.path.insert(0, str(args.source))
+    try:
+        from hermes_cli.gateway_agent import GatewayAgent  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        from native_gateway import GatewayTests  # noqa: F401
+        from native_gateway_lifecycle import GatewayLifecycleTests  # noqa: F401
+        from native_gateway_attach import GatewayAttachTests  # noqa: F401
+        __all__.extend(("GatewayTests", "GatewayLifecycleTests", "GatewayAttachTests"))
     unittest.main(argv=[sys.argv[0]])

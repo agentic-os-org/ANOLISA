@@ -9,6 +9,12 @@ acceptance boundaries. The current contract does not support key rotation and us
 `managedSkillDirs` configuration as its only persisted discovery set. Earlier dated rotation and
 private-registry acceptance results below are historical, not current capability claims.
 
+The current Rust CLI entry point is `agent-sec-cli skillsec`. `skill-ledger` remains a
+compatibility alias for the same command tree, request parameters, output and exit codes.
+This naming transition does not change `action.skill_sec`, audit event types, capability IDs,
+environment variables or persistent data. Existing Hook callers remain compatible. CLI contract
+tests cover both spellings; the core workflow and discovery process tests use `skillsec`.
+
 ## Delivery and acceptance
 
 The core migration and Agent Hook integration are separate PRs. This PR covers the Rust core,
@@ -436,6 +442,8 @@ source consistency, findings and bounded review messages separate.
 
 Publication writes the minimal schema-1 `activation.json` and directory xattr consumed by SkillFS.
 It exposes a verified snapshot, a safe pending-review stub, or a null target for an explicit block.
+The pending stub preserves the directory name as a YAML string, escaping characters that YAML
+treats as line breaks or rejects when literal; its description and review instructions remain fixed.
 `contractWritten`, `activationXattr.written` and `activationPending` distinguish committed business
 state from incomplete publication. An xattr failure never undoes a signed decision; activation or
 startup reconcile retries it. This is publication evidence, not proof of an observed FUSE effect.

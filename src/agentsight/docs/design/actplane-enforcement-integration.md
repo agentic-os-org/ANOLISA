@@ -151,6 +151,29 @@ serializes ActPlane lifecycle mutations, and translates upstream errors and
 violations into stable protocol types. Its backend trait supports a deterministic
 mock implementation for non-Linux tests and one production ActPlane adapter.
 
+For a target in the enforcer's PID namespace, `root_pid` and `process_start_time`
+remain namespace-local procfs values for topology and pre-attachment checks. A
+separate BPF task iterator resolves the corresponding initial-namespace kernel
+TGID by matching the local PID, PID-namespace inode, and process start time. The
+kernel TGID is used for process-domain state, session migration, inode preparation,
+cleanup, and event identity; it is never guessed from a namespace-local number.
+
+The resolver also validates the procfs clock. In addition to ordinary unbiased
+procfs start times, it accepts Alibaba's container-uptime mode only when `/proc/1`
+and the iterator's namespace-init record establish the mode unambiguously. Each
+kernel start time is converted to clock ticks before subtracting the validated
+namespace-init tick bias, matching procfs truncation semantics. The binding retains
+that bias for descendant and provenance event timestamps. Stale or reused PIDs,
+ambiguous records, inconsistent namespace-init clocks, and unstable time namespaces
+reject the apply instead of weakening identity checks.
+
+On pre-5.15 kernels, the installing process holds unpinnable tracepoints and records its
+kernel TGID and raw start time in a `tp_holder_*` marker. If a crash leaves that marker behind,
+a nested-namespace restart may be unable to distinguish a dead holder from a live holder in an
+invisible namespace. Singleton open therefore retains the complete pin root and returns an
+actionable error: stop and verify the old holder from its namespace or the host before manually
+removing the confirmed-stale root. It never converts this uncertainty into automatic cleanup.
+
 Only the production adapter imports ActPlane crates. The initial pin is a full
 Git SHA, never a moving branch. If the required arbitrary-PID lifecycle operation
 is not available as a stable upstream function, the adapter may use the official
@@ -192,9 +215,10 @@ not infer enforcement from request delivery alone.
 1. Procmon reports `Exec`, or an authenticated localhost API requests attachment.
 2. AgentSight captures PID and process start time and creates a pending binding.
 3. The coordinator sends `ApplyPolicy` over UDS.
-4. The enforcer re-reads process identity to reject stale or reused PIDs.
-5. ActPlane compiles the DSL, creates a domain, seeds the root process, and loads
-   required hooks.
+4. The enforcer re-reads procfs identity and resolves the validated kernel TGID to
+   reject stale, reused, ambiguous, or clock-inconsistent PIDs.
+5. ActPlane compiles the DSL, creates a domain, seeds the root kernel TGID, and
+   loads required hooks.
 6. The enforcer returns the actual policy revision and attachment status.
 7. AgentSight changes the binding to `enforced` and writes an audit event.
 

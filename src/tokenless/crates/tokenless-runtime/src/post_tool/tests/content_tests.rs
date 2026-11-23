@@ -3,6 +3,99 @@
 // stays a build log; a diff full of error lines stays a diff).
 
 #[test]
+fn isolated_maven_download_does_not_override_other_content_routes() {
+    let download = "Downloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\n";
+    for (before, after, expected) in [
+        ("Transfer example:\n".to_owned(), "", ContentType::PlainText),
+        (
+            "# Transfer example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{after}")), expected);
+        assert_eq!(detect(&format!("{before}{download}{after}")), expected);
+    }
+}
+
+#[test]
+fn maven_examples_do_not_override_the_enclosing_document() {
+    let download = "Downloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\n";
+    let phase = "[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n";
+    for prefix in ["", "[INFO] "] {
+        for count in [2, 30, 400] {
+            let transfers = format!("{prefix}{download}").repeat(count);
+            for body in [
+                transfers.clone(),
+                format!("{phase}{transfers}"),
+                format!("$ mvn verify\n{phase}{transfers}exit code: 0\n"),
+            ] {
+                for (before, after, expected) in [
+                    ("Transfer example:\n".to_owned(), "", ContentType::PlainText),
+                    (
+                        "+ /usr/bin/cat README.md\n".to_owned(),
+                        "",
+                        ContentType::PlainText,
+                    ),
+                    (
+                        "+ env cat README.md\n".to_owned(),
+                        "",
+                        ContentType::PlainText,
+                    ),
+                    (
+                        "WARNING: Quoted Maven log below:\n".to_owned(),
+                        "",
+                        ContentType::PlainText,
+                    ),
+                    (
+                        "[INFO] Scanning for projects...\n```text\n".to_owned(),
+                        "```\n",
+                        ContentType::PlainText,
+                    ),
+                    (
+                        "# Maven example\n```text\n".to_owned(),
+                        "```\n",
+                        ContentType::PlainText,
+                    ),
+                    ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+                    (
+                        format!("name,count\n{}", "sample,42\n".repeat(400)),
+                        "",
+                        ContentType::Tabular,
+                    ),
+                    (
+                        "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n"
+                            .to_owned(),
+                        "",
+                        ContentType::SourceCode,
+                    ),
+                ] {
+                    let input = format!("{before}{body}{after}");
+                    assert_eq!(
+                        detect(&input),
+                        expected,
+                        "prefix={prefix:?}, count={count}, before={before:?}"
+                    );
+                }
+            }
+            assert!(!tokenless_compressors::BuildLogCompressor::detect(
+                &transfers
+            ));
+        }
+    }
+}
+
+#[test]
 fn detects_json() {
     assert_eq!(
         detect(r#"[{"id": 1, "state": "open"}, {"id": 2, "state": "closed"}]"#),
@@ -108,8 +201,16 @@ fn a_leading_mark_does_not_hide_the_other_domains() {
     // The mark is format, not content, for every domain's reader — the
     // HTML tokenizer just already had it fixed. Each of these is the
     // twin of the same document without the mark.
-    assert_eq!(detect("\u{feff}diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n"), ContentType::Diff);
-    assert_eq!(detect("\u{feff}Traceback (most recent call last):\n  File \"t.py\", line 1\nValueError: boom\n"), ContentType::StackTrace);
+    assert_eq!(
+        detect("\u{feff}diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n"),
+        ContentType::Diff
+    );
+    assert_eq!(
+        detect(
+            "\u{feff}Traceback (most recent call last):\n  File \"t.py\", line 1\nValueError: boom\n"
+        ),
+        ContentType::StackTrace
+    );
     assert_eq!(
         detect("\u{feff}{\"items\": [{\"name\": \"a\", \"description\": \"ddd\"}]}\n"),
         ContentType::Json
@@ -119,7 +220,10 @@ fn a_leading_mark_does_not_hide_the_other_domains() {
         ContentType::Tabular
     );
     // A second mark is content: still nothing detectable.
-    assert_eq!(detect("\u{feff}\u{feff}plain words"), ContentType::PlainText);
+    assert_eq!(
+        detect("\u{feff}\u{feff}plain words"),
+        ContentType::PlainText
+    );
 }
 
 #[test]
@@ -167,7 +271,10 @@ fn html_fragments_inside_other_domains_do_not_make_them_html() {
         .collect::<String>();
     assert_ne!(detect(&numbered_grep), ContentType::Html);
     assert_eq!(
-        detect(&format!("{{\"status\": 200, \"body\": {}}}", serde_json::to_string(page).unwrap())),
+        detect(&format!(
+            "{{\"status\": 200, \"body\": {}}}",
+            serde_json::to_string(page).unwrap()
+        )),
         ContentType::Json
     );
     let jest = format!(
@@ -312,15 +419,32 @@ fn detection_is_deterministic_and_bounded() {
 
 #[test]
 fn detects_plain_path_lists_without_misclassifying_numbers_or_mixed_output() {
-    for prefix in ["/workspace/project with spaces/", "./project/", "../project/", "src/"] {
+    for prefix in [
+        "/workspace/project with spaces/",
+        "./project/",
+        "../project/",
+        "src/",
+    ] {
         let paths: String = (0..10).map(|i| format!("{prefix}file {i}.rs\n")).collect();
         assert_eq!(detect(&paths), ContentType::SearchResults);
-        assert_ne!(detect(&format!("{paths}---\n755 uploads/\n")), ContentType::SearchResults);
+        assert_ne!(
+            detect(&format!("{paths}---\n755 uploads/\n")),
+            ContentType::SearchResults
+        );
     }
     assert_ne!(detect("60\n"), ContentType::SearchResults);
-    assert_ne!(detect("https://example.com/a\nhttps://example.com/b\nhttps://example.com/c\n"), ContentType::SearchResults);
-    assert_ne!(detect("// comment /a\n// comment /b\n// comment /c\n"), ContentType::SearchResults);
-    assert_eq!(detect("src/a.rs,1\nsrc/b.rs,2\nsrc/c.rs,3\n"), ContentType::Tabular);
+    assert_ne!(
+        detect("https://example.com/a\nhttps://example.com/b\nhttps://example.com/c\n"),
+        ContentType::SearchResults
+    );
+    assert_ne!(
+        detect("// comment /a\n// comment /b\n// comment /c\n"),
+        ContentType::SearchResults
+    );
+    assert_eq!(
+        detect("src/a.rs,1\nsrc/b.rs,2\nsrc/c.rs,3\n"),
+        ContentType::Tabular
+    );
 }
 
 #[test]
@@ -335,9 +459,16 @@ fn path_list_detection_only_probes_complete_records_at_the_byte_limit() {
         // Put a space, the CR of CRLF, or the first byte of a Unicode scalar
         // exactly at the byte limit without changing any full path record.
         let padding = MAX_SCAN_BYTES - head.len() - prefix.len() - 1;
-        let input = format!("{head}{prefix}{}{boundary}{remaining}{head}", "a".repeat(padding));
+        let input = format!(
+            "{head}{prefix}{}{boundary}{remaining}{head}",
+            "a".repeat(padding)
+        );
         assert!(input.len() > MAX_SCAN_BYTES);
-        assert_eq!(detect(&input), ContentType::SearchResults, "{ending:?} {boundary:?}");
+        assert_eq!(
+            detect(&input),
+            ContentType::SearchResults,
+            "{ending:?} {boundary:?}"
+        );
     }
 }
 
@@ -362,4 +493,289 @@ fn wire_values_are_stable_and_unique() {
     wires.sort_unstable();
     wires.dedup();
     assert_eq!(wires.len(), all.len());
+}
+
+#[test]
+fn detects_maven_with_and_without_downloads() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/maven/commons_warm.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+}
+
+#[test]
+fn detects_gradle_cold_and_incremental_logs() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/gradle/caffeine_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/gradle/mockito_cold_excerpt.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+}
+
+#[test]
+fn isolated_gradle_markers_and_quoted_examples_do_not_override_enclosing_documents() {
+    let tasks = (0..12)
+        .map(|i| format!("> Task :mod-{i}:compileJava UP-TO-DATE\n"))
+        .collect::<String>();
+    let valid_log = format!("{tasks}BUILD SUCCESSFUL in 2s\n12 actionable tasks: 12 up-to-date\n");
+    for (before, after, expected) in [
+        ("Build excerpt:\n".to_owned(), "", ContentType::PlainText),
+        (
+            "+ /usr/bin/cat README.md\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "WARNING: Quoted Gradle log below:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# Gradle example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "> Task :app:compileJava\n",
+        "> Configure project :\nBuilding version '1.0'\n",
+        "BUILD SUCCESSFUL in 1s\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}
+
+#[test]
+fn detects_serial_parallel_and_failure_ctest_logs() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_parallel.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/ctest/libgit2_offline_failure.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+}
+
+#[test]
+fn isolated_ctest_markers_and_quoted_examples_do_not_override_enclosing_documents() {
+    let valid_log = concat!(
+        "Test project /work/build\n",
+        "      Start  1: suite/a\n",
+        " 1/2 Test  #1: suite/a ..........................   Passed    0.01 sec\n",
+        "      Start  2: suite/b\n",
+        " 2/2 Test  #2: suite/b ..........................   Passed    0.01 sec\n",
+        "\n",
+        "100% tests passed, 0 tests failed out of 2\n",
+    );
+    for (before, after, expected) in [
+        (
+            "CTest output example:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "+ /usr/bin/cat ctest.log\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# CTest example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "Test project /work/build\n",
+        "      Start  1: suite/a\n",
+        "100% tests passed, 0 tests failed out of 1\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}
+
+#[test]
+fn detects_ninja_and_cmake_make_build_logs_and_isolates_quotes() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_make_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/fmt_ninja_cold.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/fmt_make_incremental.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+
+    let valid_log = concat!(
+        "[1/3] Building CXX object CMakeFiles/app.dir/a.cpp.o\n",
+        "[2/3] Building CXX object CMakeFiles/app.dir/b.cpp.o\n",
+        "[3/3] Linking CXX executable app\n",
+    );
+    for (before, after, expected) in [
+        (
+            "Ninja build example:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "+ /usr/bin/cat ninja.log\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# Build example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "[1/1] Building CXX object CMakeFiles/app.dir/a.cpp.o\n",
+        "[100%] Built target app\n",
+        "[1/2] Check configuration\n[2/2] Done\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}
+
+// ---- Browser accessibility snapshots ----
+
+const PW_SNAPSHOT: &str = "### Page\n- Page URL: https://example.com/\n- Page Title: Example\n### Snapshot\n```yaml\n- generic [ref=e1]:\n  - link \"Home\" [ref=e2] [cursor=pointer]:\n    - /url: https://example.com/\n  - button \"Go\" [ref=e3]\n```";
+
+const CDT_SNAPSHOT: &str = "## Latest page snapshot\nuid=1_0 RootWebArea \"Example\" url=\"https://example.com/\"\n  uid=1_1 link \"Home\" url=\"https://example.com/\"\n  uid=1_2 button \"Go\" focusable\n  uid=1_6 \" | \"";
+
+#[test]
+fn detects_browser_snapshots_in_both_subformats() {
+    assert_eq!(detect(PW_SNAPSHOT), ContentType::BrowserSnapshot);
+    assert_eq!(detect(CDT_SNAPSHOT), ContentType::BrowserSnapshot);
+    let bare_pw = "- generic [ref=e1]:\n  - link \"Home\" [ref=e2] [cursor=pointer]:\n    - /url: https://example.com/\n  - button \"Go\" [ref=e3]\n";
+    assert_eq!(detect(bare_pw), ContentType::BrowserSnapshot);
+    let bare_cdt = "uid=1_0 RootWebArea \"x\"\nuid=1_1 link \"a\"\nuid=1_2 link \"b\"\nuid=1_3 \" | \"";
+    assert_eq!(detect(bare_cdt), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn detects_cdt_action_responses_with_snapshot_attached() {
+    let input = format!(
+        "Successfully clicked on the element\nPage navigated to https://example.com/next.\n{CDT_SNAPSHOT}"
+    );
+    assert_eq!(detect(&input), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn detects_pw_snapshots_after_action_preambles() {
+    // Playwright's response builder can emit `### Open tabs` and
+    // `### Ran Playwright code` sections before `### Page`/`### Snapshot`, so
+    // the first line is not always `### Page`; anchor on the snapshot section.
+    let open_tabs = format!(
+        "### Open tabs\n- tab 0: (current) [Example](https://example.com/)\n{PW_SNAPSHOT}"
+    );
+    assert_eq!(detect(&open_tabs), ContentType::BrowserSnapshot);
+    let ran_code = format!(
+        "### Ran Playwright code\n```js\nawait page.getByRole('button').click();\n```\n{PW_SNAPSHOT}"
+    );
+    assert_eq!(detect(&ran_code), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn snapshot_quoting_diff_text_stays_a_snapshot() {
+    let input = PW_SNAPSHOT.replace(
+        "- button \"Go\" [ref=e3]",
+        "- paragraph [ref=e3]: diff --git a/x b/x",
+    );
+    assert_eq!(detect(&input), ContentType::BrowserSnapshot);
+}
+
+#[test]
+fn echoed_git_diff_with_snapshot_context_stays_diff() {
+    // A command preamble bypasses the head-anchored diff guard, and the hunk
+    // context carries `### Snapshot`, a YAML fence, and `[ref=]`. The heading
+    // is a diff context row (leading space), not a column-0 section heading,
+    // so the snapshot detector must decline and leave it on the Diff route.
+    let diff = "diff --git a/snapshot.md b/snapshot.md\n--- a/snapshot.md\n+++ b/snapshot.md\n@@ -1,6 +1,6 @@\n ### Page\n ### Snapshot\n ```yaml\n - link \"x\" [ref=e1]\n+- link \"y\" [ref=e2]\n - link \"z\" [ref=e3]\n ```\n";
+    let input = format!("$ git diff snapshot.md\n{diff}");
+    assert_eq!(detect(&input), ContentType::Diff);
+    assert_eq!(detect(diff), ContentType::Diff);
+}
+
+#[test]
+fn diffs_of_snapshot_files_stay_diffs() {
+    let diff = "diff --git a/snap.yml b/snap.yml\n--- a/snap.yml\n+++ b/snap.yml\n@@ -1,3 +1,3 @@\n - link \"x\" [ref=e1]\n+- link \"y\" [ref=e2]\n - link \"z\" [ref=e3]\n";
+    assert_eq!(detect(diff), ContentType::Diff);
+    let preamble = format!("$ git diff snap.yml\n{diff}");
+    assert_eq!(detect(&preamble), ContentType::Diff);
+    let cdt_diff = "diff --git a/snap.txt b/snap.txt\n--- a/snap.txt\n+++ b/snap.txt\n@@ -1,3 +1,3 @@\n uid=1_1 link \"x\"\n+uid=1_2 link \"y\"\n uid=1_3 link \"z\"\n";
+    assert_eq!(detect(cdt_diff), ContentType::Diff);
+}
+
+#[test]
+fn ci_logs_and_prose_mentioning_refs_do_not_become_snapshots() {
+    let ci = "running 3 tests\ntest tests::a PASSED\ntest tests::b PASSED\ntest result: ok. 3 passed\n";
+    assert_eq!(detect(ci), ContentType::BuildLog);
+    let prose = "See [ref=e1] and uid=1_2 in the documentation for details.\nThey are not snapshots.\n";
+    assert_eq!(detect(prose), ContentType::PlainText);
 }

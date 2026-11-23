@@ -35,7 +35,10 @@ import json, os, sys, time
 from pathlib import Path
 mode = {mode:?}
 root = Path(__file__).parent
-(root / 'pid').write_text(str(os.getpid()))
+# Cancellation starts when pid appears; publish only a complete identifier.
+temporary = root / 'pid.tmp'
+temporary.write_text(str(os.getpid()))
+temporary.replace(root / 'pid')
 assert sys.argv[1:] == ['stats', 'summary', '--json', '--limit', '200']
 assert os.environ['TOKENLESS_DATA_DIR'] == str(root / 'state')
 if mode == 'slow': time.sleep(10)
@@ -120,8 +123,10 @@ print(json.dumps({{'schema_version':'2' if mode == 'version' else '1.1',
 
     fn assert_reaped(&self) {
         if let Ok(pid) = fs::read_to_string(self.root.path().join("pid")) {
+            let pid = pid.trim().parse::<u32>().expect("valid query PID record");
+            assert!(pid > 0, "query PID must be positive");
             assert!(
-                !Path::new("/proc").join(pid.trim()).exists(),
+                !Path::new("/proc").join(pid.to_string()).exists(),
                 "query child still exists"
             );
         }

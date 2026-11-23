@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SWEInstance(BaseModel):
@@ -84,8 +84,8 @@ class AgentConfig(BaseModel):
     """Agent configuration."""
 
     name: str = Field(description="Agent name (e.g., 'cosh', 'openclaw')")
-    timeout: int = Field(default=1800, description="Timeout in seconds")
-    step_limit: int = Field(default=0, description="Max steps (0 = unlimited)")
+    timeout: int = Field(default=1800, gt=0, description="Timeout in seconds")
+    step_limit: int = Field(default=0, ge=0, description="Max steps (0 = unlimited)")
     workers: int = Field(default=1, ge=1, description="Number of parallel workers")
     docker_pull_registry: str | None = Field(
         default=None,
@@ -103,6 +103,10 @@ class AgentConfig(BaseModel):
         default=False,
         description="Whether to enable tokenless/rtk helpers when the selected agent supports them",
     )
+    headroom: bool = Field(
+        default=False,
+        description="Whether to enable the Headroom context engine when the selected agent supports it",
+    )
     per_case_prompt: bool = Field(
         default=False,
         description="Whether to enable optional per-instance custom prompt guidance",
@@ -111,12 +115,35 @@ class AgentConfig(BaseModel):
         default=None,
         description="Optional directory containing per-instance prompt files named by instance_id",
     )
+    base_config: Path | None = Field(
+        default=None,
+        description="Optional agent base configuration file copied into every per-instance profile",
+    )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature override; None keeps the agent harness default",
+    )
+    seed: int | None = Field(
+        default=None,
+        description="Sampling seed override; only meaningful once temperature is above zero",
+    )
 
     @model_validator(mode="after")
     def validate_guidance_mode(self) -> AgentConfig:
         if self.use_skill and self.per_case_prompt:
             raise ValueError("use_skill and per_case_prompt are mutually exclusive")
+        # Both are context-optimization layers and headroom holds an exclusive
+        # OpenClaw slot, so enabling them together would measure neither.
+        if self.tokenless and self.headroom:
+            raise ValueError("tokenless and headroom are mutually exclusive")
         return self
+
+    @field_validator("skills_dir", "prompts_dir")
+    @classmethod
+    def expand_guidance_home(cls, value: Path | None) -> Path | None:
+        return value.expanduser() if value is not None else None
 
 
 class DatasetConfig(BaseModel):
@@ -161,6 +188,11 @@ class OutputConfig(BaseModel):
     """Output configuration."""
 
     output_dir: Path = Field(default=Path("./output"), description="Output directory")
+
+    @field_validator("output_dir")
+    @classmethod
+    def expand_output_home(cls, value: Path) -> Path:
+        return value.expanduser()
 
 
 class Settings(BaseModel):

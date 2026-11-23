@@ -237,7 +237,17 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
 
     # Latest scan result details. Loongshield returns non-zero for non-compliant
     # scans, but the backend may still parse usable passed/total statistics.
+    latest_run = scans[0] if scans else None
     latest_scan = next((e for e in scans if _has_hardening_stats(e)), None)
+    if (
+        latest_run is not None
+        and latest_run is not latest_scan
+        and latest_run.result == "failed"
+    ):
+        error_msg = _safe_details(latest_run).get("error", "unknown error")
+        lines.append("")
+        lines.append(f"  Latest scan failed: {error_msg}")
+
     if latest_scan:
         result = _get_result(latest_scan)
         passed = result.get("passed", 0)
@@ -257,7 +267,10 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
         if total > 0:
             pct = effective_passed / total * 100
             lines.append("")
-            lines.append("  Latest scan result:")
+            if latest_scan is latest_run:
+                lines.append("  Latest scan result:")
+            else:
+                lines.append("  Most recent scan with rule statistics:")
             if fixed_count > 0:
                 lines.append(
                     f"    Compliance: {effective_passed}/{total} rules passed "
@@ -272,12 +285,6 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
                 lines.append(
                     "    Check system status using `agent-sec-cli harden --scan`"
                 )
-    elif scans:
-        # All scans failed — show the latest error so users aren't left in the dark
-        latest_error = scans[0]
-        error_msg = _safe_details(latest_error).get("error", "unknown error")
-        lines.append("")
-        lines.append(f"  Latest scan failed: {error_msg}")
 
     return "\n".join(lines)
 

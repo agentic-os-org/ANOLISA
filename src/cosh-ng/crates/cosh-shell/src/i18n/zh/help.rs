@@ -2,9 +2,47 @@ use super::MessageId;
 
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
+        MessageId::CoshRootHelp => concat!(
+            "Cosh AI Shell\n\n",
+            "Usage: cosh [OPTIONS]\n",
+            "       cosh <COMMAND> [ARGS]\n\n",
+            "启动选项:\n",
+            "  --help                 显示帮助，不启动内部 Shell\n",
+            "  --shell <bash|zsh|PATH> 选择内部 Shell\n",
+            "  -l, --login            启动登录会话\n",
+            "  --isolated             抑制受支持 Shell 的启动文件\n",
+            "  --ask <QUESTION>       携带 AI 初始问题启动（需要交互终端）\n",
+            "  --context <EVENT_ID>   为 --ask 加载已保存的失败事件\n",
+            "  --resume [SESSION_ID]  选择或恢复 Agent 会话\n\n",
+            "子命令:\n",
+            "  cosh guide\n",
+            "      打开配置向导与使用入门；受限终端打印静态说明\n",
+            "  cosh guide [on|off|status]\n",
+            "      控制使用引导提示，不是所有 AI 能力的总开关\n",
+            "  cosh health banner [on|off|status]\n",
+            "      控制登录健康摘要\n",
+            "  cosh login status|set|restore [--user USER]\n",
+            "      查看或管理默认登录 Shell（仅受支持系统）\n",
+            "  cosh agent --help\n",
+            "      查看 Agent 自动化与集成命令\n\n",
+            "Cosh 会话内:\n",
+            "  /help                  查看会话命令\n",
+            "  /auth                  配置与管理 AI 服务\n",
+            "  /config language       修改界面语言\n",
+            "  /recommendations       管理个性化提问推荐与本地数据\n",
+            "  /mode analysis         修改当前会话的命令分析方式\n\n",
+            "高级集成:\n",
+            "  cosh shell-integration compat|advise\n",
+            "      Bash 启动接入协议（通过 stdin/stdout 传输帧）\n\n",
+            "示例（在原终端运行）:\n",
+            "  cosh\n",
+            "  cosh --ask 'Explain disk usage'\n",
+            "  cosh --shell bash --help\n\n",
+            "其它 Shell 参数继续透传给内部 Shell。\n",
+        ),
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => {
-            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可编写多行 prompt。"
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。运行 cosh guide 打开配置向导与使用入门。"
         }
         MessageId::PromptSoftNewlineTip => {
             "提示：以 ?? 开头可编写多行 prompt（Shift+Enter 换行）。"

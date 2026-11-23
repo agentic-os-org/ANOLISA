@@ -4,7 +4,7 @@ use crate::{
     deadline,
     endpoint::{self, Endpoint},
     ipc, rejected,
-    runtime::Runtime,
+    runtime::{process::Process, Runtime},
     Operation, Request, Response, Result, VERSION,
 };
 use std::{
@@ -20,6 +20,10 @@ use std::{
 };
 
 const CONTROL_RESERVE: usize = 16;
+mod wait;
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
 
 /// A bootstrap configuration and per-instance policies on a private same-user socket.
 /// Binding preparation executes trusted local commands with an explicit context.
@@ -63,8 +67,9 @@ impl Server {
             }
         }
         let endpoint = Endpoint::bind(state_dir)?;
-        let runtime = Runtime::new(
+        let runtime = Runtime::from_configuration(
             bytes,
+            &configuration,
             &state_dir.join("journal"),
             Arc::new(AtomicBool::new(false)),
         )?;
@@ -121,16 +126,18 @@ impl Server {
                         let Ok(peer) = endpoint::peer_credentials(&stream) else {
                             continue;
                         };
+                        // Pin the connecting process before reading a potentially slow frame.
+                        let process = Process::read(peer.pid as u32).ok();
                         let runtime = Arc::clone(&self.runtime);
                         runtime.resources.connections.fetch_add(1, Ordering::AcqRel);
                         workers.push(
                             thread::Builder::new()
                                 .name("aw-rpc".into())
-                                .spawn(move || connection(stream, runtime, peer))?,
+                                .spawn(move || connection(stream, runtime, peer, process))?,
                         );
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5))
+                        wait::idle(self.endpoint.listener().as_raw_fd(), &self.runtime)?;
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(error.into()),
@@ -159,7 +166,12 @@ impl Server {
     }
 }
 
-fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) {
+fn connection(
+    mut stream: UnixStream,
+    runtime: Arc<Runtime>,
+    peer: libc::ucred,
+    process: Option<Process>,
+) {
     struct Connection(Arc<Runtime>);
     impl Drop for Connection {
         fn drop(&mut self) {
@@ -182,29 +194,61 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
         .unwrap_or_else(|_| Instant::now() + stall);
     let binding = matches!(
         &request.operation,
-        Operation::Bind { .. } | Operation::OpenScope { .. }
+        Operation::Bind { .. }
+            | Operation::OpenScope { .. }
+            | Operation::Registration {
+                command: crate::RegistrationCommand::Register { .. }
+                    | crate::RegistrationCommand::RegisterNative { .. }
+                    | crate::RegistrationCommand::RegisterSdk { .. }
+            }
     );
     let result = (|| {
         if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections
             && !matches!(
                 &request.operation,
                 Operation::Status
+                    | Operation::SdkControl { .. }
+                    | Operation::SdkCallback { close: true, .. }
                     | Operation::Stop
                     | Operation::ReleaseInstance { .. }
                     | Operation::Unbind { .. }
                     | Operation::CloseEvent { .. }
                     | Operation::CloseHookEvent { .. }
+                    | Operation::CloseInputEvent { .. }
                     | Operation::FinishInvocation { .. }
+                    | Operation::CheckScope { .. }
+                    | Operation::Registration {
+                        command: crate::RegistrationCommand::Query { .. }
+                            | crate::RegistrationCommand::Release { .. }
+                    }
             )
         {
             return Err(runtime.overload("connection_limit"));
         }
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
-            return prepare_connected(&stream, &runtime, request, expires, peer);
+            return prepare_connected(&stream, &runtime, request, expires, peer, process.as_ref());
         }
         let deadline = request.admit(&runtime.identity)?;
+        runtime.authorize_registration_peer(&request.operation, process.as_ref())?;
         if binding {
-            prepare_connected(&stream, &runtime, request, deadline, peer)
+            prepare_connected(&stream, &runtime, request, deadline, peer, process.as_ref())
+        } else if let Operation::SdkControl { command } = request.operation {
+            runtime.sdk_control(
+                command,
+                process
+                    .as_ref()
+                    .ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                deadline,
+            )
+        } else if let Operation::Registration { command } = request.operation {
+            runtime.registration(
+                command,
+                process
+                    .as_ref()
+                    .ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                deadline,
+                &runtime.stopped,
+            )
         } else {
             runtime.handle(request.operation, deadline, &runtime.stopped)
         }
@@ -245,33 +289,57 @@ fn prepare_connected(
     request: Request,
     deadline: Instant,
     peer: libc::ucred,
+    process: Option<&Process>,
 ) -> Result<serde_json::Value> {
     let cancelled = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
+        let (completed, completion) = UnixStream::pair()?;
+        let preparation_cancelled = Arc::clone(&cancelled);
         let worker = thread::Builder::new()
             .name("aw-prepare".into())
-            .spawn_scoped(scope, || {
+            .spawn_scoped(scope, move || {
+                // Closing this endpoint wakes the monitor on success, error or panic.
+                let _completion = completion;
                 if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
-                    runtime.update_policy(&request, (peer.uid, peer.pid), &cancelled)
+                    runtime.update_policy(&request, (peer.uid, peer.pid), &preparation_cancelled)
+                } else if let Operation::Registration { command } = request.operation {
+                    runtime.registration(
+                        command,
+                        process.ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                        deadline,
+                        &preparation_cancelled,
+                    )
                 } else {
-                    runtime.handle(request.operation, deadline, &cancelled)
+                    runtime.authorize_registration_peer(&request.operation, process)?;
+                    runtime.handle(request.operation, deadline, &preparation_cancelled)
                 }
             })?;
         while !worker.is_finished() {
-            let mut peer = libc::pollfd {
-                fd: stream.as_raw_fd(),
-                events: libc::POLLRDHUP,
-                revents: 0,
-            };
-            // SAFETY: poll borrows one live socket descriptor and never consumes its data.
-            let result = unsafe { libc::poll(&mut peer, 1, 20) };
+            let mut sockets = [
+                libc::pollfd {
+                    fd: stream.as_raw_fd(),
+                    events: libc::POLLRDHUP,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: completed.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: both socket descriptors remain live throughout poll.
+            let result = unsafe { libc::poll(sockets.as_mut_ptr(), 2, 20) };
             if runtime.stopped.load(Ordering::Acquire)
                 || Instant::now() >= deadline
-                || peer.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                || sockets[0].revents
+                    & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
                     != 0
                 || (result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
             {
                 cancelled.store(true, Ordering::Release);
+                break;
+            }
+            if sockets[1].revents != 0 {
                 break;
             }
         }

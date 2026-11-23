@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 MARKER = ".tokenless-qwenwork-owned.json"
@@ -31,6 +32,10 @@ RUNTIME_FILES = (
     "hooks/shared/rewrite_hook.py",
     "hooks/shared/compress_response_hook.py",
     "hooks/shared/hook_utils.py",
+    "hooks/shared/hook_entry.py",
+    "hooks/shared/hook_runtime.py",
+    "hooks/shared/result_utils.py",
+    "hook_adapter.py",
     "hooks/shared/tool_categories.json",
     "scripts/lifecycle.py",
     "scripts/detect.sh",
@@ -198,15 +203,32 @@ def _dependencies(root: Path) -> None:
     if not tokenless:
         raise LifecycleError("tokenless binary not found; install Tokenless separately, then retry")
     print(f"Tokenless: {tokenless}")
-    rtk = utils.resolve_binary("rtk")
-    if rtk:
-        print(f"RTK: {rtk}")
-    else:
+    _data_directory_notice(utils.resolve_data_directory)
+
+
+def _data_directory_notice(resolve_directory: Callable[[], str]) -> None:
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    source = "TOKENLESS_DATA_DIR" if configured else "default"
+    try:
+        directory = resolve_directory()
+    except (OSError, ValueError, RuntimeError) as error:
+        directory = f"unavailable; configured value: {configured!r}"
         print(
-            "WARNING: rtk binary not found; command rewriting is unavailable "
-            "(response hooks remain available).",
+            f"WARNING: {error}; workspace Shell "
+            "hooks pass through without creating a data directory.",
             file=sys.stderr,
         )
+    print(f"Tokenless data directory (current process): {directory} ({source})")
+    print(
+        "This reports the current process configuration only; it does not test "
+        "sandbox write access or verify the desktop process environment."
+    )
+    print(
+        "If the Shell sandbox cannot write to the data directory, RTK statistics "
+        "and execution receipts may be missing while commands can still run. "
+        "Hook-side compression statistics use the Hook process permissions."
+    )
+    print("RTK's native database uses its own path configuration, independently of Tokenless.")
 
 
 def _inventory(root: Path) -> dict:
@@ -281,17 +303,15 @@ def _install(data: Path, target: Path, previous: dict | None) -> None:
         shutil.copytree(PLUGIN_ROOT, new, symlinks=False, ignore=_ignored)
         if platform.system() == "Windows":
             hooks = _read_json(new / "hooks/hooks.json")
-            for event, groups in hooks["hooks"].items():
+            hooks["hooks"].pop("PreToolUse", None)
+            for groups in hooks["hooks"].values():
                 for group in groups:
-                    if event == "PreToolUse":
-                        group["matcher"] = f"{group['matcher']}|PowerShell"
-                    script = "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
                     python = sys.executable.replace("'", "''")
                     for hook in group["hooks"]:
                         hook["shell"] = "powershell"
                         hook["command"] = (
                             f"& '{python}' -X utf8 -B "
-                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
+                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/compress_response_hook.py" --agent-id qwenwork'
                         )
             (new / "hooks/hooks.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
         _validate_runtime(new)

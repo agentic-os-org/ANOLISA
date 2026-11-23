@@ -9,7 +9,12 @@ use std::{fs, os::unix::process::ExitStatusExt, process::Output};
 
 #[test]
 fn configured_shutdown_grace_reaches_the_foreground_launcher() {
-    for configured in [false, true] {
+    for (signal, configured) in [
+        (libc::SIGTERM, false),
+        (libc::SIGTERM, true),
+        (libc::SIGINT, false),
+        (libc::SIGINT, true),
+    ] {
         let fixture = Fixture::new();
         let mut document = fixture.document();
         if configured {
@@ -30,7 +35,7 @@ fn configured_shutdown_grace_reaches_the_foreground_launcher() {
             })
             .unwrap();
         let pid = fs::read_to_string(fixture.root.join("started-one")).unwrap();
-        process.signal(libc::SIGTERM);
+        process.signal(signal);
         let output = process.finish();
         assert_eq!(fixture.root.join("cleanup-one").exists(), configured);
         if configured {
@@ -150,6 +155,50 @@ fn receipt(fixture: &Fixture) -> std::path::PathBuf {
 }
 
 #[test]
+fn sdk_pid_connect_bounds_connection_lock_wait_by_caller_deadline() {
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let _service = Service::start(&fixture, &fixture.document());
+    let config = fixture.root.join("aw.json");
+    let connect = || {
+        let mut command = fixture.command();
+        command
+            .args(["connect", "--config"])
+            .arg(&config)
+            .args([
+                "--sdk-pid",
+                &std::process::id().to_string(),
+                "--timeout-ms",
+                "100",
+            ])
+            .env("XDG_RUNTIME_DIR", &fixture.root);
+        command
+    };
+    // An unregistered PID still records the service before SDK discovery.
+    assert!(!fixture.run(connect()).status.success());
+    let record = fixture
+        .root
+        .join("aw/connections")
+        .join(receipt(&fixture).file_name().unwrap());
+    let held = fs::File::open(record.with_extension("lock")).unwrap();
+    held.lock().unwrap();
+    for recorded in [true, false] {
+        if !recorded {
+            fs::remove_file(&record).unwrap();
+        }
+        // Leave scheduling headroom below the independent one-second lock cap.
+        let output =
+            Process::spawn(&fixture, connect()).finish_with_timeout(Duration::from_millis(750));
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("AW connection is being changed"),
+            "{output:?}"
+        );
+        assert_eq!(record.exists(), recorded);
+    }
+}
+
+#[test]
 fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_stop() {
     use aw_service::{Client, Operation};
     use std::time::{Duration, Instant};
@@ -177,13 +226,10 @@ fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_st
     let connect = |remove| {
         let mut command = fixture.command();
         command
-            .args(["agent", "connect", "--config"])
+            .args([if remove { "disconnect" } else { "connect" }, "--config"])
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "qoder", "--pid", &pid.to_string()])
             .env("XDG_RUNTIME_DIR", runtime.path());
-        if remove {
-            command.arg("--remove");
-        }
         success(fixture.run(command))
     };
     connect(false);
@@ -228,7 +274,7 @@ fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_st
     // A direct service shutdown leaves the path receipt behind intentionally.
     let mut command = fixture.command();
     command
-        .args(["serve", "--config"])
+        .args(["service", "serve", "--config"])
         .arg(fixture.root.join("aw.json"))
         .arg("--state-dir")
         .arg(&edited.state_dir);
@@ -396,4 +442,57 @@ fn mutable_config_connection_rejects_stale_identity_and_unsafe_receipts() {
     fs::rename(backup, &path).unwrap();
     success(update(&fixture));
     success(install(&fixture, pid, true));
+}
+
+#[test]
+fn offline_service_commands_report_stable_diagnostics_without_starting_a_service() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+    let fixture = Fixture::new();
+    fixture.save(&fixture.document());
+    let state = fixture.root.join("state");
+    let socket = state.join("aw.sock");
+    for stale in [false, true] {
+        if stale {
+            fs::create_dir(&state).unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+            drop(UnixListener::bind(&socket).unwrap());
+        }
+        for args in [
+            vec!["service", "status"],
+            vec!["service", "stop"],
+            vec!["update", "--agent", "qoder"],
+        ] {
+            let mut command = fixture.command();
+            command
+                .args(args)
+                .arg("--config")
+                .arg(fixture.root.join("aw.json"));
+            let output = fixture.run(command);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("service_unavailable"), "{error}");
+            assert_eq!(state.exists(), stale);
+            assert_eq!(socket.exists(), stale);
+        }
+        let mut inspect = fixture.command();
+        inspect
+            .args(["inspect", "--json", "--config"])
+            .arg(fixture.root.join("aw.json"));
+        let output = fixture.run(inspect);
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["service"]["code"], "service_offline");
+        let mut instance = fixture.command();
+        instance
+            .args(["instance", "--connect", "--socket"])
+            .arg(&socket);
+        let output = fixture.run(instance);
+        assert_eq!(output.status.code(), Some(1));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["error"], "transport_unavailable");
+        assert_eq!(state.exists(), stale);
+        assert_eq!(socket.exists(), stale);
+    }
 }

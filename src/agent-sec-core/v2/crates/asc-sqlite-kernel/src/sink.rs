@@ -96,7 +96,7 @@ impl<R: RecordRepository, P: FaultPolicy<Record = R::Record>> SqliteSink<R, P> {
 
     /// Persists `record`, swallowing every fault.
     pub fn write(&self, record: &R::Record) {
-        let _ = self.persist(record);
+        let _ = self.persist(record, false);
     }
 
     /// Persists `record`, surfacing faults the policy asks to surface.
@@ -105,10 +105,21 @@ impl<R: RecordRepository, P: FaultPolicy<Record = R::Record>> SqliteSink<R, P> {
     ///
     /// Returns whatever the [`FaultPolicy`] turns into a [`Failure`].
     pub fn write_or_raise(&self, record: &R::Record) -> Result<(), KernelError> {
-        self.persist(record)
+        self.persist(record, false)
     }
 
-    fn persist(&self, record: &R::Record) -> Result<(), KernelError> {
+    /// Persists a record and rejects every skipped or failed write.
+    ///
+    /// Retains the normal recovery and diagnostic policy, but does not let a
+    /// best-effort policy turn a missing write into a successful acknowledgement.
+    ///
+    /// # Errors
+    /// Returns the underlying failure, or a synthetic error when no row was written.
+    pub fn write_checked(&self, record: &R::Record) -> Result<(), KernelError> {
+        self.persist(record, true)
+    }
+
+    fn persist(&self, record: &R::Record, checked: bool) -> Result<(), KernelError> {
         let _guard = self
             .write_lock
             .as_ref()
@@ -116,7 +127,7 @@ impl<R: RecordRepository, P: FaultPolicy<Record = R::Record>> SqliteSink<R, P> {
 
         match self.classify(record) {
             None => Ok(()),
-            Some(fault) => self.apply(fault, record),
+            Some(fault) => self.apply(fault, record, checked),
         }
     }
 
@@ -259,7 +270,12 @@ impl<R: RecordRepository, P: FaultPolicy<Record = R::Record>> SqliteSink<R, P> {
     }
 
     /// Asks the policy what to do and carries it out.
-    fn apply(&self, fault: OwnedFault, record: &R::Record) -> Result<(), KernelError> {
+    fn apply(
+        &self,
+        fault: OwnedFault,
+        record: &R::Record,
+        checked: bool,
+    ) -> Result<(), KernelError> {
         let outcome = self.policy.on_fault(
             &Fault {
                 kind: fault.kind,
@@ -274,7 +290,7 @@ impl<R: RecordRepository, P: FaultPolicy<Record = R::Record>> SqliteSink<R, P> {
             self.store.dispose();
         }
 
-        match outcome.failure {
+        match outcome.failure.or(checked.then_some(Failure::Original)) {
             None => Ok(()),
             Some(Failure::Message(message)) => Err(KernelError::io(
                 "write to",

@@ -51,7 +51,17 @@ export const codeScan: SecurityCapability = {
           return undefined;
         }
 
-        // 只拦截 shell 类工具
+        const mutation = extractPluginMutation(event);
+        if (mutation) {
+          const msg = `[agent-sec-core] 自我保护：该操作将禁用或卸载 agent-sec 安全插件。如果您确实需要执行，请手动运行 openclaw plugins ${mutation.action} agent-sec。出于安全原因，AI agent 无法执行此操作。`;
+          report("warn", `SELF-PROTECT block — plugins ${mutation.action} agent-sec`, {
+            outcome: "self-protect-native",
+            verdict: "warn",
+            decision: "block",
+          });
+          return { block: true, blockReason: msg };
+        }
+
         const command = extractCommand(event);
         if (!command) {
           return undefined;
@@ -171,6 +181,25 @@ export const codeScan: SecurityCapability = {
     });
   },
 };
+
+function extractPluginMutation(event: {
+  toolName: string;
+  params: Record<string, unknown>;
+}): { action: "disable" | "uninstall" } | undefined {
+  let params = event.params;
+  if (event.toolName === "tool_call") {
+    if (params.id !== "plugins" && params.id !== "openclaw:core:plugins") return undefined;
+    if (!params.args || typeof params.args !== "object" || Array.isArray(params.args)) return undefined;
+    params = params.args as Record<string, unknown>;
+  } else if (event.toolName !== "plugins") {
+    return undefined;
+  }
+
+  const action = typeof params.action === "string" ? params.action.trim() : undefined;
+  if (action !== "disable" && action !== "uninstall") return undefined;
+  if (typeof params.pluginId !== "string" || params.pluginId.trim() !== "agent-sec") return undefined;
+  return { action };
+}
 
 /** 从 event 中提取 shell 命令，无法提取则返回 undefined */
 function extractCommand(event: { toolName: string; params: Record<string, unknown> }): string | undefined {

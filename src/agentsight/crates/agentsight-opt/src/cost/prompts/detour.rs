@@ -91,7 +91,7 @@ fn render_final_outcome(trajectory: &AtifTrajectory) -> String {
         .steps
         .iter()
         .rev()
-        .find(|s| s.source == "agent" && s.message.as_deref().is_some_and(|m| !m.trim().is_empty()))
+        .find(|s| s.is_agent() && s.message.as_deref().is_some_and(|m| !m.trim().is_empty()))
         .and_then(|s| s.message.as_deref())
         .map(|m| crate::atif::truncate_chars(m, FINAL_OUTCOME_CHARS))
         .unwrap_or_else(|| "（本轨迹没有可用的最终产出文本）".to_string())
@@ -104,6 +104,9 @@ fn render_artifact_edits(trajectory: &AtifTrajectory) -> String {
     let mut turn: usize = 0;
     let mut shown = 0usize;
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         if step.source != "agent" {
             continue;
         }
@@ -143,6 +146,9 @@ fn render_user_messages(trajectory: &AtifTrajectory) -> String {
     let mut turn: usize = 0;
     let mut first = true;
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         match step.source.as_str() {
             "agent" => turn += 1,
             "user" => {
@@ -267,6 +273,28 @@ mod tests {
         assert!(body.contains("old_string"));
         assert!(body.contains("[初始 prompt → T0] 实现一个解析器"));
         assert!(body.contains("[后续消息 → T1] 命名要用 snake_case"));
+    }
+
+    #[test]
+    fn copied_messages_do_not_shift_detour_user_turns() {
+        let mut t = trajectory();
+        let mut copied_user = t.steps[0].clone();
+        copied_user.is_copied_context = Some(true);
+        let mut copied_agent = t.steps[1].clone();
+        copied_agent.is_copied_context = Some(true);
+        t.steps.splice(2..2, [copied_user, copied_agent]);
+        let msgs = build_detour_prompt(
+            &candidate_set(),
+            &candidate(),
+            strategy_for("detour").expect("strategy exists"),
+            &t,
+        );
+        let body = &msgs[1].content;
+        assert!(body.contains("T1 | Edit:src/p.rs | 70 tok"));
+        assert!(body.contains("[后续消息 → T1] 命名要用 snake_case"));
+        let users = render_user_messages(&t);
+        assert_eq!(users.lines().count(), 2);
+        assert_eq!(users.matches("实现一个解析器").count(), 1);
     }
 
     #[test]

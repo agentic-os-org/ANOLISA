@@ -5,17 +5,14 @@ mod process;
 #[cfg(test)]
 mod tests;
 
-use crate::{rejected, Client, Operation, Result};
+use crate::{rejected, Client, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs, io,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt},
-    },
-    path::{Component, Path, PathBuf},
+    os::unix::fs::{FileTypeExt, MetadataExt},
+    path::{Path, PathBuf},
     process::Child,
     time::Instant,
 };
@@ -109,31 +106,10 @@ pub fn resolve(bytes: &[u8], runtime_dir: Option<&Path>) -> Result<ServicePaths>
             };
             (namespace.join(&revision[..24]), Some(namespace))
         }
-        ("auto", endpoint) => {
-            let socket = Path::new(endpoint);
-            absolute(socket)?;
-            if socket.file_name() != Some(std::ffi::OsStr::new("aw.sock")) {
-                return Err(rejected("daemon_endpoint_must_be_aw_sock"));
-            }
-            (
-                socket
-                    .parent()
-                    .ok_or_else(|| rejected("daemon_path_invalid"))?
-                    .to_owned(),
-                None,
-            )
-        }
         (state, _) => (PathBuf::from(state), None),
     };
-    absolute(&state_dir)?;
-    let socket = state_dir.join("aw.sock");
-    if endpoint != "auto" && Path::new(endpoint) != socket {
-        return Err(rejected("daemon_path_mismatch"));
-    }
-    // sockaddr_un reserves its final byte for the pathname terminator.
-    if socket.as_os_str().as_bytes().len() >= 108 {
-        return Err(rejected("service_socket_path_too_long"));
-    }
+    let (state_dir, socket) = aw_config::service_paths::resolve(&state_dir, Path::new(endpoint))
+        .map_err(|error| rejected(&error.to_string()))?;
     Ok(ServicePaths {
         state_dir,
         socket,
@@ -146,7 +122,7 @@ pub fn resolve(bytes: &[u8], runtime_dir: Option<&Path>) -> Result<ServicePaths>
 /// Reuse an exact matching daemon or start the configured on-demand service.
 ///
 /// Startup is serialized with a private per-state lock. Configuration is copied
-/// from these bytes into a private immutable snapshot before spawning `aw serve`.
+/// from these bytes into a private immutable snapshot before spawning `aw service serve`.
 /// Existing sockets are never unlinked, including stale sockets. The new child
 /// has a separate session, null stdin/stdout and a private stderr log; it survives
 /// Agent and launcher exit. External mode never creates files or starts a process.
@@ -211,11 +187,10 @@ fn connect(paths: &ServicePaths, deadline: Instant) -> Result<(Client, u32)> {
     {
         return Err(rejected("unsafe_service_socket"));
     }
-    let client = Client::connect(&paths.socket, deadline)?;
+    let (client, status) = Client::connect_with_status(&paths.socket, deadline)?;
     if client.identity().config_revision != paths.config_revision {
         return Err(rejected("service_revision_mismatch"));
     }
-    let status = client.call(Operation::Status, deadline)?;
     let pid = status
         .get("pid")
         .and_then(Value::as_u64)
@@ -229,20 +204,13 @@ fn connect(paths: &ServicePaths, deadline: Instant) -> Result<(Client, u32)> {
 }
 
 fn absolute(path: &Path) -> Result<()> {
-    if !path.is_absolute()
-        || path.as_os_str().as_bytes().contains(&0)
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-    {
-        return Err(rejected("service_path_must_be_absolute"));
-    }
-    Ok(())
+    aw_config::service_paths::absolute(path).map_err(|error| rejected(&error.to_string()))
 }
 
-/// Literal `aw serve` arguments; no shell expansion or original config path is used.
-fn arguments(paths: &ServicePaths, snapshot: &Path) -> [OsString; 5] {
+/// Literal `aw service serve` arguments; no shell expansion or original config path is used.
+fn arguments(paths: &ServicePaths, snapshot: &Path) -> [OsString; 6] {
     [
+        "service".into(),
         "serve".into(),
         "--config".into(),
         snapshot.into(),

@@ -185,8 +185,8 @@ cd src/agentsight
 # Build frontend and embed into frontend-dist/ (required before cargo build)
 make build-frontend
 
-# Then build the Rust binary with the embedded UI
-make build
+# Then build only the Rust binary with the embedded UI
+make build-binary
 
 # Or do both in one step
 make build-all
@@ -319,6 +319,11 @@ sudo anolisa --install-mode system install agentsight
 AgentSight requires Linux system mode. This installs the AgentSight service and
 the `agentsight-enforcer` service together.
 
+Enforcer file open/write and connect blocking additionally requires an active BPF LSM and
+matching loaded hooks. Block policies for these operations are rejected when that support is
+unavailable; see the
+[integration guide](../../docs/user-guide/en/agentsight/integrations.md#agentsight-enforcer-risk-enforcement).
+
 ### Install via RPM
 
 ```bash
@@ -326,18 +331,20 @@ sudo yum install agentsight
 ```
 
 Installs:
-- `/usr/local/bin/agentsight` — CLI binary
-- `/usr/local/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight` — CLI binary
+- `/usr/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
+- `/usr/share/agentsight/adapters/dsh/` — DSH plugin resources, from the recommended
+  `agentsight-plugins` package; skipped when weak dependencies are disabled
 
-The RPM is a Linux system package. Its units are installed but not enabled by
-default; when both units run, AgentSight is ordered after the enforcer.
+The RPM is a Linux system package. When both units run, AgentSight is ordered
+after the enforcer.
 
 ### Start the Service
 
-Both package routes leave the units stopped and disabled. Start the main unit
-when you are ready to begin collection:
+Start the main unit when you are ready to begin collection:
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -384,8 +391,9 @@ For Linux cross builds, `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
 without arguments it builds for the host. `CARGO` may select a prepared Cross
 wrapper, but must honor the requested target. Both Linux architectures use the
-same raw payload layout and source-owned `.anolisa/component.toml`. macOS ARM64
-uses `.anolisa/component.macos.toml` and ships only the main executable. Cross
+same raw payload layout and source-owned
+`packaging/anolisa/raw/component.toml`. macOS ARM64 uses
+`packaging/anolisa/raw/component.macos.toml` and ships only the main executable. Cross
 compiling macOS from Linux requires `--no-default-features --features server` to
 skip the optional `bpf-build` host dependencies. Remove
 the private enforcer directory only after packaging has consumed its receipt.
@@ -459,6 +467,16 @@ See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) fo
 ## Configuration
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
+
+Defaults include Qoder CLI discovery and its legacy `*.qoder.sh` gateway.
+On Linux, the existing TLS probes feed decoded requests, native session IDs,
+tool calls, and wrapped SSE token usage into the observation pipeline.
+See the [configuration guide](../../docs/user-guide/en/agentsight/configuration.md)
+for existing-config migration and protocol coverage limits.
+
+On Linux, the optional `ws_ckpt` settings connect AgentSight to a local checkpoint
+daemon. Rollback is disabled by default. See the
+[workspace snapshot configuration](../../docs/user-guide/en/agentsight/configuration.md#workspace-snapshot-backend-linux).
 
 ### SQLite Storage (`storage`)
 
@@ -581,6 +599,7 @@ Token parsing supports multiple LLM API formats:
 ## Batch concurrency
 
 The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
+`--limit` accepts non-negative integers; `0` selects no files.
 See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Origins

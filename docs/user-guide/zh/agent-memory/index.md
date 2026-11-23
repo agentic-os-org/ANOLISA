@@ -38,6 +38,18 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+| RPM | 内容 |
+|---|---|
+| `agent-memory` | 兼容聚合包：对 core、plugins 的精确 version/release 依赖 |
+| `agent-memory-core` | MCP server、默认配置、MCP descriptor、user unit、tmpfiles 规则、许可证及文档 |
+| `agent-memory-plugins` | OpenClaw bundle、adapter manifest 及检测、注册、卸载脚本；依赖同版本 core |
+
+只需要 stdio MCP 客户端接入时，选择 `sudo yum install agent-memory-core`。
+user 服务仍为可选项，普通 MCP 客户端直接拉起 server。使用 OpenClaw 时添加
+plugins 包，并由实际 Agent 用户另行注册。本地 RPM 通过
+`yum install /absolute/path/to/matching-rpms/*.rpm` 在同一事务中安装或升级，
+目录内应只放匹配 version/release 的产物集合。
+
 RPM 安装到系统级 FHS 路径：
 
 | 用途 | 路径 |
@@ -57,8 +69,14 @@ git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/agent-memory
 
 make build         # cargo build --release --locked
-sudo make install  # 安装到 /usr/local 下
+make install       # install to ~/.local
 ```
+
+以普通用户运行上述命令，可执行文件安装到 `~/.local/bin/agent-memory`。
+
+源码安装默认使用 `anolisa` 命名空间。旧源码安装的文件仍保留在原布局中；
+使用 `make install AWPRJ=` 继续管理原布局，或先带上原安装的路径覆盖参数运行
+`make uninstall AWPRJ=`，再安装到新的默认布局。
 
 构建依赖：Rust ≥ 1.85（edition 2024；CI 钉到 1.89 与 monorepo 共享 toolchain）、cmake（libgit2 vendored 构建）、systemd-devel（journald 审计 fan-out）。
 
@@ -94,9 +112,20 @@ make remote-test    # 同上 + 跑测试 + clippy
 }
 ```
 
-`/usr/share/anolisa/mcp-servers/agent-memory.json` 描述符列出全部 37 个工具名，支持自动发现的客户端可直接识别。
+描述符列出工具名，支持自动发现的客户端可直接识别。普通用户源码安装的路径为
+`${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/agent-memory/mcp-servers/agent-memory.json`；
+系统级源码安装默认使用
+`/usr/local/share/anolisa/agent-memory/mcp-servers/agent-memory.json`。
+RPM 使用 `/usr/share/anolisa/mcp-servers/agent-memory.json`。
 
 ### OpenClaw
+
+以普通用户从源码安装后，使用以下命令注册插件，替换下文的 RPM 路径：
+
+```bash
+bash "${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/adapters/agent-memory/openclaw/scripts/install.sh"
+openclaw gateway restart
+```
 
 随包附带的插件把 4 个 memory contract 工具（`anolisa_memory_search`、`anolisa_memory_get`、`memory_observe`、`memory_get_context`）转发到 agent-memory：
 
@@ -112,7 +141,39 @@ anolisa adapter enable agent-memory openclaw
 anolisa adapter status agent-memory
 ```
 
-**前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
+**前置条件**：确保 `openclaw` CLI 在 `$PATH` 上。RPM 安装时选择
+`agent-memory-plugins`。安装脚本在 CLI 缺失时输出明确日志并以 0 退出，
+安装 OpenClaw 后重跑即可。若仅卸载兼容包、单独保留 plugins 包，
+其插件注册也会继续保留。
+
+通过独立脚本移除插件：
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/uninstall.sh
+```
+
+脚本调用 `openclaw plugins uninstall memory-anolisa --force`，由宿主处理配置目标和受管插件目录移除。
+它不会在宿主执行后重写 `openclaw.json`，因此不会给 `$include` 配置添加覆盖项，
+也不会在设置 `OPENCLAW_CONFIG_PATH` 时修改另一个配置文件。
+CLI 缺失时现在会在修改任何文件之前返回 1；此规则同样适用于旧脚本会手工清理的普通 JSON 配置。
+请恢复 CLI 后重试。CLI 返回 1 且完整诊断只有
+`Plugin not found: memory-anolisa`（忽略首尾空白和大小写）时，表示插件已注销。
+其他 CLI 失败会保留原退出码，不再额外清理。宿主成功或返回上述确切的未找到结果后，
+脚本检查 `${OPENCLAW_STATE_DIR}/extensions/memory-anolisa` 和
+`${OPENCLAW_STATE_DIR}/plugins/memory-anolisa`。任何路径仍存在（包括悬空符号链接）
+都会被报告并返回 1。手动删除前请先检查；脚本自身绝不删除这些路径。
+OpenClaw 可能已修改配置后才报错或留下文件。这不保证回滚。
+
+成功表示宿主接受移除（或插件已经注销），且两个已知路径均不存在。
+这不承诺删除外部源插件包、链接目录或自定义安装位置。使用 OpenClaw 2026.5.7 时，
+随包提供的 `install.sh` 将插件包复制到受管 extensions 目录；卸载移除该副本、保留源插件包。
+该版本宿主会将已选中的 `memory-anolisa` slot 重置为 `memory-core`，并保留原本为 `none`
+的选择。slot 仍由宿主管理；包装脚本不在其他宿主版本中强制这些值。
+
+`ANOLISA_DRY_RUN=1` 会预览宿主命令或缺少 CLI 时的拒绝执行，返回 0 且不修改文件。
+移除 `agent-memory-plugins` 时，其 RPM `%preun` 会尽力调用脚本；
+脚本失败不会中止软件包移除。如果 OpenClaw 中仍注册着插件，
+请在移除 `agent-memory-plugins` 之前成功执行此脚本。
 
 执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。
 
@@ -211,7 +272,7 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 
 ---
 
-## MCP 工具集（37 个）
+## MCP 工具集（38 个）
 
 所有工具通过 MCP `tools/call` 调用，参数为 JSON 对象。错误以 `CallToolResult { isError: true }` 返回，客户端可据此区分"成功但内容含 failed 字面"与真实错误。Profile 在 `tools/list` 与 `tools/call` 两层校验。
 
@@ -223,24 +284,56 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_write` | `path`、`content` | `overwrite` | `wrote N bytes to <path>` |
 | `mem_append` | `path`、`content` | — | `appended N bytes to <path>` |
 | `mem_edit` | `path`、`old_str`、`new_str` | — | `edited <path>`（`old_str` 须唯一命中） |
-| `mem_list` | — | `dir`、`recursive`、`glob` | `{name, type, size, mtime}` 数组 |
+| `mem_list` | — | `dir`、`recursive`、`glob` | `{name, type, size, mtime}` 数组，上限 5000 条（仅在省略额外匹配条目时写入日志告警；恰好 5000 条不告警） |
 | `mem_grep` | `pattern` | `dir`、`type`、`max`、`case_insensitive` | `{path, line, text}` 数组 |
 | `mem_diff` | `path1`、`path2` | — | unified diff |
 | `mem_mkdir` | `path` | — | `created <path>` |
 | `mem_remove` | `path` | `recursive` | `removed <path>` |
-| `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件原子移入持久化仓 |
+| `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件复制到持久化仓的新文件 |
 | `mem_session_log` | — | — | 当前会话 JSONL |
 
-### Tier B — 结构化检索（6 个）
+`mem_grep` 跳过含非法 UTF-8 字节的行，继续搜索同一文件的后续行。
+返回的行号从 1 开始，按原文件中的位置计算，包含被跳过的行。
+
+`mem_write(overwrite=false)` 和 `mem_promote` 拒绝覆盖已有目标。写入失败时，会删除
+本次创建的不完整文件，以便重试同一请求；清理失败会与写入错误一起报告。这不是原子发布：
+并发读取可能看到写入中的内容，进程崩溃也可能留下残缺文件。外部操作替换同一目标时，
+应与这些写入及其清理串行执行。
+
+`mem_edit` 和设置了 `overwrite=true` 的 `mem_write` 会先为已有普通文件
+写好完整替换内容，再发布新文件；发布前的写入失败会保留原内容。
+新文件仍按普通独占创建方式写入，并继承目标父目录的默认 ACL 和组。
+
+替换需要目标目录和元数据目录可读、可写且位于同一文件系统，并需要 Linux
+procfs 和容纳完整新内容的空闲空间。临时文件位于 `.anolisa/` 内，不会进入
+普通列表、搜索、Git 历史和快照。文件权限模式、POSIX access ACL 和 `user.*`
+属性必须保留；复制失败会在替换前报错。所有者和组在权限允许时保留，否则会
+记录警告，说明新文件保留了写入用户身份或暂存目录的组。身份变化也可能改变
+基于所有者或组的访问权限。主机管理的标签和
+完整性签名不复制，新文件使用主机默认策略，因此自定义 SELinux/IMA/EVM
+策略需要针对主机验证。set-ID 位和文件 capabilities 不保留。其他硬链接和
+已打开的文件句柄仍指向原内容。如果错误明确提示替换已发布但目录同步失败，
+新内容已可见，请先读取文件再决定是否重试。
+
+`mem_edit` 要求 `old_str` 仅出现一次，重叠匹配也计入次数。例如，`aba` 在 `ababa` 中出现两次，编辑会报错并保持文件不变。请增加前后文以确定要修改的位置。
+
+### Tier B — 结构化检索（7 个）
+
+关键词搜索时，向 `memory_search` 传入普通文本，例如
+`{"query":"config.toml","mode":"bm25"}`。带点的文件名、域名和版本号均可作为
+搜索词。`AND`、`NOT` 和 `OR` 按字面文本处理：搜索 `NOT NULL` 查找的是这些文字。
+多个搜索词用空格分隔即可，无需插入 `OR`。多个搜索词优先要求全部匹配；没有匹配项时，现有回退策略可返回
+部分词匹配的结果。短搜索词（包括双字中文词）仍使用子串搜索回退。
 
 | 工具 | 必填 | 可选 | 返回 |
 |------|------|------|------|
 | `memory_search` | `query` | `top_k`（默认 5）、`mode`（bm25/vector/hybrid）、`category` | `{path, score, snippet, suspicious}` 数组 |
 | `memory_observe` | `content` | `hint`、`type` | `observed at notes/observed/<ulid>.md` |
+| `memory_capture` | `content` | `hint`, `type` | 记录路径，或 `automatic capture skipped by consent` |
 | `memory_get_context` | — | `max_tokens`（默认 2048） | 最近修改文件的 markdown 预览，每条含 `suspicious` |
 | `memory_sessions` | — | `limit`（默认 10） | 历史会话列表 |
 | `memory_timeline` | `session_id` | `limit`（默认 50） | 指定会话的工具调用时间线 |
-| `mem_index_refresh` | — | — | 强制重建 FTS5 索引 |
+| `mem_index_refresh` | — | — | 刷新 MEMORY.md 目录索引 |
 
 ### Tier C — 治理与版本（7 个）
 
@@ -250,9 +343,28 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_snapshot_list` | — | — | 按 `created_at` 升序数组 |
 | `mem_snapshot_restore` | `id` | — | `restored <id>` |
 | `mem_log` | — | `limit`（默认 20）、`path` | `{hash, summary, author, time}` 数组（需启用 git） |
-| `mem_revert` | `path` | — | `reverted <path> (commit <hash>)`（需启用 git） |
+| `mem_revert` | `path` | — | `reverted <path> (from commit <hash>)`（需启用 git） |
 | `mem_consolidate` | — | — | `consolidation complete: N facts written` |
 | `mem_compact` | — | — | `compacted N files to cold storage` |
+
+`mem_revert` 仅从 HEAD 恢复指定文件的工作区内容，保持 Git 历史和暂存区不变（包括该文件已暂存的修改），返回恢复来源的 HEAD 哈希。因此，之后若不重新暂存就手动提交，仍可能提交恢复前的暂存区内容；若希望提交恢复后的文件，请显式重新暂存该文件。其他文件仍可单独撤销。此行为不受 `memory.git.auto_commit` 开关影响；普通写入工具保留原有的自动提交行为。
+
+快照恢复会保留只读目录的权限模式。失败尝试的解包暂存目录会被清理，重试前
+也会清理残留暂存内容。每次成功恢复都会将原有 live 内容保存在
+`.anolisa/trash/` 下的独立目录中，并保留原权限；同一秒内重复恢复同一快照
+也不会复用或覆盖已有恢复目录。如果 trash 创建或移动失败，尚未迁移的旧数据
+会留在本次操作的 `.anolisa/.<id>.rollback.<timestamp>[-<suffix>]/` 目录中，
+警告会指出保留路径。如果无法分配 rollback 目录，恢复会在移动 live 文件前
+失败。旧版 rollback 残留原地保留，不会阻塞新恢复。快照恢复不会自动删除
+保留的 trash 或 rollback 数据。手动清理只读目录时，可能需要先恢复所有者写权限。
+
+恢复与快照回收通过挂载级锁在多个 `serve` 进程之间互斥。锁被占用时，恢复会在
+修改文件前返回 `another snapshot restore or reclaim is in progress`；请等待当前
+操作结束后重试。回收无法取得锁时，会跳过本次挂载打开时的清扫。
+持锁进程退出时锁会释放，但 `.anolisa/.restore.lock` 文件会保留：任何进程仍在使用
+该挂载时，都不要删除这个文件。升级后请重启共享挂载的全部 `serve` 进程，因为
+旧版本不会遵守此锁。互斥范围覆盖恢复与回收；若需要恢复后的文件树保持不变，
+请同时暂停其他文件写入方。
 
 ### 主权与导入导出（13 个）
 
@@ -271,6 +383,58 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `memory_summary` | — | `recent_limit`（默认 10） | 记忆仓统计概览 JSON |
 | `memory_session_context` | — | `limit` | 会话启动上下文注入 |
 | `mem_dream` | — | — | 用户画像合成 JSON |
+
+使用 `memory_consent` 的 `{"action":"deny","scope":"capture"}`（或 scope `all`）
+可停止 OpenClaw 自动记录。钩子调用 `memory_capture`，每次都读取持久化授权设置，
+因此另一个 MCP 客户端的修改也会生效。没有设置时保持默认允许；设置无法读取或格式错误时，
+返回错误且不写入。允许的自动记录带有 `source: auto-capture`，可在
+`memory_auto_created` 以及 `memory_summary` 的自动记录计数中查看。
+撤销授权作用于后续采集，不会中止已经通过授权检查的采集。本设置限制自动钩子，
+并不禁止所有写入：`memory_observe` 和 `mem_write` 不受此限制，agent 自主调用它们时亦然。
+被拒绝或失败的尝试可在后续钩子调用时重试；成功记录以及同时进行的相同调用仍会去重。
+
+来源字段标识自动记录；审计条目和 git 提交标签仍使用 `memory_observe`，以保持已有
+版本管理和整合行为。授权查询及整合读取器保留原有策略：格式错误的设置可能被查询
+报告为默认允许，而自动采集会拒绝它。对于格式错误的普通设置文件，可通过显式的
+`memory_consent` allow/deny 操作修复。若设置路径是符号链接，安全写入同样会拒绝：
+请先检查并删除链接本身（不要删除目标文件），再执行 allow/deny 操作以创建普通设置文件。
+服务端不会自动删除符号链接。
+
+请同时升级服务端和适配器。OpenClaw agent 可见的四个工具不变；`memory_capture`
+由钩子调用。服务端不支持此工具时，钩子记录失败，不会回退到 `memory_observe`。
+已经保存的记录不会被重新标记或删除。
+
+`memory_summary` 将 frontmatter 的 `concepts` 和 `files` 列表统计到
+`top_concepts` 和 `top_files`。它接受 JSON 字符串数组以及 `mem_import` 写出的块列表（block list），
+因此这些排名在 AMA 导出、导入往返后仍会保留。
+例如，`concepts: ["parser, writer", "rust"]` 包含两个概念，
+`files: ["src/a,b.rs"]` 包含一个文件引用。每个单行 JSON 字符串中的逗号、引号和反斜线
+仍属于该条目。
+
+导入会先将换行等 ASCII 控制字符替换为空格，再存储 frontmatter。
+摘要排名反映这些规范化后的条目；AMA 导入往返不会保留控制字符。
+
+记忆仓根目录缺失时，导出返回错误，不会返回空归档。扫描和读取失败会包含相关的仓内相对路径，并尽力记录审计；记忆仓不可用时，审计记录也可能无法持久化。
+
+如果无法遍历目录，或无法将 Markdown 文件读取为 UTF-8 文本，`mem_export` 会返回包含相关路径的错误，不会将不完整的 AMA 归档作为成功结果返回。请检查文件权限或编码后重试。按类别或来源筛选时仍需读取元数据，因此读取失败也可能阻止筛选导出。元数据目录和非 Markdown 文件仍不参与导出。
+
+Rust API 调用者使用 `ExportFilter.include_tasks = false` 时，会在遍历或读取前排除 `tasks/` 子树，因此不可读的任务目录或文件不会阻止所请求的导出。MCP `mem_export` 工具包含任务，并继续报告这些任务的读取或遍历错误。
+
+`mem_import` 会在 `overwrite` 清空已有 Markdown 文件之前检查记忆和任务路径。
+空路径、非 Markdown 路径、重复路径、绝对路径、遍历路径、保留路径及符号链接路径
+会使本次导入跳过整库清空。合法条目仍逐项导入，也会替换同路径文件；非法条目列入
+错误列表。`dry_run=true` 只执行校验，不写入，也不创建备份。
+对于合法归档的覆盖导入，将被清空的普通 Markdown 文件可以转换为目录，例如将
+`notes/old.md` 转换为目录以导入 `notes/old.md/new.md`。预览也会考虑这类转换；
+符号链接祖先路径仍会被拒绝。
+
+对合法归档执行清空之前，`overwrite` 会将 AMA 备份保存到
+`<mount>/.anolisa/import-backup-<ULID>.json`，仅文件所有者可读。
+导出、写入或同步失败会在清空和导入之前中止。备份与清空成功后，返回结果包含
+`Backup:` 路径。若要恢复缺失的记忆，请在宿主机上读取该文件，将内容作为 `json_data`
+传给 `mem_import`，并使用 `strategy="skip-existing"`；已有路径不会被替换。
+备份会一直保留，直到手动删除。这不提供自动回滚：后续写入失败仍可能留下部分导入
+结果。执行覆盖导入时请暂停其他写入方，以保持备份与导入状态一致。
 
 ### 错误码语义
 
@@ -350,7 +514,13 @@ MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true agent-memory
 
 ### 全文搜索
 
-SQLite FTS5 BM25 索引，亚毫秒级查询。后台 tokio 任务通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合后在单事务中应用。分词器用 `trigram`（对 ≥3 字符的子串匹配友好）。trigram 分词器以 3 字符滑窗生成 token，因此少于 3 字符的查询词（如中文的"花名""小云"）不产生任何 token，本会静默命中为空；`memory_search` 会识别这种情况并回退到 `body LIKE '%term%'` 子串扫描，确保短 CJK 查询仍能召回。`IN_Q_OVERFLOW` 时自动触发全量 rescan，不静默丢事件。
+SQLite FTS5 BM25 索引。后台线程通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合，每个文件的索引更新在事务中完成。分词器用 `trigram`（对 ≥3 字符的子串匹配友好）。trigram 分词器以 3 字符滑窗生成 token，因此少于 3 字符的查询词（如中文的"花名""小云"）不产生任何 token，本会静默命中为空；`memory_search` 会识别这种情况并回退到 `body LIKE '%term%'` 子串扫描，确保短 CJK 查询仍能召回。`IN_Q_OVERFLOW` 时自动触发全量 rescan。
+
+启动或增量更新期间的索引写入失败会触发自动重扫；连续失败时，重试间隔从 1 秒
+逐步翻倍，最大为 64 秒。恢复无需再次修改文件或重启服务。已知失败尚未恢复时，
+`memory_search` 会报告 `search index is incomplete`，不会将空结果或不完整结果
+作为成功返回。恢复后重试搜索，或通过 `mem_grep` 直接检索文件。若错误持续，
+检查 index worker 告警中的失败路径与数据库错误；记忆文件仍可通过文件工具访问。
 
 索引仅收录不超过 4 MiB、格式受支持的 UTF-8 文本文件。已索引的文件超过此限制或变为非 UTF-8 后，旧的文本和向量条目会被移除并记录日志，文件本身不变。默认 16 MiB 写入限制和单次追加限制不保证文件可被索引：多次追加仍可能使文件超过 4 MiB。请将大型记忆拆分为较小文件以保持可检索。
 
@@ -361,7 +531,7 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 | Provider | 配置方式 | 说明 |
 |----------|---------|------|
 | OpenAI | `MEMORY_EMBEDDING_BACKEND=openai` + `OPENAI_API_KEY` | 调用 OpenAI Embeddings API |
-| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `OLLAMA_BASE_URL` | 本地 Ollama 实例 |
+| Ollama | `MEMORY_EMBEDDING_BACKEND=ollama` + `MEMORY_OLLAMA_BASE_URL` | 本地 Ollama 实例 |
 
 `memory_search` 支持 `mode` 参数：`bm25`（默认）/ `vector`（余弦相似度）/ `hybrid`（RRF 融合）。未配置 embedding 时 `vector`/`hybrid` 自动降级为 BM25，不报错。
 
@@ -433,7 +603,23 @@ min_episode_steps = 3
 max_episodes_per_session = 10
 conflict_detection = true
 conflict_bm25_threshold = -2.0
+
+[memory.snapshot_reclaim]
+enabled = true
+# 产物删除前的最短保留时长（秒）。硬下限：60。
+# TOML 配置低于 60 会导致启动失败；env 覆盖低于 60 则 warn 后忽略。
+min_artifact_age_secs = 86400
 ```
+
+启用 reclaim 后，挂载打开时的清扫还会删除 `.anolisa/snapshots/` 下超过保留时长的崩溃残留：不完整的 `*.partial` 归档、缺 sidecar 的归档、缺归档的 sidecar，以及 restore 中断遗留的隐藏 `.<id>.staging` 目录。崩溃 restore 的 staging 目录包含整棵挂载树拷贝，因此 reclaim 也是防止该故障模式吃满磁盘的机制。
+
+清扫还会修复损坏的 sidecar：当其归档结构完整（gzip 流完整，且所有条目均通过 restore 提取前运行的同一套检查：仅含普通文件与目录条目、无 `..` 路径穿越、无重名文件条目、无文件落在已提取路径上的冲突）时，从归档自身的元数据重新生成 sidecar。即使 sidecar 可以正常解析，归档超过保留时长后也会接受这些检查。无效归档会被删除，并在清扫汇总中单独计数；其 sidecar 超过自身保留时长后也会被删除。有效的快照对会被保留，元数据不会被重写。这项校验会在挂载打开时完整读取每个符合年龄条件的归档。
+
+如果归档打开或读取失败，清扫会保留归档及其 sidecar，记录警告并计入校验失败次数。权限或存储访问失败不能证明归档损坏；恢复访问后，可重新打开挂载以重试校验。
+
+`mem_snapshot_list` 会排除没有普通归档文件的条目，但不会执行完整性校验。名为 `<id>.tar.gz` 的目录不能使超龄 sidecar 一直保留：清扫会在 sidecar 超过保留时长后将其删除，并保留目录及其内容。
+
+修复本身会把替换内容暂存为归档旁边的隐藏 `.memory-write-*.tmp` 文件；修复中途被强杀遗留的此类文件会在超过保留时长后被后续清扫删除。
 
 ### 环境变量
 
@@ -464,6 +650,7 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_EMBEDDING_BACKEND` | embedding 后端（none/openai/ollama） | none |
 | `MEMORY_OPENAI_API_KEY` | OpenAI API key（空时回退 `OPENAI_API_KEY`） | — |
 | `MEMORY_OPENAI_MODEL` | OpenAI embedding 模型 | text-embedding-3-small |
+| `MEMORY_OPENAI_BASE_URL` | OpenAI 兼容服务地址 | https://api.openai.com |
 | `MEMORY_OLLAMA_MODEL` | Ollama embedding 模型 | nomic-embed-text |
 | `MEMORY_OLLAMA_BASE_URL` | Ollama base URL | http://localhost:11434 |
 | `MEMORY_CONSOLIDATION_ENABLED` | 启用自动 consolidation | true |
@@ -474,6 +661,8 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_MAX_EPISODES` | 每会话最多情景数 | 10 |
 | `MEMORY_CONFLICT_DETECTION` | 冲突检测 | true |
 | `MEMORY_CONFLICT_THRESHOLD` | BM25 冲突阈值 | -2.0 |
+| `MEMORY_SNAPSHOT_RECLAIM_ENABLED` | 挂载打开时回收孤儿快照产物 | true |
+| `MEMORY_SNAPSHOT_RECLAIM_MIN_AGE` | 产物删除前的最短保留时长（秒）；低于 60 秒下限的值 warn 后忽略（TOML 配置低于 60 则启动失败） | 86400 |
 
 数据存储：`~/.anolisa/memory/<namespace>/`。
 
@@ -481,9 +670,9 @@ conflict_bm25_threshold = -2.0
 
 Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` 两层校验：
 
-- **basic** —— 37 个工具全部展示；弱模型也能用 Tier B 的结构化 API。
-- **advanced**（默认）—— 37 个工具全部展示；强模型应优先使用 Tier A 文件操作。
-- **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
+- **basic** —— 38 个工具全部展示；弱模型也能用 Tier B 的结构化 API。
+- **advanced**（默认）—— 38 个工具全部展示；强模型应优先使用 Tier A 文件操作。
+- **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_capture`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
 
 `expert` 面向直连 MCP 的客户端——它们自己驱动 Tier A 文件工具。OpenClaw 适配器在插件加载阶段就会拒绝
 `plugins.entries["memory-anolisa"].config.profile = "expert"`：它为宿主 memory 契约注册的 4 个工具有
@@ -494,6 +683,28 @@ Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` �
 在启动时失败并说明原因。
 
 ### Embedding 配置
+
+在 TOML 中选择 `backend` 后，可不设置 `MEMORY_EMBEDDING_BACKEND`，从而保留该
+provider 的文件配置。对应的 `MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 变量只覆盖
+已提供的字段；例如只需设置 `MEMORY_OPENAI_API_KEY` 即可提供密钥，无需重复选择后端。
+直接运行服务时，有效密钥为空仍会回退到 `OPENAI_API_KEY`；OpenClaw 适配器转发
+带前缀的变量，不转发这个通用变量。显式设置 `MEMORY_EMBEDDING_BACKEND` 时保留
+原有行为：provider 字段来自环境变量或 provider 默认值，不继承 TOML 中的值。
+仅设置字段变量不会激活原本配置为 `none` 的后端。
+
+未设置是指变量不存在：请从环境中移除 `MEMORY_EMBEDDING_BACKEND`，而不是将其设为
+`""`。空值或未知后端选择器会保留 TOML 配置，并忽略 provider 字段覆盖。字段变量的
+空字符串仍属于已提供的覆盖值，会替换对应的 TOML 值。例如，`MEMORY_OPENAI_API_KEY=""`
+会清除文件中的密钥，随后使用通用密钥回退，或让 embedding 保持禁用。空模型名可能导致
+请求失败。`MEMORY_OPENAI_BASE_URL=""` 会选择公共默认地址 `https://api.openai.com`，
+而不是 TOML 中的地址，因此请求会发往公共服务而非文件中配置的代理。
+`MEMORY_OLLAMA_BASE_URL=""` 会让服务地址保持为空，请求构造 URL 时失败。
+若要保留文件中的字段值，请移除对应环境变量。
+
+在准备好受控的重新嵌入方案前，已有索引应继续使用生成其向量的模型；即使维度相同，不同
+模型的向量语义也可能不兼容。重启不会重新嵌入已有向量，`mem_index_refresh` 也只刷新
+`MEMORY.md` 目录索引。[维度变化恢复方案](https://github.com/agentic-os-org/ANOLISA/pull/4077)
+另行跟踪，本次配置修复不实现该能力。恢复旧模型设置也不会撤销已经使用新模型生成的向量。
 
 ```toml
 [memory.embedding]
@@ -510,7 +721,7 @@ model = "text-embedding-3-small"
 - Agent 跨会话持久化笔记和决策（Claude Code、Cursor、Continue、自研 rmcp 客户端等）。
 - 多 Agent 系统中 Agent A 写、Agent B 读的笔记跨进程共享。
 - 操作审计和状态恢复（`mem_log`、JSONL 审计、journald、`mem_revert`、`mem_snapshot_restore`）。
-- "先草稿、决定后才持久化"的多回合模式（`mem_promote` 从 session scratch 原子移入持久化仓）。
+- "先草稿、决定后才持久化"的多回合模式（`mem_promote` 从 session scratch 复制到持久化仓）。
 
 ---
 
@@ -577,7 +788,7 @@ let tools = client.list_tools(Default::default()).await?;
 
 1. 每次 Agent 运行设 `MEMORY_SESSION_ID=<sid>` 和 `MEMORY_SESSION_DIR=/run/anolisa/sessions`。
 2. Agent 把草稿写到 `/run/anolisa/sessions/<sid>/scratch/`。
-3. Agent 决定"这条值得保留"时调用 `mem_promote` 原子移入持久化仓。
+3. Agent 决定"这条值得保留"时调用 `mem_promote` 复制到持久化仓，保留 scratch 中的原文件。
 
 ---
 
@@ -672,6 +883,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 配置项 typo 被悄悄忽略 | — | 现已硬失败，看启动 stderr 报错并修正 |
 | `mem_log` 返回 `[]` 即使有写入 | git 版本控制未启用 | `MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true` |
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
+| 启动警告 `index unavailable` 并包含 `duplicate column name`，之后检索一直不可用 | 旧版在多个客户端同时打开同一索引时可能重复执行数据库迁移 | 更新 agent-memory，等待其他客户端启动完成后重启受影响的 MCP 客户端，并保留记忆文件。若仍有同样警告，检查索引的 schema；旧竞态已经造成的不一致索引可能需要修复 |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
 | OpenClaw 调用了宿主记忆后端或报告 `plugin tool name conflict` | 插件包、gateway/会话未更新，或提示词仍使用旧工具名 | 更新插件、重启 gateway、开始新会话，并使用 `anolisa_memory_search` / `anolisa_memory_get` 访问 ANOLISA 记忆 |

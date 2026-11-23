@@ -265,7 +265,7 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                     );
                 }
             }
-            AgentEvent::ToolHookVerdict { .. } => {
+            AgentEvent::EcsTrialState { .. } | AgentEvent::ToolHookVerdict { .. } => {
                 // Audit-only marker: the status line is already driven by the
                 // tool result events around it.
             }
@@ -273,9 +273,12 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCompleted).to_string();
                 active_run.current_message = display_agent_summary(summary, &i18n);
             }
-            AgentEvent::AgentFailed { error, .. } => {
+            AgentEvent::AgentFailed {
+                error, error_code, ..
+            } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusFailed).to_string();
-                active_run.current_message = display_agent_error(error, &i18n);
+                active_run.current_message =
+                    display_agent_error(error, error_code.as_deref(), &i18n);
             }
             AgentEvent::AgentCancelled { reason, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCancelled).to_string();

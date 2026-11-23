@@ -10,12 +10,29 @@ bash or zsh must own the session without Cosh hooks, observation, or insights.
 Structured JSON and JSONL interfaces remain available for automation and
 Agent integration.
 
+Run `cosh --help` for launch options and command entry points, including without a terminal.
+Inside an enhanced Cosh session, `/help` keeps the existing session command reference.
+`cosh guide on|off|status` controls usage guidance only; it is not an AI master switch.
+Use `cosh --shell bash --help` for the inner Bash help.
+
+Bash-default images can preinstall Cosh without changing users' login shells.
+Run `cosh` for an AI Shell or `cosh --ask 'your question'` to start with a question.
+`--ask` explicitly enables AI for that initial question even with `COSH_SHELL_AI=off`; authentication and approvals still apply, and later input retains its disabled state.
+Optional Bash startup integration belongs to the image's system package;
+installing the Cosh RPM alone does not enable it. See
+[Bash guidance and login-shell controls](../../docs/user-guide/en/cosh-ng/shell/bash-guidance.md).
+
 By default a login shell (for example `cosh --login`) launches Bash with a real
 login identity on Bash 4+; set `shell.login_identity = false` to keep the previous
 non-login (`--rcfile`) startup. Cosh falls back automatically when the bounded
 login-identity capability probe fails, on Bash 3.2 (such as the macOS system
-bash), or when the
-parent exports a function name that POSIX startup cannot import.
+bash), or when the parent exports a function name that POSIX startup cannot
+import. Enhanced Bash login sessions capture the resulting PATH once, before the
+first prompt, and pass it only to provider child processes. Set
+`COSH_SHELL_BOOTSTRAP_PATH=0` to disable this startup PATH handoff.
+
+`COSH_HOME` can relocate user extensions and state; see the
+[Extension guide](../../docs/user-guide/en/cosh-ng/core/extensions.md).
 
 ## Why cosh-ng
 
@@ -130,9 +147,16 @@ $ hello
 bash: hello: command not found
 ```
 
+The ECS automatic model-access candidate can guide activation on the first model
+request and resume automatically without `/auth`; existing providers take
+precedence. The service must support ECS identity exchange. See [providers and authentication](../../docs/user-guide/en/cosh-ng/core/providers.md#automatic-model-access-on-ecs).
+
 Use `/auth` to choose a supported provider plan, `/help` to list current slash
-commands, and `/mode approval recommend` when every Agent tool call should wait
-for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
+commands, and `/mode approval recommend` to keep the Agent explaining and
+suggesting with no side-effecting tool running automatically by default
+(read-only inspection may still run; explicit `allowed_tools` entries
+excepted — see [Tool Approval](../../docs/user-guide/en/cosh-ng/shell/approval.md)).
+Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. In enhanced integration, the cosh-core runtime makes
 `/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local

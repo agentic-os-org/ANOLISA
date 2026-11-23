@@ -194,12 +194,13 @@ for case, extra in cases.items():
         if extra.get("PI_WAIT"):
             assert (state / "tool.after-waited").exists()
         if extra.get("PI_AFTER_ERROR"):
-            assert tool_results[0]["isError"] is False and "aw hook failed" in err
+            assert tool_results[0]["isError"] is False
+            assert "aw step failed (exit); recorded as report in the instance audit" in err
         if extra.get("PI_NATIVE_AFTER_ERROR"):
             assert tool_results[0]["isError"] is True and tool_results[0]["content"][0]["text"] == "native after failed"
         if extra.get("PI_CHECK_LIVE"):
             assert result["liveCounts"] == [0] * expected
-        code, out, err = call([aw, "status", "--config", str(config)])
+        code, out, err = call([aw, "service", "status", "--config", str(config)])
         assert code == 0, err
         status = json.loads(out)["result"]
         assert status["bindings"] == 0 and status["events"] == 0
@@ -216,7 +217,7 @@ for case, extra in cases.items():
         (state / "verified-audits.json").write_text(json.dumps(audits, indent=2))
         results.append({"case": case, "artifacts": str(state), "passed": True, "before": len(before), "after": len(after), "sessions": result["sessions"]})
     finally:
-        code, out, err = call([aw, "stop", "--config", str(config)])
+        code, out, err = call([aw, "service", "stop", "--config", str(config)])
         (state / "stop.json").write_text(json.dumps({"code": code, "out": out, "err": err}))
         deadline = time.monotonic() + 5
         while (state / "state/aw.sock").exists() and time.monotonic() < deadline:

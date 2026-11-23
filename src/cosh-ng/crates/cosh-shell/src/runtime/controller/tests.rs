@@ -37,6 +37,7 @@ fn completed_agent_run_restores_prompt_through_the_pty_owner() {
         RawObserverAction::RestorePrompt {
             ghost_text: None,
             ghost_route: Default::default(),
+            suggestion_surface: None,
         }
     );
     assert!(
@@ -268,7 +269,8 @@ fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
         action,
         Some(RawObserverAction::RestorePrompt {
             ghost_text: None,
-            ghost_route: Default::default()
+            ghost_route: Default::default(),
+            suggestion_surface: None
         })
     );
     assert!(
@@ -368,6 +370,7 @@ fn deferred_handoff_timeout_notice_restores_native_prompt_without_input() {
         Some(RawObserverAction::RestorePrompt {
             ghost_text: None,
             ghost_route: Default::default(),
+            suggestion_surface: None,
         })
     );
     assert!(String::from_utf8_lossy(&output).contains("handoff timeout (2s)."));
@@ -384,4 +387,57 @@ fn deferred_handoff_timeout_notice_restores_native_prompt_without_input() {
         None
     );
     assert!(output.is_empty());
+}
+
+#[test]
+fn terminal_capture_invalidation_precedes_unrelated_approved_handoff_emission() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .pending_capture_invalidations
+        .push_back("dead-card".to_string());
+    let request = ShellHandoffRequest::new(
+        "echo approved",
+        "$ echo approved",
+        "approved_provider_shell_tool",
+        "user",
+        "req-approved",
+        "run-approved",
+        1,
+    )
+    .unwrap();
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request.clone());
+    let first =
+        render_raw_inline_events(&[], &mut Vec::new(), &adapter, "bash", &mut state).unwrap();
+    assert_eq!(
+        first,
+        RawObserverAction::InvalidateApprovalCapture("dead-card".to_string())
+    );
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    let second =
+        render_raw_inline_events(&[], &mut Vec::new(), &adapter, "bash", &mut state).unwrap();
+    assert_eq!(second, RawObserverAction::EmitToPty(request));
+}
+
+#[test]
+fn access_copy_pending_provider_switch_holds_prompt_until_result() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    let (_send, receive) = std::sync::mpsc::channel();
+    state.auth.ecs_trial.preference_job = Some(receive);
+    state.trigger_pty_prompt = true;
+    let mut output = Vec::new();
+    let action = render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state).unwrap();
+    assert_eq!(action, RawObserverAction::HoldShellOutput);
+    assert!(output.is_empty());
+    state.auth.ecs_trial.preference_job = None;
+    state.trigger_pty_prompt = true;
+    assert!(matches!(
+        render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state).unwrap(),
+        RawObserverAction::RestorePrompt { .. }
+    ));
 }

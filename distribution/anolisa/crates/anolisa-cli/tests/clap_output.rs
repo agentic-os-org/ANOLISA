@@ -24,6 +24,28 @@ fn help_renders_to_stdout() {
     assert_eq!(Some(0), output.status.code());
     assert!(!output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Quick start:"));
+    assert!(help.contains("anolisa list"));
+    assert!(help.contains("anolisa install tokenless"));
+    assert!(help.contains("anolisa adapter --help"));
+}
+
+#[test]
+fn adapter_help_shows_the_integration_workflow() {
+    let output = run(&["adapter", "--help"]);
+
+    assert_eq!(Some(0), output.status.code());
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Install a component first"));
+    assert!(help.contains("with Tokenless and OpenCode already installed"));
+    assert!(help.contains(
+        "  anolisa adapter scan
+  anolisa adapter enable tokenless opencode
+  anolisa adapter status tokenless"
+    ));
+    assert!(help.contains("verify the integration in your agent"));
 }
 
 #[test]

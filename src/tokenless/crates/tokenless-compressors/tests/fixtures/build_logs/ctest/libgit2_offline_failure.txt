@@ -1,0 +1,382 @@
+Internal ctest changing into directory: /work/build-ninja
+Test project /work/build-ninja
+      Start  3: online
+      Start  4: online_customcert
+ 1/12 Test  #4: online_customcert ................***Failed    0.10 sec
+Loaded 387 suites: 
+Started (test status codes: OK='.' FAILURE='F' SKIPPED='S')
+
+online::customcertFFF
+
+  1) Failure:
+online::customcert::file [/work/source/tests/libgit2/online/customcert.c:79]
+  Function call failed: (git_clone(&g_repo, "https://test.libgit2.org:1443/anonymous/test.git", "./cloned", ((void *)0)))
+  error -1 - failed to resolve address for test.libgit2.org: Temporary failure in name resolution
+
+  2) Failure:
+online::customcert::path [/work/source/tests/libgit2/online/customcert.c:87]
+  Function call failed: (git_clone(&g_repo, "https://test.libgit2.org:2443/anonymous/test.git", "./cloned", ((void *)0)))
+  error -1 - failed to resolve address for test.libgit2.org: Temporary failure in name resolution
+
+  3) Failure:
+online::customcert::raw_x509 [/work/source/tests/libgit2/online/customcert.c:114]
+  Function call failed: (git_clone(&g_repo, "https://test.libgit2.org:3443/anonymous/test.git", "./cloned", ((void *)0)))
+  error -1 - failed to resolve address for test.libgit2.org: Temporary failure in name resolution
+
+
+      Start  9: proxy
+ 2/12 Test  #9: proxy ............................***Failed    0.04 sec
+Loaded 387 suites: 
+Started (test status codes: OK='.' FAILURE='F' SKIPPED='S')
+
+online::cloneSSS.SSSSSFS
+
+  1) Failure:
+online::clone::proxy_auto_not_detected [/work/source/tests/libgit2/online/clone.c:1269]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+
+      Start 10: auth_clone
+ 3/12 Test #10: auth_clone .......................***Failed    0.05 sec
+Loaded 387 suites: 
+Started (test status codes: OK='.' FAILURE='F' SKIPPED='S')
+
+online::cloneFFS
+
+  1) Failure:
+online::clone::cred_callback_failure_return_code_is_tunnelled [/work/source/tests/libgit2/online/clone.c:411]
+  Function call failed: (git_clone(&g_repo, _remote_url, "./foo", &g_options))
+  error -1 (expected -172) - failed to resolve address for github.com: Temporary failure in name resolution
+
+  2) Failure:
+online::clone::cred_callback_called_again_on_auth_failure [/work/source/tests/libgit2/online/clone.c:445]
+  Function call failed: (git_clone(&g_repo, _remote_url, "./foo", &g_options))
+  error -1 (expected -7) - failed to resolve address for gitlab.com: Temporary failure in name resolution
+
+
+      Start  1: offline
+ 4/12 Test  #3: online ...........................***Failed    0.46 sec
+Loaded 387 suites: 
+Started (test status codes: OK='.' FAILURE='F' SKIPPED='S')
+
+online::badsslFFF..
+online::cloneFFFFFFFFFFSSSSSFFSSSSSSSSSFFFSSS.SSSSSFSFFSSSSSSSSFSSSS
+online::fetchFFFFFFFFFFFFSSFF
+online::fetchheadFFFFFFF
+online::pushSSSSSSSSSSSSSSSSSSSSSS
+online::remotesFFFFFF
+online::shallowFFFFFFFF
+online::ssh::timeoutS
+
+  1) Failure:
+online::badssl::expired [/work/source/tests/libgit2/online/badssl.c:30]
+  Function call failed: (git_clone(&g_repo, "https://expired.badssl.com/fake.git", "./fake", ((void *)0)))
+  error -1 (expected -17) - failed to resolve address for expired.badssl.com: Temporary failure in name resolution
+
+  2) Failure:
+online::badssl::wrong_host [/work/source/tests/libgit2/online/badssl.c:45]
+  Function call failed: (git_clone(&g_repo, "https://wrong.host.badssl.com/fake.git", "./fake", ((void *)0)))
+  error -1 (expected -17) - failed to resolve address for wrong.host.badssl.com: Temporary failure in name resolution
+
+  3) Failure:
+online::badssl::self_signed [/work/source/tests/libgit2/online/badssl.c:59]
+  Function call failed: (git_clone(&g_repo, "https://self-signed.badssl.com/fake.git", "./fake", ((void *)0)))
+  error -1 (expected -17) - failed to resolve address for self-signed.badssl.com: Temporary failure in name resolution
+
+  4) Failure:
+online::clone::network_full [/work/source/tests/libgit2/online/clone.c:204]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  5) Failure:
+online::clone::network_bare [/work/source/tests/libgit2/online/clone.c:219]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  6) Failure:
+online::clone::empty_repository [/work/source/tests/libgit2/online/clone.c:230]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestEmptyRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  7) Failure:
+online::clone::can_checkout_a_cloned_repo [/work/source/tests/libgit2/online/clone.c:269]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  8) Failure:
+online::clone::clone_mirror [/work/source/tests/libgit2/online/clone.c:318]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo.git", &opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  9) Failure:
+online::clone::custom_remote_callbacks [/work/source/tests/libgit2/online/clone.c:348]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  10) Failure:
+online::clone::custom_headers [/work/source/tests/libgit2/online/clone.c:376]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  11) Failure:
+online::clone::long_custom_header [/work/source/tests/libgit2/online/clone.c:386]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  12) Failure:
+online::clone::cred_callback_failure_return_code_is_tunnelled [/work/source/tests/libgit2/online/clone.c:411]
+  Function call failed: (git_clone(&g_repo, _remote_url, "./foo", &g_options))
+  error -1 (expected -172) - failed to resolve address for github.com: Temporary failure in name resolution
+
+  13) Failure:
+online::clone::cred_callback_called_again_on_auth_failure [/work/source/tests/libgit2/online/clone.c:445]
+  Function call failed: (git_clone(&g_repo, _remote_url, "./foo", &g_options))
+  error -1 (expected -7) - failed to resolve address for gitlab.com: Temporary failure in name resolution
+
+  14) Failure:
+online::clone::googlesource [/work/source/tests/libgit2/online/clone.c:600]
+  Function call failed: (git_clone(&g_repo, "https://chromium.googlesource.com/external/github.com/sergi/go-diff", "./foo", &g_options))
+  error -1 - failed to resolve address for chromium.googlesource.com: Temporary failure in name resolution
+
+  15) Failure:
+online::clone::can_cancel [/work/source/tests/libgit2/online/clone.c:619]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 (expected 4321) - failed to resolve address for github.com: Temporary failure in name resolution
+
+  16) Failure:
+online::clone::certificate_invalid [/work/source/tests/libgit2/online/clone.c:1009]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 (expected -17) - failed to resolve address for github.com: Temporary failure in name resolution
+
+  17) Failure:
+online::clone::certificate_valid [/work/source/tests/libgit2/online/clone.c:1022]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  18) Failure:
+online::clone::start_with_http [/work/source/tests/libgit2/online/clone.c:1029]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  19) Failure:
+online::clone::proxy_auto_not_detected [/work/source/tests/libgit2/online/clone.c:1269]
+  Function call failed: (git_clone(&g_repo, "http://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  20) Failure:
+online::clone::azurerepos [/work/source/tests/libgit2/online/clone.c:1296]
+  Function call failed: (git_clone(&g_repo, "https://libgit2@dev.azure.com/libgit2/test/_git/test", "./foo", &g_options))
+  error -1 - failed to resolve address for dev.azure.com: Temporary failure in name resolution
+
+  21) Failure:
+online::clone::path_whitespace [/work/source/tests/libgit2/online/clone.c:1302]
+  Function call failed: (git_clone(&g_repo, "https://libgit2@dev.azure.com/libgit2/test/_git/spaces%20in%20the%20name", "./foo", &g_options))
+  error -1 - failed to resolve address for dev.azure.com: Temporary failure in name resolution
+
+  22) Failure:
+online::clone::connect_timeout_configurable [/work/source/tests/libgit2/online/clone.c:1431]
+  Expression is not true: git_error_last() && strstr(git_error_last()->message, "timed out")
+
+  23) Failure:
+online::fetch::default_http [/work/source/tests/libgit2/online/fetch.c:75]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), &options, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  24) Failure:
+online::fetch::default_https [/work/source/tests/libgit2/online/fetch.c:75]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), &options, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  25) Failure:
+online::fetch::no_tags_git [/work/source/tests/libgit2/online/fetch.c:75]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), &options, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  26) Failure:
+online::fetch::no_tags_http [/work/source/tests/libgit2/online/fetch.c:75]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), &options, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  27) Failure:
+online::fetch::fetch_twice [/work/source/tests/libgit2/online/fetch.c:106]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  28) Failure:
+online::fetch::fetch_with_empty_http_proxy [/work/source/tests/libgit2/online/fetch.c:130]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), &opts, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  29) Failure:
+online::fetch::doesnt_retrieve_a_pack_when_the_repository_is_up_to_date [/work/source/tests/libgit2/online/fetch.c:157]
+  Function call failed: (git_clone(&_repository, "https://github.com/libgit2/TestGitRepository.git", "./fetch/lg2", &opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  30) Failure:
+online::fetch::report_unchanged_tips [/work/source/tests/libgit2/online/fetch.c:195]
+  Function call failed: (git_clone(&_repository, "https://github.com/libgit2/TestGitRepository.git", "./fetch/lg2", &opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  31) Failure:
+online::fetch::can_cancel [/work/source/tests/libgit2/online/fetch.c:243]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  32) Failure:
+online::fetch::ls_disconnected [/work/source/tests/libgit2/online/fetch.c:257]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  33) Failure:
+online::fetch::remote_symrefs [/work/source/tests/libgit2/online/fetch.c:275]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  34) Failure:
+online::fetch::twice [/work/source/tests/libgit2/online/fetch.c:290]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  35) Failure:
+online::fetch::reachable_commit [/work/source/tests/libgit2/online/fetch.c:378]
+  Function call failed: (git_remote_fetch(remote, &refspecs, ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  36) Failure:
+online::fetch::reachable_commit_without_destination [/work/source/tests/libgit2/online/fetch.c:408]
+  Function call failed: (git_remote_fetch(remote, &refspecs, ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  37) Failure:
+online::fetchhead::wildcard_spec [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  38) Failure:
+online::fetchhead::explicit_spec [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  39) Failure:
+online::fetchhead::no_merges [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  40) Failure:
+online::fetchhead::explicit_dst_refspec_creates_branch [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  41) Failure:
+online::fetchhead::empty_dst_refspec_creates_no_branch [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  42) Failure:
+online::fetchhead::colon_only_dst_refspec_creates_no_branch [/work/source/tests/libgit2/online/fetchhead.c:32]
+  Function call failed: (git_clone(&g_repo, "https://github.com/libgit2/TestGitRepository", "./foo", &g_options))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  43) Failure:
+online::fetchhead::creds_get_stripped [/work/source/tests/libgit2/online/fetchhead.c:158]
+  Function call failed: (git_remote_fetch(remote, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  44) Failure:
+online::remotes::single_branch [/work/source/tests/libgit2/online/remotes.c:26]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", "./single-branch", &opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  45) Failure:
+online::remotes::restricted_refspecs [/work/source/tests/libgit2/online/remotes.c:55]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", "./restrict-refspec", &opts))
+  error -1 (expected -12) - failed to resolve address for github.com: Temporary failure in name resolution
+
+  46) Failure:
+online::remotes::detached_remote_fails_downloading [/work/source/tests/libgit2/online/remotes.c:63]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  47) Failure:
+online::remotes::detached_remote_fails_uploading [/work/source/tests/libgit2/online/remotes.c:74]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  48) Failure:
+online::remotes::detached_remote_fails_pushing [/work/source/tests/libgit2/online/remotes.c:85]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  49) Failure:
+online::remotes::detached_remote_succeeds_ls [/work/source/tests/libgit2/online/remotes.c:109]
+  Function call failed: (git_remote_connect(remote, GIT_DIRECTION_FETCH, ((void *)0), ((void *)0), ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  50) Failure:
+online::shallow::clone_depth_zero [/work/source/tests/libgit2/online/shallow.c:27]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  51) Failure:
+online::shallow::clone_depth_one [/work/source/tests/libgit2/online/shallow.c:58]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  52) Failure:
+online::shallow::clone_depth_five [/work/source/tests/libgit2/online/shallow.c:100]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  53) Failure:
+online::shallow::unshallow [/work/source/tests/libgit2/online/shallow.c:143]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  54) Failure:
+online::shallow::deepen_full [/work/source/tests/libgit2/online/shallow.c:186]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  55) Failure:
+online::shallow::deepen_six [/work/source/tests/libgit2/online/shallow.c:232]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  56) Failure:
+online::shallow::shorten_four [/work/source/tests/libgit2/online/shallow.c:282]
+  Function call failed: (git_clone(&repo, "https://github.com/libgit2/TestGitRepository", git_str_cstr(&path), &clone_opts))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+  57) Failure:
+online::shallow::preserve_unrelated_roots [/work/source/tests/libgit2/online/shallow.c:358]
+  Function call failed: (git_remote_fetch(origin, &refspecs, &fetch_opts, ((void *)0)))
+  error -1 - failed to resolve address for github.com: Temporary failure in name resolution
+
+
+      Start 12: util
+ 5/12 Test #12: util .............................   Passed    1.21 sec
+      Start 11: auth_clone_and_push
+ 6/12 Test #11: auth_clone_and_push ..............   Passed    0.40 sec
+      Start  8: ssh
+ 7/12 Test  #8: ssh ..............................   Passed    0.37 sec
+      Start  5: gitdaemon
+ 8/12 Test  #5: gitdaemon ........................   Passed    0.42 sec
+      Start  2: invasive
+ 9/12 Test  #2: invasive .........................   Passed    0.12 sec
+      Start  7: gitdaemon_sha256
+10/12 Test  #7: gitdaemon_sha256 .................   Passed    0.04 sec
+      Start  6: gitdaemon_namespace
+11/12 Test  #6: gitdaemon_namespace ..............   Passed    0.04 sec
+12/12 Test  #1: offline ..........................   Passed   27.34 sec
+
+67% tests passed, 4 tests failed out of 12
+
+Total Test time (real) =  27.54 sec
+
+The following tests FAILED:
+	  3 - online (Failed)
+	  4 - online_customcert (Failed)
+	  9 - proxy (Failed)
+	 10 - auth_clone (Failed)
+Errors while running CTest

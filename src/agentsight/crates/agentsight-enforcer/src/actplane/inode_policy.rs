@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -27,6 +28,10 @@ struct InodeFile {
 #[derive(Clone, Debug, Default)]
 pub(super) struct InodePolicy {
     files: Vec<InodeFile>,
+    /// Directory inodes above every guarded file. Guarding them keeps the
+    /// configured path reachable: renaming or removing an ancestor would
+    /// otherwise detach the protected entry from its authored path.
+    ancestors: Vec<InodeFile>,
 }
 
 impl InodePolicy {
@@ -35,6 +40,7 @@ impl InodePolicy {
         dsl: &str,
         compiled: &Compiled,
         inode_only: bool,
+        root_pid: i32,
     ) -> Result<Self, BackendError> {
         // Full-path hooks evaluate the original policy, including globs and conditions.
         // Do not replace those semantics with an unconditional inode fast path.
@@ -49,16 +55,22 @@ impl InodePolicy {
             .iter()
             .filter(|source| source.kind == Kind::File)
         {
-            prepared.add_file(&source.pattern, None)?;
+            prepared.add_file(&source.pattern, None, root_pid)?;
         }
         for (path, rule_id) in guards {
-            prepared.add_file(&path, Some(rule_id))?;
+            prepared.add_file(&path, Some(rule_id), root_pid)?;
         }
+        prepared.add_ancestors(root_pid)?;
         Ok(prepared)
     }
 
-    fn add_file(&mut self, path: &str, rule_id: Option<u32>) -> Result<(), BackendError> {
-        let file = pin_file(path, rule_id)?;
+    fn add_file(
+        &mut self,
+        path: &str,
+        rule_id: Option<u32>,
+        root_pid: i32,
+    ) -> Result<(), BackendError> {
+        let file = pin_file(path, rule_id, root_pid)?;
         if let Some(existing) = self
             .files
             .iter_mut()
@@ -82,6 +94,71 @@ impl InodePolicy {
         Ok(())
     }
 
+    /// Hold every directory above each guarded file so path-relation changes
+    /// (rename or removal of an ancestor) cannot detach the guarded entry from
+    /// its authored path while the binding is active.
+    fn add_ancestors(&mut self, root_pid: i32) -> Result<(), BackendError> {
+        let guarded: Vec<(String, Option<u32>)> = self
+            .files
+            .iter()
+            .filter(|file| file.rule_id.is_some())
+            .map(|file| (file.path.clone(), file.rule_id))
+            .collect();
+        for (path, rule_id) in guarded {
+            let mut ancestor = Path::new(&path);
+            while let Some(parent) = ancestor.parent() {
+                if parent.as_os_str().is_empty() || parent.as_os_str() == "/" {
+                    break;
+                }
+                ancestor = parent;
+                let parent_path = parent.to_str().ok_or_else(|| {
+                    invalid(format!("'{path}': ancestor path is not valid UTF-8"))
+                })?;
+                if self
+                    .files
+                    .iter()
+                    .chain(&self.ancestors)
+                    .any(|entry| entry.path == parent_path)
+                {
+                    continue;
+                }
+                let dir = pin_dir(parent_path, rule_id, root_pid)?;
+                if self
+                    .files
+                    .iter()
+                    .chain(&self.ancestors)
+                    .any(|entry| entry.ino == dir.ino && entry.dev == dir.dev)
+                {
+                    continue;
+                }
+                self.ancestors.push(dir);
+            }
+        }
+        Ok(())
+    }
+
+    /// Device/inode identities of guarded files for the pre-attach
+    /// write-access scan. Every legacy guard entry mediates writes as well as
+    /// deletes: `block unlink` clauses lower to write-op rules that the
+    /// mediation hooks evaluate for write access, so a binding carrying them
+    /// implicitly promises content coverage and pre-existing writable
+    /// mappings or descriptors must reject the apply. Structured delete-only
+    /// targets are filtered out by the caller instead, because structured
+    /// delete protection genuinely leaves writes unmediated.
+    pub(super) fn protected_identities(&self) -> Vec<super::preexisting_maps::ProtectedEntry> {
+        self.files
+            .iter()
+            .filter(|file| file.rule_id.is_some())
+            .map(|file| super::preexisting_maps::ProtectedEntry {
+                path: file.path.clone(),
+                scope: super::preexisting_maps::ProtectedScope::Exact {
+                    dev: file.dev,
+                    ino: file.ino,
+                },
+            })
+            .collect()
+    }
+
     /// Register paths for source matching/audit, and guards only for block clauses.
     /// The caller must batch-clean both maps if any insertion fails.
     pub(super) fn install(&self, engine: &PinnedEngine, domain: u32) -> io::Result<()> {
@@ -96,7 +173,22 @@ impl InodePolicy {
                     rule_id,
                 )
             },
-        )
+        )?;
+        // Ancestor directories carry no registered path: they only keep the
+        // guarded entry's authored path reachable inside the bound domain.
+        for ancestor in &self.ancestors {
+            let rule_id = ancestor.rule_id.unwrap_or(0);
+            engine
+                .guard_inode(
+                    ancestor.ino,
+                    ancestor.dev,
+                    INODE_GUARD_UNLINK | INODE_GUARD_RENAME,
+                    domain,
+                    rule_id,
+                )
+                .map_err(|error| registration_error("guard ancestor inode", ancestor, error))?;
+        }
+        Ok(())
     }
 
     fn populate(
@@ -212,7 +304,7 @@ fn matches_clause(meta: &RuleMeta, rule: &Rule, clause: &Clause) -> bool {
         && meta.target_arg == clause.target.arg
 }
 
-fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
+fn pin_file(path: &str, rule_id: Option<u32>, root_pid: i32) -> Result<InodeFile, BackendError> {
     if !Path::new(path).is_absolute() || path.contains(['*', '?', '[', ']', '{', '}', '\\']) {
         return Err(invalid(format!(
             "'{path}': inode-only paths must be exact absolute literals, not globs; use full-path mode for patterns"
@@ -223,9 +315,15 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
             "'{path}': inode path exceeds the 126-byte event limit; use a shorter canonical path (the compiler also has a smaller pattern limit)"
         )));
     }
-    let canonical = fs::canonicalize(path).map_err(|error| invalid(format!(
-        "'{path}': cannot resolve inode path: {error}; create an existing regular file before applying the policy"
-    )))?;
+    // realpath would re-enter the enforcer's PrivateTmp namespace after expanding proc root.
+    let namespaced_path = format!("/proc/{root_pid}/root{path}");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&namespaced_path)
+        .map_err(|error| invalid(format!("'{path}': cannot hold inode with O_PATH: {error}")))?;
+    let canonical = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|error| invalid(format!("'{path}': cannot resolve held inode path: {error}")))?;
     // Compare raw spelling, since Path equality normalizes redundant separators.
     if canonical.as_os_str() != OsStr::new(path) {
         return Err(invalid(format!(
@@ -233,11 +331,6 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
             canonical.display()
         )));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| invalid(format!("'{path}': cannot hold inode with O_PATH: {error}")))?;
     let metadata = file
         .metadata()
         .map_err(|error| invalid(format!("'{path}': cannot stat held inode: {error}")))?;
@@ -255,8 +348,37 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
     })
 }
 
+/// Hold one ancestor directory of a guarded file for path-stability guards.
+fn pin_dir(path: &str, rule_id: Option<u32>, root_pid: i32) -> Result<InodeFile, BackendError> {
+    let namespaced_path = format!("/proc/{root_pid}/root{path}");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&namespaced_path)
+        .map_err(|error| {
+            invalid(format!(
+                "'{path}': cannot hold ancestor with O_PATH: {error}"
+            ))
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| invalid(format!("'{path}': cannot stat held ancestor: {error}")))?;
+    if !metadata.is_dir() {
+        return Err(invalid(format!(
+            "'{path}': guarded file ancestors must be directories"
+        )));
+    }
+    Ok(InodeFile {
+        ino: metadata.ino(),
+        dev: userspace_dev_to_kernel(metadata.dev()),
+        path: path.into(),
+        rule_id,
+        _file: Arc::new(file),
+    })
+}
+
 // Translate glibc's encoded st_dev into the kernel's MKDEV(major, minor).
-fn userspace_dev_to_kernel(dev: u64) -> u32 {
+pub(super) fn userspace_dev_to_kernel(dev: u64) -> u32 {
     (libc::major(dev) << 20) | libc::minor(dev)
 }
 
@@ -316,6 +438,7 @@ mod tests {
             dsl,
             &compile_str(dsl).map_err(BackendError::CompileFailure)?,
             true,
+            std::process::id() as i32,
         )
     }
 
@@ -326,19 +449,70 @@ mod tests {
     }
 
     #[test]
+    fn preflight_identities_cover_every_guarded_legacy_file() {
+        let fixture = Fixture::new();
+        let path = fixture.file("p");
+        // Unlink-only clauses lower to write-op rules, so even a delete-only
+        // legacy binding mediates writes and must feed the preflight.
+        let unlink_only = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
+        assert_eq!(unlink_only.protected_identities().len(), 1);
+        let dsl = format!(
+            "source AGENT = exec \"**\"\nrule protect:\n block write file \"{path}\" if AGENT\n because \"keep file\"\n"
+        );
+        let write_guarded = prepare(&dsl).unwrap();
+        assert_eq!(write_guarded.protected_identities().len(), 1);
+    }
+
+    #[test]
+    fn guarded_files_hold_their_ancestor_directories() {
+        let fixture = Fixture::new();
+        let nested = fixture.path("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let path = fixture.file("a/b/keep");
+        let prepared = prepare(&guard_dsl(&path, "if AGENT")).unwrap();
+        let ancestors: Vec<String> = prepared
+            .ancestors
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert!(ancestors.contains(&nested), "{ancestors:?}");
+        assert!(ancestors.contains(&fixture.path("a")), "{ancestors:?}");
+        assert!(!ancestors.iter().any(|entry| entry == "/"), "{ancestors:?}");
+        assert_eq!(prepared.files.len(), 1);
+        assert_eq!(prepared.files[0].path, path);
+        // Shared ancestors of two guarded files are held once.
+        let sibling = fixture.file("a/b/keep2");
+        let dsl = format!(
+            "source AGENT = exec \"**\"\nrule one:\n block unlink file \"{path}\" if AGENT\n because \"one\"\nrule two:\n block unlink file \"{sibling}\" if AGENT\n because \"two\"\n"
+        );
+        let prepared = prepare(&dsl).unwrap();
+        let held = prepared
+            .ancestors
+            .iter()
+            .filter(|entry| entry.path == nested)
+            .count();
+        assert_eq!(held, 1);
+    }
+
+    #[test]
     fn lowered_index_accounts_for_dnf_and_clause_offset_and_first_guard_wins() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
         let dsl = format!(
             "source AGENT = exec \"**\"\nsource OTHER = exec \"**\"\n\
              rule prior:\n notify connect endpoint \"*\" if AGENT or OTHER\n because \"prior\"\n\
-             rule protect:\n notify connect endpoint \"*\"\n block write file \"{path}\" if AGENT\n because \"keep file\"\n\
+             rule protect:
+ notify connect endpoint \"*\"
+ block write file \"{path}\" if AGENT
+ because \"keep file\"
+\
              rule later:\n block unlink file \"{path}\"\n because \"later\"\n"
         );
         let compiled = compile_str(&dsl).unwrap();
         assert_eq!(compiled.meta[3].name, "protect");
         assert_eq!(compiled.meta[3].clause_source_index, 1);
-        let prepared = InodePolicy::prepare(&dsl, &compiled, true).unwrap();
+        let prepared =
+            InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).unwrap();
         assert_eq!(prepared.files.len(), 1);
         assert_eq!(prepared.files[0].rule_id, Some(3));
         assert_eq!(prepared.files[0].path, path);
@@ -464,6 +638,264 @@ mod tests {
     }
 
     #[test]
+    fn pin_file_resolves_through_the_target_process_root() {
+        let fixture = Fixture::new();
+        let path = fixture.file("cred");
+        let pinned = pin_file(&path, None, std::process::id() as i32).unwrap();
+        assert_eq!(pinned.path, path);
+
+        let error = pin_file(&path, None, i32::MAX).unwrap_err();
+        assert!(error.to_string().contains("cannot hold inode with O_PATH"));
+    }
+
+    #[test]
+    fn pin_dir_resolves_through_target_root_and_rejects_non_directories() {
+        let fixture = Fixture::new();
+        let nested = fixture.path("sub");
+        fs::create_dir(&nested).unwrap();
+        let file = fixture.file("plain");
+        let link = fixture.path("sub-link");
+        std::os::unix::fs::symlink(&nested, &link).unwrap();
+
+        let self_pid = std::process::id() as i32;
+        let pinned = pin_dir(&nested, Some(0), self_pid).unwrap();
+        assert_eq!(pinned.path, nested);
+        assert_eq!(pinned.rule_id, Some(0));
+
+        // Even when the directory exists in the enforcer's own namespace,
+        // an invalid target root_pid must fail closed instead of falling back
+        // to the enforcer's filesystem view.
+        let missing_root = pin_dir(&nested, Some(0), i32::MAX).unwrap_err();
+        assert!(
+            missing_root
+                .to_string()
+                .contains("cannot hold ancestor with O_PATH"),
+            "{missing_root}"
+        );
+
+        let not_dir = pin_dir(&file, Some(0), self_pid).unwrap_err();
+        assert!(
+            not_dir
+                .to_string()
+                .contains("guarded file ancestors must be directories"),
+            "{not_dir}"
+        );
+
+        // O_NOFOLLOW opens the symlink inode itself under O_PATH, which is not a directory.
+        let symlink_err = pin_dir(&link, Some(0), self_pid).unwrap_err();
+        assert!(
+            symlink_err
+                .to_string()
+                .contains("guarded file ancestors must be directories")
+                || symlink_err
+                    .to_string()
+                    .contains("cannot hold ancestor with O_PATH"),
+            "{symlink_err}"
+        );
+    }
+
+    struct NamespacedTmpChild {
+        child: std::process::Child,
+        stdin: std::process::ChildStdin,
+    }
+
+    impl NamespacedTmpChild {
+        fn spawn(setup_script: &str) -> Option<Self> {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
+            let script =
+                format!("set -eu\nmount -t tmpfs tmpfs /tmp\n{setup_script}\necho READY\nread _\n");
+            let attempts: &[&[&str]] = &[
+                &["-m", "--propagation", "private", "sh", "-c"],
+                &["-U", "-r", "-m", "sh", "-c"],
+            ];
+            for prefix in attempts {
+                let Ok(mut child) = Command::new("unshare")
+                    .args(*prefix)
+                    .arg(&script)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                else {
+                    continue;
+                };
+                let Some(stdin) = child.stdin.take() else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    continue;
+                };
+                let Some(stdout) = child.stdout.take() else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    continue;
+                };
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() && line.trim() == "READY" {
+                    return Some(Self { child, stdin });
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            None
+        }
+
+        fn pid(&self) -> i32 {
+            self.child.id() as i32
+        }
+    }
+
+    impl Drop for NamespacedTmpChild {
+        fn drop(&mut self) {
+            use std::io::Write;
+            let _ = self.stdin.write_all(b"done\n");
+            let _ = self.stdin.flush();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn guarded_ancestors_resolve_through_target_mount_namespace_not_enforcer_tmp() {
+        let host_fixture = Fixture::new();
+        let shared_rel = format!("ai-shared-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let host_shared_dir = fs::canonicalize("/tmp").unwrap().join(&shared_rel);
+        fs::create_dir(&host_shared_dir).unwrap();
+        let shared_dir_str = host_shared_dir.to_str().unwrap().to_owned();
+        let private_dir_str = format!(
+            "{}/ns-only",
+            host_fixture.0.parent().unwrap().to_str().unwrap()
+        );
+        let private_dir_unique = format!(
+            "{}-{}",
+            private_dir_str,
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let bind_dir_unique = format!(
+            "{}/ai-bind-{}",
+            host_fixture.0.parent().unwrap().to_str().unwrap(),
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let shared_keep = format!("{shared_dir_str}/keep");
+        let shared_keep2 = format!("{shared_dir_str}/keep2");
+        let bind_keep3 = format!("{bind_dir_unique}/keep3");
+        let private_keep = format!("{private_dir_unique}/keep");
+
+        let setup = format!(
+            "mkdir -p '{shared_dir_str}' '{bind_dir_unique}' '{private_dir_unique}'\n\
+             mount --bind '{shared_dir_str}' '{bind_dir_unique}'\n\
+             printf 'secret1' > '{shared_keep}'\n\
+             printf 'secret2' > '{shared_keep2}'\n\
+             printf 'secret3' > '{bind_keep3}'\n\
+             printf 'secret4' > '{private_keep}'\n"
+        );
+        let Some(ns_child) = NamespacedTmpChild::spawn(&setup) else {
+            let _ = fs::remove_dir_all(&host_shared_dir);
+            return;
+        };
+        assert!(!Path::new(&private_dir_unique).exists());
+
+        // 1. Even when an identically named ancestor directory exists in the
+        // enforcer's own /tmp, InodePolicy::prepare must pin the target
+        // namespace's directory inodes rather than silently guarding the
+        // enforcer's private /tmp or host directory inodes.
+        let host_tmp_meta = fs::metadata("/tmp").unwrap();
+        let host_shared_meta = fs::metadata(&host_shared_dir).unwrap();
+        let target_tmp_meta = fs::metadata(format!("/proc/{}/root/tmp", ns_child.pid())).unwrap();
+        let target_shared_meta =
+            fs::metadata(format!("/proc/{}/root{shared_dir_str}", ns_child.pid())).unwrap();
+        let target_private_meta =
+            fs::metadata(format!("/proc/{}/root{private_dir_unique}", ns_child.pid())).unwrap();
+
+        let dsl = format!(
+            "source AGENT = exec \"**\"\n\
+             rule r1:\n block unlink file \"{shared_keep}\" if AGENT\n because \"s1\"\n\
+             rule r2:\n block unlink file \"{shared_keep2}\" if AGENT\n because \"s2\"\n\
+             rule r3:\n block unlink file \"{bind_keep3}\" if AGENT\n because \"s3\"\n\
+             rule r4:\n block unlink file \"{private_keep}\" if AGENT\n because \"s4\"\n"
+        );
+        let compiled = compile_str(&dsl).unwrap();
+        let prepared = InodePolicy::prepare(&dsl, &compiled, true, ns_child.pid());
+        let _ = fs::remove_dir_all(&host_shared_dir);
+        let prepared =
+            prepared.expect("prepare guarded files inside isolated /tmp mount namespace");
+
+        let find_ancestor = |target_path: &str| -> &InodeFile {
+            prepared
+                .ancestors
+                .iter()
+                .find(|entry| entry.path == target_path)
+                .unwrap_or_else(|| {
+                    panic!("missing ancestor {target_path}: {:?}", prepared.ancestors)
+                })
+        };
+
+        let held_tmp = find_ancestor("/tmp");
+        assert_eq!(
+            (held_tmp.dev, held_tmp.ino),
+            (
+                userspace_dev_to_kernel(target_tmp_meta.dev()),
+                target_tmp_meta.ino()
+            ),
+            "must guard target root's /tmp inode, not enforcer's /tmp inode"
+        );
+        assert_ne!(
+            (held_tmp.dev, held_tmp.ino),
+            (
+                userspace_dev_to_kernel(host_tmp_meta.dev()),
+                host_tmp_meta.ino()
+            )
+        );
+
+        let held_shared = find_ancestor(&shared_dir_str);
+        assert_eq!(
+            (held_shared.dev, held_shared.ino),
+            (
+                userspace_dev_to_kernel(target_shared_meta.dev()),
+                target_shared_meta.ino()
+            ),
+            "must guard target root's shared-name directory inode, not host's"
+        );
+        assert_ne!(
+            (held_shared.dev, held_shared.ino),
+            (
+                userspace_dev_to_kernel(host_shared_meta.dev()),
+                host_shared_meta.ino()
+            )
+        );
+
+        let held_private = find_ancestor(&private_dir_unique);
+        assert_eq!(
+            (held_private.dev, held_private.ino),
+            (
+                userspace_dev_to_kernel(target_private_meta.dev()),
+                target_private_meta.ino()
+            )
+        );
+
+        // Shared ancestors across sibling and bind-mounted guarded files in the
+        // target root are deduplicated both by path and by (dev, ino).
+        assert_eq!(
+            prepared
+                .ancestors
+                .iter()
+                .filter(|entry| entry.ino == held_shared.ino && entry.dev == held_shared.dev)
+                .count(),
+            1
+        );
+        assert_eq!(
+            prepared
+                .ancestors
+                .iter()
+                .filter(|entry| entry.path == "/tmp")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn required_paths_reject_missing_glob_noncanonical_and_nonregular_files() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
@@ -483,7 +915,12 @@ mod tests {
                 format!("source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{bad}\"\n");
             assert!(prepare(&source).is_err(), "source: {bad}");
         }
-        let error = pin_file(&format!("/{}", "a".repeat(126)), None).unwrap_err();
+        let error = pin_file(
+            &format!("/{}", "a".repeat(126)),
+            None,
+            std::process::id() as i32,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("126-byte"));
     }
 
@@ -520,20 +957,20 @@ mod tests {
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta.push(compiled.meta[0].clone());
         assert!(
-            InodePolicy::prepare(&dsl, &compiled, true)
+            InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32)
                 .unwrap_err()
                 .to_string()
                 .contains("unambiguous")
         );
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta[0].target_pattern = "/wrong".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta[0].kernel_op = "read".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.reasons[0] = "wrong reason".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
     }
 
     #[test]
@@ -544,7 +981,7 @@ mod tests {
         );
         let compiled = compile_str(&dsl).unwrap();
         assert!(
-            InodePolicy::prepare(&dsl, &compiled, false)
+            InodePolicy::prepare(&dsl, &compiled, false, std::process::id() as i32)
                 .unwrap()
                 .files
                 .is_empty()

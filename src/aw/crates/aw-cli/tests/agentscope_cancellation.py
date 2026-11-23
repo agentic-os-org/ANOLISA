@@ -66,7 +66,9 @@ async def worker() -> None:
         async def check_permissions(
             self, tool_input: dict[str, Any], context: Any
         ) -> PermissionDecision:
-            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+            return PermissionDecision(
+                behavior=PermissionBehavior.ALLOW, message="Cancellation fixture allows the tool"
+            )
 
         async def call(self, mode: str) -> Any:
             if mode.startswith("rpc-before-"):
@@ -85,7 +87,7 @@ async def worker() -> None:
 
     def status() -> dict[str, Any]:
         return json.loads(
-            subprocess.check_output([aw, "status", "--socket", str(socket)], timeout=3)
+            subprocess.check_output([aw, "service", "status", "--socket", str(socket)], timeout=3)
         )["result"]
 
     def turn(mode: str) -> Any:
@@ -312,7 +314,12 @@ async def worker() -> None:
 
         async def finalizing_spawn(*args: Any, **kwargs: Any) -> Any:
             nonlocal close_child
-            if "--close-event" not in args and args[args.index("--step") + 1] == "after-middle":
+            # Scope ledger commands (register/finish) carry no hook route.
+            if (
+                "--step" in args
+                and "--close-event" not in args
+                and args[args.index("--step") + 1] == "after-middle"
+            ):
                 injected.append("after-middle")
                 raise OSError(errno.EMFILE, "fixture finalization gap")
             child = await create(*args, **kwargs)
@@ -515,7 +522,7 @@ def main() -> None:
         path.write_text(json.dumps(config))
         env = {**os.environ, "AW_TEST_ROOT": str(root), "AW_TEST_BINARY": aw}
         with owned(
-            [aw, "serve", "--config", str(path), "--state-dir", str(state)],
+            [aw, "service", "serve", "--config", str(path), "--state-dir", str(state)],
             root,
             output,
             "serve",
@@ -541,7 +548,7 @@ def main() -> None:
                     assert child.returncode == 0, (output / "worker.stderr").read_text()
                 status = json.loads(
                     subprocess.check_output(
-                        [aw, "status", "--socket", str(state / "aw.sock")], timeout=3
+                        [aw, "service", "status", "--socket", str(state / "aw.sock")], timeout=3
                     )
                 )["result"]
                 assert status["bindings"] == 0 and status["events"] == 0, status
@@ -578,7 +585,7 @@ def main() -> None:
                 if (root / "callbacks.jsonl").exists():
                     (output / "callbacks.jsonl").write_text((root / "callbacks.jsonl").read_text())
                 subprocess.run(
-                    [aw, "stop", "--socket", str(state / "aw.sock")], timeout=5, capture_output=True
+                    [aw, "service", "stop", "--socket", str(state / "aw.sock")], timeout=5, capture_output=True
                 )
                 service.wait(timeout=5)
     print(

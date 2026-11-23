@@ -174,6 +174,21 @@ impl<R: CommandRunner> Systemd<R> {
         self.run_unit_operation("enable", &["enable", unit], unit)
     }
 
+    /// Enable a unit for future boots without contacting the running manager
+    /// (`systemctl --no-reload enable <unit>`).
+    ///
+    /// Image builds run in a chroot where no manager is running: `enable` must
+    /// only materialize the enablement symlink, and the implicit reload must be
+    /// suppressed so a missing D-Bus does not fail the build.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn enable_unit_offline(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("enable", &["--no-reload", "enable", unit], unit)
+    }
+
     /// Start a systemd unit (`systemctl start <unit>`).
     ///
     /// # Errors
@@ -427,6 +442,21 @@ mod tests {
         systemd
             .disable_unit_file("anolisa.service")
             .expect("disable should succeed");
+        assert_finished(&systemd);
+    }
+
+    #[test]
+    fn enable_unit_offline_suppresses_the_manager_reload() {
+        let systemd = systemd(vec![call(
+            &["--no-reload", "enable", "anolisa.service"],
+            Some(0),
+            "",
+            "",
+        )]);
+
+        systemd
+            .enable_unit_offline("anolisa.service")
+            .expect("offline enable should succeed");
         assert_finished(&systemd);
     }
 

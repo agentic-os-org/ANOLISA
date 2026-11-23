@@ -241,7 +241,7 @@ aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/anolisa.yaml" --state-dir "$AW_HOME/anolisa-state" \
   --qoder "$(command -v qodercli)" \
   --provider sec-core+tokenless --socket "$AW_SEC_SOCKET"
-aw validate --config "$AW_HOME/anolisa.yaml"
+aw config validate --config "$AW_HOME/anolisa.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/anolisa.yaml" --agent qoder
 ```
@@ -251,11 +251,11 @@ Tokenless 会尝试压缩受支持的文本结果。Agent 调用工具后，你�
 设置与启动 Agent 时所用终端相同的 `PATH` 和 `AW_HOME`，再运行以下命令查看运行记录：
 
 ```bash
-aw status --config "$AW_HOME/anolisa.yaml"
+aw service status --config "$AW_HOME/anolisa.yaml"
 aw inspect --config "$AW_HOME/anolisa.yaml" --json
 ```
 
-退出 Agent 后，请执行 `aw stop --config "$AW_HOME/anolisa.yaml"` 停止 AW 本地服务，
+退出 Agent 后，请执行 `aw service stop --config "$AW_HOME/anolisa.yaml"` 停止 AW 本地服务，
 再根据安全后台的启动方式，使用相应的命令停止该服务。其他 Agent 的接入方式、规则配置
 与观测能力接入方法，见[AW 用户指南](https://agentic-os.sh/zh/docs/user-guide/aw/)。
 
@@ -342,6 +342,10 @@ ANOLISA 基于 [Apache License 2.0](LICENSE) 发布。
 [源码构建](https://agentic-os.sh/zh/docs/user-guide/getting-started/building/) ·
 [变更日志](https://agentic-os.sh/zh/changelog/) ·
 [Agent 入口](https://agentic-os.sh/zh/agents/)
+
+统一源码构建要求 Bash 4.4 或更高版本。受限网络环境可以配置
+`NODE_DIST_MIRROR` 和 `RUSTUP_INIT_SCRIPT_URL`，具体用法见
+[下载源](docs/user-guide/zh/getting-started/building.md#下载源)。
 
 Agent Security Core 的相关安全参考资料如下：
 [AARM 登记条目（Aligned）](https://aarm.dev/builders/agentseccore-anolisa) ·

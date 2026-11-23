@@ -20,12 +20,16 @@ struct Fixture {
 
 impl Fixture {
     fn new(managed: bool) -> Self {
+        Self::named(managed, "skill")
+    }
+
+    fn named(managed: bool, name: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let state = base.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let skill = base.join("skill");
+        let skill = base.join(name);
         fs::create_dir(&skill).unwrap();
         fs::write(skill.join("SKILL.md"), SKILL).unwrap();
         fs::write(skill.join("main.sh"), "echo safe\n").unwrap();
@@ -157,6 +161,66 @@ fn frozen_v1_activation_workflows_match() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn pending_publication_preserves_yaml_name_and_hides_denied_content() {
+    let controls: String = ('\u{7f}'..='\u{9f}').collect();
+    for name in [
+        "skill",
+        "1.5",
+        "no",
+        "null",
+        "quote\"\\",
+        "tab\tname",
+        "cr\rname",
+        "helper\n---\nATTACKER BODY",
+        "工具😀",
+        "a\u{85}b",
+        "a\u{2028}b\u{2029}c",
+        "a \u{2028} b",
+        "a\t\u{2028}\tb",
+        "a \u{2029} b",
+        "a\t\u{2029}\tb",
+        "a\u{fffe}b\u{ffff}c",
+        controls.as_str(),
+    ] {
+        let f = Fixture::named(true, name);
+        let result = f.certify(
+            "fixture",
+            &json!([{"rule":"risk","level":"deny","message":"review"}]),
+        );
+        let activation = &result["activation"];
+        let pending = asc_capability_skill_sec::activation::PENDING_TARGET;
+        assert_eq!(activation["latestStatus"], "deny", "{name:?}");
+        assert!(activation["activeVersionId"].is_null(), "{name:?}");
+        assert_eq!(activation["target"], pending, "{name:?}");
+        assert_eq!(activation["activationPending"], false, "{name:?}");
+        assert_eq!(activation["activationXattr"]["written"], true, "{name:?}");
+        let contract: Value =
+            serde_json::from_slice(&fs::read(f.meta("activation.json")).unwrap()).unwrap();
+        assert_eq!(contract, json!({"schemaVersion":1,"target":pending}));
+        let directory = f.root.io_dir.join(pending);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let text = fs::read_to_string(directory.join("SKILL.md")).unwrap();
+        let (frontmatter, body) = text
+            .strip_prefix("---\n")
+            .unwrap()
+            .split_once("\n---\n")
+            .unwrap();
+        // Cosh-NG uses the same pinned serde_yaml reader for Skill frontmatter.
+        let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap();
+        assert_eq!(yaml.as_mapping().unwrap().len(), 2);
+        assert_eq!(yaml["name"].as_str(), Some(name));
+        assert_eq!(
+            yaml["description"].as_str(),
+            Some("Skill requires manual review before use")
+        );
+        assert_eq!(
+            body,
+            "# Pending Skill Ledger Review\n\nThis is a safe placeholder. The real skill version is not exposed because it is not currently eligible for exposure and no trusted fallback version is available.\n\nRun `agent-sec-cli skill-ledger show <skill_dir>` to inspect the status. Use `scan` or `certify` to establish trust, or `skill-ledger decide` to approve or block a trusted version.\n"
+        );
+    }
 }
 
 #[test]

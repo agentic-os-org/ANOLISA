@@ -7,6 +7,15 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[path = "pi/native_update.rs"]
+mod native_update;
+
+#[path = "pi/submission.rs"]
+mod submission;
+
+#[path = "pi/tool_scope.rs"]
+mod tool_scope;
+
 fn setup(fixture: &Fixture) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("node"))
@@ -18,7 +27,7 @@ fn setup(fixture: &Fixture) -> Value {
         &application,
     )
     .unwrap();
-    for (name,source) in [("pi-agent-core","export class Agent { subscribe(){ return ()=>{}; } }".to_string()),
+    for (name,source) in [("pi-agent-core","export class Agent { subscribe(){ return ()=>{}; } async processEvents(){} }".to_string()),
         ("pi-coding-agent","import {Agent} from '@earendil-works/pi-agent-core'; export class AgentSession { constructor(){this.agent=new Agent();this.sessionManager={getSessionId:()=> 'session-1'};} dispose(){} }".to_string())] {
         let path=fixture.root.join("node_modules/@earendil-works").join(name);fs::create_dir_all(path.join("dist")).unwrap();
         fs::write(path.join("package.json"),json!({"name":format!("@earendil-works/{name}"),"version":"0.84.2","type":"module","exports":{".":{"import":"./dist/index.js"}}}).to_string()).unwrap();
@@ -67,7 +76,7 @@ fn foreground_factory_installs_both_hooks_and_releases_binding() {
 }
 
 #[test]
-fn resident_observation_is_rejected_before_ready_but_off_is_allowed() {
+fn resident_observation_retains_unknown_coverage_without_source_identity() {
     for mode in ["auto", "off"] {
         let fixture = Fixture::new();
         let mut document = setup(&fixture);
@@ -81,18 +90,8 @@ fn resident_observation_is_rejected_before_ready_but_off_is_allowed() {
         let service = Service::start(&fixture, &document);
         let output = fixture.run(launch(&fixture));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if mode == "auto" {
-            assert!(!output.status.success());
-            assert!(
-                stderr.contains("AW resident Pi does not support AgentSight evidence"),
-                "{stderr}"
-            );
-            assert!(!stderr.contains("native hooks ready"));
-            assert!(!fixture.root.join("worker-started").exists());
-        } else {
-            assert!(output.status.success(), "{stderr}");
-            assert!(fixture.root.join("worker-started").exists());
-        }
+        assert!(output.status.success(), "{stderr}");
+        assert!(fixture.root.join("worker-started").exists());
         service.released(&fixture);
     }
 }
@@ -173,7 +172,7 @@ fn unavailable_before_policy_adopts_failure_block() {
     service.released(&fixture);
 }
 #[test]
-fn actual_package_version_is_checked_without_importing_business_factory() {
+fn invalid_package_metadata_is_rejected_without_importing_business_factory() {
     let fixture = Fixture::new();
     let document = setup(&fixture);
     fixture.save(&document);
@@ -181,7 +180,7 @@ fn actual_package_version_is_checked_without_importing_business_factory() {
         .root
         .join("node_modules/@earendil-works/pi-coding-agent/package.json");
     let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
-    metadata["version"] = json!("0.84.3");
+    metadata["version"] = json!("invalid version");
     fs::write(package, metadata.to_string()).unwrap();
     assert!(!fixture.run(launch(&fixture)).status.success());
     assert!(!fixture.root.join("state").exists());
@@ -254,7 +253,7 @@ export async function run(session) {{
             result:{{content:[{{type:'text',text:'okay'}}],details:{{}}}},isError:false }};
         const directive = await session.agent.beforeToolCall(context);
         if ((directive?.block === true) !== (i < 40)) throw Error('wrong denial');
-        const status = spawnSync(config.executable, ['status','--socket',binding.socket], {{encoding:'utf8',timeout:2000}});
+        const status = spawnSync(config.executable, ['service','status','--socket',binding.socket], {{encoding:'utf8',timeout:2000}});
         if (status.status !== 0 || (i < 40 && JSON.parse(status.stdout).result.events !== 0)) throw Error('live event leaked at '+i+': '+status.status+' '+status.stdout+' '+status.stderr);
         if (i === 40) await session.agent.afterToolCall(context);
     }}
@@ -332,8 +331,91 @@ fn execution_drain_fences_registration_and_transport_failures() {
     let output = fixture.run(command);
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success() && report.contains("# pass 5") && report.contains("# fail 0"),
+        output.status.success() && report.contains("# pass 10") && report.contains("# fail 0"),
         "{report}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn independently_versioned_pi_packages_keep_policy_and_cleanup() {
+    for (sdk, core) in [
+        ("0.84.3", "0.84.4"),
+        ("0.84.1", "0.84.1"),
+        ("1.0.0-preview.1", "1.0.0-preview.2"),
+    ] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        for (name, version) in [("pi-coding-agent", sdk), ("pi-agent-core", core)] {
+            let package = fixture
+                .root
+                .join(format!("node_modules/@earendil-works/{name}/package.json"));
+            let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+            metadata["version"] = json!(version);
+            fs::write(package, metadata.to_string()).unwrap();
+        }
+        policy(&fixture, &mut document, "error");
+        let service = Service::start(&fixture, &document);
+        assert_eq!(fixture.successful(launch(&fixture))["denied"], true);
+        assert!(!fixture.root.join("side-effect").exists());
+        service.released(&fixture);
+    }
+}
+
+#[test]
+fn strict_output_rejects_unverified_versions_before_application_import() {
+    for name in ["pi-coding-agent", "pi-agent-core"] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        policy(&fixture, &mut document, "normal");
+        document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        let package = fixture
+            .root
+            .join(format!("node_modules/@earendil-works/{name}/package.json"));
+        let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+        metadata["version"] = json!("0.85.1");
+        fs::write(package, metadata.to_string()).unwrap();
+        fs::write(
+            fixture.root.join("app.mjs"),
+            "throw new Error('business module imported');",
+        )
+        .unwrap();
+        let service = Service::start(&fixture, &document);
+        let output = fixture.run(launch(&fixture));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains("policy admission rejected: failure action"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("business module imported"), "{stderr}");
+        service.released(&fixture);
+    }
+}
+
+#[test]
+fn strict_output_requires_event_seam_before_application_import() {
+    let fixture = Fixture::new();
+    let mut document = setup(&fixture);
+    fs::write(
+        fixture
+            .root
+            .join("node_modules/@earendil-works/pi-agent-core/dist/index.js"),
+        "export class Agent { subscribe(){ return ()=>{}; } }",
+    )
+    .unwrap();
+    policy(&fixture, &mut document, "normal");
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    fs::write(
+        fixture.root.join("app.mjs"),
+        "throw new Error('business module imported');",
+    )
+    .unwrap();
+    let service = Service::start(&fixture, &document);
+    let output = fixture.run(launch(&fixture));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("native event dispatch seam"), "{stderr}");
+    assert!(!stderr.contains("business module imported"), "{stderr}");
+    service.released(&fixture);
 }

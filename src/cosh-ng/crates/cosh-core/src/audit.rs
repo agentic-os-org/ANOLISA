@@ -1,6 +1,7 @@
 //! Core-owned unified audit recorder and governed durability barriers.
 
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::Utc;
 use cosh_platform::audit::config::{load_audit_settings, resolve_audit_root};
@@ -9,11 +10,14 @@ use cosh_platform::audit::store::{AuditDurability, AuditSegmentWriter};
 use cosh_types::audit::{
     AuditActor, AuditActorKind, AuditComponent, AuditComponentName, AuditControlData,
     AuditEventOutcome, AuditEventType, AuditEventV1, AuditIdentity, AuditMode, AuditOutcomeStatus,
-    AuditRedaction, AuditRedactionStatus, AuditSettings, AuditSubject, KnownAuditEventType,
+    AuditProviderData, AuditRedaction, AuditRedactionStatus, AuditSettings, AuditSubject,
+    KnownAuditEventType,
 };
 use serde::Serialize;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod budget_tests;
 mod orchestration;
 
 pub(crate) use orchestration::CoreAuditScope;
@@ -38,6 +42,19 @@ enum CoreAuditSink {
     },
 }
 
+struct OpenProviderAudit {
+    request_id: String,
+    provider_type: String,
+    data: AuditProviderData,
+    started: Instant,
+}
+
+struct OpenTurnAudit {
+    run_id: String,
+    turn_id: String,
+    provider: Option<OpenProviderAudit>,
+}
+
 /// Independent audit side path for Core semantic lifecycle boundaries.
 pub(crate) struct CoreAuditRecorder {
     sink: CoreAuditSink,
@@ -48,6 +65,7 @@ pub(crate) struct CoreAuditRecorder {
     degraded: bool,
     warned: bool,
     pending_terminal_gap: bool,
+    open_turn: Option<OpenTurnAudit>,
 }
 
 impl CoreAuditRecorder {
@@ -81,7 +99,11 @@ impl CoreAuditRecorder {
         } else {
             match resolve_audit_root() {
                 Ok(root) => {
-                    match AuditSegmentWriter::create(&root.path, AuditComponentName::CoshCore) {
+                    match AuditSegmentWriter::create_with_settings(
+                        &root.path,
+                        AuditComponentName::CoshCore,
+                        settings.clone(),
+                    ) {
                         Ok(writer) => (Some(root.path), CoreAuditSink::Real(writer)),
                         Err(error) => {
                             tracing::warn!(target: "cosh_audit", "audit writer unavailable: {error}");
@@ -104,6 +126,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         };
         #[cfg(not(test))]
         if let Some(root) = recorder.root.clone() {
@@ -481,7 +504,11 @@ impl CoreAuditRecorder {
             Some(root) => root,
             None => return,
         };
-        if let Ok(writer) = AuditSegmentWriter::create(&root, AuditComponentName::CoshCore) {
+        if let Ok(writer) = AuditSegmentWriter::create_with_settings(
+            &root,
+            AuditComponentName::CoshCore,
+            self.settings.clone(),
+        ) {
             self.root = Some(root);
             self.sink = CoreAuditSink::Real(writer);
         }
@@ -512,6 +539,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -529,6 +557,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -544,6 +573,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 
@@ -586,6 +616,7 @@ impl CoreAuditRecorder {
             degraded: false,
             warned: false,
             pending_terminal_gap: false,
+            open_turn: None,
         }
     }
 

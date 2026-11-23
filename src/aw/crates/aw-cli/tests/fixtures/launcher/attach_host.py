@@ -27,20 +27,25 @@ def publish(path, value):
 def event(name):
     payload = {"hook_event_name": name, "cwd": str(root), "session_id": "session",
                "tool_use_id": f"call-{index}", "tool_name": "Bash", "tool_input": {"command": "true"},
-               "notification_type": "idle_prompt", "file_path": str(settings), "tool_response": "fixture output"}
+               "notification_type": "idle_prompt", "prompt": "risk",
+                   "request_set_id": f"request-{index}", "file_path": str(settings)}
+    if name == "PostToolUse":
+        payload["tool_response"] = "fixture output"
     results = []
     for group in loaded.get("hooks", {}).get(name, []):
         if group.get("matcher", "") not in ("", "*", "Bash", "user_settings", "idle_prompt"):
             continue
         for hook in group["hooks"]:
             result = subprocess.run([hook["command"], *hook.get("args", [])],
-                                    input=json.dumps(payload).encode(), capture_output=True, timeout=5)
+                                    input=json.dumps(payload).encode(), capture_output=True, timeout=hook.get("timeout", 5))
             if any(str(arg).endswith("/detach-confirmation.json") for arg in hook.get("args", [])):
                 publish(root / "native-detach.json", {"code": result.returncode, "descriptor": hook["args"][-1]})
             results.append({"code": result.returncode, "stderr": result.stderr.decode()})
     return results
 
 
+if os.environ.get("FAKE_NATIVE_START"):
+    publish(root / "native-start.json", event("SessionStart"))
 publish(root / "native-pid.json", os.getpid())
 while time.monotonic() < deadline:
     current = settings.read_bytes() if settings.exists() else b"{}"
@@ -54,12 +59,17 @@ while time.monotonic() < deadline:
         action = json.loads(command.read_text())["action"]
         if action == "stop":
             break
-        if action == "begin":
+        if action == "restart":
+            result = event("SessionStart")
+        elif action == "begin":
             result = event("UserPromptSubmit")
         elif action == "end":
             result = event("Notification")
         elif action == "turn":
-            result = event("UserPromptSubmit") + event("PreToolUse")
+            result = event("UserPromptSubmit")
+            if all(item["code"] == 0 for item in result):
+                publish(root / f"model-dispatch-{index}.json", {"dispatched": True})
+                result += event("PreToolUse")
             if all(item["code"] == 0 for item in result):
                 event("PostToolUse")
             event("Notification")
@@ -70,3 +80,6 @@ while time.monotonic() < deadline:
     time.sleep(0.005)
 else:
     raise TimeoutError("attachment fixture lifetime exceeded")
+
+if os.environ.get("FAKE_NATIVE_START"):
+    publish(root / "native-end.json", event("SessionEnd"))

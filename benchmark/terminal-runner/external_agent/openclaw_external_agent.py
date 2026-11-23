@@ -106,6 +106,34 @@ _log = logging.getLogger(__name__)
 _LOG_PREFIX = "OpenClaw"
 
 
+def _strip_trailing_shell_comment(line: str) -> str:
+    """Remove a shell comment only when its hash starts an unquoted word."""
+    quote: str | None = None
+    escaped = False
+    at_word_boundary = True
+
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            at_word_boundary = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            at_word_boundary = False
+        elif char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            at_word_boundary = False
+        elif quote is None:
+            if char == "#" and at_word_boundary:
+                return line[:index].rstrip()
+            at_word_boundary = char in " \t"
+
+    return line
+
+
 class OpenClawExternalAgent(BaseAgent):
     """Route between an OpenClaw process on the **host** and a Harbor Docker container.
 
@@ -439,16 +467,6 @@ class OpenClawExternalAgent(BaseAgent):
                 _LOG_PREFIX, iteration, returncode, parsed_label,
             )
 
-            # Extract session_id from first call for context continuity.
-            if not oc_session_id and isinstance(parsed, dict):
-                agent_meta = (parsed.get("meta") or {}).get("agentMeta") or {}
-                oc_session_id = agent_meta.get("sessionId")
-                if oc_session_id:
-                    self.logger.info(
-                        "%s: session established (%s...)",
-                        _LOG_PREFIX, oc_session_id[:12],
-                    )
-
             if not parsed:
                 self.logger.debug(
                     "%s: stdout(first %d): %s",
@@ -479,10 +497,27 @@ class OpenClawExternalAgent(BaseAgent):
 
                 if returncode != 0:
                     final_result = self._build_result(
-                        returncode, stdout_text, stderr_text,
-                        parsed, container_id, iteration, all_executions,
+                        returncode,
+                        stdout_text,
+                        stderr_text,
+                        parsed,
+                        container_id,
+                        iteration,
+                        all_executions,
                     )
                     break
+
+            # A successful retry response also establishes the session that the
+        # following rounds need.
+            if not oc_session_id and isinstance(parsed, dict):
+                agent_meta = (parsed.get("meta") or {}).get("agentMeta") or {}
+                oc_session_id = agent_meta.get("sessionId")
+                if oc_session_id:
+                    self.logger.info(
+                        "%s: session established (%s...)",
+                        _LOG_PREFIX,
+                        oc_session_id[:12],
+                    )
 
             # Extract commands from parsed response.
             commands = self._extract_commands(parsed)
@@ -812,9 +847,8 @@ class OpenClawExternalAgent(BaseAgent):
                 steps.append("\n".join(block))
                 continue
 
-            # Regular command line – strip trailing comments.
-            if " #" in line and not line.startswith("#"):
-                line = line[:line.index(" #")].strip()
+            # Regular command line – strip only shell comments outside quotes.
+            line = _strip_trailing_shell_comment(line)
             if line:
                 steps.append(line)
             i += 1
@@ -897,6 +931,7 @@ class OpenClawExternalAgent(BaseAgent):
         last_output_time = time.monotonic()
         total_stdout_bytes = 0
         total_stderr_bytes = 0
+        open_streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
 
         try:
             start = time.monotonic()
@@ -929,52 +964,38 @@ class OpenClawExternalAgent(BaseAgent):
                     >= no_output_timeout_sec
                 ):
                     proc.kill()
+                    # The caller decides whether to retry from the returned stderr, so a log
+            # line cannot substitute for the failure reason.
+                    stderr_chunks.append(
+                        f"\n{_LOG_PREFIX}: no stdout for {no_output_timeout_sec}s "
+                        "(likely API hang)\n".encode("utf-8")
+                    )
                     _log.warning(
                         "%s: no stdout for %ds after %ds elapsed, "
                         "killing process (likely API hang)",
-                        _LOG_PREFIX, no_output_timeout_sec, int(elapsed),
+                        _LOG_PREFIX,
+                        no_output_timeout_sec,
+                        int(elapsed),
                     )
                     break
 
-                ready, _, _ = select.select(
-                    [proc.stdout, proc.stderr], [], [], 0.5,
-                )
-                if proc.stdout in ready:
-                    chunk = (
-                        proc.stdout.read1(8192)
-                        if hasattr(proc.stdout, "read1")
-                        else proc.stdout.read(8192)
-                    )
-                    if chunk:
+                ready, _, _ = select.select(open_streams, [], [], 0.5)
+                for stream in ready:
+                    # Read only available bytes, including after the direct
+                    # child exits: descendants may still hold either pipe open.
+                    chunk = os.read(stream.fileno(), 8192)
+                    if not chunk:
+                        open_streams.remove(stream)
+                        continue
+                    if stream is proc.stdout:
                         stdout_chunks.append(chunk)
                         total_stdout_bytes += len(chunk)
                         last_output_time = time.monotonic()
-                if proc.stderr in ready:
-                    chunk = (
-                        proc.stderr.read1(8192)
-                        if hasattr(proc.stderr, "read1")
-                        else proc.stderr.read(8192)
-                    )
-                    if chunk:
+                    else:
                         stderr_chunks.append(chunk)
                         total_stderr_bytes += len(chunk)
 
-                if proc.poll() is not None:
-                    # Drain remaining output.
-                    for _ in range(10):
-                        chunk = proc.stdout.read(65536) if proc.stdout else None
-                        if chunk:
-                            stdout_chunks.append(chunk)
-                            total_stdout_bytes += len(chunk)
-                        else:
-                            break
-                    for _ in range(10):
-                        chunk = proc.stderr.read(65536) if proc.stderr else None
-                        if chunk:
-                            stderr_chunks.append(chunk)
-                            total_stderr_bytes += len(chunk)
-                        else:
-                            break
+                if proc.poll() is not None and not open_streams:
                     break
 
                 now = time.monotonic()
@@ -1000,6 +1021,10 @@ class OpenClawExternalAgent(BaseAgent):
                 proc.kill()
             except Exception:
                 pass
+        finally:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
 
         returncode = proc.returncode if proc.returncode is not None else -1
         stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")

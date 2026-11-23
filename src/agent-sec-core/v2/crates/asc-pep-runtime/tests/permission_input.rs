@@ -1,0 +1,1558 @@
+//! Compatibility and coarse Cedar projection, including real PDP request preparation.
+
+use std::collections::BTreeMap;
+
+use asc_daemon_protocol::authorization::*;
+use asc_pep_runtime::{PermissionInput, PermissionProvider};
+use serde_json::json;
+
+fn launch() -> LaunchSpec {
+    LaunchSpec {
+        program: "/usr/bin/true".into(),
+        resolved_program: "/usr/bin/true".into(),
+        args: vec![],
+        cwd: "/".into(),
+        env: BTreeMap::new(),
+    }
+}
+
+fn resolve(text: &str) -> OsPermissionSet {
+    PermissionInput::parse(text)
+        .unwrap()
+        .resolve(&launch())
+        .unwrap()
+}
+
+fn allows(permissions: &OsPermissionSet, path: &str, right: FileRight) -> bool {
+    let applicable: Vec<_> = permissions
+        .filesystem
+        .rules
+        .iter()
+        .filter(|rule| {
+            (rule.path == "/" || path == rule.path || path.starts_with(&format!("{}/", rule.path)))
+                && !rule
+                    .excluded_paths
+                    .iter()
+                    .any(|excluded| path == excluded || path.starts_with(&format!("{excluded}/")))
+        })
+        .collect();
+    !applicable.iter().any(|rule| {
+        rule.effect == RuleEffect::Deny
+            && (rule.rights.contains(&right) || rule.rights.contains(&FileRight::Read))
+    }) && applicable.iter().any(|rule| {
+        rule.effect == RuleEffect::Allow
+            && (rule.rights.contains(&right)
+                || right == FileRight::Read && rule.rights.contains(&FileRight::Write))
+    })
+}
+
+#[test]
+fn cedar_subtree_exceptions_preserve_independent_denies_and_rights() {
+    let permissions = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource);
+permit(principal, action == SecCore::Action::"process.spawn", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/a" || resource.path like "/a/*" }
+unless { resource.path == "/a/b" || resource.path like "/a/b/*" };
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/a/b/readonly" || resource.path like "/a/b/readonly/*" };
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/a/b/private" || resource.path like "/a/b/private/*" };
+"#,
+    );
+    assert_eq!(permissions.version, 1);
+    for (path, read, write) in [
+        ("/a", false, false),
+        ("/a/other", false, false),
+        ("/a/b", true, true),
+        ("/a/b/new", true, true),
+        ("/a/b/readonly/file", true, false),
+        ("/a/b/private/file", false, false),
+        ("/a/b-other", false, false),
+        ("/elsewhere", true, true),
+    ] {
+        assert_eq!(allows(&permissions, path, FileRight::Read), read, "{path}");
+        assert_eq!(
+            allows(&permissions, path, FileRight::Write),
+            write,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn json_permissions_keep_order_denies_network_and_noexec() {
+    let json = json!({
+        "version": 1, "filesystem": {"default": "deny", "rules": [
+            {"effect": "allow", "path": "/work", "rights": ["write", "read"]},
+            {"effect": "deny", "path": "/work/private", "rights": ["read"]}
+        ]}, "execution": {"deny_paths": ["/work"]}, "network": {"mode": "full"}
+    });
+    let expected: OsPermissionSet = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(resolve(&json.to_string()), expected);
+    let duplicate = json
+        .to_string()
+        .replacen("\"version\":1", "\"version\":1,\"version\":1", 1);
+    assert!(PermissionInput::parse(&duplicate).is_err());
+    for bad in [
+        "{broken",
+        r#"{"version":1,"filesystem":{},"execution":{},"network":{}}"#,
+    ] {
+        assert!(PermissionInput::parse(bad).is_err());
+    }
+    let mut unknown = json;
+    unknown["unexpected"] = json!(true);
+    assert!(PermissionInput::parse(&unknown.to_string()).is_err());
+}
+
+const TREE: &str = r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/work" || resource.path like "/work/*" };
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work/private" || resource.path like "/work/private/*" };
+"#;
+
+#[test]
+fn empty_command_candidate_only_requests_the_runtime_preset() {
+    let preset = r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/usr" || resource.path like "/usr/*" };"#;
+    for candidate in ["", "  ", "// No business permissions"] {
+        let permissions = PermissionInput::parse(candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(preset).unwrap())
+            .unwrap()
+            .resolve(&launch())
+            .unwrap();
+        assert!(allows(&permissions, "/usr/bin/true", FileRight::Read));
+        assert!(!allows(&permissions, "/work/secret", FileRight::Read));
+        assert!(!allows(&permissions, "/usr/bin/true", FileRight::Write));
+        assert_eq!(permissions.network.mode, NetworkMode::Off);
+    }
+}
+
+#[test]
+fn runtime_permits_preserve_candidate_and_preset_forbids() {
+    let permit = r#"permit(principal, action in [SecCore::Action::"file.read", SecCore::Action::"file.write", SecCore::Action::"network.use"], resource);"#;
+    let forbid = r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work" || resource.path like "/work/*" };
+forbid(principal, action == SecCore::Action::"network.use", resource);"#;
+    for (candidate, runtime) in [(forbid, permit), (permit, forbid)] {
+        let input = PermissionInput::parse(candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(runtime).unwrap())
+            .unwrap();
+        let permissions = input.resolve(&launch()).unwrap();
+        assert!(!allows(&permissions, "/work/private", FileRight::Read));
+        assert!(!allows(&permissions, "/work/private", FileRight::Write));
+        assert_eq!(permissions.network.mode, NetworkMode::Off);
+    }
+    let forbid_launch =
+        r#"forbid(principal, action == SecCore::Action::"process.spawn", resource);"#;
+    let permit_launch =
+        r#"permit(principal, action == SecCore::Action::"process.spawn", resource);"#;
+    assert!(
+        PermissionInput::parse(forbid_launch)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(permit_launch).unwrap())
+            .unwrap()
+            .resolve(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn combined_sources_bind_aliases_before_permission_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("secret");
+    let alias = dir.path().join("alias");
+    std::fs::write(&target, "secret").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let candidate = format!(
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias)
+    );
+    let preset = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(target)
+    );
+    let bound = PermissionInput::parse(&candidate)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(&preset).unwrap())
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(!allows(
+        &bound.permissions,
+        target.to_str().unwrap(),
+        FileRight::Read
+    ));
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == alias.to_str().unwrap())
+    );
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == target.to_str().unwrap())
+    );
+}
+
+#[test]
+fn runtime_merge_rejects_json_malformed_and_oversized_sources() {
+    let preset = r#"permit(principal, action == SecCore::Action::"file.read", resource);"#;
+    let json = serde_json::to_string(&resolve(preset)).unwrap();
+    for candidate in [json.as_str(), "/*", "not Cedar"] {
+        assert!(
+            PermissionInput::parse(candidate)
+                .unwrap()
+                .with_runtime(PermissionInput::parse(preset).unwrap())
+                .is_err()
+        );
+    }
+    assert!(
+        PermissionInput::parse(preset)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&json).unwrap())
+            .is_err()
+    );
+    let large = format!("// {}\n{preset}", "x".repeat(3 * 1024 * 1024));
+    assert!(
+        PermissionInput::parse(&large)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&large).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn cedar_regions_preserve_exclusions_and_directory_boundaries() {
+    let permissions = resolve(TREE);
+    assert!(allows(&permissions, "/usr/lib/libc.so", FileRight::Read));
+    assert!(allows(&permissions, "/work/new-file", FileRight::Write));
+    assert!(!allows(&permissions, "/work/private/key", FileRight::Read));
+    assert!(!allows(&permissions, "/work/private/key", FileRight::Write));
+    assert!(!allows(
+        &permissions,
+        "/work-other/report",
+        FileRight::Write
+    ));
+    assert_eq!(permissions.network.mode, NetworkMode::Off);
+    assert!(permissions.execution.deny_paths.is_empty());
+    let envelope = json!({"language":"cedar", "content":{
+        "schema":{"schemaId":"seccore.system","revision":1}, "text":TREE
+    }});
+    assert_eq!(resolve(&envelope.to_string()), permissions);
+}
+
+#[test]
+fn permitted_mutations_map_to_write_even_with_delete_forbidden() {
+    for operation in ["write", "create", "rename", "setattr"] {
+        let permissions = resolve(&format!(
+            r#"
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ (resource.path == "/work" || resource.path like "/work/*")
+  && context.input.operation == SecCore::WriteOperation::"{operation}" }};
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ context.input.operation == SecCore::WriteOperation::"delete" }};
+"#
+        ));
+        assert!(allows(&permissions, "/work/report", FileRight::Write));
+        assert!(allows(&permissions, "/work/report", FileRight::Read));
+        assert!(!allows(&permissions, "/other", FileRight::Write));
+    }
+}
+
+#[test]
+fn program_predicates_project_to_process_tree_reads_without_adding_program_paths() {
+    let permissions = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource)
+when { (resource.path == "/work" || resource.path like "/work/*")
+  && context.input.program == "/usr/bin/cat" };
+"#,
+    );
+    assert!(allows(&permissions, "/work/file", FileRight::Read));
+    assert!(!allows(&permissions, "/usr/bin/cat", FileRight::Read));
+    let forbidden = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource)
+when { context.input.program == "/usr/bin/cat" };
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { context.input.program == "/usr/bin/cat" };
+"#,
+    );
+    assert!(forbidden.filesystem.rules.is_empty());
+}
+
+#[test]
+fn explicit_denies_still_override_coarse_writes_and_network() {
+    let permissions = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.write", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"network.use", resource);
+forbid(principal, action == SecCore::Action::"network.use", resource);
+"#,
+    );
+    assert!(permissions.filesystem.rules.is_empty());
+    assert_eq!(permissions.network.mode, NetworkMode::Off);
+    assert_eq!(
+        resolve(r#"permit(principal, action == SecCore::Action::"network.use", resource);"#)
+            .network
+            .mode,
+        NetworkMode::Full
+    );
+    assert!(
+        resolve(r#"forbid(principal, action == SecCore::Action::"file.write", resource);"#)
+            .filesystem
+            .rules
+            .is_empty()
+    );
+}
+
+#[test]
+fn complement_forbids_do_not_turn_into_root_denies_over_explicit_grants() {
+    let permissions = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+unless { resource.path == "/work" || resource.path like "/work/*" };
+"#,
+    );
+    assert!(allows(&permissions, "/work/file", FileRight::Read));
+    assert!(!allows(&permissions, "/outside", FileRight::Read));
+}
+
+#[test]
+fn point_file_grants_do_not_become_directory_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file");
+    std::fs::write(&path, "content").unwrap();
+    let policy = |path: &std::path::Path| {
+        format!(
+            "permit(principal, action == SecCore::Action::\"file.read\", resource) when {{ resource.path == {} }};",
+            serde_json::to_string(path.to_str().unwrap()).unwrap()
+        )
+    };
+    let input = PermissionInput::parse(&policy(&path)).unwrap();
+    let permissions = input.resolve(&launch()).unwrap();
+    assert_eq!(permissions.filesystem.rules.len(), 1);
+    assert_eq!(permissions.filesystem.rules[0].path, path.to_str().unwrap());
+    // Replacing the file before path capture must not turn its grant into a subtree grant.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let facts = asc_pep_runtime::prepare_path_facts(&launch(), &permissions, &[]).unwrap();
+    assert!(
+        input
+            .validate_path_facts(&launch(), &permissions, &facts)
+            .is_err()
+    );
+    assert!(
+        PermissionInput::parse(&policy(dir.path()))
+            .unwrap()
+            .resolve(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn missing_create_targets_request_the_existing_parent_without_creating_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().canonicalize().unwrap();
+    let first = parent.join("first");
+    let second = parent.join("second");
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ [{} , {}].contains(resource.path)
+    && context.input.operation == SecCore::WriteOperation::"create" }};"#,
+        json!(first),
+        json!(second),
+    ))
+    .unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    assert_eq!(input.resolve(&launch()).unwrap(), bound.permissions);
+    assert!(
+        bound
+            .permissions
+            .filesystem
+            .rules
+            .iter()
+            .all(|rule| rule.path == parent.to_str().unwrap())
+    );
+    for path in [&first, &second, &parent.join("sibling/nested")] {
+        assert!(allows(
+            &bound.permissions,
+            path.to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(allows(
+            &bound.permissions,
+            path.to_str().unwrap(),
+            FileRight::Read
+        ));
+    }
+    assert!(!allows(
+        &bound.permissions,
+        parent.parent().unwrap().to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!first.exists() && !second.exists());
+    let mut json_permissions = bound.permissions.clone();
+    for rule in &mut json_permissions.filesystem.rules {
+        rule.path = first.to_str().unwrap().to_owned();
+    }
+    assert!(
+        PermissionInput::parse(&serde_json::to_string(&json_permissions).unwrap())
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == parent.to_str().unwrap() && fact.is_directory)
+    );
+    assert!(
+        !bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == first.to_str().unwrap()
+                || fact.path == second.to_str().unwrap())
+    );
+    // The directory grant is not an exclusive-create contract for the original name.
+    std::fs::write(&first, "created after preparation").unwrap();
+    input
+        .validate_path_facts(&launch(), &bound.permissions, &bound.path_facts)
+        .unwrap();
+    let existing = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(first),
+    ))
+    .unwrap()
+    .prepare(&launch())
+    .unwrap();
+    assert!(allows(
+        &existing.permissions,
+        first.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        &existing.permissions,
+        second.to_str().unwrap(),
+        FileRight::Write
+    ));
+}
+
+#[test]
+fn existing_directory_write_covers_explicit_missing_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("work");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    for root in [&real, &alias] {
+        let output = root.join("a/b/new");
+        let candidate = format!(
+            r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ [{}, {}, {}, {}].contains(resource.path) }};"#,
+            json!(root.join("new")),
+            json!(root.join("a")),
+            json!(root.join("a/b")),
+            json!(output),
+        );
+        let runtime = format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ (resource.path == {} || resource.path like {})
+    && context.input.operation == SecCore::WriteOperation::"write" }};
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ context.input.operation == SecCore::WriteOperation::"create" }};"#,
+            json!(root),
+            json!(format!("{}/*", root.display())),
+        );
+        let input = PermissionInput::parse(&candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&runtime).unwrap())
+            .unwrap();
+        let bound = input.prepare(&launch()).unwrap();
+        assert!(
+            bound
+                .permissions
+                .filesystem
+                .rules
+                .iter()
+                .all(|rule| rule.path == real.to_str().unwrap())
+        );
+        assert!(allows(
+            &bound.permissions,
+            real.join("a/b/new").to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(!allows(
+            &bound.permissions,
+            dir.path().to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(
+            bound
+                .path_facts
+                .iter()
+                .all(|fact| std::path::Path::new(&fact.path).exists())
+        );
+        assert!(!real.join("a").exists());
+        std::fs::create_dir_all(real.join("a/b")).unwrap();
+        std::fs::write(real.join("a/b/new"), "created after preparation").unwrap();
+        input
+            .validate_path_facts(&launch(), &bound.permissions, &bound.path_facts)
+            .unwrap();
+        std::fs::remove_dir_all(real.join("a")).unwrap();
+        // Whole-subtree exclusions must not be dropped just because the objects are missing.
+        let deny = format!(
+            r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(real.join("a")),
+            json!(format!("{}/a/*", real.display())),
+        );
+        assert!(
+            PermissionInput::parse(&format!("{candidate}{runtime}{deny}"))
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    // An absent suffix must not hide an existing dangling symlink from path binding.
+    std::os::unix::fs::symlink(dir.path().join("absent"), real.join("a")).unwrap();
+    let source = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};
+permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(real),
+        json!(format!("{}/*", real.display())),
+        json!(real.join("a/b/new")),
+    );
+    assert!(
+        PermissionInput::parse(&source)
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn missing_parents_without_covering_write_report_the_target_and_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = dir.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let target = dir.path().join("a/b/new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(target),
+    );
+    for extra in [
+        String::new(),
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);"#.into(),
+        format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(other),
+            json!(format!("{}/*", other.display()))
+        ),
+    ] {
+        let input = PermissionInput::parse(&format!("{create}{extra}")).unwrap();
+        let errors = [
+            input.prepare(&launch()).unwrap_err().to_string(),
+            input.resolve(&launch()).unwrap_err().to_string(),
+        ];
+        for error in errors {
+            assert!(error.contains(target.to_str().unwrap()), "{error}");
+            assert!(
+                error.contains(target.parent().unwrap().to_str().unwrap()),
+                "{error}"
+            );
+            assert!(
+                error.contains("no existing writable ancestor covers the target"),
+                "{error}"
+            );
+            assert!(
+                error.contains("grant write access to an existing ancestor directory"),
+                "{error}"
+            );
+        }
+        assert!(!dir.path().join("a").exists());
+    }
+}
+
+#[test]
+fn uncovered_missing_paths_require_create_and_an_existing_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path),
+    );
+    for restricted in [
+        create.replace("file.write", "file.read"),
+        format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} && context.input.operation == SecCore::WriteOperation::"write" }};"#,
+            json!(path),
+        ),
+    ] {
+        assert!(
+            PermissionInput::parse(&restricted)
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    let forbid = r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when { context.input.operation == SecCore::WriteOperation::"create" };"#;
+    let merged = PermissionInput::parse(&create)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(forbid).unwrap())
+        .unwrap();
+    assert!(merged.prepare(&launch()).is_err());
+    assert!(!path.exists());
+    for target in [dir.path().join("absent/child"), path.clone()] {
+        if target == path {
+            std::os::unix::fs::symlink(dir.path().join("absent"), &path).unwrap();
+        }
+        let input = PermissionInput::parse(&format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+            json!(target),
+        ))
+        .unwrap();
+        assert!(input.prepare(&launch()).is_err());
+    }
+}
+
+#[test]
+fn creation_widening_preserves_exclusions_and_rejects_parent_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let sibling = dir.path().join("protected");
+    std::fs::write(&sibling, "protected").unwrap();
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path),
+    );
+    let deny_sibling = format!(
+        r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(sibling),
+    );
+    let bound = PermissionInput::parse(&format!("{create}{deny_sibling}"))
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(allows(
+        &bound.permissions,
+        path.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        &bound.permissions,
+        sibling.to_str().unwrap(),
+        FileRight::Write
+    ));
+    for forbidden in [
+        format!("resource.path != {}", json!(path)),
+        format!(
+            "resource.path == {} || resource.path like {}",
+            json!(dir.path()),
+            json!(format!("{}/*", dir.path().display()))
+        ),
+    ] {
+        let source = format!(
+            r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource) when {{ {forbidden} }};"#
+        );
+        assert!(
+            PermissionInput::parse(&source)
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    // Keep the established coarse mapping: a delete-only forbid is not a write deny.
+    let source = format!(
+        r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ context.input.operation == SecCore::WriteOperation::"delete" }};"#
+    );
+    assert!(
+        PermissionInput::parse(&source)
+            .unwrap()
+            .prepare(&launch())
+            .is_ok()
+    );
+    let source = format!(
+        r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource)
+unless {{ resource.path == {} || resource.path like {} }};"#,
+        json!(dir.path()),
+        json!(format!("{}/*", dir.path().display()))
+    );
+    let bound = PermissionInput::parse(&source)
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(allows(
+        &bound.permissions,
+        path.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(&bound.permissions, "/", FileRight::Write));
+    std::fs::remove_file(&sibling).unwrap();
+    assert!(
+        PermissionInput::parse(&format!("{create}{deny_sibling}"))
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn creation_through_a_directory_alias_binds_the_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("real");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&parent).unwrap();
+    std::os::unix::fs::symlink(&parent, &alias).unwrap();
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias.join("new")),
+    ))
+    .unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    assert!(allows(
+        &bound.permissions,
+        parent.join("sibling").to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert_eq!(bound.mount_aliases, vec![alias.to_str().unwrap()]);
+    assert!(!alias.join("new").exists());
+    std::fs::rename(&parent, dir.path().join("old-parent")).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    let error = asc_pep_runtime::LinuxSandboxBackend::new(dir.path().join("unused-helper"))
+        .execute_bound(&bound)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("path identity changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unsupported_conditions_and_advice_are_not_discarded() {
+    for text in [
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path like "/work/*.txt" };"#,
+        r#"permit(principal, action == SecCore::Action::"file.write", resource) when { context.input has mode && context.input.mode == 420 };"#,
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { principal has agent_type && principal.agent_type == "cosh" };"#,
+        r#"@advice("{\"verdict\":\"escalate\"}") permit(principal, action == SecCore::Action::"file.read", resource);"#,
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path == "/work/../etc" };"#,
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path == "relative" };"#,
+        "not Cedar",
+        "",
+    ] {
+        let parsed = PermissionInput::parse(text);
+        assert!(
+            parsed.is_err() || parsed.unwrap().resolve(&launch()).is_err(),
+            "{text}"
+        );
+    }
+    assert!(PermissionInput::parse(&" ".repeat(4 * 1024 * 1024 + 1)).is_err());
+}
+
+#[test]
+fn invocation_conditions_check_only_the_initial_launch() {
+    let policy = r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.exec", resource)
+when { resource.path == "/usr/bin/true" && context.input.arg_count == 0 };
+"#;
+    let input = PermissionInput::parse(policy).unwrap();
+    assert!(input.resolve(&launch()).is_ok());
+    let mut changed = launch();
+    changed.args.push("unexpected".into());
+    assert!(input.resolve(&changed).is_err());
+}
+
+#[test]
+fn binding_preserves_alias_exclusions_before_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("key");
+    let alias = dir.path().join("alias");
+    std::fs::write(&target, "secret").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    for (allowed, forbidden) in [(&alias, &target), (&target, &alias)] {
+        let source = format!(
+            r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ [{}].contains(resource.path) }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ {} == resource.path }};"#,
+            json!(allowed),
+            json!(forbidden),
+        );
+        let input = PermissionInput::parse(&source).unwrap();
+        let bound = input.prepare(&launch()).unwrap();
+        assert!(bound.permissions.filesystem.rules.is_empty());
+        assert!(bound.mount_aliases.is_empty());
+        assert!(
+            bound
+                .path_facts
+                .iter()
+                .any(|fact| fact.path == alias.to_str().unwrap())
+        );
+        assert!(
+            bound
+                .path_facts
+                .iter()
+                .any(|fact| fact.path == target.to_str().unwrap())
+        );
+    }
+}
+
+#[test]
+fn directory_and_intermediate_links_share_canonical_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("real");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("key"), "secret").unwrap();
+    std::fs::write(target.join("public"), "public").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let source = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {alias} || resource.path like {pattern} }};
+permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {public} }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {key} }};"#,
+        alias = json!(alias),
+        pattern = json!(format!("{}/*", alias.display())),
+        key = json!(alias.join("key")),
+        public = json!(alias.join("public")),
+    );
+    let bound = PermissionInput::parse(&source)
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(allows(
+        &bound.permissions,
+        target.join("public").to_str().unwrap(),
+        FileRight::Read
+    ));
+    assert!(!allows(
+        &bound.permissions,
+        target.join("key").to_str().unwrap(),
+        FileRight::Read
+    ));
+    assert_eq!(bound.mount_aliases, vec![alias.to_str().unwrap()]);
+    assert!(
+        bound
+            .permissions
+            .filesystem
+            .rules
+            .iter()
+            .all(|rule| !rule.path.starts_with(alias.to_str().unwrap()))
+    );
+}
+
+#[test]
+fn hardlink_exclusions_are_rejected_before_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("key");
+    let alias = dir.path().join("hardlink");
+    std::fs::write(&target, "secret").unwrap();
+    std::fs::hard_link(&target, &alias).unwrap();
+    let source = format!(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias),
+        json!(target)
+    );
+    let error = PermissionInput::parse(&source)
+        .unwrap()
+        .prepare(&launch())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("hardlinked permission path"),
+        "{error}"
+    );
+}
+
+#[test]
+fn writable_ancestors_cannot_retarget_permission_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("key");
+    let alias = dir.path().join("alias");
+    std::fs::write(&target, "secret").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let source = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {root} || resource.path like {pattern} }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {alias} }};"#,
+        root = json!(dir.path()),
+        pattern = json!(format!("{}/*", dir.path().display())),
+        alias = json!(alias),
+    );
+    let error = PermissionInput::parse(&source)
+        .unwrap()
+        .prepare(&launch())
+        .unwrap_err();
+    assert!(error.to_string().contains("writable ancestor"), "{error}");
+}
+
+#[test]
+fn initial_program_and_cwd_must_match_the_captured_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("allowed");
+    let cwd = dir.path().join("cwd");
+    std::fs::copy("/usr/bin/true", &executable).unwrap();
+    std::fs::create_dir(&cwd).unwrap();
+    let prepared = asc_pep_runtime::prepare_launch(
+        executable.to_str().unwrap(),
+        vec![],
+        &cwd,
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let source = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.exec", resource)
+when {{ resource.path == {} }};
+forbid(principal, action == SecCore::Action::"file.exec", resource)
+when {{ resource.path == "/usr/bin/false" }};"#,
+        json!(executable),
+    );
+    let input = PermissionInput::parse(&source).unwrap();
+    assert!(input.prepare(&prepared).is_ok());
+    // Deliberately replace the object between launch resolution and provider preparation.
+    std::fs::remove_file(&executable).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/false", &executable).unwrap();
+    let error = input.prepare(&prepared).unwrap_err();
+    assert!(error.to_string().contains("launch path changed"), "{error}");
+    std::fs::remove_file(&executable).unwrap();
+    std::fs::copy("/usr/bin/true", &executable).unwrap();
+    std::fs::remove_dir(&cwd).unwrap();
+    std::os::unix::fs::symlink(dir.path(), &cwd).unwrap();
+    let error = input.prepare(&prepared).unwrap_err();
+    assert!(error.to_string().contains("launch path changed"), "{error}");
+}
+
+#[test]
+fn bound_alias_retargeting_is_rejected_before_helper_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    let alias = dir.path().join("alias");
+    std::fs::write(&first, "first").unwrap();
+    std::fs::write(&second, "second").unwrap();
+    std::os::unix::fs::symlink(&first, &alias).unwrap();
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when {{ resource.path == {} }};"#, json!(alias),
+    )).unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&second, &alias).unwrap();
+    let error = asc_pep_runtime::LinuxSandboxBackend::new(dir.path().join("absent-helper"))
+        .execute_bound(&bound)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("path identity changed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn program_region_and_source_budgets_apply_before_representative_evaluation() {
+    let expected =
+        resolve(r#"permit(principal, action == SecCore::Action::"file.read", resource);"#);
+    // Including the extra program class, 126 entries cost 16,256 regions; 127 cost 16,512.
+    for (count, expected_error) in [
+        (126, None),
+        (127, Some("region budget")),
+        (150, Some("region budget")),
+        (16_385, Some("source exceeds")),
+    ] {
+        let programs: Vec<_> = (0..count)
+            .map(|index| format!("/__asc_permission_input_{index}__"))
+            .collect();
+        let source = format!(
+            r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ {}.contains(context.input.program) }};"#,
+            json!(programs),
+        );
+        assert!(source.len() < 4 * 1024 * 1024);
+        let result = PermissionInput::parse(&source).unwrap().resolve(&launch());
+        if let Some(expected_error) = expected_error {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains(expected_error),
+                "{count}: {error}"
+            );
+        } else {
+            assert_eq!(result.unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn path_capture_rejects_oversized_literals_and_expansion_before_filesystem_access() {
+    let policy = |paths: &[String]| {
+        format!(
+            r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ {}.contains(resource.path) }};"#,
+            json!(paths)
+        )
+    };
+    for paths in [
+        vec![format!("/{}", "a".repeat(4095))],
+        vec!["/a".repeat(2048)],
+    ] {
+        let error = PermissionInput::parse(&policy(&paths))
+            .unwrap()
+            .prepare(&launch())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("path exceeds 4095 bytes"),
+            "{error}"
+        );
+    }
+    // Each literal is within the path limit; their distinct ancestors exceed
+    // the aggregate budget. No giant source or corresponding directories are needed.
+    let paths = [
+        format!("/one{}", "/a".repeat(2045)),
+        format!("/two{}", "/a".repeat(2045)),
+    ];
+    assert!(paths.iter().all(|path| path.len() <= 4095));
+    let error = PermissionInput::parse(&policy(&paths))
+        .unwrap()
+        .prepare(&launch())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("capture exceeds its byte budget"),
+        "{error}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+struct Client {
+    pdp: asc_pdp_runtime::PdpRuntime,
+    requests: std::cell::RefCell<Vec<OsAuthorizationRequest>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Client {
+    fn new(baseline: &str) -> Self {
+        Self {
+            pdp: asc_pdp_runtime::PdpRuntime::from_policy_set(
+                asc_policy_types::cedar::AuthorizationPolicySet {
+                    version: "test-policy-1".into(),
+                    policies: vec![asc_policy_types::cedar::AuthorizationPolicy {
+                        policy_id: asc_policy_types::identifiers::ResourceId::new("test-policy")
+                            .unwrap(),
+                        revision: asc_policy_types::identifiers::Revision::new(1).unwrap(),
+                        source: asc_policy_types::cedar::CedarPolicySource {
+                            schema: asc_policy_cedar::schema::embedded_reference(),
+                            text: baseline.replace("principal,", "principal is SecCore::Subject,"),
+                        },
+                    }],
+                },
+            )
+            .unwrap(),
+            requests: std::cell::RefCell::new(vec![]),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl asc_pep_runtime::AuthorizationClient for Client {
+    fn evaluate(
+        &self,
+        request: &OsAuthorizationRequest,
+    ) -> Result<Decision, asc_pep_runtime::PepError> {
+        self.requests.borrow_mut().push(request.clone());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.pdp
+            .evaluate(request, now)
+            .map_err(|error| asc_pep_runtime::PepError::Authorization(error.to_string()))
+    }
+
+    fn report(&self, _: &ExecutionReceipt) -> Result<ReceiptAck, asc_pep_runtime::PepError> {
+        panic!("authorization-only preparation must not report execution");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn subtree_exception_decisions_reach_the_real_backend_with_the_same_scope() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_none() {
+        return;
+    }
+    let helper = std::env::var_os("ASC_SANDBOX_HELPER").expect("built static helper");
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("sessions");
+    let current = parent.join("current");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(parent.join("secret"), "hidden").unwrap();
+    let policy = format!(
+        r#"permit(principal, action, resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} || resource.path like {} }}
+unless {{ resource.path == {} || resource.path like {} }};"#,
+        json!(parent),
+        json!(format!("{}/*", parent.display())),
+        json!(current),
+        json!(format!("{}/*", current.display())),
+    );
+    let client = Client::new(&policy);
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+        json!(current),
+        json!(format!("{}/*", current.display())),
+    ))
+    .unwrap();
+    let command = format!(
+        "set -eu; printf allowed > result; if cat '{}'; then exit 41; fi; if ls '{}'; then exit 42; fi",
+        parent.join("secret").display(),
+        parent.display(),
+    );
+    let launch = prepare_launch(
+        "/bin/sh",
+        vec!["-c".into(), command],
+        &current,
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let backend = LinuxSandboxBackend::new(helper.into());
+    let mut runtime = PepRuntime::new(backend.clone());
+    let (prepared, decision) = runtime
+        .authorize(
+            &AgentPrincipal {
+                agent_type: Some("test".into()),
+            },
+            launch,
+            &input,
+            &client,
+        )
+        .unwrap();
+    assert_eq!(
+        decision.verdict,
+        DecisionVerdict::Modify,
+        "{}",
+        decision.reason
+    );
+    let permissions = decision.effective_permissions.as_ref().unwrap();
+    assert_eq!(permissions.version, 1);
+    assert!(allows(
+        permissions,
+        current.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        permissions,
+        parent.to_str().unwrap(),
+        FileRight::Read
+    ));
+    let spec = runtime.prepare_execution(&prepared, &decision).unwrap();
+    let result = backend.execute_bound(&spec).unwrap();
+    assert!(result.installed && result.started, "{result:?}");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(current.join("result")).unwrap(),
+        "allowed"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pdp_authorizes_the_widened_creation_request_without_expanding_its_policy() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} && context.input.operation == SecCore::WriteOperation::"create" }};"#,
+        json!(path),
+    );
+    let read = r#"permit(principal, action == SecCore::Action::"file.read", resource);"#;
+    let input = PermissionInput::parse(&create)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(read).unwrap())
+        .unwrap();
+    let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(dir.path().join("unused-helper")));
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let invocation = r#"permit(principal, action in [SecCore::Action::"file.exec", SecCore::Action::"process.spawn"], resource);"#;
+    // PAP's launch-time projection accepts path scopes, not mutation-operation context.
+    let exact = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path)
+    );
+    let policies = [
+        format!("{read}{invocation}{exact}"),
+        format!(
+            r#"{read}{invocation}
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(dir.path()),
+            json!(format!("{}/*", dir.path().display()))
+        ),
+    ];
+    for (index, policy) in policies.iter().enumerate() {
+        let client = Client::new(policy);
+        let (prepared, decision) = runtime
+            .authorize(&principal, launch.clone(), &input, &client)
+            .unwrap();
+        let request = &prepared.request.context.requested_permissions;
+        assert!(allows(
+            request,
+            dir.path().to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(
+            request
+                .filesystem
+                .rules
+                .iter()
+                .all(|rule| rule.path != path.to_str().unwrap())
+        );
+        assert!(!path.exists());
+        if index == 0 {
+            assert!(
+                decision
+                    .effective_permissions
+                    .as_ref()
+                    .is_none_or(|permissions| !allows(
+                        permissions,
+                        dir.path().to_str().unwrap(),
+                        FileRight::Write
+                    ))
+            );
+        } else {
+            assert_eq!(decision.verdict, DecisionVerdict::Allow);
+            assert!(allows(
+                decision.effective_permissions.as_ref().unwrap(),
+                dir.path().to_str().unwrap(),
+                FileRight::Write
+            ));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fresh_cedar_sources_reach_the_pdp_as_permissions_and_remain_subject_to_policy() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    let dir = tempfile::tempdir().unwrap();
+    let private = dir.path().join("private");
+    std::fs::create_dir(&private).unwrap();
+    let path = serde_json::to_string(dir.path().to_str().unwrap()).unwrap();
+    let subtree = serde_json::to_string(&format!("{}/*", dir.path().display())).unwrap();
+    let source = format!(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {path} || resource.path like {subtree} }};
+"#
+    );
+    let baseline = format!(
+        r#"
+permit(principal, action, resource);
+forbid(principal, action == SecCore::Action::"network.use", resource);
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};
+"#,
+        serde_json::to_string(private.to_str().unwrap()).unwrap(),
+        serde_json::to_string(&format!("{}/*", private.display())).unwrap()
+    );
+    let client = Client::new(&baseline);
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(dir.path().join("unused-helper")));
+    let first = PermissionInput::parse(&source).unwrap();
+    let (prepared, decision) = runtime
+        .authorize(&principal, launch.clone(), &first, &client)
+        .unwrap();
+    assert_eq!(decision.verdict, DecisionVerdict::Modify);
+    assert!(allows(
+        &prepared.request.context.requested_permissions,
+        private.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        decision.effective_permissions.as_ref().unwrap(),
+        private.to_str().unwrap(),
+        FileRight::Write
+    ));
+    let second = PermissionInput::parse(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);"#,
+    )
+    .unwrap();
+    let (next, _) = runtime
+        .authorize(&principal, launch.clone(), &second, &client)
+        .unwrap();
+    assert!(!allows(
+        &next.request.context.requested_permissions,
+        dir.path().to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert_ne!(prepared.request.request_id, next.request.request_id);
+    assert_eq!(client.requests.borrow().len(), 2);
+    assert_ne!(
+        client.requests.borrow()[0].context.requested_permissions,
+        client.requests.borrow()[1].context.requested_permissions
+    );
+    assert!(
+        serde_json::to_value(&prepared.request)
+            .unwrap()
+            .get("policy")
+            .is_none()
+    );
+    let network = PermissionInput::parse(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"network.use", resource);
+"#,
+    )
+    .unwrap();
+    let (_, denied) = runtime
+        .authorize(&principal, launch, &network, &client)
+        .unwrap();
+    assert_eq!(denied.verdict, DecisionVerdict::Deny);
+    assert!(denied.reason.contains("network.use"), "{}", denied.reason);
+    assert!(denied.effective_permissions.is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dynamic_pdp_requests_use_bound_canonical_exclusions() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("real");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("key"), "secret").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let source = format!(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias.join("key"))
+    );
+    let client = Client::new("permit(principal, action, resource);");
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
+    let input = PermissionInput::parse(&source).unwrap();
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(dir.path().join("unused-helper")));
+    runtime
+        .authorize(&principal, launch.clone(), &input, &client)
+        .unwrap();
+    let requests = client.requests.borrow();
+    assert_eq!(requests.len(), 1);
+    let permissions = &requests[0].context.requested_permissions;
+    assert!(!allows(
+        permissions,
+        target.join("key").to_str().unwrap(),
+        FileRight::Read
+    ));
+    assert!(
+        permissions
+            .filesystem
+            .rules
+            .iter()
+            .any(|rule| rule.effect == RuleEffect::Deny
+                && rule.path == target.join("key").to_str().unwrap())
+    );
+    assert!(
+        permissions
+            .filesystem
+            .rules
+            .iter()
+            .all(|rule| !rule.path.starts_with(alias.to_str().unwrap()))
+    );
+    drop(requests);
+    // A separate request reproduces the originally omitted exclusion: the target
+    // has no lexical grant, but its alias does. It must never reach the PDP as allowed.
+    let source = format!(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias.join("key")),
+        json!(target.join("key"))
+    );
+    let input = PermissionInput::parse(&source).unwrap();
+    runtime
+        .authorize(&principal, launch, &input, &client)
+        .unwrap();
+    let requests = client.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert!(!allows(
+        &requests[1].context.requested_permissions,
+        target.join("key").to_str().unwrap(),
+        FileRight::Read
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let private = dir.path().join("private");
+    let cwd = dir.path().join("cwd");
+    for path in [&work, &private, &cwd] {
+        std::fs::create_dir(path).unwrap();
+    }
+    std::fs::write(private.join("key"), "secret").unwrap();
+    let helper = dir.path().join("helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\necho '{\"strict_filesystem\":true,\"noexec\":true,\"network_off\":true}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tree = |path: &std::path::Path| {
+        format!(
+            "(resource.path == {} || resource.path like {})",
+            json!(path),
+            json!(format!("{}/*", path.display()))
+        )
+    };
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let launch = prepare_launch("/usr/bin/true", vec![], &cwd, BTreeMap::new()).unwrap();
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(helper));
+    let client = Client::new("permit(principal, action, resource);");
+    for (action, right) in [
+        ("file.read", FileRight::Read),
+        ("file.write", FileRight::Write),
+    ] {
+        for exclusion in [
+            format!("resource.path == {}", json!(private)),
+            format!(
+                "resource.path like {}",
+                json!(format!("{}/*", private.display()))
+            ),
+            tree(&private),
+        ] {
+            let source = format!(
+                r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ {} || {} || {} }};
+permit(principal, action == SecCore::Action::"file.write", resource) when {{ {} }};
+forbid(principal, action == SecCore::Action::"{action}", resource) when {{ {} }};"#,
+                tree(std::path::Path::new("/usr")),
+                tree(&cwd),
+                tree(&work),
+                tree(&work),
+                exclusion
+            );
+            let envelope = json!({"language":"cedar", "content":{
+                "schema":{"schemaId":"seccore.system","revision":1}, "text":source
+            }});
+            for text in [source.clone(), envelope.to_string()] {
+                let input = PermissionInput::parse(&text).unwrap();
+                std::fs::hard_link(private.join("key"), work.join("key")).unwrap();
+                let bound = input.prepare(&launch).unwrap();
+                let error = linux_sandbox::runtime::check_mount_plan(&bound).expect_err(&source);
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                let (prepared, decision) = runtime
+                    .authorize(&principal, launch.clone(), &input, &client)
+                    .unwrap();
+                let json =
+                    PermissionInput::parse(&serde_json::to_string(&bound.permissions).unwrap())
+                        .unwrap();
+                let (json_prepared, json_decision) = runtime
+                    .authorize(&principal, launch.clone(), &json, &client)
+                    .unwrap();
+                assert_eq!(
+                    prepared.request.context.requested_permissions,
+                    json_prepared.request.context.requested_permissions
+                );
+                assert_eq!(
+                    decision.effective_permissions,
+                    json_decision.effective_permissions
+                );
+                for permissions in [
+                    &prepared.request.context.requested_permissions,
+                    decision.effective_permissions.as_ref().unwrap(),
+                ] {
+                    assert!(
+                        permissions
+                            .filesystem
+                            .rules
+                            .iter()
+                            .any(|rule| rule.effect == RuleEffect::Deny
+                                && rule.path == private.to_str().unwrap()
+                                && rule.rights.contains(&right))
+                    );
+                }
+                let error = runtime.prepare_execution(&prepared, &decision).unwrap_err();
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                std::fs::remove_file(work.join("key")).unwrap();
+                runtime.prepare_execution(&prepared, &decision).unwrap();
+                // A later hardlink must still be caught at execution preparation.
+                std::fs::hard_link(private.join("key"), work.join("key")).unwrap();
+                let error = runtime.prepare_execution(&prepared, &decision).unwrap_err();
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                let mut dropped = decision.clone();
+                dropped
+                    .effective_permissions
+                    .as_mut()
+                    .unwrap()
+                    .filesystem
+                    .rules
+                    .retain(|rule| rule.effect != RuleEffect::Deny);
+                let error = runtime.prepare_execution(&prepared, &dropped).unwrap_err();
+                assert!(
+                    error.to_string().contains("removed requested exclusion"),
+                    "{error}"
+                );
+                std::fs::remove_file(work.join("key")).unwrap();
+            }
+        }
+    }
+}

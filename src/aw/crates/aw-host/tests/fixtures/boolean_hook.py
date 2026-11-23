@@ -31,5 +31,6 @@ if scenario == "wait":
 elif scenario in {"null", '"true"', "true false", "X" * 33}:
     print(scenario)
     sys.exit(0)
-print(json.dumps(contains_12345(event["tool"]["input"])))
+payload = event["tool"]["input"] if "tool" in event else {"input": event.get("input"), "native": event["native"]}
+print(json.dumps(contains_12345(payload)))
 sys.exit(7 if scenario == "nonzero" else 0)

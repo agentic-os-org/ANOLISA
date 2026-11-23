@@ -9,6 +9,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-20
+
+### Changed
+
+- Text output from `anolisa status <component>` and
+  `anolisa adapter status [component]` points sec-core and Tokenless users
+  running through AW to
+  `aw inspect --config /path/to/aw.yaml --json` for Provider status and recent
+  executions. Adapter status also reports the recorded enable time when
+  available, as `enabled_at` in JSON output
+  ([#10377](https://github.com/agentic-os-org/ANOLISA/pull/10377)).
+- Update the component catalog to Agent Memory `0.2.16`, AgentSight `0.16.2`,
+  cosh-ng `0.30.0`, agent-sec-core `1.3.0`, SkillFS `0.5.8`, Tokenless `0.9.6`,
+  and ws-ckpt `0.7.3`.
+
+### Removed
+
+- Drop `cosh-switch` from the bundled cosh-ng install contract to match the
+  `0.30.0` packages. Remove calls to `cosh-switch` from scripts before upgrading
+  cosh-ng ([#9968](https://github.com/agentic-os-org/ANOLISA/pull/9968)).
+
+### Fixed
+
+- Use HTTPS at `mirrors-ssl.aliyuncs.com` for the shipped RPM repository so
+  metadata and package downloads use TLS. If `/etc/anolisa/repo.toml` still
+  points to the old mirror after upgrading, update its RPM URL manually
+  ([#10312](https://github.com/agentic-os-org/ANOLISA/pull/10312)).
+
+## [0.4.1] - 2026-11-12
+
+### Changed
+
+- Update the component catalog to Agent Memory `0.2.15`, cosh-ng `0.29.1`,
+  OS Skills `0.7.0`, agent-sec-core `1.2.1`, SkillFS `0.5.7`, and ws-ckpt `0.7.1`.
+
+### Fixed
+
+- Reject relocated `--prefix` values and `--install-mode user` for
+  `anolisa telemetry prepare`, including dry runs, instead of reporting a
+  prepared service that systemd cannot use. Run preparation inside the image
+  root with system scope; `--prefix /` remains accepted. The command's help no
+  longer advertises the rejected options
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951)).
+- Include telemetry action warnings in the JSON envelope's `warnings` array
+  when using `--json`, including boot guidance from
+  `anolisa telemetry prepare --no-service` and service failures from enable
+  or disable. Scripts that read these warnings from stderr must instead read
+  the JSON array; human-readable output is unchanged
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951)).
+- Quote and escape executable paths in generated telemetry systemd units so
+  paths containing spaces, quotes, backslashes, or percent signs reach the
+  correct binary. Reject non-UTF-8 executable paths instead of writing an
+  unusable unit. Existing units are not rewritten automatically: rerun
+  `anolisa telemetry prepare` during image preparation or
+  `anolisa telemetry enable` on hosts where collection is intended
+  ([#9952](https://github.com/agentic-os-org/ANOLISA/pull/9952)).
+
+## [0.4.0] - 2026-11-08
+
+### Added
+
+- Add the internal `anolisa telemetry prepare` command for image builds. It
+  prepares telemetry files and enables the resident systemd unit for the next
+  boot without starting collection or recording the build host's instance
+  snapshot. Applying it requires root and system scope; an existing opt-out
+  marker or service setup failure stops preparation. Use `--no-service` to skip
+  unit setup, then run `anolisa telemetry init` at boot before
+  `anolisa telemetry upload --loop`. Existing RPM and image-build flows are not
+  switched to this command automatically
+  ([#9412](https://github.com/agentic-os-org/ANOLISA/pull/9412)).
+
+### Changed
+
+- Show a component installation and adapter connection quick start in
+  `anolisa --help`. `anolisa adapter --help` now explains prerequisites,
+  discovery, enablement, status checks, and verification in the agent framework
+  ([#9661](https://github.com/agentic-os-org/ANOLISA/pull/9661)).
+- Update the component catalog to AgentSight `0.16.0`, cosh-ng `0.29.0`,
+  agent-sec-core `1.2.0`, SkillFS `0.5.6`, Tokenless `0.9.4`, and ws-ckpt `0.7.0`.
+- Update bundled installation contracts to record cosh-ng resource locations
+  for the selected layout and include Tokenless's host dispatcher and adapter
+  resources. Tokenless's contract no longer installs a separate `rtk` executable
+  or symlink; current Tokenless packages provide it through `tokenless rtk`.
+
+### Fixed
+
+- Stop reporting that command rewriting is unavailable when enabling the
+  QwenWork adapter without a separate RTK executable. Current Tokenless uses
+  `tokenless rtk`; Tokenless `0.9.2` and earlier still require their separate
+  executable, whose absence is no longer reported by this preflight check
+  ([#9454](https://github.com/agentic-os-org/ANOLISA/pull/9454)).
+
+## [0.3.21] - 2026-11-02
+
+### Added
+
+- Activate managed cosh extensions through cosh's native registry when running
+  `anolisa adapter enable <component> cosh`. Status verifies the selected user
+  source and enabled state; disable releases only the matching source selection
+  and preserves system extensions and user-edited files. Use a cosh-ng build
+  supporting conditional source cleanup and restart existing cosh sessions after
+  enable or disable; resident-session loading remains `unknown`
+  ([#9352](https://github.com/agentic-os-org/ANOLISA/pull/9352)).
+
+### Changed
+
+- Ship component discovery and integration contracts with ANOLISA in RPM,
+  prebuilt archives, npm platform packages, and installer data bundles. RPM
+  install and adopt retain these contracts for adapter management and recognize
+  standalone core packages. Keep the CLI's `bin/` and `share/` directories
+  together when moving an installation. For RPM upgrades, upgrade ANOLISA and
+  all installed older component packages that own the registry files together
+  in a single DNF/Yum transaction. The enabled repositories must provide the
+  compatible CLI, component packages, and required subpackages at the same time.
+  Rollback requires matching component packages and registry data
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Render Agent Memory MCP command paths for the selected installation layout,
+  including paths containing quotes or backslashes, while preserving other JSON
+  fields. Agent Memory `0.2.13` raw packages require ANOLISA `0.3.21` or later
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Update the component catalog to Agent Memory `0.2.13`, AgentSight `0.15.1`,
+  cosh-ng `0.28.1`, OS Skills `0.6.4`, agent-sec-core `1.1.2`, SkillFS `0.5.5`,
+  Tokenless `0.9.2`, and ws-ckpt `0.6.1`.
+
+### Fixed
+
+- Preserve ANOLISA's component discovery files during raw installation,
+  update, rollback, repair, and uninstall. Existing archives can install beside
+  the registry, and obsolete ownership records no longer treat registry changes
+  as component damage or delete the registry during cleanup. This also applies
+  when recovering quarantined records. New raw packages that omit registry
+  installation require ANOLISA `0.3.21` or later
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
+
+## [0.3.20] - 2026-10-29
+
+### Added
+
+- Add `--no-deps` to `anolisa install` for raw artifacts, including `--all`,
+  so users who manage runtime dependencies separately can skip their checks
+  and installation. Successful installs print a reminder to stderr unless
+  `--quiet` is set; batch installs print it once when any component was
+  installed. RPM rejects this option, and default dependency handling remains
+  unchanged ([#9126](https://github.com/agentic-os-org/ANOLISA/pull/9126)).
+
+### Changed
+
+- Update the component catalog to Agent Memory `0.2.11`, AgentSight `0.15.0`,
+  SkillFS `0.5.4`, and Tokenless `0.9.0`.
+
+### Fixed
+
+- Explain how to recover when adapter status or disable, including dry-run,
+  rejects a path outside the allowed framework directories. Human and JSON
+  errors now advise checking framework directory configuration and ancestor
+  symlinks, and restoring the original directory if it was redirected.
+  Boundary checks, retained installation records, and exit codes are unchanged
+  ([#9220](https://github.com/agentic-os-org/ANOLISA/pull/9220)).
+
 ## [0.3.19] - 2026-10-25
 
 ### Changed

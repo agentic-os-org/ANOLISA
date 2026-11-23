@@ -5,6 +5,10 @@ use super::readonly::{parse_disabled_rules, parse_runtime_spec, string_array};
 use super::{CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
 use crate::types::CoshApprovalMode;
 
+#[cfg(test)]
+#[path = "parse_health_tests.rs"]
+mod health_tests;
+
 pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
     // `[logging].level` is the authoritative log-level key shared with
     // cosh-core; the legacy `[ui].log_level` fallback applies only while it
@@ -53,6 +57,27 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 }
                 "health.memory_sensitive" => {
                     config.health.memory_sensitive = parse_bool_value(value);
+                }
+                "health.pressure_notices" => {
+                    config.health.pressure_notices = parse_bool_value(value);
+                }
+                "health.network_capacity_notices" => {
+                    config.health.network_capacity_notices = parse_bool_value(value);
+                }
+                "health.fs_event_notices" => {
+                    config.health.fs_event_notices = parse_bool_value(value);
+                }
+                "health.host_event_notices" => {
+                    config.health.host_event_notices = parse_bool_value(value);
+                }
+                "health.maintenance.enabled" => {
+                    config.health.maintenance.enabled = parse_bool_value(value);
+                }
+                "health.maintenance.reason" => {
+                    config.health.maintenance.reason = value.to_string();
+                }
+                "health.maintenance.until_epoch_seconds" => {
+                    config.health.maintenance.until_epoch_seconds = value.parse().ok();
                 }
                 "health.verbose" => config.health.verbose = parse_bool_value(value),
                 _ => {}
@@ -225,7 +250,7 @@ fn parse_readonly_table(
     }
 }
 
-fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
+pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     let Some(health) = value.get("health").and_then(toml::Value::as_table) else {
         return;
     };
@@ -242,6 +267,30 @@ fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     {
         config.health.memory_sensitive = memory_sensitive;
     }
+    if let Some(pressure_notices) = health
+        .get("pressure_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.pressure_notices = pressure_notices;
+    }
+    if let Some(network_capacity_notices) = health
+        .get("network_capacity_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.network_capacity_notices = network_capacity_notices;
+    }
+    if let Some(fs_event_notices) = health
+        .get("fs_event_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.fs_event_notices = fs_event_notices;
+    }
+    if let Some(host_event_notices) = health
+        .get("host_event_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.host_event_notices = host_event_notices;
+    }
     if let Some(verbose) = health.get("verbose").and_then(toml::Value::as_bool) {
         config.health.verbose = verbose;
     }
@@ -256,11 +305,59 @@ fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
             }
         }
     }
+    if let Some(mounts) = health.get("scan_mounts") {
+        if let Ok(mounts) = string_array(mounts, "health.scan_mounts") {
+            config.health.scan_mounts = Some(
+                mounts
+                    .into_iter()
+                    .filter(|mount| !mount.trim().is_empty())
+                    .collect(),
+            );
+        }
+    }
+    if let Some(mounts) = health.get("expected_writable_mounts") {
+        if let Ok(mounts) = string_array(mounts, "health.expected_writable_mounts") {
+            config.health.expected_writable_mounts = mounts
+                .into_iter()
+                .filter(|mount| !mount.trim().is_empty())
+                .collect();
+        }
+    }
+    if let Some(checks) = health.get("checks").and_then(toml::Value::as_table) {
+        for (id, enabled) in checks {
+            if let Some(enabled) = enabled.as_bool() {
+                config.health.checks.insert(id.clone(), enabled);
+            }
+        }
+    }
+    if let Some(policies) = health.get("policies").and_then(toml::Value::as_table) {
+        for (context, policy) in policies {
+            if let Some(disabled) = policy.get("disable") {
+                if let Ok(disabled) = string_array(disabled, "health.policies.disable") {
+                    config.health.policies.insert(context.clone(), disabled);
+                }
+            }
+        }
+    }
     if let Some(services) = health.get("services").and_then(toml::Value::as_array) {
         config.health.services = services
             .iter()
             .filter_map(parse_health_service)
             .collect::<Vec<_>>();
+    }
+    if let Some(maintenance) = health.get("maintenance").and_then(toml::Value::as_table) {
+        if let Some(enabled) = maintenance.get("enabled").and_then(toml::Value::as_bool) {
+            config.health.maintenance.enabled = enabled;
+        }
+        if let Some(reason) = maintenance.get("reason").and_then(toml::Value::as_str) {
+            config.health.maintenance.reason = reason.to_string();
+        }
+        if let Some(until) = maintenance
+            .get("until_epoch_seconds")
+            .and_then(toml::Value::as_integer)
+        {
+            config.health.maintenance.until_epoch_seconds = u64::try_from(until).ok();
+        }
     }
 }
 
@@ -278,6 +375,11 @@ fn parse_health_service(value: &toml::Value) -> Option<HealthServiceConfig> {
     Some(HealthServiceConfig {
         name: name.to_string(),
         expected,
+        activation: table
+            .get("activation")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("persistent")
+            .to_string(),
     })
 }
 

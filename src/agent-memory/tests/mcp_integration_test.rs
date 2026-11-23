@@ -25,6 +25,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mem_session_log",
     "memory_search",
     "memory_observe",
+    "memory_capture",
     "memory_get_context",
     "memory_sessions",
     "memory_timeline",
@@ -148,6 +149,131 @@ fn extract_text(resp: &Value) -> String {
 }
 
 #[tokio::test]
+async fn import_overwrite_replaces_markdown_file_ancestors_with_directories() {
+    let source = tempfile::tempdir().unwrap();
+    let (mut source_child, mut source_reader, mut source_stdin) =
+        spawn_with_dir(source.path()).await;
+    handshake(&mut source_reader, &mut source_stdin).await;
+    let source_root = source.path().join("user-tester");
+    for path in ["notes/old.md/new.md", "tasks/old.md/deep/new.md"] {
+        let file = source_root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "NEW\n").unwrap();
+    }
+    let exported = call_tool(
+        &mut source_reader,
+        &mut source_stdin,
+        2,
+        "mem_export",
+        json!({}),
+    )
+    .await;
+    source_child.kill().await.unwrap();
+    source_child.wait().await.unwrap();
+    assert_ne!(exported["result"]["isError"], true, "{exported}");
+
+    let target = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(target.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let root = target.path().join("user-tester");
+    for path in ["notes/old.md", "tasks/old.md", "notes/keep.md"] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "ORIGINAL\n").unwrap();
+    }
+    let preview = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_import",
+        json!({
+            "json_data": extract_text(&exported), "strategy": "overwrite", "dry_run": true
+        }),
+    )
+    .await;
+    let old_after_preview = std::fs::read(root.join("notes/old.md"));
+    let imported = call_tool(
+        &mut reader,
+        &mut stdin,
+        3,
+        "mem_import",
+        json!({"json_data": extract_text(&exported), "strategy": "overwrite"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+
+    assert!(extract_text(&preview).contains("0 errors"), "{preview}");
+    assert_eq!(old_after_preview.unwrap(), b"ORIGINAL\n");
+    let text = extract_text(&imported);
+    assert!(text.contains("3 imported"), "{imported}");
+    assert!(text.contains("0 errors"), "{imported}");
+    assert!(text.contains("Backup:"), "{imported}");
+    for path in ["notes/old.md/new.md", "tasks/old.md/deep/new.md"] {
+        assert_eq!(std::fs::read(root.join(path)).unwrap(), b"NEW\n");
+    }
+    assert!(!root.join("notes/keep.md").exists());
+}
+
+#[tokio::test]
+async fn import_overwrite_preserves_old_memories_on_invalid_tasks_and_backup_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let root = tmp.path().join("user-tester");
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join("notes/keep.md"), "ORIGINAL\n").unwrap();
+    let mut archive = json!({
+        "version": "1.0", "format": "anolisa-memory-archive",
+        "exported_at": "2026-11-11T00:00:00Z", "agent_id": "tester", "user_id": "tester",
+        "total_memories": 2,
+        "memories": [{"path": "notes/legal.md", "frontmatter": {}, "content": "NEW\n"}],
+        "tasks": [{"path": "../escape.md", "frontmatter": {}, "content": "invalid"}],
+        "stats": {"by_category": {}, "by_source": {}, "total_bytes": 0}
+    });
+    let mixed = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_import",
+        json!({"json_data": archive.to_string(), "strategy": "overwrite"}),
+    )
+    .await;
+    let original_after_mixed = std::fs::read(root.join("notes/keep.md"));
+    let legal_after_mixed = std::fs::read(root.join("notes/legal.md"));
+
+    archive["tasks"] = json!([]);
+    archive["total_memories"] = json!(1);
+    std::fs::write(root.join("notes/invalid-utf8.md"), b"\xff").unwrap();
+    let failed_backup = call_tool(
+        &mut reader,
+        &mut stdin,
+        3,
+        "mem_import",
+        json!({"json_data": archive.to_string(), "strategy": "overwrite"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+
+    let text = extract_text(&mixed);
+    assert!(text.contains("1 imported"), "{text}");
+    assert!(text.contains("1 errors"), "{text}");
+    assert!(text.contains("../escape.md"), "{text}");
+    assert_eq!(original_after_mixed.unwrap(), b"ORIGINAL\n");
+    assert_eq!(legal_after_mixed.unwrap(), b"NEW\n");
+    assert_eq!(failed_backup["result"]["isError"], true, "{failed_backup}");
+    assert!(extract_text(&failed_backup).contains("backup"));
+    assert_eq!(
+        std::fs::read(root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert_eq!(
+        std::fs::read(root.join("notes/invalid-utf8.md")).unwrap(),
+        b"\xff"
+    );
+}
+
+#[tokio::test]
 async fn lists_ten_tier_a_tools() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
@@ -177,6 +303,143 @@ async fn lists_ten_tier_a_tools() {
 
     drop(stdin);
     let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn grep_returns_matches_after_invalid_utf8_over_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let notes = tmp.path().join("user-tester/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        notes.join("mixed.md"),
+        b"alpha first\n\xff\xfe alpha bad\nomega last\n",
+    )
+    .unwrap();
+
+    let resp = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_grep",
+        json!({"pattern": "alpha|omega", "dir": "notes"}),
+    )
+    .await;
+    drop(stdin);
+    let _ = child.kill().await;
+
+    assert_ne!(resp["result"]["isError"], true, "{resp}");
+    let hits: Value = serde_json::from_str(&extract_text(&resp)).unwrap();
+    assert_eq!(
+        hits,
+        json!([
+            {"path": "notes/mixed.md", "line": 1, "text": "alpha first"},
+            {"path": "notes/mixed.md", "line": 3, "text": "omega last"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn search_reports_index_failure_and_recovers_without_file_changes() {
+    for startup in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+        handshake(&mut reader, &mut stdin).await;
+        let mount = tmp.path().join("user-tester");
+        let conn = rusqlite::Connection::open(mount.join(".anolisa/index/bm25.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_note BEFORE INSERT ON files
+             WHEN NEW.path = 'missed.md'
+             BEGIN SELECT RAISE(ABORT, 'controlled index failure'); END;",
+        )
+        .unwrap();
+        if startup {
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+        }
+        std::fs::write(mount.join("missed.md"), "quartzretry").unwrap();
+        if startup {
+            (child, reader, stdin) = spawn_with_dir(tmp.path()).await;
+            handshake(&mut reader, &mut stdin).await;
+        }
+
+        let mut id = 10;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            id += 1;
+            let response = call_tool(
+                &mut reader,
+                &mut stdin,
+                id,
+                "memory_search",
+                json!({"query": "quartzretry", "mode": "bm25"}),
+            )
+            .await;
+            if response["result"]["isError"] == true {
+                let text = extract_text(&response);
+                assert!(text.contains("index is incomplete"), "{response}");
+                assert!(text.contains("mem_grep"), "{response}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "failure was hidden: {response}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The first retry must not clear the incomplete signal while the file still fails.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        id += 1;
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            id,
+            "memory_search",
+            json!({"query": "quartzretry", "mode": "hybrid"}),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        id += 1;
+        let read = call_tool(
+            &mut reader,
+            &mut stdin,
+            id,
+            "mem_read",
+            json!({"path": "missed.md"}),
+        )
+        .await;
+        assert_ne!(read["result"]["isError"], true, "{read}");
+        assert!(extract_text(&read).contains("quartzretry"));
+
+        // Changing the internal DB does not generate a watched filesystem event.
+        conn.execute_batch("DROP TRIGGER fail_note").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            id += 1;
+            let response = call_tool(
+                &mut reader,
+                &mut stdin,
+                id,
+                "memory_search",
+                json!({"query": "quartzretry", "mode": "bm25"}),
+            )
+            .await;
+            if response["result"]["isError"] != true {
+                let hits: Value = serde_json::from_str(&extract_text(&response)).unwrap();
+                assert_eq!(hits[0]["path"], "missed.md", "{response}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "retry did not recover: {response}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -294,6 +557,12 @@ async fn edit_and_diff_workflow() {
     assert!(text.contains("--- v1.md"));
     assert!(text.contains("+++ v2.md"));
     assert!(text.contains("body: b"));
+    let patch =
+        diffy::Patch::from_str(&text).expect("MCP mem_diff must return a valid unified patch");
+    assert_eq!(
+        diffy::apply("title: hello\nbody: a", &patch).unwrap(),
+        "title: hello\nbody: b"
+    );
 
     drop(stdin);
     let _ = child.kill().await;
@@ -470,6 +739,84 @@ async fn spawn_with_env(
     let stdin = child.stdin.take().unwrap();
     let reader = BufReader::new(stdout).lines();
     (child, reader, stdin)
+}
+
+#[tokio::test]
+async fn literal_search_recalls_saved_filenames_via_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let saved = call_tool(
+        &mut reader,
+        &mut stdin,
+        100,
+        "mem_write",
+        json!({
+            "path": "notes/deployment.md",
+            "content": "deploymentmarker config.toml example.com v1.2.3 NOT NULL"
+        }),
+    )
+    .await;
+
+    // Wait for a plain keyword to prove the file is indexed before testing
+    // syntax-sensitive text. This separates query failures from watcher lag.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut request_id = 101;
+    let indexed = loop {
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            request_id,
+            "memory_search",
+            json!({"query": "deploymentmarker", "top_k": 5}),
+        )
+        .await;
+        request_id += 1;
+        if extract_text(&response).contains("notes/deployment.md") {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut responses = Vec::new();
+    for query in [
+        "config.toml",
+        "example.com",
+        "v1.2.3",
+        "deploymentmarker NOT",
+    ] {
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            request_id,
+            "memory_search",
+            json!({"query": query, "top_k": 5}),
+        )
+        .await;
+        request_id += 1;
+        responses.push((query, response));
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    assert!(extract_text(&saved).contains("wrote"), "{saved}");
+    assert!(indexed, "control keyword must confirm indexing completed");
+    for (query, response) in responses {
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let hits: Value = serde_json::from_str(&extract_text(&response)).unwrap();
+        // The server also indexes a seeded README, whose wording may match.
+        // Exact result sets and all-terms precedence are covered by store tests.
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["path"] == "notes/deployment.md"),
+            "query {query:?} must recall the saved note: {response}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -761,4 +1108,180 @@ async fn mem_export_returns_ama_json() {
 
     drop(stdin);
     let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn auto_capture_consent_changes_apply_to_the_same_mcp_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let consent = call_tool(
+        &mut reader,
+        &mut stdin,
+        900,
+        "memory_consent",
+        json!({"action": "deny", "scope": "capture"}),
+    )
+    .await;
+    assert!(extract_text(&consent).contains("deny"));
+    let denied = call_tool(
+        &mut reader,
+        &mut stdin,
+        901,
+        "memory_capture",
+        json!({"content": "Important automatic preference"}),
+    )
+    .await;
+    assert_eq!(
+        extract_text(&denied),
+        "automatic capture skipped by consent"
+    );
+    let consent = call_tool(
+        &mut reader,
+        &mut stdin,
+        902,
+        "memory_consent",
+        json!({"action": "allow", "scope": "capture"}),
+    )
+    .await;
+    assert!(extract_text(&consent).contains("allow"));
+    let allowed = call_tool(
+        &mut reader,
+        &mut stdin,
+        903,
+        "memory_capture",
+        json!({"content": "Important automatic preference", "type": "feedback"}),
+    )
+    .await;
+    let text = extract_text(&allowed);
+    let path = text
+        .strip_prefix("observed at ")
+        .expect("capture should create a note");
+    let read = call_tool(
+        &mut reader,
+        &mut stdin,
+        904,
+        "mem_read",
+        json!({"path": path}),
+    )
+    .await;
+    assert!(extract_text(&read).contains("source: auto-capture"));
+    assert!(extract_text(&read).contains("type: feedback"));
+    let consent = call_tool(
+        &mut reader,
+        &mut stdin,
+        905,
+        "memory_consent",
+        json!({"action": "deny", "scope": "all"}),
+    )
+    .await;
+    assert!(extract_text(&consent).contains("deny"));
+    let denied = call_tool(
+        &mut reader,
+        &mut stdin,
+        906,
+        "memory_capture",
+        json!({"content": "Another automatic preference"}),
+    )
+    .await;
+    assert_eq!(
+        extract_text(&denied),
+        "automatic capture skipped by consent"
+    );
+    let manual = call_tool(
+        &mut reader,
+        &mut stdin,
+        907,
+        "memory_observe",
+        json!({"content": "Explicit manual preference"}),
+    )
+    .await;
+    assert!(extract_text(&manual).starts_with("observed at "));
+    child.kill().await.unwrap();
+}
+
+async fn assert_capture_rejects_consent_file(content: Option<&str>, external_symlink: bool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let root = tmp.path().join("user-tester");
+    let consent = root.join(".anolisa/consent.toml");
+    if external_symlink {
+        let target = external.path().join("external-consent.toml");
+        if let Some(content) = content {
+            std::fs::write(&target, content).unwrap();
+        }
+        std::os::unix::fs::symlink(target, consent).unwrap();
+    } else {
+        std::fs::write(consent, content.unwrap()).unwrap();
+    }
+    let response = call_tool(
+        &mut reader,
+        &mut stdin,
+        910,
+        "memory_capture",
+        json!({"content": "An automatic observation that must not be written"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(
+        !root.join("notes/observed").exists(),
+        "rejected capture must not create an observation"
+    );
+    assert!(
+        !response.to_string().contains("SYNTHETIC_CONSENT_MARKER"),
+        "consent diagnostics must not echo source content"
+    );
+}
+
+#[tokio::test]
+async fn auto_capture_rejects_external_consent_symlink_without_echoing_contents() {
+    assert_capture_rejects_consent_file(Some("SYNTHETIC_CONSENT_MARKER"), true).await;
+}
+
+#[tokio::test]
+async fn auto_capture_rejects_symlink_even_when_external_consent_allows() {
+    assert_capture_rejects_consent_file(Some("auto_capture = \"allow\""), true).await;
+}
+
+#[tokio::test]
+async fn auto_capture_rejects_dangling_consent_symlink() {
+    assert_capture_rejects_consent_file(None, true).await;
+}
+
+#[tokio::test]
+async fn auto_capture_rejects_malformed_consent_without_echoing_contents() {
+    assert_capture_rejects_consent_file(Some("auto_capture = \"SYNTHETIC_CONSENT_MARKER\""), false)
+        .await;
+}
+
+#[tokio::test]
+async fn auto_capture_defaults_to_allow_when_consent_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    assert!(
+        !tmp.path()
+            .join("user-tester/.anolisa/consent.toml")
+            .exists()
+    );
+    let response = call_tool(
+        &mut reader,
+        &mut stdin,
+        911,
+        "memory_capture",
+        json!({"content": "An automatic observation with default consent"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+
+    let text = extract_text(&response);
+    let path = text
+        .strip_prefix("observed at ")
+        .expect("missing consent must retain default allow");
+    let note = std::fs::read_to_string(tmp.path().join("user-tester").join(path)).unwrap();
+    assert!(note.contains("source: auto-capture"));
 }

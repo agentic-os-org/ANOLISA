@@ -1,6 +1,6 @@
 [package]
 name = "aw-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Unified AW command-line entrypoint"
@@ -16,6 +16,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 aw-adapter = { workspace = true }
 aw-config = { workspace = true }
+aw-core = { workspace = true }
 aw-exec = { workspace = true }
 aw-host = { workspace = true }
 aw-package = { workspace = true }

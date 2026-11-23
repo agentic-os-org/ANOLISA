@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::fs;
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -94,6 +96,7 @@ impl TestEnforcer {
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         }
     }
 
@@ -195,6 +198,7 @@ impl ControlledEnforcer {
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         }
     }
 
@@ -528,6 +532,7 @@ fn handle_controlled_connection(
                     policy_revision: policy.revision.to_string(),
                     policy_dsl: String::new(),
                     policy_mode: Some(policy.mode),
+                    file_protection_policy: None,
                 },
                 state: BindingState::Enforced,
                 message: None,
@@ -578,6 +583,7 @@ fn handle_controlled_connection(
                     policy_revision: request.policy.revision.to_string(),
                     policy_dsl: String::new(),
                     policy_mode: Some(request.policy.mode),
+                    file_protection_policy: None,
                 },
             };
             let target = Binding {

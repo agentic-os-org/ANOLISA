@@ -41,9 +41,32 @@ SkillFS。
 # 推荐包安装
 sudo anolisa --install-mode system install skillfs
 
-# 开发者源码构建
-cd src/skillfs
-cargo +1.86.0 build --release
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
+```
+
+| RPM | 内容 |
+|---|---|
+| `skillfs` | 兼容聚合包：对 core、skills 的精确 version/release 依赖 |
+| `skillfs-core` | CLI、FUSE 运行依赖、许可证和文档 |
+| `skillfs-skills` | 内置挂载 skill；依赖同版本 core |
+
+只需要 CLI 和文件系统时，选择 `sudo yum install skillfs-core`。
+不生成 plugin RPM。安装不会自动挂载文件系统，须按下文显式启动挂载。
+本地 RPM 安装或升级应在同一事务中选择匹配 version/release 的产物。
+
+### 源码构建（开发者）
+
+在 Linux 的仓库根目录执行：
+
+```bash
+make -C src/skillfs build
+```
+
+可执行文件位于 `src/skillfs/target/release/skillfs`。构建完成后，如需安装到系统：
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source 布局
@@ -221,6 +244,81 @@ skillfs stop /mnt/skillfs &&
 
 ## CLI 工具
 
+### explain
+
+在挂载前或排查来源优先级时，检查现有[挂载配置](#挂载配置)，也支持单源配置：
+
+```bash
+skillfs explain --config /path/to/skillfs-mount.toml
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo
+skillfs explain --config /path/to/skillfs-mount.toml --skill demo --format json
+```
+
+这些命令要求所用构建包含 `explain`；使用已安装的 release 时，先通过
+`skillfs explain --help` 检查是否可用。配置中的 source 和 mountpoint 路径遵循
+上文的绝对路径规则。`--skill` **精确匹配 skill 目录名**，而非 frontmatter 名称；
+省略时报告所有已发现的 skills。默认输出文本；`--format json` 在 stdout 输出一个
+JSON 对象。日志默认写入 stderr，显式指定 `--log-file` 时写入对应文件。
+
+命令读取当前文件，不读取运行中 worker 的冻结输入或已加载 views。结果不能证明挂载
+存在或 Agent 已加载某个 skill，也不是并发修改期间的原子快照。不支持 `--mountpoint`。
+诊断不会创建挂载点、修改配置/source/managed state、写入 SLS operation records，
+也不会启动 supervisor、watcher 或 FUSE session。显式请求的日志文件仍遵循现有的
+创建/追加规则。诊断结束后无需执行 stop 或回退操作。
+
+处理顺序固定为：解析配置，验证并规范化**全部**来源，按来源顺序加载 skills，最后读取
+首个规范化来源的 `skillfs-views.toml`。阻断错误会停止后续阶段，例如后续来源验证
+失败时，不会报告之前来源的 skill 加载证据。筛选在诊断后进行，不能隐藏其他 skill
+的阻断错误。同名 skill 整体选用较早来源；被遮蔽的损坏副本保持现有的非阻断处理，
+扫描深度和加载上限不变，规范化后相同的来源去重。完整报告按名称排序 skills，按来源
+优先级及路径排序遮蔽副本；不完整报告只保留已确认的证据。
+
+| Exit code | 含义 |
+| --- | --- |
+| `0` | 完整诊断，包括扫描完成但没有精确名称匹配 |
+| `1` | 诊断不完整，或输出失败 |
+| `2` | CLI 用法错误，包括传入 `--mountpoint` |
+
+JSON schema version 1 使用以下字段。参数解析后的诊断错误仍会输出报告，前提是
+stdout 可写。
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version`、`target`、`status` | `1`、`"configuration"`，以及 `"complete"` 或 `"incomplete"` |
+| `config_path`、`mountpoint`、`sources` | 输入配置路径、规范化挂载点（或 `null`），以及已确认的 canonical 来源顺序 |
+| `phase`、`blocker` | 不完整报告中提供：`config`、`source_validation`、`source_loading` 或 `views_loading`，以及带上下文的错误 |
+| `requested_skill`、`selection_status` | 请求的精确名称（或 `null`）；状态为 `all`、`discovered`、`not_discovered` 或 `unknown` |
+| `views` | 首个来源的 views `path`、`status`，以及有效默认 view 名称（或 `null`） |
+| `skills` | 已确认的胜出副本，仅在全部诊断工作结束后筛选 |
+| `skills[].selected`、`skills[].shadowed` | 副本的 canonical `source`、`SKILL.md` `path`、`parse_status`、`parse_message` 和 `enabled` 元数据 |
+| `skills[].effective_default`、`default_reason` | 布尔成员关系或 `"unknown"`，以及下表中的原因 |
+| `skills[].configured_views`、`secondary_views` | 按配置顺序排列的全部 configured/secondary view 名称；未知时为 `null` |
+
+选中副本的 parse status 为 `ok` 或 `degraded`。遮蔽副本还可能是 `error` 或
+`unloadable`；无法加载的副本使用 `enabled: null`。Parse message 为字符串或 `null`。
+`enabled: false` 只是元数据，不是额外的可见性条件。已确认身份但被拒绝的 skill
+可以是 `discovered`，同时没有已确认的胜出记录。`not_discovered` 表示 skill 扫描
+已完成且没有匹配，即使后续 views 阶段失败也是如此；扫描中断且尚未确认匹配时为
+`unknown`。不会推断未发现的名称到底不存在还是被忽略。
+
+Views 阶段执行前的状态为 `unknown`，执行后为 `absent`、`loaded` 或
+`invalid_or_unreadable`。只有真正缺失才使用现有的无 views 配置行为。格式错误、
+权限失败以及悬空的 views 符号链接会使成员结论保持 unknown，并返回 exit 1，同时
+保留来源证据。这种更严格的诊断不会改变现有 mount 对配置的接受行为。只有首个来源
+的文件生效，不会回退到后续来源的 views 文件。
+
+| `default_reason` | 有效默认视图成员关系 |
+| --- | --- |
+| `explicit` | 出现在第一个标记 `default = true` 的 view 中 |
+| `unassigned` | 没有分配到任何 view，自动纳入；没有默认 view 时也如此 |
+| `assigned_secondary` | 仅分配到有效默认 view 之外，不出现在默认目录列表中 |
+| `no_views_configuration` | Views 文件缺失，纳入所有已发现的 skills |
+| `unknown` | 诊断在确定成员关系前中断 |
+
+成员关系不互斥：同一 skill 可以同时属于有效默认 view 和多个 secondary views。
+后续标记 `default = true` 的 views 仍是 secondary。没有默认 view 时，显式分配的
+secondary skills 保持 secondary，未分配的 skills 仍纳入有效默认视图。
+
 ### validate
 
 ```bash
@@ -231,6 +329,11 @@ skillfs validate /path/to/skills --format json
 `validate` 会报告 successful、degraded 和 failed skill parse。Parse failure 会
 进入状态汇总并返回非 0 exit code；仅 degraded 的 skill 会被报告，但 exit code 仍为
 0。
+
+`SKILL.md` 中的 `## Parameters` 和 `## Returns` 标题允许带可选的闭合 `#`
+序列，例如 `## Parameters ##` 或 `## Returns #`。闭合序列与标题文字之间须有
+空格或 Tab，序列之后也只允许空格或 Tab。这些标题下的契约条目会正常解析，
+格式错误的 bullet 会产生 warning，并使状态变为 `degraded`。
 
 JSON 输出中，error 和 warning entry 都包含 `path` 字段，方便调用方定位具体出错的
 skill 文件。
@@ -323,6 +426,28 @@ agent：
 2. 可选的 **OS 适配器** stage 第二个执行，且只作用于 `SKILL.md`，在 Ubuntu/Debian
    与 Alinux/Anolis 约定之间改写发行版相关字面量。
 
+uv 可用时，启发式归一化保留 `pip install --user` 和 `pip3 install --user`，因为 uv
+不支持 pip 的用户目录安装模式。该选项可以位于包名以及 `2>&1` 等文件描述符
+重定向之前或之后。普通 pip 安装仍可改写成 `uv pip install`，包括相邻的 shell
+命令、列表或散文中的行内代码，以及后接括号说明的命令。每个行内代码片段单独
+检查。指定解释器的 `python -m pip` 调用保持不变。未结束的参数、续行和命令
+替换也会保留原始 pip 调用。
+
+挂载启动时的环境快照中存在 `PIP_USER`，或同一行调用前的文本引用了该变量时，
+也会保留 pip，包括 `PIP_USER=1 pip install requests` 和
+`export PIP_USER=1; pip install requests`。此检查采用保守策略：空值、假值、
+覆盖赋值或 `unset` 后仍保留 pip，不求解 shell 状态。更改挂载进程的环境后需重新
+挂载；文档前面行中的赋值不在此检查范围内。
+
+已知 pip 专属选项 `--root`、`--report`、`--platform`、`--implementation`、
+`--abi` 和 `--upgrade-strategy` 也会保留 pip，同时支持 `--option value` 和
+`--option=value` 写法。例如，`pip install --root=/tmp/rootz requests` 保持不变。
+这些选项按每次调用的参数范围检查，相邻命令中的普通安装仍可使用 uv。
+
+启发式归一化选择 Yarn 时，仅把不带参数的 `npm install` 改写成 `yarn install`。
+带包名、选项或重定向的安装命令保持原样：Yarn 使用 `add` 添加依赖，并不支持所有 npm
+选项。例如，`npm install lodash` 保持不变；如果技能要求使用 Yarn，请直接写出对应命令。
+
 两个 stage 都是可选的：可以两者都开、仅 directive（默认）、仅适配器（关闭
 directive），或两者都关闭——空流水线原样返回选中的字节。初始化诊断会报告实际
 启用的 stage 列表。
@@ -342,6 +467,12 @@ directive），或两者都关闭——空流水线原样返回选中的字节�
 `SKILL.md` 无法读取，操作会返回错误（虚拟读取边界通常为 `ENOENT`），绝不会重试 live
 source。`getattr` 大小、部分读取与完整读取始终基于同一份转换结果。只有 `SKILL.md`
 会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
+
+directive stage 在挂载启动时记录命令可用性。Linux 上直接检查 `PATH` 中的
+可执行文件，不依赖 `which`，也不会执行被探测的命令。可执行符号链接及相对或
+空 `PATH` 项按常规查找位置处理；目录、断链及有效用户无权执行的文件不算可用命令。
+未设置 `PATH` 时使用平台默认搜索路径。
+固定命令白名单保持不变。更改 `PATH` 或安装命令后需重新挂载；读取技能时不会重新探测环境。
 
 ### 关闭 directive stage
 

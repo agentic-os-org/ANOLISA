@@ -1,15 +1,16 @@
 """Real resident SDK/CLI tasks, isolated local model endpoints and native Hooks."""
 
 import asyncio
+import gc
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import threading
 from contextlib import aclosing
 from http.server import ThreadingHTTPServer
 
-from aw_claude import create_client
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage
 
 ROOT = Path(os.environ["AW_TEST_ROOT"])
@@ -17,7 +18,96 @@ SOURCE = Path(os.environ["AW_TEST_CLAUDE_FIXTURE"])
 RESULTS = []
 
 
-async def task(index, mode, consumer="response"):
+async def lifecycle():
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    baseline_tasks = asyncio.all_tasks()
+    unhandled = []
+    resource_checks = []
+    config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+
+    def observe_exception(current_loop, context):
+        error = context.get("exception")
+        unhandled.append(
+            {"message": context.get("message"), "exception": type(error).__name__}
+        )
+        if previous is None:
+            current_loop.default_exception_handler(context)
+        else:
+            previous(current_loop, context)
+
+    async def drain_finalizers():
+        # Collection schedules async-generator closes; keep the observer installed
+        # while those tasks and their completion callbacks run.
+        for _ in range(6):
+            gc.collect()
+            await asyncio.sleep(0.05)
+
+    async def assert_idle(index):
+        await drain_finalizers()
+        assert not unhandled, (index, "unretrieved cleanup exceptions", unhandled)
+        remaining = [
+            pending for pending in asyncio.all_tasks()
+            if pending not in baseline_tasks and not pending.done()
+        ]
+        assert not remaining, (index, "SDK tasks survived client close", remaining)
+        pids = [
+            json.loads(path.read_text())["pid"]
+            for path in ROOT.glob("*/sdk-process.json")
+        ]
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids), (index, pids)
+        status = json.loads(
+            subprocess.check_output(
+                [config["executable"], "service", "status", "--config", str(ROOT / "aw.json")],
+                timeout=5,
+            )
+        )["result"]
+        usage = status["resources"]["usage"]
+        assert status["bindings"] == 1 and status["events"] == 0, status
+        assert all(usage[name] == 0 for name in ("invocations", "correlations", "calls")), status
+        resource_checks.append(
+            {"task": index, "live_tasks": 0, "sdk_processes_absent": pids,
+             "bindings": status["bindings"], "events": status["events"], "usage": usage}
+        )
+
+    loop.set_exception_handler(observe_exception)
+    try:
+        for index in range(18):
+            await task(index, "allow")
+        await asyncio.gather(*(task(18 + index, "allow") for index in range(3)))
+        await task(21, "deny")
+        for index, mode in ((22, "before-error"), (24, "after-error")):
+            await task(index, mode)
+            await assert_idle(index)
+            # A fresh client in this same worker must remain usable after failure.
+            await task(index + 1, "allow")
+            await assert_idle(index + 1)
+    finally:
+        try:
+            await drain_finalizers()
+        finally:
+            loop.set_exception_handler(previous)
+    assert not unhandled, ("unretrieved cleanup exceptions", unhandled)
+    assert len({item["instance"] for item in RESULTS}) == 26
+    (ROOT / "result.json").write_text(
+        json.dumps(
+            {
+                "tasks": 26,
+                "cases": RESULTS,
+                "fault_recovery_tasks": [23, 25],
+                "unhandled_async_errors": unhandled,
+                "resource_checks": resource_checks,
+                "passed": True,
+            }
+        )
+    )
+
+
+async def task(index, mode, consumer="response", settings_origin=None, factory=None):
+    if factory is None:
+        from aw_claude import create_client
+
+        factory = create_client
     directory = ROOT / str(index)
     directory.mkdir()
     spec = importlib.util.spec_from_file_location(f"model_{index}", SOURCE)
@@ -27,6 +117,11 @@ async def task(index, mode, consumer="response"):
     fixture.ORIGINAL = f"private-result-{index}"
 
     class Handler(fixture.Handler):
+        def do_POST(self):
+            if settings_origin is not None:
+                assert self.headers.get("x-api-key") == "native-model-fixture"
+            super().do_POST()
+
         def reply(self, data, kind):
             (directory / "requests.json").write_text(json.dumps(fixture.REQUESTS))
             super().reply(data, kind)
@@ -50,12 +145,16 @@ async def task(index, mode, consumer="response"):
         native.append(payload["hook_event_name"])
         return {}
 
+    skill = directory / ".claude/skills/aw-resident-fixture/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: aw-resident-fixture\ndescription: Native configuration fixture\n---\nReturn fixture text.\n")
     options = ClaudeAgentOptions(
         model="claude-sonnet-4-6",
         cwd=str(directory),
         tools=["Bash"],
         allowed_tools=["Bash"],
-        setting_sources=[],
+        setting_sources=["user", "project"],
+        settings='{"env":{"AW_NATIVE_CONFIG":"retained"}}',
         max_turns=2,
         hooks={name: [HookMatcher(hooks=[hook])] for name in ("PreToolUse", "PostToolUse")},
         env={
@@ -67,17 +166,31 @@ async def task(index, mode, consumer="response"):
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         },
     )
-    client = create_client(options)
+    native_files = {}
+    if settings_origin is not None:
+        from claude_settings import configure
+
+        options, native_files = configure(
+            options, directory, settings_origin, f"http://127.0.0.1:{server.server_port}"
+        )
+    client = factory(options)
     failed = False
     try:
         async with client:
+            if settings_origin is not None:
+                assert client._aw_relay.upstream == f"http://127.0.0.1:{server.server_port}"
+                assert client.options.settings == options.settings
+                assert options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1"
+            info = await client.get_server_info()
+            assert any(command["name"] == "aw-resident-fixture" for command in info["commands"]), info
             cli_pid = (
                 client._transport.delegate._process.pid
             )  # Test-only process evidence; production uses public SDK methods.
             (directory / "sdk-process.json").write_text(
                 json.dumps({"pid": cli_pid, "owner": os.getpid()})
             )
-            turns = 1 if mode.endswith("error") else 2
+            fatal = mode == "before-error"
+            turns = 1 if fatal else 2
             for turn in range(turns):
                 await client.query("Run the fixture tool")
                 try:
@@ -89,7 +202,7 @@ async def task(index, mode, consumer="response"):
                 except Exception:
                     failed = True
                 assert client._transport.delegate._process.pid == cli_pid
-            if mode.endswith("error"):
+            if fatal:
                 try:
                     await client.query("failed client must remain stopped")
                 except RuntimeError:
@@ -97,6 +210,7 @@ async def task(index, mode, consumer="response"):
                 else:
                     raise AssertionError("failed client accepted another query")
         await client.disconnect()
+        assert all(path.read_bytes() == content for path, content in native_files.items())
         try:
             await client.connect()
         except RuntimeError:
@@ -111,12 +225,14 @@ async def task(index, mode, consumer="response"):
         assert all(item["tenant"] == str(index) for item in events)
         assert len({item["event"]["agent"]["instance_id"] for item in events}) == 1
         assert (directory / "effect").exists() == (mode in {"allow", "after-error"}), mode
-        assert failed == mode.endswith("error"), (mode, failed)
-        if mode.endswith("error"):
+        assert failed == fatal, (mode, failed)
+        if fatal:
             assert len(requests) == 1, (mode, "model continued after Hook failure", len(requests))
             assert fixture.ORIGINAL not in json.dumps(requests)
         else:
             assert len(requests) == 2 * turns, (mode, len(requests))
+        if mode == "allow" and os.environ.get("AW_TEST_SCENARIO") == "cooperative-attach":
+            assert fixture.ORIGINAL in json.dumps(requests[1]), requests
         assert native.count("PreToolUse") == turns, native
         assert native.count("PostToolUse") == turns * (mode in {"allow", "after-error"}), native
         RESULTS.append(
@@ -134,18 +250,58 @@ async def task(index, mode, consumer="response"):
         assert not thread.is_alive()
 
 
+async def cooperative_attach():
+    from aw_sdk.claude import ResidentClaude
+
+    worker = ResidentClaude.from_config(
+        os.environ["AW_TEST_CONFIG"],
+        target="claude",
+        descriptor_file=os.environ["AW_TEST_DESCRIPTOR"],
+        executable="/nonexistent/aw",
+        attach_timeout_ms=15000,
+    )
+    worker.listen()
+    (ROOT / "application-started").write_text("started")
+    try:
+        await task(0, "allow", factory=worker.create_client)
+        await task(1, "deny", factory=worker.create_client)
+    finally:
+        await worker.close()
+    assert RESULTS[0]["instance"] != RESULTS[1]["instance"]
+    (ROOT / "result.json").write_text(json.dumps({"tasks": 2, "cases": RESULTS, "passed": True}))
+
+
 async def main():
+    scenario = os.environ.get("AW_TEST_SCENARIO", "lifecycle")
+    if scenario == "cooperative-attach":
+        await cooperative_attach()
+        return
     (ROOT / "application-started").write_text("started")
     # Host readiness must precede the first task/client.
     config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
     assert Path(config["ready_path"]).exists()
-    scenario = os.environ.get("AW_TEST_SCENARIO", "lifecycle")
+    if scenario == "observation":
+        await task(0, "allow")
+        await task(1, "deny")
+        assert RESULTS[0]["instance"] != RESULTS[1]["instance"]
+        (ROOT / "result.json").write_text(json.dumps({"tasks": 2, "cases": RESULTS, "passed": True}))
+        return
+    if scenario == "settings":
+        from claude_settings import run
+
+        await run(ROOT, task, RESULTS)
+        return
     if scenario in {"messages", "eof-stop-failure"}:
         from claude_messages import run, eof_stop_failure
         if scenario == "eof-stop-failure":
             await eof_stop_failure(ROOT, config)
         else:
             await run(ROOT, config, task)
+        return
+    if scenario == "report":
+        from claude_report import run
+
+        await run(ROOT, SOURCE)
         return
     if scenario == "denial":
         from claude_denial import run
@@ -196,13 +352,7 @@ async def main():
         assert not (ROOT / "0/effect").exists()
         (ROOT / "result.json").write_text(json.dumps({"tasks": 1, "passed": True}))
         return
-    for index in range(20):
-        await task(index, "allow")
-    await asyncio.gather(*(task(20 + index, "allow") for index in range(3)))
-    for index, mode in enumerate(("deny", "before-error", "after-error"), 23):
-        await task(index, mode)
-    assert len({item["instance"] for item in RESULTS}) == 26
-    (ROOT / "result.json").write_text(json.dumps({"tasks": 26, "cases": RESULTS, "passed": True}))
+    await lifecycle()
 
 
 asyncio.run(main())

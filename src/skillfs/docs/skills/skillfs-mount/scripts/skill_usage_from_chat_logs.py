@@ -22,20 +22,21 @@ from pathlib import Path
 
 
 def iter_chat_files(logs_dir: Path):
-    pattern = str(logs_dir / "projects" / "*" / "chats" / "*.jsonl")
-    return glob.glob(pattern)
+    pattern = os.path.join(glob.escape(str(logs_dir)), "projects", "*", "chats", "*.jsonl")
+    return [path for path in glob.glob(pattern) if Path(path).is_file()]
 
 
 def parse_function_calls(file_path):
     """Yield (tool_name, skill_name_or_None, timestamp) from a chat log."""
-    with open(file_path, "r", encoding="utf-8") as f:
+    # Decode each physical line separately so corrupt bytes cannot abort the file.
+    with open(file_path, "rb") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
+                obj = json.loads(line.decode("utf-8").strip())
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
 
             # A non-object line (array/scalar) has no message/parts; skip it

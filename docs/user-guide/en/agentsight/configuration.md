@@ -18,7 +18,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200,
@@ -120,10 +120,12 @@ checkpoint gates the capacity phase. Physical allocation above `max_db_size_mb` 
 the pass deletes the oldest eligible records until logical usage is at most 90% of the limit. It
 does not run `VACUUM`, so freed pages remain on the SQLite freelist for later writes.
 
-`check_interval_inserts` is no longer supported. The configuration format is replaced as a unit when
-`schema_version` changes: a missing or pre-v5 version is backed up and replaced with schema v5
-instead of merging old settings. Start custom files from the shipped `agentsight.json` and do not
-copy the old key into the replacement.
+`check_interval_inserts` is no longer supported. When `schema_version` is missing or older than the
+current version, AgentSight backs up the file, overlays its top-level keys on the current defaults,
+and sets `schema_version` to `6`. This is a shallow merge: an existing section such as `storage`
+replaces the corresponding default section in full, so removed nested keys are not migrated
+automatically. Start custom files from the shipped `agentsight.json` and do not copy obsolete keys
+into the merged file.
 
 ## Feature switches
 
@@ -241,7 +243,14 @@ of command-line tokens with `*` wildcards; all tokens must match in order.
 matches a process whose first argument contains `node` and whose next argument contains `claude`.
 
 The shipped file covers Hermes, Codex, Runloop, cosh (`Cosh`), cosh-ng (`CoshNG`), OpenClaw,
-Claude Code, Qwen Code, and AgentScope — 31 rules in total.
+Claude Code, Qwen Code, AgentScope, and Qoder CLI — 36 rules in total.
+
+Qoder CLI rules cover native/versioned binaries and Node launchers. Its legacy
+`*.qoder.sh` gateway is included in `https`. Existing configurations retain their
+own `cmdline` and `https` sections during migration; append the Qoder rules from
+the shipped file if those sections are customized. Linux tracing requires root
+or the documented BPF capabilities. Protocol support covers the encoded HTTP/SSE
+chat endpoint; it does not imply support for every Qoder product or transport.
 
 To add your own Agent, append a rule and reload:
 
@@ -329,20 +338,23 @@ this table. If a new Codex release is not captured, regenerate the entry with
 
 ## schema_version and upgrades
 
-`schema_version` (currently `5`) marks the config format. On start, AgentSight compares it with the
+`schema_version` (currently `6`) marks the config format. On start, AgentSight compares it with the
 built-in version:
 
 - equal or newer → your file is left untouched;
-- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>` and replaces it
-  with the current default file.
+- missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>`, shallow-merges
+  its top-level keys into the current defaults, and sets the current schema version.
+
+Existing top-level sections are preserved and missing sections are added from the defaults. Nested
+values within an existing section are kept as written rather than recursively merged. After an
+upgrade, review obsolete nested keys against the shipped `agentsight.json`, then reload the service.
 
 Schema v5 introduces the bounded HTTP and FFI retention defaults described above and lowers the
-probe and deferred GenAI byte budgets. Files with an older version are backed up and replaced as
-a whole; reapply custom discovery rules and settings from the backup.
+probe and deferred GenAI byte budgets.
 
 Schema v4 replaces insert-count storage checks with `check_interval_secs` for every policy and adds
-`reuse`, `causal`, and `enforcement`. Custom settings from an older schema are not merged. Reapply
-required custom rules to the new file, then reload the service.
+`reuse`, `causal`, and `enforcement`. These sections are added by the shallow merge when absent;
+existing custom sections remain unchanged.
 
 ## Environment variables
 
@@ -368,12 +380,75 @@ systemctl is-active agentsight.service
 sudo agentsight summary --last 1
 ```
 
-If the service refuses to come back, the file is usually invalid JSON:
+Malformed JSON does not stop `trace` or `serve`. AgentSight logs the parse error, leaves the file
+unchanged without creating a schema backup, and uses the embedded defaults. `serve` also disables
+the optional `tokenless_api` integration. Other startup errors, including invalid `tokenless_api`
+settings, can still stop the service. Check the file and startup warnings with:
 
 ```bash
 python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
+
+## Workspace snapshot backend (Linux)
+
+The optional `ws_ckpt` section configures how AgentSight invokes the local
+ws-ckpt CLI:
+
+```json
+{
+  "ws_ckpt": {
+    "binary": "/usr/bin/ws-ckpt",
+    "restore_enabled": false,
+    "plugins": {
+      "example-openclaw": {
+        "runtime": "openclaw",
+        "config_path": "/home/example/.openclaw/ws-ckpt.json"
+      },
+      "example-hermes": {
+        "runtime": "hermes",
+        "config_path": "/home/example/.hermes/config.yaml"
+      }
+    }
+  }
+}
+```
+
+`binary` defaults to `ws-ckpt` on PATH. AgentSight uses the CLI to list snapshots,
+view file changes, and request guarded rollback when restore is enabled. The CLI
+connects to the daemon and verifies the peer UID.
+
+If the daemon uses a custom socket address, set `socket` to pass that address to
+the CLI through its `WS_CKPT_SOCKET` environment variable. AgentSight chooses the
+address from `socket`, its own `WS_CKPT_SOCKET` environment variable, or
+`/run/ws-ckpt/ws-ckpt.sock`, in that order.
+
+Settings are read per request. Sight shows workspace snapshots only when
+`rollback --guarded --json --check` confirms the registered workspace and the
+CLI supports `diff --format json`. This also applies in read-only mode. If either
+check fails, the snapshot and restore controls are hidden and the ATIF trace
+remains available. Omit `plugins` when tool calls carry explicit workspace
+arguments. No workspace is inferred from process cwd.
+
+Each `plugins` key must match the recorded ATIF agent name and identify its actual
+host instance. `runtime` is `openclaw` (persisted JSON) or `hermes` (YAML section
+`plugins.ws-ckpt`). If the Hermes instance sets `HERMES_HOME`, point `config_path`
+to that instance's `config.yaml`. An optional `workspace_override` records its known
+environment override or host default. Do not substitute the server's HOME or
+environment. A config modified after the recorded call is not used to infer that
+call's historical workspace; unknown bindings remain unresolved.
+
+For automatic snapshots without a recorded ws-ckpt call, Sight can use the bound
+plugin configuration when it sets `autoCheckpoint: true`. The binding and its
+configuration file must predate the start of the trajectory. A recorded
+workspace operation takes precedence over this fallback.
+
+Snapshot data and restore operations require Dashboard credentials, including on
+loopback. The Dashboard can check whether a registered workspace is available
+before prompting for a token. Restore also requires `restore_enabled: true` and
+is off by default. See
+[snapshot APIs](data-and-storage.md#workspace-snapshot-api) for the confirmation
+protocol and [Dashboard snapshot controls](dashboard.md#workspace-snapshots-in-execution-steps).
 
 ## Tokenless statistics API
 
@@ -386,5 +461,6 @@ passed to `agentsight serve --config /etc/agentsight/config.json`:
 
 The credential file holds the same Bearer token configured for `tokenless stats serve`.
 Use a private connection or HTTPS proxy. The server reads the file at startup; restart
-AgentSight after changing it. Credentials stay on the backend. Invalid configuration
-fails startup. Omitting this setting preserves the existing local database integration.
+AgentSight after changing it. Credentials stay on the backend. Invalid `tokenless_api`
+settings fail startup; malformed JSON in the shared file follows the fallback above.
+Omitting this setting preserves the existing local database integration.

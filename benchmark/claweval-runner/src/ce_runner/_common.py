@@ -297,16 +297,17 @@ def is_sandbox_task(task_yaml: str) -> bool:
 # ── Trace directory helpers ──────────────────────────────────────────────────
 
 def make_trace_dir(prefix: str = "openclaw") -> str:
-    """Return trace directory path: `<repo>/claw-eval/traces/<prefix>_YY-MM-DD-HH-MM`.
+    """Create an independent trace directory with a readable timestamp prefix.
 
-    Creates the directory if it does not exist.
+    A unique suffix keeps repeated or concurrent runs from sharing output files.
     """
+    import tempfile
     from datetime import datetime
 
     ts = datetime.now().strftime("%y-%m-%d-%H-%M")
-    trace_dir = str(_REPO_DIR / "claw-eval" / "traces" / f"{prefix}_{ts}")
-    os.makedirs(trace_dir, exist_ok=True)
-    return trace_dir
+    trace_root = _REPO_DIR / "claw-eval" / "traces"
+    trace_root.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkdtemp(prefix=f"{prefix}_{ts}-", dir=trace_root)
 
 
 def atomic_write_config(config_path: str, config: dict) -> None:

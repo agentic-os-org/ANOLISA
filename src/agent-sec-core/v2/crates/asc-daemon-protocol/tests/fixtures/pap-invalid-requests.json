@@ -54,6 +54,11 @@
       "expectedError": {"code": "invalid_request", "message": "invalid selector at pid: must be positive"}
     },
     {
+      "name": "create scope with a relative cmdline argument",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "process", "match": {"cmdlineArg": "bin/agent"}}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid selector at cmdlineArg: must be a normalized absolute path"}
+    },
+    {
       "name": "update scope with zero cgroup ID",
       "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 0}}},
       "expectedError": {"code": "unknown_method", "message": "daemon method is not implemented"}
@@ -305,7 +310,7 @@
     },
     {
       "name": "category mismatch",
-      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "network", "action": "write", "target": {"type": "file", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}]}}},
+      "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "agenthook", "action": "write", "target": {"type": "file", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}]}}},
       "expectedError": {"code": "invalid_argument", "message": "invalid policy: template.rules[0].target: resource type must match category; only file targets are defined"}
     },
     {
@@ -316,7 +321,7 @@
     {
       "name": "unknown action",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "connect", "target": {"type": "file", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}]}}},
-      "expectedError": {"code": "invalid_request", "message": "unknown variant `connect`, expected one of `read`, `write`, `exec`"}
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `connect`, expected one of `read`, `write`, `exec`, `use_credential`"}
     },
     {
       "name": "missing target path",
@@ -331,7 +336,7 @@
     {
       "name": "unknown target type",
       "request": {"method": "policy.templates.create", "params": {"policyName": "invalid", "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "network", "path": "/valid"}, "where": {"operation": {"eq": "delete"}}}]}}},
-      "expectedError": {"code": "invalid_request", "message": "unknown variant `network`, expected `file`"}
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `network`, expected `file` or `http_request`"}
     },
     {
       "name": "target is not an object",

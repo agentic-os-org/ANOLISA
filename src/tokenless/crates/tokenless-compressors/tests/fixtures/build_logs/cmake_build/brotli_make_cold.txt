@@ -1,0 +1,44 @@
+[  2%] Building C object CMakeFiles/brotlicommon.dir/c/common/constants.c.o
+[  5%] Building C object CMakeFiles/brotlicommon.dir/c/common/context.c.o
+[  7%] Building C object CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o
+[ 10%] Building C object CMakeFiles/brotlicommon.dir/c/common/platform.c.o
+[ 12%] Building C object CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o
+[ 15%] Building C object CMakeFiles/brotlicommon.dir/c/common/transform.c.o
+[ 17%] Linking C shared library libbrotlicommon.so
+[ 17%] Built target brotlicommon
+[ 20%] Building C object CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o
+[ 22%] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o
+[ 25%] Building C object CMakeFiles/brotlidec.dir/c/dec/decode.c.o
+[ 27%] Building C object CMakeFiles/brotlidec.dir/c/dec/huffman.c.o
+[ 30%] Building C object CMakeFiles/brotlidec.dir/c/dec/prefix.c.o
+[ 32%] Building C object CMakeFiles/brotlidec.dir/c/dec/state.c.o
+[ 35%] Building C object CMakeFiles/brotlidec.dir/c/dec/static_init.c.o
+[ 37%] Linking C shared library libbrotlidec.so
+[ 37%] Built target brotlidec
+[ 40%] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o
+[ 42%] Building C object CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o
+[ 45%] Building C object CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o
+[ 47%] Building C object CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o
+[ 50%] Building C object CMakeFiles/brotlienc.dir/c/enc/cluster.c.o
+[ 52%] Building C object CMakeFiles/brotlienc.dir/c/enc/command.c.o
+[ 55%] Building C object CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o
+[ 57%] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o
+[ 60%] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o
+[ 62%] Building C object CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o
+[ 65%] Building C object CMakeFiles/brotlienc.dir/c/enc/encode.c.o
+[ 67%] Building C object CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o
+[ 70%] Building C object CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o
+[ 72%] Building C object CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o
+[ 75%] Building C object CMakeFiles/brotlienc.dir/c/enc/histogram.c.o
+[ 77%] Building C object CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o
+[ 80%] Building C object CMakeFiles/brotlienc.dir/c/enc/memory.c.o
+[ 82%] Building C object CMakeFiles/brotlienc.dir/c/enc/metablock.c.o
+[ 85%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o
+[ 87%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o
+[ 90%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_init.c.o
+[ 92%] Building C object CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o
+[ 95%] Linking C shared library libbrotlienc.so
+[ 95%] Built target brotlienc
+[ 97%] Building C object CMakeFiles/brotli.dir/c/tools/brotli.c.o
+[100%] Linking C executable brotli
+[100%] Built target brotli

@@ -56,11 +56,14 @@ def adapter(tmp_path, monkeypatch):
         register_tool=lambda **kw: registered.__setitem__(kw["name"], kw["handler"]),
     ))
 
-    def rollback(workspace=None, preview=False):
+    def rollback(workspace=None, preview=False, session_id="conv-a"):
         args = {"target": "before-edit", "preview": preview}
         if workspace is not None:
             args["workspace"] = str(workspace)
-        return json.loads(registered["ws-ckpt-rollback"](args))
+        kwargs = {"task_id": "task-1"}
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        return json.loads(registered["ws-ckpt-rollback"](args, **kwargs))
 
     def configure(workspace):
         result = json.loads(registered["ws-ckpt-config"]({
@@ -68,13 +71,18 @@ def adapter(tmp_path, monkeypatch):
         }))
         assert result["success"]
 
+    def end(session_id="conv-a"):
+        kwargs = {"task_id": "task-1", "completed": True}
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        hooks["on_session_end"](**kwargs)
+
     def checkpoints():
         return [argv[argv.index("--workspace") + 1] for argv in calls if argv[1] == "checkpoint"]
 
     return SimpleNamespace(
         default=default, other=other, state=state, calls=calls, manager=manager,
-        rollback=rollback, configure=configure,
-        end=lambda: hooks["on_session_end"](), checkpoints=checkpoints,
+        rollback=rollback, configure=configure, end=end, checkpoints=checkpoints,
     )
 
 
@@ -228,11 +236,58 @@ def test_unready_turn_consumes_other_workspace_suppression(
             patch.setattr(subprocess, "run", unavailable)
         adapter.end()
 
-    assert adapter.manager.skip_auto_checkpoint_workspaces == set()
+    assert adapter.manager.rollback_workspaces_by_session == {}
     adapter.manager.set_auto_checkpoint(True)
     adapter.configure(adapter.other)
     adapter.end()
     assert adapter.checkpoints() == [str(adapter.other)]
+
+
+def test_other_session_does_not_consume_rollback_on_same_workspace(adapter):
+    assert adapter.rollback()["success"]
+    adapter.end("conv-b")
+    assert adapter.checkpoints() == [str(adapter.default)]
+    adapter.end("conv-a")
+    assert adapter.checkpoints() == [str(adapter.default)]
+    adapter.end("conv-a")
+    assert adapter.checkpoints() == [str(adapter.default)] * 2
+
+
+def test_sessions_keep_independently_pending_rollbacks(adapter):
+    assert adapter.rollback()["success"]
+    assert adapter.rollback(session_id="conv-b")["success"]
+    adapter.end("conv-a")
+    adapter.end("conv-b")
+    assert adapter.checkpoints() == []
+    adapter.end("conv-b")
+    assert adapter.checkpoints() == [str(adapter.default)]
+
+
+def test_other_session_does_not_consume_second_workspace_rollback(adapter):
+    assert adapter.rollback(adapter.other)["success"]
+    adapter.configure(adapter.other)
+    adapter.end("conv-b")
+    assert adapter.checkpoints() == [str(adapter.other)]
+    adapter.end("conv-a")
+    assert adapter.checkpoints() == [str(adapter.other)]
+
+
+@pytest.mark.parametrize("session_id", [None, ""])
+def test_rollback_without_session_identity_does_not_arm_suppression(adapter, session_id):
+    assert adapter.rollback(session_id=session_id)["success"]
+    assert adapter.manager.rollback_workspaces_by_session == {}
+    adapter.end("conv-b")
+    adapter.end(session_id)
+    assert adapter.checkpoints() == [str(adapter.default)] * 2
+
+
+@pytest.mark.parametrize("session_id", [None, ""])
+def test_turn_without_session_identity_does_not_consume_pending_state(adapter, session_id):
+    assert adapter.rollback()["success"]
+    adapter.end(session_id)
+    assert adapter.checkpoints() == [str(adapter.default)]
+    adapter.end("conv-a")
+    assert adapter.checkpoints() == [str(adapter.default)]
 
 
 def test_workspace_id_suppresses_its_registered_path_once(adapter: SimpleNamespace) -> None:

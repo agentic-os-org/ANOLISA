@@ -103,14 +103,12 @@ else:
     struct.pack_into("<H", header, 68, 0x8664)
     struct.pack_into("<H", header, 88, 0x20B)
     content = bytes(header)
-for name in ("tokenless", "rtk"):
-    if target == "win32-x64":
-        name += ".exe"
-    (root / name).write_bytes(content + f"\n{name}-{target}\n".encode())
+name = "tokenless.exe" if target == "win32-x64" else "tokenless"
+(root / name).write_bytes(content + f"\n{name}-{target}\n".encode())
 PY
     local suffix=""
     if [[ "$target" == "win32-x64" ]]; then suffix=".exe"; fi
-    chmod 0755 "$destination/tokenless$suffix" "$destination/rtk$suffix"
+    chmod 0755 "$destination/tokenless$suffix"
 }
 
 for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
@@ -118,7 +116,7 @@ for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
 done
 
 cp "$PREBUILT/linux-x64/"* "$PREBUILT/linux-arm64/"
-if node "$ROOT/npm/scripts/package-npm.js" --target linux-arm64 \
+if node "$ROOT/packaging/npm/package-npm.js" --target linux-arm64 \
     >"$TMP/mismatch.out" 2>&1; then
     echo "ERROR: npm packer accepted mislabeled x86_64 binaries as arm64" >&2
     exit 1
@@ -133,7 +131,7 @@ import sys
 path = pathlib.Path(sys.argv[1])
 path.write_bytes(path.read_bytes().replace(b"GLIBC_2.17", b"GLIBC_2.18"))
 PY
-if ! node "$ROOT/npm/scripts/package-npm.js" --target linux-x64 \
+if ! node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 \
     >"$TMP/glibc.out" 2>&1; then
     echo "ERROR: npm packer rejected a binary above the GLIBC 2.17 baseline" >&2
     exit 1
@@ -144,7 +142,7 @@ make_binaries linux-x64
 check_selector() {
     local selector="$1"
     local expected="$2"
-    node "$ROOT/npm/scripts/package-npm.js" --target "$selector" >"$TMP/selector.out"
+    node "$ROOT/packaging/npm/package-npm.js" --target "$selector" >"$TMP/selector.out"
     grep -Fq "Targets: $expected" "$TMP/selector.out"
 }
 
@@ -159,7 +157,7 @@ if [[ -f "$QWENWORK_PLUGIN" ]]; then
 fi
 STALE_PLUGIN_SEEDED=1
 printf '{"name":"tokenless","version":"0.0.0-stale"}\n' > "$QWENWORK_PLUGIN"
-node "$ROOT/npm/scripts/package-npm.js" --all
+node "$ROOT/packaging/npm/package-npm.js" --all
 test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
 # Inspect the published tarball: staging can contain working symlinks that
@@ -189,7 +187,7 @@ version = re.search(
 source = root / "adapters/tokenless"
 manifest = json.loads((source / "manifest.json.in").read_text().replace("@VERSION@", version))
 assert "qwenwork" in manifest["targets"]
-contract = (root / ".anolisa/component.toml.in").read_text()
+contract = (root / "packaging/anolisa/component.toml.in").read_text()
 assert set(manifest["targets"]) == set(re.findall(r'^framework\s*=\s*"([^"]+)"', contract, re.M))
 plugin = json.loads(
     (source / "qwenwork/.qoder-plugin/plugin.json.in").read_text().replace("@VERSION@", version)
@@ -224,15 +222,17 @@ for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
     test -f "$package/package.json"
     test -f "$package"/*.tgz
-    for binary in tokenless rtk; do
-        if [[ "$target" = win32-x64 ]]; then binary="$binary.exe"; fi
-        cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
-        test "$(stat -c '%a' "$package/bin/$binary")" = 755
-    done
+    binary=tokenless
+    if [[ "$target" = win32-x64 ]]; then binary="$binary.exe"; fi
+    cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
+    test "$(stat -c '%a' "$package/bin/$binary")" = 755
+    # RTK is linked into tokenless; no standalone helper may ship.
+    test ! -e "$package/bin/rtk"
+    test ! -e "$package/bin/rtk.exe"
 done
 
 # Platform packages must not declare bin entries: they would collide with
-# the root package's tokenless/rtk bins, and npm resolves such
+# the root package's tokenless bin, and npm resolves such
 # collisions by removing every conflicting .bin link, leaving installs
 # without a tokenless executable. The root package's postinstall links its
 # bins to these platform binaries instead (esbuild's platform packages use
@@ -244,7 +244,7 @@ const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (manifest.bin !== undefined) {
   throw new Error(
     `${manifest.name} must not declare bin entries; ` +
-    'the root package owns the tokenless/rtk bin names',
+    'the root package owns the tokenless bin name',
   );
 }
 JS
@@ -281,7 +281,7 @@ JS
 
 if grep -Eq \
     'cargo-zigbuild|cargo zigbuild|cross build|rustup target|SDKROOT|detectBuilder' \
-    "$ROOT/npm/scripts/package-npm.js"; then
+    "$ROOT/packaging/npm/package-npm.js"; then
     echo "ERROR: npm packer still contains cross-compilation logic" >&2
     exit 1
 fi

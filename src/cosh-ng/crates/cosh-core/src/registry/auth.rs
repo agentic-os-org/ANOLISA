@@ -3,6 +3,17 @@
 use super::*;
 use crate::provider::sysom::{CredentialStatus, ProbeError};
 
+mod ecs_trial;
+
+#[cfg(test)]
+#[path = "auth/trial_tests.rs"]
+mod trial_tests;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_ECS_PROBE: (Result<bool, ProbeError>, std::sync::Arc<std::sync::atomic::AtomicUsize>);
+}
+
 fn ecs_probe_response(
     request_id: &str,
     result: Result<CredentialStatus, ProbeError>,
@@ -56,8 +67,45 @@ pub(super) async fn handle_auth(
     params: &Value,
     config: &mut CoreConfig,
 ) -> OutputMessage {
+    let guarded = params.get("guarded_writes").and_then(Value::as_bool) == Some(true);
+    let persist_candidate = |candidate: &crate::config::CoreConfig| {
+        if guarded {
+            crate::config::persist_config_guarded(candidate)
+        } else {
+            crate::config::persist_config(candidate)
+        }
+    };
     match action {
         "state" => {
+            let (trial_preferences, probe) = tokio::join!(
+                async {
+                    match tokio::task::spawn_blocking(crate::auth::trial_preferences::load).await {
+                        Ok(Ok(auto_use)) => serde_json::json!({ "auto_use": auto_use }),
+                        result => {
+                            let error = match result {
+                                Ok(Err(error)) => error,
+                                _ => crate::auth::trial_preferences::Error::Worker,
+                            };
+                            serde_json::json!({ "auto_use": false, "error_code": error.code() })
+                        }
+                    }
+                },
+                async {
+                    if params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true) {
+                        Some(ecs_trial::available().await)
+                    } else {
+                        None
+                    }
+                }
+            );
+            let ecs_trial = ecs_trial::state(
+                config,
+                probe,
+                trial_preferences
+                    .get("auto_use")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            );
             let templates: Vec<Value> = crate::auth::builtin_auth_providers()
                 .into_iter()
                 .map(|provider| {
@@ -94,7 +142,11 @@ pub(super) async fn handle_auth(
                         "source": source,
                         "editable": editable,
                         "auth_source": provider.auth_source,
-                        "model": provider.model,
+                        "model": if provider.is_ecs_identity() {
+                            Some(crate::auth::trial_policy::MODEL)
+                        } else {
+                            provider.model.as_deref()
+                        },
                         "base_url": provider.base_url,
                         "api_key_len": provider.api_key.as_ref().map(|v| v.chars().count()).unwrap_or(0),
                         "access_key_id_len": provider.access_key_id.as_ref().map(|v| v.chars().count()).unwrap_or(0),
@@ -111,14 +163,55 @@ pub(super) async fn handle_auth(
                 request_id: request_id.to_string(),
                 success: true,
                 data: Some(serde_json::json!({
+                    "trial_preferences": trial_preferences,
+                    "ecs_trial": ecs_trial,
                     "templates": templates,
                     "saved_providers": saved_providers,
                     "active_provider": active_provider,
                     "effective_auth_required": effective_auth_required,
+                    "config_write_guard": "v1",
                 })),
                 error: None,
             }
         }
+        "set_trial_preference" => {
+            let Some(auto_use) = params.get("auto_use").and_then(Value::as_bool) else {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: Some(
+                        serde_json::json!({ "error_code": "trial_preferences_invalid_argument" }),
+                    ),
+                    error: Some("trial_preferences_invalid_argument".into()),
+                };
+            };
+            let result =
+                tokio::task::spawn_blocking(move || crate::auth::trial_preferences::save(auto_use))
+                    .await;
+            match result {
+                Ok(Ok(())) => OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: true,
+                    data: Some(
+                        serde_json::json!({ "trial_preferences": { "auto_use": auto_use } }),
+                    ),
+                    error: None,
+                },
+                result => {
+                    let error = match result {
+                        Ok(Err(error)) => error,
+                        _ => crate::auth::trial_preferences::Error::Worker,
+                    };
+                    OutputMessage::RegistryResponse {
+                        request_id: request_id.to_string(),
+                        success: false,
+                        data: Some(serde_json::json!({ "error_code": error.code() })),
+                        error: Some(error.to_string()),
+                    }
+                }
+            }
+        }
+        "activate_trial" => ecs_trial::activate(request_id, config, None, guarded).await,
         "activate" => {
             let provider_id = params
                 .get("provider_id")
@@ -126,6 +219,12 @@ pub(super) async fn handle_auth(
                 .unwrap_or("");
             if provider_id.is_empty() || !config.ai.providers.contains_key(provider_id) {
                 return registry_error(request_id, "provider not found");
+            }
+            let provider = &config.ai.providers[provider_id];
+            if provider.provider_type.as_deref() == Some("aliyun")
+                && provider.auth_source.as_deref() == Some("ecs_identity")
+            {
+                return ecs_trial::activate(request_id, config, Some(provider_id), guarded).await;
             }
             let mut candidate = config.clone();
             candidate.ai.active_provider = Some(provider_id.to_string());
@@ -137,7 +236,7 @@ pub(super) async fn handle_auth(
                 .and_then(|provider| provider.model.clone());
             candidate.ai.active_model.clone_from(&model);
             candidate.user_ai.active_model = model;
-            if let Err(e) = crate::config::persist_config(&candidate) {
+            if let Err(e) = persist_candidate(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
             *config = candidate;
@@ -161,7 +260,7 @@ pub(super) async fn handle_auth(
                 Ok(removed) => removed,
                 Err(error) => return registry_error(request_id, &error.to_string()),
             };
-            if let Err(error) = crate::config::persist_config(&candidate) {
+            if let Err(error) = persist_candidate(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {error}"));
             }
             *config = candidate;
@@ -271,7 +370,11 @@ pub(super) async fn handle_auth(
             let candidate = match crate::auth::prepare_and_persist_auth_candidate(
                 config,
                 &response,
-                crate::config::persist_config,
+                if guarded {
+                    crate::config::persist_config_guarded
+                } else {
+                    crate::config::persist_config
+                },
             )
             .await
             {

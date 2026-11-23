@@ -18,15 +18,7 @@ pub(super) struct Recover {
 pub(super) fn install(value: package::Install) -> crate::cli::Result<crate::cli::Exit> {
     let result = (|| {
         let paths = scope::paths(value.scope)?;
-        let prefix = value
-            .prefix
-            .as_deref()
-            .ok_or_else(|| aw_package::Error::Invalid("missing --prefix".into()))?;
-        let bundle = value
-            .bundle
-            .as_deref()
-            .ok_or_else(|| aw_package::Error::Invalid("missing --bundle".into()))?;
-        let plan = plan::install(&paths, Path::new(bundle), Path::new(prefix))?;
+        let plan = plan::install(&paths, Path::new(&value.bundle), Path::new(&value.prefix))?;
         Ok((paths, plan))
     })();
     complete("install", value.dry_run, value.output, result)
@@ -35,7 +27,14 @@ pub(super) fn install(value: package::Install) -> crate::cli::Result<crate::cli:
 pub(super) fn uninstall(value: package::Uninstall) -> crate::cli::Result<crate::cli::Exit> {
     let result = (|| {
         let paths = scope::paths(value.scope)?;
-        let plan = plan::uninstall(&paths, Path::new(&value.prefix.prefix), &value.packages)?;
+        let plan = plan::uninstall_with_options(
+            &paths,
+            Path::new(&value.prefix.prefix),
+            &value.packages,
+            plan::UninstallOptions {
+                keep_changed: value.keep_changed,
+            },
+        )?;
         Ok((paths, plan))
     })();
     complete("uninstall", value.dry_run, value.prefix.output, result)
@@ -65,7 +64,9 @@ fn complete(
         plan::Action::Install => output::Outcome::Installed {
             prefix: plan.prefix.clone(),
         },
-        plan::Action::Uninstall => output::Outcome::Uninstalled,
+        plan::Action::Uninstall => output::Outcome::Uninstalled {
+            preserved: plan.preserved.clone(),
+        },
     };
     let result = plan::execute(&paths, &plan, &signals::CANCEL);
     output::complete_mutation(command, options, outcome, result)

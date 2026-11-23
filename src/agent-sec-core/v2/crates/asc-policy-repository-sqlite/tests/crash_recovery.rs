@@ -260,6 +260,7 @@ fn crash_child() {
             scope_id: scope_id.clone(),
             selector: input.scope.selector.clone(),
             policy_snapshots: vec![input.policy],
+            owner_uid: None,
             status: ScopeStatus::Active,
         })
         .unwrap();

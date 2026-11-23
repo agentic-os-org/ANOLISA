@@ -148,7 +148,7 @@ export class Reload {
         if (message.type === "command_lifecycle" &&
             ["completed", "cancelled", "discarded"].includes(message.state) &&
             this.requests.has(message.command_uuid) && !this.closing) {
-          // Worker 1.1.74 can emit result/command completion before generator
+          // Worker 1.1.78 can emit result/command completion before generator
           // finally blocks finish. getContextUsage is a read-only control request
           // queued behind the active turn in this SDK's native command loop.
           await this.native.getContextUsage();

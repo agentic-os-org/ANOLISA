@@ -108,6 +108,19 @@ pub fn list(svc: &MemoryService, dir: &str, opts: ListOptions) -> Result<Vec<Lis
             }
         }
 
+        if out.len() == MAX_ENTRIES {
+            // This additional matching entry proves the listing is truncated.
+            // Render the mount root as '.', matching the `dir` contract.
+            let shown = if rel.is_empty() { "." } else { rel.as_str() };
+            tracing::warn!(
+                "mem_list hit the {}-entry cap under '{}' — listing truncated, \
+                 narrow with a glob or a subdirectory",
+                MAX_ENTRIES,
+                shown
+            );
+            break;
+        }
+
         let ft = entry.file_type();
         let kind = if ft.is_dir() {
             EntryKind::Dir
@@ -123,9 +136,6 @@ pub fn list(svc: &MemoryService, dir: &str, opts: ListOptions) -> Result<Vec<Lis
             kind,
             size,
         });
-        if out.len() >= MAX_ENTRIES {
-            break;
-        }
     }
 
     svc.audit_log(AuditEntry::new(TOOL).path(rel).bytes(out.len() as u64));

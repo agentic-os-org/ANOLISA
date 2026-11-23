@@ -39,16 +39,24 @@ Usage:
 """
 
 import argparse
-import csv
 import glob
-import io
 import json
 import os
 import sys
 from pathlib import Path
 
+from report_formatting import (
+    build_table as build_summary_table,
+    extract_failure_info as extract_failure_info,
+    extract_trial_hash as extract_trial_hash,
+    fmt as fmt,
+    render_csv as render_csv,
+    render_table as render_table,
+)
+
 try:
     import yaml
+    from report_evidence import load_grading_result, load_task_info
 except ImportError:
     print("Error: pyyaml is required. Install with: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
@@ -124,38 +132,6 @@ def load_config(config_path: str | None, cli_args) -> dict:
 
 
 # ── Trial report generation ─────────────────────────────────────────────────
-
-def load_task_info(task_id: str, tasks_dir: str) -> dict:
-    yaml_path = os.path.join(tasks_dir, task_id, "task.yaml")
-    if not os.path.exists(yaml_path):
-        return {"task_id": task_id, "error": "task.yaml not found"}
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f)
-    return {
-        "task_id": data.get("task_id", task_id),
-        "task_name": data.get("task_name", ""),
-        "category": data.get("category", ""),
-        "difficulty": data.get("difficulty", ""),
-        "prompt": data.get("prompt", {}).get("text", "")[:300],
-        "scoring_components": data.get("scoring_components", []),
-        "judge_rubric": data.get("judge_rubric", ""),
-        "reference_solution": data.get("reference_solution", "")[:300],
-        "primary_dimensions": data.get("primary_dimensions", []),
-    }
-
-
-def load_grading_result(trace_path: str) -> tuple:
-    grading = None
-    trace_end = None
-    with open(trace_path) as f:
-        for line in f:
-            obj = json.loads(line)
-            if obj.get("type") == "grading_result":
-                grading = obj
-            if obj.get("type") == "trace_end":
-                trace_end = obj
-    return grading, trace_end
-
 
 def infer_failure_reason(grading: dict, scores: dict) -> list:
     reasons = []
@@ -321,140 +297,6 @@ def generate_reports(trace_dir: str, tasks_dir: str, report_dir: str,
 
 
 # ── Summary table ───────────────────────────────────────────────────────────
-
-def fmt(val):
-    if val is None:
-        return "N/A"
-    if isinstance(val, bool):
-        return "Y" if val else "N"
-    if isinstance(val, float):
-        if val == int(val) and abs(val) < 1e6:
-            return str(int(val))
-        return f"{val:.2f}"
-    return str(val)
-
-
-def extract_failure_info(report: dict) -> str:
-    if not report:
-        return "N/A"
-    if report.get("status") == "succ":
-        return "-"
-    fc = report.get("failure_classification", {})
-    category = fc.get("category", "")
-    reason = fc.get("key_reason_zh", "")
-    if category and reason:
-        result = f"{category} | {reason}"
-    elif category:
-        result = category
-    elif reason:
-        result = reason
-    else:
-        reasons = report.get("failure_reason", [])
-        if reasons:
-            snippets = []
-            for r in reasons:
-                if isinstance(r, dict):
-                    msg = r.get("reasoning", r.get("message", ""))
-                    if msg:
-                        snippets.append(str(msg)[:80])
-            result = "; ".join(snippets[:2]) if snippets else "unknown"
-        else:
-            return "unknown"
-    # Replace commas with semicolons to avoid CSV parsing issues
-    return result.replace(",", ";").replace("，", "；")
-
-
-def extract_trial_hash(trace_field: str) -> str:
-    base = os.path.basename(trace_field).replace(".jsonl", "")
-    parts = base.rsplit("_", 1)
-    return parts[1] if len(parts) == 2 else ""
-
-
-def build_summary_table(data: list, reports: dict) -> tuple:
-    sorted_data = sorted(data, key=lambda t: t["task_id"])
-    has_reports = bool(reports)
-
-    trial_cols = [
-        "Trial", "Trial ID", "Input Toks", "Output Toks",
-        "Model Time(s)", "Tool Time(s)", "Other Time(s)", "Wall Time(s)",
-        "Completion", "Robustness", "Communication", "Safety",
-        "Task Score", "Passed",
-    ]
-    header = ["Task ID", "Task Name", "Difficulty"] + trial_cols + ["Avg Score", "Pass@1", "PassHatK", "Overall"]
-    if has_reports:
-        header.append("Failure Reason")
-
-    rows = [header]
-    for task in sorted_data:
-        task_id = task["task_id"]
-        task_name = task["task_name"]
-        difficulty = task["difficulty"]
-        avg_score = task.get("avg_score")
-        pass_at_1 = task.get("pass_at_1")
-        pass_hat_k = task.get("pass_hat_k")
-        avg_passed = task.get("avg_passed")
-
-        for i, trial in enumerate(task.get("trials", []), 1):
-            trace_field = trial.get("trace", "")
-            trace_basename = os.path.basename(trace_field) if trace_field else ""
-            trial_hash = extract_trial_hash(trace_field)
-            report = reports.get(trace_basename) if reports else None
-            failure_info = extract_failure_info(report) if has_reports else ""
-
-            row = [
-                task_id if i == 1 else "",
-                task_name if i == 1 else "",
-                difficulty if i == 1 else "",
-                f"#{i}",
-                trial_hash,
-                fmt(trial.get("input_tokens")),
-                fmt(trial.get("output_tokens")),
-                fmt(trial.get("model_time_s")),
-                fmt(trial.get("tool_time_s")),
-                fmt(trial.get("other_time_s")),
-                fmt(trial.get("wall_time_s")),
-                fmt(trial.get("completion")),
-                fmt(trial.get("robustness")),
-                fmt(trial.get("communication")),
-                fmt(trial.get("safety")),
-                fmt(trial.get("task_score")),
-                fmt(trial.get("passed")),
-                fmt(avg_score) if i == 1 else "",
-                fmt(pass_at_1) if i == 1 else "",
-                fmt(pass_hat_k) if i == 1 else "",
-                fmt(avg_passed) if i == 1 else "",
-            ]
-            if has_reports:
-                row.append(failure_info)
-            rows.append(row)
-
-    return rows
-
-
-def render_table(rows: list) -> str:
-    widths = [0] * len(rows[0])
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-    sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-
-    def format_row(row):
-        return "|" + "|".join(f" {str(cell):<{widths[i]}} " for i, cell in enumerate(row)) + "|"
-
-    lines = [sep, format_row(rows[0]), sep]
-    for row in rows[1:]:
-        lines.append(format_row(row))
-        lines.append(sep)
-    return "\n".join(lines)
-
-
-def render_csv(rows: list) -> str:
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    for row in rows:
-        writer.writerow(row)
-    return buf.getvalue()
-
 
 def load_reports(report_dir: str) -> dict:
     reports = {}
@@ -686,10 +528,15 @@ Examples:
         sum(1 for tr in t.get("trials", []) if tr.get("passed"))
         for t in data
     )
+    # 空/零试次批次（batch_results.json 为 [] 或 trials 全空）不得在报表
+    # 生成后以 ZeroDivisionError 毁掉输出——守卫与 build_structured_data
+    # 及 batch_runner 的既有写法一致
+    task_pct = passed_tasks / total_tasks * 100 if total_tasks else 0.0
+    trial_pct = passed_trials / total_trials * 100 if total_trials else 0.0
     summary_text = (
         table_txt
-        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/total_tasks*100:.1f}%)\n"
-        + f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
+        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({task_pct:.1f}%)\n"
+        + f"Trials: {total_trials} total, {passed_trials} passed ({trial_pct:.1f}%)\n"
     )
     summary_csv = render_csv(rows)
 
@@ -702,7 +549,7 @@ Examples:
     json_path = os.path.join(output_dir, "report.json")
     with open(txt_path, "w") as f:
         f.write(summary_text)
-    with open(csv_path, "w") as f:
+    with open(csv_path, "w", newline="") as f:
         f.write(summary_csv)
     with open(json_path, "w") as f:
         json.dump(structured, f, indent=2, ensure_ascii=False)

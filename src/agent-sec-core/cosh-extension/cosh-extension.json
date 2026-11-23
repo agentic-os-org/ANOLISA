@@ -1,6 +1,6 @@
 {
   "name": "agent-sec-core",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "hooks": {
     "PreToolUse": [
       {
@@ -32,7 +32,10 @@
           {
             "type": "command",
             "command": "python3 ${extensionPath}/hooks/sandbox-guard.py",
-            "name": "sandbox-guard"
+            "name": "sandbox-guard",
+            "fail_open": false,
+            "require_output_when_env": "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
+            "timeout": 60000
           }
         ]
       },
@@ -128,6 +131,17 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "^(run_shell_command|shell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${extensionPath}/hooks/sandbox-guard.py",
+            "name": "sandbox-receipt",
+            "timeout": 15000
+          }
+        ]
+      },
       {
         "hooks": [
           {

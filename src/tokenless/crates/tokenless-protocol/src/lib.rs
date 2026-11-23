@@ -467,6 +467,8 @@ pub enum ContentType {
     Diff,
     /// Complete HTML document.
     Html,
+    /// Browser accessibility-tree snapshot (Playwright MCP or chrome-devtools-mcp).
+    BrowserSnapshot,
     /// Delimiter-consistent table.
     Tabular,
     /// Program source code.
@@ -488,6 +490,7 @@ impl ContentType {
             Self::StackTrace => "stack_trace",
             Self::Diff => "diff",
             Self::Html => "html",
+            Self::BrowserSnapshot => "browser_snapshot",
             Self::Tabular => "tabular",
             Self::SourceCode => "source_code",
             Self::PlainText => "plain_text",
@@ -504,7 +507,7 @@ pub enum AppliedOperation {
     SchemaCompression,
     /// ANSI SGR presentation sequences were removed from a build log.
     TerminalCleanup,
-    /// Repeated build/test progress was reduced behind retrieval markers.
+    /// Reduced build-log layout or progress; [`PostToolResponse::recoverability`] states recovery guarantees.
     BuildLogReduction,
     /// CSV/TSV quoting and record terminators changed with all cells retained.
     TabularCompaction,
@@ -514,9 +517,13 @@ pub enum AppliedOperation {
     SearchPathSharing,
     /// Unmodified Git diff context was reduced with the original available in Stash.
     DiffReduction,
-    /// An HTML page was rendered as Markdown with enumerated non-content elements
-    /// removed and the original available in Stash.
+    /// HTML was rendered as Markdown with the original available in Stash: a page,
+    /// with enumerated non-content elements removed, or (with the `json` content
+    /// type) fragments inside JSON string values, with nothing visible removed.
     HtmlExtraction,
+    /// A browser accessibility snapshot was re-encoded as a record table with
+    /// every element reference retained and the original available in Stash.
+    BrowserSnapshotReduction,
     /// JSON was serialized compactly, optionally unwrapping one JSON string
     /// envelope, without omitting payload values.
     JsonCleanup,
@@ -541,6 +548,7 @@ impl AppliedOperation {
             Self::SearchPathSharing => "search_path_sharing",
             Self::DiffReduction => "diff_reduction",
             Self::HtmlExtraction => "html_extraction",
+            Self::BrowserSnapshotReduction => "browser_snapshot_reduction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

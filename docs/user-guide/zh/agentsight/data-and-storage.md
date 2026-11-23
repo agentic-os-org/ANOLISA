@@ -95,8 +95,12 @@ GenAI 维护使用独立于采集投递与查询的连接。删除分成小批�
 采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
 
 开启定时维护时，trace 进程将 primary 和 GenAI 的 WAL checkpoint 交给该维护线程，避免在采集提交时触发。
-保留与容量检查之间约每秒执行一次 passive checkpoint；清理周期仍由 `check_interval_secs` 控制。
-SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动 WAL checkpoint。
+`runtime_limits.cpu_budget_percent=0` 时，保留与容量检查之间约每秒执行一次 passive checkpoint。
+启用非零 CPU 预算时，worker 每 20 ms 检查一次，并在 WAL 增长达到 1 MiB 或距上次 checkpoint 达到
+50 ms 时请求 passive checkpoint；清理轮次在有界操作之间让出执行权时也遵循该节奏。
+`check_interval_secs` 仍控制清理周期。容量清理只在一轮结束时尝试截断 WAL：达到 live page 目标，
+或已没有可淘汰记录时执行。SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动
+WAL checkpoint。
 
 开启 `runtime_limits.cpu_budget_percent` 后，primary 与 GenAI 清理会在有界操作之间让出执行权，
 并在后续调度继续。维护与采集投递共用 CPU 准入，既有保留和容量目标继续生效，但清理一轮可能耗时更长。
@@ -112,6 +116,9 @@ over_budget、failed 区分排队、锁冲突、写入成功、预算拒绝和�
 2. 如果按时间删除改变了数据库，必须成功完成 WAL checkpoint 后才能继续。
 3. 仅在物理占用（database、WAL 与 SHM）超过上限时触发容量淘汰。
 4. 按最旧且允许淘汰的记录清理，每轮 checkpoint，直到逻辑占用降至上限的 90%。
+
+90% 目标只统计 live page，不计 WAL 与 SHM，因此在下一次边界 checkpoint 截断 WAL 之前，物理占用
+可能超出 `max_db_size_mb` 约 WAL+SHM 的大小。
 
 总量分配排序同样计入 WAL 与 SHM，因此 WAL 较大的数据库可能在一轮中优先治理。该数据库会在淘汰前执行
 checkpoint，后续轮次再按新的物理占用重新分配。
@@ -187,12 +194,13 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 服务 | `GET /health`、`GET /metrics`、`GET /api/docs` | 存活探测、Prometheus 指标、路由清单（`/health` 与 `/metrics` 仅本机可访问） |
 | 认证 | `GET /api/auth/status`、`GET /api/auth/verify`、`POST /api/auth/login` | 认证状态、能力列表、令牌换 cookie |
 | 会话与调用 | `GET /api/sessions`、`GET /api/sessions/{id}/traces`、`GET /api/sessions/{id}/resources`、`GET /api/traces/{id}`、`GET /api/conversations/{id}`、`POST /api/sessions/search` | 会话列表、会话内对话摘要（以 `conversation_id` 为键）与进程资源、按 response_id 的单次调用详情、语义搜索 |
-| 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/agent-names` | Token 时序、延迟分位、Agent 过滤项 |
+| 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/metrics/cache`、`GET /api/agent-names` | Token 时序、延迟分位、提示词缓存命中率与低命中原因（字段同 `agentsight cache --json`）、Agent 过滤项 |
 | 中断 | `GET /api/interruptions`、`/count`、`/stats`、`/session-counts`、`/conversation-counts`、`POST /api/interruptions/{id}/resolve` | 排查与关闭 |
 | Agent 健康 | `GET /api/agent-health`、`DELETE /api/agent-health/{pid}`、`POST /api/agent-health/{pid}/restart` | 实时状态与恢复动作 |
 | Tokenless 记录 | `POST /api/tokenless/refresh`、`GET /api/tokenless/records`、`GET /api/tokenless/records/{cache_id}` | 刷新已保存统计、列出元数据和读取详情；内容需显式指定 `include_content=true`。三条路由即使来自 loopback 也需要 Dashboard 凭据 |
 | Token 节省 | `GET /api/token-savings`、`GET /api/token-savings/session/{id}` | Tokenless 节省量 |
 | ATIF 导出 | `GET /api/export/atif/session/{id}`（还有 `trace`、`conversation`） | 轨迹导出 |
+| 工作区快照 | `GET /api/ws-ckpt/{kind}/{id}/snapshots`、`POST /api/ws-ckpt/diff`、`POST /api/ws-ckpt/restore/{prepare,execute,result}` | 本机 ws-ckpt 查询与显式确认的文件恢复；包括回环地址在内均要求认证 |
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |
@@ -286,6 +294,46 @@ sudo systemctl start agentsight.service
 ```
 
 先停服务可以确保 WAL 已 checkpoint，归档内容才是一致的。
+
+## 工作区快照 API
+
+以下接口使用 Linux 本机 ws-ckpt 存储。读取快照数据和恢复文件均要求 Dashboard 凭据，
+包括回环地址。
+
+- `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`：对 `session` 或 `conversation` 查询
+  是否有可用工作区。注册工作区通过 ws-ckpt 兼容性检查时返回空的 `204`，不可用时返回 `404`。
+  沿用普通轨迹的访问规则，供 Dashboard 决定是否提示登录。
+- `GET /api/ws-ckpt/{kind}/{id}/snapshots`：`kind` 为 `session`、`conversation` 或
+  `trajectory`（已采集 ATIF）。session 优先读取捕获事件，再回退到已采集轨迹。
+  由已确认成功的 ws-ckpt 操作确定工作区；省略参数时仅使用已明确绑定的插件配置。
+  返回 `trajectory`、`scope`、`step_snapshots`、`unassigned`、`association` 与
+  `completeness`；未解析工作区时 `scope: null`。兼容性检查失败时保留 `trajectory`，
+  返回 `scope: null`、`restore_enabled: false` 和空的 `step_snapshots`。把 `completeness.next_cursor` 作为
+  `cursor` 继续读取，各页共享 Step 边界和 `as_of`；轨迹版本变化时需重新查询。
+  首 Step 之前或截止时刻及之后的快照仅保留在 `unassigned` 诊断中，不生成 Step 按钮。
+- `POST /api/ws-ckpt/diff`：请求体为
+  `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`。返回文件级 `changes`、权威
+  `scope`、快照 ID 和比较时间。只读查询先在列表中核对完整快照 ID，再调用 CLI diff。
+  开启回滚时，Sight 调用 guarded CLI 预览，并在 `restore_preview` 中返回该预览的
+  `generation` 和 `diff_digest`。
+  不返回逐行文件内容。
+- `POST /api/ws-ckpt/restore/prepare`：请求体包含上述目标 `target`、
+  `writers_stopped: true`，以及从 `restore_preview` 复制的 `expected_preview`。
+  操作者必须确保回滚期间没有其他写入。Sight 获取同一目标的新 guarded 预览，核对代际
+  和差异摘要是否均与已显示的预览一致，通过后返回密封的 `confirmation_token` 和操作 ID。
+  任一字段变化时返回 `409`，需刷新预览后重新确认。
+- `POST /api/ws-ckpt/restore/execute`：请求体为 `{"confirmation_token":"<TOKEN>"}`。
+  守护进程在工作区锁内核对完整目标、工作区代际和差异，然后执行回滚，无需创建保护快照。
+  返回 `status: "succeeded"` 或 `"unknown"`。拒绝若带有 `effect: "known_no_effect"`，
+  操作者可在刷新后重新准备确认。CLI 超时且未返回完整结果等情况，保留原 token，
+  使用结果接口查询。
+- `POST /api/ws-ckpt/restore/result`：使用同一 token 查询守护进程记录的持久化 `evidence`。
+  快照兼容性检查失败时仍可查询。evidence 缺失不能证明恢复未发生。
+
+关联区间为 `[当前 Agent Step 开始, 下一个 Agent Step 开始)`，最后一段截至
+`as_of`。这不证明创建者；同工作区的自动 hook、独立 CLI 和其他会话快照也会包含在内。
+恢复另需启用
+[配置开关](configuration.md#工作区快照后端linux)。
 
 ## 相关页面
 

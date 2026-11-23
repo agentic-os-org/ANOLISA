@@ -92,6 +92,7 @@ pub(crate) fn run(
     signal: &AtomicI32,
     failed: &AtomicBool,
     shutdown_grace: Duration,
+    leader_signals: bool,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus, Error> {
     let mut terminal = Terminal::capture().map_err(|e| io_error("terminal transfer", e))?;
@@ -114,7 +115,11 @@ pub(crate) fn run(
         while !child.observe_exit()? {
             let pending = signal.swap(0, Ordering::AcqRel);
             if pending != 0 {
-                child.signal(pending)?;
+                if leader_signals {
+                    child.signal_leader(pending)?;
+                } else {
+                    child.signal(pending)?;
+                }
                 stopping.get_or_insert(Instant::now() + shutdown_grace);
             }
             if failed.load(Ordering::Acquire) && !failure_sent {

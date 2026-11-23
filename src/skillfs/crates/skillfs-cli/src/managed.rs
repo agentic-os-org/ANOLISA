@@ -96,8 +96,31 @@ pub struct ManagedState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_config: Option<ManagedMountConfig>,
     pub worker_program: String,
+    /// Executable identity captured before launching the supervisor and worker.
+    /// Absent in legacy state, which verifies the current `worker_program` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_identity: Option<ExecutableIdentity>,
     pub worker_args: Vec<String>,
     pub desired_state: DesiredState,
+}
+
+/// Filesystem identity of an executable, stable across links and unlinking.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl ExecutableIdentity {
+    fn read(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
 }
 
 /// Sequence that makes every staging path unique inside this process.
@@ -446,6 +469,48 @@ fn pid_alive(pid: i32) -> bool {
     pid > 0 && unsafe { libc::kill(pid, 0) } == 0
 }
 
+/// Whether the process behind `pid` is still the program a managed pid file
+/// was written for.
+///
+/// A managed pid file can outlive its process: once the kernel recycles the
+/// pid for an unrelated same-uid process, a liveness-only check would make
+/// `skillfs stop` / `--managed` SIGTERM/SIGKILL that process (issue #5065).
+/// Following `/proc/<pid>/exe` identifies the running executable even after
+/// unlinking. Comparing device/inode also accepts hard links and merged-/usr
+/// aliases without trusting a shared basename. Unresolvable identity returns
+/// `false` so the caller spares the pid and falls back to unmount-only reclaim.
+fn pid_matches_program(pid: i32, recorded_program: &str) -> bool {
+    ExecutableIdentity::read(recorded_program)
+        .is_ok_and(|expected| pid_matches_identity(pid, expected))
+}
+
+fn pid_matches_identity(pid: i32, expected: ExecutableIdentity) -> bool {
+    pid > 0
+        && ExecutableIdentity::read(format!("/proc/{pid}/exe"))
+            .is_ok_and(|actual| actual == expected)
+}
+
+/// Live AND identity-verified. A pid whose exe cannot be matched to the
+/// recorded worker program is treated as gone everywhere a signal would go,
+/// and its identity verification is retried on each wait tick so a slow
+/// start (exe link not yet readable) is not permanently mistaken for a
+/// mismatch.
+fn process_live(pid: i32, state: Option<&ManagedState>) -> bool {
+    pid_alive(pid) && matches_program(pid, state)
+}
+
+fn matches_program(pid: i32, state: Option<&ManagedState>) -> bool {
+    match state {
+        Some(state) => match state.worker_identity {
+            Some(identity) => pid_matches_identity(pid, identity),
+            None => pid_matches_program(pid, &state.worker_program),
+        },
+        // No readable state: the recorded program is unknown, so no pid can
+        // be verified. Direct signaling and process waiting are disabled.
+        None => false,
+    }
+}
+
 fn send_signal(pid: i32, sig: i32) {
     if pid > 0 {
         unsafe {
@@ -695,8 +760,13 @@ pub fn run_client(
     // A killed supervisor can leave behind an orphan worker that still serves
     // the mount. Do not start a competing worker over it: terminate the orphan
     // and clear the mountpoint, then create a fresh supervised pair below.
+    // The warn is gated on the same identity check teardown applies — a
+    // recycled pid is not an orphan worker.
     if let Some(pid) = read_pid(&paths.worker_pid) {
-        if pid_alive(pid) {
+        if pid_alive(pid)
+            && ManagedState::load(&paths.state)
+                .is_ok_and(|state| matches_program(pid, Some(&state)))
+        {
             warn!(
                 worker_pid = pid,
                 mountpoint = %normalized.display(),
@@ -708,6 +778,8 @@ pub fn run_client(
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
+    let worker_identity = ExecutableIdentity::read("/proc/self/exe")
+        .map_err(|e| format!("failed to identify current executable: {e}"))?;
     let worker_args = match &mount_config {
         Some(config) => build_config_worker_args(raw_args, config, &paths.mount_config)?,
         None => build_worker_args(raw_args),
@@ -724,6 +796,7 @@ pub fn run_client(
         source: source_norm.to_string_lossy().to_string(),
         mount_config,
         worker_program: worker_program.to_string_lossy().to_string(),
+        worker_identity: Some(worker_identity),
         worker_args,
         desired_state: DesiredState::Mounted,
     };
@@ -1178,32 +1251,42 @@ fn teardown_instance_with_shutdown(
     }
 
     // Prefer signaling the supervisor: it owns the worker and unmounts it
-    // cleanly. Fall back to signaling the worker directly.
+    // cleanly. Fall back to signaling the worker directly. Recorded pids are
+    // only signaled when their /proc identity still matches the recorded
+    // worker program — a recycled pid belongs to an unrelated process.
+    let state = ManagedState::load(&paths.state).ok();
+    let signaled = |pid: i32| -> bool { process_live(pid, state.as_ref()) };
     let sup_pid = read_pid(&paths.supervisor_pid);
     let worker_pid = read_pid(&paths.worker_pid);
 
     if let Some(pid) = sup_pid {
-        if pid_alive(pid) {
+        if signaled(pid) {
             info!(supervisor_pid = pid, "stopping managed supervisor");
             send_signal(pid, libc::SIGTERM);
         }
     }
-    if sup_pid.is_none_or(|p| !pid_alive(p)) {
+    // The fallback keys on the verified-supervisor predicate, not raw
+    // liveness: an identity-mismatched (recycled) supervisor pid counts as
+    // absent, so the worker still gets its graceful TERM instead of
+    // waiting out the timeout for a SIGKILL that bypasses cleanup.
+    if sup_pid.is_none_or(|p| !process_live(p, state.as_ref())) {
         if let Some(pid) = worker_pid {
-            if pid_alive(pid) {
+            if signaled(pid) {
                 info!(worker_pid = pid, "stopping managed worker directly");
                 send_signal(pid, libc::SIGTERM);
             }
         }
     }
 
-    let processes_gone =
-        || sup_pid.is_none_or(|p| !pid_alive(p)) && worker_pid.is_none_or(|p| !pid_alive(p));
+    let processes_gone = || {
+        sup_pid.is_none_or(|p| !process_live(p, state.as_ref()))
+            && worker_pid.is_none_or(|p| !process_live(p, state.as_ref()))
+    };
     let unmount_result = shutdown(&processes_gone);
     if !processes_gone() {
         warn!("teardown timed out waiting for clean shutdown; forcing");
         for p in [sup_pid, worker_pid].into_iter().flatten() {
-            if pid_alive(p) {
+            if process_live(p, state.as_ref()) {
                 send_signal(p, libc::SIGKILL);
             }
         }
@@ -1266,6 +1349,26 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// Readiness handshake for stand-in children: spin until the child's
+    /// `/proc/<pid>/exe` matches the recorded program. Readability alone is
+    /// not enough — during startup the link briefly points at the test
+    /// executable before the `execve` into the stand-in completes, and a
+    /// readiness check that only tests readability lets teardown's
+    /// identity gate see the wrong program, refuse to signal, and leave
+    /// the reap loop to time out (single-CPU scheduling makes this
+    /// reproducible). Bounded so a pathological environment fails the
+    /// test instead of hanging it.
+    fn wait_until_program_matches(pid: i32, recorded_program: &str) {
+        for _ in 0..100 {
+            if pid_matches_program(pid, recorded_program) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child {pid} never matched the recorded program {recorded_program}");
+    }
 
     #[test]
     fn instance_id_is_stable_for_same_path() {
@@ -1518,6 +1621,10 @@ mod tests {
             source: "/srv/skills".to_string(),
             mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
+            worker_identity: Some(ExecutableIdentity {
+                device: 1,
+                inode: 2,
+            }),
             worker_args: vec![
                 "mount".to_string(),
                 "--foreground".to_string(),
@@ -1531,6 +1638,7 @@ mod tests {
         assert_eq!(loaded.instance_id, state.instance_id);
         assert_eq!(loaded.desired_state, DesiredState::Mounted);
         assert_eq!(loaded.worker_args, state.worker_args);
+        assert_eq!(loaded.worker_identity, state.worker_identity);
     }
 
     #[test]
@@ -1549,6 +1657,7 @@ mod tests {
             source: "/srv/skills".to_string(),
             mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
+            worker_identity: None,
             worker_args: vec![
                 "mount".to_string(),
                 "--foreground".to_string(),
@@ -1564,8 +1673,10 @@ mod tests {
         let mut legacy = sample_state("legacy");
         let json = serde_json::to_string(&legacy).expect("legacy JSON");
         assert!(!json.contains("mount_config"));
+        assert!(!json.contains("worker_identity"));
         legacy = serde_json::from_str(&json).expect("read old state shape");
         assert!(legacy.mount_config.is_none());
+        assert!(legacy.worker_identity.is_none());
         // Legacy request matching intentionally does not compare worker options.
         legacy.worker_args.push("--allow-other".to_string());
         legacy.worker_args.push("--read-only".to_string());
@@ -1779,6 +1890,460 @@ mod tests {
                 "unreadable mount table",
             ))
         });
+    }
+
+    // ---- signaling identity gate (#5065) ----
+
+    #[test]
+    fn pid_identity_requires_the_same_executable() {
+        let me = std::process::id() as i32;
+        let my_exe = std::env::current_exe().expect("current exe");
+        assert!(
+            pid_matches_program(me, &my_exe.to_string_lossy()),
+            "a live process must match its own exe"
+        );
+        let other = tempfile::tempdir().expect("different executable directory");
+        let basename = my_exe.file_name().expect("exe basename");
+        let same_name = other.path().join(basename);
+        std::fs::copy("/usr/bin/sleep", &same_name).expect("copy different executable");
+        assert!(!pid_matches_program(me, &same_name.to_string_lossy()));
+        assert!(
+            !pid_matches_program(me, "/usr/bin/definitely-not-this-binary"),
+            "a live unrelated program must not match the recorded skillfs path"
+        );
+    }
+
+    struct StandIn(std::process::Child);
+
+    impl StandIn {
+        fn spawn(program: &Path) -> Self {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let child = loop {
+                match std::process::Command::new(program).arg("30").spawn() {
+                    Ok(child) => break child,
+                    // Parallel forks can briefly inherit the copy's writable fd.
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ETXTBSY)
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("spawn stand-in: {error}"),
+                }
+            };
+            let stand_in = Self(child);
+            wait_until_program_matches(stand_in.0.id() as i32, &program.to_string_lossy());
+            stand_in
+        }
+    }
+
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn pid_identity_accepts_hard_links_and_symlinks() {
+        let dir = tempfile::tempdir().expect("executable directory");
+        let program = dir.path().join("skillfs");
+        let hard_link = dir.path().join("hard-link");
+        let symlink = dir.path().join("symlink");
+        std::fs::copy("/usr/bin/sleep", &program).expect("copy executable");
+        std::fs::hard_link(&program, &hard_link).expect("hard link");
+        std::os::unix::fs::symlink(&program, &symlink).expect("symlink");
+        let child = StandIn::spawn(&hard_link);
+        for path in [&program, &hard_link, &symlink] {
+            assert!(pid_matches_program(
+                child.0.id() as i32,
+                &path.to_string_lossy()
+            ));
+        }
+    }
+
+    #[test]
+    fn recorded_identity_survives_executable_deletion_and_replacement() {
+        let dir = tempfile::tempdir().expect("executable directory");
+        let program = dir.path().join("skillfs");
+        std::fs::copy("/usr/bin/sleep", &program).expect("copy executable");
+        let child = StandIn::spawn(&program);
+        let pid = child.0.id() as i32;
+        let mut state = sample_state("instance");
+        state.worker_program = program.to_string_lossy().into_owned();
+        state.worker_identity = Some(ExecutableIdentity::read(&program).expect("identity"));
+        assert!(matches_program(pid, Some(&state)));
+
+        std::fs::remove_file(&program).expect("unlink running executable");
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("deleted executable");
+        assert!(exe.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"));
+        assert!(matches_program(pid, Some(&state)));
+        // Legacy state cannot prove identity once its executable is gone.
+        assert!(!pid_matches_program(pid, &state.worker_program));
+
+        std::fs::copy("/usr/bin/sleep", &program).expect("replace executable");
+        let replacement = StandIn::spawn(&program);
+        assert!(matches_program(pid, Some(&state)));
+        assert!(!matches_program(replacement.0.id() as i32, Some(&state)));
+    }
+
+    #[test]
+    fn teardown_spares_same_named_executables_in_both_pid_slots() {
+        for legacy in [false, true] {
+            for supervisor in [false, true] {
+                let runtime = tempfile::tempdir().expect("runtime directory");
+                let mountpoint = tempfile::tempdir().expect("mountpoint directory");
+                let paths = ManagedPaths {
+                    state: runtime.path().join("instance.state.json"),
+                    supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+                    worker_pid: runtime.path().join("instance.worker.pid"),
+                    supervisor_log: runtime.path().join("instance.supervisor.log"),
+                    worker_log: runtime.path().join("instance.worker.log"),
+                    mount_config: runtime.path().join("instance.mount.toml"),
+                };
+                let recorded = runtime.path().join("recorded/skillfs");
+                let unrelated = runtime.path().join("unrelated/skillfs");
+                std::fs::create_dir(recorded.parent().expect("recorded parent")).expect("mkdir");
+                std::fs::create_dir(unrelated.parent().expect("unrelated parent")).expect("mkdir");
+                std::fs::copy(std::env::current_exe().expect("test executable"), &recorded)
+                    .expect("copy recorded executable");
+                std::fs::copy("/usr/bin/sleep", &unrelated).expect("copy unrelated executable");
+                let mut child = StandIn::spawn(&unrelated);
+                let mut state = sample_state("instance");
+                state.worker_program = recorded.to_string_lossy().into_owned();
+                state.worker_identity = if legacy {
+                    None
+                } else {
+                    Some(ExecutableIdentity::read(&recorded).expect("recorded identity"))
+                };
+                state.save(&paths.state).expect("save state");
+                let pid_path = if supervisor {
+                    &paths.supervisor_pid
+                } else {
+                    &paths.worker_pid
+                };
+                write_pid(pid_path, child.0.id()).expect("write recycled pid");
+                teardown_instance_with_shutdown(
+                    &paths,
+                    mountpoint.path(),
+                    |processes_gone| {
+                        assert!(
+                            processes_gone(),
+                            "unrelated process must not delay shutdown"
+                        );
+                        // Exercise the forced-cleanup decision after shutdown fails too.
+                        Err("injected shutdown failure".into())
+                    },
+                    || Ok(Vec::new()),
+                )
+                .expect_err("injected shutdown failure is surfaced");
+                assert!(child.0.try_wait().expect("child status").is_none());
+                assert!(!paths.state.exists());
+                assert!(!pid_path.exists());
+            }
+        }
+    }
+
+    /// A pid that cannot be resolved (dead, or not ours) is a mismatch:
+    /// the gate fails spare, never fails kill.
+    #[test]
+    fn pid_identity_of_unresolvable_pid_is_false() {
+        // Spawn and reap a child so its pid is guaranteed dead afterwards.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id() as i32;
+        child.wait().expect("reap child");
+        assert!(!pid_alive(pid), "reaped pid must be dead");
+        assert!(!pid_matches_program(pid, "/usr/bin/skillfs"));
+        let mut state = sample_state("instance");
+        state.worker_identity = Some(ExecutableIdentity::read("/proc/self/exe").expect("identity"));
+        assert!(!matches_program(pid, Some(&state)));
+    }
+
+    /// The recorded program from state gates teardown signaling: a live
+    /// child that is NOT the recorded program must survive `stop` —
+    /// SIGTERM and the SIGKILL-forcing path included — while cleanup
+    /// proceeds as if the pid were gone. Regression for #5065: a stale
+    /// managed pid file must not kill a recycled-pid process.
+    #[test]
+    fn teardown_spares_a_recycled_pid_of_another_program() {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        // The recorded program is skillfs; the recycled pid runs something
+        // else entirely.
+        state.worker_program = "/usr/bin/skillfs".to_string();
+        state.save(&paths.state).expect("save state");
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn recycled-pid stand-in");
+        let pid = child.id() as i32;
+        std::fs::write(&paths.worker_pid, pid.to_string()).expect("write worker pid");
+
+        // Shutdown reports the processes gone immediately (the gate says so)
+        // and the mount table is empty, so teardown goes straight to
+        // file cleanup without waiting the full shutdown timeout.
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint.path(),
+            |processes_gone| {
+                // The unrelated process is alive, but the identity gate must
+                // already report it as gone.
+                assert!(
+                    processes_gone(),
+                    "an identity-mismatched pid must be treated as gone"
+                );
+                Ok(())
+            },
+            || Ok(Vec::new()),
+        )
+        .expect("teardown succeeds without signaling");
+
+        // The child must still be running: no SIGTERM, no SIGKILL.
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "an unrelated process reusing a managed pid must not be signaled"
+        );
+        child.kill().expect("cleanup child");
+        child.wait().expect("reap child");
+    }
+
+    /// The matching-program case keeps working end to end: a real child of
+    /// the recorded program (here, the test binary itself playing the
+    /// worker) is signaled, and the shutdown hook observes it gone only
+    /// after it exits.
+    #[test]
+    fn teardown_signals_a_matching_program() {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        // Record a real binary the child runs, so /proc/<pid>/exe matches.
+        // `sleep` is used instead of the test binary's --help: the role must
+        // stay alive under the default TERM disposition so the test can
+        // observe that teardown's TERM was actually delivered (exit status
+        // = signal SIGTERM), not merely that the process disappeared.
+        state.worker_program = "/usr/bin/sleep".to_string();
+        state.worker_identity =
+            Some(ExecutableIdentity::read(&state.worker_program).expect("worker identity"));
+        state.save(&paths.state).expect("save state");
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn matching stand-in");
+        let pid = child.id() as i32;
+        std::fs::write(&paths.worker_pid, pid.to_string()).expect("write worker pid");
+        // Readiness handshake: wait until /proc/<pid>/exe matches the
+        // recorded program, so the identity check never races the
+        // execve from the test executable into the stand-in.
+        wait_until_program_matches(pid, &state.worker_program);
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint.path(),
+            |processes_gone| {
+                // The hook runs after teardown's SIGTERM, so the child's exit
+                // races this probe: between the SIGTERM and the hook, the
+                // child may have died into its zombie state, where
+                // `/proc/<pid>/exe` is already unreadable and `processes_gone()`
+                // reports true while `try_wait` has not yet observed the exit.
+                // Neither a liveness assertion nor a nonblocking probe can
+                // close that window; a blocking reap can. The hook therefore
+                // blocks (bounded by a generous multiple of the signal's
+                // delivery time) until the child is reaped, then asserts the
+                // delivered signal — and after the reap, `processes_gone()`
+                // is deterministically true, so that contract holds too.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break status,
+                        // `try_wait` errors are transient (waitpid EINTR on
+                        // signal-heavy scheduling); keep retrying until the
+                        // deadline, like the still-running arm.
+                        Ok(None) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            panic!("reaping probe failed: {e}");
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("child reaping probe timed out before the SIGTERM took effect");
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                assert_eq!(
+                    status.signal(),
+                    Some(libc::SIGTERM),
+                    "the reaped child must show teardown's SIGTERM, got {status}"
+                );
+                assert!(
+                    processes_gone(),
+                    "after the reap the identity-matched pid must count as gone"
+                );
+                Ok(())
+            },
+            || Ok(Vec::new()),
+        )
+        .expect("teardown succeeds");
+        assert!(!paths.worker_pid.exists(), "pid file cleaned up");
+
+        // The hook above already reaped the child via `try_wait`, so this
+        // `wait` returns the same cached status; it re-asserts the delivered
+        // signal outside the hook, where a failure cannot mask the teardown
+        // result itself.
+        let status = child.wait().expect("reap matching child");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "the matching worker must die from teardown's SIGTERM, got {status}"
+        );
+    }
+
+    /// An identity-mismatched supervisor pid must count as *absent* for the
+    /// worker fallback: the orphan worker still receives its graceful TERM
+    /// (instead of waiting out the timeout for a SIGKILL that bypasses its
+    /// cleanup), while the unrelated process sitting on the supervisor pid
+    /// is spared entirely.
+    #[test]
+    fn worker_fallback_fires_when_supervisor_pid_is_recycled() {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.worker_program = "/usr/bin/sleep".to_string();
+        state.save(&paths.state).expect("save state");
+
+        // The worker: a genuine stand-in of the recorded program.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn worker stand-in");
+        let worker_pid = worker.id() as i32;
+        std::fs::write(&paths.worker_pid, worker_pid.to_string()).expect("write worker pid");
+        wait_until_program_matches(worker_pid, &state.worker_program);
+
+        // The supervisor slot: an unrelated long-lived process of a
+        // different program (`sh` vs the recorded `sleep`; two commands
+        // keep sh from exec-ing the single sleep).
+        let mut bystander = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30; sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn supervisor stand-in");
+        let bystander_pid = bystander.id() as i32;
+        std::fs::write(&paths.supervisor_pid, bystander_pid.to_string())
+            .expect("write supervisor pid");
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint.path(),
+            |_processes_gone| Ok(()),
+            || Ok(Vec::new()),
+        )
+        .expect("teardown succeeds");
+
+        // The worker must have received TERM (die by signal 15), not the
+        // timeout's KILL — the fallback fired despite the recycled
+        // supervisor pid.
+        let status = worker.wait().expect("reap worker");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "the orphan worker must get graceful SIGTERM, got {status}"
+        );
+
+        // The bystander must have survived both TERM and KILL; reap it.
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            bystander.try_wait().expect("try_wait").is_none(),
+            "an unrelated process in the supervisor slot must not be signaled"
+        );
+        bystander.kill().expect("cleanup bystander");
+        bystander.wait().expect("reap bystander");
+    }
+
+    /// An unreadable state file leaves no recorded program: direct
+    /// signaling is disabled entirely (fail spare) and the live pid of an
+    /// unknown program is spared.
+    #[test]
+    fn teardown_without_readable_state_signals_nothing() {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        // No state file at all.
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in");
+        let pid = child.id() as i32;
+        std::fs::write(&paths.worker_pid, pid.to_string()).expect("write worker pid");
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint.path(),
+            |processes_gone| {
+                assert!(
+                    processes_gone(),
+                    "an unverifiable pid must be treated as gone for signaling"
+                );
+                Ok(())
+            },
+            || Ok(Vec::new()),
+        )
+        .expect("teardown succeeds");
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "without a readable state the recorded pid must not be signaled"
+        );
+        child.kill().expect("cleanup child");
+        child.wait().expect("reap child");
     }
 
     #[cfg(unix)]
@@ -2006,6 +2571,7 @@ mod tests {
             source: "/srv/src-a".to_string(),
             mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
+            worker_identity: None,
             worker_args: vec![],
             desired_state: DesiredState::Mounted,
         };

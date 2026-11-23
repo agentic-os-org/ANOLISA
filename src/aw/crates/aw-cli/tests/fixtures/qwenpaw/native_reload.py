@@ -81,7 +81,7 @@ class ReloadTests(unittest.IsolatedAsyncioTestCase):
         output = Path(os.environ["AW_TEST_OUTPUT"])
         log = output / f"{self._testMethodName}.daemon.log"
         with log.open("wb") as stream:
-            command = [str(self.binary), "serve", "--config", str(self.config),
+            command = [str(self.binary), "service", "serve", "--config", str(self.config),
                        "--state-dir", str(self.root / "state")]
             self.daemon = await asyncio.create_subprocess_exec(
                 *command, cwd=self.root, stdout=stream, stderr=stream,
@@ -98,7 +98,7 @@ class ReloadTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         binding = await self.rpc(
             "bind", target="native", cwd=str(self.root), environment={},
-            capabilities={"adapter": "qwenpaw", "version": "2.2.2b4", "entrypoint": "app",
+            capabilities={"adapter": "qwenpaw", "version": "2.2.2.post1", "entrypoint": "app",
                           "events": {"tool.before": ["observe", "block"],
                                      "tool.after": ["observe", "replace_result"]}},
         )

@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import type { CostStats, LLMCall, WasteItem, WasteReport } from '../types/optimization';
-import { copyText } from './CopyButton';
+import { copyText } from '../utils/clipboard';
 import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n';
 

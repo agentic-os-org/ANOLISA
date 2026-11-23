@@ -8,10 +8,27 @@ Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可�
 在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
 JSONL 接口。
 
+运行 `cosh --help` 查看启动参数与命令入口，无交互终端时也可使用。
+在增强集成的 Cosh 会话中，`/help` 保留现有会话命令参考。
+`cosh guide on|off|status` 仅控制使用引导提示，不是 AI 总开关。
+需要内部 Bash 帮助时使用 `cosh --shell bash --help`。
+
+镜像可以保留默认 Bash 并预装 Cosh。运行 `cosh` 进入 AI Shell，或运行
+`cosh --ask '你的问题'` 携带初始问题。可选的 Bash 启动接入由镜像的系统包负责，
+仅安装 Cosh RPM 不会启用。详见
+[Bash 引导与登录 Shell 控制](../../docs/user-guide/zh/cosh-ng/shell/bash-guidance.md)。
+
+`--ask` 是本次初问的显式 AI 请求，即使 `COSH_SHELL_AI=off` 也可使用；认证和工具授权仍生效，后续输入保持原关闭状态。
+
 默认情况下，登录 shell（例如 `cosh --login`）会在 Bash 4+ 上以真实 login 身份
 启动 Bash；设 `shell.login_identity = false` 可保留旧的非 login（`--rcfile`）启动。
 有界的真实 login 身份能力探测失败、使用 Bash 3.2（如 macOS 系统 bash），或父会话导出了 POSIX
-启动无法导入的函数名时，cosh 会自动回退。
+启动无法导入的函数名时，cosh 会自动回退。Enhanced Bash login 会在首个 prompt 前一次性
+记录最终 PATH，并仅传给 Provider 子进程。设置 `COSH_SHELL_BOOTSTRAP_PATH=0`
+可关闭该启动 PATH 交接。
+
+`COSH_HOME` 可统一指定用户扩展和状态根目录，详见
+[Extension 指南](../../docs/user-guide/zh/cosh-ng/core/extensions.md)。
 
 ## 为什么使用 cosh-ng
 
@@ -119,8 +136,12 @@ $ hello
 bash: hello: command not found
 ```
 
-用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
-调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
+ECS 默认免配置接入的候选实现可在首次模型请求时引导开通并自动继续，无需先执行 `/auth`；现有 Provider 配置优先。需要服务端支持 ECS 实例身份交换，详见[模型与认证](../../docs/user-guide/zh/cosh-ng/core/providers.md#ecs-免配置接入)。
+
+用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望 Agent
+只解释和建议、默认不自动执行有副作用的工具，运行 `/mode approval recommend`
+（只读检查仍可能运行，显式 `allowed_tools` 例外），详见
+[工具审批](../../docs/user-guide/zh/cosh-ng/shell/approval.md)。Shell 和 Core 的审批设置
 统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。

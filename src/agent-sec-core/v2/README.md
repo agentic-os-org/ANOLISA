@@ -1,16 +1,17 @@
 # AgentSecCore V2 Policy, SkillSec and daemon
 
 SkillSec supplies scanning, system-key integrity, versions and activation through the Rust
-`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
+`skillsec` CLI (`skill-ledger` remains a compatibility alias) and a root daemon. See the
+[core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 and [migration/acceptance boundaries](../docs/design/SKILL_SEC_PHASE_ONE.md).
 Agent Hook migration is separate; the core never calls Python Ledger.
 
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, Policy-template
 validation, protocol-independent Unix-domain-socket service framework, and runnable
-foreground process bootstrap, together with the first AgentSight file-deletion
-target Adapter, and its independent deployment Client used by later AgentSecCore
-V2 work packages. `asc-pcp` provides synchronous attempts and
+foreground process bootstrap, together with a PEP Translator for native JSON
+file-deletion rules and Cedar deletion/ordinary-write/exact-file read restrictions, and an
+independent Deployment Client. `asc-pcp` provides synchronous attempts and
 `asc-policy-runtime/src/reconciliation/` provides the bounded Binding queue,
 workers, retry timers and compensation scanning. The daemon stores Policy, Scope
 and Binding state in SQLite, including deployment cleanup responsibility.
@@ -26,6 +27,13 @@ Start the daemon with background Binding delivery:
 ```sh
 sudo agent-sec-daemon serve --socket /run/agent-sec-core/daemon.sock
 ```
+
+Gateway management is disabled by default. Add `--enable-gateway` to the daemon
+command before using credential Policy/Scope or Gateway methods; existing Gateway
+state also requires this option. It restores the original synchronous startup
+recovery path and saved proxy enablement. The runtime `agent-sec-cli gateway enable`
+command still controls activation of a disabled proxy. For systemd configuration,
+see the [deployment contract](../docs/design/DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md).
 
 Create the root-owned runtime directory first (0755 for local clients). The daemon entrypoint
 starts the reconciliation service. Its `reconciliation.rs`
@@ -54,19 +62,70 @@ an explicit daemon socket. Its Cargo package and source directory remain `asc-cl
 the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [lifecycle acceptance criteria](../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收).
 
+`agent-sec-cli inject-credential --builtin github` adds an unreleased root-only
+shortcut for fake generation and Policy/Scope creation from the packaged Cedar
+template. It leaves the template and existing manual commands unchanged, never
+enables the gateway, and returns only IDs, file paths and status. See the
+[credential injection reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md#built-in-credential-injection-unreleased-v2).
+
+The Rust CLI also provides local sandbox execution:
+
+```bash
+agent-sec-cli sandbox run --permissions permissions.json -- command
+```
+
+`asc-pep-runtime::prepare_launch` resolves the command, and `execute` installs the
+caller-supplied `OsPermissionSet` through the sibling static `linux-sandbox`
+helper. This path does not connect to the daemon. See the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for the
+permission format and the [execution design](../docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
+for preparation, installation and process-lifetime boundaries.
+
+`asc-pep-runtime::PepRuntime` adds authorization for embedding applications through
+`DaemonAuthorizationClient`. The daemon reads PAP's current effective Cedar policy set,
+returns ALLOW/DENY/MODIFY/STEP_UP/DEFER, and records owner-bound execution receipts
+through `authorization.evaluate` and `authorization.report`. Approval remains in
+the application, and execution uses the same local backend. PAP includes Cedar sources
+whose statements all have explicit principal headers; Cedar matches the request against
+the combined set independently of Scope/Binding assignments. Authorization is always
+enabled; an empty set denies requests. There is no separate authorization configuration
+or environment-permission ceiling. A decision must be accepted within 60 seconds.
+Remove the old `--authorization-config` argument when upgrading and express shared
+restrictions in PAP-managed Cedar. Review the old baseline/task intersection semantics
+before adapting request policies to the combined set; see the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for migration.
+
 The current crates are:
 
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
   `policyId`, `policyName`, `revision` and `template`.
-- `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
-  translation directly from the Binding's template into an AgentSight/ActPlane
-  plan, with semantic and encoding checks. Reusable policies contain general
-  rules; this Adapter supports only block + file/write + operation=delete without
-  history. Any unsupported rule rejects the complete Binding with its rule index.
-  Typed resources currently cover files; undefined resource formats are rejected.
-  Compiler acceptance belongs to the deployed target, not an embedded compiler.
+- `asc-os-permission-types`: the versioned OS permission set.
+- `asc-sandbox-types`: local invocation, path identities, mount plan and backend results.
+- Runtime requests, decisions and receipts live in `asc-daemon-protocol::authorization`.
+  `AuthorizationRequest<C>` carries principal/action/resource entity references and
+  a consumer-specific context. `OsAuthorizationRequest` binds the OS context to
+  `process.spawn`; the current daemon evaluates only this specialization.
+- `asc-pep-runtime`: command and path preparation, strict sandbox execution and
+  installation-handshake supervision, plus upper-PEP authorization, approval and
+  receipt handling for embedding applications.
+- `asc-pdp-runtime`: OS request evaluation over a combined Cedar policy set, advice
+  handling and five-state decisions within the requested permissions.
+  `from_policy_set` is the sole policy-loading API.
+- `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
+  whole-network permission schema, strict SDK validation, common-subset checks
+  through `validate` and official typed PST output through `pst`. Agent Hook
+  actions can add separate typed contexts.
+  PAP/RPC and SQLite retain validated source and exact schema references. Revision 1
+  supports logical subjects, program calls and permit advice for sandbox authorization.
+  The AgentSight adapter translates and deploys supported deletion, write and exact-file read rules. See the
+  [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
+- `asc-policy-translator-agentsight`: translates immutable Binding snapshots into
+  target plans. Native JSON supports block + file/write + operation=delete without
+  history and produces DSL; Cedar supports a bounded `forbid` subset for deletion
+  and ordinary writes plus exact-file read denial, producing structured file-protection JSON. Unsupported
+  rules reject the entire translation. Backend validation occurs at deployment.
 - `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
   one configured endpoint, with process identity resolution and complete HTTP
   fixtures. It does not depend on a reconciliation framework.
@@ -109,8 +168,11 @@ The current crates are:
   [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
-- `asc-model-client`: shared, loopback-only HTTP client for local model
-  inference backends (Ollama); injected by scanner crates.
+- `asc-model-client`: shared loopback client for local inference (Ollama),
+  plus an explicitly configured HTTPS OpenAI-compatible provider for Intent.
+- `asc-intent`: task/command-to-Cedar generation against the unified schema with official
+  parsing, canonical absolute-path checks and Strict validation. It does not
+  approve, persist, deploy or enforce candidates.
 - `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
   a rule engine, model-backed classification and multi-turn intent detection;
   served by the daemon through `action.prompt_scan`. It supports `fast`,
@@ -129,6 +191,131 @@ locations, dependency order, interface boundaries, and acceptance requirements.
 The workspace now exposes `action.code_scan`, `action.pii_scan` and `action.prompt_scan`
 through the common Action Runtime. PII migration and its future policy boundary are described in the
 [two-stage PII design](../docs/design/PII_V2_MIGRATION.md).
+
+## Intent candidates
+
+`agent-sec-cli intent propose` sends only the task text to the configured model,
+which directly returns Cedar against the unified schema. The response
+is exactly `{"policy":"...","unresolved":[]}`. The unconfirmed draft preserves
+that response and task provenance; it does not grant authorization.
+
+The task proposal has no path inputs: its request carries only the task text and a TTL.
+No file contents, directory listings or Git changes are read, and the daemon does
+not open caller paths. The model resolves absolute paths from the task itself; a
+relative or ambiguous target goes into `unresolved`. Nothing is appended to the
+model output, so a permit written by the model is the whole grant.
+
+Enable `ASC_INTENT_ENABLED=true` and supply `DASHSCOPE_API_KEY` in the daemon startup
+environment. Cloud calls may incur charges. `deepseek-v4.1-flash` remains the default;
+`ASC_INTENT_MODEL` and `ASC_INTENT_BASE_URL` can select another model and
+OpenAI-compatible HTTPS service. Use `ASC_INTENT_THINKING=provider` if that service
+does not support the DashScope thinking extension. There is no automatic model
+selection or local fallback.
+
+Rust parses the original Cedar with the official parser, checks inspectable absolute
+path expressions, rejects unbound templates, model-supplied Subject/File identities
+and unsupported annotations, then runs official Strict validation against
+`asc-policy-cedar/schema/seccore.cedarschema`. It does not rewrite
+model semantics or prove task completeness. The prompt requires unresolved identities,
+necessary conditions, approvals and obligations to be reported rather than silently
+removed. `unresolved` is model-reported, not a complete gap or conflict detector.
+
+Requests use `asc.intent.request.v1`, drafts `asc.intent.draft.v1` with
+`cedar-policy@1`, and candidates `asc.intent.candidate.v1`. Candidates contain the
+original `draft`, final `artifact`, TTL, hashes and `notes`.
+CLI rechecks provenance, versions, TTL and hashes, and rebuilds the expected artifact
+from `draft.policy` with its embedded schema. Upgrade CLI and daemon together;
+version mismatches fail instead of adapting.
+
+`--format` accepts text, JSON or Cedar. Every outcome is single-shot: a candidate,
+including one with nonempty `unresolved`, is displayed and exits 0, and no format
+prompts for input or requests approval. Only an unexpressible task, a transport
+failure or a validation error changes the exit status. Empty `unresolved`, Strict
+validation and hashes do not establish correct understanding, process binding or
+enforcement. TTL, trusted approval, Scope/Binding selection and execution remain
+downstream; this path does not connect to PAP.
+See [the Intent reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task)
+for configuration, constraints and output semantics.
+
+### Command Cedar API
+
+For hook integrations, `intent.propose_command` accepts existing command/cwd values
+and returns unapproved Cedar, without requiring a base policy or changing the hook.
+This is a V2 API addition in the source tree, not an integrated sandbox workflow.
+
+```json
+{"method":"intent.propose_command","params":{"format_version":"asc.intent.command.request.v1","command":"read -r line < report.csv","cwd":"/work"}}
+```
+
+The result is `{"outcome":"candidate","policy":"Cedar text"}` or
+`{"outcome":"needs_clarification","reasons":["missing information"]}`. Any
+model-reported ambiguity discards the partial policy. Empty Cedar requests no permissions.
+The API validates Cedar syntax, paths and types, but cannot prove that the model
+identified every required operation or chose minimal permissions. The API itself emits no
+`requested_permissions`, reads or rewrites no base policy, and calculates no effective
+permissions. It publishes no policy and executes no command either, so PDP mapping, approval
+and hook/sandbox integration remain separate work.
+
+The Rust entry point is `asc_intent::propose_command` with `CommandInput { command, cwd }`.
+The RPC uses the existing Intent model configuration, authenticated LocalUser access,
+shared per-UID/global concurrency limits and 35-second dispatch budget. Command/cwd
+are sent to the configured model service and can contain sensitive data or incur charges.
+`agent-sec-cli intent propose-command --command <text> [--cwd <dir>]` wraps the RPC for
+hook callers, defaults to JSON output and keeps `--format text|cedar`; `--format text`
+groups permissions as read/write/exec/spawn/network and falls back to the exact Cedar
+when a condition cannot be summarized. `--format cedar` prints the unapproved candidate with
+its caveats as comments, and that text is the artifact a later approval step consumes. The
+candidate covers only the command's own demand, so the program, cwd and loader paths are still
+not included; the CLI adds none of them.
+The PDP restricts every request to the PAP-managed Cedar policy set.
+A candidate returns determinable permissions
+plus non-blocking `caveats` for gaps such as an unresolved PATH lookup or unknown
+script behavior; only an inexpressible command yields a clarification, and an empty policy is a
+candidate as well: a command with no file, process or network action grants nothing and keeps
+its caveats instead of becoming a question. There is no TTL.
+See the
+[command contract (Chinese)](../docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)
+for field budgets and errors, plus the offline `command_api_*` daemon and `command_*`
+CLI tests.
+
+### Intent source layout
+
+`asc-intent/src/` contains five Rust files:
+
+- `lib.rs`: public entry points and module declarations.
+- `intent_extraction.rs`: task or command/cwd model input, command prompt, response parsing and task drafts.
+- `policy_validation.rs`: native Cedar/path checks, escaping and Strict validation.
+- `policy_summary.rs`: read/write/exec/spawn/network summary for `--format text`; presentation only, never an authorization result.
+- `policy_generator.rs`: command outcomes and task candidate orchestration, TTL, hashes and safety notes.
+
+The generation instructions in `asc-intent/prompts/policy-generation.md` are
+embedded at build time. Entity, action and field semantics come from the embedded
+schema and its comments; the prompt keeps generation constraints instead of
+duplicating those definitions.
+
+### Extending schema support
+
+Intent embeds `asc-policy-cedar/schema/seccore.cedarschema` into both model input
+and Strict validation; it does not generate or expand the schema. Compatible type
+or field additions that leave identity, path and protection contracts unchanged
+normally need only a schema update and rebuild in Intent, plus targeted tests.
+Identity or path changes still need aligned frontend checks; new modification
+actions need explicit hard-protection semantics. Request producers and enforcement
+must implement new capabilities separately; schema typing does not provide them.
+Incompatible protocol semantics need explicit version changes, and CLI/daemon
+must use matching schemas.
+
+Tests in `asc-intent/tests/policy.rs` use official Cedar authorization to check
+paths, program/argument/attribute conditions, operation-specific complements,
+composition and immutable protection. Strict typing is not a substitute for
+producer invariants such as complete argument indices, normalized paths or rename
+endpoints. No task-to-policy semantic equivalence checker is implemented.
+
+Current-version candidates can be checked offline through the ignored
+`real_model_candidate_case` using `ASC_INTENT_CANDIDATE`, `ASC_INTENT_WORKSPACE`
+and optional `ASC_INTENT_CASE` (`deny-etc`, `unsupported-network`). Without a case,
+this validates structure and Strict, not task semantics. Historical real-model
+archives keep their original versions and cannot be relabeled as new verification.
 
 ## PII scanning
 
@@ -178,12 +365,21 @@ UDS frame -> DaemonDispatcher -> method metadata authorization
           -> PapHandler -> PolicyAdministration -> PapService<R, C>
 ```
 
-RPC reuses the domain `PolicyTemplate`, `ScopeSelector`, `PreparedPolicy`,
+RPC reuses the domain `PolicySource`, `ScopeSelector`, `PreparedPolicy`,
 `PreparedScope`, and `BindingView` types. It does not define result wrappers for
 each CRUD operation. `PolicyAdministration` intentionally mirrors the use cases
 once: it erases `R`/`C` before dispatch and repeats authorization at the
 application boundary; there is no additional `PapServiceAdapter` forwarding
 object.
+
+Policy create/update accepts native JSON templates and Cedar source envelopes.
+PAP validates Cedar against its exact schema before saving source; the shared
+source decoder reads historical native Policy, Scope and Binding snapshots.
+Native serialization and SQLite storage version 1 are retained. Saved Cedar
+source can be passed to the existing `asc-policy-cedar::pst` entrypoint to
+regenerate the official PST under its saved schema. The PEP Translator supports
+Cedar `forbid` deletion/ordinary-write/exact-file read restrictions; unsupported semantics reject
+the entire translation. The Deployment Client checks capabilities and applies the plan.
 
 The current bootstrap bounds frame read, application dispatch, rejection
 encoding, response write, connection drain, and final Tokio runtime shutdown.

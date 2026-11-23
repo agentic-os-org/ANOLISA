@@ -1,7 +1,10 @@
 //! Stable bridge plans keep native scheduling and lifecycle interpretation in Adapters.
 
 use crate::{adapter, HookEvent, HookOutput, NativeContext, NativeExit, Result};
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::{
+    admission::{AdapterCapabilities, AdmittedStep},
+    routes::{GroupOrder, PreparedRoutes, RouteError, SkillCheck},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -32,21 +35,72 @@ pub struct Plan {
     pub groups: Vec<Vec<Step>>,
     /// Whether native normalization must include the result projection.
     pub replacement: bool,
-    /// Retain optional pure observation even when the policy has no steps.
+    /// Capture default metadata and configured observation without policy steps.
     pub observe: bool,
+    /// Hermes source guard action for the active Skill checker, absent when disabled.
+    #[serde(default)]
+    pub skill_check: Option<String>,
 }
 
-/// Check the initially pinned version and reusable native entrypoint.
+/// Check the reusable native entrypoint; runtime bridges verify its protocol.
 pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     match (
         capabilities.adapter.as_str(),
-        capabilities.version.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2b4", "app")
-        | ("qoder-sdk", "1.0.54", "sdk-worker") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 App or Qoder SDK 1.0.54".into()),
+        ("qoder", "tui" | "print")
+        | ("qwenpaw", "app")
+        | ("qoder-sdk", "sdk-worker")
+        | ("openclaw", "gateway")
+        | ("hermes", "chat" | "gateway") => Ok(()),
+        _ => Err("runtime policy updates require a verified native entrypoint".into()),
     }
+}
+
+/// Check the ordinary resident adapters and standard Source profiles with immutable task snapshots.
+pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
+    crate::adapters::sdk_tools::resident_supported(capabilities)
+}
+
+/// Validate a replacement with the ordinary factory's native routing contract.
+pub fn validate_resident(
+    document: &Value,
+    target: &str,
+    capabilities: &AdapterCapabilities,
+) -> Result<()> {
+    resident_supported(capabilities)?;
+    let config = aw_config::Validator::new()
+        .map_err(|error| error.to_string())?
+        .parse(&serde_json::to_vec(document)?)
+        .map_err(|error| error.to_string())?;
+    let steps = aw_core::admission::preflight(&config, target, capabilities)
+        .map_err(|error| error.to_string())?;
+    scope_routes(document, target, &steps, capabilities)?;
+    Ok(())
+}
+
+/// Compile an immutable task's [`PreparedRoutes`] without exposing Provider configuration.
+pub fn scope_routes(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<PreparedRoutes> {
+    resident_supported(capabilities)?;
+    if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
+        return Err("resident policy adapter differs from its target".into());
+    }
+    crate::adapters::sdk_tools::compile_resident_routes(document, steps, capabilities)
+}
+
+/// Project an immutable task's routes without exposing Provider configuration.
+pub fn scope_policy(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<Value> {
+    Ok(scope_routes(document, target, steps, capabilities)?.to_policy_value())
 }
 
 /// Validate native scheduling and budget constraints before Provider preparation.
@@ -57,64 +111,114 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?
         .parse(&bytes)
         .map_err(|e| e.to_string())?;
-    let steps = aw_provider::admission::preflight(&config, target, capabilities)
-        .map_err(|e| e.to_string())?;
+    let steps =
+        aw_core::admission::preflight(&config, target, capabilities).map_err(|e| e.to_string())?;
+    if capabilities.adapter == "hermes"
+        && capabilities.entrypoint == "gateway"
+        && steps
+            .iter()
+            .any(|step| crate::adapters::sdk_tools::checks_skill_tool(step, "hermes", "skill_view"))
+    {
+        return Err("Hermes Gateway attachment does not support Skill checking".into());
+    }
+    if capabilities.adapter != "hermes"
+        && steps
+            .iter()
+            .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
+    {
+        return Err("Skill checking requires ordinary resident mode".into());
+    }
+    if capabilities.adapter == "openclaw"
+        && steps
+            .iter()
+            .any(|step| !matches!(step.event.as_str(), "tool.before" | "tool.after"))
+    {
+        return Err("native policy updates currently require tool events".into());
+    }
     for event in ["tool.before", "tool.after"] {
         plan(document, target, &steps, event)?;
+    }
+    if matches!(capabilities.adapter.as_str(), "qoder" | "hermes") {
+        plan(document, target, &steps, "input.submit")?;
     }
     Ok(())
 }
 
 /// Build callback order using the same native rules as launch-time registration.
 pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str) -> Result<Plan> {
-    if !matches!(event, "tool.before" | "tool.after") {
-        return Err("unsupported native event".into());
-    }
     let adapter = document["spec"]["agents"][target]["adapter"]
         .as_str()
         .ok_or("missing adapter")?;
-    let selected = steps
-        .iter()
-        .filter(|step| step.event == event)
-        .collect::<Vec<_>>();
-    let replacement = selected.iter().any(|step| step.execution.replaces_result());
-    let mut ordered = selected
-        .iter()
-        .map(|step| Step {
-            id: step.step_id.clone(),
-            on_error: step.on_error.clone(),
-        })
-        .collect::<Vec<_>>();
-    let sequential = match adapter {
-        "qoder" => document["spec"]["agents"][target]["qoder"]["sequential"] == true,
-        "qoder-sdk" => true,
-        "qwenpaw" => {
-            if event == "tool.after" && !replacement {
-                ordered.reverse();
-            }
-            true
+    if !matches!(event, "tool.before" | "tool.after")
+        && !(event == "input.submit" && matches!(adapter, "qoder" | "hermes"))
+    {
+        return Err("unsupported native event".into());
+    }
+    if adapter == "hermes"
+        && event == "input.submit"
+        && steps.iter().any(|step| step.event == event)
+    {
+        crate::adapters::hermes::validate_reload_submission(document, target)?;
+    }
+    let order = match adapter {
+        "qoder" if document["spec"]["agents"][target]["qoder"]["sequential"] == true => {
+            GroupOrder::Sequential
         }
+        "qoder" => GroupOrder::Parallel,
+        "qoder-sdk" | "hermes" => GroupOrder::Sequential,
+        "openclaw"
+            if event == "tool.before"
+                || steps
+                    .iter()
+                    .any(|step| step.event == event && step.execution.replaces_result()) =>
+        {
+            GroupOrder::Sequential
+        }
+        "openclaw" => GroupOrder::Parallel,
+        "qwenpaw" if event == "tool.after" => GroupOrder::ReverseUnlessReplacement,
+        "qwenpaw" => GroupOrder::Sequential,
         _ => return Err("unsupported runtime policy adapter".into()),
     };
-    let budget = document["spec"]["events"][event]
-        .get("budget_ms")
-        .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
-        .as_f64()
-        .ok_or("invalid event budget")? as u64;
-    if !(1..=55000).contains(&budget) || (replacement && !sequential) {
-        return Err("runtime policy requires 1..55000 ms budgets and ordered replacement".into());
-    }
+    let maximum = if adapter == "openclaw" { 12000 } else { 55000 };
+    let skill = if adapter == "hermes" {
+        SkillCheck::Tool {
+            source_id: "hermes",
+            tool_name: "skill_view",
+        }
+    } else {
+        SkillCheck::None
+    };
+    let scheduled = aw_core::routes::schedule_event(document, steps, event, maximum, order, skill)
+        .map_err(|error| match error {
+            RouteError::InvalidBudget => "invalid event budget".into(),
+            RouteError::NonIntegralBudget => {
+                "event budget must be an integer millisecond value".into()
+            }
+            RouteError::BudgetOutOfRange { .. } | RouteError::UnorderedReplacement => {
+                format!("runtime policy requires 1..{maximum} ms budgets and ordered replacement")
+            }
+            RouteError::UnsupportedSkillCheck => error.to_string(),
+        })?;
     Ok(Plan {
-        budget_ms: budget,
-        groups: if sequential {
-            ordered.into_iter().map(|step| vec![step]).collect()
-        } else if ordered.is_empty() {
-            vec![]
-        } else {
-            vec![ordered]
-        },
-        replacement,
-        observe: adapter::observation_enabled(document, target),
+        budget_ms: scheduled.budget_ms,
+        groups: scheduled
+            .groups
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|step| Step {
+                        id: step.id,
+                        on_error: step.on_error,
+                    })
+                    .collect()
+            })
+            .collect(),
+        replacement: scheduled.replacement,
+        observe: event != "input.submit"
+            && (matches!(adapter, "qwenpaw" | "qoder-sdk")
+                || adapter::observation_enabled(document, target)),
+        skill_check: scheduled.skill_check,
     })
 }
 
@@ -181,6 +285,63 @@ pub fn tool_key(session: &str, call: &str) -> Result<String> {
     ))
 }
 
+/// Native reservation selector used to bind an event to its admitted execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecutionClaim {
+    /// Exact native request identity.
+    Request(String),
+    /// Exact native tool identity.
+    Tool(String),
+    /// A serial native loop whose callbacks do not expose its request identity.
+    SerialRequest,
+}
+
+/// Select the native reservation corresponding to a normalized callback.
+///
+/// The runtime supplies the generation and verifies that the selected claim
+/// remains active. A claim name alone does not authorize Provider execution.
+///
+/// # Errors
+/// Reject unsupported native adapters and missing or inconsistent identities.
+pub fn execution_claim(adapter: &str, entrypoint: &str, event: &Value) -> Result<ExecutionClaim> {
+    let identity = |value: &Value| -> Result<String> {
+        value
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .map(str::to_owned)
+            .ok_or_else(|| "native execution requires bounded reservation identities".into())
+    };
+    match adapter {
+        "openclaw" => {
+            let native = &event["native"];
+            let session = identity(&native["context"]["sessionId"])?;
+            let context = &native["context"]["runId"];
+            let run = &native["event"]["runId"];
+            if !context.is_null() && !run.is_null() && context != run {
+                return Err("native execution run identities disagree".into());
+            }
+            let run = identity(if context.is_null() { run } else { context })?;
+            Ok(ExecutionClaim::Request(tool_key(&session, &run)?))
+        }
+        "qoder" => {
+            let session = identity(&event["session_id"])?;
+            if event["name"] == "input.submit" {
+                Ok(ExecutionClaim::Request(session))
+            } else {
+                let call = identity(&event["tool"]["call_id"])?;
+                Ok(ExecutionClaim::Tool(tool_key(&session, &call)?))
+            }
+        }
+        "hermes" if entrypoint == "gateway" => {
+            Err("Hermes Gateway callbacks require a Scope".into())
+        }
+        // Hermes' admitted chat loop is serial; its private request UUID does
+        // not appear in native tool callbacks. Ambiguity is rejected by runtime.
+        "hermes" => Ok(ExecutionClaim::SerialRequest),
+        _ => Err("native execution reservation is unsupported".into()),
+    }
+}
+
 /// Combine dynamic Qoder replies using native veto precedence and JSON envelopes.
 pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
     let mut result = HookOutput {
@@ -192,7 +353,9 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
     for output in outputs {
         result.stderr.extend(output.stderr);
         if matches!(output.exit, NativeExit::Code(2)) {
-            if adapter == "qoder-sdk" && !matches!(result.exit, NativeExit::Code(2)) {
+            if matches!(adapter, "qoder-sdk" | "openclaw" | "hermes")
+                && !matches!(result.exit, NativeExit::Code(2))
+            {
                 // SDK denial reasons are JSON strings, not mergeable Hook objects.
                 result.stdout = output.stdout.clone();
             }
@@ -210,12 +373,28 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
         }
     }
     if matches!(result.exit, NativeExit::Code(2)) {
-        if adapter == "qoder-sdk" {
+        if matches!(adapter, "qoder-sdk" | "hermes") {
+            return Ok(result);
+        }
+        if adapter == "openclaw" {
+            result.exit = NativeExit::Code(0);
+            let mut denial = serde_json::from_slice::<Value>(&result.stdout)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
+            denial["block"] = json!(true);
+            if denial["blockReason"]
+                .as_str()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                denial["blockReason"] = json!("Tool blocked by AW policy");
+            }
+            result.stdout = serde_json::to_vec(&denial)?;
             return Ok(result);
         }
         value = json!({});
     }
-    if adapter == "qoder" || value != json!({}) {
+    if matches!(adapter, "qoder" | "hermes") || value != json!({}) {
         result.stdout = serde_json::to_vec(&value)?;
     }
     Ok(result)
@@ -228,6 +407,19 @@ pub fn adopt_step(
     on_error: &str,
     mut output: HookOutput,
 ) -> Result<HookOutput> {
+    if adapter == "openclaw"
+        && event == "tool.before"
+        && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|value| value["block"] == true)
+    {
+        output.exit = NativeExit::Code(2);
+    }
+    if adapter == "hermes" && event == "tool.before" {
+        if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+            if value["action"] == "block" || value["decision"] == "block" {
+                output.exit = NativeExit::Code(2);
+            }
+        }
+    }
     let succeeded = matches!(output.exit, NativeExit::Code(0));
     let mut value = serde_json::from_slice::<Value>(&output.stdout).ok();
     if adapter == "qoder" && succeeded && event == "tool.before" {
@@ -257,13 +449,14 @@ pub fn adopt_step(
         return Err("unsupported native approval".into());
     }
     if !matches!(output.exit, NativeExit::Code(0))
-        && !(event == "tool.before" && matches!(output.exit, NativeExit::Code(2)))
+        && !(matches!(event, "input.submit" | "tool.before")
+            && matches!(output.exit, NativeExit::Code(2)))
     {
         // Qoder logs nonblocking exits. QwenPaw applies each wrapper's failure
         // policy; a report-only failure must not hide another step's veto/result.
         output.exit = NativeExit::Code(
-            if matches!(adapter, "qwenpaw" | "qoder-sdk")
-                && event == "tool.before"
+            if matches!(adapter, "qwenpaw" | "qoder-sdk" | "openclaw" | "hermes")
+                && matches!(event, "input.submit" | "tool.before")
                 && on_error == "block"
             {
                 2

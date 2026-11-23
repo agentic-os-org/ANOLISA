@@ -47,6 +47,26 @@ Inside `cosh-shell`, `/audit status`, `/audit trace current`, and `/audit export
 
 An export contains `events.jsonl`, `summary.json`, `manifest.json`, and `SHA256SUMS`. The export is redacted and published atomically; `--force` replaces only a directory containing a valid cosh audit manifest. Version 1 supports retention preview only, so `audit prune` must include `--dry-run` and does not delete data.
 
+The default audit budget is 100 MiB per user across active and closed v1
+segments. Write-time admission counts buffered bytes under a shared lock, so
+continued writes and concurrent writers remain subject to the same cap.
+
+Retention returns `Blocked` when lifecycle evidence is malformed, unknown, or
+exceeds the bounded scan limits. It preserves the evidence, leaves the last
+successful retention time unchanged, and remains retryable. Session start/end
+events are paired only by their actual line order within the same segment.
+Without an invocation identity, unpaired Session evidence across segments is
+kept conservatively; a long session spanning rotation may not be reclaimed
+automatically.
+
+Core session files have a separate per-user 100 MiB budget, including staging.
+Atomic replacement admits the old file and the incoming staging file together
+before writing; when that peak cannot fit, it preserves the old file and refuses
+the commit.
+Core/Shell diagnostic logs share 20 MiB and retain today plus the previous two
+UTC dates. Storage ownership checks refuse unsafe entries before writes or
+cleanup.
+
 ## Policy commands
 
 ```bash

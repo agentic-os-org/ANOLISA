@@ -4,7 +4,7 @@
 //! Rust engines do not. Loading the YAML only proves it parses, so each pattern
 //! is compiled here: a rule the engine rejects cannot reach a release quietly.
 
-use asc_capability_code_scan::{Language, load_rules};
+use asc_capability_code_scan::{Language, load_rules, scan};
 use fancy_regex::Regex;
 
 /// Rule ids the loader returns for `language`.
@@ -14,6 +14,86 @@ fn loaded_ids(language: Language) -> Vec<String> {
         .into_iter()
         .map(|rule| rule.rule_id)
         .collect()
+}
+
+#[test]
+fn full_bash_scan_keeps_persistence_evidence_near_the_rpc_frame_limit() {
+    let noise = concat!(
+        "# setup step\nset -euo pipefail\n",
+        "mkdir -p \"$HOME/work\" || true\n",
+        "echo \"preparing\" >> \"$HOME/log.txt\"\n",
+        "for f in *.txt; do\n",
+        "    [ -f \"$f\" ] && cp \"$f\" \"$HOME/work/\" || echo \"skip $f\"\n",
+        "done\n",
+    );
+    // Leave room for the request envelope, including JSON's escaping overhead.
+    let encoded_block = serde_json::to_string(noise).unwrap().len() - 2;
+    let near_frame_limit = (4 * 1024 * 1024 - 2048) / encoded_block;
+    for repeats in [7_000, near_frame_limit] {
+        let mut code = String::from("crontab -l\n");
+        code.push_str(&noise.repeat(repeats));
+        code.push_str("systemctl enable fixture.service\n");
+        let result = scan(&code, Language::Bash, None, "regex");
+        eprintln!(
+            "full Bash scan: {} code bytes, {} ms",
+            code.len(),
+            result.elapsed_ms
+        );
+        assert!(result.ok, "{} bytes: {}", code.len(), result.summary);
+        let persistence = result
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == "shell-persistence")
+            .expect("the final command must be reported");
+        assert_eq!(persistence.evidence, ["systemctl enable"]);
+    }
+}
+
+#[test]
+fn full_bash_scan_preserves_findings_across_prefilter_threshold() {
+    for len in [249_999, 250_000] {
+        let mut code = String::from("crontab -l\n");
+        let bad = "\nsystemctl enable fixture.service\n";
+        code.push_str(&"#\n".repeat((len - code.len() - bad.len()) / 2));
+        code.extend(std::iter::repeat_n(' ', len - code.len() - bad.len()));
+        code.push_str(bad);
+        assert_eq!(code.len(), len);
+        let result = scan(&code, Language::Bash, None, "regex");
+        assert!(result.ok, "{len} bytes: {}", result.summary);
+        let finding = result
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "shell-persistence")
+            .unwrap();
+        assert_eq!(finding.evidence, ["systemctl enable"]);
+    }
+}
+
+#[test]
+fn full_bash_scan_handles_many_rejected_persistence_candidates() {
+    let block = format!("{}crontab\n", "crontab -l\n".repeat(7));
+    let code = block.repeat(255_000 / block.len());
+    assert!((250_000..262_144).contains(&code.len()));
+    let result = scan(&code, Language::Bash, None, "regex");
+    eprintln!(
+        "rejection-heavy Bash scan: {} bytes, {} ms",
+        code.len(),
+        result.elapsed_ms
+    );
+    assert!(result.ok, "{}", result.summary);
+    let finding = result
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "shell-persistence")
+        .unwrap();
+    assert_eq!(finding.evidence, vec!["crontab"; 255_000 / block.len()]);
+    // Debug builds run the full shipped rule set without optimizations.
+    let max_ms = if cfg!(debug_assertions) {
+        15_000
+    } else {
+        5_000
+    };
+    assert!(result.elapsed_ms < max_ms);
 }
 
 /// Rule file stems present on disk for `language`, excluding shared data files.

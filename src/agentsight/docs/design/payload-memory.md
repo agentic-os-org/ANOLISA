@@ -9,6 +9,20 @@ runtime, including the ring buffer, native decoding state and allocator retentio
 
 ## Ownership boundaries
 
+Slow static SSL signature detection runs on one worker with at most 32 in-flight executable files,
+including completed results. The worker also runs the whole-file marker prefilter for unknown
+exe-probe candidates, so the event consumer never reads executable contents. Known static inputs
+(for example static OpenSSL/Codex binaries) skip that BoringSSL-only prefilter and scan their
+prologues directly. Jobs pin file descriptors and share the configured process CPU budget between
+4 MiB windows. The event owner re-fstats the pinned descriptor and checks live
+process references immediately before installing global uprobes, then registers every still-live
+affected PID in the filter map. Symbol and known-offset fast paths stay synchronous. Queue-full
+retries are scheduled by the runtime tick instead of requiring another discovery. Shutdown cancels
+and joins the worker. Discovery of a previously unseen static binary remains best-effort while its
+scan runs. Executable SSL scans use vectorized substring searches in bounded 4 MiB windows with
+signature overlap. Every overlapping match and cross-window start is preserved; inode caching and
+symbol selection keep their existing behavior.
+
 ```mermaid
 flowchart LR
     Probe[Probe payload] --> Capture[Queue with slot and byte limits]
@@ -65,12 +79,28 @@ IDs in the existing retroactive fix-up registry; a later file write repairs both
 and completed-event JSON. FFI and active non-SQLite exporters keep deferred delivery because an
 already delivered event cannot be repaired in those consumers.
 
+Raw completions and deferred GenAI calls share the configured pending byte and count bounds.
+Raw admission is limited to half of the shared byte allowance, so deferred delivery and SQLite
+local retries retain capacity; this matters for FFI and active non-SQLite exporters, where an
+already-delivered event cannot be repaired. The trade-off is earlier synchronous backpressure on
+event reception while CPU admission is busy. Hard-limit backpressure and oversized-task admission
+remain synchronous to preserve bounded ownership and FIFO delivery.
+The standalone loop ticks once per receive attempt; FFI polling keeps the same maintenance path.
+The `completion_backpressure` stage records synchronous admission and delivery when the raw queue
+reaches its reserved share or the hard shared limit.
+
 Registered sinks report their current activity; unknown exporters default to active. The default
 Logtail sink checks the same required-file and telemetry-sentinel gates for routing and writing.
 Dynamic sinks also re-read their current path so a paused exporter can resume without registration
 changes. Inactive sinks are still called during immediate fan-out: activation during persistence
 does not discard the current call, which may carry its fallback session metadata. Subsequent calls
 to an active external sink use the existing resolution window.
+
+GenAI session and conversation resolution prepares lookup keys once per call and reuses them for
+turn eviction and crash draining. Identical first/last user text shares its unfinished SHA-256
+state. Repeated long text can reuse exact-byte-checked prefixes in a cache bounded by 2 MiB and
+64 entries; eviction never changes anchors. Anchors retain domain-separated IDs and binary lookup
+digests, preserving external ID bytes, process/message-count isolation and sliding TTL behavior.
 
 SQLite completion serializes JSON before taking the connection lock. Capacity selection uses
 `octet_length` on stored JSON columns to read their byte lengths without fetching and scanning whole
@@ -87,6 +117,13 @@ payload target, allowing one oversized row to make progress. Batches yield betwe
 write contention defers the remaining work. A passive checkpoint copies WAL frames before a
 non-waiting truncate attempt, and an incomplete checkpoint stops further capacity pruning.
 Separate age, pruning and checkpoint timings identify which maintenance phase is slow.
+Paced workers check WAL growth every 20 ms and request a passive checkpoint after 1 MiB of growth
+or 50 ms, including during resumable cleanup. Admission still depends on the shared CPU budget;
+these are scheduling targets, not a bound on WAL size or checkpoint duration. Capacity passes use
+SQLite's live page count, excluding freelist pages and reusable WAL space, and truncate at their
+entry and completion instead of after every deletion batch. Passive checkpoints between batches
+retain the reader-contention gate. Metrics record WAL bytes, total/copied/pending frames, checkpoint
+outcomes and separate passive/truncate durations. PASSIVE can copy the whole available WAL in one call.
 
 FFI delivery moves calls and records into boxed queue items. A byte reservation survives dequeue
 until callbacks return, and failed sends or receiver destruction refund it. Large JSON fields are

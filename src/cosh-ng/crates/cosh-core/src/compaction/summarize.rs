@@ -1,6 +1,6 @@
 //! Structured summary generation over a bounded, untrusted transcript prefix.
 
-use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
+use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message, ProviderFailure};
 
 use super::budget::{estimate_text_tokens, ModelCapability};
 use super::projection::{CompactionState, MAX_SUMMARY_BYTES};
@@ -50,6 +50,7 @@ Rules:
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Failure classes for one summary generation attempt.
 pub enum SummaryError {
+    Access(ProviderFailure),
     /// Provider request or stream failed.
     Provider(String),
     /// Provider stream produced no usable summary text.
@@ -196,12 +197,15 @@ pub(super) async fn generate_summary(
                     "summarizer received a tool call event".to_string(),
                 ));
             }
-            GenerateEvent::ThinkingDelta(_) | GenerateEvent::Usage { .. } => {}
+            GenerateEvent::RequestAccepted
+            | GenerateEvent::ThinkingDelta(_)
+            | GenerateEvent::Usage { .. } => {}
             GenerateEvent::MessageEnd => {
                 completed = true;
                 break;
             }
             GenerateEvent::Cancelled => return Err(SummaryError::Cancelled),
+            GenerateEvent::ProviderFailure(failure) => return Err(SummaryError::Access(failure)),
             GenerateEvent::Error(error) => return Err(SummaryError::Provider(error)),
         }
     }
@@ -258,6 +262,51 @@ mod tests {
             generate_summary(&provider, "m", "input").await,
             Err(SummaryError::Provider(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn summary_preserves_access_failure_after_partial_output() {
+        use crate::provider::{DispatchState, ProviderFailure, ProviderFailureKind};
+
+        for (code, kind) in [
+            (
+                "Sysom.ServiceNotActivated",
+                ProviderFailureKind::ActivationRequired,
+            ),
+            (
+                "Sysom.CreditsExhausted",
+                ProviderFailureKind::QuotaExhausted,
+            ),
+        ] {
+            let failure = ProviderFailure {
+                code: code.to_string(),
+                kind,
+                dispatch: DispatchState::NotDispatched,
+                request_id: Some("summary-request".to_string()),
+            };
+            let provider = MockProvider::new(vec![vec![
+                GenerateEvent::TextDelta("uncommitted summary".to_string()),
+                GenerateEvent::ProviderFailure(failure.clone()),
+                GenerateEvent::MessageEnd,
+            ]]);
+            assert_eq!(
+                generate_summary(&provider, "m", "input").await,
+                Err(SummaryError::Access(failure))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_summary_discards_partial_output() {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::TextDelta("uncommitted summary".to_string()),
+            GenerateEvent::Cancelled,
+            GenerateEvent::MessageEnd,
+        ]]);
+        assert_eq!(
+            generate_summary(&provider, "m", "input").await,
+            Err(SummaryError::Cancelled)
+        );
     }
 
     #[tokio::test]

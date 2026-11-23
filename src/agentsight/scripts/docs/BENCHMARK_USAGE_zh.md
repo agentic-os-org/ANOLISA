@@ -17,7 +17,7 @@ source /tmp/agentsight-bench-venv/bin/activate
 python -m pip install -r scripts/benchmark/requirements.txt
 ```
 
-Agent 模式无需 k6。`tiktoken` 用于确认重复的 ` x` 文本每个片段对应一个 `cl100k_base` Token；首次使用会在测量窗口开始前下载并缓存编码数据。mock 的输入 usage 是每个请求固定 12 Token 的模拟值。
+Agent 模式无需 k6 或 tiktoken。测试数据在本地构造：每个 SSE delta 中的固定片段 ` x` 计一个合成测试 Token，并与 mock 上报的 usage 对账。不下载模型词表；这验证负载及协议处理，不验证任意模型的分词。mock 的输入 usage 是每个请求固定 12 Token 的模拟值。
 
 ## 2. 启动 32 个 Agent，每路 100 tok/s
 
@@ -132,7 +132,7 @@ bash scripts/benchmark/single_run/resource_run.sh \
   --output-dir /tmp/agentsight-resource-single
 ```
 
-脚本会在独立缓存的 venv 中准备缺失的 Python 依赖，冻结当前工作区，并使用 Cargo lock 文件编译 release 二进制。Git/源码模式需要项目的 Rust 和 Linux eBPF 构建依赖；已有二进制时可通过 `--agentsight-bin PATH` 跳过编译。构建和依赖缓存在 `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/` 下。采集和数据库校验会按需请求 `sudo`，可能需要输入密码；仅当当前用户已有 eBPF 权限时使用 `--no-sudo`。
+HTTP/1.1 资源负载仅使用 Python 标准库；特权运行时准备独立缓存的 venv，不下载 Python 包。脚本冻结当前工作区，并使用 Cargo lock 文件编译 release 二进制。Git/源码模式需要项目的 Rust 和 Linux eBPF 构建依赖；已有二进制时可通过 `--agentsight-bin PATH` 跳过编译。构建和依赖缓存在 `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/` 下。采集和数据库校验会按需请求 `sudo`，可能需要输入密码；仅当当前用户已有 eBPF 权限时使用 `--no-sudo`。
 
 脚本生成隔离配置、数据库和日志，等待采集初始化成功，然后执行已有负载和采集校验。正常结束、失败、Ctrl+C 或 SIGTERM 都会回收本次启动的进程。
 
@@ -155,15 +155,15 @@ bash scripts/benchmark/single_run/resource_run.sh \
 
 `--baseline` 和 `--candidate` 也接受 commit hash、本地分支和 tag。候选版本默认是 `working-tree`；`HEAD` 不包含未提交改动。源码在临时 detached worktree 中编译，工作区快照使用独立 index，保留当前分支和暂存区。两个二进制都在测量前编译完成，随后使用同一份冻结的负载脚本、配置和负载参数依次运行，每轮重新启动采集，并使用独立数据库。已有两个二进制时，使用 `--ab --baseline-bin PATH --candidate-bin PATH`。
 
-终端和 `resource-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、平均/P95/峰值 CPU、Load/Capture 的 PASS 或 FAIL，以及运行状态。CPU 统计 standalone AgentSight 进程的全部线程，100% 表示一个逻辑核，允许超过 100%；报告记录主机逻辑核数，不包含 mock 服务端和客户端进程。
+终端和 `resource-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、平均/P95/峰值 CPU、Load/Capture 的 PASS 或 FAIL，以及运行状态。资源门禁只检查平均 CPU（25%）与平均/峰值 RSS（265/300 MiB）；P95 与峰值 CPU 仅作诊断，不参与门禁判定。CPU 统计 standalone AgentSight 进程的全部线程，100% 表示一个逻辑核，允许超过 100%；报告记录主机逻辑核数，不包含 mock 服务端和客户端进程。
 
-A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告和日志位于 `run/`，A/B 则位于 `before/`、`after/`。
+A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。A/B HTML 从 `resource-summary.json` 读取权威 RSS/CPU 统计和 `valid` 标记；结果无效或未验证时页面标记为 INVALID，不输出改善判定。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告、日志和自包含的 `metrics-report.html` 评估报告位于 `run/`，A/B 则位于 `before/`、`after/`。
 
-只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且可用的探针计数未发现丢事件时，结果才是 VALID。报告分别打印 Ring Buffer 和用户态通道丢事件数；计数覆盖全部探针类型，不能据此确定丢失事件的类型。即使全部请求的 usage 正确，发现丢事件仍判为 INVALID，不计算优化比例。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
+只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且正式负载窗口和尾部收流阶段没有丢事件时，结果才是 VALID。`probe_drops` 保留 Ring Buffer 和用户态通道的累计计数以兼容旧报告，`probe_drop_phases` 将每类计数拆分为 `before_load`、`load`、`tail` 和 `unattributed`。只有能明确证明发生在负载开始之前的丢事件才仅作诊断；`load`、`tail` 或 `unattributed` 为正，或计数器复位（包括归零）时，都会判为 INVALID，即使全部请求的 usage 正确。基线丢包计数为正时，基线时间戳缺失或迟到同样判为 INVALID；基线计数为空或为零时，即使时间戳缺失或迟到，也不单独导致 INVALID。基线的 `counter_timestamp` 必须严格早于 `agents/start.json.start`，它在计数读取完成后立即记录，与 CPU 采样使用的 `monotonic_timestamp` 相互独立。计数覆盖全部探针类型，不能据此确定丢失事件的类型。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
 
 此一键脚本默认 32 个 Agent、每路 100 tok/s、60 秒；仅负载的 `run.sh` 仍默认 900 秒。支持上面的负载、探针发现、端口和安全限制参数，完整列表见 `resource_run.sh --help`。RSS 和 CPU 约每秒采样一次，覆盖尾部收流。主统计使用 `agents/start.json` 中的单调时钟起止窗口，尾部收流单独保存在每轮的 `tail` 对象和文本报告中。
 
-平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
+平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp`、`counter_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
 
 ### 7.1 使用最小 C 宿主测量 FFI 动态库
 

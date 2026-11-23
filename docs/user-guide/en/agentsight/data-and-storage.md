@@ -113,10 +113,13 @@ Maintenance yields before starting another delete batch while capture writes or 
 need the writer, and resumes on a later scheduled pass.
 
 When periodic maintenance is enabled, the trace process delegates primary and GenAI WAL checkpoints
-to that worker instead of triggering them on capture commits. Passive checkpoints run about once a
-second between retention/capacity checks; `check_interval_secs` still controls cleanup. SQLite's
-synchronous durability setting is unchanged. Disabling periodic maintenance retains automatic WAL
-checkpointing on capture connections.
+to that worker instead of triggering them on capture commits. With `runtime_limits.cpu_budget_percent=0`,
+passive checkpoints run about once a second between retention/capacity checks. With a nonzero CPU budget,
+the worker polls every 20 ms and requests a passive checkpoint after 1 MiB of WAL growth or 50 ms since
+the previous checkpoint, including while a cleanup pass is yielding between bounded operations.
+`check_interval_secs` still controls cleanup. A capacity pass attempts WAL truncation only at its boundary,
+after the live-page target is reached or no eligible rows remain. SQLite's synchronous durability setting
+is unchanged. Disabling periodic maintenance retains automatic WAL checkpointing on capture connections.
 
 With `runtime_limits.cpu_budget_percent` enabled, primary and GenAI cleanup yield between bounded
 operations and continue on later worker ticks. They share CPU admission with capture delivery;
@@ -134,6 +137,9 @@ Every pass follows the same lifecycle:
 2. If age deletion changed the database, require a successful WAL checkpoint before continuing.
 3. Trigger capacity pruning only when physical allocation (database, WAL, and SHM) exceeds the limit.
 4. Delete the oldest eligible records and checkpoint between rounds until logical usage reaches 90% of the limit.
+
+The 90% target counts live pages only, so WAL and SHM are not included; physical usage can exceed
+`max_db_size_mb` by roughly their size until the boundary checkpoint truncates the WAL.
 
 The combined-budget ranking also includes WAL and SHM. A WAL-heavy database can therefore rank first
 for one pass; its maintenance checkpoints before pruning, and subsequent passes rebalance using the
@@ -218,12 +224,13 @@ Endpoint groups in 0.11:
 | Service | `GET /health`, `GET /metrics`, `GET /api/docs` | Liveness, Prometheus metrics, route list (`/health` and `/metrics` are loopback-only) |
 | Authentication | `GET /api/auth/status`, `GET /api/auth/verify`, `POST /api/auth/login` | Auth state, capability list, token → cookie exchange |
 | Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/sessions/{id}/resources`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session conversation summaries (keyed by `conversation_id`) and process resources, per-call detail by response id, semantic search |
-| Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
+| Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/metrics/cache`, `GET /api/agent-names` | Token time series, latency percentiles, prompt-cache hit rate and low-hit causes (same fields as `agentsight cache --json`), Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
 | Tokenless records | `POST /api/tokenless/refresh`, `GET /api/tokenless/records`, `GET /api/tokenless/records/{cache_id}` | Refresh saved statistics, list metadata, and read details; content requires explicit `include_content=true`. All three routes require Dashboard credentials, including on loopback |
 | Token savings | `GET /api/token-savings`, `GET /api/token-savings/session/{id}` | Tokenless savings |
 | ATIF export | `GET /api/export/atif/session/{id}` (also `trace` and `conversation`) | Trajectory export |
+| Workspace snapshots | `GET /api/ws-ckpt/{kind}/{id}/snapshots`, `POST /api/ws-ckpt/diff`, `POST /api/ws-ckpt/restore/{prepare,execute,result}` | Local ws-ckpt queries and explicit guarded file restore; credentials required, including loopback |
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
 | Reuse labels | `POST /api/reuse/triage`, `GET /api/reuse/sessions`, `POST /api/reuse/sessions/{session_id}/label`, `POST /api/reuse/sessions/labels:batch-confirm`, `GET /api/reuse/label-stats`, `POST /api/reuse/judge` | Rule triage and human label decisions. The judge requires `features.reuse_llm_judge=true` and configured LLM credentials; it makes billed model calls |
 | Preferences | `GET /api/preferences`, `/export`, `/turns` | User preference analysis, Markdown export, and source user turns for agent-side reasoning |
@@ -325,6 +332,60 @@ sudo systemctl start agentsight.service
 ```
 
 Stopping the service first ensures the WAL is checkpointed, so the archive is consistent.
+
+## Workspace snapshot API
+
+These Linux-only routes use local ws-ckpt storage and create no additional
+snapshot database. Reading snapshot data and restoring files require Dashboard
+credentials even on loopback.
+
+- `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`: for `session` and `conversation`,
+  the Dashboard can check whether to prompt for a token. Returns an empty
+  `204` for a registered workspace that passes the ws-ckpt compatibility checks,
+  or `404` when unavailable. Normal trajectory
+  access rules apply, including read access on loopback.
+- `GET /api/ws-ckpt/{kind}/{id}/snapshots`: `kind` is `session`, `conversation`,
+  or `trajectory` (collected ATIF). Session queries prefer captured events, then
+  collected ATIF. A confirmed successful ws-ckpt operation selects the workspace;
+  omitted parameters use only an explicitly bound plugin configuration. The
+  response includes `trajectory`, `scope`, `step_snapshots`, `unassigned`,
+  `association` and `completeness`. An unresolved workspace returns `scope: null`.
+  If a compatibility check fails, the response keeps `trajectory`, sets
+  `scope: null` and `restore_enabled: false`, and returns an empty `step_snapshots`.
+  Pass `completeness.next_cursor` as `cursor` to continue; all pages retain the
+  same Step boundaries and `as_of` cutoff. A changed revision requires a reload.
+  Snapshots before the first Step or at/after the cutoff appear only in
+  `unassigned` diagnostics, never as a Step action.
+- `POST /api/ws-ckpt/diff`: body `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`.
+  Returns existing file-level `changes`, authoritative `scope`, the snapshot ID
+  and comparison time. For read-only requests, Sight checks the full ID in the
+  snapshot list before running the CLI diff. When rollback is enabled, Sight
+  uses the guarded CLI preview and includes its `generation` and `diff_digest`
+  in `restore_preview`. No line-by-line contents are returned.
+- `POST /api/ws-ckpt/restore/prepare`: body contains the same `target`,
+  `writers_stopped: true` and `expected_preview` copied from `restore_preview`.
+  The operator must ensure there are no concurrent writes during rollback.
+  Sight obtains a fresh guarded preview of the same target and compares its
+  generation and diff digest with the values from the displayed preview. Both
+  must match before it returns a sealed `confirmation_token` and operation ID.
+  A mismatch returns `409` and requires a fresh preview.
+- `POST /api/ws-ckpt/restore/execute`: body `{"confirmation_token":"<TOKEN>"}`.
+  The daemon locks the workspace, verifies the exact target, generation, and diff,
+  then applies the rollback without creating a protection snapshot. Returns
+  `status: "succeeded"` or `"unknown"`. A refusal with `effect: "known_no_effect"`
+  lets the operator refresh and prepare a new confirmation if they choose to retry.
+  Keep the original token and query the result endpoint when the outcome is
+  uncertain, including when the CLI times out before returning a complete result.
+- `POST /api/ws-ckpt/restore/result`: accepts the same token and returns durable
+  `evidence` recorded by the daemon. This lookup remains available when the
+  snapshot compatibility checks fail. Missing evidence does not establish
+  that restore had no effect.
+
+Snapshots use `[Agent Step start, next Agent Step start)`, with the last interval
+ending at `as_of`. Association does not prove who created the snapshot; automatic
+hooks, independent CLI and other sessions' snapshots in that workspace are also
+included. Configure restore separately as described in
+[configuration](configuration.md#workspace-snapshot-backend-linux).
 
 ## Related pages
 

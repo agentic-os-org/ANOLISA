@@ -29,7 +29,8 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
-        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/launcher-tests");
+        // Unix socket paths must fit SUN_LEN even when the checkout is a deep worktree.
+        let parent = std::env::temp_dir().join("aw-launcher-tests");
         fs::create_dir_all(&parent).unwrap();
         let root = parent.join(format!(
             "{}-{}",
@@ -297,8 +298,11 @@ impl Process {
             fs::read_to_string(&self.stderr).unwrap_or_else(|error| format!("unreadable: {error}")),
         ))
     }
-    pub fn finish(mut self) -> Output {
-        let deadline = Instant::now() + TIMEOUT;
+    pub fn finish(self) -> Output {
+        self.finish_with_timeout(TIMEOUT)
+    }
+    pub fn finish_with_timeout(mut self, timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
@@ -321,6 +325,15 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!(
+                "owned process: {}\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+                self.value,
+                self.child.try_wait(),
+                fs::read_to_string(&self.stdout).unwrap_or_default(),
+                fs::read_to_string(&self.stderr).unwrap_or_default(),
+            );
+        }
         if self.child.try_wait().unwrap().is_none() {
             // This unreaped Child reserves its PID; signal only the owned launcher.
             unsafe {
@@ -348,9 +361,12 @@ impl Service {
     }
     pub fn start_at(fixture: &Fixture, document: &Value, state: &Path) -> Self {
         fixture.save(document);
+        Self::start_saved(fixture, state)
+    }
+    pub fn start_saved(fixture: &Fixture, state: &Path) -> Self {
         let mut command = fixture.command();
         command
-            .args(["serve", "--config"])
+            .args(["service", "serve", "--config"])
             .arg(fixture.root.join("aw.json"))
             .arg("--state-dir")
             .arg(state);

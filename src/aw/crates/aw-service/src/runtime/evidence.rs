@@ -55,7 +55,7 @@ use aw_adapter::association::source_matches_adapter;
 
 pub(super) struct Contexts {
     sources: BTreeMap<String, Settings>,
-    registry: Registry,
+    registry: &'static Registry,
     // Claims live until the owning instance has drained all its observation work.
     sessions: Mutex<SessionClaims>,
 }
@@ -119,11 +119,8 @@ impl Cell {
 }
 
 impl Contexts {
-    pub(super) fn new(bytes: &[u8]) -> Result<Self> {
-        let document = aw_config::Validator::new()?
-            .parse(bytes)?
-            .as_value()
-            .clone();
+    pub(super) fn new(configuration: &aw_config::Configuration) -> Result<Self> {
+        let document = configuration.as_value();
         let mut sources = BTreeMap::new();
         for (target, agent) in document["spec"]["agents"]
             .as_object()
@@ -156,7 +153,7 @@ impl Contexts {
         }
         Ok(Self {
             sources,
-            registry: Registry::new().map_err(contract)?,
+            registry: crate::public_projection::registry()?,
             sessions: Mutex::new(SessionClaims::default()),
         })
     }
@@ -189,11 +186,15 @@ impl Contexts {
         Ok(Seed {
             settings: self.sources.get(target).cloned(),
             subject,
-            candidate: projection::content(&json!({"name":event["name"], "tool":event["tool"]}))?,
+            candidate: projection::content(&if event["name"] == "input.submit" {
+                json!({"name":event["name"], "turn_id":event["turn_id"], "input":event["input"]})
+            } else {
+                json!({"name":event["name"], "tool":event["tool"]})
+            })?,
             constraints,
             association,
             deadline,
-            deadline_ns: deadline::encode(deadline)?.to_string(),
+            deadline_ns: deadline::recorded(deadline)?.to_string(),
             received_at_ms: now_ms()?,
             after: event["name"] == "tool.after",
         })
@@ -336,7 +337,7 @@ impl Runtime {
             .and_then(|()| projection::snapshot(seed, query, status, gap, deadline))
             .and_then(|value| {
                 aw_contracts::evidence::validate_context(
-                    &self.contexts.registry,
+                    self.contexts.registry,
                     &value,
                     &seed.subject,
                     revision,

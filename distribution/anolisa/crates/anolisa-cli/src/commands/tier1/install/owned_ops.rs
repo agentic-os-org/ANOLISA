@@ -330,11 +330,11 @@ impl OwnedOps for RawReplayOps<'_> {
             // The same hook-phase contract a fresh install enforces
             // (`validate_owned_install`): a strict declaration of a phase
             // no command runs is an authoring defect the update path must
-            // refuse rather than place — failing in download-verify keeps
-            // the host untouched (no backup, no placement, no record
-            // write). A non-strict declaration proceeds with a warning
-            // naming the phase: a hook the current CLI will not execute is
-            // a capability limitation to surface, not a reason to block
+            // refuse before replacing files or writing the new installation
+            // record. The artifact is already cached, and the update plan
+            // has already run its backup step. A non-strict declaration proceeds
+            // with a warning naming the phase: a hook the current CLI will not
+            // execute is a capability limitation to surface, not a reason to block
             // the whole upgrade. Replay (repair) skips the preflight and
             // this check with it: it re-places the recorded manifest and
             // must not turn a legacy dead-phase declaration into a

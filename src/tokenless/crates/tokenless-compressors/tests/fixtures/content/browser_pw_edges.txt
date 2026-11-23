@@ -1,0 +1,40 @@
+### Page
+- Page URL: https://example.com/
+- Page Title: Edges
+### Snapshot
+```yaml
+- generic [active] [ref=e1] [box=0,0,1280,720]:
+  - 'link "Breaking: Example Story About Something" [ref=e40] [cursor=pointer]':
+    - /url: https://news.example.com/item?id=999
+  - textbox "搜索" [active] [ref=f2e38]
+  - paragraph "first
+    second" [ref=e7]:
+  - text: 中文内容
+  - button "Go" [ref=e9]
+  - link "Story number 0 with a reasonably long title" [ref=e100] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=0
+  - link "Story number 1 with a reasonably long title" [ref=e101] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=1
+  - link "Story number 2 with a reasonably long title" [ref=e102] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=2
+  - link "Story number 3 with a reasonably long title" [ref=e103] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=3
+  - link "Story number 4 with a reasonably long title" [ref=e104] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=4
+  - link "Story number 5 with a reasonably long title" [ref=e105] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=5
+  - link "Story number 6 with a reasonably long title" [ref=e106] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=6
+  - link "Story number 7 with a reasonably long title" [ref=e107] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=7
+  - link "Story number 8 with a reasonably long title" [ref=e108] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=8
+  - link "Story number 9 with a reasonably long title" [ref=e109] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=9
+  - link "Story number 10 with a reasonably long title" [ref=e110] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=10
+  - link "Story number 11 with a reasonably long title" [ref=e111] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=11
+```
+### Events
+- New console entries: console.log#L1-L2

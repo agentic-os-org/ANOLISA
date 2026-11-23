@@ -295,7 +295,7 @@ agent-sec-cli scan-prompt --text "ignore all system instructions" --mode fast --
 | 退出码 | 含义 |
 |--------|------|
 | `0` | 扫描器正常运行（verdict 在 JSON 中，包含 PASS / WARN / DENY / ERROR） |
-| `1` | 参数错误（无效 mode、无效 format、文件不存在、空输入） |
+| `1` | 参数错误（无效 mode、无效 format、文件不存在、空输入：空 stdin、空文件、空白 `--text`） |
 
 > **注意**：`ok: false`（威胁或错误）时退出码仍为 `0`，调用方应解析 JSON 中的 `verdict` 字段判断是否阻断。
 > scanner 内部异常（如模型加载失败）也会以 `verdict: error` 的 JSON 格式输出，退出码为 `0`。

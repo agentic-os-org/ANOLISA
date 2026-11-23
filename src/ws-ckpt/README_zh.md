@@ -17,10 +17,13 @@
 - **TOML 配置热重载** — 以 `/etc/ws-ckpt/config.toml` 为唯一入口，`ws-ckpt reload` 即时生效
 - **容量与数量阈值告警** — 任一工作区快照数超 1000 或文件系统使用率超 90% 时统一告警
 
+将健康检查间隔设为零会关闭周期诊断；daemon 仍会刷新 advisory 缓存。参见
+[CLI 配置](../../docs/user-guide/zh/ws-ckpt/index.md#cli-配置)。
+
 通过 OpenClaw 或 Hermes 插件成功回滚后，仅跳过被恢复工作区在本轮结束时的自动检查点，
 无论回滚使用工作区 ID 还是注册路径。
 其他工作区仍正常创建自动检查点；预览和失败的回滚不会抑制检查点。
-OpenClaw 将跳过记录限定在发起回滚的会话内，其他会话先结束也不会消费该记录。
+两个插件都将跳过记录限定在发起回滚的会话内，其他会话先结束也不会消费该记录。
 
 ## 项目结构
 
@@ -33,11 +36,10 @@ ws-ckpt/
 │   │   ├── common/            # 共享类型、IPC 协议编解码
 │   │   ├── daemon/            # 守护进程核心逻辑
 │   │   └── cli/               # 命令行客户端
-│   ├── systemd/               # systemd service 文件
 │   └── skills/                # OS Skills
 ├── docs/                      # 项目文档
-├── ws-ckpt.spec.in            # RPM 规格模板
-├── build-rpm.sh               # RPM 打包脚本
+├── packaging/                 # RPM/raw 规格、服务资源及交付规则
+├── build-rpm.sh               # packaging/rpm/build.sh 的兼容入口
 └── .gitignore
 ```
 
@@ -47,7 +49,7 @@ ws-ckpt/
 
 - Linux（推荐 Alinux 4）
 - btrfs 文件系统
-- Rust 1.70+
+- Rust 1.91+
 
 工作区根目录不能是活跃的挂载点。初始化时会把原目录改名后作为备份，而 `rename(2)` 对
 「自身是挂载点」的目录会返回 `EBUSY` —— 最常见的是 in-place 模式的 SkillFS 挂载。执行
@@ -56,8 +58,7 @@ ws-ckpt/
 ### 编译
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
 [维护者说明：Raw 打包与 GitHub 构建](../../contribute/zh/ws-ckpt/packaging.md)
@@ -99,6 +100,10 @@ ws-ckpt delete --workspace ~/my-workspace -s feature
 
 ### 快照管理
 
+Hermes 的 `ws-ckpt-list` 工具也支持用 `{"limit":20}` 获取一页，再用
+`{"limit":20,"cursor":"<next_cursor>"}` 继续。仅在 `next_cursor:null` 时结束；
+`{}` 仍返回完整表格。详见[用户指南](../../docs/user-guide/zh/ws-ckpt/index.md#hermes-快照列表分页)。
+
 ```bash
 # 列出工作区所有快照
 ws-ckpt list --workspace ~/my-workspace
@@ -117,6 +122,9 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 
 # 查看快照与当前工作区的差异（省略 --to）
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
+
+# 以 JSON 输出文件变化列表（不包含逐行内容差异）
+ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --format json
 
 # 清理旧快照，保留最近 5 个
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
@@ -148,6 +156,10 @@ delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 u
 - `-g` / `--global` 查看或修改全局配置文件
 - `-w <workspace>` / `--workspace <workspace>` 查看或修改单个工作区的 `policy.toml`
 
+`backend.btrfs-loop.img_size` / `config -g --img-size` 接受至少 **5 GiB** 的整数
+（默认 30 GiB），修改后需要重启 daemon。配置非法时 daemon 停止启动，不会用默认值
+替换其他设置。CLI 在保存前校验更新后的配置，也允许修复旧配置中的数值越界问题。
+
 ```bash
 # 查看系统状态
 ws-ckpt status --workspace ~/my-workspace
@@ -173,6 +185,14 @@ ws-ckpt reload
 ```
 
 `config -g` 写入全局配置后会校验 daemon 重载了相同的设置——若有字段不一致会以非零退出并逐项列出。Kubernetes sidecar 部署下 CLI 与 daemon 运行在不同容器，`/etc/ws-ckpt` 必须挂在两容器共享的卷上，否则全局设置无法送达 daemon。
+
+使用 BtrfsBase 时，可设置 `[backend.btrfs-base] btrfs_mount = "/data"`，固定到
+已挂载且可写的 btrfs 挂载点；数据位于 `/data/ws-ckpt-data`。后端设置需重启生效。
+未指定时，重启沿用持久化挂载点；该挂载不可用就报错。修改此配置会有意切换数据根，
+旧快照不再可见，启动可能清除未 pinned 的索引记录；切回不会恢复，残留子卷会作为 pinned 的
+恢复孤儿重新出现。修改前请备份状态和数据。
+`daemon --mount-path` 仅配置 BtrfsLoop。
+详见[存储后端选择](../../docs/user-guide/zh/ws-ckpt/index.md#存储后端选择)。
 
 ## 命令总览
 

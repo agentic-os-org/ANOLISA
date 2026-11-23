@@ -3,6 +3,9 @@
 use aw_contracts::canonical;
 use serde_json::{json, Value};
 
+#[cfg(test)]
+mod tests;
+
 fn identifier(value: &Value) -> Option<&str> {
     value.as_str().filter(|text| {
         !text.trim().is_empty() && text.len() <= 512 && !text.chars().any(char::is_control)
@@ -41,17 +44,45 @@ fn matches_native(
     let after = event["name"] == "tool.after";
     let tool = &event["tool"];
     let (session, call, name, input, result, seam) = match adapter {
-        "qoder" => (
+        "sdk" => (
+            native["session_id"].clone(),
+            native["call_id"].clone(),
+            native["name"].clone(),
+            native["input"].clone(),
+            if after {
+                native["result"].clone()
+            } else {
+                Value::Null
+            },
+            native["api_version"] == "aw-hook-source/v1"
+                && matches!(event["name"].as_str(), Some("tool.before" | "tool.after"))
+                && native["event"] == event["name"],
+        ),
+        "qoder" | "qoder-sdk" => (
             native["session_id"].clone(),
             native["tool_use_id"].clone(),
             native["tool_name"].clone(),
             native["tool_input"].clone(),
-            native["tool_response"].clone(),
-            native["hook_event_name"] == if after { "PostToolUse" } else { "PreToolUse" },
+            if native["hook_event_name"] == "PostToolUseFailure" {
+                json!({"is_error":true,"error":native["error"],"is_interrupt":native["is_interrupt"]})
+            } else {
+                native["tool_response"].clone()
+            },
+            if after {
+                matches!(
+                    native["hook_event_name"].as_str(),
+                    Some("PostToolUse" | "PostToolUseFailure")
+                )
+            } else {
+                native["hook_event_name"] == "PreToolUse"
+            },
         ),
         "qwenpaw" => (
             native["session_id"].clone(),
-            native["tool_call"]["id"].clone(),
+            native
+                .get("aw_invocation_id")
+                .unwrap_or(&native["tool_call"]["id"])
+                .clone(),
             native["tool_call"]["name"].clone(),
             match native["tool_call"]["input"]
                 .as_str()
@@ -108,12 +139,7 @@ fn matches_native(
                 return false;
             };
             let name = if after {
-                match name.trim().to_lowercase().as_str() {
-                    "bash" => "exec".into(),
-                    "apply-patch" => "apply_patch".into(),
-                    "cron" => "automations".into(),
-                    other => other.to_owned(),
-                }
+                crate::adapters::openclaw::policy_name(name)
             } else {
                 name.to_owned()
             };
@@ -133,12 +159,30 @@ fn matches_native(
         }
         _ => return false,
     };
+    let native_name = if adapter == "openclaw" && after {
+        let Some(retained) = identifier(&tool["native_name"]) else {
+            return false;
+        };
+        // A correlated observation retains its replacement's exact spelling,
+        // while the native completion can supply the runtime's policy alias.
+        json!(crate::adapters::openclaw::policy_name(retained))
+    } else {
+        tool["native_name"].clone()
+    };
     seam && identifier(&session).is_some()
         && identifier(&call).is_some()
         && event["session_id"] == session
         && tool["call_id"] == call
-        && tool["native_name"] == name
-        && tool["name"] == name
+        && native_name == name
+        && (tool["name"] == name
+            || (adapter == "qoder-sdk"
+                && tool["name"]
+                    == match name.as_str() {
+                        Some("Bash") => "bash",
+                        Some("Read") => "file_read",
+                        Some("Write" | "Edit") => "file_write",
+                        _ => "",
+                    }))
         && tool["input"] == input
         && tool["result"] == result
 }
@@ -153,4 +197,29 @@ pub fn source_matches_adapter(adapter: &Value, name: &Value) -> bool {
             | (Some("openclaw"), Some("openclaw" | "OpenClaw"))
             | (Some("qwenpaw"), Some("qwenpaw"))
     )
+}
+
+/// Retains native IDs separately from AW-normalized invocation identities.
+/// Missing or malformed native fields remain null.
+pub fn native_references(adapter: &str, event: &Value) -> Value {
+    let native = &event["native"];
+    let call = match adapter {
+        "qoder-sdk" => native
+            .get("aw_native_tool_use_id")
+            .unwrap_or(&native["tool_use_id"]),
+        "qoder" | "claude-sdk" => &native["tool_use_id"],
+        "qwenpaw" | "agentscope" | "pi" => &native["tool_call"]["id"],
+        "hermes" => &native["extra"]["tool_call_id"],
+        _ => &Value::Null,
+    };
+    let reference = |normalized: &Value, raw: &Value| {
+        if identifier(normalized).is_none() {
+            Value::Null
+        } else {
+            json!(identifier(raw))
+        }
+    };
+    json!({"sessionId":reference(&event["session_id"],&native["session_id"]),
+        "turnId":reference(&event["turn_id"],&native["turn_id"]),
+        "toolCallId":reference(&event["tool"]["call_id"],call),"modelCallId":null})
 }

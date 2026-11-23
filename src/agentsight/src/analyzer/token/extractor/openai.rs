@@ -2,6 +2,7 @@
 
 use super::super::data::{MessageTokenData, ResponseTokenData, TokenData};
 use super::utils::extract_model_from_json;
+use crate::analyzer::message::ResponsesReasoningReplay;
 use serde_json::Value;
 
 /// Extract token data from OpenAI format JSON
@@ -61,6 +62,17 @@ pub fn extract_token_data(
     if has_content { Some(token_data) } else { None }
 }
 
+/// OpenAI sends `arguments` as JSON text. Only inside a Qoder envelope does the
+/// gateway also send a complete object there; every other provider keeps the
+/// previous text-only read so its estimate is unchanged.
+fn tool_arguments(func: &Value, is_qoder: bool) -> String {
+    match func.get("arguments") {
+        Some(Value::String(text)) => text.clone(),
+        Some(object) if is_qoder => object.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Extract response content from OpenAI format response JSON
 ///
 /// Returns a tuple of (content, reasoning_content, tool_calls)
@@ -71,6 +83,9 @@ pub fn extract_response_content(
     response_json: Option<&Value>,
 ) -> Option<(String, Option<String>, Vec<String>)> {
     let resp = response_json?;
+    let envelope = crate::parser::llm::unwrap_qoder_envelope(resp);
+    let is_qoder = envelope.is_some();
+    let resp = envelope.as_ref().unwrap_or(resp);
 
     let mut content = String::new();
     let mut reasoning = None;
@@ -80,7 +95,7 @@ pub fn extract_response_content(
     if let Some(choices) = resp.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
             // Support both "message" (standard response) and "delta" (SSE streaming) formats
-            let msg_or_delta = choice.get("message").or_else(|| choice.get("delta"));
+            let msg_or_delta = message_or_delta(choice);
 
             if let Some(msg) = msg_or_delta {
                 // Extract content
@@ -119,8 +134,7 @@ pub fn extract_response_content(
                     for tool_call in calls {
                         if let Some(func) = tool_call.get("function") {
                             let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let arguments =
-                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let arguments = tool_arguments(func, is_qoder);
                             let tool_content = format!("{name}: {arguments}");
                             if !tool_content.is_empty() {
                                 tool_calls.push(tool_content);
@@ -389,19 +403,32 @@ pub fn extract_response_content(
             // delivered them, and counting both would double the call.
             "response.output_item.added" => {
                 if let Some(item) = resp.get("item") {
-                    // A custom (freeform) tool is announced the same way as a
-                    // function call; only the kind differs. The message parser
-                    // and the chatml reader both accept it, so a captured
-                    // turn that called one must count its name here too.
-                    if matches!(
-                        item.get("type").and_then(|t| t.as_str()),
-                        Some("function_call" | "custom_tool_call")
-                    ) {
-                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                            if !name.is_empty() {
-                                return Some((String::new(), None, vec![format!("{name}: ")]));
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        // A custom (freeform) tool is announced the same way as a
+                        // function call; only the kind differs. The message parser
+                        // and the chatml reader both accept it, so a captured
+                        // turn that called one must count its name here too.
+                        Some("function_call" | "custom_tool_call") => {
+                            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                                if !name.is_empty() {
+                                    return Some((String::new(), None, vec![format!("{name}: ")]));
+                                }
                             }
                         }
+                        // Codex's `local_shell_call` names the tool implicitly
+                        // and carries the whole argv in `action`. The live
+                        // message parser and the collector already read it, so
+                        // a shell-only turn must not count zero output tokens.
+                        Some("local_shell_call") => {
+                            if let Some(action) = item.get("action") {
+                                return Some((
+                                    String::new(),
+                                    None,
+                                    vec![format!("shell: {action}")],
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -590,13 +617,7 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
         })
     };
     let saw_text_delta = saw_delta("response.output_text.delta");
-    // A reasoning item repeats the thinking, not the answer, and the two
-    // deltas are separate events: a capture cut after the reasoning item but
-    // before the first answer delta has a reasoning delta and no text delta,
-    // so the text rule alone let the item's thinking land in the answer buffer
-    // while the deltas had already counted it as reasoning.
-    let saw_reasoning_delta = saw_delta("response.reasoning_text.delta")
-        || saw_delta("response.reasoning_summary_text.delta");
+    let reasoning_replay = ResponsesReasoningReplay::new(chunks);
     // A refusal is the call's answer too, and it repeats the same way: the
     // `response.refusal.done` event closes the deltas, so it is read only
     // when no refusal delta was captured.
@@ -607,7 +628,7 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
             Some("response.refusal.done") => saw_refusal_delta,
             Some("response.output_item.done") => {
                 if chunk.get("item").is_some_and(is_reasoning_item) {
-                    saw_reasoning_delta
+                    false
                 } else {
                     // A message item repeats its refusal part too.
                     saw_text_delta || saw_refusal_delta
@@ -658,6 +679,11 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
                     content.push_str(&chunk_content);
                 }
             }
+            let chunk_reasoning = if closing_reasoning {
+                reasoning_replay.closing_item_text(chunk)
+            } else {
+                chunk_reasoning
+            };
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
                     if closing && !closing_reasoning {
@@ -751,6 +777,20 @@ fn is_closing_response_event(chunk: &Value) -> bool {
     )
 }
 
+/// Returns the message or delta object of a choice, treating an explicit
+/// `"message": null` as absent.
+///
+/// Some OpenAI-compatible gateways include `"message": null` next to a
+/// streaming `delta`. Preferring the present-but-null value hid the delta's
+/// content, refusal, reasoning and tool calls from the manual counter and the
+/// drain estimate.
+fn message_or_delta(choice: &Value) -> Option<&Value> {
+    choice
+        .get("message")
+        .filter(|value| !value.is_null())
+        .or_else(|| choice.get("delta").filter(|value| !value.is_null()))
+}
+
 /// A choice that carries `message` instead of `delta` speaks in cumulative
 /// snapshots: each frame repeats the answer so far rather than an increment.
 fn carries_message_snapshot(chunk: &Value) -> bool {
@@ -769,9 +809,12 @@ fn carries_message_snapshot(chunk: &Value) -> bool {
         .get("choices")
         .and_then(|c| c.as_array())
         .is_some_and(|choices| {
-            choices
-                .iter()
-                .any(|choice| choice.get("message").is_some() && choice.get("delta").is_none())
+            choices.iter().any(|choice| {
+                choice
+                    .get("message")
+                    .is_some_and(|message| !message.is_null())
+                    && choice.get("delta").is_none_or(Value::is_null)
+            })
         })
 }
 
@@ -818,7 +861,7 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
                     .get("index")
                     .and_then(Value::as_u64)
                     .unwrap_or(choice_pos as u64);
-                let snapshot = choice.get("message");
+                let snapshot = choice.get("message").filter(|message| !message.is_null());
                 let message = snapshot.or_else(|| choice.get("delta"));
                 let Some(message) = message else {
                     continue;
@@ -953,7 +996,7 @@ fn collect_native_call_slots(chunk: &Value, slots: &mut std::collections::BTreeM
         .iter()
         .enumerate()
     {
-        let message = choice.get("message").or_else(|| choice.get("delta"));
+        let message = message_or_delta(choice);
         let Some(message) = message else {
             continue;
         };
@@ -1459,6 +1502,61 @@ mod tests {
         assert!(tool_calls.is_empty());
     }
 
+    /// A gateway may emit `"message": null` alongside a streaming `delta`.
+    /// Treating the null value as a present message hid the delta's content
+    /// and tool calls from the manual counters and the drain estimate, while
+    /// the live message parser kept them.
+    #[test]
+    fn test_null_message_does_not_hide_delta() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "message": null, "delta": {"content": "hello there"}}]
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&chunk)).expect("the delta content must be extracted");
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_none());
+        assert!(tool_calls.is_empty());
+
+        let tool_chunk = serde_json::json!({
+            "choices": [{"index": 0, "message": null, "delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "lookup", "arguments": "{}"}}
+            ]}}]
+        });
+        let (_, _, tool_calls) = extract_response_content(Some(&tool_chunk))
+            .expect("the delta tool call must be extracted");
+        assert_eq!(tool_calls, vec!["lookup: {}".to_string()]);
+        assert_eq!(
+            merge_response_tool_calls(&[tool_chunk]),
+            vec!["lookup: {}".to_string()]
+        );
+
+        assert_eq!(
+            merge_response_output_text(&[chunk]).0,
+            "hello there",
+            "a null message must not turn a delta chunk into a snapshot"
+        );
+    }
+
+    /// The mirror case: a gateway repeats a whole `message` frame beside
+    /// `"delta": null`. A present-but-null delta must count as absent, or the
+    /// cumulative snapshots are appended as increments and the answer is
+    /// counted twice.
+    #[test]
+    fn test_null_delta_does_not_hide_message_snapshot() {
+        let first = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hello"}, "delta": null}]
+        });
+        let second = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hello world"}, "delta": null}]
+        });
+        assert!(carries_message_snapshot(&first));
+        assert_eq!(
+            merge_response_output_text(&[first, second]).0,
+            "hello world",
+            "a cumulative snapshot repeated beside a null delta must not be appended"
+        );
+    }
+
     /// An OpenAI-compatible gateway's final frame can be a whole `message`
     /// after a run of deltas; the snapshot completes the text instead of
     /// appending to it.
@@ -1527,9 +1625,9 @@ mod tests {
             "every closing reasoning item carries different thinking and must be kept"
         );
 
-        // Accumulating the closing items must not weaken the delta-wins rule:
-        // when the thinking arrived as deltas, `repeats_delivered_text` drops
-        // every closing reasoning item whatever their number.
+        // Accumulating closing items must not weaken legacy identity-less
+        // suppression: when the thinking arrived as deltas, replay filtering
+        // drops every closing reasoning item whatever their number.
         let with_deltas = vec![
             serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Check the logs. "}),
             serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Then retry."}),
@@ -1541,8 +1639,22 @@ mod tests {
         let (_content, reasoning, _tool_calls) = merge_response_output_text(&with_deltas);
         assert_eq!(
             reasoning, "Check the logs. Then retry.",
-            "delivered deltas supersede every closing reasoning item"
+            "delivered identity-less deltas supersede every closing reasoning item"
         );
+    }
+
+    #[test]
+    fn test_merge_response_output_text_scopes_reasoning_replay_to_the_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_0", "summary": [{"type": "summary_text", "text": "Inspect logs. "}]}}),
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "output_index": 1,
+                "item": {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+        ];
+
+        let (_content, reasoning, _tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(reasoning, "Inspect logs. Then retry.");
     }
 
     /// Reasoning and tool fragments pass through the same merge unchanged.
@@ -1802,6 +1914,45 @@ mod tests {
         // exact string they expect.
         let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
         assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// Codex's Responses protocol announces a shell call as
+    /// `local_shell_call`, with the argv in `action` and the tool name
+    /// implicit. The live message parser and the collector already read that
+    /// shape, but the manual counter and drain estimate counted a shell-only
+    /// turn as zero output tokens.
+    #[test]
+    fn test_responses_api_local_shell_call_yields_a_tool_call() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "local_shell_call",
+                "id": "lsc_1",
+                "call_id": "call_shell",
+                "action": {"type": "exec", "command": ["ls", "-l"]},
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the shell call must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(
+            tool_calls,
+            vec![format!(
+                "shell: {}",
+                serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+            )]
+        );
+
+        let (_, _, merged) = merge_response_output_text(&[added]);
+        assert_eq!(
+            merged,
+            vec![format!(
+                "shell: {}",
+                serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+            )]
+        );
     }
 
     /// A custom (freeform) tool call is announced and streamed exactly like a
@@ -2406,5 +2557,41 @@ mod tests {
         assert_eq!(content, "the answer");
         assert_eq!(tool_calls.len(), 1);
         assert!(tool_calls[0].starts_with("get_weather: "));
+    }
+
+    /// Qoder's gateway sends the tool-call arguments as a complete object
+    /// inside its `statusCode`/`body` envelope. The estimate used to read only
+    /// text arguments, so a fallback estimate counted `name: ` and dropped the
+    /// parameter text. Only the enveloped path gains the object read: a plain
+    /// OpenAI body keeps the text-only behaviour, so no other provider's
+    /// estimate moves.
+    #[test]
+    fn test_qoder_envelope_object_arguments_join_the_estimate() {
+        let inner = serde_json::json!({
+            "choices": [{"message": {
+                "content": "",
+                "tool_calls": [{"function": {
+                    "name": "lookup",
+                    "arguments": {"city": "Paris"}
+                }}]
+            }}]
+        });
+        let enveloped = serde_json::json!({
+            "statusCode": 200,
+            "statusCodeValue": 200,
+            "body": inner.to_string()
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&enveloped)).expect("an enveloped call must extract");
+        assert_eq!(tool_calls, vec![r#"lookup: {"city":"Paris"}"#.to_string()]);
+
+        let plain = serde_json::json!({
+            "choices": [{"message": {"tool_calls": [{"function": {
+                "name": "lookup", "arguments": {"city": "Paris"}
+            }}]}}]
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&plain)).expect("the call name still extracts");
+        assert_eq!(tool_calls, vec!["lookup: ".to_string()]);
     }
 }

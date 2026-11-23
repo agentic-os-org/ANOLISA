@@ -98,3 +98,15 @@ test('interpolation keeps replacement patterns inside parameter values literal',
   assert.equal(interpolateMessage('a {n} b', { n: 42 }), 'a 42 b');
   assert.equal(interpolateMessage('a {n} b'), 'a {n} b');
 });
+
+// Policy-authored reason strings are data even when they name an inherited
+// JavaScript property; only this module's own translations may replace them.
+test('an inherited property name remains an unknown risk conclusion', () => {
+  assert.equal(translateRuleReason('constructor', 'zh-CN'), 'constructor');
+  assert.equal(translateRuleReason('constructor', 'en-US'), 'constructor');
+});
+
+test('an unknown reason keeps its original spelling and whitespace', () => {
+  const reason = '  ConStructor  ';
+  assert.equal(translateRuleReason(reason, 'zh-CN'), reason);
+});

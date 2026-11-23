@@ -17,13 +17,21 @@
 from swe_runner.trace_extraction.analysis import analyze_trace_files
 from swe_runner.trace_extraction.export import write_trace_analysis_csvs
 from swe_runner.trace_extraction.helpers import ExtractionError
+from swe_runner.trace_extraction.openclaw_sqlite import (
+    SqliteUsageError,
+    build_usage_report,
+    read_profiles_usage,
+)
 from swe_runner.trace_extraction.plan import TraceCollectionPlan
 from swe_runner.trace_extraction.recording import record_openclaw_jsonl_traces_in_window
 
 __all__ = [
     "ExtractionError",
+    "SqliteUsageError",
     "TraceCollectionPlan",
     "analyze_trace_files",
+    "build_usage_report",
+    "read_profiles_usage",
     "write_trace_analysis_csvs",
     "record_openclaw_jsonl_traces_in_window",
 ]

@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import posixpath
 import struct
 import sys
 from pathlib import Path
-
 
 MH_MAGIC_64 = 0xFEEDFACF
 CPU_TYPES = {"aarch64": 0x0100000C, "x86_64": 0x01000007}
@@ -117,13 +117,19 @@ def validate(
     if cursor != commands_end:
         raise MachOError("load commands do not consume the declared command table")
     if set(minimums) != {expected_minimum}:
-        rendered = ", ".join(
-            ".".join(map(str, value)) for value in sorted(set(minimums))
-        ) or "missing"
+        rendered = (
+            ", ".join(".".join(map(str, value)) for value in sorted(set(minimums)))
+            or "missing"
+        )
         expected = ".".join(map(str, expected_minimum))
         raise MachOError(f"deployment target is {rendered}, expected {expected}")
     allowed = ("/usr/lib/", "/System/Library/Frameworks/")
-    unsupported = sorted(name for name in dylibs if not name.startswith(allowed))
+    unsupported = sorted(
+        name
+        for name in dylibs
+        if not name.startswith(allowed)
+        or not posixpath.normpath(name).startswith(allowed)
+    )
     if unsupported:
         raise MachOError(
             "non-system dynamic library reference(s): " + ", ".join(unsupported)

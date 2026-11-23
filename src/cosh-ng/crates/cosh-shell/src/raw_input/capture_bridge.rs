@@ -97,6 +97,7 @@ fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
         RawInputCapture::Session { id, .. } => ("session", id),
         RawInputCapture::Consultation { id } => ("consultation", id),
         RawInputCapture::Evidence { id } => ("evidence", id),
+        RawInputCapture::TrialWaiting { id, .. } => ("ecs_trial", id),
         RawInputCapture::PromptDraft { id, .. } => ("prompt_draft", id),
     }
 }
@@ -386,5 +387,34 @@ mod tests {
             &*input_mode.lock().expect("input mode"),
             RawInputMode::Submitted { generation: 9, .. }
         ));
+    }
+    #[test]
+    fn kongche_transition_n_keeps_capture_and_control_c_can_still_cancel() {
+        for phase in ["Pausing", "Cancelling"] {
+            let capture = RawInputCapture::TrialWaiting {
+                id: phase.into(),
+                settings: None,
+                allow_settings: false,
+            };
+            let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+                capture: capture.clone(),
+                generation: 7,
+                installed_at: std::time::Instant::now(),
+            }));
+            let (sender, receiver) = mpsc::channel();
+            let mut state = CardInputState::default();
+            consume_captured_input(&mut state, &capture, 7, b"n", &sender, &input_mode);
+            assert!(receiver.try_recv().is_err());
+            assert!(matches!(
+                *input_mode.lock().unwrap(),
+                RawInputMode::Capture { .. }
+            ));
+            consume_captured_input(&mut state, &capture, 7, b"\x03", &sender, &input_mode);
+            assert!(receiver.try_iter().any(|event| matches!(event, RawInputEvent::TrialControl { action, .. } if action == "cancel")));
+            assert!(matches!(
+                *input_mode.lock().unwrap(),
+                RawInputMode::Submitted { .. }
+            ));
+        }
     }
 }

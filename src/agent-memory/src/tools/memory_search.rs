@@ -5,6 +5,34 @@ use crate::service::MemoryService;
 
 const TOOL: &str = "memory_search";
 
+fn audit_index_error(
+    svc: &MemoryService,
+    mode: &str,
+    query: &str,
+    error: MemoryError,
+) -> MemoryError {
+    svc.audit_log(
+        AuditEntry::new(TOOL)
+            .path(sanitized_query_path(mode, query))
+            .error(error.to_string()),
+    );
+    if crate::index::store::is_row_decode_error(&error) && mode != "hybrid" {
+        let table = if mode == "vector" {
+            "files_vec"
+        } else {
+            "files/files_fts"
+        };
+        if let Some(index) = svc.index.as_ref() {
+            tracing::error!(
+                "memory search row decode failed (backend={mode}, table={table}, db={}): {error}; {}",
+                index.db_path().display(),
+                crate::index::store::ROW_DECODE_RECOVERY
+            );
+        }
+    }
+    error
+}
+
 /// Tier B: search the memory store.
 ///
 /// `mode` controls the search algorithm:
@@ -45,6 +73,10 @@ pub fn memory_search(
         }
     };
 
+    index
+        .check_search_health()
+        .map_err(|e| audit_index_error(svc, mode, query, e))?;
+
     // Determine effective agent scope from parameter or config.
     // We never silently widen the visibility domain: an explicitly configured
     // `isolated`/`filter` scope with no `MCP_CLIENT_NAME` is a misconfiguration,
@@ -80,10 +112,13 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            // `category` is part of the SQL WHERE clause, so it narrows the
-            // candidate set before `LIMIT top_k` rather than trimming an
-            // already-truncated window down to nothing.
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
+            // Category is filtered in SQL before LIMIT.
+            let hits = index
+                .search_scoped(query, top_k.max(1), scope_ref, category)
+                .map_err(|e| audit_index_error(svc, "bm25", query, e))?;
+            index
+                .check_search_health()
+                .map_err(|e| audit_index_error(svc, mode, query, e))?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -125,7 +160,14 @@ pub fn memory_search(
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref, category)?;
+                    let hits = index
+                        .search_scoped(query, top_k.max(1), scope_ref, category)
+                        .map_err(|e| {
+                            audit_index_error(svc, &fallback_query_mode(mode), query, e)
+                        })?;
+                    index
+                        .check_search_health()
+                        .map_err(|e| audit_index_error(svc, mode, query, e))?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(sanitized_query_path(&fallback_query_mode(mode), query))
@@ -162,11 +204,15 @@ pub fn memory_search(
                 MemoryError::Other(format!("embedding failed: {e}"))
             })?;
 
-            let hits = if mode == "vector" {
-                index.search_vec(&embedding.vector, top_k.max(1))?
+            let hits = (if mode == "vector" {
+                index.search_vec(&embedding.vector, top_k.max(1))
             } else {
-                index.search_hybrid(query, &embedding.vector, top_k.max(1))?
-            };
+                index.search_hybrid(query, &embedding.vector, top_k.max(1))
+            })
+            .map_err(|e| audit_index_error(svc, mode, query, e))?;
+            index
+                .check_search_health()
+                .map_err(|e| audit_index_error(svc, mode, query, e))?;
             let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()

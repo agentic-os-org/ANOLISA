@@ -1,0 +1,133 @@
+//! Lower the supported Cedar forbid subset to Sight file protection.
+
+mod expressions;
+mod paths;
+
+use asc_agentsight_protocol::{
+    FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+    FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
+};
+use asc_policy_types::target::TranslationRejection;
+use cedar_policy::pst::{
+    ActionConstraint, Clause, Effect, PrincipalConstraint, ResourceConstraint,
+};
+
+use expressions::{Branch, DELETE, READ, WRITE, WRITE_OPERATIONS, and, expression};
+use paths::target;
+
+pub(super) const MAX_TARGETS: usize = 64;
+type Result<T> = std::result::Result<T, &'static str>;
+
+pub(super) fn translate(
+    policies: &cedar_policy::pst::PolicySet,
+) -> std::result::Result<FileProtectionPolicy, TranslationRejection> {
+    let mut targets = Vec::new();
+    for (index, (id, policy)) in policies.policies.iter().enumerate() {
+        // Projection retains SDK statement identities even when HTTP statements precede them.
+        let index = id
+            .to_string()
+            .strip_prefix("policy")
+            .and_then(|position| position.parse::<usize>().ok())
+            .unwrap_or(index);
+        let body = policy.body();
+        let translated = (|| {
+            if body.principal != PrincipalConstraint::Any {
+                return Err("UNSUPPORTED_PRINCIPAL_CONSTRAINT");
+            }
+            if !body.annotations.is_empty() {
+                return Err("UNSUPPORTED_ANNOTATION");
+            }
+            if body.effect != Effect::Forbid {
+                return Err("UNSUPPORTED_EFFECT");
+            }
+            let all_actions = |name: &str| {
+                let matches = |id: &cedar_policy::pst::EntityUID| {
+                    id.ty.to_string() == "SecCore::Action" && id.eid == name
+                };
+                match &body.action {
+                    ActionConstraint::Eq(id) => matches(id),
+                    ActionConstraint::In(ids) => !ids.is_empty() && ids.iter().all(matches),
+                    ActionConstraint::Any => false,
+                }
+            };
+            let operations = if all_actions("file.write") {
+                WRITE_OPERATIONS
+            } else if all_actions("file.read") {
+                READ
+            } else {
+                return Err("UNSUPPORTED_ACTION");
+            };
+            match &body.resource {
+                ResourceConstraint::Any => {}
+                ResourceConstraint::Is(ty) if ty.to_string() == "SecCore::File" => {}
+                _ => return Err("UNSUPPORTED_RESOURCE_CONSTRAINT"),
+            }
+            let mut branches = vec![Branch {
+                operations,
+                ..Branch::default()
+            }];
+            for clause in body.clauses() {
+                let (expr, negate) = match clause {
+                    Clause::When(expr) => (expr, false),
+                    Clause::Unless(expr) => (expr, true),
+                };
+                branches = and(branches, &expression(expr, negate, 0)?)?;
+            }
+            for branch in branches {
+                if branch.operations & !(DELETE | WRITE | READ) != 0 {
+                    return Err("UNSUPPORTED_OPERATION");
+                }
+                if let Some(mut item) = target(branch)? {
+                    if item.protections.read && item.kind != FileProtectionTargetKind::ExactFile {
+                        return Err("UNSUPPORTED_READ_TARGET");
+                    }
+                    // Identical scopes may share operation bits. Different exclusions
+                    // on the same root are rejected by Sight's structured protocol.
+                    item.exclusions.sort_by(|a, b| a.path.cmp(&b.path));
+                    item.exclusions.dedup();
+                    merge(&mut targets, item)?;
+                }
+            }
+            Ok(())
+        })();
+        translated.map_err(|code| reject(&format!("CEDAR_RULE_{index}_{code}")))?;
+    }
+    if targets.is_empty() {
+        return Err(reject("CEDAR_EMPTY_EFFECTIVE_POLICY"));
+    }
+    targets.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(FileProtectionPolicy {
+        version: FILE_PROTECTION_POLICY_VERSION,
+        topology_mode: FileProtectionTopologyMode::StaticAtApply,
+        targets,
+    })
+}
+
+fn merge(targets: &mut Vec<FileProtectionTarget>, item: FileProtectionTarget) -> Result<()> {
+    if let Some(existing) = targets.iter_mut().find(|target| target.path == item.path) {
+        if existing.kind != item.kind || existing.exclusions != item.exclusions {
+            return Err("CONFLICTING_TARGET_SCOPES");
+        }
+        existing.protections.delete |= item.protections.delete;
+        existing.protections.ordinary_write |= item.protections.ordinary_write;
+        existing.protections.read |= item.protections.read;
+    } else {
+        if targets.len() == MAX_TARGETS {
+            return Err("TARGET_LIMIT_EXCEEDED");
+        }
+        targets.push(item);
+    }
+    Ok(())
+}
+
+fn protections(operations: u8) -> FileProtections {
+    FileProtections {
+        delete: operations & DELETE != 0,
+        ordinary_write: operations & WRITE != 0,
+        read: operations & READ != 0,
+    }
+}
+
+fn reject(code: &str) -> TranslationRejection {
+    TranslationRejection { code: code.into() }
+}

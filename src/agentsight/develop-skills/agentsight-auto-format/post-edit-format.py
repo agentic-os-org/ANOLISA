@@ -85,10 +85,13 @@ def extract_paths(raw):
             elif "file_path" in data:
                 paths.append(data["file_path"])
             # Legacy MultiEdit: {"edits": [{"file_path": "..."}, ...]}
-            for edit in data.get("edits", []):
-                if isinstance(edit, dict) and "file_path" in edit:
-                    paths.append(edit["file_path"])
-    except (json.JSONDecodeError, TypeError):
+            # This optional field may be null or a scalar; only a list is meaningful.
+            edits = data.get("edits")
+            if isinstance(edits, list):
+                for edit in edits:
+                    if isinstance(edit, dict) and "file_path" in edit:
+                        paths.append(edit["file_path"])
+    except json.JSONDecodeError:
         paths = [line.strip() for line in raw.splitlines() if line.strip()]
     return paths
 

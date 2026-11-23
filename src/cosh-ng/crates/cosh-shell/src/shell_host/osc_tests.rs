@@ -18,6 +18,9 @@ const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
 #[test]
 fn bounded_raw_session_spools_output_without_materializing_result() {
+    // Serialize with process-wide PATH rewrites so a concurrent env-guard
+    // holder cannot change PATH while this test spawns bash.
+    let _env_guard = crate::diagnostics::test_env::env_guard();
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-bounded-raw-session-{}-{:?}",
         std::process::id(),
@@ -1980,4 +1983,96 @@ fn feed_environment_marker(
     parser
         .feed(bytes.as_bytes())
         .expect("feed environment marker");
+}
+
+#[test]
+fn clean_and_alt_screen_fast_paths_preserve_state_across_chunkings() {
+    let mut flood = Vec::new();
+    for i in 1..=500 {
+        flood.extend_from_slice(format!("{i}\r\n").as_bytes());
+    }
+    let mut long_line = vec![b'x'; 9000];
+    long_line.extend_from_slice(b"\r\nshort\r\n");
+    let cases: Vec<Vec<u8>> = vec![
+        flood,
+        b"plain text with\ttabs and\r\nnewlines\r\n".to_vec(),
+        b"a\x1b[?2004hb\x1b[?2004lc\x1b[0md\x1b[27me\x1b[24mf\x1b[Jg\x1b[Kh\r\n".to_vec(),
+        b"abc\x08\x08xyz\r\n\x08\r\n".to_vec(),
+        b"text\x1b[?2004hmore\r\n".to_vec(),
+        b"\x1b]1337;COSH;{\"e\":\"p\",\"t\":\"1\"}\x07after\r\n".to_vec(),
+        b"\x1b[?1049hA\x1b[?1049lB\x1b[?1047hC\x1b[?1047lD\x1b[?47hE\x1b[?47lF\r\n".to_vec(),
+        b"tail\x1b[?1049l\r\n".to_vec(),
+        b"\x9b0m\x9dbody\x07\x90str\x9c\r\n".to_vec(),
+        "你好世界\r\n🦀rust\r\n".as_bytes().to_vec(),
+        b"ok\xff\xfebad\r\n".to_vec(),
+        "a\u{200b}b\u{200e}c\r\n".as_bytes().to_vec(),
+        long_line,
+        b"\x1b]1337;COSH;{\"e\":\"p\"}\x07\x1b[?1049h\x1b[0mx\x08y\r\n\x1b[?1049l".to_vec(),
+        Vec::new(),
+        b"trailing\x1b".to_vec(),
+        b"trailing\x1b[?20".to_vec(),
+        b"\r\r\n\x1b[K\x1b[J\r\n".to_vec(),
+        b"\x1b[?1049h\r\n".to_vec(),
+        b"text\x1b[?47h".to_vec(),
+        b"\x1b[?1049h\x1b[?1047l\x1b[?47h".to_vec(),
+        b"tail\x1b[?1049hplainafter\r\n".to_vec(),
+    ];
+    let chunkings = [1usize, 2, 3, 7, 13, 64, 1024, usize::MAX];
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    for (ci, case) in cases.iter().enumerate() {
+        let mut reference: Option<String> = None;
+        for chunk in chunkings {
+            let work_dir = std::env::temp_dir().join(format!(
+                "cosh-chunk-equiv-{}-{}-{:?}",
+                std::process::id(),
+                ci,
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&work_dir);
+            std::fs::create_dir_all(&work_dir).expect("work dir");
+            let mut parser = OscParser::with_retention(
+                format!("chunk-equiv-{ci}"),
+                work_dir.join("refs"),
+                "chunkequiv".to_string(),
+                TranscriptRetention::Bounded {
+                    window_bytes: 256 * 1024,
+                },
+                &work_dir,
+            )
+            .expect("parser");
+            let step = chunk.min(case.len().max(1));
+            let mut at = 0;
+            while at < case.len() {
+                let end = (at + step).min(case.len());
+                parser.feed(&case[at..end]).expect("feed");
+                at = end;
+            }
+            if case.is_empty() {
+                parser.feed(b"").expect("empty feed");
+            }
+            let clean = std::fs::read(work_dir.join("terminal-output-chunkequiv.transcript"))
+                .unwrap_or_default();
+            let display =
+                std::fs::read(work_dir.join("display-chunkequiv.transcript")).unwrap_or_default();
+            let events =
+                std::fs::read(work_dir.join("events-chunkequiv.jsonl")).unwrap_or_default();
+            let signature = format!(
+                "clean={} display={} events={} alt={} tail={} dpos={}",
+                hex(&clean),
+                hex(&display),
+                hex(&events),
+                parser.alt_screen_active(),
+                parser.active_command_visible_tail(),
+                parser.display_position(),
+            );
+            match &reference {
+                None => reference = Some(signature),
+                Some(expected) => assert_eq!(
+                    &signature, expected,
+                    "case {ci} chunk {chunk} diverged from the whole-chunk reference"
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&work_dir);
+        }
+    }
 }

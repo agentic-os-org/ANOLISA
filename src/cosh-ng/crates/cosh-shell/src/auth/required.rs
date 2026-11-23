@@ -18,6 +18,7 @@ pub(crate) fn record_auth_required(
     let mut ids = Vec::new();
     for event in governed_events {
         if let AgentEvent::AuthRequired {
+            run_id,
             request_id,
             error_message,
             providers,
@@ -27,7 +28,7 @@ pub(crate) fn record_auth_required(
             if state.auth.state.is_some() {
                 continue;
             }
-            let id = format!("auth-{request_id}");
+            let id = format!("auth-{run_id}-{request_id}");
             if state.auth.completed_ids.contains(&id) {
                 continue;
             }

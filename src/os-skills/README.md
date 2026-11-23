@@ -29,13 +29,9 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### System Admin
 - **alinux-admin** — ALinux 4 system management (systemd, SSH, firewalld, NetworkManager)
 - **backup-restore** — System backup and restore
-- **regex-mastery** — Regular expression guide
-- **shell-scripting** — Bash/Zsh scripting and automation
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)
-- **upgrade-alinux-kernel** — ALinux kernel upgrade
 
 ### DevOps
-- **github** — GitHub workflows and integration
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning
@@ -48,6 +44,22 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### Other
 - **cosh-guide** - Copilot Shell user guide
+
+## Removed Skills
+
+To focus on OS operations, OS Skills removed the following eight skills from its
+default bundle and wound down routine maintenance of the bundled copies.
+Users who need these capabilities can use upstream skills, tools, or official
+documentation.
+
+- `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
+- `humanizer` — [Humanizer](https://github.com/blader/humanizer)
+- `image-gen`
+- `pdf-reader`
+- `xlsx` — [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md)
+- `regex-mastery`
+- `shell-scripting`
+- `upgrade-alinux-kernel`
 
 ## Skill Format
 
@@ -90,13 +102,13 @@ anolisa install os-skills --backend raw
 The GitHub Release and Preview workflows build Linux x86_64 and ARM64 raw
 archives from the same source commit. Each target provides a `.tar.gz` archive,
 its SHA256 checksum, a CycloneDX SBOM, and the SBOM checksum. The package
-installs the tracked skill directories under `{datadir}/skills`; no executable
-is compiled. CI checks the tag and source version for official releases.
+installs the skill directories listed in [the release catalog](packaging/released-skills.txt)
+under `{datadir}/skills`. CI checks the tag and source version for official releases.
 The local release pipeline still uses its existing configuration.
 
 ### Extension
 
-Install all skills as a single extension:
+Install all released skills as a single extension:
 
 ```
 /extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
@@ -142,6 +154,27 @@ Copy any skill directory to one of the skill search paths:
 3. Optionally add `scripts/` and `reference/` directories.
 4. Test the skill in Copilot Shell.
 5. Submit a pull request.
+
+Keep script regression tests in `tests/` within this component. See the
+[contribution guide](../../CONTRIBUTING.md#skill-regression-tests-and-path-ownership)
+for dependencies, test commands, and component ownership.
+
+### Incubation and default delivery
+
+A reviewed skill can enter incubation in its normal category directory. The
+release catalog controls default source installs, packages, and COSH extensions.
+Trial users can copy the chosen skill from a reviewed source revision using the
+manual installation instructions above.
+
+Source installation and release-catalog maintenance require Python 3.6 or newer
+with its standard library. See the [source installation guide](../../docs/user-guide/en/os-skills/index.md#installation)
+for selecting the installer interpreter.
+
+When maintainers approve default delivery, add the directory to
+[`packaging/released-skills.txt`](packaging/released-skills.txt) and run
+`python3 src/os-skills/packaging/cosh_manifests.py --write` from the repository
+root. Include any applicable adapter registrations in `component.toml`.
+CI verifies that the generated COSH manifests match the catalog.
 
 ## License
 

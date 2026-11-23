@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import replace
-from importlib.metadata import version
+from hashlib import sha256
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import claude_agent_sdk
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultDeny
 
 _CLIENT_CREATED = False
+_stop_delivery: ContextVar[str | None] = ContextVar("aw_claude_stop_delivery", default=None)
 
 
 class CallbackFailure(RuntimeError):
@@ -43,19 +45,35 @@ def _copy_json(value: Any) -> Any:
 class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
-    def __init__(self) -> None:
-        if version("claude-agent-sdk") != "0.2.88":
-            raise RuntimeError("AW requires claude-agent-sdk 0.2.88")
-        self.config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+    def __init__(
+        self, config: dict[str, Any] | None = None, *, launch_bound: bool = True
+    ) -> None:
+        self.config = config if config is not None else json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+        if launch_bound:
+            self._validate_launch()
+        self.set_routes(self.config.get("hooks"))
+        self.turn_id: str | None = None
+        self._stop_turn: str | None = None
+        self._stop_replies: dict[str, tuple[bytes, asyncio.Future[dict[str, Any]]]] = {}
+        self.session_id: str | None = None
+        self.final = None
+        if self.config.get("final_profile"):
+            from aw_final import FinalGate
+
+            self.final = FinalGate(self.config)
+
+    def _validate_launch(self) -> None:
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
                 raise ValueError(f"AW configuration requires {key}")
-        hooks = self.config.get("hooks")
+    def set_routes(self, hooks: list[dict[str, Any]]) -> None:
+        """Install the immutable Adapter projection for this client."""
         if not isinstance(hooks, list):
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
             if (
-                hook.get("event") not in {"tool.before", "tool.after"}
+                hook.get("event") not in {"session.start", "input.submit", "tool.before", "tool.after", "security.violation",
+                                          "turn.stop", "session.end"}
                 or not isinstance(hook.get("step"), str)
                 or not hook["step"]
                 or hook.get("on_error") not in {"report", "block"}
@@ -64,11 +82,13 @@ class Bridge:
                 or not 1 <= hook["budget_ms"] <= 55000
             ):
                 raise ValueError("Invalid AW hook route")
+        self.config = {**self.config, "hooks": hooks}
 
     async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
+        close = ["--close-event", "true"] if hook.get("close_event") else []
         proc = await asyncio.create_subprocess_exec(
             self.config["executable"],
             "hook",
@@ -82,6 +102,7 @@ class Bridge:
             hook["step"],
             "--on-error",
             hook["on_error"],
+            *close,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -120,20 +141,36 @@ class Bridge:
         specific = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
         if not isinstance(specific, dict):
             raise CallbackFailure("invalid_native_response")
+        updated_input = specific.get("updatedInput")
+        if (hook["event"] == "tool.before" and isinstance(updated_input, dict)
+                and result == {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "updatedInput": updated_input}}):
+            return result
         updated = specific.get("updatedToolOutput")
         original = payload.get("tool_response")
+        # Native MCP tools adopt a string replacement of the whole
+        # model-visible projection; the CLI keeps its own error state.
         if (
             not hook["replace_result"]
             or payload.get("hook_event_name") != "PostToolUse"
-            or payload.get("tool_name") != "Bash"
-            or not isinstance(original, dict)
-            or not isinstance(updated, dict)
-            or not isinstance(updated.get("stdout"), str)
-            or {**updated, "stdout": original.get("stdout")} != original
             or result
             != {
                 "hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
             }
+        ):
+            raise CallbackFailure("invalid_native_response")
+        if str(payload.get("tool_name", "")).startswith("mcp__") and isinstance(
+            original, (str, list)
+        ):
+            if not isinstance(updated, str):
+                raise CallbackFailure("invalid_native_response")
+            return result
+        if (
+            payload.get("tool_name") != "Bash"
+            or not isinstance(original, dict)
+            or not isinstance(updated, dict)
+            or not isinstance(updated.get("stdout"), str)
+            or {**updated, "stdout": original.get("stdout")} != original
         ):
             raise CallbackFailure("invalid_native_response")
         return result
@@ -148,6 +185,11 @@ class Bridge:
             raise ValueError("Unsupported Claude tool event")
         if tool_use_id is not None and payload.get("tool_use_id") != tool_use_id:
             return _deny("AW tool identity mismatch") if event == "tool.before" else {}
+        if self.final is not None and event == "tool.after":
+            self.final.record(payload)
+        if (self.final is not None and self.final.enforcing and event == "tool.before"
+                and not self.final.supports_tool(payload)):
+            return _deny("AW final gate does not cover this tool delivery path")
         for hook in self.config["hooks"]:
             if hook["event"] != event:
                 continue
@@ -174,15 +216,127 @@ class Bridge:
                     return result
         return {}
 
+    async def _observe_session(self, event: str, native: str, cwd: str, **fields: str) -> None:
+        payload = {"hook_event_name": native, "session_id": self.session_id, "cwd": cwd, **fields}
+        for hook in self.config["hooks"]:
+            if hook["event"] == event:
+                try:
+                    code, stdout = await self._transport(hook, payload)
+                    if code != 0 or stdout.strip() not in (b"", b"{}"):
+                        raise CallbackFailure("invalid_native_response")
+                except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+                    logging.getLogger(__name__).error("AW %s/%s failed: %s", event, hook["step"], error)
+
+    async def session_initialized(self, message: Any, cwd: str) -> None:
+        if self.session_id is not None:
+            return
+        from claude_agent_sdk import SystemMessage
+
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            session = message.data.get("session_id")
+            if isinstance(session, str) and session:
+                self.session_id = session
+                await self._observe_session("session.start", "AWSessionInit", cwd)
+
+    async def session_disconnected(self, cwd: str, reason: str) -> None:
+        if self.session_id is not None:
+            await self._observe_session("session.end", "AWSessionDisconnect", cwd, reason=reason)
+            self.session_id = None
+
+    def bind_stop_deliveries(self, query: Any) -> None:
+        if not any(hook["event"] == "turn.stop" for hook in self.config["hooks"]):
+            return
+        # Claude SDK 0.2.88 drops the control request ID before calling HookMatcher.
+        # Preserve it on this unshared Query, after connection and before any prompt.
+        handler = getattr(query, "_handle_control_request", None)
+        if not callable(handler):
+            raise CallbackFailure("Claude SDK cannot expose native Stop delivery identity")
+
+        async def with_delivery(frame: dict[str, Any]) -> Any:
+            request = frame["request"]
+            if (
+                request["subtype"] != "hook_callback"
+                or (request.get("input") or {}).get("hook_event_name") != "Stop"
+            ):
+                return await handler(frame)
+            token = _stop_delivery.set(frame.get("request_id"))
+            try:
+                return await handler(frame)
+            finally:
+                _stop_delivery.reset(token)
+
+        query._handle_control_request = with_delivery
+
+    def _stop_failure(self) -> dict[str, Any]:
+        if any(hook["event"] == "turn.stop" and hook["on_error"] == "block"
+               for hook in self.config["hooks"]):
+            return {"decision": "block", "reason": "AW turn stop check failed"}
+        return {}
+
+    async def stop_callback(
+        self, payload: dict[str, Any], _tool_use_id: str | None, _context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the Stop decision to Claude before the terminal result is emitted."""
+        delivery = _stop_delivery.get()
+        turn = self.turn_id
+        if turn is None or not isinstance(delivery, str) or not delivery or len(delivery) > 512:
+            logging.getLogger(__name__).error("AW Stop has no active turn or SDK delivery ID")
+            return self._stop_failure()
+        if self._stop_turn != turn:
+            self._stop_turn = turn
+            self._stop_replies.clear()
+        fingerprint = sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).digest()
+        previous = self._stop_replies.get(delivery)
+        if previous is not None:
+            original, reply = previous
+            if original != fingerprint:
+                return self._stop_failure()
+            return dict(await asyncio.shield(reply))
+        # The durable receipt fences replay after a completed cache entry is evicted.
+        if len(self._stop_replies) >= 64:
+            completed = next((key for key, (_, reply) in self._stop_replies.items()
+                              if reply.done()), None)
+            if completed is None:
+                return self._stop_failure()
+            del self._stop_replies[completed]
+        reply = asyncio.get_running_loop().create_future()
+        self._stop_replies[delivery] = (fingerprint, reply)
+        native = {**payload, "turn_id": turn, "attempt_id": delivery,
+                  "delivery_id": delivery, "reason": "stop_requested"}
+        try:
+            result = await self._check_stop(native)
+        except BaseException:
+            reply.set_result(self._stop_failure())
+            raise
+        reply.set_result(result)
+        return dict(result)
+
+    async def _check_stop(self, native: dict[str, Any]) -> dict[str, Any]:
+        for hook in self.config["hooks"]:
+            if hook["event"] != "turn.stop":
+                continue
+            try:
+                code, stdout = await self._transport(hook, native)
+                if code == 2:
+                    reason = json.loads(stdout or b'"AW policy requires the turn to continue"')
+                    if not isinstance(reason, str) or not reason:
+                        raise CallbackFailure("invalid_native_response")
+                    return {"decision": "block", "reason": reason}
+                if code != 0 or stdout.strip() not in (b"", b"{}"):
+                    raise CallbackFailure("invalid_native_response")
+            except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+                logging.getLogger(__name__).error("AW turn.stop/%s failed: %s", hook["step"], error)
+                if hook["on_error"] == "block":
+                    return {"decision": "block", "reason": "AW turn stop check failed"}
+        return {}
+
     def failure_reply(self, event: str, hook: dict[str, Any]) -> dict[str, Any]:
         if event == "tool.before" and hook["on_error"] == "block":
             return _deny("AW hook failed; configured failure action blocked the tool")
         return {}
 
     def options(self, options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-        """Retain existing matchers and vetoes; reject unchecked argument rewrites."""
-        if options.setting_sources != [] or options.settings is not None or options.plugins:
-            raise ValueError("AW Claude SDK requires setting_sources=[] and no settings/plugins")
+        """Compose SDK callbacks; CLI-loaded Hooks retain their native scheduling."""
         if any(
             key != "strict-mcp-config" or value is not None
             for key, value in options.extra_args.items()
@@ -195,7 +349,8 @@ class Bridge:
                 "AW Claude SDK requires its bundled CLI; cli_path overrides unsupported"
             )
         hooks = {event: list(matchers) for event, matchers in (options.hooks or {}).items()}
-        before = any(hook["event"] == "tool.before" for hook in self.config["hooks"])
+        final_enforcing = self.final is not None and self.final.enforcing
+        before = final_enforcing or any(hook["event"] == "tool.before" for hook in self.config["hooks"])
         if before:
             if options.permission_prompt_tool_name is not None:
                 raise ValueError("AW tool.before does not support permission_prompt_tool_name")
@@ -243,12 +398,16 @@ class Bridge:
             ("tool.after", ["PostToolUse", "PostToolUseFailure"]),
         ):
             selected = [hook for hook in self.config["hooks"] if hook["event"] == event]
-            if selected:
+            if selected or final_enforcing or (event == "tool.after" and self.final is not None):
                 timeout = sum(hook["budget_ms"] + 3000 for hook in selected) / 1000 + 1
                 for native in native_events:
                     hooks.setdefault(native, []).append(
                         HookMatcher(hooks=[self.callback], timeout=timeout)
                     )
+        stops = [hook for hook in self.config["hooks"] if hook["event"] == "turn.stop"]
+        if stops:
+            timeout = sum(hook["budget_ms"] + 3000 for hook in stops) / 1000 + 1
+            hooks.setdefault("Stop", []).append(HookMatcher(hooks=[self.stop_callback], timeout=timeout))
         permission = options.can_use_tool
         if before and permission is not None:
             original_permission = permission
@@ -267,10 +426,13 @@ class Bridge:
         bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
         if not bundled.is_file():
             raise ValueError("AW requires the SDK bundled CLI; PATH fallback unsupported")
-        return replace(options, hooks=hooks, cli_path=str(bundled), can_use_tool=permission)
+        composed = replace(options, hooks=hooks, cli_path=str(bundled), can_use_tool=permission)
+        return self.final.options(composed, bundled) if self.final is not None else composed
 
     def ready(self) -> None:
         """Publish only after the SDK initialize handshake accepted installed callbacks."""
+        if self.final is not None:
+            self.final.ready()
         path = Path(self.config["ready_path"])
         temporary = None
         try:
@@ -301,17 +463,30 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
     if _CLIENT_CREATED:
         raise RuntimeError("AW Claude SDK supports one client per foreground worker")
     bridge = Bridge()
-    composed = bridge.options(options)
-    _CLIENT_CREATED = True
-    async with ClaudeSDKClient(options=composed) as client:
-        bridge.ready()
-        yield client
+    try:
+        composed = bridge.options(options)
+        _CLIENT_CREATED = True
+        if any(hook["event"] in {"session.start", "input.submit", "turn.stop", "session.end"}
+               for hook in bridge.config["hooks"]):
+            from aw_foreground import CheckedClient
+            client = CheckedClient(composed, bridge)
+        else:
+            client = ClaudeSDKClient(options=composed)
+        async with client:
+            bridge.ready()
+            yield client
+    finally:
+        if bridge.final is not None:
+            bridge.final.close()
 
 
 def create_client(options: ClaudeAgentOptions) -> Any:
     """Use the public client factory in task workers and resident AW hosts."""
     if os.environ.get("AW_CLAUDE_RESIDENT") == "1":
-        from aw_resident import ManagedClient
+        if __package__:
+            from .aw_resident import ManagedClient
+        else:
+            from aw_resident import ManagedClient
         return ManagedClient(options)
     return _create_task_client(options)
 
@@ -320,10 +495,16 @@ def create_sdk_mcp_server(name: str, version: str = "1.0.0", tools: Any = None) 
     """Create an explicitly managed in-process MCP server for a resident task client."""
     if os.environ.get("AW_CLAUDE_RESIDENT") != "1":
         raise RuntimeError("Managed MCP requires the AW resident entrypoint")
-    from aw_mcp import create_sdk_mcp_server as factory
+    if __package__:
+        from .aw_mcp import create_sdk_mcp_server as factory
+    else:
+        from aw_mcp import create_sdk_mcp_server as factory
     return factory(name, version, tools)
 
 
 if __name__ == "__main__":
-    from aw_resident import main
+    if __package__:
+        from .aw_resident import main
+    else:
+        from aw_resident import main
     main()

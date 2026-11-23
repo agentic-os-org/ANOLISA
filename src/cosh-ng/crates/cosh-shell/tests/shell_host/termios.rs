@@ -70,7 +70,15 @@ mod parent_lifecycle {
             ignore_sigint: bool,
             wait_for_raw_mode: bool,
         ) -> Self {
-            Self::spawn_with_options(label, args, ignore_sigint, wait_for_raw_mode, None, None)
+            Self::spawn_with_options(
+                label,
+                args,
+                ignore_sigint,
+                wait_for_raw_mode,
+                None,
+                None,
+                None,
+            )
         }
 
         fn spawn_with_login_profile(label: &str, profile: &str) -> Self {
@@ -81,6 +89,7 @@ mod parent_lifecycle {
                 true,
                 Some(profile),
                 Some(&LOGIN_PROFILE_WINSIZE),
+                None,
             )
         }
 
@@ -91,6 +100,7 @@ mod parent_lifecycle {
             wait_for_raw_mode: bool,
             login_profile: Option<&str>,
             winsize: Option<&Winsize>,
+            render: Option<&str>,
         ) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "cosh-shell-parent-termios-{label}-{}-{}",
@@ -146,6 +156,9 @@ mod parent_lifecycle {
                 .env("TERM", "xterm-256color")
                 .env("LANG", "C.UTF-8")
                 .env("LC_ALL", "C.UTF-8");
+            if let Some(render) = render {
+                command.env("COSH_SHELL_RENDER", render);
+            }
             if login_profile.is_some() {
                 command.env("PATH", "/usr/bin:/bin");
             }
@@ -229,6 +242,26 @@ mod parent_lifecycle {
                     }
                     Err(error) => panic!("write parent PTY input: {error}"),
                 }
+            }
+        }
+
+        fn wait_for_output_after(&mut self, start: usize, needle: &[u8]) -> usize {
+            let deadline = Instant::now() + TERMINAL_LIFECYCLE_TIMEOUT;
+            loop {
+                self.drain_output();
+                if let Some(offset) = self.output[start..]
+                    .windows(needle.len())
+                    .position(|window| window == needle)
+                {
+                    return start + offset + needle.len();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "parent PTY did not emit {:?}: {}",
+                    String::from_utf8_lossy(needle),
+                    String::from_utf8_lossy(&self.output)
+                );
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 
@@ -579,6 +612,55 @@ mod parent_lifecycle {
         release_tx.send(()).expect("release worker thread");
         worker.join().expect("join worker thread");
         assert!(found, "worker-thread child {child} was not discovered");
+    }
+
+    #[test]
+    fn raw_cli_plain_candidate_commit_starts_agent_title_at_column_zero() {
+        let _guard = shell_host_run_guard();
+        let winsize = Winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let mut session = ParentPtySession::spawn_with_options(
+            "plain-candidate-column",
+            &["raw", "fake", "--shell", "bash"],
+            false,
+            true,
+            None,
+            Some(&winsize),
+            Some("plain"),
+        );
+        let banner_end = session.wait_for_output_after(0, b"Help: /help");
+        let ready = session.wait_for_output_after(banner_end, b"cosh-osc$ ");
+        assert_eq!(
+            read_termios(session.terminal.as_raw_fd()).c_oflag & libc::OPOST,
+            0,
+            "outer PTY must not supply implicit LF-to-CRLF conversion"
+        );
+
+        session.write("?? 你好\r".as_bytes());
+        let title_end = session.wait_for_output_after(ready, b"Agent:");
+        let title_start = title_end - b"Agent:".len();
+        let mut terminal = vt100::Parser::new(30, 100, 0);
+        terminal.process(&session.output[..title_start]);
+        let title_column = terminal.screen().cursor_position().1;
+        let response = session.wait_for_output_after(title_end, b"Received shell prompt request:");
+        let idle = session.wait_for_output_after(response, b"cosh-osc$ ");
+        session.write(b"printf '%s%s\\n' __PLAIN_COLUMN_ SHELL_OK\r");
+        let command_output = session.wait_for_output_after(idle, b"__PLAIN_COLUMN_SHELL_OK");
+        session.wait_for_output_after(command_output, b"cosh-osc$ ");
+        session.write(b"exit 0\r");
+        let (status, output) = session.wait_with_output();
+
+        assert!(status.success(), "plain candidate status: {status:?}");
+        assert_eq!(
+            title_column,
+            0,
+            "first Agent title must start at column zero after candidate commit: {}",
+            String::from_utf8_lossy(&output)
+        );
     }
 
     #[test]

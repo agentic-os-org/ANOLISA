@@ -85,6 +85,77 @@ def _scan(daemon, *args, input_text=None):
     return json.loads(result.stdout)
 
 
+@pytest.mark.parametrize("source", ["tool_input", "tool_output", "model_input"])
+def test_cjk_adjacent_key_is_redacted_in_all_input_channels(
+    source, pii_daemon, pii_environment, tmp_path
+):
+    key = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ-="
+    text = f"中文api_key={key}カギ"
+    input_file = tmp_path / "cjk.txt"
+    input_file.write_text(text)
+    for args, stdin in [
+        (["--text", text], None),
+        (["--stdin"], text),
+        (["--input", str(input_file)], None),
+    ]:
+        report = _scan(
+            pii_daemon,
+            *args,
+            "--source",
+            source,
+            "--raw-evidence",
+            "--redact-output",
+            input_text=stdin,
+        )
+        assert report["verdict"] == "deny"
+        assert report["summary"]["scanner_version"] == "2.1.2"
+        assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
+        [finding] = report["findings"]
+        assert finding["type"] == "api_key"
+        assert finding["raw_evidence"] == key
+        assert finding["span"] == {"start": 10, "end": 10 + len(key)}
+        assert report["redacted_text"] == "中文api_key=sk-a...[REDACTED]...IJ-=カギ"
+    assert input_file.read_text() == text
+    events = _events(pii_environment)
+    assert len(events) == 3
+    assert all(event["details"]["request"]["source"] == source for event in events)
+    assert key not in json.dumps(events)
+
+
+@pytest.mark.parametrize("context, confidence", [("latest", 0.78), ("test-only", None)])
+def test_negative_context_words_and_sanitized_audit(
+    context, confidence, pii_daemon, pii_environment
+):
+    text = f"{context} 13812345678"
+    report = _scan(
+        pii_daemon,
+        "--text",
+        text,
+        "--source",
+        "model_input",
+        "--raw-evidence",
+        "--redact-output",
+    )
+    assert report["summary"]["scanner_version"] == "2.1.2"
+    if confidence is None:
+        assert report["findings"] == []
+        assert report["verdict"] == "pass"
+        assert report["redacted_text"] == text
+    else:
+        [finding] = report["findings"]
+        assert finding["type"] == "phone_cn"
+        assert finding["confidence"] == confidence
+        assert finding["raw_evidence"] == "13812345678"
+        assert report["verdict"] == "warn"
+        assert report["redacted_text"] == f"{context} 138****5678"
+    [event] = _events(pii_environment)
+    assert event["details"]["result"]["verdict"] == report["verdict"]
+    assert event["details"]["result"]["summary"] == report["summary"]
+    audit = json.dumps(event)
+    assert "13812345678" not in audit
+    assert "raw_evidence" not in audit and "redacted_text" not in audit
+
+
 @pytest.mark.parametrize("source", ["tool_input", "model_input"])
 def test_input_modes_unicode_redaction_and_one_event_per_scan(
     source, pii_daemon, pii_environment, tmp_path
@@ -121,7 +192,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
         }
         assert report["ok"] and report["verdict"] == "deny"
         assert report["summary"]["source"] == source
-        assert report["summary"]["scanner_version"] == "2.1.0"
+        assert report["summary"]["scanner_version"] == "2.1.2"
         assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
         assert not report["summary"].get("findings_truncated", False)
         assert not report["summary"].get("redacted_text_omitted", False)
@@ -141,7 +212,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
     for event in events:
         assert event["result"] == "succeeded"
         assert event["details"]["request"]["text_length"] == len(text)
-        assert event["details"]["result"]["summary"]["scanner_version"] == "2.1.0"
+        assert event["details"]["result"]["summary"]["scanner_version"] == "2.1.2"
         assert event["details"]["result"]["summary"]["source"] == source
     audit = json.dumps(events)
     for forbidden in [
@@ -516,6 +587,7 @@ def test_business_and_propagation_budgets_are_independent(pii_daemon, pii_enviro
     payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
     assert len(payload) > 4 * 1024 * 1024
     response = _rpc(pii_daemon, payload)
+    assert "error" not in response, response.get("error")
     assert response["result"]["ok"]
     assert response["result"]["summary"]["coverage"]["status"] == "complete"
     [event] = _events(pii_environment)

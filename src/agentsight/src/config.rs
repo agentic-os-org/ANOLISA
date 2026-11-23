@@ -1,3 +1,6 @@
+pub(crate) mod atomic_write;
+pub(crate) use atomic_write::write_config_atomically;
+
 use anyhow::Context;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -36,6 +39,8 @@ pub const ENFORCEMENT_DB_NAME: &str = "enforcement.db";
 pub const REUSE_DB_NAME: &str = "reuse.db";
 /// Private causal analysis database filename.
 pub const CAUSAL_DB_NAME: &str = "causal.db";
+/// Learned static-SSL offset cache filename.
+pub const SSL_OFFSETS_LEARNED_NAME: &str = "ssl_offsets_learned.json";
 
 /// Default audit table name.
 pub const DEFAULT_AUDIT_TABLE: &str = "audit_events";
@@ -162,6 +167,34 @@ pub fn poll_timeout_ms() -> u64 {
     POLL_TIMEOUT_MS.load(Ordering::SeqCst)
 }
 
+// ==================== Global Learned SSL Offset Cache Path ====================
+
+/// Process-wide location of the learned static-SSL offset cache, published
+/// by `AgentSight::new` from [`StorageConfig::ssl_offsets_learned_path`].
+///
+/// `SslSniff::build` loads the cache from code that cannot see the config
+/// object — the same publication pattern as the poll timeout above.
+static SSL_OFFSETS_LEARNED_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Publish where the learned static-SSL offset cache lives.
+pub fn set_ssl_offsets_learned_path(path: PathBuf) {
+    *SSL_OFFSETS_LEARNED_PATH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+/// Current learned static-SSL offset cache path.
+///
+/// Falls back to the default storage directory when never published
+/// (standalone probe binaries that do not load the full config).
+pub fn ssl_offsets_learned_path() -> PathBuf {
+    SSL_OFFSETS_LEARNED_PATH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| default_base_path().join(SSL_OFFSETS_LEARNED_NAME))
+}
+
 // ==================== Global HTTP Trace Duration Floor ====================
 
 /// Process-wide floor for the duration of HTTP request/response Chrome trace
@@ -231,7 +264,7 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 /// At startup the on-disk config's `schema_version` is compared against this
 /// value. If the on-disk version is missing or older, the config file is
 /// backed up (`.bak`) and overwritten with the embedded default.
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 // ==================== TCP Target Configuration ====================
 
@@ -450,6 +483,11 @@ impl StorageConfig {
     /// Returns the fixed path of the optimization database.
     pub fn optimization_path(&self) -> PathBuf {
         self.base_path.join(OPTIMIZATION_DB_NAME)
+    }
+
+    /// Returns the fixed path of the learned static-SSL offset cache.
+    pub fn ssl_offsets_learned_path(&self) -> PathBuf {
+        self.base_path.join(SSL_OFFSETS_LEARNED_NAME)
     }
 
     pub(crate) fn validate_total_size_mb(max_total_size_mb: u64) -> Result<(), String> {
@@ -854,16 +892,17 @@ pub fn parse_json_rules(
 ///
 /// - If the file does not exist, creates it with the embedded default.
 /// - If the file exists but `schema_version` is missing or older than
-///   `CURRENT_SCHEMA_VERSION`, backs up the old file and replaces it with the
-///   embedded default.
-/// - If the file exists and `schema_version` matches, leaves it untouched.
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file and shallow-merges its
+///   top-level settings into the embedded default.
+/// - If the file exists and `schema_version` matches or exceeds the current
+///   version, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {parent:?}"))?;
         }
-        std::fs::write(path, DEFAULT_AGENTS_JSON)
+        write_config_atomically(path, DEFAULT_AGENTS_JSON)
             .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
         log::info!("Generated default agents config at {path:?}");
         return Ok(());
@@ -876,7 +915,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // BOM-prefixed config takes the same valid/invalid decision — and the
     // same schema upgrade — as its unmarked twin, instead of being frozen
     // as "invalid" while the load falls back to embedded defaults.
-    let content = strip_leading_bom(&content);
+    let normalized = strip_leading_bom(&content);
 
     // If the file is not valid JSON at all, leave it untouched so the caller's
     // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
@@ -885,15 +924,37 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // *valid* JSON whose schema_version is outdated; silently overwriting an
     // invalid file masks the parse error and breaks the documented fallback
     // contract (see issue #1502).
-    if serde_json::from_str::<serde_json::Value>(content).is_err() {
-        return Ok(());
-    }
+    let user: serde_json::Value = match serde_json::from_str(normalized) {
+        Ok(user) => user,
+        Err(_) => return Ok(()),
+    };
 
-    let on_disk_version = extract_schema_version(content);
+    let on_disk_version = extract_schema_version(normalized);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
     }
+
+    // Overlay user top-level keys on the defaults so existing customizations
+    // survive while newly introduced sections are added.
+    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
+        .context("Embedded DEFAULT_AGENTS_JSON is invalid")?;
+
+    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
+        for (key, value) in user_obj {
+            if key == "schema_version" {
+                continue;
+            }
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base_obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+        );
+    }
+
+    let merged =
+        serde_json::to_string_pretty(&base).context("Failed to serialize merged agents config")?;
 
     let backup = {
         let ts = std::time::SystemTime::now()
@@ -902,12 +963,14 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
             .unwrap_or(0);
         path.with_extension(format!("json.bak.{ts}"))
     };
-    std::fs::copy(path, &backup)
+    std::fs::write(&backup, content)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
-    std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
+    std::fs::set_permissions(&backup, std::fs::metadata(path)?.permissions())
+        .with_context(|| format!("Failed to preserve backup permissions at {backup:?}"))?;
+    write_config_atomically(path, &merged)
+        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
     log::info!(
-        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, replaced it with defaults at {path:?} (backup at {backup:?})"
+        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, merged user config with defaults at {path:?} (backup at {backup:?})"
     );
     Ok(())
 }
@@ -1453,7 +1516,19 @@ impl AgentsightConfig {
     /// Load configuration from a JSON string, appending rules to existing ones.
     ///
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
+    ///
+    /// A rejected document leaves the configuration untouched. Callers keep
+    /// using the previous values when this returns an error, so a field that
+    /// was parsed before the failing one must not take effect.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
+        let mut next = self.clone();
+        next.apply_json_fields(json)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Apply one parsed document to this configuration.
+    fn apply_json_fields(&mut self, json: &str) -> Result<(), String> {
         // The --config and FFI `load_config()` entry point: one leading BOM
         // (see [`strip_leading_bom`]) must not fail the whole load and leave
         // the tracer on embedded defaults without the user's rules.
@@ -2051,6 +2126,32 @@ mod tests {
             .unwrap();
     }
 
+    /// A rejected document must not leave the fields parsed before the
+    /// failing one in effect: the caller reports the error and continues on
+    /// the previous configuration, so a typo in `storage` must not also flip
+    /// the content-upload switch or the cgroup filter.
+    #[test]
+    fn a_rejected_document_leaves_the_configuration_unchanged() {
+        let mut config = AgentsightConfig::new();
+        assert!(!config.trace_enabled);
+        assert!(!config.cgroup_filter_enabled);
+
+        let error = config
+            .load_from_json(
+                r#"{
+                    "schema_version": 6,
+                    "traceEnabled": true,
+                    "cgroup_filter_enabled": true,
+                    "storage": {"max_total_size_mb": 8}
+                }"#,
+            )
+            .unwrap_err();
+
+        assert!(error.contains("must be zero or at least 9"));
+        assert!(!config.trace_enabled);
+        assert!(!config.cgroup_filter_enabled);
+    }
+
     #[test]
     fn test_config_with_storage_path() {
         let config = AgentsightConfig::with_storage_path(PathBuf::from("/tmp/test"));
@@ -2231,10 +2332,29 @@ mod tests {
             vec![
                 "dashscope.aliyuncs.com",
                 "*.maas.aliyuncs.com",
-                "api.openai.com"
+                "api.openai.com",
+                "*.qoder.sh"
             ]
         );
         assert!(http_targets.is_empty());
+    }
+
+    /// `docs/user-guide/*/agentsight/{integrations,cli-reference,configuration}.md`
+    /// quote the shipped rule count as allow rules only, which is what
+    /// `discover --list-known` prints (deny rules build no listing matcher).
+    /// Neither may drift from the file without the other.
+    #[test]
+    fn test_default_agents_json_rule_count_matches_docs() {
+        let (cmdline_rules, https_rules, _) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
+        assert_eq!(cmdline_rules.len(), 37);
+        let allow = cmdline_rules.iter().filter(|r| r.allow).count();
+        assert_eq!(allow, 36);
+        assert_eq!(https_rules.len(), 4);
+        let qoder = cmdline_rules
+            .iter()
+            .filter(|r| r.agent_name.as_deref() == Some("QoderCLI"))
+            .count();
+        assert_eq!(qoder, 4);
     }
 
     #[test]
@@ -2797,6 +2917,29 @@ mod tests {
         assert!(!config.server_auth.enabled);
     }
 
+    #[test]
+    fn storage_learned_offsets_path_follows_base_path() {
+        let storage = StorageConfig::default();
+        assert_eq!(
+            storage.ssl_offsets_learned_path(),
+            storage.base_path.join(SSL_OFFSETS_LEARNED_NAME)
+        );
+    }
+
+    #[test]
+    fn learned_offsets_path_falls_back_until_published() {
+        // Nothing publishes the global in a default `cargo test` run (the
+        // BPF-gated publishers are #[ignore]d), so the fallback is observable
+        // here; `AgentSight::new` publishes the configured path in production.
+        assert_eq!(
+            ssl_offsets_learned_path(),
+            default_base_path().join(SSL_OFFSETS_LEARNED_NAME)
+        );
+        let published = unique_temp_dir().join(SSL_OFFSETS_LEARNED_NAME);
+        set_ssl_offsets_learned_path(published.clone());
+        assert_eq!(ssl_offsets_learned_path(), published);
+    }
+
     // ── schema_version / config upgrade ─────────────────────────────────
 
     /// Helper: create a unique temp dir under std env temp.
@@ -2844,12 +2987,107 @@ mod tests {
         );
     }
 
+    fn assert_concurrent_workers_load_config(path: &Path) {
+        const WORKERS: usize = 8;
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let path = path.to_path_buf();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_default_agents_config(&path).unwrap();
+                    let mut config = AgentsightConfig::new();
+                    config.load_from_file(&path).unwrap();
+                    assert!(config.features.sqlite_storage_enabled);
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn ensure_default_agents_config_supports_concurrent_creation() {
+        for _ in 0..8 {
+            let dir = unique_temp_dir();
+            let path = dir.join("agentsight.json");
+            assert_concurrent_workers_load_config(&path);
+        }
+    }
+
+    #[test]
+    fn ensure_default_agents_config_supports_concurrent_upgrades() {
+        let stale = r#"{"schema_version": 1}"#;
+        for _ in 0..8 {
+            let dir = unique_temp_dir();
+            let path = dir.join("agentsight.json");
+            std::fs::write(&path, stale).unwrap();
+            assert_concurrent_workers_load_config(&path);
+
+            let backups: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("agentsight.json.bak.")
+                })
+                .collect();
+            assert!(!backups.is_empty());
+            for backup in backups {
+                assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), stale);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_agents_config_preserves_config_symlink() {
+        let dir = unique_temp_dir();
+        let target = dir.join("managed.json");
+        let path = dir.join("agentsight.json");
+        std::fs::write(&target, r#"{"schema_version": 1}"#).unwrap();
+        std::os::unix::fs::symlink("managed.json", &path).unwrap();
+
+        ensure_default_agents_config(&path).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
     #[test]
     fn ensure_default_agents_config_upgrades_stale_config() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"cmdline": {"allow": []}}"#).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
         ensure_default_agents_config(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
         // The old file should be backed up to a timestamped .bak.* file.
         let parent = path.parent().unwrap();
         let backups: Vec<_> = std::fs::read_dir(parent)
@@ -2866,6 +3104,18 @@ mod tests {
             std::fs::read_to_string(backups[0].path()).unwrap(),
             r#"{"cmdline": {"allow": []}}"#
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(backups[0].path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             extract_schema_version(&content),
@@ -3001,26 +3251,65 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_agents_config_replaces_outdated_config() {
+    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let user_config = r#"{
-            "schema_version": 2,
+            "schema_version": 1,
             "cmdline": {
                 "allow": [
                     {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
-                ]
-            }
+                ],
+                "deny": [{"rule": ["*noisy*"]}]
+            },
+            "https": [{"rule": ["custom.api.example.com"]}]
         }"#;
         std::fs::write(&path, user_config).unwrap();
         ensure_default_agents_config(&path).unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(result, DEFAULT_AGENTS_JSON);
-        assert!(!result.contains("MyCustomAgent"));
+        assert!(
+            result.contains("MyCustomAgent"),
+            "user cmdline rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("custom.api.example.com"),
+            "user https rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("*noisy*"),
+            "user deny rule lost during migration: {result}"
+        );
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            migrated["schema_version"].as_u64().unwrap() as u32,
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]
-    fn ensure_default_agents_config_replacement_contains_storage_section() {
+    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let minimal_v1 = r#"{
+            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
+        }"#;
+        std::fs::write(&path, minimal_v1).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            migrated.get("features").is_some(),
+            "features section not added from default"
+        );
+        assert!(
+            migrated.get("runtime_limits").is_some(),
+            "runtime_limits section not added from default"
+        );
+        assert!(result.contains("Test"), "user rule lost");
+    }
+
+    #[test]
+    fn ensure_default_agents_config_merged_config_contains_storage_section() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"schema_version": 2}"#).unwrap();

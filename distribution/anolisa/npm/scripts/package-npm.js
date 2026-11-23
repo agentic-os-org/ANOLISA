@@ -51,6 +51,7 @@ import {
   targetForSelector,
   targetsForHost,
 } from './platforms.js';
+import { copyIntegrationContracts } from './contracts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -88,6 +89,7 @@ function platformPackageTemplate(path, expectedName) {
     template.bin !== undefined ||
     !Array.isArray(template.files) ||
     !template.files.includes('bin/') ||
+    !template.files.includes('share/') ||
     template.preferUnplugged !== true
   ) {
     throw new Error(
@@ -198,6 +200,7 @@ function packagePlatform(target, binaryPath) {
   // Copy binary
   copyFileSync(binaryPath, join(pkgDir, 'bin', 'anolisa'));
   execSync(`chmod 755 "${join(pkgDir, 'bin', 'anolisa')}"`, { stdio: 'pipe' });
+  copyIntegrationContracts(workspaceRoot, pkgDir);
 
   const template = platformPackageTemplate(
     join(npmDir, 'platforms', target.pkg_suffix, 'package.json'),

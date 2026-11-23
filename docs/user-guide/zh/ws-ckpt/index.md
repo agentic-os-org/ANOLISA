@@ -37,10 +37,31 @@ sudo anolisa --install-mode system install ws-ckpt
 sudo yum install ws-ckpt
 ```
 
+| RPM | 内容 |
+|---|---|
+| `ws-ckpt` | 兼容聚合包：对下列三个包的精确 version/release 依赖 |
+| `ws-ckpt-core` | CLI、daemon、配置、服务 unit 和生命周期、许可证及文档 |
+| `ws-ckpt-plugins` | OpenClaw/Hermes bundle 及检测、注册、卸载脚本；依赖同版本 core |
+| `ws-ckpt-skills` | 内置 checkpoint skill；依赖同版本 core |
+
+只需要服务和 CLI 时，选择 `sudo yum install ws-ckpt-core`，按需添加 plugins
+或 skills。core 安装会 enable/restart 服务，随后用
+`systemctl status ws-ckpt.service` 确认状态。框架插件仍由实际 Agent 用户另行注册。
+本地 RPM 通过 `yum install /absolute/path/to/matching-rpms/*.rpm` 在同一事务中
+安装或升级，目录内应只放匹配 version/release 的产物集合。
+
 ### 方式三：源码编译（开发者）
 
+在 Linux 的仓库根目录执行：
+
 ```bash
-cd src/ws-ckpt && make build
+make -C src/ws-ckpt build
+```
+
+可执行文件位于 `src/ws-ckpt/src/target/release/ws-ckpt`。构建完成后，如需安装到系统：
+
+```bash
+sudo make -C src/ws-ckpt install
 ```
 
 ---
@@ -73,11 +94,11 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | 命令 | 说明 |
 |------|------|
 | `ws-ckpt init -w <workspace>` | 初始化工作区 |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | 创建新检查点 |
-| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
-| `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | 创建新检查点。省略 `-s` 时自动生成快照 ID。 |
+| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview] [--json]` | 回滚到指定检查点，可选 JSON 输出 |
+| `ws-ckpt rollback -w <workspace> -n <num-ancestors> [--json]` | 回滚 N 个祖先版本 |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | 列出检查点；默认自动翻页 |
-| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | 显示检查点间差异 |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | 显示文件变化；省略 `-t` 时与当前工作区比较 |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | 清理旧检查点 |
@@ -88,6 +109,11 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt unregister -w <workspace> [--force]` | 仅在子卷丢失时解除注册；不恢复数据 |
 | `ws-ckpt reload` | 重载 daemon 配置 |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | 启动 daemon 进程 |
+
+新建 checkpoint 的 ID 不得包含控制字符（例如换行或制表符）。已有此类 ID 的快照
+仍可删除、回滚或 diff。`list` 表格会转义快照 ID、工作区路径和备注中的控制字符及
+反斜杠；JSON 保留原始字段值，使用 JSON 转义。`status` 表格和命令回执也会转义
+所显示的工作区路径及 ID 中的控制字符和反斜杠。
 
 ### 查询大量快照
 
@@ -107,13 +133,14 @@ ws-ckpt status -w /home/user/projects/my-project --format json
 
 显式分页的 JSON 是包含 `snapshots` 和 `next_cursor` 的对象。分页按
 `(created_at, workspace_id, snapshot_id)` 升序排列。游标是不透明且带版本的，并绑定
-原始工作区范围和第一页的上界（首次索引扫描观察到的最大键，而非当前时间）。上界之后
+原始工作区范围和第一页的上界（第一页观察到的最大键，而非当前时间）。上界之后
 的新快照不会混入，位于上界内的并发插入以及
 删除仍可能影响后续页。如需无变更的时点列表，应在遍历期间暂停 checkpoint 和 cleanup。
 
-Daemon 从内存中的快照索引读取每一页，不扫描快照文件内容。每页仍重新扫描查询范围：
-N 条快照、P 页需要 O(N * P) 次索引访问，另加候选维护和渲染。只有入选候选键会被复制，
-但重复扫描仍然存在；不承诺固定延迟。页面目标约为 1 MiB，且不会超过
+Daemon 在各查询工作区的内存有序索引中直接定位到游标之后，不再每页重新扫描全部快照。
+该顺序在启动时重建，并随快照变化维护；额外内存与快照数量成正比。
+仅查询 orphan 时，仍可能检查剩余范围内的非 orphan 键。列表不读取快照文件内容，
+也不承诺固定延迟。页面目标约为 1 MiB，且不会超过
 16 MiB IPC 帧上限。如果单条记录的可选 `message` 或 `metadata` 会导致超限，该记录会以
 `detail: "summary"` 和 `omitted_fields` 返回。保留的 `created_at`、`pinned`、`missing`
 仍位于 `meta` 下，与完整记录一致；省略字段缺席，不返回 null。快照仍可通过 ID 操作。
@@ -142,12 +169,43 @@ ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
 # 预览回滚（不实际执行）
 ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview
 
+# 以 JSON 格式预览回滚
+ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview --json
+
 # 清理旧检查点，保留最近 20 个
 ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 
 # 为工作区启用自动清理
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### 回滚的 JSON 输出
+
+`ws-ckpt rollback --json` 向 stdout 输出一个 JSON 对象。只有传入
+`--preview` 才会预览回滚效果。成功回滚时返回工作区 ID 和实际恢复到的完整快照 ID。
+
+```json
+{
+  "elapsed_secs": 0.012,
+  "schema": "ws-ckpt.rollback.v1",
+  "snapshot_id": "snap-001",
+  "status": "succeeded",
+  "workspace": "ws-abc123"
+}
+```
+
+传入 `--preview` 时，结果含 `status: "preview"`、`snapshot_id` 和文件级
+`changes`。执行失败时退出码非零，JSON 区分确定未执行（`known_no_effect`）
+和结果未知（`unknown`），并返回 `code` 和 `message`。
+
+集成需要在执行前确认完整快照和预览内容时，使用 `rollback --guarded --json`。
+传入 `--check -w <registered_path>` 可检查该工作区的守护进程兼容性，成功时返回
+`status: "compatible"`。guarded 模式的 `--preview` 接受工作区注册路径和完整快照
+ID，另外返回 `ws_id`、`registered_path`、`generation` 和 `diff_digest`。
+执行 guarded 回滚时，从 stdin 的 JSON 对象读取 `ws_id`、`generation`、
+`diff_digest`、`operation_id` 和 `operation_digest`。传入 `--result -w <ws_id>`
+和同一份 stdin JSON 即可查询持久化结果。结果含 `status: "result"` 和
+`evidence`，后者可能为 `null`。
 
 ### cleanup 中断后的快照恢复
 
@@ -226,6 +284,19 @@ ws-ckpt init -w /path/to/workspace
 
 ### diff 输出标记
 
+默认仍为文本输出。程序读取文件变化时可使用 JSON：
+
+```bash
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 --format json
+```
+
+成功时只输出一个 JSON 对象，包含 `changes` 和 `elapsed_secs`。每项变化沿用已有
+`path`、`change_type`（`Added`、`Modified`、`Deleted` 或 `Renamed`）和 `detail`
+（字符串或 `null`）；没有差异时返回 `"changes": []`。路径和重命名说明按 JSON
+规则转义，解码后的值保持不变。这里只返回文件变化列表，不包含逐行内容差异。
+比较方向为 `-f` 到 `-t`；省略 `-t` 时为 `-f` 到当前工作区。失败时退出码非零，
+诊断写入 stderr，stdout 不输出成功 JSON；读取 `changes` 前应先检查退出码。
+
 | 标记 | 含义 | 颜色 |
 |------|------|------|
 | `+` | 新增文件/目录（Added） | 绿色 |
@@ -249,7 +320,73 @@ systemd 服务在失败后等待 10 秒重试，5 分钟内最多启动 4 次（
 
 daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进程配置。
 
-不存在用户侧全局配置文件。自动检查点和清理行为通过各插件配置控制：
+`backend.btrfs-loop.img_size` 是以 GiB 为单位的整数（1 GiB = 1024³ 字节），
+最小值为 **5**，未配置时默认为 **30**。这是配置策略，不代表通用的 btrfs 安全容量保证。
+首次创建仍受百分比上限和宿主可用空间约束。镜像大小修改在下次 daemon 重启时生效，
+不会通过 reload 调整。
+
+配置文件非法时 daemon 停止启动，不会用默认值替换其他设置。CLI 在保存前校验
+更新后的完整配置，非法更新不会改写原文件。修复旧配置中的越界值而保留其他设置，例如：
+
+```bash
+ws-ckpt config -g --img-size 30
+```
+
+TOML 语法或字段类型错误仍需手工修正。daemon 未运行时，合法的修正会保存到文件，
+但 CLI 可能因无法核验 daemon 配置而以非零退出。重启前修复所有非法字段，并按工作区
+及保留历史的实际需求选择镜像容量。
+
+不存在用户侧全局配置文件。插件各自的自动检查点行为在下文单独配置。
+
+### 存储后端选择
+
+如需指定某个原生 btrfs 文件系统，编辑 `/etc/ws-ckpt/config.toml`：
+
+```toml
+[backend]
+type = "btrfs-base"
+
+[backend.btrfs-base]
+btrfs_mount = "/data"
+```
+
+`btrfs_mount` 是绝对路径的**挂载点**，不是设备或数据目录。该目录必须已经存在，
+在 `/proc/mounts` 中有精确匹配项，文件系统为 btrfs，并以读写方式挂载。
+daemon 还会检查实际文件系统类型和只读标志。数据存放在 `/data/ws-ckpt-data`，
+不要把此子目录填入配置。指定路径不存在、未挂载、不是 btrfs 或只读都会报错，
+即使系统还有其他可用 btrfs 挂载也不会自动替换。
+
+后端类型和存储位置分别选择：
+
+- `[backend] type = "auto"` 沿用 `/var/lib/ws-ckpt/state.json` 中记录的后端类型。
+  显式指定 `btrfs-base` 或 `btrfs-loop` 会在重启时覆盖该类型。
+- BtrfsBase 的位置优先级为：显式 `btrfs_mount` > 由持久化 `data_root` 推导的挂载点。
+  只有新选择后端、没有可恢复的 BtrfsBase 根目录时才检测。首次 `auto` 安装指定
+  挂载点也会选用 BtrfsBase；已有 BtrfsLoop 安装在类型仍为 `auto` 时不会因此切换。
+- 首次检测按内核挂载表顺序选择第一个可写的物理 btrfs 挂载，排除 loop 设备。
+  存在多个候选时，日志列出所有设备、挂载点及最终选择，并建议显式指定。
+  检测使用一次读取的挂载表，同一路径有多层挂载时以最后一个精确项为准。
+  实时验证失败的候选会按顺序跳过；全部不合格时，首次 `auto` 安装使用 BtrfsLoop。
+
+重启时，记录的 BtrfsBase 挂载点必须仍在原路径挂载。把它移动到其他位置，
+不会触发自动寻找新位置。这里识别的是路径，不是文件系统 UUID 或设备：
+同一路径改挂另一文件系统，由操作者负责确认。旧 manifest 将数据目录同时写入
+两个路径字段的格式仍受支持，恢复依据是 `data_root`。
+
+修改显式挂载点表示有意切换根目录，会警告但不会作为隐式漂移拒绝。
+显式切换后端类型同样不会接管旧后端数据。两种情况下，旧快照都不再可见，
+启动时的 reconciliation 可能清除 `/var/lib/ws-ckpt/indexes` 中未 pinned 的快照记录。
+**切回原位置不会恢复已清除的记录**，消息、创建时间和父子链均会丢失；原位置上仍存在的
+快照子卷会作为 pinned 的[恢复孤儿](#cleanup-中断后的快照恢复)重新出现，不参与自动清理，
+需用 `ws-ckpt list --orphans` 查看并显式删除。有意切换前应停止 daemon，备份 manifest、
+索引和快照数据。此设置不会迁移任何数据。
+
+CLI 与 daemon 应使用同一构建版本一同升级；reload 回复包含扩展后的后端配置。
+升级或修改后端设置后，执行 `sudo systemctl restart ws-ckpt`。
+`ws-ckpt reload` 会提示挂载点配置有变化，但重启前继续使用原根目录。
+`ws-ckpt daemon --mount-path` 只配置 BtrfsLoop，不选择 BtrfsBase 文件系统。
+配置格式错误或无法读取 `state.json` 会中止启动，不会默默使用默认后端。
+应先修复配置或恢复原挂载和状态，再重试；删除 manifest 会重新选择后端，不是恢复步骤。
 
 ### OpenClaw 插件配置
 
@@ -262,6 +399,10 @@ daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进�
 ```
 
 ### Hermes 插件配置
+
+Hermes 同步计划时，从 Agent 的 `PATH` 查找 `ws-ckpt`，并将可执行文件的绝对路径
+写入 crontab。使用自定义安装前缀时，先将其 `bin` 目录加入该 `PATH`。
+如果找不到 CLI，同步失败并保留现有 crontab；删除计划不要求程序仍已安装。
 
 ```bash
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
@@ -281,7 +422,12 @@ OpenClaw 将回滚工具绑定到宿主提供的 `sessionKey`；工具工厂还�
 新版上下文带有 `sessionId` 时可区分这些会话实例。宿主没有提供 `sessionKey` 时，回滚仍可执行，
 但不会设置跳过记录；缺少会话身份的 hook 也不会清除其他会话的记录。工具工厂不提供 `runId`，
 所以本机制不区分同一会话内的并发运行。待消费状态保留在内存中，直到匹配的轮次结束或插件进程退出。
-Hermes 保留按工作区区分的状态；本次修改没有为其 hook 添加会话所有权。
+
+Hermes 将回滚工具绑定到宿主传给工具 handler 和 `on_session_end` 的 `session_id`。
+其他会话的轮次结束不会消费这份状态；没有 `session_id` 的轮次结束也不会清除其他会话的记录。
+Hermes 自 2026.6.19 起向工具 handler 传递 `session_id`；更早的版本上回滚仍可执行，
+但不会设置跳过记录，下一次轮次结束时正常创建自动检查点。待消费状态保留在内存中，
+直到该会话的下一次轮次结束或插件进程退出。
 
 回滚可以使用工作区 ID 或注册路径。没有路径分隔符的参数（`.` 和 `..` 除外）会在非预览回滚前
 通过 `ws-ckpt status -w <selector> --format json` 解析。查询失败时不会执行回滚；
@@ -293,9 +439,47 @@ Hermes 保留按工作区区分的状态；本次修改没有为其 hook 添加�
 使用路径时，请使用工作区的注册路径，包括路径末尾的符号链接，而不是链接所指向的当前快照目录。
 父目录别名和等价路径写法仍表示同一个注册路径。
 
+### Hermes 快照列表分页
+
+快照历史较大时，使用现有 `ws-ckpt-list` 工具请求有数量上限的第一页，
+之后按需读取下一页：
+
+```json
+{"limit":20}
+```
+
+成功响应为 JSON 字符串，内容是
+`{"success":true,"snapshots":[...],"next_cursor":"..."}`。将返回的游标原样传入下一次调用：
+
+```json
+{"limit":20,"cursor":"<next_cursor>"}
+```
+
+只有 `next_cursor:null` 表示遍历结束。短页或空页仍可能带有续页游标。
+续页期间保持配置的工作区不变。`limit` 必须是 1 至 10000 的整数；布尔值、
+小数、字符串和显式 null 均无效。`cursor` 必须是非空字符串，显式 null 无效。
+仅传游标时沿用 CLI 的默认页大小 1000。
+
+两个键都不传时，`{}` 保留完整表格及原有
+`{"success":true,"output":"..."}` 响应。显式分页只执行一次 CLI 调用，
+返回 `snapshots` 和 `next_cursor`，不添加 `output` 包装，也不自动遍历。
+分页需要支持该功能的 CLI 和匹配的 daemon；这里不指定未经验证的最低发行版本。
+CLI 缺失、不支持参数、游标无效或跨工作区、daemon 故障、超时及分页输出格式异常，
+均返回 `{"success":false,"error":"..."}`，不会重试完整列表。
+
+每个快照对象均原样保留，包括嵌套 `meta`、未知字段、`detail:"summary"`
+和 `omitted_fields`；省略的字段保持不存在。`elapsed_secs` 等 CLI 顶层附加字段
+会被忽略。条目数量上限不取代 daemon 的字节预算，因此仍可能出现摘要条目和短页。
+分页沿用快照列表的升序及弱一致性：创建或删除快照期间，列表不是固定时间点的视图。
+此选项不修改 checkpoint/rollback 状态或插件配置。OpenClaw 的列表工具保持原行为。
+
 ### CLI 配置
 
 配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。
+
+设置 `ws-ckpt config -g --health-check-interval 0` 会关闭周期健康诊断。daemon 仍以
+默认的 300 秒间隔刷新 advisory 缓存，并在工作区或全局配置变更后刷新。CLI 告警为尽力而为：在尚无完整样本或上次成功
+样本超过 600 秒时，CLI 会跳过告警。
 
 ```bash
 # 启用自动清理，保留 7 天内的检查点

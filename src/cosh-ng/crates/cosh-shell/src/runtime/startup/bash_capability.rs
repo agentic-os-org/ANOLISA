@@ -130,14 +130,20 @@ fn run_bash_probe(
     winsize: &Winsize,
     timeout: Duration,
 ) -> Result<String, BootstrapPathProbeError> {
+    let command = bash_probe_command(path, inject_path);
+
+    run_supervised_profile_probe(command, Some(OsStr::new("-bash")), timeout, winsize)
+}
+
+fn bash_probe_command(path: &Path, inject_path: &Path) -> Command {
     let mut command = Command::new(path);
     command
         .args(["--posix", "-i"])
         .env("COSH_R2_CAPABILITY_INJECT", inject_path)
         .env("ENV", "${COSH_R2_CAPABILITY_INJECT}")
-        .env("LC_ALL", "C");
-
-    run_supervised_profile_probe(command, Some(OsStr::new("-bash")), timeout, winsize)
+        .env("LC_ALL", "C")
+        .env("COSH_INTERNAL_SHELL", "1");
+    command
 }
 
 /// POSIX Bash rejects exported function names that are not shell identifiers
@@ -168,6 +174,16 @@ fn bash_function_env_key_posix_compatible(key: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_capability_probe_is_an_explicit_internal_shell() {
+        let command = bash_probe_command(Path::new("/trusted/bash"), Path::new("/trusted/inject"));
+        assert_eq!(command.get_program(), OsStr::new("/trusted/bash"));
+        assert!(command
+            .get_envs()
+            .any(|(name, value)| name == "COSH_INTERNAL_SHELL" && value == Some(OsStr::new("1"))));
+    }
+
     use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStringExt;

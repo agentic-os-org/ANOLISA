@@ -158,6 +158,18 @@ private and is also logged by the daemon.
 rejections and 17 for rollback rejections in both ws-ckpt and cosh. Older cosh
 clients cannot decode it and fail closed with a non-recoverable protocol error.
 
+## Guarded rollback CLI JSON contract
+
+AgentSight accepts the exact schema identifier `ws-ckpt.rollback.v1`. The
+`rollback --guarded --json --check` response confirms the registered workspace
+and advertises `diff_json: true` when the CLI supports `diff --format json`.
+The check works before any snapshots exist. A missing or false field leaves
+the workspace snapshot controls unavailable.
+
+Guarded execution and result lookup accept at most 4096 bytes of confirmation
+JSON on stdin. AgentSight checks the same limit before launching the CLI.
+Exceeding the limit is a pre-execution rejection.
+
 ## Compatibility and validation
 
 New request and response variants are appended to the bincode enums. All legacy

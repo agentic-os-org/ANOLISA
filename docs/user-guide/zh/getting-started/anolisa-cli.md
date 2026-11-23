@@ -68,6 +68,30 @@ sudo anolisa --install-mode system --dry-run install cosh-ng --backend rpm
 
 如果 ANOLISA 无法识别系统包管理器，请按提示手工安装缺失依赖后重试。
 
+自行管理依赖的 raw 安装可使用 `--no-deps`：
+
+```bash
+anolisa install tokenless --backend raw --no-deps
+anolisa install --all --backend raw --no-deps
+anolisa --dry-run install tokenless --backend raw --no-deps
+```
+
+此参数在 user 和 system 模式下均跳过 ANOLISA 的运行依赖解析、检查（包括
+声明的平台要求）、自动安装和复验，仅作用于本次 install。制品校验、安装
+契约及冲突检查、hooks 和服务设置仍会执行；使用组件前需自行确保所需依赖
+可用。不传此参数时，依赖处理保持不变。RPM 不支持 `--no-deps`，包括由配置
+或已有安装记录选中 RPM 的情况，都会明确报错。
+
+实际安装成功后，stderr 会输出：
+
+> Runtime dependency checks and installation were skipped (--no-deps). Ensure required dependencies are available before use.
+
+即运行依赖检查和安装已跳过，使用前需确保依赖可用。`--quiet` 可隐藏此提醒，
+`--json` 的 stdout 仍保持 JSON 格式。批量安装只要至少一个组件安装成功，就在
+结果末尾提醒一次，部分成功时也如此。安装失败、已安装而无需操作及 dry-run
+均不输出此提醒。提醒不改变退出码。使用 `--no-deps` 时，dry-run 计划也会省略
+运行依赖补装步骤。
+
 ### uninstall
 
 从所选 scope 移除一个安装：
@@ -196,6 +220,13 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+`anolisa status <component>` 显示组件安装状态及关联的 Adapter。
+`anolisa adapter status` 检查已有接入，并在有有效记录时显示启用时间。
+通过 AW 运行 sec-core 或 Tokenless 时，两个命令都会提示使用
+`aw inspect --config /path/to/aw.yaml --json`，组件索引不可用时也会给出该提示。
+请以启动 AW 服务的用户执行查询，沿用相同的 `XDG_RUNTIME_DIR` 设置，并传入启动配置的
+绝对路径，以查看 Provider 状态及最近执行记录。详见 [AW 命令参考](../aw/cli-reference.md#aw-inspect)。
+
 对于 OpenClaw 插件，`adapter enable` 默认同意插件声明的能力。ANOLISA 仅在
 对应命令的 help 列出 `--accept-capabilities` 时，将该参数添加到安装和激活
 命令。可通过以下选项拒绝自动授予同意：
@@ -248,6 +279,25 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 运行时加载状态报告为
 `unknown`；链接存在不代表运行中的 OpenCode 已加载插件。`--dry-run` 仅预览操作，
 不修改插件文件或 receipt。
+
+#### Cosh
+
+```bash
+anolisa adapter enable sec-core cosh
+anolisa adapter status sec-core
+anolisa adapter disable sec-core cosh
+```
+
+enable 通过 cosh 原生 registry 选择并启用 ANOLISA 交付的用户扩展，兼容 RPM
+同时提供系统副本的情况。cosh 需支持按身份清理 adapter 来源选择；旧版本会在修改文件前
+报错，提示更新 cosh-ng。`COSH_CORE_PATH` 可指定原生程序，`COSH_HOME` 可指定扩展和状态根目录。
+
+status 核对所选来源身份、catalog 启用状态和 receipt 文件。来源冲突或扩展禁用时报告
+`degraded`；已有会话的加载情况报告为 `unknown`。enable 或 disable 后重启已有 cosh 会话。
+disable 仅移除 ANOLISA 拥有的用户副本，并清除与该副本身份匹配的用户来源选择；包管理器
+拥有的系统文件和用户后续选择会保留。组件升级改变扩展身份时，重新启用会先移除旧受管副本并清理匹配的来源选择，再替换
+receipt。清理失败保留旧 receipt，激活失败保留新 receipt，供 disable 或重新启用时重试。
+重新启用或禁用前，需先处理受管文件被修改的情况。
 
 #### 千问办公 QwenWorkCN（macOS）
 

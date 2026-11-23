@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/deployment-descriptor/v1alpha1",
+  "title": "AW deployment descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "configuration_sha256",
+    "target",
+    "profile",
+    "endpoint",
+    "wait_for_input_submit",
+    "availability"
+  ],
+  "properties": {
+    "version": {
+      "const": "aw-deployment/v1alpha1"
+    },
+    "configuration_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-zA-Z0-9._-]"
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter",
+        "version",
+        "entrypoint"
+      ],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/profileString"
+        },
+        "version": {
+          "$ref": "#/$defs/profileString"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/profileString"
+        }
+      }
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/",
+      "not": {
+        "pattern": "\u0000"
+      }
+    },
+    "wait_for_input_submit": {
+      "type": "boolean"
+    },
+    "availability": {
+      "enum": [
+        "required",
+        "native_fallback"
+      ]
+    }
+  },
+  "$defs": {
+    "profileString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\P{White_Space}"
+    }
+  }
+}

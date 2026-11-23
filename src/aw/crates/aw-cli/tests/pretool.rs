@@ -19,11 +19,16 @@ use std::{
 };
 use support::{Fixture, Service};
 
+#[path = "pretool/tool_scope.rs"]
+mod tool_scope;
+
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
+    if output.status.code() == Some(2) {
+        return true;
+    }
     match adapter {
-        "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
-            output.status.code() == Some(2)
-        }
+        "sdk" | "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk"
+        | "codex" => output.status.code() == Some(2),
         _ => serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"] == true,
     }
 }
@@ -66,6 +71,7 @@ print(json.dumps(reply))
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),
@@ -129,7 +135,15 @@ print(json.dumps(reply))
                 // SDK chains stop at a veto; the service must close unvisited steps.
                 if matches!(
                     adapter,
-                    "qoder-sdk" | "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
+                    "sdk"
+                        | "qoder-sdk"
+                        | "pi"
+                        | "deepseek-harness"
+                        | "codex"
+                        | "claude-sdk"
+                        | "agentscope"
+                        | "qwenpaw"
+                        | "openclaw"
                 ) && blocked(adapter, outputs.last().unwrap())
                 {
                     break;
@@ -175,7 +189,14 @@ print(json.dumps(reply))
             }
         }
         for entry in fs::read_dir(f.root.join("state/journal")).unwrap() {
-            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "jsonl")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path).unwrap();
             assert!(!text.contains("Retry with arguments"));
             assert!(!text.contains("rtk candidate"));
         }
@@ -191,3 +212,6 @@ print(json.dumps(reply))
         service.released(&f);
     }
 }
+
+#[path = "pretool/input_rewrite.rs"]
+mod input_rewrite;

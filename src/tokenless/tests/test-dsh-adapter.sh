@@ -35,15 +35,18 @@ writeFileSync(
     '  const request = JSON.parse(input);\n' +
     '  appendFileSync(process.env.TOKENLESS_TEST_LOG, JSON.stringify({ argv: process.argv.slice(2), dataDir: process.env.TOKENLESS_DATA_DIR, statsDb: process.env.TOKENLESS_STATS_DB, stashDb: process.env.TOKENLESS_STASH_DB, request }) + "\\n");\n' +
     '  const mode = process.env.TOKENLESS_TEST_MODE;\n' +
+    '  if (request.protocol_version !== 2) process.exit(2);\n' +
     '  if (mode === "fail") process.exit(7);\n' +
     '  if (mode === "timeout") { setTimeout(() => {}, 10000); return; }\n' +
     '  if (mode === "invalid") { process.stdout.write("{"); return; }\n' +
-    '  const result = mode === "applied"\n' +
+    '  const result = request.operation === "pre_tool"\n' +
+    '    ? { arguments: { ...request.input.arguments, command: "tokenless rtk git status" }, action: "block_and_suggest", output_optimization: "rtk" }\n' +
+    '    : ["applied", "wrong-version", "future-version"].includes(mode)\n' +
     '    ? { output: "{\\"ok\\":true}", disposition: "applied" }\n' +
     '    : mode === "tool-error"\n' +
     '      ? { output: request.input.content, disposition: "tool_error", additional_context: "Install the missing dependency and retry." }\n' +
     '      : { output: request.input.content, disposition: "passthrough" };\n' +
-    '  process.stdout.write(JSON.stringify({ protocol_version: mode === "wrong-version" ? 1 : 2, operation: mode === "wrong-operation" ? "pre_tool" : "post_tool", attribution: request.attribution, result }));\n' +
+    '  process.stdout.write(JSON.stringify({ protocol_version: mode === "wrong-version" ? 1 : mode === "future-version" ? 3 : 2, operation: mode === "wrong-operation" ? "invalid" : request.operation, attribution: request.attribution, result }));\n' +
     '});\n',
 )
 chmodSync(binary, 0o755)
@@ -61,11 +64,15 @@ assert.doesNotMatch(cordisPatch, /name:\s+\.\/dist\/index\.js/)
 
 function register(config = {}) {
   let callback
+  let preTool
   let shellEnvContributor
   const ctx = {
     on(event, listener) {
-      assert.equal(event, 'tools/post-execute')
-      callback = listener
+      if (event === 'tools/pre-execute') preTool = listener
+      else {
+        assert.equal(event, 'tools/post-execute')
+        callback = listener
+      }
     },
     shellEnv: {
       register(contributor) {
@@ -76,6 +83,7 @@ function register(config = {}) {
   plugin.apply(ctx, config)
   assert.equal(typeof callback, 'function')
   callback.shellEnvContributor = shellEnvContributor
+  callback.preTool = preTool
   return callback
 }
 
@@ -118,6 +126,56 @@ delete process.env.TOKENLESS_DATA_DIR
 delete process.env.TOKENLESS_STATS_DB
 delete process.env.TOKENLESS_STASH_DB
 const listener = register({ tokenlessBin: binary })
+const shellExec = { ...exec, name: 'bash', arguments: { command: 'git status', description: 'status' } }
+const shellSnapshot = structuredClone(shellExec.arguments)
+const allow = { kind: 'allow' }
+const deny = { kind: 'deny', reason: 'host policy' }
+assert.deepEqual(await listener.preTool(shellExec, async () => deny), deny)
+assert.equal(requests().length, 0)
+const suggestion = await listener.preTool(shellExec, async () => allow)
+assert.equal(suggestion.kind, 'deny')
+assert.match(suggestion.reason, /Re-execute as: tokenless rtk git status/)
+assert.deepEqual(shellExec.arguments, shellSnapshot, 'already-audited arguments stay immutable')
+assert.deepEqual(requests()[0].request.input.capabilities, {
+  replace_arguments: false, block_and_suggest: true,
+})
+await listener.preTool({ ...shellExec, name: 'pwsh' }, async () => allow)
+assert.equal(requests().at(-1).request.input.tool_name, 'PowerShell')
+const retry = { ...shellExec, callId: 'retry', arguments: { command: 'tokenless rtk git status' } }
+clearRequests()
+assert.equal(await listener.preTool(retry, async () => allow), allow)
+await listener(retry, success(), async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].request.input.output_optimization, 'rtk')
+assert.equal(requests()[0].request.input.capabilities.recovery.kind, 'none')
+clearRequests()
+assert.equal(await listener.preTool(retry, async () => allow), allow)
+assert.equal(requests()[0].request.operation, 'pre_tool', 'retry exemption is consumed')
+await listener(retry, success(), async () => ({ kind: 'accept' }))
+assert.equal(requests().at(-1).request.input.output_optimization, 'none')
+// A later policy rejection or an aborted result must also consume the exemption.
+for (const rejected of [false, true]) {
+  await listener.preTool(shellExec, async () => allow)
+  const controller = new AbortController()
+  if (!rejected) controller.abort()
+  const ended = { ...retry, signal: controller.signal }
+  await listener(ended, success(), async () => rejected ? { kind: 'reject' } : { kind: 'accept' })
+  clearRequests()
+  await listener.preTool(retry, async () => allow)
+  assert.equal(requests()[0].request.operation, 'pre_tool')
+}
+clearRequests()
+await listener({ ...retry, agent: { id: 'different-agent' } }, success(), async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].request.input.output_optimization, 'none')
+clearRequests()
+assert.equal(register({ rtkEnabled: false }).preTool, undefined)
+assert.equal(await listener.preTool({ ...shellExec, parent: Symbol('nested') }, async () => allow), allow)
+assert.equal(requests().length, 0)
+for (const mode of ['fail', 'invalid', 'wrong-operation']) {
+  process.env.TOKENLESS_TEST_MODE = mode
+  assert.equal(await listener.preTool(shellExec, async () => allow), allow)
+}
+delete process.env.TOKENLESS_TEST_MODE
+clearRequests()
 assert.equal(plugin.name, 'anolisa-tokenless')
 assert.deepEqual(plugin.inject, ['tools', 'shellEnv'])
 assert.deepEqual(listener.shellEnvContributor.variables, {
@@ -618,13 +676,18 @@ assert.equal(disabledFailure.additionalContexts.length, 1)
 async function failOpen(mode, callback = listener) {
   process.env.TOKENLESS_TEST_MODE = mode
   clearRequests()
-  const decision = { kind: 'accept', content: success().content }
-  const actual = await callback(exec, success(), async () => decision)
+  const original = success()
+  const snapshot = structuredClone(original)
+  const decision = { kind: 'accept', content: original.content }
+  const actual = await callback(exec, original, async () => decision)
   assert.strictEqual(actual, decision)
+  assert.deepEqual(original, snapshot)
+  assert.deepEqual(decision.content, snapshot.content)
 }
 await failOpen('fail')
 await failOpen('invalid')
 await failOpen('wrong-version')
+await failOpen('future-version')
 await failOpen('wrong-operation')
 const timeoutListener = register({ tokenlessBin: binary, timeoutMs: 20 })
 await failOpen('timeout', timeoutListener)

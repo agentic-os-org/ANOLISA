@@ -11,6 +11,9 @@ use std::{
     sync::{mpsc, TryLockError},
 };
 
+#[path = "observation_tests.rs"]
+mod observation;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Fixture {
@@ -68,6 +71,7 @@ impl Fixture {
             .call(Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),
@@ -271,9 +275,9 @@ fn owner_death_before_dispatch(during_audit: bool) {
         let rejected = thread::scope(|threads| {
             let worker = threads.spawn(|| {
                 runtime.event_loop(
-                    (&key, instance),
+                    (&key, instance, &json!({"name":"tool.after"})),
                     &event,
-                    (&cancelled, &context),
+                    (&cancelled, &context, None),
                     receiver,
                     false,
                     true,
@@ -407,4 +411,196 @@ fn failed_acknowledgement_audit_cancels_committed_task() {
         matches!(fixture.runtime.maintain(false), Err(Error::Rejected(code)) if code == "audit_unavailable")
     );
     assert_eq!(fixture.call(Operation::Status).unwrap()["bindings"], 1);
+}
+
+#[test]
+fn bridge_failure_fences_dispatch_but_retains_cleanup_and_isolates_siblings() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    fixture.acknowledge(&task).unwrap();
+    fixture
+        .runtime
+        .enable_invocations(&task.instance_id)
+        .unwrap();
+    let parent = fixture.runtime.owners.lock().unwrap()[&task.instance_id]
+        .parent
+        .clone()
+        .unwrap();
+    let other: Binding = serde_json::from_value(
+        fixture
+            .call(Operation::OpenScope {
+                parent_id: parent.clone(),
+                pid: std::process::id(),
+                cwd: fixture.directory.path().to_str().unwrap().into(),
+                environment: BTreeMap::new(),
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    fixture.acknowledge(&other).unwrap();
+    let watch = fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    let revision = watch["policy_revision"].as_str().unwrap();
+    fixture
+        .runtime
+        .register_invocation(&task.instance_id, 1, "first", "tool", json!({}))
+        .unwrap();
+    fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, true)
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, false)
+        .is_err());
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, true)
+        .is_err());
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+    assert!(fixture
+        .runtime
+        .register_invocation(&task.instance_id, 2, "second", "tool", json!({}))
+        .is_err());
+    fixture.runtime.maintain_scopes().unwrap();
+    fixture
+        .runtime
+        .check_scope_owner(&other.instance_id)
+        .unwrap();
+    let status = fixture.runtime.policy_status().unwrap();
+    let status = status
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["instance_id"] == task.instance_id)
+        .unwrap();
+    assert_eq!(
+        status["scope_validity"],
+        json!({"native_alive":true,"covered_bridge":"failed"})
+    );
+    // Failed coverage keeps the live owner and ledger until native drain is acknowledged.
+    fixture
+        .runtime
+        .finish_invocation(&task.instance_id, 1, "first", Instant::now() + TIMEOUT)
+        .unwrap();
+    fixture
+        .runtime
+        .release_instance(&parent, Instant::now() + TIMEOUT)
+        .unwrap();
+    assert!(fixture.runtime.instances.lock().unwrap().is_empty());
+}
+
+#[test]
+fn bridge_watch_rejects_wrong_worker_and_revision_without_reviving_old_scope() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+    fixture.acknowledge(&task).unwrap();
+    assert!(fixture.runtime.watch_scope(&task.instance_id, 0).is_err());
+    fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), "stale", true)
+        .is_err());
+    fixture
+        .runtime
+        .release_instance(&task.instance_id, Instant::now() + TIMEOUT)
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+}
+
+impl Runtime {
+    pub(in crate::runtime) fn expire_scope_bridge(&self, id: &str) {
+        self.owners
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .validity
+            .as_mut()
+            .unwrap()
+            .deadline = Instant::now();
+    }
+}
+
+#[test]
+fn expired_bridge_cannot_renew_or_reclaim_live_owner() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    fixture.acknowledge(&task).unwrap();
+    let watch = fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    fixture.runtime.expire_scope_bridge(&task.instance_id);
+    let revision = watch["policy_revision"].as_str().unwrap();
+    assert!(
+        matches!(fixture.runtime.check_scope(&task.instance_id, std::process::id(), revision, true),
+        Err(Error::Rejected(code)) if code == "scope_bridge_expired")
+    );
+    fixture.runtime.maintain_scopes().unwrap();
+    assert!(fixture
+        .runtime
+        .instances
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
+    assert!(fixture
+        .runtime
+        .check_scope_owner(&task.instance_id)
+        .is_err());
+    fixture
+        .runtime
+        .check_scope_cleanup(&task.instance_id)
+        .unwrap();
+}
+
+#[test]
+fn maintenance_tracks_handoff_deadlines_and_omits_cancelled_exit_notifications() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    {
+        let mut owners = fixture.runtime.owners.lock().unwrap();
+        owners.get_mut(&task.instance_id).unwrap().acknowledge_by = Some(deadline);
+    }
+    let pending = fixture.runtime.maintenance().unwrap();
+    assert_eq!(pending.deadline, Some(deadline));
+    assert_eq!(pending.exits.len(), 2);
+    {
+        let owners = fixture.runtime.owners.lock().unwrap();
+        owners[&task.instance_id]
+            .cancelled
+            .store(true, Ordering::Release);
+    }
+    let draining = fixture.runtime.maintenance().unwrap();
+    assert!(draining.deadline.is_none());
+    assert_eq!(draining.exits.len(), 1);
+    fixture.runtime.maintain(false).unwrap();
+    assert!(!fixture
+        .runtime
+        .owners
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
+    assert!(!fixture
+        .runtime
+        .instances
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
 }

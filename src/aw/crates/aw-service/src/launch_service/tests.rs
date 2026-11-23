@@ -74,6 +74,44 @@ fn explicit_endpoint_infers_state_and_conflicting_paths_are_rejected() {
 }
 
 #[test]
+fn shared_path_rules_preserve_service_errors_and_component_normalization() {
+    for (state, endpoint, code) in [
+        ("auto", "/explicit.sock", "daemon_endpoint_must_be_aw_sock"),
+        ("auto/", "/run/aw/aw.sock", "service_path_must_be_absolute"),
+        ("/run/aw", "auto/", "daemon_path_mismatch"),
+        ("/run/aw", "/other/aw.sock", "daemon_path_mismatch"),
+        ("/run/../aw", "auto", "service_path_must_be_absolute"),
+        ("auto", "/run/../aw.sock", "service_path_must_be_absolute"),
+    ] {
+        let mut value = config();
+        value["spec"]["daemon"]["state_dir"] = json!(state);
+        value["spec"]["daemon"]["endpoint"] = json!(endpoint);
+        assert!(
+            matches!(resolve(&bytes(&value), None), Err(crate::Error::Rejected(actual)) if actual == code)
+        );
+    }
+    let mut value = config();
+    value["spec"]["daemon"]["state_dir"] = json!("/run/aw");
+    value["spec"]["daemon"]["endpoint"] = json!("/run/./aw/aw.sock");
+    assert_eq!(
+        resolve(&bytes(&value), None).unwrap().socket,
+        Path::new("/run/aw/aw.sock")
+    );
+    for (length, accepted) in [(98, true), (99, false)] {
+        value["spec"]["daemon"]["state_dir"] = json!(format!("/{}", "x".repeat(length)));
+        value["spec"]["daemon"]["endpoint"] = json!("auto");
+        let result = resolve(&bytes(&value), None);
+        if accepted {
+            assert_eq!(result.unwrap().socket.as_os_str().len(), 107);
+        } else {
+            assert!(
+                matches!(result, Err(crate::Error::Rejected(code)) if code == "service_socket_path_too_long")
+            );
+        }
+    }
+}
+
+#[test]
 fn unsafe_runtime_paths_and_overlong_socket_paths_fail_without_fallback() {
     let fixture = Fixture::new();
     let document = bytes(&config());
@@ -136,6 +174,58 @@ fn external_absence_has_no_filesystem_or_process_side_effects() {
     )
     .is_err());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
+}
+
+#[test]
+fn discovery_status_is_reused_for_readiness() {
+    use std::{os::unix::net::UnixListener, thread};
+
+    for healthy in [true, false] {
+        let fixture = Fixture::new();
+        let mut value = config();
+        value["spec"]["daemon"]["state_dir"] = json!(fixture.0.join("state"));
+        value["spec"]["daemon"]["startup"] = json!("external");
+        let document = bytes(&value);
+        let paths = resolve(&document, None).unwrap();
+        files::private_directory(&paths.state_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("fixture accept failed: {error}"),
+                    }
+                };
+                let request: Value = crate::ipc::read(&mut stream, deadline).unwrap();
+                assert_eq!(request["operation"]["method"], "status");
+                crate::ipc::write(&mut stream, &json!({
+                    "api_version":crate::VERSION,
+                    "identity":{"generation":"fixture", "config_revision":paths.config_revision},
+                    "result":{"pid":std::process::id(), "audit_healthy":healthy},
+                    "error":null, "audit_key":null,
+                }), deadline).unwrap();
+                // Closing the sole listener makes an accidental second discovery fail.
+                drop(listener);
+            });
+            let result = ensure_service(&document, Path::new("/must-not-be-executed"), deadline);
+            server.join().unwrap();
+            if healthy {
+                assert_eq!(result.unwrap().pid, std::process::id());
+            } else {
+                assert!(
+                    matches!(result, Err(crate::Error::Rejected(ref code)) if code == "service_audit_unavailable")
+                );
+            }
+        });
+    }
 }
 
 #[test]

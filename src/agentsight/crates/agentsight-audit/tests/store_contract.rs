@@ -4,12 +4,12 @@ use agentsight_audit::{
     AuditError as SecurityStoreError, AuditEventFilter as SecurityEventFilter,
     AuditMaintenancePolicy, AuditStore as SecurityStore, ContainmentAction,
     ContainmentActivationResult, ContainmentClaimResult, ContainmentFailureStage,
-    ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity,
+    ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity, event_result,
 };
 use agentsight_enforcement_protocol::{
-    DestinationClass, Effect, EventIdentity, FileAction, NetworkAction, NetworkDirection,
-    PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition,
-    TaintTransitionKind,
+    DestinationClass, Effect, EnforcementStateEvent, EventIdentity, FileAction, NetworkAction,
+    NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind,
+    TaintTransition, TaintTransitionKind,
 };
 use agentsight_sqlite_lifecycle::MaintenanceStatus;
 use uuid::Uuid;
@@ -139,6 +139,24 @@ fn fixture_taint_transition(occurred_at_ns: u64) -> SecurityEvent {
         target_pid: 4242,
         target_process_start_time: 99,
         reason: "credential source read".into(),
+    });
+    event
+}
+
+fn fixture_enforcement_state(
+    occurred_at_ns: u64,
+    code: &str,
+    ready: bool,
+    dropped_events: Option<u64>,
+) -> SecurityEvent {
+    let mut event = fixture_file_action("~/.ssh/id_rsa", occurred_at_ns);
+    event.kind = SecurityEventKind::EnforcementState(EnforcementStateEvent {
+        policy_id: Some("credential-exfiltration".into()),
+        policy_revision: Some(3),
+        code: code.into(),
+        ready,
+        message: "enforcement state fixture".into(),
+        dropped_events,
     });
     event
 }
@@ -878,6 +896,110 @@ fn summary_counts_one_blocked_decision_for_a_full_blocked_chain() {
 }
 
 #[test]
+fn summary_ignores_an_agent_display_name_that_reads_evidence_loss() {
+    // The loss aggregate reads the serialized event as text, so identity and
+    // policy metadata carrying the state code spelled a ready subscription as
+    // lost evidence. Only the enforcement state code may decide the count.
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut restored = fixture_enforcement_state(100, "subscription_restored", true, None);
+    restored.identity.agent_name = Some("evidence_loss".into());
+    store
+        .insert_event(&restored)
+        .expect("state event should insert");
+
+    let summary = store.summary().expect("summary should load");
+
+    assert_eq!(summary.total_events, 1);
+    assert_eq!(summary.evidence_loss_events, 0);
+}
+
+#[test]
+fn filtered_summary_ignores_a_policy_identifier_that_reads_evidence_loss() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut restored = fixture_enforcement_state(100, "subscription_restored", true, None);
+    let SecurityEventKind::EnforcementState(state) = &mut restored.kind else {
+        panic!("fixture must be an enforcement state event");
+    };
+    state.policy_id = Some("evidence_loss".into());
+    store
+        .insert_event(&restored)
+        .expect("state event should insert");
+
+    let summary = store
+        .summary_filtered(&SecurityEventFilter {
+            event_type: Some("enforcement_state".into()),
+            result: Some("ready".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered summary should load");
+
+    assert_eq!(summary.total_events, 1);
+    assert_eq!(summary.evidence_loss_events, 0);
+}
+
+#[test]
+fn summary_counts_one_evidence_loss_state_event_reporting_many_drops() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let lost = fixture_enforcement_state(100, "evidence_loss", false, Some(7));
+    store
+        .insert_event(&lost)
+        .expect("state event should insert");
+    store
+        .insert_event(&fixture_enforcement_state(
+            200,
+            "subscription_restored",
+            true,
+            None,
+        ))
+        .expect("recovery event should insert");
+
+    let summary = store.summary().expect("summary should load");
+
+    assert_eq!(summary.total_events, 2);
+    assert_eq!(summary.evidence_loss_events, 1);
+}
+
+#[test]
+fn summary_survives_malformed_persisted_event_json() {
+    let path = security_db_path("summary-malformed-event-json");
+    {
+        let store = SecurityStore::open(&path).expect("fixture store should open");
+        store
+            .insert_event(&fixture_enforcement_state(
+                100,
+                "evidence_loss",
+                false,
+                Some(1),
+            ))
+            .expect("state event should insert");
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).expect("fixture database should open");
+        conn.execute(
+            "INSERT INTO security_events (
+                event_id, event_type, occurred_at_ns, observed_at_ns, agent_id, agent_name,
+                session_id, pid, process_start_time, binding_id, policy_id, policy_revision,
+                result, destination_class, event_json
+             ) VALUES ('malformed', 'enforcement_state', 200, 200, 'hermes-test', NULL,
+                       NULL, 4242, 99, '00000000-0000-0000-0000-000000000001', NULL, NULL,
+                       'degraded', NULL, '{truncated')",
+            [],
+        )
+        .expect("malformed fixture row should insert");
+    }
+
+    let store = SecurityStore::open(&path).expect("fixture store should reopen");
+    let summary = store
+        .summary()
+        .expect("malformed JSON must not fail the aggregate");
+
+    assert_eq!(summary.total_events, 2);
+    assert_eq!(summary.evidence_loss_events, 1);
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
 fn session_pages_group_the_complete_event_set_before_pagination() {
     let store = SecurityStore::open_in_memory().expect("fixture store should open");
     for index in 0..1_005_u64 {
@@ -1532,4 +1654,91 @@ fn case_index_maps_agent_policy_revision_triplet_to_latest_case() {
         )),
         Some(&other_id)
     );
+}
+
+fn result_fixture(event_id: Uuid, succeeded: bool, errno: Option<i32>, at: u64) -> SecurityEvent {
+    SecurityEvent {
+        event_id,
+        occurred_at_ns: at,
+        observed_at_ns: at,
+        identity: EventIdentity {
+            binding_id: Uuid::new_v4(),
+            agent_id: "agent".into(),
+            agent_name: None,
+            session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
+            pid: 42,
+            process_start_time: 420,
+            ppid: Some(1),
+            cgroup_id: None,
+            protocol_version: 1,
+            enforcer_version: "test".into(),
+            actplane_revision: "test".into(),
+        },
+        kind: SecurityEventKind::FileAction(FileAction {
+            policy_id: "file-deletion-policy".into(),
+            policy_revision: 1,
+            operation: "unlink".into(),
+            path: "~/reports".into(),
+            resource_class: "protected_path".into(),
+            succeeded,
+            errno,
+            rule_id: Some("deny-delete".into()),
+        }),
+    }
+}
+
+#[test]
+fn a_policy_denied_file_operation_is_stored_as_blocked() {
+    // The backend reports a policy denial as `EPERM` on the file action itself.
+    // Labelling that `failed` kept denied deletions out of the blocked filter
+    // and out of the blocked totals, so an operator looking for blocked file
+    // operations never saw them.
+    let store = SecurityStore::open_in_memory().expect("in-memory store should open");
+    let denied = result_fixture(Uuid::new_v4(), false, Some(1), 100);
+    let io_error = result_fixture(Uuid::new_v4(), false, Some(2), 200);
+    let allowed = result_fixture(Uuid::new_v4(), true, None, 300);
+    for event in [&denied, &io_error, &allowed] {
+        store.insert_event(event).expect("event should persist");
+    }
+
+    let blocked = store
+        .list_events(&SecurityEventFilter {
+            result: Some("blocked".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered query should work");
+    assert_eq!(
+        blocked
+            .items
+            .iter()
+            .map(|item| item.event_id)
+            .collect::<Vec<_>>(),
+        vec![denied.event_id],
+        "a denied file operation must be filterable as blocked"
+    );
+
+    // A genuine I/O failure is not a policy denial and must stay distinct.
+    let failed = store
+        .list_events(&SecurityEventFilter {
+            result: Some("failed".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered query should work");
+    assert_eq!(
+        failed
+            .items
+            .iter()
+            .map(|item| item.event_id)
+            .collect::<Vec<_>>(),
+        vec![io_error.event_id],
+        "an ordinary file error must not masquerade as a policy denial"
+    );
+
+    // The label the API returns is the label the filter matched, so the two
+    // cannot drift apart the way two separate derivations would.
+    assert_eq!(event_result(&denied), "blocked");
+    assert_eq!(event_result(&io_error), "failed");
+    assert_eq!(event_result(&allowed), "allowed");
 }

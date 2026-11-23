@@ -16,11 +16,14 @@
 //! - Model inference time of a step = `end − start`. When `start_timestamp` is
 //!   absent, the previous step's timestamp is used as an approximation —
 //!   unless that previous agent step issued tool calls (and no user step
-//!   intervenes): the interval is then booked as that step's tool window
-//!   instead, so the model/tool split never double-books one gap.
-//! - Tool execution time of a step = next agent step's `start` − this step's
-//!   `end`, valid only when no user step intervenes (a user step means the
-//!   turn ended and the gap is user idle, not tool time).
+//!   intervenes). If all those tool completions are recorded, their latest
+//!   result bounds model inference; otherwise that interval belongs to the
+//!   estimated tool window, avoiding double-booking the same gap.
+//! - A tool's recorded `extra.result_timestamp` bounds its execution window
+//!   from its recorded `extra.start_timestamp`, falling back to the issuing
+//!   step's end. Without a valid result time, use the next
+//!   agent step's `start` (or end), only when no user step intervenes.
+//!   Parallel windows contribute their union to total tool wall time.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -80,6 +83,9 @@ pub struct AtifStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub source: String,
+    /// Historical request context, not a newly executed interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_copied_context: Option<bool>,
     #[serde(
         default,
         deserialize_with = "de_step_message",
@@ -109,6 +115,9 @@ pub struct AtifToolCall {
     pub function_name: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+    /// Producer extensions, including the recorded tool `result_timestamp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Environment feedback after tool calls.
@@ -213,11 +222,12 @@ where
 // ─── Parsing & helpers ───────────────────────────────────────────────────────
 
 impl AtifTrajectory {
-    /// Parse an ATIF JSON document.
+    /// Parse an ATIF JSON document, accepting one leading UTF-8 byte-order mark.
     ///
     /// # Errors
     /// Returns an error when the input is not valid ATIF JSON.
     pub fn from_json(json: &str) -> Result<Self> {
+        let json = json.strip_prefix('\u{feff}').unwrap_or(json);
         serde_json::from_str(json).context("failed to parse ATIF trajectory JSON")
     }
 
@@ -235,6 +245,7 @@ impl AtifTrajectory {
     pub fn origin_ts(&self) -> Option<DateTime<Utc>> {
         self.steps
             .iter()
+            .filter(|step| step.is_copied_context != Some(true))
             .flat_map(|s| [s.start_ts(), s.end_ts()])
             .flatten()
             .min()
@@ -244,19 +255,46 @@ impl AtifTrajectory {
     pub fn last_ts(&self) -> Option<DateTime<Utc>> {
         self.steps
             .iter()
-            .flat_map(|s| [s.start_ts(), s.end_ts()])
-            .flatten()
+            .filter(|step| step.is_copied_context != Some(true))
+            .flat_map(|s| {
+                [s.start_ts(), s.end_ts()].into_iter().flatten().chain(
+                    s.calls()
+                        .iter()
+                        .flat_map(|call| [s.tool_start_ts(call), s.tool_result_ts(call)])
+                        .flatten(),
+                )
+            })
             .max()
     }
 }
 
 impl AtifStep {
-    pub fn is_agent(&self) -> bool {
-        self.source == "agent"
+    /// A grouped rollout step can dispatch its tools at different times.
+    pub(crate) fn tool_start_ts(&self, call: &AtifToolCall) -> Option<DateTime<Utc>> {
+        let step_end = self.end_ts()?;
+        call.extra
+            .as_ref()
+            .and_then(|extra| extra.get("start_timestamp"))
+            .and_then(|value| value.as_str())
+            .and_then(parse_ts)
+            .filter(|start| *start >= step_end)
+            .or(Some(step_end))
     }
 
+    /// A recorded result cannot finish before its issuing agent step.
+    pub(crate) fn tool_result_ts(&self, call: &AtifToolCall) -> Option<DateTime<Utc>> {
+        let timestamp = parse_ts(call.extra.as_ref()?.get("result_timestamp")?.as_str()?)?;
+        (self.is_agent() && timestamp >= self.tool_start_ts(call)?).then_some(timestamp)
+    }
+
+    /// Whether this step records agent execution rather than copied history.
+    pub fn is_agent(&self) -> bool {
+        self.source == "agent" && self.is_copied_context != Some(true)
+    }
+
+    /// Whether this step records user input rather than copied history.
     pub fn is_user(&self) -> bool {
-        self.source == "user"
+        self.source == "user" && self.is_copied_context != Some(true)
     }
 
     pub fn is_system(&self) -> bool {
@@ -396,6 +434,9 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
     let mut out = String::new();
     for step in &traj.steps {
         let ts = step.timestamp.as_deref().unwrap_or("-");
+        if step.is_copied_context == Some(true) {
+            out.push_str("[copied request context; not a new execution]\n");
+        }
         match step.source.as_str() {
             "system" => {
                 let msg = step.message.as_deref().unwrap_or("");
@@ -436,22 +477,22 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
                         call.command_summary(200)
                     ));
                 }
-                for result in step.results() {
-                    let content = result.content.as_deref().unwrap_or("");
-                    let total = content.chars().count();
-                    if total > OBSERVATION_TRIM_CHARS {
-                        out.push_str(&format!(
-                            "  tool_result: {}…[trimmed, {} chars total]\n",
-                            content
-                                .chars()
-                                .take(OBSERVATION_TRIM_CHARS)
-                                .collect::<String>(),
-                            total
-                        ));
-                    } else {
-                        out.push_str(&format!("  tool_result: {content}\n"));
-                    }
-                }
+            }
+        }
+        for result in step.results() {
+            let content = result.content.as_deref().unwrap_or("");
+            let total = content.chars().count();
+            if total > OBSERVATION_TRIM_CHARS {
+                out.push_str(&format!(
+                    "  tool_result: {}…[trimmed, {} chars total]\n",
+                    content
+                        .chars()
+                        .take(OBSERVATION_TRIM_CHARS)
+                        .collect::<String>(),
+                    total
+                ));
+            } else {
+                out.push_str(&format!("  tool_result: {content}\n"));
             }
         }
     }
@@ -635,6 +676,7 @@ mod tests {
     fn tool_call_summaries() {
         let call = AtifToolCall {
             tool_call_id: "c1".into(),
+            extra: None,
             function_name: "Agent".into(),
             arguments: serde_json::json!({"subagent_type": "Explore", "description": "scan"}),
         };
@@ -649,6 +691,7 @@ mod tests {
     fn tool_call_summary_is_json() {
         let call = AtifToolCall {
             tool_call_id: "c2".into(),
+            extra: None,
             function_name: "Grep".into(),
             arguments: serde_json::json!({"regex": "fn main\\(\\)", "path": "/src"}),
         };
@@ -660,6 +703,7 @@ mod tests {
         // Empty object → empty string.
         let call2 = AtifToolCall {
             tool_call_id: "c3".into(),
+            extra: None,
             function_name: "Noop".into(),
             arguments: serde_json::json!({}),
         };

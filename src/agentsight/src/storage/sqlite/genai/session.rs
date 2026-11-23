@@ -363,14 +363,18 @@ impl GenAISqliteStore {
                 Ok(call_id)
             })?;
 
-            for (idx, row) in rows.enumerate() {
+            // Turn numbers count mapped calls, not scanned rows: a skipped
+            // NULL row must not consume a turn.
+            let mut turn = 0usize;
+            for row in rows {
                 let call_id = row?;
                 // A malformed row with a NULL call_id has no key to map, so
                 // skip it instead of failing the turn lookup — same guard as
                 // `get_tool_call_turn_indices` below.
                 let Some(call_id) = call_id else { continue };
+                turn += 1;
                 // 1-based turn index
-                result.insert(call_id, idx + 1);
+                result.insert(call_id, turn);
             }
         }
 
@@ -405,12 +409,13 @@ impl GenAISqliteStore {
                 Ok((call_id, tool_call_ids, start_timestamp_ns))
             })?;
 
-            for (idx, row) in rows.enumerate() {
+            let mut turn = 0usize;
+            for row in rows {
                 let (call_id, tool_call_ids_json, start_timestamp_ns) = row?;
                 // A malformed row with a NULL call_id has no key to map, so
                 // skip it instead of failing every session's turn lookup.
                 let Some(call_id) = call_id else { continue };
-                let turn = idx + 1; // 1-based
+                turn += 1; // 1-based, and only mapped rows advance it
                 let session_id = sid.to_string();
 
                 // Also map the call_id itself (for backward compat with

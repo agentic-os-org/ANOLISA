@@ -30,6 +30,7 @@ Usage (inside _execute_one):
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import httpx
 
@@ -48,8 +49,9 @@ def start_sandbox_container(
 
     Returns a ContainerHandle (from claw_eval.runner.sandbox_runner).
     """
-    import docker
     from claw_eval.runner.sandbox_runner import ContainerHandle
+
+    import docker
 
     client = docker.from_env()
     container = client.containers.run(
@@ -62,28 +64,52 @@ def start_sandbox_container(
         labels={"app": "claw-eval", "role": "agent", "run_id": run_id},
     )
     sandbox_url = f"http://localhost:{host_port}"
-    _wait_healthy(f"{sandbox_url}/health")
-    _probe_exec(sandbox_url)
-    log(f"  [sandbox] container {run_id} ready on :{host_port}")
-    return ContainerHandle(
-        container=container,
-        host_port=host_port,
-        run_id=run_id,
-        sandbox_url=sandbox_url,
-    )
+    try:
+        _wait_healthy(f"{sandbox_url}/health")
+        _probe_exec(sandbox_url)
+        log(f"  [sandbox] container {run_id} ready on :{host_port}")
+        return ContainerHandle(
+            container=container,
+            host_port=host_port,
+            run_id=run_id,
+            sandbox_url=sandbox_url,
+        )
+    except BaseException:
+        # The caller cannot release a container until its handle is returned.
+        try:
+            _release_container(container, run_id)
+        except BaseException as error:
+            log(f"  [WARNING] startup cleanup({run_id}): {error}")
+        raise
+
+
+def _release_container(container: Any, run_id: str) -> None:
+    errors = []
+    removed = False
+    for name, action in (
+        ("stop", lambda: container.stop(timeout=10)),
+        ("remove", lambda: container.remove(force=True)),
+    ):
+        try:
+            action()
+            if name == "remove":
+                removed = True
+        except BaseException as error:
+            errors.append((name, error))
+    for name, error in errors:
+        log(f"  [WARNING] {name}_sandbox_container({run_id}): {error}")
+    if removed:
+        log(f"  [sandbox] container {run_id} removed")
+        # Let the fixed host port be released before another trial binds it.
+        time.sleep(1)
+    for _, error in errors:
+        if not isinstance(error, Exception):
+            raise error
 
 
 def stop_sandbox_container(handle) -> None:
     """Stop and remove container, then wait for port release."""
-    try:
-        handle.container.stop(timeout=10)
-        handle.container.remove(force=True)
-        log(f"  [sandbox] container {handle.run_id} removed")
-        # Grace period: allow kernel to fully release the host port before
-        # a subsequent trial binds a new container to the same port.
-        time.sleep(1)
-    except Exception as exc:
-        log(f"  [WARNING] stop_sandbox_container({handle.run_id}): {exc}")
+    _release_container(handle.container, handle.run_id)
 
 
 def _wait_healthy(url: str, timeout: float = 30.0):
@@ -122,8 +148,10 @@ def _probe_exec(sandbox_url: str, max_attempts: int = 5):
             pass
         if attempt < max_attempts - 1:
             wait = backoff[attempt]
-            log(f"  [sandbox] probe /exec attempt {attempt + 1}/{max_attempts} "
-                f"failed, retrying in {wait}s")
+            log(
+                f"  [sandbox] probe /exec attempt {attempt + 1}/{max_attempts} "
+                f"failed, retrying in {wait}s"
+            )
             time.sleep(wait)
 
     raise TimeoutError(

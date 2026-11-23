@@ -1,8 +1,10 @@
 //! Revisioned authored Policy snapshots retained by Scope and Binding.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::authoring::PolicyTemplate;
+use crate::authoring::{PolicySource, source_serde};
 use crate::error::{Validate, ValidationError};
 use crate::identifiers::{ResourceId, Revision};
 
@@ -17,7 +19,30 @@ pub struct PreparedPolicy {
     /// Immutable revision.
     pub revision: Revision,
     /// Product authoring input.
-    pub template: PolicyTemplate,
+    /// Cedar schema and syntax checks belong to frontend admission/loading.
+    #[serde(with = "source_serde")]
+    pub template: PolicySource,
+    /// Server-resolved pair identities, pinned independently of mutable source files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_bindings: Vec<CredentialBinding>,
+}
+
+/// A validated source rule's server-owned credential association.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialBinding {
+    /// Cedar rule identity within this immutable source.
+    pub rule_id: String,
+    /// Opaque identity of a registered real/fake pair; never a secret or its digest.
+    pub pair_id: String,
+}
+
+impl PreparedPolicy {
+    /// Whether this snapshot requires credential execution and root administration.
+    #[must_use]
+    pub fn uses_credentials(&self) -> bool {
+        !self.credential_bindings.is_empty() || self.template.uses_credentials()
+    }
 }
 
 impl Validate for PreparedPolicy {
@@ -28,7 +53,39 @@ impl Validate for PreparedPolicy {
                 "must contain a visible, control-free value of at most 256 bytes",
             ));
         }
-        self.template.validate().map_err(|error| {
+        if !self.credential_bindings.is_empty() && !matches!(self.template, PolicySource::Cedar(_))
+        {
+            return Err(ValidationError::new(
+                "credentialBindings",
+                "requires Cedar source",
+            ));
+        }
+        if self.credential_bindings.len() > 256 {
+            return Err(ValidationError::new(
+                "credentialBindings",
+                "exceeds 256 rules",
+            ));
+        }
+        let mut rules = BTreeSet::new();
+        for binding in &self.credential_bindings {
+            ResourceId::new(&binding.rule_id).map_err(|_| {
+                ValidationError::new("credentialBindings.ruleId", "invalid rule identity")
+            })?;
+            ResourceId::new(&binding.pair_id).map_err(|_| {
+                ValidationError::new("credentialBindings.pairId", "invalid pair identity")
+            })?;
+            if !rules.insert(&binding.rule_id) {
+                return Err(ValidationError::new(
+                    "credentialBindings",
+                    "duplicate rule identity",
+                ));
+            }
+        }
+        let validation = match &self.template {
+            PolicySource::SecCore(template) => template.validate(),
+            source @ PolicySource::Cedar(_) => source.validate(),
+        };
+        validation.map_err(|error| {
             ValidationError::new(format!("template.{}", error.path), error.message)
         })
     }

@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from test_campaign_evidence import summary, thresholds, write_recovery_artifacts
+from test_campaign_evidence import (
+    aggregate_report,
+    summary,
+    thresholds,
+    write_recovery_artifacts,
+)
 from test_campaign_matrix_evidence import complete_formal_evidence
 
 BENCHMARK = Path(__file__).parents[1]
@@ -107,3 +112,49 @@ def test_recovery_report_cli_preserves_incomplete_evidence(
         assert "baseline recovery rep 1 did not pass" in final["issues"]
         recovery = (tmp_path / "recovery-report.md").read_text()
         assert "INCONCLUSIVE" in recovery and "—" in recovery
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"version": None},
+        {"version": 7},
+        {"label": None},
+        {"repetition": "1"},
+        {"repetition": True},
+        {"version": None, "label": None, "repetition": None},
+    ],
+)
+def test_recovery_report_skips_records_without_identity(
+    tmp_path: Path, record: dict[str, object]
+) -> None:
+    """An ungroupable recovery record must not suppress the rest."""
+    good = {
+        "scenario": "recovery",
+        "version": "baseline",
+        "repetition": 1,
+        "label": "recover",
+        "summary": summary(),
+    }
+    broken = {
+        "scenario": "recovery",
+        "version": "baseline",
+        "repetition": 1,
+        "label": "overload",
+        "summary": summary(),
+    }
+    broken.update(record)
+    path = tmp_path / "run-result.json"
+    path.write_text(json.dumps(good))
+
+    outcomes = aggregate_report.write_recovery(
+        tmp_path,
+        [(path, broken), (path, good)],
+        {"tolerance_ratio": 0.1, "recovery_window_seconds": 2},
+        thresholds(),
+    )
+
+    assert list(outcomes) == [("baseline", 1)]
+    report = (tmp_path / "recovery-report.md").read_text()
+    assert report.count("| baseline/1 |") == 1
+    assert "None" not in report

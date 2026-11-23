@@ -1,0 +1,54 @@
+{
+  "name": "@anolisa/aw-sdk",
+  "version": "0.2.0",
+  "description": "Application-owned AW Service client with explicit native fallback",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "linux"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/client.mjs",
+      "default": "./dist/client.mjs"
+    },
+    "./sources": {
+      "types": "./dist/sources.d.ts",
+      "import": "./dist/sources.mjs",
+      "default": "./dist/sources.mjs"
+    },
+    "./configuration": {
+      "types": "./dist/configuration.d.ts",
+      "import": "./dist/configuration.mjs",
+      "default": "./dist/configuration.mjs"
+    },
+    "./task-scope": {
+      "types": "./dist/task-scope.d.ts",
+      "import": "./dist/task-scope.mjs",
+      "default": "./dist/task-scope.mjs"
+    },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "import": "./dist/pi.mjs",
+      "default": "./dist/pi.mjs"
+    },
+    "./qoder": {
+      "types": "./dist/qoder.d.ts",
+      "import": "./dist/qoder.mjs",
+      "default": "./dist/qoder.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "examples"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

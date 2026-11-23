@@ -24,7 +24,7 @@ pub struct PreferenceEventRow {
     pub id: i64,
     pub session_id: Option<String>,
     /// Per-turn identity: the genai `conversation_id` (a user-query
-    /// fingerprint) or the trajectory session id. Cross-turn rules group by
+    /// fingerprint) or the trajectory's session-and-step id. Cross-turn rules group by
     /// `session_id`; this is the fallback for rows that have none.
     pub conversation_id: Option<String>,
     /// Per-turn timestamp in epoch nanoseconds. `None` when the source has
@@ -174,8 +174,9 @@ fn detect_rapid_followups(rows: &[PreferenceEventRow], out: &mut Vec<PreferenceS
     // per-query fingerprint (`genai::id_resolver` keys it on the last user
     // message), so one bucket can only ever contain a single query and the
     // rule could never fire on the primary Linux source. The session id spans
-    // the turns being compared; the trajectory source already uses it as its
-    // conversation key. Rows without a session fall back to the old key.
+    // the turns being compared, including trajectory rows whose conversation
+    // key identifies one step. Rows without a session fall back to the
+    // conversation key.
     let mut by_session: BTreeMap<&str, Vec<(&PreferenceEventRow, &str, i64)>> = BTreeMap::new();
     for row in rows {
         let Some(conversation_id) = row.session_id.as_deref().or(row.conversation_id.as_deref())

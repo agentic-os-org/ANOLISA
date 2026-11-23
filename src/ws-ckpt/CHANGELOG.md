@@ -2,6 +2,78 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.7.3
+
+### Added
+- Added `ws-ckpt rollback --json` for machine-readable rollback and preview results, and `ws-ckpt rollback --guarded --json` for the guarded protocol: compatibility checks, exact preview, confirmed execution and durable result lookup; guarded result lookup also accepts valid legacy snapshot IDs (#10233)
+- Added `ws-ckpt diff --format json` returning file-level changes and elapsed seconds; omit `--to` to compare against the current workspace (#9368)
+
+### Fixed
+- Escaped control characters and backslashes in `ws-ckpt list` table fields, `ws-ckpt status` workspace rows and command receipts so each entry stays on one line; JSON output keeps the original values (#9987)
+- Rejected snapshot IDs containing control characters at `ws-ckpt checkpoint` creation before any workspace mutation; historical IDs remain usable through diff, rollback preview, rollback and delete (#9987)
+
+## 0.7.2
+
+### Changed
+- Recursive watching no longer follows directory symlinks inside a workspace; writes under a symlink target are detected only by a workspace registered on that target directory (#9988)
+
+### Fixed
+- Fixed rollback leaking one inotify watch per watched directory; rollback now releases the retired tree's watches before swapping and fails before the swap if they cannot be detached (#9988, #9986)
+
+## 0.7.1
+
+### Changed
+- Documentation: Documented that switching `btrfs-base.btrfs_mount` back to a previous root does not recover pruned snapshot records; subvolumes still on that root are re-adopted as pinned recovered orphans to review with `list --orphans` and delete explicitly (#9856, #9784)
+- Documentation: Updated the RPM packaging guide for split-package ownership and `/usr/bin` executables, distinguishing RPM installation from the default `/usr/local/bin` source-install layout (#9863)
+
+### Fixed
+- Fixed OpenClaw cron snapshots to use the installed `ws-ckpt` executable discovered from the plugin's PATH, including RPM's `/usr/bin/ws-ckpt`, instead of hardcoded `/usr/local/bin/ws-ckpt`; launcher symlinks remain stable across upgrades (#9892)
+- Fixed Hermes plugin initialization with non-mapping `plugins.ws-ckpt` sections; invalid sections now fall back to defaults and environment overrides (#9770)
+- Scoped Hermes rollback auto-checkpoint suppression to the originating session; hosts without session identity no longer arm suppression (#9860)
+- Rejected blank or null Hermes rollback `preview` values and non-boolean OpenClaw `preview` values before executing rollback (#9796)
+- Rejected fractional, boolean and string rollback depths in both plugins; positive integer-valued JSON numbers remain accepted (#9792)
+- Removed Hermes `tests/` and `.coverage` from `make install` and `make install-plugins` outputs (#9838)
+- Fixed overlapping writers being reported as quiet when one file closes; required a fresh 200 ms quiet interval after observed activity or watcher re-arming (#9756)
+- Rejected quiet-window observations affected by recursive watcher registration instead of treating delayed file events as silence (#8494)
+- Preserved Hermes checkpoint message truncation markers within the existing 80-character limit (#9595)
+
+## 0.7.0
+
+### Added
+- Added `limit` and `cursor` pagination to Hermes `ws-ckpt-list` (#8874)
+- Added cached health advisory sampling; `health-check-interval=0` disables periodic diagnostics but retains advisory sampling; warnings are omitted when samples are incomplete or stale (#8774)
+- Added skill-only per-turn snapshots, cron schedules and retention management without host plugins; orchestration is model-driven, not a guaranteed lifecycle hook (#9465)
+
+### Changed
+- **BREAKING** Changed `make install` to install prebuilt files without building or activation; added selective `install-core`, `install-plugins` and `install-skills` targets (#9222)
+- **BREAKING** Defaulted `make install` to `AWPRJ=anolisa`; use `AWPRJ=` for the independent layout (#9462)
+- Moved RPM executables from `/usr/local/bin` to `/usr/bin` (#9222)
+- Removed ANOLISA discovery contracts from standalone packages; new raw packages require ANOLISA ≥ 0.3.21 (#9222, #9351)
+- Improved cursor paging performance on long snapshot histories (#8881)
+
+### Fixed
+- Shared one inotify instance across workspaces; exposed missing watcher coverage and queue overflows in ws-ckpt and cosh checkpoint status (#7592)
+- Preserved service enablement and activity when rolling back to the legacy unsplit RPM (#9472)
+- Rejected unsafe snapshot IDs at the legacy IPC boundary (#7593)
+- Detached idle loop associations before remount, with bounded retries for transient device holders (#9385, #9471)
+- Enforced a 5 GiB minimum for btrfs-loop `img_size`; invalid configuration now fails startup instead of falling back to defaults; repair legacy values with `ws-ckpt config -g --img-size <GiB>` (#9400)
+- Fixed out-of-range `auto_cleanup_keep` ages stopping periodic cleanup; such retentions now keep all snapshots (#9399)
+- Honored `btrfs-base.btrfs_mount` and reused persisted native storage roots across restarts; mount changes require restart without data migration (#8943)
+- Correctly parsed stringified Hermes rollback `preview`, preventing unintended rollback (#9527)
+- Scoped rollback auto-checkpoint suppression to the target workspace and session (#8866)
+- Bounded Hermes plugin activation and deactivation commands; failures or timeouts no longer block local installation or cleanup (#8998)
+- Persisted Hermes workspace and cron configuration before activation (#3618)
+- Resolved symlinked workspace paths in OpenClaw cwd checks (#4768)
+- Corrected the skill's rollback parent-chain guidance: `-n 1` selects HEAD and `-n 2` its parent; undoing a completed turn selects that turn snapshot's parent (#9465)
+- Corrected ws-ckpt IPC enum indices, payload fields and client-mirror compatibility in the cosh-ng reference; wire encoding is unchanged (#9466)
+
+## [0.6.1] - Unreleased
+
+### Changed
+
+- Install the runtime, host integrations and skill through separate RPMs.
+- Place the skill and host plugins in the shared ANOLISA resource directories.
+
 ## 0.6.0
 
 ### Added

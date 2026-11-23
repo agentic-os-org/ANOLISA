@@ -2,6 +2,168 @@ use super::*;
 #[cfg(target_os = "linux")]
 use nix::libc;
 
+#[cfg(target_os = "linux")]
+fn native_ps2_agent_text_stays_bash_owned(kind: &str) {
+    use super::support::terminal_screen::TerminalSession;
+    let mut session = TerminalSession::spawn_with_startup(
+        "bash", "enhanced", 100,
+        &[(".bashrc", "PS1='\\[\\e[32m\\]screen$ \\[\\e[0m\\]'\nPS2='native-cont> '\nbind '\"\\C-x\\C-a\": accept-line'\n")],
+    );
+    let result = session.home().join("consumer-result");
+    let before = session.home().join("bash-before");
+    let after = session.home().join("bash-after");
+    let fresh = session.home().join("fresh-effect");
+    session.send(b"printf '%s' \"$$\" > \"$HOME/bash-before\"; pwd > \"$HOME/cwd-before\"; printf '%s' \"$PS1\" > \"$HOME/ps1-before\"\n");
+    session.wait_screen("Bash identity before continuation", |screen| {
+        before.exists() && screen.contents().ends_with("screen$ ")
+    });
+    let opener: &[u8] = if kind == "custom-accept-paste" {
+        b"printf '%s\\n' > \"$HOME/consumer-result\" '\x18\x01"
+    } else if kind == "heredoc" {
+        b"cat > \"$HOME/consumer-result\" <<'NATIVE_END'\n"
+    } else {
+        b"printf '%s\\n' > \"$HOME/consumer-result\" '\n"
+    };
+    session.send(opener);
+    session.wait_screen("original Bash PS2 before marker", |screen| {
+        screen.contents().ends_with("native-cont> ")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 13
+    });
+    if kind == "slash-edit" {
+        session.send(b"/");
+        session.wait_screen("Slash draft before native edit", |screen| {
+            screen.contents().contains("native-cont> /") && !screen.hide_cursor()
+        });
+        session.send(b"\x7f?? native ps2'\n");
+    } else if kind == "custom-accept-paste" {
+        session.send(b"\x1b[200~?? native ps2'\x1b[201~\n");
+    } else if kind == "heredoc" {
+        session.send(b"?? native ps2\nNATIVE_END\n");
+    } else {
+        session.send(b"?? native ps2'\n");
+    }
+    let expected: &[u8] = if kind == "heredoc" {
+        b"?? native ps2\n"
+    } else {
+        b"\n?? native ps2\n"
+    };
+    session.wait_screen("native consumer and PS1 before fresh input", |screen| {
+        screen.contents().contains("Thinking...")
+            || screen.contents().contains("Agent ")
+            || (fs::read(&result).is_ok_and(|bytes| bytes == expected)
+                && screen.contents().ends_with("screen$ ")
+                && !screen.hide_cursor()
+                && screen.cursor_position().1 == 8)
+    });
+    let raw = session.raw_output();
+    assert!(
+        !raw.contains("Thinking...") && !raw.contains("Agent "),
+        "{kind}: {raw:?}"
+    );
+    assert_eq!(
+        fs::read(&result).ok().as_deref(),
+        Some(expected),
+        "{kind}: native consumer: {raw:?}"
+    );
+    assert!(raw.contains("\x1b[32m"), "original green PS1: {raw:?}");
+    let row = session.screen().cursor_position().0;
+    assert!(
+        (0..8).all(
+            |column| session.screen().cell(row, column).unwrap().fgcolor() == vt100::Color::Idx(2)
+        ),
+        "original PS1 cells remain green: {raw:?}"
+    );
+    assert_eq!(
+        fs::read(session.home().join("ps1-before")).unwrap(),
+        b"\\[\\e[32m\\]screen$ \\[\\e[0m\\]"
+    );
+    assert!(!fresh.exists(), "fresh input must not precede native PS1");
+    session.send(b"pX\x7f");
+    session.wait_screen("original prompt cursor edits first fresh input", |screen| {
+        screen.contents().ends_with("screen$ p")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 9
+    });
+    session.send(b"rintf 'fresh-once\\n' >> \"$HOME/fresh-effect\"; printf '%s' \"$$\" > \"$HOME/bash-after\"; pwd > \"$HOME/cwd-after\"; printf '%s' \"$PS1\" > \"$HOME/ps1-after\"\n");
+    session.wait_screen("first fresh input completes once", |screen| {
+        after.exists()
+            && fresh.exists()
+            && screen.contents().ends_with("screen$ ")
+            && !screen.hide_cursor()
+            && screen.cursor_position().1 == 8
+    });
+    assert_eq!(fs::read(&fresh).unwrap(), b"fresh-once\n");
+    assert_eq!(
+        fs::read(session.home().join("ps1-before")).unwrap(),
+        fs::read(session.home().join("ps1-after")).unwrap()
+    );
+    let row = session.screen().cursor_position().0;
+    assert!(
+        (0..8).all(
+            |column| session.screen().cell(row, column).unwrap().fgcolor() == vt100::Color::Idx(2)
+        ),
+        "PS1 remains green after first fresh input"
+    );
+    assert_eq!(
+        fs::read(&before).unwrap(),
+        fs::read(&after).unwrap(),
+        "same original Bash"
+    );
+    assert_eq!(
+        fs::read(session.home().join("cwd-before")).unwrap(),
+        fs::read(session.home().join("cwd-after")).unwrap()
+    );
+    eprintln!(
+        "{kind}: original Bash PS2/PS1 and fresh-once: {:?}",
+        session.raw_output()
+    );
+    if kind == "custom-accept-paste" {
+        session.send(b"?? primary-after-native-control\n");
+        session.wait_screen("fresh primary marker restores Agent routing", |screen| {
+            screen.contents().contains("Agent ") && screen.contents().ends_with("screen$ ")
+        });
+    }
+    session.finish();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_quoted_ps2_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("quote");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_heredoc_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("heredoc");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_ps2_slash_edited_to_agent_marker_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("slash-edit");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_custom_accept_line_ps2_paste_stays_native() {
+    native_ps2_agent_text_stays_bash_owned("custom-accept-paste");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_primary_prompt_still_accepts_explicit_agent_marker() {
+    use super::support::terminal_screen::TerminalSession;
+    let mut session = TerminalSession::spawn("enhanced", 100);
+    session.send(b"?? primary-agent-control\n");
+    session.wait_screen("primary prompt selects Agent", |screen| {
+        screen.contents().contains("Agent ") && screen.contents().ends_with("screen$ ")
+    });
+    eprintln!("primary Agent control: {:?}", session.raw_output());
+    session.finish();
+}
+
 #[test]
 fn raw_cli_isolated_candidate_redraws_add_no_status_lines() {
     let prompt = "isolated-owner$ ";
@@ -161,6 +323,481 @@ fn raw_cli_login_probe_preserves_login_argv0() {
         logout_events, "session\n",
         "capability discovery must not run the real session's logout hook"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_r2_login_sources_profile_once_with_path_bootstrap() {
+    for bootstrap_path in ["0", "1"] {
+        let home = temp_shell_home(&format!("r2-profile-count-{bootstrap_path}"));
+        let profile_hits = home.join("profile-hits");
+        fs::write(
+            home.join(".bash_profile"),
+            "printf 'profile-hit\\n' >> \"$HOME/profile-hits\"\nPS1='r2-profile-count$ '\n",
+        )
+        .expect("write login profile");
+        let home_str = home.display().to_string();
+
+        let output = run_raw_cli_with_args_and_env(
+            "fake",
+            &["--shell", "bash", "--login"],
+            "exit\n",
+            &[
+                ("HOME", &home_str),
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_ISOLATED", "0"),
+                ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+                ("COSH_SHELL_BOOTSTRAP_PATH", bootstrap_path),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ],
+        );
+        let profile_hit_count = fs::read_to_string(&profile_hits)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        let _ = fs::remove_dir_all(&home);
+
+        assert_eq!(
+            profile_hit_count, 1,
+            "a login profile with side effects must run exactly once (bootstrap={bootstrap_path}): {output}"
+        );
+    }
+}
+
+/// Core stand-in reached only through the managed shell's PATH. It records
+/// the PATH it was started with and how its own children resolve a tool.
+#[cfg(target_os = "linux")]
+const STARTUP_PATH_CORE: &str = r#"#!/bin/sh
+if [ "$1" = "--registry" ]; then
+  read -r request
+  printf '%s|%s\n' "$PATH" "$request" >> "$HOME/registry-calls"
+  case "$request" in
+    *'"action":"state"'*)
+      printf '%s\n' "$PATH" > "$HOME/auth-core-path"
+      printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"effective_auth_required":false}}'
+      ;;
+    *)
+      printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"configured":true}}'
+      ;;
+  esac
+  exit 0
+fi
+printf '%s\n' "$PATH" > "$HOME/core-path"
+command -v cosh-li-profile-tool > "$HOME/core-child" 2>/dev/null || :
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"startup-path","model":"mock","tools":[]}'
+read -r line
+printf '%s\n' '{"type":"assistant","session_id":"startup-path","message":{"content":[{"type":"text","text":"STARTUP_PATH_CORE_DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"startup-path","is_error":false,"result":"done"}'
+"#;
+
+#[cfg(target_os = "linux")]
+struct StartupPathFixture {
+    home: std::path::PathBuf,
+    profile_bin: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl StartupPathFixture {
+    /// `profile_tail` runs after the login profile prepends `$HOME/profile-bin`.
+    fn new(label: &str, profile_tail: &str) -> Self {
+        let home = temp_shell_home(label);
+        let profile_bin = home.join("profile-bin");
+        fs::create_dir_all(&profile_bin).expect("create profile-only bin");
+        write_executable(&profile_bin.join("cosh-li-core"), STARTUP_PATH_CORE);
+        write_executable(&profile_bin.join("cosh-li-profile-tool"), "#!/bin/sh\n");
+        fs::write(
+            home.join(".bash_profile"),
+            format!(
+                "printf 'profile-hit\\n' >> \"$HOME/profile-hits\"\n\
+                 export PATH=\"$HOME/profile-bin:$PATH\"\n\
+                 PS1='startup-path$ '\n{profile_tail}"
+            ),
+        )
+        .expect("write login profile");
+        Self { home, profile_bin }
+    }
+
+    fn run(&self, steps: &[(&str, &[u8])]) -> String {
+        self.run_with_env(&[], steps)
+    }
+
+    fn run_with_env(&self, extra_env: &[(&str, &str)], steps: &[(&str, &[u8])]) -> String {
+        let home = self.home.display().to_string();
+        let mut env = vec![
+            ("HOME", home.as_str()),
+            ("COSH_CORE_PATH", "cosh-li-core"),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ];
+        env.extend_from_slice(extra_env);
+        run_raw_cli_with_args_env_current_dir_and_marker_input(
+            "cosh-core",
+            &["--shell", "bash", "--login"],
+            &env,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            steps,
+        )
+    }
+
+    fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.home.join(name)).unwrap_or_default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for StartupPathFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.home);
+    }
+}
+
+#[cfg(target_os = "linux")]
+const STARTUP_PATH_AGENT_REQUEST: &[u8] = "解释一下 ls -la \"当前目录 (preview)\"\n".as_bytes();
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_first_agent_request_finds_core_and_tools_through_profile_path() {
+    let fixture = StartupPathFixture::new("startup-path-profile-provider", "");
+
+    let output = fixture.run(&[
+        ("startup-path$ ", STARTUP_PATH_AGENT_REQUEST),
+        ("STARTUP_PATH_CORE_DONE", b"exit\n"),
+    ]);
+
+    let core_path = fixture.read("core-path");
+    assert!(
+        core_path.starts_with(&format!("{}:", fixture.profile_bin.display())),
+        "Core must start with the managed shell's PATH: {core_path:?}\n{output}"
+    );
+    assert_eq!(
+        fixture.read("core-child").trim_end(),
+        fixture
+            .profile_bin
+            .join("cosh-li-profile-tool")
+            .display()
+            .to_string(),
+        "Core children must resolve tools through the same PATH: {output}"
+    );
+    assert_eq!(fixture.read("profile-hits").lines().count(), 1, "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_audit_commands_use_the_login_profile_path_once() {
+    let fixture = StartupPathFixture::new("startup-path-audit", "");
+    write_executable(
+        &fixture.profile_bin.join("cosh-cli"),
+        r#"#!/bin/sh
+printf '%s\n' "$PATH" >> "$HOME/audit-paths"
+printf '%s\n' "$*" >> "$HOME/audit-calls"
+printf '%s' '{"ok":true,"data":{"audit_path_fixture":"profile-only"}}'
+"#,
+    );
+    let output = fixture.run_with_env(
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("COSH_CLI_BIN", RAW_CLI_UNSET_ENV),
+        ],
+        &[
+            ("startup-path$ ", b"/audit status\n"),
+            ("startup-path$ ", b"/audit trace current\n"),
+            (
+                "startup-path$ ",
+                b"/audit export current /tmp/audit profile path\n",
+            ),
+            ("startup-path$ ", b"exit\n"),
+        ],
+    );
+    let calls = fixture.read("audit-calls");
+    let calls = calls.lines().collect::<Vec<_>>();
+    assert_eq!(
+        calls.len(),
+        3,
+        "all audit entrances must run: {calls:?}\n{output}"
+    );
+    assert_eq!(calls[0], "audit status", "{output}");
+    assert!(calls[1].starts_with("audit trace "), "{calls:?}\n{output}");
+    assert!(
+        calls[2].starts_with("audit export --output /tmp/audit profile path --identity "),
+        "{calls:?}\n{output}"
+    );
+    let paths = fixture.read("audit-paths");
+    assert_eq!(paths.lines().count(), 3, "{output}");
+    for path in paths.lines() {
+        assert!(
+            path.starts_with(&format!("{}:", fixture.profile_bin.display())),
+            "audit must inherit the managed login PATH: {path:?}\n{output}"
+        );
+    }
+    assert_eq!(fixture.read("profile-hits").lines().count(), 1, "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_disabled_startup_path_keeps_the_inherited_provider_path() {
+    let fixture = StartupPathFixture::new("startup-path-disabled", "");
+    let inherited_bin = fixture.home.join("inherited-bin");
+    fs::create_dir_all(&inherited_bin).expect("create inherited bin");
+    fs::rename(
+        fixture.profile_bin.join("cosh-li-core"),
+        inherited_bin.join("cosh-li-core"),
+    )
+    .expect("move Core to inherited PATH");
+    let inherited_path = format!("{}:/usr/bin:/bin", inherited_bin.display());
+
+    let output = fixture.run_with_env(
+        &[
+            ("PATH", inherited_path.as_str()),
+            ("COSH_SHELL_BOOTSTRAP_PATH", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        &[
+            (
+                "startup-path$ ",
+                b"for ((i=0; i<100; i++)); do [ -s \"$HOME/registry-calls\" ] && break; sleep 0.01; done; printf '__BOOTSTRAP_DISABLED_%s__\\n' READY\n",
+            ),
+            ("__BOOTSTRAP_DISABLED_READY__", STARTUP_PATH_AGENT_REQUEST),
+            ("STARTUP_PATH_CORE_DONE", b"exit\n"),
+        ],
+    );
+
+    let core_path = fixture.read("core-path");
+    let registry_calls = fixture.read("registry-calls");
+    assert!(
+        core_path.starts_with(&inherited_path)
+            && registry_calls.starts_with(&inherited_path)
+            && !core_path.contains("profile-bin")
+            && !registry_calls.contains("profile-bin"),
+        "disabled PATH bootstrap must leave auth and providers on inherited PATH: {registry_calls:?} {core_path:?}\n{output}"
+    );
+    assert!(fixture.read("core-child").trim().is_empty(), "{output}");
+    assert_eq!(fixture.read("profile-hits").lines().count(), 1, "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_identity_fallback_reports_its_profile_path_once() {
+    let fixture = StartupPathFixture::new("startup-path-identity-fallback", "");
+
+    let output = fixture.run_with_env(
+        &[("COSH_SHELL_LOGIN_IDENTITY", "0")],
+        &[
+            ("startup-path$ ", STARTUP_PATH_AGENT_REQUEST),
+            ("STARTUP_PATH_CORE_DONE", b"exit\n"),
+        ],
+    );
+
+    assert!(
+        fixture
+            .read("core-path")
+            .starts_with(&format!("{}:", fixture.profile_bin.display())),
+        "the marker fallback must report the profile PATH: {output}"
+    );
+    assert_eq!(fixture.read("profile-hits").lines().count(), 1, "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_forged_or_late_startup_path_reports_cannot_redirect_providers() {
+    let fixture = StartupPathFixture::new(
+        "startup-path-forged",
+        "printf '\\033]1337;COSH;{\"event\":\"startup_environment\",\"token\":\"forged\",\
+         \"session_id\":\"%s\",\"path\":\"%s\"}\\a' \"$COSH_SESSION_ID\" \"$HOME/evil-bin\"\n\
+         printf '\\033]1337;COSH;{\"event\":\"startup_environment\",\"token\":\"%s\",\
+         \"path\":\"%s\"}\\a' \"$_COSH_MARKER_TOKEN\" \"$HOME/evil-bin\"\n",
+    );
+    let evil_bin = fixture.home.join("evil-bin");
+    fs::create_dir_all(&evil_bin).expect("create untrusted bin");
+    write_executable(
+        &evil_bin.join("cosh-li-core"),
+        "#!/bin/sh\nprintf hit > \"$HOME/evil-hit\"\nexit 1\n",
+    );
+    write_executable(&evil_bin.join("cosh-li-profile-tool"), "#!/bin/sh\n");
+    let late_report = "printf '\\033]1337;COSH;{\"event\":\"startup_environment\",\
+        \"token\":\"%s\",\"session_id\":\"%s\",\"path\":\"%s\"}\\a' \
+        \"$_COSH_MARKER_TOKEN\" \"$COSH_SESSION_ID\" \"$HOME/evil-bin\"; \
+        printf '__LATE_%s__\\n' REPORTED\n";
+
+    let output = fixture.run(&[
+        ("startup-path$ ", late_report.as_bytes()),
+        ("__LATE_REPORTED__", STARTUP_PATH_AGENT_REQUEST),
+        ("STARTUP_PATH_CORE_DONE", b"exit\n"),
+    ]);
+
+    let core_path = fixture.read("core-path");
+    assert!(
+        !fixture.home.join("evil-hit").exists() && !core_path.contains("evil-bin"),
+        "untrusted startup reports must not redirect providers: {core_path:?}\n{output}"
+    );
+    assert_eq!(
+        fixture.read("core-child").trim_end(),
+        fixture
+            .profile_bin
+            .join("cosh-li-profile-tool")
+            .display()
+            .to_string(),
+        "{output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_oversized_startup_path_keeps_inherited_provider_path() {
+    let fixture = StartupPathFixture::new(
+        "startup-path-oversized",
+        &format!("export PATH=\"$PATH:{}\"\n", "/x".repeat(4200)),
+    );
+
+    let output = fixture.run(&[
+        ("startup-path$ ", STARTUP_PATH_AGENT_REQUEST),
+        ("failed to run cosh-core", b"exit\n"),
+    ]);
+
+    assert!(fixture.read("core-path").is_empty(), "{output}");
+    assert_eq!(
+        fixture.read("profile-hits").lines().count(),
+        1,
+        "a rejected startup report must not replay the profile: {output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_path_includes_the_first_user_prompt_hook() {
+    let fixture = StartupPathFixture::new(
+        "startup-path-prompt-hook",
+        "PROMPT_COMMAND='export PATH=\"$HOME/prompt-bin:$PATH\"'\n",
+    );
+    let prompt_bin = fixture.home.join("prompt-bin");
+    fs::create_dir_all(&prompt_bin).expect("create prompt-hook bin");
+    fs::rename(
+        fixture.profile_bin.join("cosh-li-core"),
+        prompt_bin.join("cosh-li-core"),
+    )
+    .expect("move Core to prompt-hook PATH");
+    fs::rename(
+        fixture.profile_bin.join("cosh-li-profile-tool"),
+        prompt_bin.join("cosh-li-profile-tool"),
+    )
+    .expect("move child tool to prompt-hook PATH");
+
+    let output = fixture.run(&[
+        ("startup-path$ ", STARTUP_PATH_AGENT_REQUEST),
+        ("STARTUP_PATH_CORE_DONE", b"exit\n"),
+    ]);
+
+    assert!(
+        fixture
+            .read("core-path")
+            .starts_with(&format!("{}:", prompt_bin.display())),
+        "the first prompt hook must finish before PATH is frozen: {output}"
+    );
+    assert_eq!(
+        fixture.read("core-child").trim_end(),
+        prompt_bin
+            .join("cosh-li-profile-tool")
+            .display()
+            .to_string(),
+        "{output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_startup_auth_probe_waits_for_the_managed_shell_path() {
+    let fixture = StartupPathFixture::new("startup-path-auth-probe", "");
+    let home = fixture.home.display().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "cosh-core",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", home.as_str()),
+            ("COSH_CORE_PATH", "cosh-li-core"),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            (
+                "startup-path$ ",
+                b"for ((i=0; i<100; i++)); do [ -s \"$HOME/auth-core-path\" ] && break; sleep 0.01; done; printf '__AUTH_PROBE_%s__\\n' READY\n",
+            ),
+            ("__AUTH_PROBE_READY__", b"exit\n"),
+        ],
+    );
+
+    let calls = fixture.read("registry-calls");
+    assert!(
+        calls.starts_with(&format!("{}:", fixture.profile_bin.display()))
+            && calls.contains("\"action\":\"state\"")
+            && calls.contains("\"domain\":\"auth\""),
+        "startup auth must use the managed shell's PATH: {calls:?}\n{output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_rejected_startup_path_runs_auth_probe_with_inherited_path() {
+    let fixture = StartupPathFixture::new(
+        "startup-path-auth-fallback",
+        &format!("export PATH=\"$PATH:{}\"\n", "/x".repeat(4200)),
+    );
+    let inherited_bin = fixture.home.join("inherited-bin");
+    fs::create_dir_all(&inherited_bin).expect("create inherited bin");
+    fs::rename(
+        fixture.profile_bin.join("cosh-li-core"),
+        inherited_bin.join("cosh-li-core"),
+    )
+    .expect("move Core to inherited PATH");
+    let home = fixture.home.display().to_string();
+    let inherited_path = format!("{}:/usr/bin:/bin", inherited_bin.display());
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "cosh-core",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", home.as_str()),
+            ("PATH", inherited_path.as_str()),
+            ("COSH_CORE_PATH", "cosh-li-core"),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            (
+                "startup-path$ ",
+                b"for ((i=0; i<100; i++)); do [ -s \"$HOME/registry-calls\" ] && break; sleep 0.01; done; printf '__AUTH_FALLBACK_%s__\\n' READY\n",
+            ),
+            ("__AUTH_FALLBACK_READY__", b"exit\n"),
+        ],
+    );
+
+    let calls = fixture.read("registry-calls");
+    assert!(
+        calls.starts_with(&format!("{}:", inherited_bin.display()))
+            && calls.contains("\"action\":\"state\""),
+        "a rejected report must leave startup auth on inherited PATH: {calls:?}\n{output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_unset_path_during_profile_reaches_the_first_prompt() {
+    let fixture = StartupPathFixture::new("startup-path-unset", "set -u\nunset PATH\n");
+
+    let output = fixture.run(&[("startup-path$ ", b"exit\n")]);
+
+    assert_eq!(fixture.read("profile-hits").lines().count(), 1, "{output}");
 }
 
 #[cfg(target_os = "linux")]
@@ -877,4 +1514,11 @@ fn raw_cli_zsh_native_path_slash_and_tab_stay_in_shell() {
     assert!(!output.contains("Slash commands"), "{output}");
     assert!(!output.contains("User mode"), "{output}");
     assert!(!output.contains("/mode [recommend|agent]"), "{output}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn raw_cli_bash_explicit_exit_42_preserves_status() {
+    let session = super::support::terminal_screen::TerminalSession::spawn("enhanced", 100);
+    session.finish_with_input(b"exit 42\n", 42);
 }

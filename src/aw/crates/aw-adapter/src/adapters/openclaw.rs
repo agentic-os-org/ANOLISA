@@ -1,4 +1,4 @@
-//! OpenClaw 2026.9.6 Gateway plugin registration with persistent native state.
+//! OpenClaw Gateway plugin registration with persistent native state.
 
 use super::super::{
     adapter::{
@@ -7,13 +7,13 @@ use super::super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use super::openclaw_bundle::verified_bundle;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     os::{
         fd::AsRawFd,
@@ -23,14 +23,25 @@ use std::{
     time::Duration,
 };
 
-const VERSION: &str = "2026.9.6";
 const PLUGIN: &str = "aw-native-hooks";
 const MAX_BUDGET_MS: u64 = 12000;
+
+/// Match the pinned runtime's completion names without replacing native identity.
+pub(crate) fn policy_name(name: &str) -> String {
+    match name.trim().to_lowercase().as_str() {
+        "bash" => "exec".into(),
+        "apply-patch" => "apply_patch".into(),
+        "cron" => "automations".into(),
+        other => other.to_owned(),
+    }
+}
 
 pub(crate) struct OpenClaw;
 
 struct Prepared {
     input: LaunchInput,
+    version: String,
+    bundle_verified: bool,
     settings: Value,
     profile: PathBuf,
     _lock: File,
@@ -81,11 +92,16 @@ impl Adapter for OpenClaw {
         check_settings(&settings)?;
         let (profile, lock) = lock_profile(Path::new(state_path))?;
         let version = adapter::Probe(cancelled).version_output(&input.command, &version_args)?;
-        if version.split_whitespace().take(2).collect::<Vec<_>>() != ["OpenClaw", VERSION] {
-            return Err(format!("OpenClaw {VERSION} is required by this adapter").into());
-        }
+        let version = version
+            .strip_prefix("OpenClaw ")
+            .and_then(|value| value.split_whitespace().next())
+            .ok_or("OpenClaw --version must identify OpenClaw and its version")?;
+        let version = crate::version::reported(version, "OpenClaw")?;
+        let bundle_verified = verified_bundle(&input.command, &version);
         Ok(Box::new(Prepared {
             input,
+            version,
+            bundle_verified,
             settings,
             profile,
             _lock: lock,
@@ -93,9 +109,21 @@ impl Adapter for OpenClaw {
     }
 
     fn normalize(&self, binding: &NativeContext, name: &str, native: &Value) -> Result<Value> {
+        if crate::callback::lifecycle(name) {
+            let hook = match name {
+                "session.start" => "session_start",
+                "turn.stop" => "before_agent_finalize",
+                _ => "session_end",
+            };
+            if native["hook"] != hook {
+                return Err("OpenClaw lifecycle Hook differs from its route".into());
+            }
+            return super::lifecycle::normalize(binding, "openclaw", name, native);
+        }
         let hook = match name {
             "tool.before" => "before_tool_call",
             "tool.after" => "after_tool_call",
+            "security.violation" => "final_tool_result",
             _ => return Err("unsupported OpenClaw tool event".into()),
         };
         if native["hook"] != hook {
@@ -107,18 +135,20 @@ impl Adapter for OpenClaw {
         let context = native["context"]
             .as_object()
             .ok_or("missing OpenClaw context")?;
-        let tool = identifier(event.get("toolName"), "toolName")?;
+        if name == "security.violation"
+            && (!event.get("result").is_some_and(Value::is_object)
+                || !event["result"]["content"].is_array()
+                || !event["result"]["isError"].is_boolean())
+        {
+            return Err("OpenClaw final tool result must contain content and error status".into());
+        }
+        let native_tool = identifier(event.get("toolName"), "toolName")?;
         // Native completion uses policy names; middleware retains the tool's name.
         // Match the pinned runtime's three aliases without changing before input.
-        let tool = if name == "tool.after" {
-            match tool.trim().to_lowercase().as_str() {
-                "bash" => "exec".to_owned(),
-                "apply-patch" => "apply_patch".to_owned(),
-                "cron" => "automations".to_owned(),
-                _ => tool.trim().to_lowercase(),
-            }
+        let tool = if name != "tool.before" {
+            policy_name(native_tool)
         } else {
-            tool.to_owned()
+            native_tool.to_owned()
         };
         let call = identifier(
             event.get("toolCallId").or(context.get("toolCallId")),
@@ -138,7 +168,7 @@ impl Adapter for OpenClaw {
             "agent": {"adapter":"openclaw", "binding_id":binding.target,
                 "instance_id":binding.instance_id},
             "session_id": session,
-            "tool": {"name":tool, "native_name":tool, "call_id":call_id,
+            "tool": {"name":tool, "native_name":native_tool, "call_id":call_id,
                 "input":params, "result":event.get("result").unwrap_or(&Value::Null)},
             "native": native,
         }))
@@ -159,12 +189,31 @@ impl Adapter for OpenClaw {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::OPENCLAW.capabilities(VERSION, "gateway")
+        let mut capabilities =
+            super::super::adapter::catalog::OPENCLAW.capabilities(&self.version, "gateway");
+        if self.input.options.reloadable || !self.bundle_verified {
+            for name in ["session.start", "turn.stop", "session.end"] {
+                capabilities.events.remove(name);
+            }
+        }
+        if self.bundle_verified
+            && !self.input.options.reloadable
+            && verified_model_api(&self.settings)
+        {
+            capabilities.events.insert(
+                "security.violation".into(),
+                ["observe".into(), "block".into()].into(),
+            );
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         for step in steps {
             budget(&self.input.document, &step.event)?;
+            if step.event == "security.violation" && step.on_error != "block" {
+                return Err("OpenClaw final result gate requires on_error: block".into());
+            }
         }
         Ok(())
     }
@@ -188,27 +237,42 @@ impl PreparedLaunch for Prepared {
             "openclaw-plugin/openclaw.plugin.json",
             include_bytes!("../../native/openclaw/openclaw.plugin.json"),
         )?;
+        context.files.write(
+            "openclaw-plugin/reload.mjs",
+            include_bytes!("../../native/openclaw/reload.mjs"),
+        )?;
         let ready = context.files.directory().join("ready.json");
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
         let mut hooks = json!({"before":[],"after":[]});
         let mut events = BTreeMap::new();
-        for name in ["tool.before", "tool.after"] {
+        for name in [
+            "session.start",
+            "tool.before",
+            "tool.after",
+            "security.violation",
+            "turn.stop",
+            "session.end",
+        ] {
             let selected = adapter::native_steps(
+                &self.input.document,
                 context.steps,
                 name,
-                adapter::observation_enabled(&self.input.document, &self.input.target),
+                matches!(name, "tool.before" | "tool.after")
+                    && adapter::observation_enabled(&self.input.document, &self.input.target),
             );
             if selected.is_empty() {
                 continue;
             }
             let budget = budget(&self.input.document, name)?;
-            hooks[if name == "tool.before" {
-                "before"
-            } else {
-                "after"
-            }] = json!(selected
+            let group = match name {
+                "tool.before" => "before",
+                "tool.after" => "after",
+                "security.violation" => "final",
+                _ => name,
+            };
+            hooks[group] = json!(selected
                 .iter()
                 .map(|step| json!({"step":step.step_id,"onError":step.on_error,"budgetMs":budget,"replaceResult":step.replaces_result}))
                 .collect::<Vec<_>>());
@@ -258,8 +322,15 @@ impl PreparedLaunch for Prepared {
             json!({"enabled":true,"config":{
                 "binary":context.executable,"binding":context.binding_path,
                 "ready":{"path":ready,"token":token},"hooks":hooks,
+                "reloadable":self.input.options.reloadable,
             }}),
         );
+        if self.input.options.reloadable || events.contains_key("turn.stop") {
+            // The native request and finalization gates is conversation-scoped; only the AW entry
+            // receives permission in this private overlay.
+            entries.get_mut(PLUGIN).ok_or("missing AW plugin entry")?["hooks"] =
+                json!({"allowConversationAccess":true});
+        }
         let settings_path = context
             .files
             .write("openclaw.json", &serde_json::to_vec(&settings)?)?;
@@ -280,6 +351,36 @@ impl PreparedLaunch for Prepared {
             .environment
             .insert("NODE_DISABLE_COMPILE_CACHE".into(), "1".into());
         let provider_environment = command.environment.clone();
+        if events.contains_key("security.violation") {
+            fs::create_dir_all(context.files.directory().join("shared/js-runtime"))?;
+            context.files.write(
+                "shared/js-runtime/module-patch.mjs",
+                include_bytes!("../../native/shared/js-runtime/module-patch.mjs"),
+            )?;
+            let preload = context.files.write(
+                "openclaw-plugin/final-preload.mjs",
+                include_bytes!("../../native/openclaw/final-preload.mjs"),
+            )?;
+            let url = reqwest::Url::from_file_path(preload)
+                .map_err(|_| "OpenClaw final preload path is not a file URL")?;
+            let mut options = command
+                .environment
+                .get(OsStr::new("NODE_OPTIONS"))
+                .cloned()
+                .or_else(|| std::env::var_os("NODE_OPTIONS"))
+                .unwrap_or_default();
+            if !options.is_empty() {
+                options.push(" ");
+            }
+            options.push(format!("--import={url}"));
+            command.environment.insert("NODE_OPTIONS".into(), options);
+        }
+        if self.input.options.reloadable {
+            events = crate::reload::routes();
+            for event in events.values_mut() {
+                event.budget_ms = MAX_BUDGET_MS;
+            }
+        }
         let hook_count = events.values().map(|event| event.steps.len()).sum();
         Ok(LaunchPlan {
             command,
@@ -357,6 +458,15 @@ fn check_settings(value: &Value) -> Result<()> {
     Ok(())
 }
 
+fn verified_model_api(settings: &Value) -> bool {
+    let primary = settings["agents"]["defaults"]["model"]["primary"].as_str();
+    let provider = primary.and_then(|value| value.split_once('/').map(|(provider, _)| provider));
+    let fallbacks = &settings["agents"]["defaults"]["model"]["fallbacks"];
+    provider
+        .is_some_and(|name| settings["models"]["providers"][name]["api"] == "openai-completions")
+        && fallbacks.as_array().is_none_or(Vec::is_empty)
+}
+
 fn check_args(args: &[OsString]) -> Result<Vec<OsString>> {
     let offset = usize::from(args.first().is_some_and(|arg| {
         Path::new(arg)
@@ -420,198 +530,4 @@ fn lock_profile(path: &Path) -> Result<(PathBuf, File)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn after_identity_matches_native_completion_case_and_aliases() {
-        let binding = NativeContext {
-            target: "target".into(),
-            instance_id: "instance".into(),
-            cwd: "/tmp".into(),
-        };
-        for (raw, canonical) in [
-            ("Custom/Tool", "custom/tool"),
-            ("Bash", "exec"),
-            ("apply-patch", "apply_patch"),
-            ("CRON", "automations"),
-        ] {
-            let native = json!({"hook":"after_tool_call","event":{"toolName":raw,"params":{},"toolCallId":"call","runId":"run"},"context":{"sessionId":"session"}});
-            let normalized = OpenClaw.normalize(&binding, "tool.after", &native).unwrap();
-            assert_eq!(normalized["tool"]["name"], canonical);
-            assert_eq!(normalized["native"]["event"]["toolName"], raw);
-            let mut before = native;
-            before["hook"] = json!("before_tool_call");
-            assert_eq!(
-                OpenClaw
-                    .normalize(&binding, "tool.before", &before)
-                    .unwrap()["tool"]["name"],
-                raw
-            );
-        }
-    }
-
-    #[test]
-    fn generated_profile_marks_only_the_admitted_replacement_step() {
-        use aw_provider::admission::StepExecution;
-        let parent =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
-        fs::create_dir_all(&parent).unwrap();
-        let root = tempfile::tempdir_in(parent).unwrap();
-        let launch = root.path().join("launch");
-        fs::create_dir(&launch).unwrap();
-        let files = crate::test_support::Artifacts(launch);
-        let steps: Vec<_> = ["observe", "compress"]
-            .into_iter()
-            .map(|id| AdmittedStep {
-                event: "tool.after".into(),
-                step_id: id.into(),
-                provider: "fixture".into(),
-                on_error: "report".into(),
-                execution: StepExecution::Provider {
-                    operation: "record".into(),
-                    effects: vec![if id == "compress" {
-                        "replace_result"
-                    } else {
-                        "observe"
-                    }
-                    .into()],
-                },
-            })
-            .collect();
-        let mut prepared = Prepared {
-            input: LaunchInput {
-                document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
-                target: "openclaw".into(),
-                options: crate::NativeOptions::default(),
-                command: aw_exec::CommandSpec {
-                    program: "/native/openclaw".into(),
-                    args: vec!["gateway".into(), "run".into()],
-                    cwd: root.path().into(),
-                    environment: BTreeMap::new(),
-                },
-            },
-            settings: json!({"gateway":{"mode":"local"}}),
-            profile: root.path().join("profile"),
-            _lock: File::create(root.path().join("lock")).unwrap(),
-        };
-        let plan = prepared
-            .configure(&LaunchContext {
-                files: &files,
-                binding_path: &root.path().join("binding"),
-                executable: Path::new("/aw"),
-                steps: &steps,
-            })
-            .unwrap();
-        let settings: Value =
-            serde_json::from_slice(&fs::read(files.0.join("openclaw.json")).unwrap()).unwrap();
-        let hooks = &settings["plugins"]["entries"][PLUGIN]["config"]["hooks"]["after"];
-        assert_eq!(hooks[0]["replaceResult"], false);
-        assert_eq!(hooks[1]["replaceResult"], true);
-        assert_eq!(
-            plan.events["tool.after"].replacement_step.as_deref(),
-            Some("compress")
-        );
-        assert!(files.0.join("openclaw-plugin/hooks.mjs").is_file());
-    }
-
-    #[test]
-    fn gateway_arguments_preserve_literal_values_and_version_prefix() {
-        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-        assert_eq!(
-            check_args(&args(&["gateway", "run", "--port", "12345"])).unwrap(),
-            args(&["--version"])
-        );
-        assert_eq!(
-            check_args(&args(&["/native/openclaw.mjs", "gateway", "run"])).unwrap(),
-            args(&["/native/openclaw.mjs", "--version"])
-        );
-        for input in [
-            vec!["agent", "exec"],
-            vec!["gateway", "stop"],
-            vec!["gateway", "run", "--force"],
-            vec!["gateway", "run", "--profile=another"],
-            vec!["--dev", "gateway", "run"],
-        ] {
-            assert!(check_args(&args(&input)).is_err(), "{input:?}");
-        }
-    }
-
-    #[test]
-    fn native_settings_require_local_gateway_and_enabled_unowned_plugin() {
-        let config = json!({"gateway":{"mode":"local"},"plugins":{"allow":["existing"],
-            "entries":{"existing":{"enabled":true}}}});
-        check_settings(&config).unwrap();
-        for path in ["$include", "disabled", "owned", "remote", "denied"] {
-            let mut modified = config.clone();
-            match path {
-                "$include" => modified["models"] = json!({"$include":"models.json"}),
-                "disabled" => modified["plugins"]["enabled"] = json!(false),
-                "owned" => modified["plugins"]["entries"][PLUGIN] = json!({"enabled":false}),
-                "remote" => modified["gateway"]["mode"] = json!("remote"),
-                _ => modified["plugins"]["deny"] = json!([PLUGIN]),
-            }
-            assert!(check_settings(&modified).is_err(), "{path}");
-        }
-    }
-
-    #[test]
-    fn budget_stays_below_native_before_timeout_and_accepts_integer_floats() {
-        let mut config =
-            json!({"spec":{"execution":{"default_event_budget_ms":5000.0},"events":{}}});
-        assert_eq!(budget(&config, "tool.before").unwrap(), 5000);
-        config["spec"]["events"]["tool.before"] = json!({"budget_ms":12001});
-        assert!(budget(&config, "tool.before").is_err());
-    }
-
-    #[test]
-    fn response_returns_native_block_without_granting_permissions() {
-        let output = OpenClaw.reply(true);
-        assert!(matches!(output.exit, Exit::Code(0)));
-        assert_eq!(
-            serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"],
-            true
-        );
-        assert_eq!(OpenClaw.reply(false).stdout, b"{}");
-    }
-
-    #[test]
-    fn normalized_events_obey_provider_contract_and_scope_call_ids_to_runs() {
-        let binding = NativeContext {
-            target: "target".into(),
-            instance_id: "instance".into(),
-            cwd: "/tmp".into(),
-        };
-        let mut native = json!({"hook":"before_tool_call","event":{"toolName":"exec",
-            "toolCallId":"call","runId":"first","params":{"command":"literal $HOME"}},
-            "context":{"sessionId":"session"}});
-        let first = OpenClaw
-            .normalize(&binding, "tool.before", &native)
-            .unwrap();
-        let protocol = aw_provider::Protocol::new().unwrap();
-        protocol
-            .bind_invocation(
-                json!({"api_version":"aw-provider/v1alpha1","method":"invoke",
-            "request_id":"request","operation":"check","config_revision":"a".repeat(64),
-            "budget_ms":1000,"allowed_effects":["observe","block"],"config":{},"event":first}),
-            )
-            .unwrap();
-        assert_eq!(
-            OpenClaw
-                .normalize(&binding, "tool.before", &native)
-                .unwrap()["tool"]["call_id"],
-            first["tool"]["call_id"]
-        );
-        native["event"]["runId"] = json!("second");
-        assert_ne!(
-            OpenClaw
-                .normalize(&binding, "tool.before", &native)
-                .unwrap()["tool"]["call_id"],
-            first["tool"]["call_id"]
-        );
-        native["context"] = json!({});
-        assert!(OpenClaw
-            .normalize(&binding, "tool.before", &native)
-            .is_err());
-    }
-}
+mod tests;

@@ -37,6 +37,9 @@ SRC="$TEMPORARY/src"
 
 # Pre-existing content owned by other packages under the shared prefix.
 install -d -m 0755 "$PREFIX/bin" "$PREFIX/bin/other-pkg" "$PREFIX/share/other-pkg"
+install -d -m 0755 "$PREFIX/share/anolisa/adapters/other-component"
+printf '#!/usr/bin/env sh\nexit 0\n' > "$PREFIX/share/anolisa/adapters/other-component/hook.sh"
+chmod 0755 "$PREFIX/share/anolisa/adapters/other-component/hook.sh"
 printf '#!/usr/bin/env sh\nexit 0\n' > "$PREFIX/bin/other-pkg/tool.sh"
 chmod 0755 "$PREFIX/bin/other-pkg/tool.sh"
 printf 'not a program\n' > "$PREFIX/bin/other-tool-data"
@@ -54,6 +57,7 @@ chmod 0711 "$PREFIX"
 # does not invoke cargo) plus one osbase manifest to stage. The empty
 # templates/ directory only satisfies the checkout-layout validation.
 install -d "$SRC/target/release" "$SRC/manifests/osbase" "$SRC/templates"
+cp -R "$ROOT/manifests/components" "$SRC/manifests/"
 printf '#!/usr/bin/env sh\nexit 0\n' > "$SRC/target/release/anolisa"
 chmod 0755 "$SRC/target/release/anolisa"
 printf 'version = "0.0.0-test"\n' > "$SRC/manifests/osbase/base.toml"
@@ -67,12 +71,14 @@ assert_mode "$PREFIX/bin/other-pkg/tool.sh" 0755
 assert_mode "$PREFIX/bin/other-tool-data" 0644
 assert_mode "$PREFIX/share/other-pkg/tool.sh" 0755
 assert_mode "$PREFIX/share/other-pkg/data.txt" 0600
+assert_mode "$PREFIX/share/anolisa/adapters/other-component/hook.sh" 0755
 
 # Staged paths still get the intended modes.
 assert_mode "$PREFIX/bin/anolisa" 0755
 assert_mode "$PREFIX/share/anolisa/manifests/osbase/base.toml" 0644
 assert_mode "$PREFIX/share/anolisa/manifests/osbase" 0755
 assert_mode "$PREFIX/share/anolisa/manifests" 0755
+assert_mode "$PREFIX/share/anolisa/components/tokenless/component.toml" 0644
 
 # A fresh prefix installed under a restrictive umask must still yield
 # traversable bin/ and share/ parent directories (0755); other users need

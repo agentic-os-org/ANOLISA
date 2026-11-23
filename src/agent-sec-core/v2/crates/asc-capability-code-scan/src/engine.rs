@@ -14,6 +14,8 @@ use crate::errors::CodeScanError;
 use crate::findings::Finding;
 use crate::rules::{Language, RuleDefinition};
 
+mod prefilter;
+
 /// Minimum work budget for a single shipped-rule match.
 ///
 /// Python's V1 `re` engine has no equivalent 1-million-step ceiling. This floor
@@ -117,8 +119,8 @@ fn backtrack_limit(input_len: usize) -> usize {
 /// [`CodeScanError::EngineResource`] if a match exhausts backtracking.
 fn match_with_targets(
     code: &str,
-    rule: &RuleDefinition,
-    targets: &[String],
+    main: &Regex,
+    target_patterns: &[Regex],
     language: Language,
 ) -> Result<Vec<String>, CodeScanError> {
     let normalized;
@@ -129,11 +131,6 @@ fn match_with_targets(
         code
     };
     let segments = split_segments(code)?;
-    let main = compile(&rule.regex, &rule.rule_id, code.len())?;
-    let target_patterns = targets
-        .iter()
-        .map(|target| compile(target, &rule.rule_id, code.len()))
-        .collect::<Result<Vec<_>, _>>()?;
 
     let mut evidence = Vec::new();
     for segment in &segments {
@@ -144,7 +141,7 @@ fn match_with_targets(
             continue;
         };
         let mut satisfied = false;
-        for target in &target_patterns {
+        for target in target_patterns {
             let Some(hit) = target
                 .find(segment)
                 .map_err(|_| CodeScanError::EngineResource)?
@@ -180,22 +177,53 @@ pub fn run_regex_rules(
     rules: &[RuleDefinition],
     language: Language,
 ) -> Result<Vec<Finding>, CodeScanError> {
+    run_regex_rules_for_inputs(&[code], rules, language)
+}
+
+pub(crate) fn run_regex_rules_for_inputs(
+    inputs: &[&str],
+    rules: &[RuleDefinition],
+    language: Language,
+) -> Result<Vec<Finding>, CodeScanError> {
+    let input_len = inputs.iter().map(|code| code.len()).max().unwrap_or(0);
     let mut findings = Vec::new();
     for rule in rules {
-        let evidence = match &rule.target_regexes {
-            Some(targets) if !targets.is_empty() => {
-                match_with_targets(code, rule, targets, language)?
-            }
-            _ => {
-                let pattern = compile(&rule.regex, &rule.rule_id, code.len())?;
-                let mut matches = Vec::new();
+        let pattern = compile(&rule.regex, &rule.rule_id, input_len)?;
+        let targets = rule
+            .target_regexes
+            .iter()
+            .flatten()
+            .map(|target| compile(target, &rule.rule_id, input_len))
+            .collect::<Result<Vec<_>, _>>()?;
+        // At 250,000 bytes the scaled budget reaches its absolute ceiling.
+        // input_len is the maximum input length, including for batched scans.
+        let large_plain_bash_rule = language == Language::Bash
+            && targets.is_empty()
+            && input_len >= MAX_BACKTRACK_LIMIT / BACKTRACK_STEPS_PER_BYTE;
+        let prefilter = if large_plain_bash_rule {
+            prefilter::Prefilter::new(&rule.regex)
+        } else {
+            None
+        };
+        let mut evidence = Vec::new();
+        // Match independently: joining calls could manufacture a shell pipeline.
+        for code in inputs {
+            if targets.is_empty() {
+                if let Some(matches) = prefilter
+                    .as_ref()
+                    .and_then(|matcher| matcher.find_all(code))
+                {
+                    evidence.extend(matches);
+                    continue;
+                }
                 for found in pattern.find_iter(code) {
                     let text = found.map_err(|_| CodeScanError::EngineResource)?;
-                    matches.push(text.as_str().to_owned());
+                    evidence.push(text.as_str().to_owned());
                 }
-                matches
+            } else {
+                evidence.extend(match_with_targets(code, &pattern, &targets, language)?);
             }
-        };
+        }
         if evidence.is_empty() {
             continue;
         }

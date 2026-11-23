@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 if (process.argv.includes('--version')) {
-  console.log('OpenClaw 2026.9.6 (fixture)');
+  console.log(process.env.FAKE_OPENCLAW_VERSION ?? 'OpenClaw 2026.9.6 (fixture)');
   process.exit(0);
 }
 const config = JSON.parse(readFileSync(process.env.OPENCLAW_CONFIG_PATH));

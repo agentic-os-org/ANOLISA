@@ -107,13 +107,61 @@ mod tests {
     }
 
     #[test]
-    fn message_id_keeps_fieldless_enum_compatibility() {
+    fn review_regression_approval_copy_describes_foreground_execution() {
+        for (language, foreground) in [
+            (Language::EnUs, "foreground Shell"),
+            (Language::ZhCn, "前台 Shell"),
+        ] {
+            let i18n = I18n::new(language);
+            assert_eq!(
+                i18n.t(MessageId::ApprovalExecutableToolPolicy),
+                match language {
+                    Language::EnUs => "This tool request requires your approval.",
+                    Language::ZhCn => "此工具请求需要你的批准。",
+                }
+            );
+            for id in [
+                MessageId::ApprovalExecutableToolPolicyExtra,
+                MessageId::ApprovalCommandDefaultPolicy,
+            ] {
+                let text = i18n.t(id);
+                assert!(text.contains(foreground), "{id:?}: {text}");
+                assert!(!text.contains("MVP") && !text.contains("broker"));
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_trust_copy_preserves_approval_exceptions() {
+        for (language, required) in [
+            (
+                Language::EnUs,
+                ["supported", "unknown", "Hook", "high-risk"],
+            ),
+            (Language::ZhCn, ["受支持", "未知", "Hook", "高风险"]),
+        ] {
+            let i18n = I18n::new(language);
+            for id in [
+                MessageId::ApprovalModeTrustFooter,
+                MessageId::ApprovalModeCardTrustLine,
+                MessageId::ApprovalModeTrustConfirmationBody,
+            ] {
+                let text = i18n.t(id);
+                for term in required {
+                    assert!(text.contains(term), "{id:?} missing {term}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn message_id_catalog_order_matches_declared_segments() {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
-        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
-        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
-        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 744);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 745);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 746);
         assert_eq!(
             MessageId::AgentQuestionUnavailableTitle as usize,
             MessageId::SlashQuotedArgumentsUnsupported as usize + 1
@@ -122,33 +170,31 @@ mod tests {
             MessageId::ApprovalTitle as usize,
             MessageId::QuestionNoPendingBody as usize + 1
         );
-        // The tool-argument status pair is a registered stable runtime
-        // interface: pin the discriminants with fixed values so a segment
-        // inserted ahead of them can never shift the tail unnoticed
-        // (new segments must append after mcp_registry_ids).
-        assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
-        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
-        assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
+        // Pin local catalog order after removing six unused startup keys.
+        // MessageId numbers are not persisted or sent over a protocol.
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 823);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 824);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 825);
         // The #1747 trailing segment must stay appended after every earlier
         // segment so pre-existing discriminants never shift.
-        assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
-        assert_eq!(MessageId::SlashMcpTitle as usize, 835);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 828);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 829);
         // The #1988 segment remains pinned ahead of the appended #2029
         // turn-extension messages.
         assert_eq!(
             MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
-            836
+            830
         );
         // The #2029 turn-extension segment keeps its pinned discriminants.
-        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 837);
+        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 831);
         assert_eq!(
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
-            846
+            840
         );
         // The #1913 capture-notice segment remains pinned ahead of the
         // appended shell-recovery, auth, and hook-notification messages.
-        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
-        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
+        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 841);
+        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 842);
         assert_eq!(
             MessageId::AgentRecoveryTriggerLine as usize,
             MessageId::CaptureInputRejectedBody as usize + 1
@@ -294,7 +340,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 21
+            MessageId::GuideUsage as usize - 21
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
@@ -310,7 +356,95 @@ mod tests {
         );
         assert_eq!(
             MessageId::SlashBugCopyLine as usize + 1,
-            MessageId::ALL.len()
+            MessageId::GuideUsage as usize
+        );
+        assert_eq!(
+            MessageId::GuideErrorIo as usize + 1,
+            MessageId::StartupAiDisabledLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupAiDisabledLine as usize + 1,
+            MessageId::HealthMetricUsed as usize
+        );
+        assert_eq!(
+            MessageId::HealthMetricUsed as usize + 1,
+            MessageId::StartupHelpLabel as usize
+        );
+        assert_eq!(
+            MessageId::StartupHelpLabel as usize + 1,
+            MessageId::StartupAskOnlyLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupAskOnlyLine as usize + 1,
+            MessageId::StartupEcsAuthHintLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupEcsAuthHintLine as usize + 1,
+            MessageId::StartupConfigureAuthHintLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupConfigureAuthHintLine as usize + 1,
+            MessageId::LoginUser as usize
+        );
+        assert_eq!(
+            MessageId::LoginRecoveryMissing as usize + 1,
+            MessageId::CoshRootHelp as usize
+        );
+        assert_eq!(
+            MessageId::CoshRootHelp as usize + 1,
+            MessageId::GuideWizardTitle as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiManage as usize + 1,
+            MessageId::GuideWizardTipsAnalysis as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardCancel as usize + 1,
+            MessageId::GuideWizardLoginSet as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardConfigUnreadable as usize + 1,
+            MessageId::GuideWizardDataClearConfirm as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardDataClearConfirm as usize + 1,
+            MessageId::GuideWizardLoginOtherGuidance as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginRereadDone as usize + 1,
+            MessageId::GuideWizardAiAsk as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiSourceRuntime as usize + 1,
+            MessageId::HealthSessionPromptAnalyzeMemoryPressure as usize
+        );
+        assert_eq!(
+            MessageId::HealthSessionPromptInspectProcessMemory as usize + 1,
+            MessageId::SuggestionListTitle as usize
+        );
+        assert_eq!(
+            MessageId::SuggestionShortcutAsk as usize + 1,
+            MessageId::GuideWizardDetailHint as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginPrivilegeDenied as usize + 1,
+            MessageId::AgentResponseTruncated as usize
+        );
+        assert_eq!(
+            MessageId::AgentResponseTruncated as usize + 1,
+            MessageId::HealthOomScopeCurrentCgroup as usize
+        );
+        assert_eq!(
+            MessageId::HealthEvidenceSoftLockup as usize + 1,
+            MessageId::HealthFindingExt4ReadonlyRemount as usize
+        );
+        assert_eq!(
+            MessageId::HealthPromptInspectFilesystemEvent as usize + 1,
+            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalRiskPhraseGitRepoConfigExecution as usize,
+            MessageId::ALL.len() - 1
         );
     }
 
@@ -341,19 +475,47 @@ mod tests {
             zh.t(MessageId::QuestionAnswerNotSentBody),
             "问题仍在等待回答，请重试或按 Ctrl+C 取消。"
         );
+        let zh_title = zh.t(MessageId::AuthProviderManagementQuestion);
+        assert!(zh_title.contains("服务管理"), "{zh_title}");
+        assert!(!zh_title.contains("Provider Management"), "{zh_title}");
+        assert!(
+            en.t(MessageId::AuthProviderManagementQuestion)
+                .contains("Provider Management"),
+            "{}",
+            en.t(MessageId::AuthProviderManagementQuestion)
+        );
+        let zh_delete = zh.t(MessageId::GuideAuthDeleteKeys);
+        assert!(zh_delete.contains("确认"), "{zh_delete}");
+        assert!(!zh_delete.contains("发送"), "{zh_delete}");
+        assert!(
+            en.t(MessageId::GuideAuthDeleteKeys)
+                .contains("Enter confirm"),
+            "{}",
+            en.t(MessageId::GuideAuthDeleteKeys)
+        );
+        let zh_field = zh.t(MessageId::GuideAuthFieldKeys);
+        assert!(zh_field.contains("输入"), "{zh_field}");
+        assert!(zh_field.contains("提交"), "{zh_field}");
+        assert!(!zh_field.contains("发送"), "{zh_field}");
+        let en_field = en.t(MessageId::GuideAuthFieldKeys);
+        assert!(en_field.contains("Type the value"), "{en_field}");
+        assert!(en_field.contains("Enter submit"), "{en_field}");
+        assert!(!en_field.contains("send"), "{en_field}");
     }
 
     #[test]
     fn format_replaces_known_args_and_keeps_missing_args() {
-        let i18n = I18n::new(Language::EnUs);
-        let text = i18n.format(
-            MessageId::StartupAdapterLine,
-            &[("adapter", "qwen"), ("shell", "bash"), ("approval", "auto")],
-        );
+        for language in [Language::ZhCn, Language::EnUs] {
+            let i18n = I18n::new(language);
+            let text = i18n.format(
+                MessageId::StartupAdapterLine,
+                &[("shell", "bash"), ("unused", "qwen")],
+            );
 
-        assert!(text.contains("qwen"));
-        assert!(text.contains("bash"));
-        assert!(text.contains("{analysis}"));
+            assert!(text.contains("bash"));
+            assert!(text.contains("{approval}"));
+            assert!(!text.contains("qwen"));
+        }
     }
 
     #[test]

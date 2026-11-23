@@ -366,6 +366,51 @@ fn code_blocks_keep_language_and_verbatim_whitespace() {
 }
 
 #[test]
+fn code_block_fences_outgrow_the_longest_run_and_keep_three_tick_minimum() {
+    for (code, length) in [
+        ("", 3),
+        ("plain text", 3),
+        ("a`b", 3),
+        ("a``b", 3),
+        ("```", 4),
+        ("a``b`````c```d", 6),
+    ] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><pre><code class=\"language-sh\">{code}</code></pre>"
+        ));
+        let fence = "`".repeat(length);
+        let view = HtmlExtractor.render(&html).unwrap();
+        assert_eq!(
+            body_of(&view),
+            format!("{PARAGRAPH}\n\n{fence}sh\n{code}\n{fence}"),
+            "code={code:?}"
+        );
+    }
+}
+
+#[test]
+fn code_block_fence_selection_is_bounded_for_long_backtick_runs() {
+    // A fetched page controls the run length. The old prefix-probing loop
+    // takes seconds here; the budget leaves ample room for one linear scan.
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><pre class=\"lang-sh\">a{run}b</pre>"
+    ));
+    let started = std::time::Instant::now();
+    let view = HtmlExtractor.render(&html).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\n{fence}sh\na{run}b\n{fence}")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "code block rendering took {elapsed:?}"
+    );
+}
+
+#[test]
 fn inline_code_spans_containing_double_backticks_keep_one_fence() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><p>Run <code>a``b</code>, <kbd>ctl``alt</kbd> and <samp>x `` y</samp>,          plain <code>a`b</code> stays.</p>"
@@ -416,6 +461,68 @@ fn lists_nest_and_ordered_lists_honor_start() {
         format!(
             "{PARAGRAPH}\n\n- one\n\n  - one.a\n  - one.b\n- two\n\n  more\n\n3. three\n4. four"
         )
+    );
+}
+
+#[test]
+fn ordered_lists_number_their_items_as_a_browser_does() {
+    let body = |list: &str| {
+        let html = page(&format!("<p>{PARAGRAPH}</p>{list}"));
+        let view = HtmlExtractor.render(&html).unwrap();
+        body_of(&view)
+            .strip_prefix(&format!("{PARAGRAPH}\n\n"))
+            .unwrap()
+            .to_owned()
+    };
+    // A sign and trailing characters are read as a browser reads them.
+    assert_eq!(
+        body("<ol start=\"-1\"><li>a</li><li>b</li><li>c</li></ol>"),
+        "-1. a\n0. b\n1. c"
+    );
+    assert_eq!(
+        body("<ol start=\" 5th\"><li>a</li><li>b</li></ol>"),
+        "5. a\n6. b"
+    );
+    assert_eq!(
+        body("<ol start=\"x\"><li>a</li><li>b</li></ol>"),
+        "1. a\n2. b"
+    );
+    // An empty item still takes its number; content between items takes none.
+    assert_eq!(body("<ol><li>a</li><li></li><li>c</li></ol>"), "1. a\n3. c");
+    assert_eq!(
+        body("<ol><li>a</li><p>note</p><li>b</li></ol>"),
+        "1. a\n   note\n2. b"
+    );
+    // `value` restarts the count, and `reversed` counts down.
+    assert_eq!(
+        body("<ol><li>a</li><li value=\"7\">b</li><li>c</li></ol>"),
+        "1. a\n7. b\n8. c"
+    );
+    assert_eq!(
+        body("<ol reversed><li>a</li><li>b</li><li>c</li></ol>"),
+        "3. a\n2. b\n1. c"
+    );
+    assert_eq!(
+        body("<ol reversed start=\"10\"><li>a</li><li>b</li></ol>"),
+        "10. a\n9. b"
+    );
+    // An item the view removes still takes its number and applies its `value`.
+    assert_eq!(
+        body("<ol reversed><li role=\"navigation\">Nav</li><li>Keep</li></ol>"),
+        "1. Keep"
+    );
+    assert_eq!(
+        body("<ol><li role=\"navigation\">Nav</li><li>Keep</li></ol>"),
+        "2. Keep"
+    );
+    assert_eq!(
+        body("<ol><li>a</li><li role=\"navigation\" value=\"7\">Nav</li><li>b</li></ol>"),
+        "1. a\n8. b"
+    );
+    // A `center` is a block, so it does not run into the text before it.
+    assert_eq!(
+        body("<div><span>Total</span><center>125.50</center></div>"),
+        "Total\n\n125.50"
     );
 }
 
@@ -757,6 +864,72 @@ fn unbalanced_brackets_in_link_text_drop_the_link() {
 }
 
 #[test]
+fn zero_rowspan_preserves_columns_in_its_row_group() {
+    for rowspan in ["0", "00", " 0 ", "3"] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><table>\
+             <thead><tr><th>Region</th><th>Service</th><th>Count</th></tr></thead>\
+             <tbody><tr><td rowspan=\"{rowspan}\">EU</td><td>api</td><td>10</td></tr>\
+             <tr><td>worker</td><td>20</td></tr><tr><td>database</td><td>30</td></tr>\
+             </tbody></table>"
+        ));
+        assert_eq!(
+            body_of(&HtmlExtractor.render(&html).unwrap()),
+            format!(
+                "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+                 | EU | api | 10 |\n|  | worker | 20 |\n|  | database | 30 |"
+            ),
+            "rowspan={rowspan:?}"
+        );
+    }
+}
+
+#[test]
+fn zero_rowspans_stop_at_each_row_group() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th rowspan=\"0\">Region</th><th>Service</th><th>Count</th></tr>\
+         <tr><th>Name</th><th>Instances</th></tr></thead>\
+         <tbody><tr><td rowspan=\"0\">EU</td><td>api</td><td>10</td></tr>\
+         <tr><td>worker</td><td>20</td></tr></tbody>\
+         <tbody><tr><td rowspan=\"0\">US</td><td>web</td><td>30</td></tr>\
+         <tr><td>batch</td><td>40</td></tr></tbody>\
+         <tfoot><tr><td rowspan=\"0\">All</td><td>total</td><td>100</td></tr>\
+         <tr><td>expected</td><td>100</td></tr></tfoot></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+             |  | Name | Instances |\n| EU | api | 10 |\n|  | worker | 20 |\n\
+             | US | web | 30 |\n|  | batch | 40 |\n| All | total | 100 |\n\
+             |  | expected | 100 |"
+        )
+    );
+}
+
+#[test]
+fn zero_rowspan_combines_with_colspan_after_the_first_row() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th>Region</th><th>Zone</th><th>Service</th><th>Count</th></tr></thead>\
+         <tbody><tr><td>US</td><td>east</td><td>web</td><td>5</td></tr>\
+         <tr><td rowspan=\"0\" colspan=\"2\">EU</td><td>api</td><td>10</td></tr>\
+         <tr></tr><tr><td>worker</td><td>20</td></tr>\
+         <tr><td>database</td><td>30</td></tr></tbody>\
+         <tbody><tr><td>AU</td><td>west</td><td>batch</td><td>40</td></tr></tbody></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Zone | Service | Count |\n| --- | --- | --- | --- |\n\
+             | US | east | web | 5 |\n| EU |  | api | 10 |\n|  |\n\
+             |  |  | worker | 20 |\n|  |  | database | 30 |\n| AU | west | batch | 40 |"
+        )
+    );
+}
+
+#[test]
 fn spanned_table_cells_leave_placeholders_and_are_clipped() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><table><tr><th colspan=\"2\">Pair</th><th>C</th></tr>\
@@ -835,5 +1008,43 @@ fn mathml_renders_its_tex_annotation_or_alttext() {
     assert_eq!(
         body_of(&view),
         format!("{PARAGRAPH} Area is $\\pi r^2$ and $x^{{2}}$ and y.")
+    );
+}
+
+#[test]
+fn line_breaks_in_code_and_spaces_at_link_edges_keep_words_apart() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><pre>$ make<br>$ make test<br><br>ok</pre>\
+         <pre><div>line one</div><div>line two</div></pre>\
+         <pre><div>a</div>\n<div>b</div></pre><pre>c\n<div>d</div></pre>\
+         <p><kbd>Ctrl<br>Shift</kbd> then click<a href=\"https://example.com/save\" \
+         title=\"Save\"> save</a>.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    // In `pre`, a newline before a block already ends its line: a newline
+    // alone between two blocks shows one blank line, as in a browser.
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n```\n$ make\n$ make test\n\nok\n```\n\n```\nline one\nline two\n```\n\n\
+             ```\na\n\nb\n```\n\n```\nc\nd\n```\n\n\
+             `Ctrl`\n`Shift` then click [save](https://example.com/save)."
+        )
+    );
+}
+
+#[test]
+fn table_footers_render_below_the_body_wherever_they_are_written() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table><tfoot><tr><td>Total</td><td>300</td></tr></tfoot>\
+         <tbody><tr><td>alpha</td><td>100</td></tr></tbody>\
+         <thead><tr><th>Item</th><th>Amount</th></tr></thead></table>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n| Item | Amount |\n| --- | --- |\n| alpha | 100 |\n| Total | 300 |"
+        )
     );
 }

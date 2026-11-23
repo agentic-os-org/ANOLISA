@@ -298,7 +298,7 @@ async fn ecs_metadata_token_failures_never_fall_back_or_leak() {
         (403, IMDS_TOKEN.to_string(), ProbeError::AccessDenied),
         (404, IMDS_TOKEN.to_string(), ProbeError::Http),
         (405, IMDS_TOKEN.to_string(), ProbeError::Http),
-        (500, IMDS_TOKEN.to_string(), ProbeError::Http),
+        (500, IMDS_TOKEN.to_string(), ProbeError::ServiceUnavailable),
         (200, String::new(), ProbeError::InvalidResponse),
         (200, "  ".to_string(), ProbeError::InvalidResponse),
         (
@@ -308,13 +308,19 @@ async fn ecs_metadata_token_failures_never_fall_back_or_leak() {
         ),
         (200, "x".repeat(4097), ProbeError::InvalidResponse),
     ] {
-        let fixture = Fixture::start(vec![Reply::new(TOKEN_PATH, status, &body)]).await;
+        let count = if status == 500 { 2 } else { 1 };
+        let fixture = Fixture::start(
+            (0..count)
+                .map(|_| Reply::new(TOKEN_PATH, status, &body))
+                .collect(),
+        )
+        .await;
         let result = ecs_metadata::TEST_ENDPOINT
             .scope(fixture.base_url.clone(), probe_ecs_ram_role())
             .await;
         assert_eq!(result, Err(expected));
         assert!(!format!("{expected:?} {expected}").contains(IMDS_TOKEN));
-        fixture.finish(1).await;
+        fixture.finish(count).await;
     }
 }
 
@@ -546,4 +552,161 @@ async fn ecs_metadata_disk_cache_preserves_positive_negative_and_expiry() {
         })
         .await;
     fixture.finish(2).await;
+}
+
+#[tokio::test]
+async fn identity_stability_discovery_recovers_one_transient_token_response() {
+    let fixture = Fixture::start(vec![
+        Reply::new(TOKEN_PATH, 503, "ignored-token-canary"),
+        Reply::token(),
+        Reply::new(INSTANCE_PATH, 200, "i-recovered"),
+        Reply::new(ZONE_PATH, 200, "cn-hangzhou-i"),
+    ])
+    .await;
+    let result = TEST_ENDPOINT
+        .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+        .await;
+    assert_eq!(result.unwrap().unwrap().instance_id, "i-recovered");
+    fixture.finish(4).await;
+}
+
+#[tokio::test]
+async fn identity_stability_transient_token_failures_stop_after_one_retry() {
+    for status in [429, 500, 502, 503, 504] {
+        let fixture = Fixture::start(
+            (0..2)
+                .map(|_| Reply::new(TOKEN_PATH, status, IMDS_TOKEN))
+                .collect(),
+        )
+        .await;
+        let result = TEST_ENDPOINT
+            .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+            .await;
+        assert_eq!(result.unwrap_err().code(), "metadata_http_error");
+        fixture.finish(2).await;
+    }
+}
+
+#[tokio::test]
+async fn identity_stability_metadata_get_retry_keeps_the_same_token_session() {
+    let fixture = Fixture::start(vec![
+        Reply::token(),
+        Reply::new(INSTANCE_PATH, 503, IMDS_TOKEN),
+        Reply::new(INSTANCE_PATH, 200, "i-recovered"),
+        Reply::new(ZONE_PATH, 200, "cn-hangzhou-i"),
+    ])
+    .await;
+    let result = TEST_ENDPOINT
+        .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+        .await;
+    assert_eq!(result.unwrap().unwrap().instance_id, "i-recovered");
+    let requests = fixture.finish(4).await;
+    assert_eq!(requests.iter().filter(|r| r.starts_with("PUT ")).count(), 1);
+}
+
+#[tokio::test]
+async fn identity_stability_healthy_slow_token_keeps_original_response_budget() {
+    let mut token = Reply::token();
+    token.delay = Duration::from_millis(1100);
+    let fixture = Fixture::start(vec![
+        token,
+        Reply::new(INSTANCE_PATH, 200, "i-slow"),
+        Reply::new(ZONE_PATH, 200, "cn-hangzhou-i"),
+    ])
+    .await;
+    let result = TEST_ENDPOINT
+        .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+        .await;
+    assert_eq!(result.unwrap().unwrap().instance_id, "i-slow");
+    fixture.finish(3).await;
+}
+
+#[tokio::test]
+async fn identity_stability_retry_connection_loss_preserves_metadata_http_evidence() {
+    let mut reply = Reply::new(TOKEN_PATH, 503, IMDS_TOKEN);
+    reply.close_listener = true;
+    let fixture = Fixture::start(vec![reply]).await;
+    let result = TEST_ENDPOINT
+        .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+        .await;
+    assert!(
+        matches!(&result, Err(error) if error.code() == "metadata_http_error"),
+        "metadata evidence was downgraded to non-ECS: {result:?}"
+    );
+    fixture.finish(1).await;
+}
+
+#[tokio::test]
+async fn identity_stability_retry_never_overrides_a_later_hard_failure() {
+    for (status, body, expected) in [
+        (403, IMDS_TOKEN, ProbeError::AccessDenied),
+        (200, "", ProbeError::InvalidResponse),
+    ] {
+        let fixture = Fixture::start(vec![
+            Reply::new(TOKEN_PATH, 503, IMDS_TOKEN),
+            Reply::new(TOKEN_PATH, status, body),
+        ])
+        .await;
+        let result = TEST_ENDPOINT
+            .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+            .await;
+        assert_eq!(result.unwrap_err(), expected);
+        fixture.finish(2).await;
+    }
+}
+
+#[tokio::test]
+async fn identity_stability_metadata_failure_logs_redact_query_token_and_body() {
+    const PATH: &str = "/latest/dynamic/instance-identity/pkcs7?audience=query-canary";
+    let directory = tempfile::tempdir().unwrap();
+    let log_path = directory.path().join("metadata.log");
+    let writer_path = log_path.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&writer_path)
+                .unwrap()
+        })
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let fixture = Fixture::start(vec![
+        Reply::token(),
+        Reply::new(PATH, 403, "body-token-canary"),
+    ])
+    .await;
+    let session = ecs_metadata::MetadataSession::start(&fixture.base_url)
+        .await
+        .unwrap();
+    assert_eq!(session.get(PATH).await.unwrap().0, 403);
+    fixture.finish(2).await;
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(
+        log.contains("/latest/dynamic/instance-identity/pkcs7"),
+        "{log}"
+    );
+    assert!(log.contains("metadata_access_denied"), "{log}");
+    for secret in ["query-canary", "body-token-canary", IMDS_TOKEN] {
+        assert!(!log.contains(secret), "secret leaked: {log}");
+    }
+}
+
+#[tokio::test]
+async fn identity_combinations_metadata_gets_share_the_original_session_deadline() {
+    let mut token = Reply::token();
+    token.delay = Duration::from_millis(500);
+    let mut instance = Reply::new(INSTANCE_PATH, 200, "i-deadline");
+    instance.delay = Duration::from_secs(1);
+    let mut zone = Reply::new(ZONE_PATH, 200, "cn-hangzhou-i");
+    zone.delay = Duration::from_secs(2);
+    let fixture = Fixture::start(vec![token, instance, zone]).await;
+    let result = TEST_ENDPOINT
+        .scope(fixture.base_url.clone(), detect_ecs_auth_challenge())
+        .await;
+    assert_eq!(result, Err(ProbeError::Timeout));
+    fixture.finish(3).await;
 }

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel>=0.42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anolisa-aw-sdk"
+version = "0.2.0"
+description = "Application-owned AW Service client with explicit native fallback"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+classifiers = ["Operating System :: POSIX :: Linux", "Typing :: Typed"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aw_sdk = ["py.typed"]
+
+[tool.setuptools.data-files]
+"share/anolisa-aw-sdk/examples" = ["examples/application.py", "examples/language_source.py"]

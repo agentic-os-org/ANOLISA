@@ -15,7 +15,9 @@ import collect_metrics
 import resource_report
 
 
-def row(timestamp: float, interval: float | str, cpu: float | str, rss: float) -> dict[str, str]:
+def row(
+    timestamp: float, interval: float | str, cpu: float | str, rss: float | str
+) -> dict[str, str]:
     return {
         "monotonic_timestamp": str(timestamp),
         "cpu_interval_seconds": str(interval),
@@ -66,7 +68,11 @@ def test_boundary_intervals_are_split_by_overlap() -> None:
 
 def test_invalid_cpu_values_are_rejected_and_unrelated_intervals_are_ignored() -> None:
     valid = row(11, 1, 25, 250)
-    for invalid in [row(float("nan"), 1, 25, 250), row(12, 1, "nan", 250), row(12, 1, -1, 250)]:
+    for invalid in [
+        row(float("nan"), 1, 25, 250),
+        row(12, 1, "nan", 250),
+        row(12, 1, -1, 250),
+    ]:
         stats = resource_report.resource_stats([valid, invalid], 10, 13)
         assert not stats["cpu_samples_valid"]
         assert stats["cpu_average_pct"] == 25
@@ -94,7 +100,12 @@ def artifacts(output: Path, label: str, cpu: float, rss: float) -> Path:
         },
         "agents/start.json": {"start": 10, "end": 12},
         "agent-summary.json": {"passed": True},
-        "report.json": {"sent": 1, "completeness_ratio": 1, "token_accuracy": 1},
+        "report.json": {
+            "sent": 1,
+            "completeness_ratio": 1,
+            "token_accuracy": 1,
+            "conflicts": 0,
+        },
     }
     for name, record in records.items():
         (directory / name).write_text(json.dumps(record))
@@ -148,7 +159,69 @@ def test_zero_cpu_baseline_has_no_relative_percentage(tmp_path: Path) -> None:
     artifacts(tmp_path, "after", 150, 250)
     assert resource_report.report(tmp_path, {"before": {}, "after": {}})
     summary = json.loads((tmp_path / "resource-summary.json").read_text())
-    assert summary["comparison"]["cpu_peak_pct"] == {"percentage_points": -150, "percent": None}
+    assert summary["comparison"]["cpu_peak_pct"] == {
+        "percentage_points": -150,
+        "percent": None,
+    }
+
+
+def test_collector_row_without_vmrss_cannot_certify_a_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts(tmp_path, "before", 10, 400)
+    directory = artifacts(tmp_path, "after", 10, 250)
+    # Procfs can expose numeric status fields without VmRSS (for example
+    # during process exit). sample() emits a live row with an empty RSS field.
+    monkeypatch.setattr(collect_metrics, "read_status", lambda _: {"Threads": 1})
+    monkeypatch.setattr(collect_metrics, "read_cpu_ticks", lambda _: 110)
+    monkeypatch.setattr(collect_metrics.time, "monotonic", lambda: 11.0)
+    monkeypatch.setattr(collect_metrics.os, "sysconf", lambda _: 100)
+    measured, _, _ = collect_metrics.sample(123, 100, 10.0, 0, None)
+    assert measured["process_alive"] == 1
+    assert measured["rss_mb"] == ""
+    assert measured["cpu_pct"] == "10.000"
+    with (directory / "metrics.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=collect_metrics.FIELDS)
+        writer.writeheader()
+        writer.writerows([row(10, "", "", 250), measured, row(12, 1, 10, 250)])
+    assert not resource_report.report(tmp_path, {"before": {}, "after": {}})
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert summary["runs"]["after"]["cpu_samples_valid"]
+    assert not summary["comparison"]
+
+
+@pytest.mark.parametrize("rss", ["", "nan", "inf", "-1", "broken"])
+def test_invalid_load_rss_suppresses_improvement(tmp_path: Path, rss: str) -> None:
+    artifacts(tmp_path, "before", 10, 400)
+    directory = artifacts(tmp_path, "after", 10, 250)
+    path = directory / "metrics.csv"
+    with path.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    # Keep one usable RSS point and complete CPU coverage. Dropping only the
+    # bad point used to certify this run and advertise a 37.5% improvement.
+    rows[1]["rss_mb"] = rss
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    assert not resource_report.report(tmp_path, {"before": {}, "after": {}})
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert not summary["valid"] and not summary["comparison"]
+    after = summary["runs"]["after"]
+    assert after["rss_average_mib"] == after["rss_peak_mib"] == 250
+    assert after["cpu_samples_valid"]
+    assert not after["rss_samples_valid"]
+    assert "RSS" in after["resource_error"]
+
+
+def test_rss_validity_follows_the_half_open_measurement_window() -> None:
+    rows = [row(9, "", "", ""), row(10, 1, 10, 0), row(11, 1, 10, 250)]
+    rows += [row(12, 1, 10, ""), row(13, 1, 10, 300)]
+    load = resource_report.resource_stats(rows, 10, 12)
+    assert load["rss_samples_valid"]
+    assert load["rss_average_mib"] == 125
+    assert not resource_report.resource_stats(rows, 12, 14)["rss_samples_valid"]
+    assert not resource_report.resource_stats([], 10, 12)["rss_samples_valid"]
 
 
 def write_counters(directory: Path, counters: list[dict[str, str]]) -> None:
@@ -163,7 +236,9 @@ def write_counters(directory: Path, counters: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-@pytest.mark.parametrize("counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"])
+@pytest.mark.parametrize(
+    "counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"]
+)
 @pytest.mark.parametrize("value", ["broken", "NaN", "inf", "-1", "1e999"])
 def test_invalid_counter_preserves_reports_and_suppresses_comparison(
     tmp_path: Path, counter: str, value: str
@@ -184,7 +259,9 @@ def test_invalid_counter_preserves_reports_and_suppresses_comparison(
 
 
 @pytest.mark.parametrize("counter", ["ring_buffer_dropped", "channel_dropped"])
-def test_valid_drop_evidence_survives_an_invalid_sample(tmp_path: Path, counter: str) -> None:
+def test_valid_drop_evidence_survives_an_invalid_sample(
+    tmp_path: Path, counter: str
+) -> None:
     directory = artifacts(tmp_path, "run", 30, 250)
     write_counters(directory, [{counter: "0"}, {counter: "broken"}, {counter: "3"}])
     run = resource_report.summarize(directory, {})
@@ -194,9 +271,17 @@ def test_valid_drop_evidence_survives_an_invalid_sample(tmp_path: Path, counter:
 
 
 @pytest.mark.parametrize("value", ["", "0"])
-def test_optional_blank_and_zero_counters_preserve_validity(tmp_path: Path, value: str) -> None:
+def test_optional_blank_and_zero_counters_preserve_validity(
+    tmp_path: Path, value: str
+) -> None:
     directory = artifacts(tmp_path, "run", 30, 250)
-    counters = {key: value for key in ("eviction_count", "ring_buffer_dropped", "channel_dropped")}
+    counters = {
+        key: value
+        for key in ("eviction_count", "ring_buffer_dropped", "channel_dropped")
+    }
+    (directory / "metrics-baseline.json").write_text(
+        json.dumps({"ring_buffer_dropped": "", "channel_dropped": ""})
+    )
     write_counters(directory, [counters, counters, counters])
     run = resource_report.summarize(directory, {})
     assert run["valid"] and run["capture"] == "PASS"
@@ -206,8 +291,12 @@ def test_optional_blank_and_zero_counters_preserve_validity(tmp_path: Path, valu
     assert all(observed == expected for observed in run["probe_drops"].values())
 
 
-@pytest.mark.parametrize("counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"])
-def test_valid_counter_peaks_retain_existing_capture_rules(tmp_path: Path, counter: str) -> None:
+@pytest.mark.parametrize(
+    "counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"]
+)
+def test_valid_counter_peaks_retain_existing_capture_rules(
+    tmp_path: Path, counter: str
+) -> None:
     directory = artifacts(tmp_path, "run", 30, 250)
     write_counters(directory, [{counter: "0"}, {counter: "3"}, {counter: "2"}])
     run = resource_report.summarize(directory, {})
@@ -218,3 +307,184 @@ def test_valid_counter_peaks_retain_existing_capture_rules(tmp_path: Path, count
     else:
         assert run["probe_drops"][counter] == 3
         assert not run["valid"] and run["capture"] == "FAIL"
+
+
+@pytest.mark.parametrize("counter", ["ring_buffer_dropped", "channel_dropped"])
+def test_preload_drops_are_attributed_without_failing_load_or_drain(
+    tmp_path: Path, counter: str
+) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    (directory / "agents/start.json").write_text(json.dumps({"start": 11, "end": 12}))
+    write_counters(directory, [{counter: "5"}, {counter: "5"}, {counter: "5"}])
+
+    run = resource_report.summarize(directory, {})
+
+    assert run["valid"] and run["capture"] == "PASS"
+    assert run["probe_drops"][counter] == 5
+    assert run["probe_drop_phases"][counter] == {
+        "before_load": 5,
+        "load": 0,
+        "tail": 0,
+        "unattributed": 0,
+    }
+    assert resource_report.report(tmp_path, {"run": {}})
+    assert "confined to pre-load" in (tmp_path / "resource-report.txt").read_text()
+
+
+@pytest.mark.parametrize("counter", ["ring_buffer_dropped", "channel_dropped"])
+@pytest.mark.parametrize(
+    ("values", "expected_phase"),
+    [(["0", "1", "1"], "load"), (["0", "0", "1"], "tail")],
+)
+def test_load_and_tail_drops_remain_fatal(
+    tmp_path: Path, counter: str, values: list[str], expected_phase: str
+) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    write_counters(directory, [{counter: value} for value in values])
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"][counter][expected_phase] == 1
+
+
+def test_counter_reset_is_unattributed_and_fatal(tmp_path: Path) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    write_counters(
+        directory,
+        [
+            {"ring_buffer_dropped": "0"},
+            {"ring_buffer_dropped": "3"},
+            {"ring_buffer_dropped": "2"},
+        ],
+    )
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["load"] == 3
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["unattributed"] == 2
+
+
+@pytest.mark.parametrize("counter", ["ring_buffer_dropped", "channel_dropped"])
+def test_collector_baseline_separates_preflight_from_first_load_sample(
+    tmp_path: Path, counter: str
+) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    (directory / "metrics-baseline.json").write_text(
+        json.dumps({counter: 5, "monotonic_timestamp": 9, "counter_timestamp": 9})
+    )
+    write_counters(directory, [{counter: "5"}, {counter: "5"}, {counter: "5"}])
+
+    run = resource_report.summarize(directory, {})
+
+    assert run["valid"] and run["capture"] == "PASS"
+    assert run["probe_drop_phases"][counter] == {
+        "before_load": 5,
+        "load": 0,
+        "tail": 0,
+        "unattributed": 0,
+    }
+
+
+def test_zero_counter_reset_is_unattributed_and_fatal(tmp_path: Path) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    (directory / "agents/start.json").write_text(json.dumps({"start": 11, "end": 12}))
+    write_counters(
+        directory,
+        [
+            {"ring_buffer_dropped": "5"},
+            {"ring_buffer_dropped": "0"},
+            {"ring_buffer_dropped": "0"},
+        ],
+    )
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["before_load"] == 5
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["unattributed"] == 1
+
+
+def test_final_counter_reset_to_zero_is_unattributed_and_fatal(tmp_path: Path) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    (directory / "agents/start.json").write_text(json.dumps({"start": 11, "end": 12}))
+    write_counters(
+        directory,
+        [
+            {"ring_buffer_dropped": "5"},
+            {"ring_buffer_dropped": "5"},
+            {"ring_buffer_dropped": "5"},
+        ],
+    )
+    (directory / "internal-metrics.prom").write_text(
+        "agentsight_ring_buffer_dropped_total 0\nagentsight_channel_dropped_total 0\n"
+    )
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["before_load"] == 5
+    assert run["probe_drop_phases"]["ring_buffer_dropped"]["unattributed"] == 1
+
+
+@pytest.mark.parametrize("timestamp", [None, 10])
+def test_missing_or_late_baseline_timestamp_is_unattributed_and_fatal(
+    tmp_path: Path, timestamp: float | None
+) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    baseline = {"ring_buffer_dropped": 1}
+    if timestamp is not None:
+        baseline["counter_timestamp"] = timestamp
+    (directory / "metrics-baseline.json").write_text(json.dumps(baseline))
+    write_counters(
+        directory,
+        [
+            {"ring_buffer_dropped": "1"},
+            {"ring_buffer_dropped": "1"},
+            {"ring_buffer_dropped": "1"},
+        ],
+    )
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"]["ring_buffer_dropped"] == {
+        "before_load": 0,
+        "load": 0,
+        "tail": 0,
+        "unattributed": 1,
+    }
+
+
+def test_baseline_counter_read_after_load_start_is_unattributed_and_fatal(
+    tmp_path: Path,
+) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    (directory / "metrics-baseline.json").write_text(
+        json.dumps(
+            {
+                "monotonic_timestamp": 9.477,
+                "counter_timestamp": 10.026,
+                "ring_buffer_dropped": 1,
+            }
+        )
+    )
+    write_counters(
+        directory,
+        [
+            {"ring_buffer_dropped": "1"},
+            {"ring_buffer_dropped": "1"},
+            {"ring_buffer_dropped": "1"},
+        ],
+    )
+
+    run = resource_report.summarize(directory, {})
+
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drop_phases"]["ring_buffer_dropped"] == {
+        "before_load": 0,
+        "load": 0,
+        "tail": 0,
+        "unattributed": 1,
+    }

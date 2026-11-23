@@ -29,7 +29,10 @@ use crate::session::{
 use crate::sls;
 use crate::tool::SessionWorkspace;
 
-mod auth;
+pub(crate) mod auth;
+#[cfg(test)]
+mod live_state_tests;
+mod trial;
 
 use auth::request_auth;
 
@@ -41,6 +44,7 @@ use auth::request_auth;
 const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
 const EXIT_PROTOCOL_MISMATCH: i32 = 65;
 const EXIT_TURN_FAILURE: i32 = 1;
+const EXIT_PARENT_LOST: i32 = 75;
 
 pub async fn run(
     args: &CliArgs,
@@ -49,6 +53,7 @@ pub async fn run(
     workspace: SessionWorkspace,
 ) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
+    let parent_watch = crate::parent_watch::ParentWatch::spawn();
 
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
@@ -157,7 +162,9 @@ pub async fn run(
 
     // --- Auth check: if no API key, request auth from Shell ---
     let mut buffered_lines: Vec<String> = Vec::new();
-    let provider = if crate::needs_auth(&config) {
+    let provider = if auth::defer_auth(args) && crate::needs_auth(&config) {
+        auth::unconfigured_provider()
+    } else if crate::needs_auth(&config) {
         match request_auth(&mut config, &mut lines, &mut writer, &mut buffered_lines).await {
             Some(p) => p,
             None => {
@@ -235,7 +242,7 @@ pub async fn run(
                 let result_msg = OutputMessage::Result {
                     subtype: Some("success".to_string()),
                     is_error: false,
-                    result: Some("completed".to_string()),
+                    result: None,
                     errors: None,
                     error_code: None,
                     max_turns: None,
@@ -264,7 +271,8 @@ pub async fn run(
         } else {
             0
         };
-        let transport_failed = engine.control_transport_failure().is_some();
+        let transport_failed = engine.control_transport_failure().is_some()
+            || engine.emit_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
         // Await the standalone upload handle with a 1-second grace period
         // reserved for the POST itself. The region probe (also bounded, see
@@ -299,6 +307,7 @@ pub async fn run(
             &mut session,
             &mut extensions,
             &mut protocol,
+            &parent_watch,
         )
         .await
         {
@@ -315,14 +324,34 @@ pub async fn run(
                 engine.shutdown_extension_runtime().await;
                 return Ok(EXIT_PROTOCOL_MISMATCH);
             }
+            InputLineResult::ParentLost => {
+                // The aborted turn is deliberately not persisted: the shell is
+                // gone and the dropped future can leave unpaired tool calls,
+                // which would corrupt transcript replay on the next session.
+                crate::core::emit_fatal_diagnostic(
+                    &mut std::io::stderr().lock(),
+                    "parent process lost; agent turn cancelled",
+                );
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PARENT_LOST);
+            }
         }
-        if engine.control_transport_failure().is_some() {
+        if engine.control_transport_failure().is_some() || engine.emit_transport_failure().is_some()
+        {
             engine.shutdown_extension_runtime().await;
             return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
         }
     }
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = if let Some(line) = protocol.pending_input.pop_front() {
+            line
+        } else {
+            match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => break,
+            }
+        };
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -337,6 +366,7 @@ pub async fn run(
             &mut session,
             &mut extensions,
             &mut protocol,
+            &parent_watch,
         )
         .await
         {
@@ -353,10 +383,22 @@ pub async fn run(
                 engine.shutdown_extension_runtime().await;
                 return Ok(EXIT_PROTOCOL_MISMATCH);
             }
+            InputLineResult::ParentLost => {
+                // The aborted turn is deliberately not persisted: the shell is
+                // gone and the dropped future can leave unpaired tool calls,
+                // which would corrupt transcript replay on the next session.
+                crate::core::emit_fatal_diagnostic(
+                    &mut std::io::stderr().lock(),
+                    "parent process lost; agent turn cancelled",
+                );
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PARENT_LOST);
+            }
         }
         // Checked after every line, not only after a turn: once the transport
         // is gone the process can neither answer nor be answered.
-        if engine.control_transport_failure().is_some() {
+        if engine.control_transport_failure().is_some() || engine.emit_transport_failure().is_some()
+        {
             engine.shutdown_extension_runtime().await;
             return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
         }
@@ -370,11 +412,14 @@ enum InputLineResult {
     Shutdown,
     InvalidJson,
     ProtocolMismatch,
+    ParentLost,
 }
 
 struct ProtocolState {
     profile: crate::cli::ExecutionProfile,
     initialized: bool,
+    pending_input: std::collections::VecDeque<String>,
+    trial_preference_notice_shown: bool,
 }
 
 impl ProtocolState {
@@ -382,6 +427,8 @@ impl ProtocolState {
         Self {
             profile,
             initialized: false,
+            pending_input: std::collections::VecDeque::new(),
+            trial_preference_notice_shown: false,
         }
     }
 }
@@ -483,6 +530,9 @@ fn brokered_capability_profile(
 }
 
 /// Processes a single JSONL input line.
+// The line dispatcher threads every session subsystem; the parent watch joins
+// the existing parameter set rather than reshaping the call sites.
+#[allow(clippy::too_many_arguments)]
 async fn process_input_line<W, R>(
     line: &str,
     engine: &mut CoshCore,
@@ -492,11 +542,15 @@ async fn process_input_line<W, R>(
     session: &mut SessionRuntime,
     extensions: &mut HeadlessExtensionRuntime<'_>,
     protocol: &mut ProtocolState,
+    parent_watch: &crate::parent_watch::ParentWatch,
 ) -> InputLineResult
 where
     W: io::Write,
     R: AsyncBufReadExt + Unpin,
 {
+    if parent_watch.is_dead() {
+        return InputLineResult::ParentLost;
+    }
     let msg: InputMessage = match serde_json::from_str(line) {
         Ok(m) => m,
         Err(e) => {
@@ -662,6 +716,33 @@ where
                     );
                     return InputLineResult::Continue;
                 }
+                if model != crate::auth::trial_policy::MODEL
+                    && crate::auth::trial_policy::decide(
+                        &engine.config,
+                        &crate::auth::trial_policy::ProviderIntent::from_env(),
+                        true,
+                        true,
+                        true,
+                    ) == crate::auth::trial_policy::TrialDecision::EcsIdentity
+                    && (engine.trial_identity_provider.is_some()
+                        || engine
+                            .config
+                            .ai
+                            .providers
+                            .values()
+                            .any(crate::config::ProviderConfig::is_ecs_identity))
+                {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "ECS automatic access uses the fixed model auto; use /auth to configure another provider",
+                            Some("EcsTrialModelFixed"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
+                engine.config.ai.active_model = Some(model.clone());
                 engine.model = model.clone();
                 engine.emit(
                     writer,
@@ -713,8 +794,20 @@ where
             message,
             session_id,
             shell_context,
+            ecs_trial_context,
             ..
         } => {
+            if auth::defer_auth(args) && !protocol.initialized {
+                engine.emit(
+                    writer,
+                    &OutputMessage::result_error_with_code(
+                        &engine.session_id,
+                        "initialize is required before user input",
+                        Some("InitializeRequired"),
+                    ),
+                );
+                return InputLineResult::Continue;
+            }
             if protocol.profile.is_brokered() && !protocol.initialized {
                 engine.emit(
                     writer,
@@ -743,6 +836,74 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            let trial_capable =
+                auth::defer_auth(args) && engine.client_capabilities.can_handle_ecs_trial_v1;
+            let previous_model = engine.model.clone();
+            let selection = match trial::prepare(engine, trial_capable, ecs_trial_context).await {
+                Ok(selection) => selection,
+                Err(code) => {
+                    let preference_error = code.starts_with("trial_preferences_");
+                    if preference_error && !protocol.trial_preference_notice_shown {
+                        engine.emit(
+                            writer,
+                            &OutputMessage::system_status(&format!(
+                                "trial_preferences_unavailable:{code}"
+                            )),
+                        );
+                        protocol.trial_preference_notice_shown = true;
+                    }
+                    let message = if preference_error {
+                        "automatic access preferences are unavailable; automatic model access is disabled; use /auth"
+                    } else if code == "EcsTrialDisabled" {
+                        "automatic model access is disabled; use /auth to enable automatic access or configure a model"
+                    } else {
+                        "no model configured; use /auth to configure or re-enable a model"
+                    };
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            message,
+                            Some(code),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
+            };
+
+            if selection == trial::Prepared::Trial && engine.model != previous_model {
+                engine.emit(
+                    writer,
+                    &OutputMessage::system_status(&format!("model_switched:{}", engine.model)),
+                );
+            }
+
+            if selection == trial::Prepared::Existing
+                && auth::defer_auth(args)
+                && crate::needs_auth(&engine.config)
+            {
+                let mut buffered = Vec::new();
+                let provider = request_auth(&mut engine.config, lines, writer, &mut buffered).await;
+                protocol.pending_input.extend(buffered);
+                let Some(provider) = provider else {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "authentication cancelled; configure a model with /auth",
+                            Some("AuthenticationCancelled"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                };
+                engine.provider = provider;
+                let resolved = engine.config.resolve_provider();
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+            }
+
+            session.refresh_background_compaction(engine);
+
             // Reset per-turn metrics before each user message
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
@@ -751,9 +912,19 @@ where
                 .cosh_shell_transport
                 .then_some(message.raw_user_input.as_deref())
                 .flatten();
-            let turn_result = engine
-                .handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer)
-                .await;
+            // Dropping the turn future cancels the in-flight provider request:
+            // an orphaned core must not keep streaming (and billing) after the
+            // shell is gone (issue #10315).
+            let turn_result = tokio::select! {
+                result = engine.handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer) => result,
+                _ = parent_watch.notified() => {
+                    engine.audit.finalize_parent_lost();
+                    return InputLineResult::ParentLost;
+                }
+            };
+            if let Some(access) = engine.trial_access.as_ref() {
+                protocol.pending_input.extend(access.drain_input());
+            }
             let persist_result = session.persist(engine);
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
@@ -761,7 +932,7 @@ where
                     let result_msg = OutputMessage::Result {
                         subtype: Some("success".to_string()),
                         is_error: false,
-                        result: Some("completed".to_string()),
+                        result: None,
                         errors: None,
                         error_code: None,
                         max_turns: None,
@@ -783,7 +954,16 @@ where
                     session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
-                    let err_msg = failure.output_message(&engine.session_id);
+                    let mut err_msg = failure.output_message(&engine.session_id);
+                    if let Some(failure) = engine
+                        .trial_access
+                        .as_ref()
+                        .and_then(|access| access.failure())
+                    {
+                        if let OutputMessage::Result { error_code, .. } = &mut err_msg {
+                            *error_code = Some(failure.code);
+                        }
+                    }
                     // Emit the error result before awaiting telemetry so a stalled
                     // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &err_msg);
@@ -801,7 +981,7 @@ where
         InputMessage::ControlResponse { .. } => {}
         // Receipts only matter to an interactive `wait_for_approval` loop;
         // the headless path never waits on one.
-        InputMessage::ApprovalReceipt { .. } => {}
+        InputMessage::ApprovalReceipt { .. } | InputMessage::EcsTrialControl { .. } => {}
         InputMessage::RegistryRequest {
             request_id,
             domain,
@@ -823,7 +1003,7 @@ where
                 );
                 return InputLineResult::Continue;
             };
-            let response = crate::registry::handle_registry_request(
+            let mut response = crate::registry::handle_registry_request(
                 &request_id,
                 &domain,
                 &action,
@@ -834,6 +1014,35 @@ where
                 Some(extensions.live),
             )
             .await;
+            if domain == "auth"
+                && matches!(action.as_str(), "activate" | "activate_trial" | "configure")
+                && matches!(
+                    &response,
+                    OutputMessage::RegistryResponse { success: true, .. }
+                )
+            {
+                let resolved = engine.config.resolve_provider();
+                engine.provider = crate::create_provider(&engine.config);
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+                if session.record.was_loaded {
+                    session.refresh_background_compaction(engine);
+                    if let Err(error) = session.persist(engine) {
+                        tracing::warn!(error = ?error, "provider selection session save failed");
+                        response = OutputMessage::RegistryResponse {
+                            request_id,
+                            success: false,
+                            data: Some(serde_json::json!({
+                                "provider_updated": true,
+                                "error_code": error.code(),
+                            })),
+                            error: Some(format!(
+                                "Provider updated, but the session model could not be saved: {error}. The current session uses the selected provider; a later question will retry session saving."
+                            )),
+                        };
+                    }
+                }
+            }
             engine.emit(writer, &response);
             engine.drain_retired_extension_snapshots().await;
         }
@@ -988,6 +1197,43 @@ impl SessionRuntime {
         }
     }
 
+    fn refresh_background_compaction(&mut self, engine: &mut CoshCore) {
+        if !self.auto_persist
+            || !self.record.was_loaded
+            || self.record.session_id.as_str() != engine.session_id
+        {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let saved = match store.load(&self.record.session_id) {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!(error = ?error, "background compaction refresh failed");
+                return;
+            }
+        };
+        if saved.generation <= self.record.generation
+            || saved.compaction_revision <= engine.compaction.revision()
+        {
+            return;
+        }
+        // Compare the durable redaction without changing live provider context.
+        let mut persisted_messages = engine.messages.clone();
+        crate::redaction::redact_messages(&mut persisted_messages);
+        if crate::compaction::source_digest(&persisted_messages)
+            != crate::compaction::source_digest(&saved.messages)
+        {
+            tracing::warn!("background compaction transcript differs from live session");
+            return;
+        }
+        engine
+            .compaction
+            .load_state(saved.compaction.clone(), saved.compaction_revision);
+        self.record = saved;
+    }
+
     fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {
         if !self.auto_persist || self.store.is_none() {
             return Ok(());
@@ -1051,6 +1297,17 @@ impl SessionRuntime {
     /// revision) so the shell can suppress retrigger loops per revision.
     fn recommend_auto_compaction<W: io::Write>(&self, engine: &mut CoshCore, writer: &mut W) {
         let policy = &engine.config.session.compaction;
+        if engine.trial_access.is_some()
+            || crate::auth::trial_policy::decide(
+                &engine.config,
+                &crate::auth::trial_policy::ProviderIntent::from_env(),
+                true,
+                true,
+                true,
+            ) == crate::auth::trial_policy::TrialDecision::EcsIdentity
+        {
+            return;
+        }
         if !policy.enabled || !policy.auto || !self.resumable() {
             return;
         }

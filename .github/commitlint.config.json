@@ -19,6 +19,7 @@
         "skillfs",
         "ktuner",
         "aw",
+        "benchmark",
         "deps",
         "ci",
         "docs",
@@ -35,6 +36,11 @@
       120
     ],
     "body-max-line-length": [
+      1,
+      "always",
+      100
+    ],
+    "footer-max-line-length": [
       1,
       "always",
       100

@@ -154,9 +154,9 @@ impl SqlitePolicyRepository {
                     return Err(error);
                 }
             };
-            #[cfg(test)]
+            #[cfg(feature = "test-support")]
             if write {
-                tests::before_commit(&transaction);
+                test_support::before_commit(&transaction);
             }
             if let Err(error) = transaction.commit() {
                 let classified = RepositoryError::from(error).store();

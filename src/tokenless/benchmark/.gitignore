@@ -1,8 +1,9 @@
 # Benchmark suite report artifacts, for every layer.
 #
-# Each layer (l1-compressor, l2-module, l3-scenario, and any later l4-*) also
-# carries its own .gitignore, because each is a standalone Cargo workspace that
-# must stay self-contained. This file is the suite-wide backstop so a new layer
+# Each layer (l1-compressor, l2-module, l3-scenario, l4-end-to-end) also carries
+# its own .gitignore. The L1-L3 layers are standalone Cargo workspaces that must
+# stay self-contained; L4 is not a Cargo workspace but follows the same
+# per-layer-ignore convention. This file is the suite-wide backstop so a new layer
 # cannot leak reports before someone remembers to add its ignore rules, and so
 # the policy lives in one reviewable place.
 #

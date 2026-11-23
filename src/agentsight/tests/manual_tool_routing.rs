@@ -3,7 +3,7 @@
 mod common;
 
 use agentsight::aggregator::Aggregator;
-use agentsight::analyzer::Analyzer;
+use agentsight::analyzer::{Analyzer, TokenConsumptionBreakdown};
 use agentsight::event::Event;
 use agentsight::parser::Parser;
 use agentsight::tokenizer::LlmTokenizer;
@@ -42,7 +42,7 @@ impl Fixture {
         }
     }
 
-    fn count(&self, responses: bool, chunks: &[Value]) -> (usize, Vec<usize>) {
+    fn breakdown(&self, responses: bool, chunks: &[Value]) -> TokenConsumptionBreakdown {
         let path = if responses {
             "/v1/responses"
         } else {
@@ -79,10 +79,14 @@ impl Fixture {
                 common::make_ssl_event(123, 0x123, 0, record, "fixture"),
             ))));
         }
-        let breakdown = completed
+        completed
             .iter()
             .find_map(|r| self.analyzer.analyze_token_consumption(r))
-            .expect("captured SSE must reach the manual counter");
+            .expect("captured SSE must reach the manual counter")
+    }
+
+    fn count(&self, responses: bool, chunks: &[Value]) -> (usize, Vec<usize>) {
+        let breakdown = self.breakdown(responses, chunks);
         let blocks = breakdown
             .output_per_block
             .into_iter()
@@ -90,6 +94,14 @@ impl Fixture {
             .map(|b| b.tokens)
             .collect();
         (breakdown.total_output_tokens, blocks)
+    }
+
+    fn reasoning_tokens(&self, chunks: &[Value]) -> usize {
+        self.breakdown(true, chunks)
+            .output_by_type
+            .get("reasoning")
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -145,6 +157,24 @@ fn check_parallel(responses: bool, interleaved: bool) {
         (2 * single.0, vec![single.1[0]; 2]),
         "each identical call must render its own complete template"
     );
+}
+
+#[test]
+fn responses_mixed_reasoning_replay_preserves_each_item() {
+    let fixture = Fixture::new();
+    let closing_first = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":"Inspect logs. "}]}});
+    let delta_second = json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"delta":"Then retry."});
+    let closing_second = json!({"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Then retry."}]}});
+    let expected = fixture.reasoning_tokens(&[closing_first.clone(), closing_second.clone()]);
+    assert!(expected > 0);
+
+    let mixed = fixture.reasoning_tokens(&[
+        closing_first,
+        delta_second,
+        closing_second,
+        json!({"type":"response.completed","response":{"id":"resp_mixed"}}),
+    ]);
+    assert_eq!(mixed, expected);
 }
 
 #[test]

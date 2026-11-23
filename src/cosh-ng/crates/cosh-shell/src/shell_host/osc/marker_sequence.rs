@@ -9,9 +9,22 @@ use super::super::model::ShellHistoryFileObserver;
 const SHELL_HISTORY_FILE_MAX_BYTES: usize = 4 * 1024;
 
 pub(super) fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    // A full match must start with the needle's first byte, so scanning for
+    // that byte first skips the per-position slice comparisons of a naive
+    // windows() walk on control-free output.
+    let Some(&first) = needle.first() else {
+        return Some(0);
+    };
+    let mut from = 0;
+    while from + needle.len() <= haystack.len() {
+        let skip = haystack[from..].iter().position(|byte| *byte == first)?;
+        let at = from + skip;
+        if haystack[at..].starts_with(needle) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
 }
 
 pub(super) fn osc_prefix_suffix_len(pending: &[u8]) -> usize {
@@ -140,5 +153,56 @@ impl HistoryFileTracker {
         if let Some(observer) = &self.observer {
             observer.observe(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_bytes;
+
+    fn naive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    #[test]
+    fn accelerated_search_matches_the_naive_window_walk() {
+        let haystacks: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"aaaaab".to_vec(),
+            b"\x1b]1337;COSH;{}".to_vec(),
+            b"xx\x1b]1337;COSH;a\x1b]1337;COSH;b".to_vec(),
+            b"\x1b\x1b\x1b]1337;COSH;".to_vec(),
+            (0..=255u8).collect(),
+            vec![b'1'; 5000],
+            b"1\r\n2\r\n3\r\n".to_vec(),
+        ];
+        let needles: Vec<Vec<u8>> = vec![
+            // The naive walk panics on a zero-length window, so the empty
+            // needle is asserted separately below instead of compared here.
+            b"a".to_vec(),
+            b"\x1b".to_vec(),
+            b"\x1b]1337;COSH;".to_vec(),
+            b"\x1b[?1049h".to_vec(),
+            b"aaab".to_vec(),
+            b"zzz".to_vec(),
+            vec![b'1'; 4000],
+            vec![b'1'; 6000],
+        ];
+        for haystack in &haystacks {
+            for needle in &needles {
+                assert_eq!(
+                    find_bytes(haystack, needle),
+                    naive(haystack, needle),
+                    "haystack_len={} needle_len={}",
+                    haystack.len(),
+                    needle.len()
+                );
+            }
+        }
+        assert_eq!(find_bytes(b"abc", b""), Some(0));
+        assert_eq!(find_bytes(b"", b""), Some(0));
     }
 }

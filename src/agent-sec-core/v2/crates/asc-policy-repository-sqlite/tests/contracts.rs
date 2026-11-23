@@ -9,115 +9,48 @@ use asc_policy_types::{
 };
 use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn repository_retains_sqlite_wal_locks_like_a_plain_connection() {
-    use std::os::unix::fs::MetadataExt;
-
-    let dir = private_dir();
-    let holds_deadman_lock = |name: &str| {
-        let inode = std::fs::metadata(dir.path().join(name))
-            .unwrap()
-            .ino()
-            .to_string();
-        let pid = std::process::id().to_string();
-        let locks = std::fs::read_to_string("/proc/locks").unwrap();
-        locks.lines().any(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            fields.len() >= 8
-                && fields[1] == "POSIX"
-                && fields[4] == pid
-                && fields[5].rsplit(':').next() == Some(inode.as_str())
-                && fields[6].parse::<u64>().is_ok_and(|start| start <= 128)
-                && (fields[7] == "EOF" || fields[7].parse::<u64>().is_ok_and(|end| end >= 128))
-        })
-    };
-    let plain = rusqlite::Connection::open(dir.path().join("plain.db")).unwrap();
-    plain
-        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE example(value);")
-        .unwrap();
-    assert!(
-        holds_deadman_lock("plain.db-shm"),
-        "positive control must retain the WAL deadman lock"
-    );
-
-    let repository = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
-    repository.check_writable().unwrap();
-    // An unrelated close() must not release SQLite's cross-process protection.
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository file validation released SQLite's WAL deadman lock"
-    );
-    let initial = seed(&repository);
-    let applying = transition(&repository, &initial, BindingStatus::Applying);
-    assert_eq!(
-        repository
-            .get_binding_state(&initial.binding.spec.binding_id)
-            .unwrap(),
-        Some(applying)
-    );
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository reads and writes must preserve SQLite's WAL deadman lock"
-    );
-}
-
-trait Repository: PapRepository + BindingStateRepository + BindingReconcileCatalog {}
-impl<T: PapRepository + BindingStateRepository + BindingReconcileCatalog> Repository for T {}
+mod common;
+use common::{Repository, private_dir, seed, transition};
 
 fn each(test: impl Fn(&dyn Repository)) {
     let dir = private_dir();
     test(&SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap());
 }
 
-fn seed(repo: &dyn Repository) -> BindingStateSnapshot {
-    let binding: PreparedBinding = serde_json::from_str(include_str!(
-        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
-    ))
-    .unwrap();
-    repo.put_policy(&binding.policy).unwrap();
-    repo.put_scope(&PreparedScope {
-        scope_id: binding.scope.scope_id.clone(),
-        selector: binding.scope.selector.clone(),
-        policy_snapshots: vec![binding.policy],
-        status: ScopeStatus::Active,
-    })
-    .unwrap();
-    let intent = repo
-        .sync_scope_instances(&binding.scope.scope_id, &[binding.scope.process])
-        .unwrap()
-        .remove(0);
-    assert_eq!(intent.status_version, 1);
-    repo.get_binding_state(&intent.spec.binding_id)
-        .unwrap()
-        .unwrap()
-}
-fn transition(
-    repo: &dyn Repository,
-    current: &BindingStateSnapshot,
-    phase: BindingStatus,
-) -> BindingStateSnapshot {
-    let mut next = current.clone();
-    next.binding.status = phase.into();
-    let result = repo
-        .compare_exchange_binding_state(current, &BindingStateWrite::new(next))
-        .unwrap();
-    let WriteResult::Applied(receipt) = result else {
-        panic!("unexpected result {result:?}");
-    };
-    let next = repo
-        .get_binding_state(&current.binding.spec.binding_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(receipt.status_version, Some(next.status_version));
-    assert!(receipt.status_applied);
-    next
-}
 fn target() -> TargetRef {
     TargetRef {
         route: "test".into(),
         id: "target".into(),
         cleanup: vec![1, 2, 3],
     }
+}
+
+#[test]
+fn scope_delete_intent_fences_apply_before_discovery_cleanup() {
+    each(|repo| {
+        let initial = seed(repo);
+        let scope_id = &initial.binding.spec.scope.scope_id;
+        repo.begin_scope_delete(scope_id).unwrap();
+        let mut applying = initial.clone();
+        applying.binding.status = BindingStatus::Applying.into();
+        assert_eq!(
+            repo.compare_exchange_binding_state(&initial, &BindingStateWrite::new(applying))
+                .unwrap(),
+            WriteResult::Conflict
+        );
+        assert_eq!(
+            repo.get_binding_state(&initial.binding.spec.binding_id)
+                .unwrap(),
+            Some(initial.clone())
+        );
+        repo.finish_scope_discovery(scope_id).unwrap();
+        let deleting = repo
+            .get_binding_state(&initial.binding.spec.binding_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleting.binding.status.phase, BindingStatus::PendingDelete);
+        transition(repo, &deleting, BindingStatus::Deleting);
+    });
 }
 
 #[test]
@@ -266,6 +199,123 @@ fn scope_and_last_binding_disappear_together_but_active_scope_survives() {
 }
 
 #[test]
+fn credential_scope_release_responsibility_survives_restart_with_zero_or_last_binding() {
+    use asc_policy_types::scope::{ProcessMatcher, ScopeSelector};
+    for with_binding in [false, true] {
+        let dir = private_dir();
+        let path = dir.path().join("policy-state.db");
+        let repo = SqlitePolicyRepository::open(&path).unwrap();
+        let fixture: PreparedBinding = serde_json::from_str(include_str!(
+            "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+        ))
+        .unwrap();
+        let mut policy = fixture.policy;
+        let source = asc_policy_types::cedar::CedarPolicySource {
+            schema: asc_policy_types::cedar::CedarSchemaReference {
+                schema_id: ResourceId::new("seccore.system").unwrap(),
+                revision: Revision::new(2).unwrap(),
+            },
+            text: r#"@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when { resource.host == "api.github.com" && context.input.method == "GET" && context.input.path like "/repos/*" };"#.into(),
+        };
+        policy.credential_bindings = asc_policy_cedar::http::compile(&source)
+            .unwrap()
+            .into_iter()
+            .map(|rule| asc_policy_types::policy::CredentialBinding {
+                rule_id: rule.rule_id,
+                pair_id: "pair-one".into(),
+            })
+            .collect();
+        policy.template = asc_policy_types::authoring::PolicySource::Cedar(source);
+        for binding in [None, Some("unrelated-rule")] {
+            let mut invalid = policy.clone();
+            if let Some(rule_id) = binding {
+                invalid.credential_bindings[0].rule_id = rule_id.into();
+            } else {
+                invalid.credential_bindings.clear();
+            }
+            assert!(matches!(
+                repo.put_policy(&invalid),
+                Err(PapError::InvalidCedar(_))
+            ));
+            assert_eq!(
+                repo.get_policy(&policy.policy_id, policy.revision),
+                Err(PapError::NotFound)
+            );
+        }
+        repo.put_policy(&policy).unwrap();
+        let scope = PreparedScope {
+            scope_id: fixture.scope.scope_id,
+            selector: ScopeSelector::Process {
+                matcher: ProcessMatcher::Name {
+                    process_name: "agent".into(),
+                },
+            },
+            owner_uid: Some(1000),
+            policy_snapshots: vec![policy.clone()],
+            status: ScopeStatus::Active,
+        };
+        repo.put_scope(&scope).unwrap();
+        assert_eq!(
+            repo.finish_scope_execution(&scope.scope_id),
+            Err(PapError::Conflict)
+        );
+        if with_binding {
+            repo.sync_scope_instances(&scope.scope_id, &[fixture.scope.process])
+                .unwrap();
+        }
+        repo.delete_policy_revision(&policy.policy_id, policy.revision)
+            .unwrap();
+        repo.begin_scope_delete(&scope.scope_id).unwrap();
+        repo.finish_scope_discovery(&scope.scope_id).unwrap();
+        assert_eq!(
+            repo.scope_execution_ready_to_release(&scope.scope_id)
+                .unwrap(),
+            !with_binding
+        );
+        if with_binding {
+            assert_eq!(
+                repo.finish_scope_execution(&scope.scope_id),
+                Err(PapError::Conflict)
+            );
+            let intent = repo.list_bindings(10, 0).unwrap().items.remove(0);
+            let pending = repo
+                .get_binding_state(&intent.spec.binding_id)
+                .unwrap()
+                .unwrap();
+            let deleting = transition(&repo, &pending, BindingStatus::Deleting);
+            repo.compare_exchange_binding_state(&deleting, &BindingStateWrite::delete())
+                .unwrap();
+        }
+        let mut expected = scope;
+        expected.status = ScopeStatus::Deleting;
+        assert_eq!(repo.get_scope(&expected.scope_id).unwrap(), expected);
+        drop(repo);
+        let repo = SqlitePolicyRepository::open(&path).unwrap();
+        assert_eq!(repo.get_scope(&expected.scope_id).unwrap(), expected);
+        assert!(
+            repo.scope_execution_ready_to_release(&expected.scope_id)
+                .unwrap()
+        );
+        // Discovery completion alone never discards credential release responsibility.
+        repo.finish_scope_discovery(&expected.scope_id).unwrap();
+        assert_eq!(repo.get_scope(&expected.scope_id).unwrap(), expected);
+        repo.finish_scope_execution(&expected.scope_id).unwrap();
+        repo.finish_scope_execution(&expected.scope_id).unwrap();
+        assert_eq!(repo.get_scope(&expected.scope_id), Err(PapError::NotFound));
+        drop(repo);
+        let repo = SqlitePolicyRepository::open(&path).unwrap();
+        assert_eq!(repo.list_scopes(10, 0).unwrap().total, 0);
+    }
+}
+
+#[test]
 fn deleting_scope_waits_for_last_binding_and_discovery_barrier() {
     each(|repo| {
         let initial = seed(repo);
@@ -406,13 +456,6 @@ fn keyset_recovery_does_not_skip_rows_deleted_on_previous_page() {
     assert_eq!(repo.list_scopes(10, 0).unwrap().total, 1);
 }
 
-fn private_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()
-        .unwrap()
-}
-
 #[test]
 fn scope_capacity_and_snapshot_admission_are_atomic() {
     each(|repo| {
@@ -448,7 +491,7 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
     let repo = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
     let initial = seed(&repo).binding.spec.policy;
     let mut policy = initial.clone();
-    let mut template = serde_json::to_value(&policy.template).unwrap();
+    let mut template = serde_json::to_value(&policy).unwrap()["template"].clone();
     let rule = template["rules"][0].clone();
     template["rules"] = serde_json::Value::Array(
         (0..200)
@@ -459,7 +502,9 @@ fn sql_list_byte_budget_preserves_total_and_advances_every_page() {
             })
             .collect(),
     );
-    policy.template = serde_json::from_value(template).unwrap();
+    policy.template = asc_policy_types::authoring::PolicySource::SecCore(
+        serde_json::from_value(template).unwrap(),
+    );
     let mut expected = vec![initial];
     for index in 0..7 {
         policy.policy_id = ResourceId::new(format!("large-{index}")).unwrap();
@@ -884,14 +929,14 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
     ))
     .unwrap();
     let mut policy = binding.policy;
-    policy.template = serde_json::from_value(serde_json::json!({
+    policy.template = asc_policy_types::authoring::PolicySource::SecCore(serde_json::from_value(serde_json::json!({
         "specVersion":"0.1", "description":"Reusable policy requiring review",
         "rules":[{"effect":"require_confirmation","category":"file","action":"exec",
             "target":{"type":"file","path":"/usr/bin/git"},
             "where":{"and":[{"argsPrefix":{"eq":["push"]}},{"cwd":{"eq":"/workspace"}}]},
             "previous":{"category":"file","action":"read","target":{"type":"file","path":"/secrets/**"}},
             "because":"Review before pushing"}]
-    })).unwrap();
+    })).unwrap());
     repo.put_policy(&policy).unwrap();
     let mut scopes = Vec::new();
     let mut bindings = Vec::new();
@@ -900,6 +945,7 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
             scope_id: ResourceId::new(id).unwrap(),
             selector: binding.scope.selector.clone(),
             policy_snapshots: vec![policy.clone()],
+            owner_uid: None,
             status: ScopeStatus::Active,
         };
         repo.put_scope(&scope).unwrap();
@@ -947,6 +993,107 @@ fn general_policy_rules_survive_reopen_in_current_scope_and_binding_snapshots() 
             policy
         );
     }
+}
+
+#[test]
+fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_schema() {
+    use asc_pap::PapService;
+    use asc_policy_cedar::pst;
+    use asc_policy_types::authoring::PolicySource;
+    use std::sync::Arc;
+
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+    let pap = PapService::new(repo.clone());
+    let source: PolicySource = serde_json::from_value(serde_json::json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system","revision":1},
+            "text":"// Retain whitespace and original source.\nforbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/protected\" };\n"
+        }
+    })).unwrap();
+    let original = pap.create_policy("cedar", &source).unwrap();
+    let fixture: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    let scope = PreparedScope {
+        scope_id: fixture.scope.scope_id,
+        selector: fixture.scope.selector,
+        policy_snapshots: vec![original.clone()],
+        owner_uid: None,
+        status: ScopeStatus::Active,
+    };
+    repo.put_scope(&scope).unwrap();
+    let intent = repo
+        .sync_scope_instances(&scope.scope_id, &[fixture.scope.process])
+        .unwrap()
+        .remove(0);
+    let mut updated_source = source.clone();
+    let PolicySource::Cedar(cedar) = &mut updated_source else {
+        unreachable!()
+    };
+    cedar.text = cedar.text.replace("/protected", "/changed");
+    let current = pap
+        .update_policy(&original.policy_id, "renamed", &updated_source)
+        .unwrap();
+    assert_eq!(current.revision.get(), 2);
+    assert_ne!(current.template, original.template);
+    assert_eq!(repo.get_scope(&scope.scope_id).unwrap(), scope);
+    drop(pap);
+    drop(repo);
+
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(
+        repo.get_policy(&current.policy_id, current.revision)
+            .unwrap(),
+        current
+    );
+    assert_eq!(repo.get_scope(&scope.scope_id).unwrap(), scope);
+    let restored = repo
+        .get_binding_state(&intent.spec.binding_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.binding.spec.policy, original);
+    let PolicySource::Cedar(saved) = &restored.binding.spec.policy.template else {
+        panic!("saved Cedar policy must produce a PST");
+    };
+    assert_eq!(saved.schema.revision.get(), 1);
+    assert_eq!(pst(saved).unwrap().policies.len(), 1);
+    repo.delete_policy_revision(&current.policy_id, current.revision)
+        .unwrap();
+    drop(repo);
+
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        1
+    );
+    let saved: String = db
+        .query_row("SELECT spec_json FROM bindings", [], |r| r.get(0))
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(
+        saved["policy"]["template"],
+        serde_json::to_value(&source).unwrap()
+    );
+    drop(db);
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let restored = repo
+        .get_binding_state(&intent.spec.binding_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.binding.spec.policy, original);
+    let PolicySource::Cedar(mut invalid) = restored.binding.spec.policy.template else {
+        unreachable!()
+    };
+    assert!(pst(&invalid).is_ok());
+    invalid.schema.revision = Revision::new(3).unwrap();
+    assert!(matches!(
+        pst(&invalid),
+        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 3, .. })
+    ));
 }
 
 #[test]
@@ -1003,4 +1150,63 @@ fn legacy_policy_payloads_are_rejected_without_discarding_saved_responsibility()
         let db = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(read(&db), before);
     }
+}
+
+#[test]
+fn selected_current_policies_preserve_cedar_and_legacy_sources_across_reopen() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let (native, cedar) = {
+        let repository = std::sync::Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+        let native = seed(repository.as_ref()).binding.spec.policy;
+        let pap = asc_pap::PapService::new(repository.clone());
+        let source: asc_policy_types::authoring::PolicySource =
+            serde_json::from_value(serde_json::json!({
+                "language": "cedar", "content": {
+                    "schema": {"schemaId": "seccore.system", "revision": 1},
+                    "text": "permit(principal, action, resource);"
+                }
+            }))
+            .unwrap();
+        let cedar = pap.create_policy("sandbox", &source).unwrap();
+        assert_eq!(
+            pap.current_policies(&[cedar.policy_id.clone(), native.policy_id.clone()])
+                .unwrap(),
+            vec![cedar.clone(), native.clone()]
+        );
+        assert!(pap.current_policies(&[]).is_err());
+        assert!(
+            pap.current_policies(&vec![native.policy_id.clone(); 33])
+                .is_err()
+        );
+        assert_eq!(
+            pap.current_policies(&[
+                native.policy_id.clone(),
+                ResourceId::new("missing").unwrap()
+            ]),
+            Err(PapError::NotFound)
+        );
+        (native, cedar)
+    };
+    let repository = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(
+        repository
+            .current_policies(&[native.policy_id.clone(), cedar.policy_id.clone()])
+            .unwrap(),
+        vec![native.clone(), cedar.clone()]
+    );
+    let native_json = serde_json::to_value(&native).unwrap();
+    assert!(native_json["template"].get("specVersion").is_some());
+    assert!(native_json["template"].get("language").is_none());
+    assert_eq!(
+        serde_json::to_value(&cedar).unwrap()["template"]["language"],
+        "cedar"
+    );
+    repository
+        .delete_policy_revision(&cedar.policy_id, cedar.revision)
+        .unwrap();
+    assert_eq!(
+        repository.current_policies(&[native.policy_id, cedar.policy_id]),
+        Err(PapError::NotFound)
+    );
 }

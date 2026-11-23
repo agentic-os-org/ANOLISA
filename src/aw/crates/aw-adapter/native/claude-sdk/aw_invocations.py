@@ -11,7 +11,10 @@ import json
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from aw_claude import CallbackFailure
+if __package__:
+    from .aw_claude import CallbackFailure
+else:
+    from aw_claude import CallbackFailure
 
 
 def digest(value: Any) -> bytes:
@@ -49,6 +52,7 @@ class Dispatch:
     call_id: str | None
     execution: int
     entered: bool = False
+    stop_fingerprint: bytes | None = None
 
 
 dispatch: ContextVar[Dispatch | None] = ContextVar("aw_dispatch", default=None)
@@ -153,14 +157,17 @@ class Invocations:
         # their bounded identity until the next model request or execution drain.
         entry.phase = "adopted"
 
-    def reserve(self, request_id: str, call_id: str | None, callback: str) -> Dispatch:
+    def reserve(self, request_id: str, call_id: str | None, callback: str, *,
+                stop_fingerprint: bytes | None = None) -> Dispatch | None:
         self.bridge.scope.check()
         if self.bridge.failure or self.closing or (call_id is not None and not self.running):
             raise CallbackFailure("AW callback arrived outside its execution")
-        if (
-            request_id in self.pending
-            or len(self.pending) >= self.bridge.scope.invocation_limit * 8
-        ):
+        pending = self.pending.get(request_id)
+        if pending is not None and stop_fingerprint is not None and pending.stop_fingerprint == stop_fingerprint:
+            # One native request ID needs one response. Forwarding another copy
+            # would overwrite the SDK's cancellation handle for the first task.
+            return None
+        if pending is not None or len(self.pending) >= self.bridge.scope.invocation_limit * 8:
             raise CallbackFailure("AW callback dispatch duplicate or capacity exceeded")
         if call_id is not None:
             entry = self.active.get(call_id)
@@ -172,7 +179,7 @@ class Invocations:
             ):
                 raise CallbackFailure("AW callback identity was retired or already dispatched")
             entry.callbacks.add(callback)
-        ticket = Dispatch(request_id, call_id, self.execution)
+        ticket = Dispatch(request_id, call_id, self.execution, stop_fingerprint=stop_fingerprint)
         self.pending[request_id] = ticket
         return ticket
 

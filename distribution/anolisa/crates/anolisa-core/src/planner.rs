@@ -45,6 +45,8 @@ pub struct InstallRequest {
     pub target: ProviderTarget,
     /// Explicit `--version` request, if any.
     pub requested_version: Option<String>,
+    /// Skip runtime dependency checks and provisioning for a raw install.
+    pub no_deps: bool,
 }
 
 /// Which provider family an install resolves to.
@@ -468,17 +470,22 @@ fn plan_install(req: &InstallRequest, facts: &Facts) -> Result<Plan, PlanError> 
                 return Err(PlanError::AlreadyPresentOnSystem);
             }
             match &req.target {
-                ProviderTarget::Owned { .. } => Ok(Plan::execute(vec![
+                ProviderTarget::Owned { .. } => {
                     // I1
-                    Step::DownloadVerify,
-                    Step::ProvisionRuntimeDeps,
-                    Step::RunHook(HookKind::PreInstall),
-                    Step::PlaceFiles,
-                    Step::SetCapabilities,
-                    Step::RunHook(HookKind::PostInstall),
-                    Step::EnableServices,
-                    Step::WriteRecord(RecordWrite::Owned),
-                ])),
+                    let mut steps = vec![Step::DownloadVerify];
+                    if !req.no_deps {
+                        steps.push(Step::ProvisionRuntimeDeps);
+                    }
+                    steps.extend([
+                        Step::RunHook(HookKind::PreInstall),
+                        Step::PlaceFiles,
+                        Step::SetCapabilities,
+                        Step::RunHook(HookKind::PostInstall),
+                        Step::EnableServices,
+                        Step::WriteRecord(RecordWrite::Owned),
+                    ]);
+                    Ok(Plan::execute(steps))
+                }
                 ProviderTarget::Delegated {
                     pm,
                     package,
@@ -903,6 +910,7 @@ mod tests {
         Intent::Install(InstallRequest {
             target,
             requested_version: None,
+            no_deps: false,
         })
     }
 
@@ -999,6 +1007,27 @@ mod tests {
     }
 
     #[test]
+    fn fresh_owned_install_without_dependencies_preserves_other_steps() {
+        let request = InstallRequest {
+            target: owned_target(),
+            requested_version: None,
+            no_deps: true,
+        };
+        assert_eq!(
+            expect_steps(plan(&Intent::Install(request), &facts())),
+            vec![
+                Step::DownloadVerify,
+                Step::RunHook(HookKind::PreInstall),
+                Step::PlaceFiles,
+                Step::SetCapabilities,
+                Step::RunHook(HookKind::PostInstall),
+                Step::EnableServices,
+                Step::WriteRecord(RecordWrite::Owned),
+            ]
+        );
+    }
+
+    #[test]
     fn i2_fresh_delegated_install() {
         let f = facts();
         let steps = expect_steps(plan(&install(delegated_target()), &f));
@@ -1059,6 +1088,7 @@ mod tests {
         let same = Intent::Install(InstallRequest {
             target: owned_target(),
             requested_version: Some("1.2.3".to_string()),
+            no_deps: false,
         });
         assert_eq!(
             plan(&same, &f),
@@ -1070,6 +1100,7 @@ mod tests {
         let other = Intent::Install(InstallRequest {
             target: owned_target(),
             requested_version: Some("2.0.0".to_string()),
+            no_deps: false,
         });
         assert_eq!(plan(&other, &f), Err(PlanError::UseUpdate));
     }
@@ -1141,6 +1172,7 @@ mod tests {
                 artifact: None,
             },
             requested_version: None,
+            no_deps: false,
         });
         assert_eq!(plan(&repointed, &f), Err(PlanError::ProvenanceConflict));
     }

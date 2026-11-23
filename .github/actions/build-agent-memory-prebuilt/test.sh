@@ -66,7 +66,6 @@ grep -Fq 'profile gnu2.28-x86_64 does not match target linux/aarch64' "$TEMPORAR
 fixture="$TEMPORARY/source"
 install -d "$fixture/src/agent-memory"
 cp "$REPO_ROOT/src/agent-memory/Cargo.toml" "$fixture/src/agent-memory/"
-cp -r "$REPO_ROOT/src/agent-memory/.anolisa" "$fixture/src/agent-memory/"
 cp -r "$REPO_ROOT/src/agent-memory/packaging" "$fixture/src/agent-memory/"
 tar -C "$REPO_ROOT/src/agent-memory" --exclude=node_modules --exclude=dist --exclude=tests \
     -cf - config adapters | tar -x -C "$fixture/src/agent-memory"

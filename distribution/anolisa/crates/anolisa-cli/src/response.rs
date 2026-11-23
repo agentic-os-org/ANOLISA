@@ -256,18 +256,39 @@ impl CliError {
 /// caller's exit code reflects the failure instead of silently
 /// returning `Ok(())`.
 pub fn render_json<T: Serialize>(command: &str, data: T) -> Result<(), CliError> {
-    let response = CliResponse {
+    render_json_with_warnings(command, data, Vec::new())
+}
+
+/// Print a successful JSON envelope that carries handler warnings.
+///
+/// `warnings` is the machine-readable counterpart of the `warn:` lines the human
+/// path writes to stderr. Feed both from the same outcome: a `--json` caller that
+/// loses a warning silently skips whatever step the human path was guiding it to.
+pub fn render_json_with_warnings<T: Serialize>(
+    command: &str,
+    data: T,
+    warnings: Vec<String>,
+) -> Result<(), CliError> {
+    write_json(&success_envelope(command, data, warnings)).map_err(|e| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to serialize JSON response: {e}"),
+    })
+}
+
+/// Build the success envelope in one place so `warnings` cannot be dropped.
+pub(crate) fn success_envelope<T: Serialize>(
+    command: &str,
+    data: T,
+    warnings: Vec<String>,
+) -> CliResponse<T> {
+    CliResponse {
         ok: true,
         schema_version: SCHEMA_VERSION,
         command: command.to_string(),
         data: Some(data),
-        warnings: Vec::new(),
+        warnings,
         error: None,
-    };
-    write_json(&response).map_err(|e| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to serialize JSON response: {e}"),
-    })
+    }
 }
 
 /// Print a JSON envelope whose `ok` field reflects `ok`.  Used by batch
@@ -383,6 +404,39 @@ mod tests {
             }
             other => panic!("expected CliError::Runtime, got {other:?}"),
         }
+    }
+
+    /// Handler warnings must survive into the envelope: a script that reads
+    /// `warnings` cannot be left with a field that is always empty while the
+    /// human path still prints the same guidance to stderr.
+    #[test]
+    fn success_envelope_carries_warnings() {
+        let warning = "run `anolisa telemetry init` at boot".to_string();
+        let envelope = success_envelope(
+            "telemetry prepare",
+            serde_json::json!({"prepared": true}),
+            vec![warning.clone()],
+        );
+
+        assert_eq!(envelope.warnings, vec![warning]);
+        let rendered = serde_json::to_string(&envelope).expect("envelope must serialize");
+        assert!(
+            rendered.contains("anolisa telemetry init"),
+            "warnings must reach the wire format, got: {rendered}"
+        );
+    }
+
+    /// `render_json` keeps its old contract: callers without warnings still emit
+    /// an empty array rather than omitting the field.
+    #[test]
+    fn render_json_defaults_to_an_empty_warnings_array() {
+        let envelope = success_envelope("status", serde_json::json!({}), Vec::new());
+        assert!(envelope.warnings.is_empty());
+        let rendered = serde_json::to_string(&envelope).expect("envelope must serialize");
+        assert!(
+            rendered.contains("\"warnings\":[]"),
+            "warnings must stay present, got: {rendered}"
+        );
     }
 
     /// `NOT_INSTALLED` is the whole point of the variant: a caller that

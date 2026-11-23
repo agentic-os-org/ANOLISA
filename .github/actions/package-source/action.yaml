@@ -126,18 +126,40 @@ runs:
       env:
         GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
       run: |
-        mkdir -p /tmp/build/${ARCHIVE_NAME}
+        mkdir -p "/tmp/build/${ARCHIVE_NAME}" || exit 1
         if [ "${{ inputs.component }}" = "os-skills" ]; then
-          # Copy top-level files (LICENSE, README, etc.) into archive root.
-          find "${SRC_DIR}" -maxdepth 1 -not -type d -exec cp -p {} /tmp/build/${ARCHIVE_NAME}/ \;
+          archive_root="/tmp/build/${ARCHIVE_NAME}"
+          existing="$(find "$archive_root" -mindepth 1 -print -quit)" || exit 1
+          if [ -L "$archive_root" ] || [ -n "$existing" ]; then
+            echo "ERROR: os-skills archive staging directory must be empty: $archive_root" >&2
+            exit 1
+          fi
+          find "${SRC_DIR}" -maxdepth 1 -not -type d ! -name component.toml -exec cp -p {} "$archive_root/" \; || exit 1
 
-          # Flatten skill directories (identified by containing SKILL.md) into
-          # skills/ subdirectory, mirroring the RPM spec install logic.
-          mkdir -p /tmp/build/${ARCHIVE_NAME}/skills
-          find "${SRC_DIR}" -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
-            skill_dir=$(dirname "$skillmd")
-            cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
-          done
+          # The same staged payload is signed and later installed by the RPM spec.
+          catalog="${SRC_DIR}/packaging/release_catalog.py"
+          python3 "$catalog" stage "$SRC_DIR" "$archive_root/skills" --layout flat || exit 1
+          python3 "$catalog" manifest "$SRC_DIR" "$archive_root/component.toml" || exit 1
+
+          # Keep source installs and COSH discovery working after flattening.
+          mkdir "$archive_root/packaging" || exit 1
+          cp "$catalog" "$archive_root/packaging/" || exit 1
+          (
+            cd "$archive_root" || exit 1
+            staged_paths="$(find skills -mindepth 1 -maxdepth 1 -type d)" || exit 1
+            printf '%s\n' "$staged_paths" | LC_ALL=C sort > packaging/released-skills.txt || exit 1
+            if [ -f cosh-extension.json ]; then
+              python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        manifest = Path("cosh-extension.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["skills"] = Path("packaging/released-skills.txt").read_text(encoding="utf-8").splitlines()
+        manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        PY
+            fi
+          ) || exit 1
 
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
@@ -275,7 +297,11 @@ runs:
       shell: bash
       run: |
         mkdir -p /tmp/archives
-        tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
+        SOURCE_EXCLUDES=()
+        case "${{ inputs.component }}" in
+          tokenless|agent-memory) SOURCE_EXCLUDES+=(--exclude="${ARCHIVE_NAME}/target") ;;
+        esac
+        tar -czf "/tmp/archives/${ARCHIVE_FILE}" "${SOURCE_EXCLUDES[@]}" \
           -C /tmp/build "${ARCHIVE_NAME}"
 
     - name: Verify tokenless component contract in archive
@@ -284,10 +310,17 @@ runs:
       run: |
         set -euo pipefail
         ARCHIVE="/tmp/archives/${ARCHIVE_FILE}"
-        EXPECTED_VERSION=$(grep '^version' "/tmp/build/${ARCHIVE_NAME}/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-        CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        EXPECTED_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+        TEMPLATE="${ARCHIVE_NAME}/packaging/anolisa/component.toml.in"
+        MEMBERS=$(tar -tzf "$ARCHIVE")
+        if grep -Fxq "$TEMPLATE" <<< "$MEMBERS"; then
+          CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "$TEMPLATE" | sed "s/@VERSION@/${EXPECTED_VERSION}/g" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        else
+          # Historical sources shipped the generated contract beside the source.
+          CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        fi
         if [ -z "$CONTRACT_VERSION" ]; then
-          echo "ERROR: .anolisa/component.toml is missing from the archive or has no version"
+          echo "ERROR: ANOLISA contract source is missing from the archive or has no version"
           exit 1
         fi
         if [ "$CONTRACT_VERSION" != "$EXPECTED_VERSION" ]; then

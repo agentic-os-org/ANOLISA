@@ -54,23 +54,16 @@ class TokenlessRuntime:
         *,
         compression_enabled: bool = True,
         search_path_sharing_enabled: bool = True,
-        diff_compression_enabled: bool = False,
+        diff_compression_enabled: bool = True,
+        mixed_content_enabled: bool = False,
         html_extraction_enabled: bool = True,
+        browser_snapshot_enabled: bool = True,
         stats_enabled: bool = True,
         sls_enabled: bool = False,
     ) -> None: ...
     def _before_model_json(
         self,
         request_json: str,
-        *,
-        agent_id: str = "python",
-        session_id: str | None = None,
-        tool_use_id: str | None = None,
-    ) -> str: ...
-    def _pre_tool_json(
-        self,
-        request_json: str,
-        rtk_path: str | os.PathLike[str],
         *,
         agent_id: str = "python",
         session_id: str | None = None,

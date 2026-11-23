@@ -50,6 +50,8 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertIn("~/.qoder/skills/*", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
         self.assertIn("/usr/local/share/anolisa/skills/*", dirs)
+        self.assertIn("/usr/share/agent-sec-core/skills/*", dirs)
+        self.assertIn("/usr/local/share/agent-sec-core/skills/*", dirs)
         self.assertNotIn(".qoder/skills/*", dirs)
         self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
         self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])
@@ -63,6 +65,19 @@ class TestDefaultConfig(unittest.TestCase):
         )
         self.assertTrue(
             is_default_system_skill_dir("/usr/local/share/anolisa/skills/weather")
+        )
+        self.assertTrue(
+            is_default_system_skill_dir("/usr/share/agent-sec-core/skills/weather")
+        )
+        self.assertTrue(
+            is_default_system_skill_dir(
+                "/usr/local/share/agent-sec-core/skills/weather"
+            )
+        )
+        self.assertFalse(
+            is_default_system_skill_dir(
+                "/usr/local/share/agent-sec-core/skills-evil/weather"
+            )
         )
         self.assertTrue(
             is_default_system_skill_dir("/usr/share/anolisa/skills/../skills/weather")

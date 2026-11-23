@@ -164,3 +164,61 @@ impl Write for SizeBudget {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Span;
+
+    #[test]
+    fn oversized_matches_omit_raw_evidence_and_preserve_counts_and_redaction() {
+        let input = "😀".repeat(160_000);
+        assert!(input.len() > REPORT_BYTES);
+        let mut findings = Findings::default();
+        let mut redactor = redact::Text::new(&input);
+        // Exercise report limits without coupling them to the regex time budget.
+        for (kind, severity) in [
+            ("custom_0", Severity::Warn),
+            ("custom_1", Severity::Warn),
+            ("custom_2", Severity::Deny),
+        ] {
+            let candidate = Candidate {
+                kind,
+                category: "custom",
+                severity,
+                confidence: 1.0,
+                value: &input,
+                span: Span {
+                    start: 0,
+                    end: 160_000,
+                },
+                bytes: 0..input.len(),
+                metadata: BTreeMap::new(),
+            };
+            redactor.push(&candidate);
+            findings.push(candidate, true);
+        }
+
+        assert_eq!(findings.total, 3);
+        assert_eq!(findings.by_type.len(), 3);
+        assert_eq!(findings.by_category["custom"], 3);
+        assert_eq!(findings.by_severity["warn"], 2);
+        assert_eq!(findings.by_severity["deny"], 1);
+        assert_eq!(findings.verdict(), Verdict::Deny);
+        assert!(findings.truncated);
+        assert_eq!(findings.items.len(), 3);
+        for finding in &findings.items {
+            assert_eq!(findings.by_type[&finding.pii_type], 1);
+            assert_eq!(
+                finding.span,
+                Span {
+                    start: 0,
+                    end: 160_000
+                }
+            );
+            assert!(finding.raw_evidence.is_none());
+            assert_eq!(finding.metadata["evidence_omitted"], true);
+        }
+        assert_eq!(redactor.finish(), ("[CUSTOM_2_REDACTED]".to_owned(), false));
+    }
+}

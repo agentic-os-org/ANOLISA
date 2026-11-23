@@ -17,6 +17,9 @@ use std::{
 };
 use support::{Fixture, Service};
 
+#[path = "openclaw/native_update.rs"]
+mod native_update;
+
 fn source(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/openclaw")
@@ -118,6 +121,26 @@ fn zero_provider_gateway_is_ready_and_keeps_native_tools() {
         "kept"
     );
     service.released(&fixture);
+}
+
+#[test]
+fn gateway_versions_preserve_native_readiness_and_policy() {
+    for version in ["2026.9.5", "2026.10.1", "2027.1.1-preview.1"] {
+        let fixture = Fixture::new();
+        let mut config = document(&fixture);
+        command_policy::configure(&fixture, &mut config);
+        let service = Service::start(&fixture, &config);
+        let mut launch = command(&fixture);
+        launch.env(
+            "FAKE_OPENCLAW_VERSION",
+            format!("OpenClaw {version} (fixture)"),
+        );
+        launch.env("FAKE_SCENARIO", "12345");
+        let report = fixture.successful(launch);
+        assert_eq!(report["blocked"], true);
+        assert!(!fixture.root.join("tool-ran").exists());
+        service.released(&fixture);
+    }
 }
 
 #[test]
@@ -337,7 +360,9 @@ fn plugin_node_contract_tests_pass() {
     let mut command = Command::new("node");
     command
         .arg("--test")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openclaw.mjs"));
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openclaw.mjs"))
+        .arg(source("startup.mjs"))
+        .arg(source("reload.mjs"));
     let output = fixture.run(command);
     assert!(
         output.status.success(),

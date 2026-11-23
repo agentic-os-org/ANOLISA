@@ -4,11 +4,11 @@
 //! - On startup, `<mount.root>` is initialized as a git repo if it isn't
 //!   already, with `.anolisa/` (audit / index / snapshots) excluded via
 //!   the repo's own `.gitignore`.
-//! - When `auto_commit = true`, every successful audit-emitting tool call
-//!   performs a best-effort inline `commit -am "<tool> <path>"`. Failures are
-//!   logged at debug level and never block the foreground tool.
-//! - `mem_log` returns recent commits; `mem_revert` checks out a path
-//!   from the previous commit.
+//! - When `auto_commit = true`, successful calls to classified write tools
+//!   perform a best-effort inline commit of pending changes. Failures are
+//!   logged at warning level and never block the foreground tool.
+//! - `mem_log` returns recent commits; `mem_revert` restores a path's
+//!   working-tree content from HEAD without changing the index or history.
 
 use std::os::fd::BorrowedFd;
 use std::path::Path;
@@ -237,9 +237,8 @@ fn commit_touches_path(repo: &Repository, commit: &git2::Commit, path: &Path) ->
     hit
 }
 
-/// Restore `path` to its content in the most recent commit, then commit
-/// the revert. Returns the hash of the revert commit (or the existing
-/// HEAD hash if nothing changed).
+/// Restore `path` in the working tree to its content at HEAD.
+/// Returns the source commit's hash without changing HEAD or the index.
 ///
 /// `root_fd` is the mount's O_PATH dirfd; the write-back routes through
 /// `safe_fs` (openat2 RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) so a
@@ -291,22 +290,9 @@ pub fn revert(root: &Path, root_fd: BorrowedFd<'_>, path: &str) -> Result<String
     }
     crate::safe_fs::write(root_fd, rel_path, blob.content())?;
 
-    // commit_all returns None when the file already matched HEAD (revert
-    // of unchanged content); surface the existing HEAD oid as the caller
-    // contract is "return the relevant commit id".
-    match commit_all(root, &format!("revert {path} to HEAD"))? {
-        Some(oid) => Ok(oid),
-        None => {
-            let repo =
-                Repository::open(root).map_err(|e| MemoryError::Other(format!("git open: {e}")))?;
-            let head = repo
-                .head()
-                .map_err(|e| MemoryError::Other(format!("git head: {e}")))?
-                .target()
-                .ok_or_else(|| MemoryError::Other("git head detached".to_string()))?;
-            Ok(head.to_string())
-        }
-    }
+    // Restoring HEAD content needs no new commit. Staging the whole mount
+    // here would commit unrelated edits and consume their own undo.
+    Ok(head_commit.id().to_string())
 }
 
 /// Lightweight handle MemoryService can hold. Today this is just config —
@@ -382,16 +368,18 @@ impl GitHandle {
         }
     }
 
-    /// Restore `path` to its content at HEAD, then commit the revert.
-    /// Holds the same mutex as auto_commit_for so the two never race on
-    /// git's index.lock. `root_fd` is the mount's O_PATH dirfd used to
-    /// route the blob write through `safe_fs`.
+    /// Restore `path` in the working tree from HEAD without staging or committing.
+    /// Holds the same mutex as auto_commit_for to serialize the restore
+    /// with automatic commits. `root_fd` is the mount's O_PATH dirfd used
+    /// to route the blob write through `safe_fs`.
     pub fn revert(&self, root_fd: BorrowedFd<'_>, path: &str) -> Result<String> {
         let _g = self.commit_mutex.lock().unwrap_or_else(|p| p.into_inner());
         revert(&self.root, root_fd, path)
     }
 }
 
+// mem_revert must stay excluded: its audit event must not stage pending work
+// or advance HEAD after a working-tree-only restore.
 fn is_write_tool(name: &str) -> bool {
     matches!(
         name,

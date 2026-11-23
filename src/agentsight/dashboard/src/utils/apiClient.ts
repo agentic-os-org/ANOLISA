@@ -11,7 +11,7 @@ import type {
   OptimizeLlmConfig,
 } from '../types/optimization';
 
-const API_BASE: string = (() => {
+export const API_BASE: string = (() => {
   // Explicit override via env var (set at build time for non-embedded deployments)
   if (typeof process !== 'undefined' && (process.env as any).REACT_APP_API_BASE) {
     return (process.env as any).REACT_APP_API_BASE as string;
@@ -114,9 +114,9 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(url: string, init: RequestInit = {}, redirectOnUnauthorized = true): Promise<T> {
   const res = await fetch(url, { ...init, credentials: 'same-origin' });
-  if (res.status === 401) {
+  if (res.status === 401 && redirectOnUnauthorized) {
     // Session expired or invalid — redirect to login
     window.location.hash = '#/login';
     throw new Error('Authentication required');
@@ -251,6 +251,9 @@ export interface EnforcementCapabilities {
   policy_handoff: boolean;
   alternate_pid_retarget: boolean;
   test_development: boolean;
+  file_delete_guard?: boolean;
+  file_delete_guard_mode?: string | null;
+  file_read_protection?: boolean;
 }
 
 export interface EnforcementBinding {
@@ -264,6 +267,7 @@ export interface EnforcementBinding {
     policy_revision: string;
     policy_dsl: string;
     policy_mode?: EnforcementPolicyMode | null;
+    file_protection_policy?: { targets: Array<{ path: string; protections: { read?: boolean } }> };
   };
   state: 'pending' | 'enforced' | 'failed' | 'degraded' | 'detaching' | 'detached';
   message: string | null;
@@ -324,7 +328,7 @@ export function enforcementViolationTotal(
   violations: ReadonlyArray<Pick<EnforcementViolation, 'blocked'>>,
   health: EnforcementHealth | null,
 ): number {
-  if (health?.capabilities.credential_enforce === true) {
+  if (health?.capabilities.credential_enforce === true || health?.capabilities.file_read_protection === true) {
     return violations.filter((event) => event.blocked).length;
   }
   return violations.length;
@@ -414,6 +418,15 @@ export const fetchEnforcementViolations = (limit = 100) =>
 
 export const createFileBinding = (input: FileBindingInput) =>
   enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+// A dedicated route makes servers without read protection answer 404 instead
+// of silently applying an open-only policy.
+export const createFileReadBinding = (input: FileBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/file-read-bindings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -779,6 +792,84 @@ export async function fetchLatencyMetrics(
   });
   if (agentName) params.set('agent_name', agentName);
   return apiFetch<LatencyMetricsSummary[]>(`${API_BASE}/api/metrics/latency?${params.toString()}`);
+}
+
+export type CacheStatus = 'no_usage' | 'undeterminable' | 'insufficient_samples' | 'needs_review' | 'healthy';
+export type CacheFindingKind = 'suspected' | 'undeterminable' | 'expected';
+export type CacheTrend = 'improved' | 'regressed' | 'unchanged' | 'incomparable';
+
+export interface CacheLatencyBucket {
+  calls: number;
+  median_input_tokens: number | null;
+  ttft_ms: MetricPercentiles | null;
+  e2e_latency_ms: MetricPercentiles | null;
+}
+
+export interface CacheFinding {
+  reason: string;
+  kind: CacheFindingKind;
+  calls: number;
+  unread_tokens: number;
+  missed_tokens: number;
+  ttft_ms_p50: number | null;
+  e2e_latency_ms_p50: number | null;
+  recommendation: string;
+  examples: {
+    trace_id: string | null;
+    call_id: string | null;
+    session_id: string | null;
+    start_ns: number;
+    input_tokens: number;
+    cache_read_tokens: number | null;
+    previous_input_tokens: number | null;
+  }[];
+}
+
+export interface CacheGroupDiagnosis {
+  agent_name: string | null;
+  provider: string | null;
+  model: string | null;
+  status: CacheStatus;
+  coverage: {
+    calls: number;
+    duplicate_calls: number;
+    failed_calls: number;
+    usage_calls: number;
+    cache_read_field_calls: number;
+    cache_creation_field_calls: number;
+    explicit_zero_read_calls: number;
+  };
+  tokens: { input: number; cache_read: number; cache_creation: number; output: number; uncached_input: number };
+  conservative_hit_rate: number | null;
+  complete_hit_rate: number | null;
+  latency: { warm: CacheLatencyBucket; cold: CacheLatencyBucket };
+  findings: CacheFinding[];
+  baseline: {
+    status: CacheStatus;
+    conservative_hit_rate: number | null;
+    hit_rate_change_pp: number | null;
+    trend: CacheTrend;
+    sufficient_samples: boolean;
+  } | null;
+}
+
+export interface CacheDiagnosis {
+  start_ns: number;
+  end_ns: number;
+  truncated: boolean;
+  groups: CacheGroupDiagnosis[];
+}
+
+/**
+ * Fetch prompt-cache hit rates and low-hit causes, compared with the preceding window of equal length.
+ */
+export async function fetchCacheDiagnosis(startNs: number, endNs: number): Promise<CacheDiagnosis> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+    compare: 'true',
+  });
+  return apiFetch<CacheDiagnosis>(`${API_BASE}/api/metrics/cache?${params.toString()}`);
 }
 
 /**
@@ -2227,6 +2318,7 @@ export async function fetchOptimizeConfig(): Promise<OptimizeLlmConfig> {
  */
 export async function saveOptimizeConfig(body: {
   api_key?: string;
+  current_api_key?: string;
   base_url?: string;
   model?: string;
   search_timeout_secs?: number;

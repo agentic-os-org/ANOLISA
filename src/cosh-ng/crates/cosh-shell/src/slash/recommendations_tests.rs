@@ -59,6 +59,37 @@ fn privacy_explains_sources_retention_and_current_ai_boundary() {
 }
 
 #[test]
+fn review_regression_privacy_limits_redaction_guarantees_in_both_languages() {
+    for (language, required) in [
+        (
+            Language::ZhCn,
+            [
+                "尝试识别并脱敏常见凭证",
+                "不能保证",
+                "敏感信息",
+                "AI 服务侧保留遵循其政策",
+            ],
+        ),
+        (
+            Language::EnUs,
+            [
+                "attempt",
+                "common credentials",
+                "cannot guarantee",
+                "AI-side retention follows its policy",
+            ],
+        ),
+    ] {
+        let text = privacy_lines(&I18n::new(language)).join("\n");
+        for term in required {
+            assert!(text.contains(term), "missing {term}: {text}");
+        }
+        assert!(!text.contains("Collected: sanitized"));
+        assert!(!text.contains("采集：脱敏后的"));
+    }
+}
+
+#[test]
 fn off_panel_points_to_mode_analysis_for_failure_insights() {
     let root = std::env::temp_dir().join(format!(
         "cosh-slash-off-hint-{}-{}",

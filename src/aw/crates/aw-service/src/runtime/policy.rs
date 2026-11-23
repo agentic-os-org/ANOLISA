@@ -5,7 +5,7 @@ use crate::{rejected, Error, LifecyclePhase, Operation, Request, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,15 +15,44 @@ use std::{
 
 use super::process::Process;
 
+mod execution;
+#[cfg(test)]
+mod tests;
+pub(super) use execution::Execution;
+
 pub(super) struct Reload {
+    pub(super) resident: bool,
     process: Option<Process>,
     ready: bool,
     pending_bridge: Option<u32>,
     process_audit: Option<String>,
     bridge_audit: Option<String>,
-    requests: BTreeSet<String>,
-    tools: BTreeSet<String>,
+    requests: BTreeMap<String, u64>,
+    tools: BTreeMap<String, u64>,
+    next_claim: u64,
     pub(super) preparation_cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl Reload {
+    pub(super) fn admit_scope(&self, pid: u32) -> Result<()> {
+        if !self.resident || !self.ready || self.requests.is_empty() {
+            return Err(rejected("request_not_admitted"));
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| rejected("process_not_associated"))?
+            .corroborate(pid)
+    }
+
+    pub(super) fn admit_gateway_scope(&self, pid: u32) -> Result<()> {
+        if !self.ready {
+            return Err(rejected("bridge_not_ready"));
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| rejected("process_not_associated"))?
+            .matches(pid)
+    }
 }
 
 impl Runtime {
@@ -33,34 +62,35 @@ impl Runtime {
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
-        if self
-            .owners
-            .lock()
-            .map_err(|_| rejected("state_poisoned"))?
-            .contains_key(id)
-        {
-            return Err(rejected("scope_reload_unsupported"));
-        }
+        let resident = self.resident_root(id)?;
         if instance.reload.is_some() {
             return Err(rejected("reload_already_enabled"));
         }
-        aw_adapter::reload::supported(instance.host.capabilities())
-            .map_err(|_| rejected("unsupported"))?;
+        if resident {
+            aw_adapter::reload::resident_supported(instance.host.capabilities())
+                .map_err(|_| rejected("unsupported"))?;
+            self.no_scope_children(id)?;
+        } else {
+            aw_adapter::reload::supported(instance.host.capabilities())
+                .map_err(|_| rejected("unsupported"))?;
+        }
         instance.reload = Some(Reload {
+            resident,
             process: None,
             ready: false,
             pending_bridge: None,
             process_audit: None,
             bridge_audit: None,
-            requests: BTreeSet::new(),
-            tools: BTreeSet::new(),
+            requests: BTreeMap::new(),
+            tools: BTreeMap::new(),
+            next_claim: 0,
             preparation_cancelled: None,
         });
         Ok(json!({"reloadable":true,"policy_revision":instance.host.revision()}))
     }
 
     pub(super) fn associate_process(&self, id: &str, pid: u32) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let mut instances = self
             .instances
             .lock()
@@ -69,6 +99,10 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
+            self.corroborate_scope_root(id, pid)?;
+        }
         if state.process.is_some() {
             return Err(rejected("process_already_associated"));
         }
@@ -106,6 +140,10 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
+            self.corroborate_scope_root(id, pid)?;
+        }
         if matches!(phase, LifecyclePhase::Ready) && state.process.is_none() {
             if !key.is_empty() || state.pending_bridge.is_some() {
                 return Err(rejected("bridge_already_ready"));
@@ -123,8 +161,11 @@ impl Runtime {
             .corroborate(pid)?;
         match phase {
             LifecyclePhase::Ready => {
-                if !key.is_empty() || state.ready {
+                if !key.is_empty() || (state.ready && !state.resident) {
                     return Err(rejected("bridge_already_ready"));
+                }
+                if state.ready {
+                    return Ok(json!({"policy_revision":instance.host.revision(),"ready":true}));
                 }
                 state.bridge_audit =
                     Some(self.lifecycle_record("bridge_ready", id, json!({"pid":pid}))?);
@@ -138,14 +179,25 @@ impl Runtime {
                 if tool && state.requests.is_empty() {
                     return Err(rejected("request_not_admitted"));
                 }
+                let generation = state
+                    .next_claim
+                    .checked_add(1)
+                    .ok_or_else(|| rejected("lifecycle_identity_exhausted"))?;
                 let claims = if tool {
                     &mut state.tools
                 } else {
                     &mut state.requests
                 };
-                if claims.len() >= 64 || !claims.insert(key.into()) {
+                let limit = if state.resident {
+                    self.limits.bindings
+                } else {
+                    64
+                };
+                if claims.len() >= limit || claims.contains_key(key) {
                     return Err(rejected("busy"));
                 }
+                claims.insert(key.into(), generation);
+                state.next_claim = generation;
             }
             LifecyclePhase::RequestEnd | LifecyclePhase::ToolEnd => {
                 if !state.ready || key.is_empty() {
@@ -162,24 +214,47 @@ impl Runtime {
         Ok(json!({"policy_revision":instance.host.revision(),"ready":state.ready}))
     }
 
+    // The caller holds the instance gate shared with lifecycle and activation.
+    pub(super) fn execution_admission(&self, instance: &Instance, id: &str) -> Result<()> {
+        self.check_scope_owner(id)?;
+        if self.native_root(id)? {
+            let state = instance
+                .reload
+                .as_ref()
+                .ok_or_else(|| rejected("request_not_admitted"))?;
+            state
+                .process
+                .as_ref()
+                .ok_or_else(|| rejected("process_not_associated"))?
+                .check()?;
+            if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
+                return Err(rejected("request_not_admitted"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn hook_plan(&self, id: &str, event: &str) -> Result<Value> {
         let mut instances = self
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
-        let state = instance
-            .reload
-            .as_ref()
-            .ok_or_else(|| rejected("unsupported"))?;
-        if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
-            return Err(rejected("request_not_admitted"));
+        self.execution_admission(instance, id)?;
+        if !instance.hermes_gateway() || !self.gateway_scope(id)? {
+            let state = instance
+                .reload
+                .as_ref()
+                .ok_or_else(|| rejected("unsupported"))?;
+            if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
+                return Err(rejected("request_not_admitted"));
+            }
+            state
+                .process
+                .as_ref()
+                .ok_or_else(|| rejected("process_not_associated"))?
+                .check()?;
         }
-        state
-            .process
-            .as_ref()
-            .ok_or_else(|| rejected("process_not_associated"))?
-            .check()?;
         let plan = aw_adapter::reload::plan(
             instance.host.configuration().as_value(),
             instance.host.target(),
@@ -195,15 +270,20 @@ impl Runtime {
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         Ok(Value::Array(instances.iter().filter_map(|(id, instance)| instance.as_ref().map(|instance| {
             let state = instance.reload.as_ref();
+            let sdk = owners.get(id).filter(|owner| owner.sdk.is_some());
             json!({"instance_id":id,"target":instance.host.target(),"policy_revision":instance.host.revision(),
+                "parent_instance_id":owners.get(id).and_then(|owner| owner.parent.as_ref()),
+                "scope_validity":owners.get(id).map(|owner| owner.validity_status()),
                 "adapter":instance.host.capabilities().adapter,"native_version":instance.host.capabilities().version,
                 "entrypoint":instance.host.capabilities().entrypoint,"cwd":instance.context.cwd,
-                "reloadable":state.is_some(),"ready":state.is_some_and(|s| s.ready),
+                "reloadable":state.is_some(),"resident_reload":state.is_some_and(|s| s.resident),"ready":sdk.map_or_else(|| state.is_some_and(|s| s.ready), |owner| owner.process.check().is_ok() && owner.acknowledge_by.is_none() && !owner.cancelled.load(Ordering::Acquire) && !instance.closing),
+                "sdk_availability":sdk.and_then(|owner| owner.sdk),
                 "process_audit":state.and_then(|s| s.process_audit.as_ref()),"bridge_audit":state.and_then(|s| s.bridge_audit.as_ref()),
                 "requests":state.map(|s| s.requests.len()),"tools":state.map(|s| s.tools.len()),
-                "process":state.and_then(|s| s.process.as_ref()).map(Process::metadata)})
+                "process":state.and_then(|s| s.process.as_ref()).or_else(|| sdk.map(|owner| &owner.process)).map(Process::metadata)})
         })).collect()))
     }
 
@@ -217,6 +297,12 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| rejected("process_not_associated"))?
             .check()?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
+        }
+        if state.resident || instance.hermes_gateway() {
+            self.no_scope_children(id)?;
+        }
         if !state.ready
             || !state.requests.is_empty()
             || !state.tools.is_empty()
@@ -285,6 +371,14 @@ impl Runtime {
                 Error::Configuration(_) => ("configuration_rejected".into(), None),
                 Error::Io(_) => ("service_failure".into(), None),
             };
+            // A terminal write may reach disk before reporting failure. The
+            // committed Host is fenced; never append a contradictory rejection.
+            if code == "policy_activation_indeterminate" {
+                return Err(Error::Attempt {
+                    code,
+                    audit_key: key.clone(),
+                });
+            }
             let active = self.policy_revision(instance_id)?;
             self.audit.append(
                 &key,
@@ -321,7 +415,7 @@ impl Runtime {
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Value> {
         let started = Instant::now();
-        let (baseline, target, capabilities, context, update) = {
+        let (baseline, target, capabilities, context, update, resident) = {
             let mut instances = self
                 .instances
                 .lock()
@@ -337,6 +431,7 @@ impl Runtime {
                 instance.host.capabilities().clone(),
                 instance.context.clone(),
                 instance.policy_update.clone(),
+                instance.reload.as_ref().is_some_and(|state| state.resident),
             )
         };
         // Preparation does not block native requests. A concurrent request wins
@@ -360,8 +455,20 @@ impl Runtime {
         validator
             .parse(&baseline)?
             .validate_policy_update(&candidate)?;
-        aw_adapter::reload::validate(candidate.as_value(), &target, &capabilities)
-            .map_err(|_| rejected("native_policy_unsupported"))?;
+        let sdk = self
+            .owners
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .get(id)
+            .and_then(|owner| owner.sdk);
+        super::sdk::validate_availability(&candidate, &target, sdk)?;
+        if resident {
+            aw_adapter::reload::validate_resident(candidate.as_value(), &target, &capabilities)
+                .map_err(|_| rejected("native_policy_unsupported"))?;
+        } else {
+            aw_adapter::reload::validate(candidate.as_value(), &target, &capabilities)
+                .map_err(|_| rejected("native_policy_unsupported"))?;
+        }
         let attempt = self.identifier()?;
         let host = self.prepare(
             bytes,
@@ -371,6 +478,13 @@ impl Runtime {
             context,
             (deadline, cancelled),
         )?;
+        let routes = Instance::prepare_routes(&host);
+        if resident && routes.is_none() {
+            return Err(Error::Attempt {
+                code: "native_policy_unsupported".into(),
+                audit_key: attempt,
+            });
+        }
         let activated = (|| {
             let prepared = Instant::now();
             let mut instances = self
@@ -388,11 +502,29 @@ impl Runtime {
             {
                 return Err(rejected("policy_update_cancelled"));
             }
-            self.audit.append(key, json!({"phase":"closed","status":"active",
+            self.audit.append(key, json!({"phase":"activating",
                 "previous_revision":expected,"policy_revision":host.revision(),"preparation_audit":attempt}))?;
+            // Durable writes can block while the native owner exits. Do not
+            // activate a prepared policy after losing its execution boundary.
+            self.idle(instance, id)?;
+            if cancelled.load(Ordering::Acquire)
+                || self.stopped.load(Ordering::Acquire)
+                || Instant::now() >= deadline
+            {
+                return Err(rejected("policy_update_cancelled"));
+            }
             let revision = host.revision().to_owned();
+            instance.routes = routes;
             instance.host = std::sync::Arc::new(host);
             instance.bytes = bytes.to_vec();
+            if self.audit.append(key, json!({"phase":"closed","status":"active",
+                "previous_revision":expected,"policy_revision":revision,"preparation_audit":attempt})).is_err() {
+                // Fence callers already waiting on admission before releasing
+                // the gate. Recovery requires a fresh service generation.
+                instance.closing = true;
+                self.stopped.store(true, Ordering::Release);
+                return Err(rejected("policy_activation_indeterminate"));
+            }
             // Completed native correlation claims remain retained across updates;
             // an old callback cannot receive a fresh execution budget.
             Ok(

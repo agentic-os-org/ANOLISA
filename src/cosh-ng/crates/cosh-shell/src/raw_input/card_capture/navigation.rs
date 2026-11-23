@@ -94,6 +94,7 @@ impl CardInputState {
         code: u8,
     ) -> Option<RawInputEvent> {
         match capture {
+            RawInputCapture::TrialWaiting { .. } => None,
             RawInputCapture::Question { id, .. } => {
                 let choice_count = question_choice_count(capture);
                 if choice_count == 0 {
@@ -155,6 +156,7 @@ impl CardInputState {
                 }
                 if self.selected != previous {
                     match capture {
+                        RawInputCapture::TrialWaiting { .. } => None,
                         RawInputCapture::Mode { .. } => {
                             Some(RawInputEvent::ModeFocus(id.clone(), self.selected))
                         }
@@ -192,6 +194,7 @@ impl CardInputState {
 
     pub(super) fn apply_tab(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
         match capture {
+            RawInputCapture::TrialWaiting { .. } => None,
             RawInputCapture::Question { id, .. } => {
                 let choice_count = question_choice_count(capture);
                 let previous = self.selected;
@@ -227,6 +230,7 @@ impl CardInputState {
                 }
                 self.selected = (self.selected + 1).min(option_count.saturating_sub(1));
                 match capture {
+                    RawInputCapture::TrialWaiting { .. } => None,
                     RawInputCapture::Mode { .. } => {
                         Some(RawInputEvent::ModeFocus(id.clone(), self.selected))
                     }
@@ -249,6 +253,7 @@ impl CardInputState {
 
     fn apply_shift_tab(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
         match capture {
+            RawInputCapture::TrialWaiting { .. } => None,
             RawInputCapture::Question { id, .. } => {
                 let previous = self.selected;
                 self.selected = self.selected.saturating_sub(1);

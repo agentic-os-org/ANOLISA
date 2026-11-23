@@ -17,12 +17,11 @@ updates.
 
 ## Recommended contribution directions
 
-If you are looking for a contribution direction, we recommend starting with the
-component topics in [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
+If you are looking for a contribution direction, start with [Ways to Contribute](contribute/en/tracks.md) to pick a track that fits your background and environment, or explore component topics in [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
+For community roles, decision tiers, and component lifecycle rules, see [Community Governance](GOVERNANCE.md).
 Bug reports, bug fixes, and other Issues and PRs are also welcome.
 
-Roadmap topics are candidate directions, not scheduling commitments or tasks
-available to claim. To implement a roadmap direction, follow the Issue process:
+Roadmap topics list candidate directions; scope and claiming happen on the corresponding Issue. See [Issues, Roadmap, and Claiming Workflow](contribute/en/workflow.md) for the full label and `/claim` guide, or follow these steps:
 
 1. Search for an existing Issue covering the direction. If none exists, open an
    Issue linking to the source Discussion and describe the proposed scope.
@@ -47,7 +46,7 @@ scopes are used in commit subjects and PR titles.
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
 | tokenless | `src/tokenless/` | Linux for full development; macOS x64/arm64 for shipped CLI binaries and npm adapters | `tokenless` | `tokenless` | `make build`, `make lint`, `make test` |
 | agent-memory | `src/agent-memory/` | Linux only | `memory` | `memory` | `make build`, `make fmt-check`, `make lint`, `make test`; use `make smoke` for MCP changes |
-| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | Static Markdown skill definitions and shell assets; `make build` confirms that no compilation step is required |
+| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | Python 3.6+ for source installation; no compilation; run the [component regression tests](#skill-regression-tests-and-path-ownership) with Python 3.11 |
 | anolisa | `distribution/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
@@ -65,8 +64,10 @@ The Linux-only components must be built and tested on Linux. `cosh-ng` and
 - The stable Rust toolchain for Rust components. Follow a component's
   `AGENTS.md` when it pins a toolchain or adds native libraries.
 - Python **3.11.6** and [uv](https://docs.astral.sh/uv/) for
-  `agent-sec-core`. `os-skills` is primarily static Markdown and shell data;
-  it does not own the repository Python environment.
+  `agent-sec-core`. The `os-skills` source installer and release-catalog tools
+  require Python **3.6+** with its standard library; select a source-install
+  interpreter with `PYTHON3=/path/to/python3`. Component regression tests use
+  Python **3.11** in a separate virtual environment.
 - `clang` and `libbpf` headers when changing `agentsight` eBPF probes.
 
 ## Fork and create a branch
@@ -206,6 +207,37 @@ CI adds coverage, packaging, frontend, adapter, and integration jobs according
 to the changed paths. Check [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)
 when changing generated packages or framework adapters.
 
+### Skill regression tests and path ownership
+
+For contributors changing skill scripts, keep component regression tests in
+`src/os-skills/tests/`. Tests for SkillFS belong in `src/skillfs/tests/`,
+including tests of its bundled `skillfs-mount` scripts. The former
+`tests/os-skills/` directory has been consolidated into these component
+directories. Reserve repository-level `tests/` for shared test runners and
+tests that exercise multiple components.
+
+From the repository root, use Python 3.11 and a virtual environment:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+.venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
+```
+
+The OS Skills suite covers skill scripts and installation/package layout.
+Its PDF regression uses the pinned PyMuPDF dependency. The SkillFS command
+above only checks the Python log-usage scripts; it does not replace the Linux
+Rust or FUSE checks. Both suites run in their component's prebuilt CI workflow.
+
+For maintainers changing component ownership, `.github/components.json`
+keeps source roots in `path_prefixes` and component-specific files outside
+those roots in `supporting_paths`. A trailing slash denotes a directory;
+other supporting paths name exact files. For example, the OS Skills prebuilt
+action and workflow belong to OS Skills, while shared build actions and release
+workflows retain their shared ownership. Update the matching component entries
+in `.github/CODEOWNERS` too; CI checks that the declarations agree.
+
 ## Commit messages
 
 Commit message rules are defined in
@@ -261,24 +293,35 @@ Before requesting review, confirm that:
 - The PR template records risk, compatibility, and rollback considerations.
 - Documentation and bilingual counterparts are updated when required.
 
+### Draft PRs and claiming
+
+Use a **Draft PR** (`isDraft=true`) for early work-in-progress or prototype
+feedback, and mark it **Ready for review** (`isDraft=false`) when it is ready
+for formal review and merge gates:
+
+- Opening a Draft PR does **not** claim or lock an issue by itself. To reserve
+  an accepted issue while iterating, comment `/claim` on the issue first (see
+  [`.github/TRIAGE.md`](.github/TRIAGE.md#claiming-community-work)).
+- Draft PRs do not enter formal code review unless you explicitly ask for early
+  feedback in a PR comment.
+- Post a short progress update if you need more time on a claimed issue, or
+  comment `/unclaim` if you can no longer continue. Maintainers may check in
+  after 7 days without visible progress and release inactive claims after 14
+  days (staying in Draft does not extend an inactive claim indefinitely).
+- When a linked issue is resolved by another PR or closed, competing
+  ready-for-review PRs are closed with a courtesy note linking the resolution;
+  unconverted Draft PRs do not block issue closure.
+
+The full normative lifecycle matrix and automation rules are defined in
+[`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md).
+
 ## Documentation synchronization
 
-Documentation changes must follow
-[`specs/documentation-standard.md`](specs/documentation-standard.md) and keep
-English and Chinese pages semantically equivalent. Command examples remain
-identical in both languages. The root guide stays a cross-component overview;
-long usage and architecture material belongs in the canonical locations below.
+Follow the [PR documentation update rules in §5 of the documentation standard](specs/documentation-standard.md#5-pr-documentation-update-rules)
+to identify which pages to update in the same PR. Keep English and Chinese pages
+semantically equivalent and command examples identical.
 
-| Change | Update in the same PR |
-| --- | --- |
-| CLI command or flag | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Configuration option | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Installation method | Shared installation/quickstart pages as applicable, the component manual, and its README. |
-| Architecture or protocol | `src/<component>/docs/design/`. |
-| New component | Root README and `NOTICE` when applicable. |
-
-Daily feature and fix PRs update README and user-guide pages. Release version
-bump PRs aggregate user-perceivable entries into `CHANGELOG*.md`.
+Release version bump PRs aggregate user-perceivable entries into `CHANGELOG*.md`.
 
 ## License
 

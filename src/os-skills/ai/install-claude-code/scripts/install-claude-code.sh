@@ -36,6 +36,10 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # --- Flags ---
 WRITE_CONFIG=false
 SKIP_TOKENLESS=false
+# Set when --config was asked for but the document could not be written. The
+# tokenless step still runs, then the script exits non-zero: callers only see
+# the exit code, and "configured" must not be reported for a failed write.
+CONFIG_WRITE_FAILED=false
 for arg in "$@"; do
   case "$arg" in
     --config) WRITE_CONFIG=true ;;
@@ -252,24 +256,126 @@ write_config() {
   mkdir -p "$HOME/.claude"
   local settings_file="$HOME/.claude/settings.json"
 
-  if [[ -f "$settings_file" ]]; then
-    local backup="$settings_file.bak.$(date +%s)"
-    cp "$settings_file" "$backup"
-    info "Existing settings backed up to $backup"
-  fi
-
-  cat > "$settings_file" <<JSONEOF
+  # The four keys go into the document the user already has, not over it: this
+  # file carries their permissions, hooks and status line, and "Also write ..."
+  # in --help means a merge. Without a JSON parser there is nothing that can
+  # merge, so a host that already has a file keeps it untouched; a fresh host
+  # has nothing to preserve.
+  if ! command_exists python3; then
+    if [[ -f "$settings_file" ]]; then
+      warn "python3 not found — leaving $settings_file untouched."
+      warn "Install python3, or merge the four env keys by hand, then re-run --config."
+      return 0
+    fi
+    # Nothing to merge into: escape the key so the document stays parseable.
+    # A control character has no hand-written JSON escape here, and writing a
+    # document Claude Code rejects is the defect this script exists to fix.
+    if [[ "$api_key" == *[[:cntrl:]]* ]]; then
+      warn "CLAUDE_API_KEY contains control characters — leaving $settings_file untouched."
+      warn "Install python3, or set the key by hand, then re-run --config."
+      return 0
+    fi
+    local escaped_key
+    escaped_key="$(printf '%s' "$api_key" | sed 's/[\"]/\\&/g')"
+    cat > "$settings_file" <<JSONEOF
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "${api_key}",
+    "ANTHROPIC_AUTH_TOKEN": "${escaped_key}",
     "ANTHROPIC_MODEL": "qwen3-coder-plus",
     "ANTHROPIC_SMALL_FAST_MODEL": "qwen3-coder-plus"
   }
 }
 JSONEOF
+    ok "Configuration written to $settings_file"
+    return 0
+  fi
 
-  ok "Configuration written to $settings_file"
+  # The helper copies the original just before it replaces the file, so a
+  # document it refuses to merge never leaves a pointless .bak behind.
+  local backup=""
+  if [[ -f "$settings_file" ]]; then
+    backup="$settings_file.bak.$(date +%s)"
+  fi
+
+  local merge_rc=0
+  CLAUDE_SETTINGS_API_KEY="$api_key" python3 - "$settings_file" "$backup" <<'PYEOF' || merge_rc=$?
+import json
+import os
+import shutil
+import stat
+import sys
+
+path = sys.argv[1]
+backup = sys.argv[2] if len(sys.argv) > 2 else ""
+# The key travels in the environment, not in argv: /proc/<pid>/cmdline is
+# world-readable, while /proc/<pid>/environ is restricted to the same user.
+api_key = os.environ["CLAUDE_SETTINGS_API_KEY"]
+
+
+def merge():
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except FileNotFoundError:
+        document = {}
+    except (OSError, ValueError) as error:
+        # A document we cannot read is not ours to drop, and overwriting it is what
+        # this fix exists to stop: report and let the caller keep it.
+        print(f"cannot read {path}: {error}", file=sys.stderr)
+        sys.exit(3)
+    if not isinstance(document, dict):
+        print(f"{path} is not a JSON object", file=sys.stderr)
+        sys.exit(3)
+    env = document.get("env")
+    if not isinstance(env, dict):
+        env = {}
+        document["env"] = env
+    env["ANTHROPIC_BASE_URL"] = "https://dashscope.aliyuncs.com/apps/anthropic"
+    env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    env["ANTHROPIC_MODEL"] = "qwen3-coder-plus"
+    env["ANTHROPIC_SMALL_FAST_MODEL"] = "qwen3-coder-plus"
+
+    # Same file, atomically: a half-written settings.json is a broken Claude Code
+    # on the next start.
+    tmp = f"{path}.tmp"
+    try:
+        # The token lives in this file, so keep the mode the user chose for it
+        # (0600 is common); a fresh file starts private instead of umask-default.
+        try:
+            keep_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            keep_mode = 0o600
+        if backup:
+            shutil.copy2(path, backup)
+            print(f"Existing settings backed up to {backup}")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        os.chmod(tmp, keep_mode)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    print(f"merged the DashScope env block into {path}")
+
+
+try:
+    merge()
+except SystemExit:
+    raise
+except Exception as error:  # one actionable line beats a traceback in the terminal
+    print(f"failed to update {path}: {error}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+  case "$merge_rc" in
+    0) ok "Configuration written to $settings_file" ;;
+    3) warn "left $settings_file untouched — it is not a JSON document this script can merge into." ;;
+    *) CONFIG_WRITE_FAILED=true; err "Failed to update $settings_file (python3 exited $merge_rc)"; return 0 ;;
+  esac
 }
 
 # =============================================================================
@@ -379,6 +485,10 @@ main() {
   install_tokenless_plugin
 
   echo ""
+  if [[ "$CONFIG_WRITE_FAILED" == true ]]; then
+    err "Finished, but the API configuration was not written; see the error above."
+    exit 1
+  fi
   ok "Done! Run 'claude' to get started."
   echo ""
 }

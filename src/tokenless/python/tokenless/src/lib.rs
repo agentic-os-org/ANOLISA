@@ -8,8 +8,7 @@ use pyo3::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokenless_protocol::{
-    Attribution as ProtocolAttribution, BeforeModelRequest, PostToolRequest, PreToolRequest,
-    RetrieveRequest,
+    Attribution as ProtocolAttribution, BeforeModelRequest, PostToolRequest, RetrieveRequest,
 };
 use tokenless_runtime::{
     Attribution, CompressOptions, CompressResult, RuntimeConfig, TokenlessRuntime as NativeRuntime,
@@ -276,13 +275,19 @@ impl PyStatsQuery {
 #[pymethods]
 impl PyTokenlessRuntime {
     #[new]
+    // One bool per RuntimeConfig switch mirrors the keyword-only Python
+    // signature; grouping them into a struct would break the keyword-only
+    // call surface existing callers compile against.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         data_dir=None,
         *,
         compression_enabled=true,
         search_path_sharing_enabled=true,
-        diff_compression_enabled=false,
+        diff_compression_enabled=true,
+        mixed_content_enabled=false,
         html_extraction_enabled=true,
+        browser_snapshot_enabled=true,
         stats_enabled=true,
         sls_enabled=false
     ))]
@@ -291,7 +296,9 @@ impl PyTokenlessRuntime {
         compression_enabled: bool,
         search_path_sharing_enabled: bool,
         diff_compression_enabled: bool,
+        mixed_content_enabled: bool,
         html_extraction_enabled: bool,
+        browser_snapshot_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
     ) -> PyResult<Self> {
@@ -302,7 +309,9 @@ impl PyTokenlessRuntime {
             compression_enabled,
             search_path_sharing_enabled,
             diff_compression_enabled,
+            mixed_content_enabled,
             html_extraction_enabled,
+            browser_snapshot_enabled,
         })
         .map_err(to_python_error)?;
         Ok(Self { inner })
@@ -328,33 +337,6 @@ impl PyTokenlessRuntime {
         py.allow_threads(|| {
             self.inner
                 .before_model(&request, &attribution)
-                .map_err(to_python_error)
-                .and_then(encode_lifecycle_payload)
-        })
-    }
-
-    #[pyo3(signature = (
-        request_json,
-        rtk_path,
-        *,
-        agent_id="python",
-        session_id=None,
-        tool_use_id=None
-    ))]
-    fn _pre_tool_json(
-        &self,
-        py: Python<'_>,
-        request_json: &str,
-        rtk_path: PathBuf,
-        agent_id: &str,
-        session_id: Option<String>,
-        tool_use_id: Option<String>,
-    ) -> PyResult<String> {
-        let request = decode_lifecycle_payload::<PreToolRequest>(request_json)?;
-        let attribution = protocol_attribution(agent_id, session_id, tool_use_id);
-        py.allow_threads(|| {
-            self.inner
-                .pre_tool(&request, &attribution, &rtk_path)
                 .map_err(to_python_error)
                 .and_then(encode_lifecycle_payload)
         })

@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import tarfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -92,16 +93,12 @@ def _copy_to_container_normalized_owner(container: Any, src: Path, dst: Path | P
     if os.path.dirname(str(dst)) == "":
         raise ValueError(f"Destination path parent directory cannot be empty!, dst: {dst}")
 
-    tar_path = src.with_suffix(".tar")
-    try:
-        with tarfile.open(tar_path, "w") as tar:
+    with BytesIO() as archive:
+        with tarfile.open(fileobj=archive, mode="w") as tar:
             tar.add(src, arcname=dst.name, filter=_normalize_tar_owner)
 
-        data = tar_path.read_bytes()
         container.exec_run(f"mkdir -p {dst.parent}")
-        container.put_archive(os.path.dirname(str(dst)), data)
-    finally:
-        tar_path.unlink(missing_ok=True)
+        container.put_archive(os.path.dirname(str(dst)), archive.getvalue())
 
 
 def _install_swebench_rootless_copy_patch() -> None:
@@ -120,13 +117,24 @@ def _ensure_docker_host_for_rootless_context(
         return
 
     docker_config = docker_config or Path.home() / ".docker" / "config.json"
-    rootless_socket = rootless_socket or Path(f"/run/user/{os.getuid()}/docker.sock")
+    # os.getuid 在原生 Windows 等平台不存在：默认 socket 探测按平台跳过，
+    # 而不是 AttributeError 打断每次 evaluate 调用
+    if rootless_socket is None:
+        if not hasattr(os, "getuid"):
+            return
+        rootless_socket = Path(f"/run/user/{os.getuid()}/docker.sock")
 
     try:
-        config = json.loads(docker_config.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        # A docker config is optional and user-owned: it can be missing, be
+        # written in the platform code page, or hold a bare ``null``. Probing it
+        # must never raise out of evaluation setup, so every decode and shape
+        # failure maps to "no rootless context to detect".
+        config = json.loads(docker_config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return
 
+    if not isinstance(config, dict):
+        return
     if config.get("currentContext") != "rootless" or not rootless_socket.exists():
         return
 
@@ -158,24 +166,51 @@ def run_evaluation(
 
     output_dir = output_dir.resolve()
     preds_path = preds_path.resolve()
-    with _pushd(output_dir):
-        swebench_run_evaluation(
-            dataset_name=dataset_name,
-            split=split,
-            instance_ids=instance_ids,
-            predictions_path=str(preds_path),
-            max_workers=workers,
-            run_id=run_id,
-            timeout=timeout,
-            cache_level=cache_level,
-            force_rebuild=False,
-            clean=False,
-            open_file_limit=4096,
-            namespace=namespace,
-            rewrite_reports=False,
-            modal=False,
-            report_dir=str(output_dir),
+
+    # swebench's entry point is not a stable API: 5.x dropped cache_level,
+    # force_rebuild, clean and namespace, and passing any of them raises TypeError
+    # before a single instance is evaluated. Filter against the installed signature
+    # instead of pinning, and log what was dropped so a silently ignored knob shows
+    # up in the run log rather than as an unexplained result difference.
+    candidate_kwargs = {
+        "dataset_name": dataset_name,
+        "split": split,
+        "instance_ids": instance_ids,
+        "predictions_path": str(preds_path),
+        "max_workers": workers,
+        "run_id": run_id,
+        "timeout": timeout,
+        "cache_level": cache_level,
+        "force_rebuild": False,
+        "clean": False,
+        "open_file_limit": 4096,
+        "namespace": namespace,
+        "rewrite_reports": False,
+        "modal": False,
+        "report_dir": str(output_dir),
+    }
+    accepted = inspect.signature(swebench_run_evaluation).parameters
+    if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in accepted.values()):
+        dropped = sorted(set(candidate_kwargs) - set(accepted))
+        if dropped:
+            logger.warning(
+                "EVAL_SWEBENCH_ARGS_DROPPED unsupported_by_installed_swebench=%s",
+                ",".join(dropped),
+            )
+        missing = sorted(
+            name
+            for name, p in accepted.items()
+            if p.default is inspect.Parameter.empty and name not in candidate_kwargs
         )
+        if missing:
+            raise RuntimeError(
+                "installed swebench requires arguments this runner does not supply: "
+                f"{', '.join(missing)}"
+            )
+        candidate_kwargs = {k: v for k, v in candidate_kwargs.items() if k in accepted}
+
+    with _pushd(output_dir):
+        swebench_run_evaluation(**candidate_kwargs)
 
 
 # ---------------------------------------------------------------------------

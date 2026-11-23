@@ -1,11 +1,18 @@
 //! Versioned local control messages; native identities are data, not authentication.
 
-use aw_provider::admission::AdapterCapabilities;
+use aw_core::admission::AdapterCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString};
 
 mod environment;
+mod registration;
+mod sdk_control;
+pub use registration::{
+    Availability, RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
+    RegistrationRequest, REGISTRATION_VERSION, SDK_VERSION,
+};
+pub use sdk_control::{SdkControl, SdkIntent, SDK_CONTROL_VERSION};
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
 pub const VERSION: &str = "aw-service/v1alpha7";
@@ -32,6 +39,9 @@ pub struct Capabilities {
     pub entrypoint: String,
     /// Supported effects by event.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported at the exact launch entrypoint.
+    #[serde(default)]
+    pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
 impl From<AdapterCapabilities> for Capabilities {
@@ -41,6 +51,7 @@ impl From<AdapterCapabilities> for Capabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -52,6 +63,7 @@ impl From<Capabilities> for AdapterCapabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -84,6 +96,31 @@ pub struct EventHandle {
     pub candidate_revision: String,
 }
 
+/// Caller-reported terminal tool outcome for a manually opened event.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultStatus {
+    /// The tool completed successfully.
+    Success,
+    /// The tool failed.
+    Error,
+    /// The tool was interrupted before completion.
+    Interrupted,
+    /// Execution was denied.
+    Denied,
+}
+
+impl ResultStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Interrupted => "interrupted",
+            Self::Denied => "denied",
+        }
+    }
+}
+
 /// Same-user launcher report; a PID is descriptive data, never process authentication.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -101,6 +138,7 @@ pub enum RunOutcome {
         signal: Option<i32>,
     },
     /// Launch or native readiness failed; no successful completion is implied.
+    #[serde(deserialize_with = "empty_fields")]
     Failed,
 }
 
@@ -152,9 +190,34 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    /// Exchange application-owned control intents over an authenticated peer.
+    SdkControl {
+        /// Negotiated cooperative control command.
+        command: SdkControl,
+    },
+    /// Coordinate an application-owned instance through an authenticated peer.
+    Registration {
+        /// Versioned independent lifecycle action.
+        command: RegistrationCommand,
+    },
+    /// Execute one installed SDK callback through the canonical Adapter mapping.
+    SdkCallback {
+        /// Acknowledged task Scope of an SDK registration.
+        instance_id: String,
+        /// Admitted event name.
+        event: String,
+        /// Step from the immutable Scope routes, including the observation sentinel.
+        step_id: String,
+        /// Native callback object; normalized by the selected Adapter.
+        native_input: Value,
+        /// Close the correlation after native completion or cancellation.
+        close: bool,
+    },
     /// Discover identity and current bounded resource counts.
+    #[serde(deserialize_with = "empty_fields")]
     Status,
     /// Read at most 20 completed step metadata entries from this service start.
+    #[serde(deserialize_with = "empty_fields")]
     RecentExecutions,
     /// Pin context and perform real Provider discovery/private configuration checks.
     Bind {
@@ -177,7 +240,7 @@ pub enum Operation {
     },
     /// Prepare an isolated task binding under an owned root's immutable policy.
     OpenScope {
-        /// Owned root; nested task scopes and reloadable roots are rejected.
+        /// Owned root; nested task scopes and restricted reload roots are rejected.
         parent_id: String,
         /// Task worker PID: the root launcher itself or one of its descendants.
         pid: u32,
@@ -187,15 +250,44 @@ pub enum Operation {
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
     },
+    /// Read the immutable task policy before preparing and acknowledging native routes.
+    ScopePolicy {
+        /// Prepared task scope under an owned resident reload root.
+        instance_id: String,
+    },
     /// Confirm that the native owner received its task handle within five seconds.
     AcknowledgeScope {
         /// Prepared task binding; callbacks remain closed until acknowledgement.
         instance_id: String,
     },
 
+    /// Start continuous validity checking on an acknowledged task scope.
+    WatchScope {
+        /// Task identity, already bound to the outer service generation.
+        instance_id: String,
+        /// Native worker PID; must match the original scope owner.
+        pid: u32,
+    },
+    /// Validate the installed bridge against its immutable task policy.
+    CheckScope {
+        /// Previously watched task scope.
+        instance_id: String,
+        /// Original native worker PID.
+        pid: u32,
+        /// Revision returned by WatchScope; a mismatch permanently fences the scope.
+        policy_revision: String,
+        /// Whether the native owner still observes every required installed seam.
+        valid: bool,
+    },
+
     /// Enable producer-sequenced reclamation on a fresh owned binding.
     EnableInvocations {
         /// Owned binding whose adapter supplies stable producer identities.
+        instance_id: String,
+    },
+    /// Enable sequenced input turns before the binding's first submission.
+    EnableSubmissions {
+        /// Owned binding whose input producer supplies monotonic turn IDs.
         instance_id: String,
     },
     /// Reserve one invocation before forwarding it to native dispatch.
@@ -294,15 +386,22 @@ pub enum Operation {
         instance_id: String,
     },
     /// Establish one shared event lifetime, without executing any step.
+    ///
+    /// Rust callers migrating existing constructors set `result_status: None`
+    /// to keep omitting this field from the serialized request.
     OpenEvent {
         /// Prepared service instance.
         instance_id: String,
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
+        /// Terminal tool outcome when no result projection supplies it.
+        /// Valid only for `tool.after`. Must agree with projection and native status.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_status: Option<ResultStatus>,
     },
-    /// Lease one native callback shared by all step processes for the same tool call.
+    /// Lease one native submission or tool callback shared by all its step processes.
     ///
-    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Nonempty session plus turn/tool-call IDs identify the event within this instance.
     /// Repeated opens require identical input and reuse the first deadline. Hermes
     /// completion observers and final replacement normalize only their seam name
     /// and observer-only middleware trace; the first native bytes are retained.
@@ -310,6 +409,7 @@ pub enum Operation {
     /// its pinned completion view supplies native metadata without renewing claims.
     /// Sequenced bindings require a producer registration and reclaim both phases
     /// after FinishInvocation drains them. Unknown or retired identities fail closed.
+    /// Sequenced inputs reclaim details after CloseInputEvent, retaining a high-water mark.
     /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
@@ -333,6 +433,15 @@ pub enum Operation {
         session_id: String,
         /// Invocation-scoped normalized tool call identifier.
         call_id: String,
+    },
+    /// Cancel a submitted turn without creating a tool invocation identity.
+    CloseInputEvent {
+        /// Owning binding instance.
+        instance_id: String,
+        /// Session used by the normalized submission.
+        session_id: String,
+        /// Adapter-issued turn identity.
+        turn_id: String,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {
@@ -371,7 +480,18 @@ pub enum Operation {
         key: String,
     },
     /// Request cancellation and graceful shutdown; process exit completes cleanup.
+    #[serde(deserialize_with = "empty_fields")]
     Stop,
+}
+
+// Serde's internally tagged unit visitor ignores unknown fields. Decode the
+// remaining map as an empty struct to enforce the same contract as other variants.
+fn empty_fields<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<(), D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+
+    Empty::deserialize(decoder).map(|_| ())
 }
 
 impl Operation {
@@ -400,4 +520,65 @@ pub struct Response {
     pub error: Option<String>,
     /// Evidence for a failed preparation when no successful binding was returned.
     pub audit_key: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fieldless_operations_reject_unknown_fields_at_every_entrypoint() {
+        for (method, operation) in [
+            ("status", Operation::Status),
+            ("recent_executions", Operation::RecentExecutions),
+            ("stop", Operation::Stop),
+        ] {
+            let expected = json!({"method": method});
+            assert_eq!(serde_json::to_value(operation).unwrap(), expected);
+            for extra in [None, Some(Value::Null), Some(json!({"nested": true}))] {
+                let mut value = expected.clone();
+                if let Some(extra) = &extra {
+                    value["unknown"] = extra.clone();
+                }
+                let bytes = serde_json::to_vec(&value).unwrap();
+                assert_eq!(Operation::from_json(&bytes).is_ok(), extra.is_none());
+                assert_eq!(
+                    serde_json::from_slice::<Operation>(&bytes).is_ok(),
+                    extra.is_none()
+                );
+                let request = json!({
+                    "api_version": VERSION,
+                    "identity": null,
+                    "deadline_ns": 1,
+                    "operation": value,
+                });
+                assert_eq!(
+                    crate::ipc::decode::<Request>(&serde_json::to_vec(&request).unwrap()).is_ok(),
+                    extra.is_none()
+                );
+            }
+        }
+        assert!(Operation::from_json(
+            br#"{"method":"own_instance","instance_id":"i","pid":1,"unknown":null}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn failed_run_outcome_rejects_unknown_fields() {
+        let expected = json!({"state": "failed"});
+        assert_eq!(serde_json::to_value(RunOutcome::Failed).unwrap(), expected);
+        for extra in [None, Some(Value::Null), Some(json!({"nested": true}))] {
+            let mut outcome = expected.clone();
+            if let Some(extra) = &extra {
+                outcome["unknown"] = extra.clone();
+            }
+            let value = json!({"method": "report_run", "instance_id": "i", "outcome": outcome});
+            assert_eq!(
+                Operation::from_json(&serde_json::to_vec(&value).unwrap()).is_ok(),
+                extra.is_none()
+            );
+        }
+    }
 }

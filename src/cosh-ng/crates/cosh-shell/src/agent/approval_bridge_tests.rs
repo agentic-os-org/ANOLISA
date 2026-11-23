@@ -1939,7 +1939,7 @@ fn late_allow_verdict_reconciles_the_provisional_staged_entry() {
         Some("ctrl-late"),
         Some("toolu-staged"),
     );
-    crate::approval::requests::record_auto_approved_request(&mut state, late_request);
+    crate::approval::requests::record_auto_approved_request(&mut state, late_request, true);
 
     let entries = state
         .approvals
@@ -2046,7 +2046,7 @@ fn late_verdict_reconcile_is_scoped_to_its_own_run() {
             Some("toolu-staged"),
         )
     };
-    crate::approval::requests::record_auto_approved_request(&mut state, late_request);
+    crate::approval::requests::record_auto_approved_request(&mut state, late_request, true);
 
     let run1 = state
         .approvals
@@ -3285,6 +3285,558 @@ fn trusted_escaped_space_command_queues_a_handoff_with_the_same_bytes() {
         "emitted bytes must equal the minted key"
     );
     assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+fn read_audit_segments(root: &std::path::Path) -> String {
+    let mut content = String::new();
+    let segments = root.join("v1/segments");
+    if let Ok(dates) = std::fs::read_dir(&segments) {
+        for date in dates.flatten() {
+            if let Ok(files) = std::fs::read_dir(date.path()) {
+                for file in files.flatten() {
+                    if let Ok(text) = std::fs::read_to_string(file.path()) {
+                        content.push_str(&text);
+                    }
+                }
+            }
+        }
+    }
+    content
+}
+
+fn heredoc_governed_event(command: &str, request_id: &str, tool_use_id: &str) -> GovernedEvent {
+    GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: request_id.to_string(),
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": command }),
+            tool_use_id: tool_use_id.to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "shell command".to_string(),
+        display_text: "shell command".to_string(),
+        auto_execute: false,
+    }
+}
+
+fn drain_responses(
+    rx: &std::sync::mpsc::Receiver<crate::adapter::ApprovalChannelMessage>,
+) -> Vec<crate::adapter::ApprovalResponse> {
+    rx.try_iter()
+        .filter_map(|message| match message {
+            crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+            crate::adapter::ApprovalChannelMessage::Receipt { .. }
+            | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn auto_and_trust_heredoc_handoff_block_consistently() {
+    // #10316: a bare-newline heredoc fails handoff validation. Auto (exact
+    // trust key) and Trust must each persist Blocked everywhere — stored
+    // request, journal, audit, provider verdict — never approve-then-flip,
+    // never queue, never render "sent to shell", and never hang the turn.
+    let command = "cat <<'EOF' | wc -w\nhello world foo\nEOF";
+    for mode in [CoshApprovalMode::Auto, CoshApprovalMode::Trust] {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let audit_root = unique_audit_root("10316-heredoc");
+        let mut state = InlineState {
+            approval_mode: mode,
+            audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+                audit_root.path(),
+            )),
+            ..InlineState::default()
+        };
+        let (active_run, approval_rx) =
+            crate::agent::run::test_support::test_active_run_with_id("run-1");
+        state.agent_run.active = Some(active_run);
+        state
+            .control
+            .approval_ledger_mut()
+            .register("run-1", "ctrl-1");
+        if mode == CoshApprovalMode::Auto {
+            let key = crate::approval::handoff::trust_key_from_command(command).expect("trust key");
+            state.control.trust.trust_session_command(key);
+        }
+        let governed = [heredoc_governed_event(command, "ctrl-1", "toolu-1")];
+        let mut output = Vec::new();
+
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &governed,
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render heredoc approval");
+
+        let stored = state
+            .approvals
+            .requests
+            .iter()
+            .find(|request| request.request_id.as_deref() == Some("ctrl-1"))
+            .expect("the heredoc request must be recorded");
+        assert_eq!(
+            stored.status,
+            ApprovalRequestStatus::Blocked,
+            "mode={mode:?}"
+        );
+        assert_eq!(
+            stored.execution_path,
+            Some("blocked_handoff_validation"),
+            "mode={mode:?}"
+        );
+
+        let journal: Vec<_> = state
+            .approvals
+            .journal
+            .iter()
+            .filter(|entry| entry.request_id.as_deref() == Some("ctrl-1"))
+            .collect();
+        assert_eq!(
+            journal.len(),
+            1,
+            "mode={mode:?}: one terminal journal entry"
+        );
+        assert_eq!(
+            journal[0].decision,
+            ApprovalRequestStatus::Blocked,
+            "mode={mode:?}"
+        );
+
+        assert!(
+            state.control.shell_handoff().approved_is_empty(),
+            "mode={mode:?}: a blocked command must not queue for the foreground shell"
+        );
+
+        let responses = drain_responses(&approval_rx);
+        assert_eq!(
+            responses.len(),
+            1,
+            "mode={mode:?}: exactly one terminal verdict: {responses:?}"
+        );
+        assert_eq!(responses[0].request_id, "ctrl-1", "mode={mode:?}");
+        match &responses[0].decision {
+            ApprovalDecision::Deny { message } => {
+                assert!(
+                    message.contains("blocked this Bash tool request"),
+                    "mode={mode:?}: {message}"
+                );
+                assert!(
+                    message.contains("Rewrite it as a single line"),
+                    "mode={mode:?}: rewrite hint missing: {message}"
+                );
+            }
+            other => panic!("mode={mode:?}: expected Deny, got {other:?}"),
+        }
+
+        assert!(
+            !state
+                .control
+                .approval_ledger()
+                .unresponded_for_run("run-1")
+                .contains(&"ctrl-1".to_string()),
+            "mode={mode:?}: the control request ledger must be settled"
+        );
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("Blocked"), "mode={mode:?}: {rendered}");
+        assert!(
+            !rendered.contains("sent to shell"),
+            "mode={mode:?}: a blocked handoff must not render a sent-to-shell receipt: {rendered}"
+        );
+
+        let audit_content = read_audit_segments(audit_root.path());
+        assert!(audit_content.contains("approval.resolved"), "mode={mode:?}");
+        assert!(
+            audit_content.contains("denied"),
+            "mode={mode:?}: the persisted audit resolution must be denied: {audit_content}"
+        );
+        assert!(
+            !audit_content.contains("allowed"),
+            "mode={mode:?}: audit must not record an allowed resolution: {audit_content}"
+        );
+    }
+}
+
+#[test]
+fn heredoc_block_does_not_rewrite_a_prior_resolved_staged_decision() {
+    // #10316/#2156: control requests may reuse a tool_use_id. A later heredoc
+    // block settles only its own entry; it must never rewrite an earlier
+    // resolved staged decision that shares the tool_use_id.
+    let command = "cat <<'EOF' | wc -w\nhello world foo\nEOF";
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("10316-staged-reuse");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    state.agent_run.active = Some(active_run);
+    state.approvals.journal.push(RuntimeApprovalJournalEntry {
+        id: "req-old".to_string(),
+        audit_ref: None,
+        run_id: "run-1".to_string(),
+        source: "approved_provider_shell_tool",
+        kind: ApprovalRequestKind::Tool,
+        subject: "Bash".to_string(),
+        preview: "$ df -h".to_string(),
+        preview_hash: "old-hash".to_string(),
+        risk: "medium",
+        request_id: Some("ctrl-old".to_string()),
+        tool_use_id: Some("toolu-shared".to_string()),
+        actor: "agent-auto",
+        decision: ApprovalRequestStatus::Approved,
+        execution_path: Some("staged_resolved_late_verdict"),
+        command_block_id: None,
+        redaction_status: None,
+        assessment: None,
+    });
+    let key = crate::approval::handoff::trust_key_from_command(command).expect("trust key");
+    state.control.trust.trust_session_command(key);
+    state
+        .control
+        .approval_ledger_mut()
+        .register("run-1", "ctrl-new");
+    let governed = [heredoc_governed_event(command, "ctrl-new", "toolu-shared")];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render reused-toolu heredoc");
+
+    let old = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.request_id.as_deref() == Some("ctrl-old"))
+        .expect("prior resolved staged entry");
+    assert_eq!(
+        old.decision,
+        ApprovalRequestStatus::Approved,
+        "a later block must not rewrite the prior resolved staged decision"
+    );
+    assert_eq!(old.execution_path, Some("staged_resolved_late_verdict"));
+
+    let new = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.request_id.as_deref() == Some("ctrl-new"))
+        .expect("the new blocked entry");
+    assert_eq!(new.decision, ApprovalRequestStatus::Blocked);
+    assert!(state.control.shell_handoff().approved_is_empty());
+    let responses = drain_responses(&approval_rx);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].request_id, "ctrl-new");
+    assert!(matches!(
+        responses[0].decision,
+        ApprovalDecision::Deny { .. }
+    ));
+}
+
+#[test]
+fn auto_single_line_handoff_positive_control() {
+    // #10316 positive control: a valid single-line command still auto-approves,
+    // queues, and emits byte-identical bytes to the foreground shell.
+    let command = "echo heredoc-control-10316";
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("10316-control");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    let (active_run, _approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    state.agent_run.active = Some(active_run);
+    let key = crate::approval::handoff::trust_key_from_command(command).expect("trust key");
+    state.control.trust.trust_session_command(key);
+    let governed = [heredoc_governed_event(command, "ctrl-ok", "toolu-ok")];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render single-line control");
+
+    let stored = state
+        .approvals
+        .requests
+        .iter()
+        .find(|request| request.request_id.as_deref() == Some("ctrl-ok"))
+        .expect("control request recorded");
+    assert_eq!(stored.status, ApprovalRequestStatus::Approved);
+    let emitted = state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("the valid single-line command must queue and emit");
+    assert_eq!(emitted.command, command);
+    let rendered = String::from_utf8(output).expect("utf8");
+    assert!(rendered.contains("sent to shell"), "{rendered}");
+}
+
+#[test]
+fn blocked_handoff_continues_the_batch_so_later_approvals_are_not_orphaned() {
+    // #10316 review: a delivered deny (run continues) must not end the batch.
+    // A later high-risk request in the same batch must still reach its normal
+    // pending approval card instead of being orphaned into the generic
+    // unhomed-control drain.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("10316-batch");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    state.agent_run.active = Some(active_run);
+    state
+        .control
+        .approval_ledger_mut()
+        .register("run-1", "ctrl-1");
+    state
+        .control
+        .approval_ledger_mut()
+        .register("run-1", "ctrl-2");
+    let governed = [
+        heredoc_governed_event(
+            "cat <<'EOF' | wc -w\nhello world foo\nEOF",
+            "ctrl-1",
+            "toolu-1",
+        ),
+        heredoc_governed_event("reboot", "ctrl-2", "toolu-2"),
+    ];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render mixed batch");
+
+    let first = state
+        .approvals
+        .requests
+        .iter()
+        .find(|request| request.request_id.as_deref() == Some("ctrl-1"))
+        .expect("heredoc request recorded");
+    assert_eq!(first.status, ApprovalRequestStatus::Blocked);
+    let responses = drain_responses(&approval_rx);
+    assert!(
+        responses
+            .iter()
+            .any(|response| response.request_id == "ctrl-1"
+                && matches!(response.decision, ApprovalDecision::Deny { .. })),
+        "the blocked heredoc must deliver its deny verdict: {responses:?}"
+    );
+
+    let second = state
+        .approvals
+        .requests
+        .iter()
+        .find(|request| request.request_id.as_deref() == Some("ctrl-2"))
+        .expect("the later high-risk request must still be registered, not orphaned");
+    assert_eq!(second.status, ApprovalRequestStatus::Pending);
+    assert!(state.approvals.active_panel_id.is_some());
+    assert!(state.control.shell_handoff().approved_is_empty());
+}
+
+#[test]
+fn required_audit_authorization_failure_settles_the_journal_to_blocked() {
+    // #10316 review: when required audit cannot persist execution authorization
+    // after the approval was already journaled Approved, the journal entry this
+    // recording appended must be corrected to Blocked so log, request, receipt,
+    // and provider verdict agree.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("10316-audit-authz");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    state.agent_run.active = Some(active_run);
+    state
+        .control
+        .approval_ledger_mut()
+        .register("run-1", "ctrl-audit");
+    let request = shell_request(
+        ProviderShellRequestKind::ControlPermission,
+        Some("ctrl-audit"),
+        Some("toolu-audit"),
+    );
+    let (mut request, journal_index) =
+        crate::approval::requests::record_auto_approved_request(&mut state, request, true);
+    assert_eq!(request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(
+        state
+            .approvals
+            .journal
+            .get(journal_index)
+            .expect("journal entry appended")
+            .decision,
+        ApprovalRequestStatus::Approved
+    );
+
+    // The approval resolution persisted; only execution authorization fails.
+    state.audit =
+        Some(crate::journal::audit::ShellAuditRecorder::test_required_unavailable("session-1"));
+    let mut output = Vec::new();
+    let flow = apply_auto_approved_request_outcome(
+        &mut state,
+        &mut request,
+        journal_index,
+        MessageId::ApprovalResolutionAutoApprovedTitle,
+        &mut output,
+    )
+    .expect("apply outcome");
+    assert_eq!(flow, AutoApprovalFlow::Continue);
+
+    assert_eq!(request.status, ApprovalRequestStatus::Blocked);
+    assert_eq!(request.execution_path, Some("blocked_audit_required"));
+    assert_eq!(
+        state
+            .approvals
+            .journal
+            .get(journal_index)
+            .expect("journal entry")
+            .decision,
+        ApprovalRequestStatus::Blocked,
+        "the journal must reflect the final Blocked decision"
+    );
+    assert_eq!(
+        state
+            .approvals
+            .requests
+            .iter()
+            .find(|stored| stored.id == request.id)
+            .expect("stored request")
+            .status,
+        ApprovalRequestStatus::Blocked
+    );
+    let responses = drain_responses(&approval_rx);
+    assert!(
+        responses
+            .iter()
+            .any(|response| response.request_id == "ctrl-audit"
+                && matches!(response.decision, ApprovalDecision::Deny { .. })),
+        "the provider must receive a terminal deny verdict: {responses:?}"
+    );
+    let rendered = String::from_utf8(output).expect("utf8");
+    assert!(rendered.contains("Blocked"), "{rendered}");
+    assert!(!rendered.contains("sent to shell"), "{rendered}");
+    let _ = adapter;
+}
+
+#[test]
+fn audit_authorization_failure_does_not_overwrite_a_same_numbered_staged_entry() {
+    // #10316 review P1-1: journal ids are display numbers (`req-{n}`) reused by
+    // staged entries that never push into `requests`. The authorization-failure
+    // write-back must correct only the entry this recording appended (by index),
+    // never an unrelated same-numbered staged_unresolved entry.
+    let audit_root = unique_audit_root("10316-journal-collision");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    let (active_run, _approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    state.agent_run.active = Some(active_run);
+    state
+        .control
+        .approval_ledger_mut()
+        .register("run-1", "ctrl-audit");
+
+    let staged = RuntimeApprovalRequest {
+        run_id: "run-other".to_string(),
+        ..shell_request(
+            ProviderShellRequestKind::ControlPermission,
+            Some("ctrl-staged"),
+            Some("toolu-staged"),
+        )
+    };
+    crate::approval::requests::record_staged_unresolved_request(&mut state, staged);
+    assert_eq!(state.approvals.journal[0].id, "req-1");
+    assert_eq!(
+        state.approvals.journal[0].execution_path,
+        Some("staged_unresolved")
+    );
+
+    let request = shell_request(
+        ProviderShellRequestKind::ControlPermission,
+        Some("ctrl-audit"),
+        Some("toolu-audit"),
+    );
+    let (mut request, journal_index) =
+        crate::approval::requests::record_auto_approved_request(&mut state, request, true);
+    assert_eq!(request.id, "req-1");
+    assert_eq!(journal_index, 1);
+    assert_eq!(state.approvals.journal[1].id, "req-1");
+
+    state.audit =
+        Some(crate::journal::audit::ShellAuditRecorder::test_required_unavailable("session-1"));
+    let mut output = Vec::new();
+    apply_auto_approved_request_outcome(
+        &mut state,
+        &mut request,
+        journal_index,
+        MessageId::ApprovalResolutionAutoApprovedTitle,
+        &mut output,
+    )
+    .expect("apply outcome");
+
+    assert_eq!(
+        state.approvals.journal[1].decision,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        state.approvals.journal[1].execution_path,
+        Some("blocked_audit_required")
+    );
+    assert_eq!(
+        state.approvals.journal[0].execution_path,
+        Some("staged_unresolved"),
+        "the unrelated same-numbered staged entry must keep its marker"
+    );
+    assert_eq!(state.approvals.journal[0].run_id, "run-other");
 }
 
 #[test]

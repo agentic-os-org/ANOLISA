@@ -38,7 +38,8 @@ def test_missing_or_rewound_counter_invalidates_interval(
 def test_recovery_reestablishes_baseline_before_measuring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collect_metrics, "read_status", lambda pid: {"VmRSS": 1024})
     counter = iter([None, 120, 130])
-    clock = iter([11, 12, 13])
+    # Keep the original sample-start times 11, 12, 13; counter reads use 14, 15, 16.
+    clock = iter([11, 14, 12, 15, 13, 16])
     monkeypatch.setattr(collect_metrics, "read_cpu_ticks", lambda pid: next(counter))
     monkeypatch.setattr(collect_metrics.time, "monotonic", lambda: next(clock))
     first, ticks, now = collect_metrics.sample(123, 100, 10, 1, None)

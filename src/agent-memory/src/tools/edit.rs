@@ -9,10 +9,11 @@ use crate::service::MemoryService;
 
 const TOOL: &str = "mem_edit";
 
-/// String-replacement edit (Anthropic str_replace style).
+/// Replace exactly one occurrence, counting overlapping matches.
 ///
 /// - `old_str` MUST occur exactly once in the file. Zero occurrences →
-///   `NotFound`-style error; multiple occurrences → ambiguity error.
+///   `InvalidArgument` error; multiple occurrences (including overlaps)
+///   → ambiguity error.
 /// - `new_str` may be empty (deletion).
 pub fn edit(svc: &MemoryService, path: &str, old_str: &str, new_str: &str) -> Result<()> {
     let resolved = match resolve_path(&svc.mount, path) {
@@ -62,16 +63,17 @@ pub fn edit(svc: &MemoryService, path: &str, old_str: &str, new_str: &str) -> Re
             return Err(e);
         }
     };
-    // Short-circuit at the second match — we only care whether the count
-    // is 0, 1, or "2+". Walking the full body to count every match wastes
-    // CPU for large files when the answer was decided after byte ~N.
-    let count = body.match_indices(old_str).take(2).count();
-    if count == 0 {
+    let Some(first) = body.find(old_str) else {
         let err = MemoryError::InvalidArgument(format!("old_str not found in '{rel}'"));
         svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
         return Err(err);
-    }
-    if count > 1 {
+    };
+    // Search after the first character, not the whole match: a second
+    // occurrence can overlap the first. old_str is nonempty, and advancing
+    // by a character keeps the search on a UTF-8 boundary. Stop at the second
+    // match because further matches cannot change the ambiguity decision.
+    let next = first + old_str.chars().next().map_or(0, char::len_utf8);
+    if body[next..].contains(old_str) {
         let err = MemoryError::InvalidArgument(format!(
             "old_str matches multiple occurrences in '{rel}' — provide more context to disambiguate"
         ));
@@ -80,7 +82,12 @@ pub fn edit(svc: &MemoryService, path: &str, old_str: &str, new_str: &str) -> Re
     }
 
     let updated = body.replacen(old_str, new_str, 1);
-    let bytes = match safe_fs::write(svc.mount.root_fd.as_fd(), rel_path, updated.as_bytes()) {
+    let bytes = match safe_fs::write_atomic(
+        svc.mount.root_fd.as_fd(),
+        Path::new(svc.mount.meta_dir_name()),
+        rel_path,
+        updated.as_bytes(),
+    ) {
         Ok(n) => n,
         Err(e) => {
             svc.audit_log(AuditEntry::new(TOOL).path(rel).error(e.to_string()));

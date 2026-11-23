@@ -30,7 +30,7 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 "$SCRIPT_DIR/remote_sync.sh"
 
 # Rebuild after the sync. rsync excludes target/, so the previously built
-# l2_compare, tokenless library and rtk binary all survive a source update:
+# l2_compare, tokenless library and tokenless binary all survive a source update:
 # running them directly would benchmark stale artifacts while the report reads
 # the freshly synced Git SHA, i.e. attribute numbers to code that never ran.
 # remote_setup.sh is idempotent and rebuilds all three, so it is cheap when
@@ -56,7 +56,7 @@ echo "[run] executing l2_compare on $L2_SSH_HOST"
 SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
     "DASHSCOPE_API_KEY=$SAFE_DASHSCOPE_API_KEY \
      HEADROOM_PYTHON=$L2_REMOTE_WORK/headroom-venv/bin/python \
-     RTK_BIN=$L2_REMOTE_WORK/anolisa/src/tokenless/third_party/rtk/target/release/rtk \
+     TOKENLESS_BIN=$L2_REMOTE_WORK/anolisa/src/tokenless/target/release/tokenless \
      $L2_REMOTE_WORK/anolisa/src/tokenless/benchmark/l2-module/target/release/l2_compare$REMOTE_ARGS"
 
 # Reports live in the workspace root's reports/ directory, two levels above

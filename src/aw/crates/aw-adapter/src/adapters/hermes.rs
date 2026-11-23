@@ -16,13 +16,10 @@ use super::super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
-
-const REVISION: &str = "952c941e741e922a9be8fc403c8944c6e96318bb";
 
 pub(crate) struct Hermes;
 
@@ -31,6 +28,42 @@ struct Prepared {
     profile: PathBuf,
     python: PathBuf,
     callback_timeout: f64,
+    revision: String,
+    gateway: bool,
+}
+
+/// Prepare a verified running Gateway without executing the Hermes CLI again.
+pub fn prepare_gateway(
+    mut input: LaunchInput,
+    owner_executable: &std::path::Path,
+    revision: &str,
+    callback_timeout: f64,
+) -> Result<Box<dyn PreparedLaunch>> {
+    const VERIFIED_GATEWAY: &str = "3b421578588243f920886e6fe79a6faa87ea026e";
+    if revision != VERIFIED_GATEWAY || !callback_timeout.is_finite() || callback_timeout < 0.0 {
+        return Err("unsupported Hermes Gateway revision or callback timeout".into());
+    }
+    if input.options.settings.is_some() || input.options.state_dir.is_some() {
+        return Err("Hermes Gateway requires a native profile".into());
+    }
+    let profile =
+        install::profile(input.options.profile.as_ref().ok_or(
+            "Hermes Gateway requires --native-profile pointing to its installed profile",
+        )?)?;
+    install::installed(&profile)?;
+    check_args(&input.command.args)?;
+    let python = preflight::python_entrypoint(&mut input.command)?;
+    if python.canonicalize()? != owner_executable {
+        return Err("Hermes Gateway owner does not use the configured interpreter".into());
+    }
+    Ok(Box::new(Prepared {
+        input,
+        profile,
+        python,
+        callback_timeout,
+        revision: revision.into(),
+        gateway: true,
+    }))
 }
 
 impl Adapter for Hermes {
@@ -50,12 +83,12 @@ impl Adapter for Hermes {
         check_args(&input.command.args)?;
         install::installed(&profile).map_err(|error| {
             format!(
-                "{error}; run aw install --config FILE --agent {} --native-profile {}",
+                "{error}; run aw connect --config FILE --agent {} --native-profile {}",
                 input.target,
                 profile.display()
             )
         })?;
-        let (selector, python, cache) =
+        let (selector, python, cache, revision) =
             checked_profile_command(&mut input.command, &profile, cancelled)?;
         let timeout =
             callback_timeout(&input.command, &python, &selector, cache.path(), cancelled)?;
@@ -70,6 +103,8 @@ impl Adapter for Hermes {
             profile,
             python,
             callback_timeout: timeout,
+            revision,
+            gateway: false,
         }))
     }
 
@@ -81,6 +116,12 @@ impl Adapter for Hermes {
             return Err(
                 "Hermes callback event or working directory differs from its binding".into(),
             );
+        }
+        if crate::callback::lifecycle(event) {
+            return super::lifecycle::normalize(binding, "hermes", event, native);
+        }
+        if event == "input.submit" {
+            return super::submission::normalize(binding, native, "hermes", "input_text");
         }
         let session = identifier(&native["session_id"], "session_id")?;
         let call = identifier(&native["extra"]["tool_call_id"], "extra.tool_call_id")?;
@@ -94,13 +135,25 @@ impl Adapter for Hermes {
         if !native["tool_input"].is_object() {
             return Err("Hermes callback requires a tool_input object".into());
         }
+        let mut input = native["tool_input"].clone();
+        let mut native = native.clone();
+        if tool == "skill_view" {
+            input["skill"] = input["name"].clone();
+            native["aw_skill"] = native["extra"]["aw_skill"].clone();
+        }
+        // Observation and replacement must retain the same result correlation.
+        let result = if event == "tool.after" {
+            crate::projection::decoded_result("hermes", &native)
+        } else {
+            native["extra"]["result"].clone()
+        };
         Ok(json!({
             "name": event,
             "agent": {"adapter": "hermes", "binding_id": binding.target,
                       "instance_id": binding.instance_id},
             "session_id": session,
             "tool": {"name": tool, "native_name": tool, "call_id": call,
-                     "input": native["tool_input"], "result": native["extra"]["result"]},
+                     "input": input, "result": result},
             "native": native,
         }))
     }
@@ -153,7 +206,8 @@ impl Adapter for Hermes {
             cwd: std::env::current_dir()?.canonicalize()?,
             environment: std::env::vars_os().collect(),
         };
-        let (selector, python, cache) = checked_profile_command(&mut command, &profile, cancelled)?;
+        let (selector, python, cache, _) =
+            checked_profile_command(&mut command, &profile, cancelled)?;
         let backup = install::install(
             &profile,
             cancelled,
@@ -274,11 +328,44 @@ fn installed_output(
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::HERMES.capabilities(REVISION, "chat")
+        let entrypoint = if self.gateway { "gateway" } else { "chat" };
+        let mut capabilities =
+            super::super::adapter::catalog::HERMES.capabilities(&self.revision, entrypoint);
+        if self.gateway {
+            capabilities.events.remove("input.submit");
+        }
+        if self.gateway || self.input.options.reloadable {
+            for event in ["session.start", "turn.stop", "session.end"] {
+                capabilities.events.remove(event);
+            }
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        for event in ["tool.before", "tool.after"] {
+        if self.input.options.reloadable {
+            crate::reload::validate(
+                &self.input.document,
+                &self.input.target,
+                &self.capabilities(),
+            )?;
+            if self.callback_timeout > 0.0 && self.callback_timeout < 60.0 {
+                return Err(
+                    "Hermes native policy updates require plugins.hook_callback_timeout of at least 60 seconds or zero (unlimited)"
+                        .into(),
+                );
+            }
+        }
+        if !self.native_steps(steps, "input.submit").is_empty() {
+            check_submission_args(&self.input.command.args)?;
+        }
+        for event in [
+            "session.start",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+        ] {
             if !self.native_steps(steps, event).is_empty() {
                 let budget = self.budget(event)?;
                 if self.callback_timeout > 0.0
@@ -294,15 +381,36 @@ impl PreparedLaunch for Prepared {
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
         let mut events = BTreeMap::new();
         let mut hooks = Vec::new();
-        for event in ["tool.before", "tool.after"] {
+        let mut submissions = Vec::new();
+        for event in [
+            "session.start",
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+        ] {
             let selected = self.native_steps(context.steps, event);
             if selected.is_empty() {
                 continue;
             }
             let budget = self.budget(event)?;
             for step in &selected {
-                hooks.push(json!({"event":event, "step":step.step_id,
-                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result}));
+                let mut hook = json!({"event":event, "step":step.step_id,
+                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result});
+                if context.steps.iter().any(|admitted| {
+                    admitted.event == event
+                        && admitted.step_id == step.step_id
+                        && super::sdk_tools::checks_skill_tool(admitted, "hermes", "skill_view")
+                }) {
+                    hook["skill_check"] = json!(true);
+                }
+                let callbacks = if event == "input.submit" {
+                    &mut submissions
+                } else {
+                    &mut hooks
+                };
+                callbacks.push(hook);
             }
             events.insert(
                 event.into(),
@@ -319,6 +427,32 @@ impl PreparedLaunch for Prepared {
                 },
             );
         }
+        if self.input.options.reloadable {
+            events = crate::reload::routes();
+            for event in events.values_mut() {
+                event.budget_ms = 55000;
+            }
+            if !self.gateway && check_submission_args(&self.input.command.args).is_ok() {
+                events.insert(
+                    "input.submit".into(),
+                    HookEvent {
+                        budget_ms: 55000,
+                        replacement_step: None,
+                        steps: BTreeMap::from([(crate::reload::DISPATCH.into(), "block".into())]),
+                    },
+                );
+                submissions = vec![
+                    json!({"event":"input.submit", "step":crate::reload::DISPATCH,
+                    "on_error":"block", "timeout":59}),
+                ];
+            }
+            hooks = vec![
+                json!({"event":"tool.before", "step":crate::reload::DISPATCH,
+                    "on_error":"block", "timeout":59, "replace_result":false}),
+                json!({"event":"tool.after", "step":crate::reload::DISPATCH,
+                    "on_error":"report", "timeout":59, "replace_result":true}),
+            ];
+        }
         let ready = context.files.directory().join("hermes-ready.json");
         let token = String::from_utf8(read_file("/proc/sys/kernel/random/uuid", 128)?)?
             .trim()
@@ -327,11 +461,19 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision, "reloadable":self.input.options.reloadable});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
         let mut command = self.input.command.clone();
+        context.files.write(
+            "aw_skill.py",
+            include_bytes!("../../native/hermes/aw_skill.py"),
+        )?;
+        context.files.write(
+            "aw_reload.py",
+            include_bytes!("../../native/hermes/aw_reload.py"),
+        )?;
         let entrypoint = context.files.write(
             "hermes-entrypoint.py",
             include_bytes!("../../native/hermes/launch.py"),
@@ -367,9 +509,11 @@ impl PreparedLaunch for Prepared {
 impl Prepared {
     fn native_steps(&self, steps: &[AdmittedStep], event: &str) -> Vec<adapter::NativeStep> {
         adapter::native_steps(
+            &self.input.document,
             steps,
             event,
-            adapter::observation_enabled(&self.input.document, &self.input.target),
+            matches!(event, "tool.before" | "tool.after")
+                && adapter::observation_enabled(&self.input.document, &self.input.target),
         )
     }
 
@@ -399,10 +543,51 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 
 fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "session.start" => Ok("on_session_start"),
+        "turn.stop" => Ok("on_session_end"),
+        "session.end" => Ok("on_session_finalize"),
+        "input.submit" => Ok("AWInputSubmit"),
         "tool.before" => Ok("pre_tool_call"),
         "tool.after" => Ok("post_tool_call"),
         _ => Err("unsupported Hermes hook event".into()),
     }
+}
+
+/// Retain the immutable native CLI mode when activating submission policy.
+pub(crate) fn validate_reload_submission(document: &Value, target: &str) -> Result<()> {
+    let args = document["spec"]["agents"][target]["argv"]
+        .as_array()
+        .ok_or("Hermes native argv missing")?
+        .iter()
+        .skip(1)
+        .map(|value| {
+            value
+                .as_str()
+                .map(OsString::from)
+                .ok_or_else(|| "invalid Hermes native argv".into())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    check_submission_args(&args)
+}
+
+fn check_submission_args(args: &[OsString]) -> Result<()> {
+    let options: Vec<_> = args
+        .iter()
+        .filter_map(|arg| arg.to_str())
+        .map(|arg| arg.split('=').next().unwrap_or(arg))
+        .collect();
+    if !options
+        .iter()
+        .any(|arg| matches!(*arg, "--query" | "-q" | "--query-file"))
+        || !options.iter().any(|arg| matches!(*arg, "--quiet" | "-Q"))
+        || options.contains(&"--image")
+    {
+        return Err(
+            "Hermes input.submit requires --quiet with --query or --query-file and no --image"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn check_args(args: &[OsString]) -> Result<()> {

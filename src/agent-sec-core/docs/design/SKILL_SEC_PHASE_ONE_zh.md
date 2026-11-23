@@ -7,6 +7,11 @@ SkillSec 在一个 `asc-capability-skill-sec` crate 内拆分 Skill 扫描、内
 及 Linux 验收边界。当前合同不支持密钥轮转，以系统 `managedSkillDirs` 配置作为唯一持久化
 发现集合。下文带日期的旧换钥与私有登记表验收仅是历史证据，不代表当前功能。
 
+当前 Rust CLI 入口为 `agent-sec-cli skillsec`，`skill-ledger` 保留为兼容别名，使用相同的
+命令树、请求参数、输出和退出码。此次命名迁移不改变 `action.skill_sec`、审计事件类型、
+能力 ID、环境变量或持久化数据，现有 Hook 调用保持兼容。CLI 合同测试覆盖两种命令名，
+核心工作流及目录发现的进程测试使用 `skillsec`。
+
 ## 交付与验收
 
 核心迁移和 Agent Hook 接入分为两个 PR。当前 PR 包含 Rust 核心、公共 Action Runtime 审计、
@@ -365,7 +370,8 @@ Service 已提供 `decide`、`clear_decision`、`show`、`activate` 和 `rollbac
 `show` 只读，分别呈现 latest/active、源目录一致性、findings 和有长度限制的审核说明。
 
 发布写入 SkillFS 使用的最小 schema-1 `activation.json` 与目录 xattr；目标是已验证快照、
-安全的待审核占位目录，或显式 block 对应的 null。`contractWritten`、
+安全的待审核占位目录，或显式 block 对应的 null。占位内容将目录名保留为 YAML 字符串，
+转义 YAML 会作为换行处理或拒绝的字面字符；description 和审核说明固定不变。`contractWritten`、
 `activationXattr.written`、`activationPending` 区分业务提交与发布完成。xattr 失败不会撤销
 已签名决策；activate 或启动 reconcile 可重试。发布成功不等于已证明真实 FUSE 暴露效果。
 

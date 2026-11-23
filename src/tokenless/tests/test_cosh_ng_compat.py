@@ -35,7 +35,6 @@ and output parsing are defined exactly once.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -55,12 +54,11 @@ _HOOKS_DIR = (
     / "hooks"
 )
 
-_spec = importlib.util.spec_from_file_location(
-    "hook_utils", _HOOKS_DIR / "hook_utils.py"
-)
-assert _spec and _spec.loader
-hook_utils = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(hook_utils)
+sys.path.insert(0, str(_HOOKS_DIR))
+sys.path.insert(0, str(_HOOKS_DIR.parent.parent))
+import hook_dispatch
+cosh_adapter = hook_dispatch.load_adapter("cosh-ng")
+
 
 COMPRESS_HOOK = _HOOKS_DIR / "compress_response_hook.py"
 REWRITE_HOOK = _HOOKS_DIR / "rewrite_hook.py"
@@ -278,72 +276,85 @@ class TestCoshNGRuntimeDetection(CoshNGEnvTestCase):
     def test_detect_version_from_cosh_ng_version(self):
         """COSH_NG_VERSION yields the parsed version tuple."""
         os.environ["COSH_NG_VERSION"] = "0.21.0"
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 21, 0))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 21, 0))
 
     def test_detect_version_tolerates_surrounding_whitespace(self):
         """A padded version string still parses (regex search, not match)."""
         os.environ["COSH_NG_VERSION"] = "  0.6.0 "
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 6, 0))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 6, 0))
 
     def test_unparseable_version_is_unknown_sentinel(self):
         """Detected but unparseable version maps to the (0, 0, 0) sentinel."""
         os.environ["COSH_NG_VERSION"] = "not-a-version"
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 0, 0))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 0, 0))
 
     def test_whitespace_only_version_is_unknown_sentinel(self):
         """A whitespace-only version is detected but unsupported, not a crash."""
         os.environ["COSH_NG_VERSION"] = "   "
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 0, 0))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 0, 0))
 
     def test_runtime_marker_without_version_is_unknown_sentinel(self):
         """COSH_RUNTIME=cosh-ng without a version maps to (0, 0, 0)."""
         os.environ["COSH_RUNTIME"] = "cosh-ng"
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 0, 0))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 0, 0))
 
     def test_version_wins_over_runtime_marker(self):
         """When both markers are present the version string is authoritative."""
         os.environ["COSH_NG_VERSION"] = "0.7.1"
         os.environ["COSH_RUNTIME"] = "cosh-ng"
-        self.assertEqual(hook_utils.detect_cosh_ng_runtime(), (0, 7, 1))
+        self.assertEqual(cosh_adapter.detect_cosh_ng_runtime(), (0, 7, 1))
 
     def test_not_cosh_ng_when_markers_absent(self):
         """No markers means the hook is not running under Cosh-NG."""
-        self.assertIsNone(hook_utils.detect_cosh_ng_runtime())
+        self.assertIsNone(cosh_adapter.detect_cosh_ng_runtime())
 
     def test_other_runtime_marker_is_not_cosh_ng(self):
         """COSH_RUNTIME values other than cosh-ng are ignored."""
         os.environ["COSH_RUNTIME"] = "copilot-shell"
-        self.assertIsNone(hook_utils.detect_cosh_ng_runtime())
+        self.assertIsNone(cosh_adapter.detect_cosh_ng_runtime())
 
 
 class TestCoshNGAgentAttribution(CoshNGEnvTestCase):
     """Stats attribution resolves to the cosh-ng agent ID."""
 
+    def test_dispatch_and_capability_detection_agree(self):
+        for version, runtime in (
+            ("not-a-version", ""), ("", "cosh-ng"), ("", ""),
+            ("   ", ""), ("0.21.0", "copilot-shell"),
+        ):
+            with self.subTest(version=version, runtime=runtime):
+                os.environ["COSH_NG_VERSION"] = version
+                os.environ["COSH_RUNTIME"] = runtime
+                self.assertEqual(
+                    hook_dispatch.resolve_agent_id(argv=[]) == "cosh-ng",
+                    cosh_adapter.detect_cosh_ng_runtime() is not None,
+                )
+
     def test_cosh_ng_version_overrides_declared_agent_id(self):
         """The host env beats the manifest-declared TOKENLESS_AGENT_ID."""
         os.environ["TOKENLESS_AGENT_ID"] = "copilot-shell"
         os.environ["COSH_NG_VERSION"] = "0.21.0"
-        self.assertEqual(hook_utils.resolve_agent_id(), "cosh-ng")
+        self.assertEqual(hook_dispatch.resolve_agent_id(), "cosh-ng")
 
     def test_runtime_marker_overrides_declared_agent_id(self):
         """COSH_RUNTIME alone is enough to re-attribute to cosh-ng."""
         os.environ["TOKENLESS_AGENT_ID"] = "copilot-shell"
         os.environ["COSH_RUNTIME"] = "cosh-ng"
-        self.assertEqual(hook_utils.resolve_agent_id(), "cosh-ng")
+        self.assertEqual(hook_dispatch.resolve_agent_id(), "cosh-ng")
 
     def test_unknown_version_still_attributes_to_cosh_ng(self):
         """Even the fail-open sentinel keeps stats attribution correct."""
         os.environ["COSH_RUNTIME"] = "cosh-ng"
-        self.assertEqual(hook_utils.resolve_agent_id(), "cosh-ng")
+        self.assertEqual(hook_dispatch.resolve_agent_id(), "cosh-ng")
 
     def test_declared_agent_id_used_outside_cosh_ng(self):
         """Without Cosh-NG markers the declared agent ID is kept."""
         os.environ["TOKENLESS_AGENT_ID"] = "copilot-shell"
-        self.assertEqual(hook_utils.resolve_agent_id(), "copilot-shell")
+        self.assertEqual(hook_dispatch.resolve_agent_id(), "copilot-shell")
 
     def test_default_used_when_nothing_declared(self):
         """No markers and no declaration fall back to the visible default."""
-        self.assertEqual(hook_utils.resolve_agent_id(), "unknown")
+        self.assertEqual(hook_dispatch.resolve_agent_id(), "unknown")
 
 
 class TestCoshNGCompressResponseIntegration(CompressHookTestCase):

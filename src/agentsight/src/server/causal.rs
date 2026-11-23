@@ -24,12 +24,15 @@ use crate::storage::sqlite::GenAISqliteStore;
 // model is asked anything.
 use crate::grounding;
 
+#[path = "causal_cache_source.rs"]
+mod cache_source;
+
 // ─── In-memory cache ─────────────────────────────────────────────────────────
 //
 // Caches the last successful causal case per (session_id, round_index) so the
 // dashboard can re-open a run instantly without replaying three LLM calls.
 // The cache is invalidated automatically when the user submits a different
-// complaint (stale-complaint check) or explicitly via `CausalRequest.force`.
+// complaint or the source changes, or explicitly via `CausalRequest.force`.
 
 type CausalCacheKey = (String, Option<usize>);
 type CausalCacheMap = std::collections::HashMap<CausalCacheKey, CausalCacheEntry>;
@@ -47,6 +50,7 @@ static CAUSAL_CACHE_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 #[derive(Clone)]
 struct CausalCacheEntry {
     complaint: String,
+    source_hash: Option<String>,
     case: CausalCase,
     /// Monotonic counter bumped on every read/write; the smallest value in
     /// the map is the eviction candidate when the cap is exceeded.
@@ -384,10 +388,27 @@ pub async fn run_causal_attribution(
         format!("{scope_tag}:{resolved_session_id}"),
         req.round_index,
     );
+    // Read first so an appended or corrected trajectory cannot reuse an old
+    // case. A missing source can still serve the paid, retained analysis.
+    let loaded = load_trajectory(
+        &state.storage_path,
+        &resolved_session_id,
+        genai_store.as_deref(),
+        trajectory_store.as_deref(),
+        id_kind,
+    );
+    let source_hash = loaded.as_ref().ok().and_then(|trajectory| {
+        let round = slice_round(trajectory, req.round_index).ok()?;
+        cache_source::fingerprint(trajectory, round).ok()
+    });
+    let source_available = loaded.is_ok();
     if !req.force {
         if let Ok(mut guard) = causal_cache().lock() {
             if let Some(entry) = guard.get_mut(&cache_key) {
-                if entry.complaint == req.complaint {
+                if entry.complaint == req.complaint
+                    && (!source_available
+                        || (source_hash.is_some() && entry.source_hash == source_hash))
+                {
                     entry.last_used = next_cache_tick();
                     log::info!(
                         "Causal attribution: cache hit for {}='{}' round={:?}, returning prior case",
@@ -413,19 +434,23 @@ pub async fn run_causal_attribution(
             };
             match store.get(key) {
                 Ok(Some(case_json)) => {
-                    // The stored bytes are exactly what the client received
-                    // last time; replaying them verbatim cannot drift.
                     match serde_json::from_str::<serde_json::Value>(&case_json) {
                         Ok(case_value) => {
-                            log::info!(
-                                "Causal attribution: restored case for {} round={:?} from causal.db",
-                                resolved_session_id,
-                                req.round_index,
-                            );
-                            return HttpResponse::Ok().json(serde_json::json!({
-                                "case": case_value,
-                                "cached": true,
-                            }));
+                            if let Some(case_value) = cache_source::restored_case(
+                                case_value,
+                                source_hash.as_deref(),
+                                source_available,
+                            ) {
+                                log::info!(
+                                    "Causal attribution: restored case for {} round={:?} from causal.db",
+                                    resolved_session_id,
+                                    req.round_index,
+                                );
+                                return HttpResponse::Ok().json(serde_json::json!({
+                                    "case": case_value,
+                                    "cached": true,
+                                }));
+                            }
                         }
                         Err(error) => {
                             // A corrupt row must not wedge the feature: log it
@@ -450,13 +475,7 @@ pub async fn run_causal_attribution(
         }
     }
 
-    let trajectory = match load_trajectory(
-        &state.storage_path,
-        &resolved_session_id,
-        genai_store.as_deref(),
-        trajectory_store.as_deref(),
-        id_kind,
-    ) {
+    let trajectory = match loaded {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -497,7 +516,7 @@ pub async fn run_causal_attribution(
                     round: cache_key.1,
                     complaint: &req.complaint,
                 };
-                match serde_json::to_string(&case_) {
+                match cache_source::persisted_case(&case_, source_hash.as_deref()) {
                     Ok(case_json) => {
                         if let Err(error) = store.put(key, &case_json) {
                             log::warn!(
@@ -525,6 +544,7 @@ pub async fn run_causal_attribution(
                     cache_key,
                     CausalCacheEntry {
                         complaint: req.complaint.clone(),
+                        source_hash,
                         case: case_.clone(),
                         last_used: tick,
                     },
@@ -1312,9 +1332,12 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
         }
     }
 
-    // 2. trace_id — genai_events
-    let genai_candidate = base_dir.join("genai_events.db");
-    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, &genai_candidate) {
+    // 2. trace_id — genai_events. `db_path` is the database the server was
+    // told to serve (`--db`, else storage.genai_path()), so a custom filename
+    // must be queried as itself. Joining the default name onto the directory
+    // opened a different (often absent) file and every trace id from a custom
+    // database fell through to a 404.
+    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, db_path) {
         let sql = "SELECT session_id FROM genai_events \
                    WHERE trace_id = ?1 AND session_id IS NOT NULL \
                    LIMIT 1";
@@ -1333,11 +1356,8 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
 
 /// Load a session's ATIF trajectory, trying every data source the deployment
 /// exposes in order: eBPF genai events first (richest signal, already
-/// normalized), then the collector's `trajectories.db`, then any sibling DB
-/// that passes the ATIF-JSON schema probe (covers macOS builds that ship
-/// `~/Library/Application Support/agentsight/trajectories.db` with a
-/// non-standard column name, and Linux deployments that colocate an
-/// `agentsight.db` next to `genai_events.db`).
+/// normalized), then the collector's `trajectories.db`, then compatible
+/// sibling trajectory stores with non-standard ATIF column names.
 fn load_trajectory(
     db_path: &std::path::Path,
     session_id: &str,
@@ -1385,7 +1405,7 @@ fn load_trajectory(
     // handles the §2.1 "don't assume fixed table/column names" requirement:
     // we enumerate tables, enumerate TEXT columns, and take the first row
     // whose value parses as ATIF JSON for the requested session.
-    let candidate_files = ["trajectories.db", "agentsight.db", "collected.db"];
+    let candidate_files = ["trajectories.db", "collected.db"];
     let base_dir = db_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -1458,8 +1478,8 @@ fn probe_atif_column(
 
             // The sample parses as JSON — assume this column holds ATIF.
             // Prefer equality lookup on a session_id column when one exists;
-            // otherwise scan every row (bounded by small dataset sizes
-            // typical of local trajectory stores).
+            // otherwise inspect rows one at a time so a large TEXT column
+            // cannot accumulate in memory.
             let session_column = find_session_column(&conn, &table)?;
             let rows_sql = match session_column.as_deref() {
                 Some(col) => format!("SELECT \"{column}\" FROM \"{table}\" WHERE \"{col}\" = ?1",),
@@ -1469,22 +1489,19 @@ fn probe_atif_column(
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let values: Vec<String> = if session_column.is_some() {
-                rows.query_map([session_id], |r| r.get::<_, String>(0))
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r.ok())
-                    .collect()
+            let query_result = if session_column.is_some() {
+                rows.query([session_id])
             } else {
-                rows.query_map([], |r| r.get::<_, String>(0))
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r.ok())
-                    .collect()
+                rows.query([])
             };
-            for value in values {
+            let mut values = match query_result {
+                Ok(values) => values,
+                Err(_) => continue,
+            };
+            while let Some(row) = values.next().map_err(|e| e.to_string())? {
+                let Ok(value) = row.get::<_, String>(0) else {
+                    continue;
+                };
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
                     // `scoped`: the SQL above filtered by the session column,
                     // so a document without a session_id field is still known
@@ -1680,7 +1697,7 @@ async fn call_json<T: serde::de::DeserializeOwned>(
     let raw = client
         .chat_json(messages)
         .await
-        .map_err(|e| format!("LLM call [{label}] failed: {e}"))?;
+        .map_err(|e| format!("LLM call [{label}] failed: {e:#}"))?;
     // Dump raw JSON so we can diagnose what the evaluator actually produced
     // when the graph comes back with too few nodes / weird kind values.
     log::debug!(
@@ -1742,6 +1759,12 @@ fn build_case(
     attr: &Attribution,
     index: &grounding::evidence::GroundingIndex,
 ) -> Result<CausalCase, String> {
+    // The evaluator's outcome is free-form text; every outcome-keyed decision
+    // below (and the dashboard's own `outcome === 'fail'` checks) keys on the
+    // canonical pair, so the variant spellings a model produces are folded
+    // here, once, before anything reads the value.
+    let outcome = normalize_outcome(attr.outcome.as_deref());
+
     let mut nodes: Vec<CausalNode> = Vec::new();
     let mut edges: Vec<CausalEdge> = Vec::new();
     let mut timeline: Vec<String> = Vec::new();
@@ -1787,7 +1810,7 @@ fn build_case(
     // round accuses something. A live capture stumbled eight times on one SQL
     // quoting mistake, adapted, and answered correctly; drawing all eight buried
     // the onset rather than pointing at it.
-    let alleging = is_alleging(attr.outcome.as_deref(), index);
+    let alleging = is_alleging(Some(outcome.as_str()), index);
     let mut failed_steps: std::collections::HashMap<usize, (String, Option<String>, String)> =
         std::collections::HashMap::new();
     for v in &index.call_verdicts {
@@ -1925,7 +1948,7 @@ fn build_case(
                     // Anchor override: the agent's last step becomes "shipped"
                     // (fail) or "good" (success) so the chain has an endpoint.
                     if !is_user(step) && Some(*step_idx) == last_agent_idx {
-                        if attr.outcome.as_deref() == Some("fail") {
+                        if outcome == "fail" {
                             "shipped".to_string()
                         } else {
                             "good".to_string()
@@ -1958,7 +1981,7 @@ fn build_case(
                 if Some(*step_idx) == first_user_idx {
                     "用户任务".to_string()
                 } else if Some(*step_idx) == last_agent_idx {
-                    if attr.outcome.as_deref() == Some("fail") {
+                    if outcome == "fail" {
                         "问题交付".to_string()
                     } else {
                         "最终结论".to_string()
@@ -1990,7 +2013,7 @@ fn build_case(
                 } else if Some(*step_idx) == last_agent_idx {
                     format!(
                         "agent 交付的最终结论{}",
-                        if attr.outcome.as_deref() == Some("fail") {
+                        if outcome == "fail" {
                             "（未达标）"
                         } else {
                             ""
@@ -2060,7 +2083,7 @@ fn build_case(
     // printed "失败形态：走了弯路，但最后结果是对的" under a ❌.
     let turn_issue_str = attr
         .turn_issue
-        .filter(|single_turn| !single_turn && attr.outcome.as_deref() == Some("fail"))
+        .filter(|single_turn| !single_turn && outcome == "fail")
         .map(|_| "错误结论直接交付给了用户".to_string());
 
     Ok(CausalCase {
@@ -2085,7 +2108,7 @@ fn build_case(
         // was the "needs human review" hedge this panel must not show.
         verdict: attr.verdict.clone().unwrap_or_default(),
         root_one: attr.root_one.clone().unwrap_or_default(),
-        outcome: attr.outcome.clone().unwrap_or_else(|| "success".into()),
+        outcome,
         outcome_note: attr.outcome_note.clone(),
         turn_issue: turn_issue_str,
         attrib: normalize_attrib(attr.attrib.as_deref()),
@@ -2248,6 +2271,28 @@ fn normalize_attrib(value: Option<&str>) -> String {
     match lowered.as_str() {
         "model" | "skill" | "prompt" | "agent" => lowered,
         _ => "model".to_string(),
+    }
+}
+
+/// Map the evaluator's free-form `outcome` onto the canonical pair the case,
+/// its rendering decisions, and the dashboard's `outcome === 'fail'` checks all
+/// key on.
+///
+/// `normalize_kind` exists because "the evaluator sometimes returns Chinese
+/// labels or capitalized English"; `outcome` is the same class of free-form
+/// value with the same variance — and compared exactly, a one-word variant
+/// ("failed") flipped every outcome-keyed decision to the success side: the
+/// endpoint node rendered "good" with the "最终结论" label, the failure chain
+/// was withheld, the turn_issue marker was lost, and the dashboard showed
+/// "✅ 最终办成了". Only recognized failure spellings map to `"fail"`; anything
+/// else stays `"success"`, exactly what an unrecognized value meant before.
+fn normalize_outcome(value: Option<&str>) -> String {
+    let Some(lowered) = value.map(|s| s.trim().to_ascii_lowercase()) else {
+        return "success".to_string();
+    };
+    match lowered.as_str() {
+        "fail" | "failed" | "failure" | "失败" => "fail".to_string(),
+        _ => "success".to_string(),
     }
 }
 

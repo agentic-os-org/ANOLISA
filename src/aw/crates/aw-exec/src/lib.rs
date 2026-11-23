@@ -1,13 +1,15 @@
 //! Bounded byte transport for one hook command, independent of Agent and Provider protocols.
 //! Callers retain scheduling, policy decisions and interpretation of native responses.
 
+pub mod uds;
+
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     io,
     path::PathBuf,
     process::ExitStatus,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -118,6 +120,27 @@ pub enum Error {
     /// Execution is implemented only on Linux.
     #[error("bounded command execution requires Linux")]
     UnsupportedPlatform,
+}
+
+const CHILD_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const CHILD_CLEANUP_GRACE: Duration = Duration::from_secs(1);
+
+/// Maximum cooperative termination and group verification budget.
+pub const COOPERATIVE_CHILD_CLEANUP_GRACE: Duration =
+    CHILD_TERMINATE_GRACE.saturating_add(CHILD_CLEANUP_GRACE);
+
+/// Checks the shared execution limit before doing work or accepting a result.
+///
+/// # Errors
+/// Returns cancellation first, then deadline expiry.
+pub fn check_active(deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(Error::Cancelled)
+    } else if Instant::now() >= deadline {
+        Err(Error::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
 }
 
 /// Run one command with nonblocking pipes and a caller-owned absolute deadline.
@@ -252,6 +275,37 @@ pub fn run_foreground_with_grace(
     shutdown_grace: Duration,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus, Error> {
+    run_foreground_mode(command, signal, failed, shutdown_grace, false, started)
+}
+
+/// Run a worker that owns the graceful shutdown of its subprocesses.
+///
+/// External signals reach only the unreaped worker PID so its SDK transports
+/// remain available during cleanup. Internal failure still signals the group;
+/// deadline expiry and worker exit still force cleanup of the whole group.
+/// Terminal-generated signals continue to follow the kernel foreground group.
+/// All other guarantees match [`run_foreground_with_grace`].
+///
+/// # Errors
+/// Returns the same validation and cleanup errors as [`run_foreground_with_grace`].
+pub fn run_foreground_worker_with_grace(
+    command: &CommandSpec,
+    signal: &std::sync::atomic::AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus, Error> {
+    run_foreground_mode(command, signal, failed, shutdown_grace, true, started)
+}
+
+fn run_foreground_mode(
+    command: &CommandSpec,
+    signal: &std::sync::atomic::AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
+    leader_signals: bool,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus, Error> {
     if shutdown_grace < Duration::from_millis(1) || shutdown_grace > Duration::from_secs(120) {
         return Err(Error::Io {
             operation: "foreground shutdown grace",
@@ -260,11 +314,25 @@ pub fn run_foreground_with_grace(
     }
     #[cfg(target_os = "linux")]
     {
-        linux::foreground::run(command, signal, failed, shutdown_grace, started)
+        linux::foreground::run(
+            command,
+            signal,
+            failed,
+            shutdown_grace,
+            leader_signals,
+            started,
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (command, signal, failed, shutdown_grace, started);
+        let _ = (
+            command,
+            signal,
+            failed,
+            shutdown_grace,
+            leader_signals,
+            started,
+        );
         Err(Error::UnsupportedPlatform)
     }
 }

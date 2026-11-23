@@ -120,6 +120,18 @@ impl ConfiguredSecurityEventSinks {
         }
     }
 
+    /// Records an event only acknowledging success after both configured writes.
+    ///
+    /// # Errors
+    /// Reports either destination's failure. A failed call may have inserted the `SQLite` row;
+    /// callers must not retry the action that produced the event.
+    pub fn record(&self, event: &SecurityEvent) -> Result<(), SinkError> {
+        // SQLite ignores a duplicate event_id; append to JSONL only after the row is durable.
+        self.sqlite_writer()?.write_checked(event)?;
+        self.jsonl.write_or_raise(event)?;
+        Ok(())
+    }
+
     /// Runs maintenance and closes the configured `SQLite` writer if initialized.
     pub fn close(&self) {
         self.close_with_deadline(None);
@@ -252,6 +264,75 @@ mod tests {
     use serde_json::Map;
 
     use super::*;
+
+    #[test]
+    fn checked_security_record_requires_both_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let db = dir.path().join("events.db");
+        let sinks = ConfiguredSecurityEventSinks::new(log.clone(), db.clone());
+        let event = SecurityEvent::new("authorization_receipt", "sandbox", Map::new());
+        sinks.record(&event).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let count: u64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        for (jsonl, sqlite) in [
+            (blocked.join("events.jsonl"), dir.path().join("other.db")),
+            (dir.path().join("other.jsonl"), blocked.join("events.db")),
+        ] {
+            assert!(
+                ConfiguredSecurityEventSinks::new(jsonl, sqlite)
+                    .record(&event)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn storage_retry_delivers_one_copy_to_each_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_parent = dir.path().join("database");
+        let log_parent = dir.path().join("logs");
+        let db = db_parent.join("events.db");
+        let log = log_parent.join("events.jsonl");
+        let sinks = ConfiguredSecurityEventSinks::new(log.clone(), db.clone());
+        let event = SecurityEvent::new("authorization_receipt", "sandbox", Map::new());
+
+        fs::write(&db_parent, b"blocked").unwrap();
+        assert!(sinks.record(&event).is_err());
+        assert!(!log.exists());
+        fs::remove_file(&db_parent).unwrap();
+        fs::create_dir(&db_parent).unwrap();
+        fs::write(&log_parent, b"blocked").unwrap();
+        assert!(sinks.record(&event).is_err());
+        fs::remove_file(&log_parent).unwrap();
+        fs::create_dir(&log_parent).unwrap();
+        sinks.record(&event).unwrap();
+
+        let jsonl = fs::read_to_string(log).unwrap();
+        assert_eq!(jsonl.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<SecurityEvent>(&jsonl)
+                .unwrap()
+                .event_id,
+            event.event_id
+        );
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let (count, id): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(event_id) FROM security_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((count, id), (1, event.event_id));
+    }
 
     #[test]
     fn run_sqlite_retention_runs_once_per_window_without_closing() {

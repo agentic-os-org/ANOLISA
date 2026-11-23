@@ -107,6 +107,16 @@ try {
   const first = events();
   assert(first.some((event) => event.name === "tool.before" && JSON.stringify(event.tool.input).includes("AW_DENY")), "denial must come from AW");
   results.push({ case: "first-request-denied", status: "passed" });
+  if (!reloadable) {
+    const before = first.find(event => event.name === "tool.before");
+    assert.match(before.tool.call_id, /^[0-9a-f-]{36}$/);
+    assert.equal(typeof before.native.aw_native_tool_use_id, "string");
+    assert.notEqual(before.tool.call_id, before.native.aw_native_tool_use_id);
+    assert.equal(managed.q.handleControlRequest, undefined);
+    assert.equal(managed.q.recordInboundSessionMessage, undefined);
+    assert.equal(managed.q.transport, undefined);
+    results.push({ case: "native-producer-identity", status: "passed" });
+  }
   const count = first.length;
   await turn(unbound, "printf AW_DENY > unbound.txt", "unbound.txt", true);
   assert.equal(events().length, count, "AW hooks leaked to the unbound session");

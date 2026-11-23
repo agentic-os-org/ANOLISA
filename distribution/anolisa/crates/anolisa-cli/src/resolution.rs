@@ -366,6 +366,25 @@ impl<'a> ComponentResolver<'a> {
             ));
         }
 
+        let installed_core =
+            query.what_provides_installed(&rpm_component_core_provide(component))?;
+        if !installed_core.is_empty() {
+            return Ok(normalize_resolution_set(
+                installed_core
+                    .into_iter()
+                    .map(|package| {
+                        ResolvedTarget::new(
+                            component,
+                            BackendKind::Rpm,
+                            package,
+                            ResolutionSource::InstalledRpmProvides,
+                            true,
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+
         let available_providers = query.what_provides_available(&provide)?;
         if !available_providers.is_empty() {
             return Ok(normalize_resolution_set(
@@ -580,9 +599,50 @@ impl ComponentIndex {
                     targets.push(index_target(entry, backend, backend_entry));
                 }
             }
+            if backend == BackendKind::Rpm
+                && entry
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.kind == "rpm-package" && alias.name == package)
+            {
+                targets.push(ResolvedTarget::new(
+                    component,
+                    backend,
+                    package,
+                    ResolutionSource::ComponentIndex,
+                    true,
+                ));
+            }
         }
         targets
     }
+}
+
+/// Installed RPM package names explicitly associated with a component.
+pub(crate) fn index_rpm_packages(index: Option<&ComponentIndex>, component: &str) -> Vec<String> {
+    let Some(entry) = index.and_then(|index| index.components.iter().find(|e| e.name == component))
+    else {
+        return Vec::new();
+    };
+    let mut packages = Vec::new();
+    for package in entry
+        .backends
+        .iter()
+        .filter(|entry| entry.kind == "rpm")
+        .map(|entry| &entry.package)
+        .chain(
+            entry
+                .aliases
+                .iter()
+                .filter(|alias| alias.kind == "rpm-package")
+                .map(|alias| &alias.name),
+        )
+    {
+        if !package.is_empty() && !packages.contains(package) {
+            packages.push(package.clone());
+        }
+    }
+    packages
 }
 
 impl ComponentIndexEntry {
@@ -636,21 +696,29 @@ pub(crate) fn rpm_component_provide(component: &str) -> String {
     format!("anolisa-component({component})")
 }
 
+/// RPM capability identifying a standalone component core package.
+pub(crate) fn rpm_component_core_provide(component: &str) -> String {
+    format!("anolisa-component-core({component})")
+}
+
 fn rpm_package_provides_component(
     query: &dyn PackageQuery,
     package: &str,
     component: &str,
 ) -> Result<Option<ResolvedTarget>, PackageQueryError> {
     let capability = rpm_component_provide(component);
+    let core_capability = rpm_component_core_provide(component);
     let (providers, source) = match query.query_installed(package)? {
-        Some(_) => (
-            query.what_provides_installed(&capability)?,
-            ResolutionSource::InstalledRpmProvides,
-        ),
-        None => (
-            query.what_provides_available(&capability)?,
-            ResolutionSource::AvailableRpmProvides,
-        ),
+        Some(_) => {
+            let mut providers = query.what_provides_installed(&capability)?;
+            providers.extend(query.what_provides_installed(&core_capability)?);
+            (providers, ResolutionSource::InstalledRpmProvides)
+        }
+        None => {
+            let mut providers = query.what_provides_available(&capability)?;
+            providers.extend(query.what_provides_available(&core_capability)?);
+            (providers, ResolutionSource::AvailableRpmProvides)
+        }
     };
     Ok(providers
         .iter()

@@ -29,7 +29,7 @@ pub enum AuditCommands {
     Check(CheckArgs),
     /// View audit log entries for the current session (or filtered).
     Log(LogArgs),
-    /// Report audit storage, retention, and reader health.
+    /// Report audit storage, retention, reader health, and the local integrity boundary.
     Status,
     /// Query a bounded page of canonical audit events.
     Events(EventArgs),

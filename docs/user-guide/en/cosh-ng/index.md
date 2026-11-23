@@ -60,6 +60,16 @@ remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../../../contribute/en/cosh-ng/getting-started.md)
 after the packaged options above.
 
+From `src/cosh-ng`, build and install for the current user:
+
+```bash
+make build
+make install
+```
+
+This source installation does not create the `cosh` terminal command. Use the
+RPM/raw installation above for the complete terminal.
+
 ### 2. Start the terminal
 
 Start `cosh` in the project or system directory where the Agent should work:
@@ -104,7 +114,7 @@ Useful first commands in Enhanced Assisted mode:
 /session list
 ```
 
-`/auth` chooses or updates provider authentication, `/help` lists slash commands, `/status` shows runtime and session status, `/mode approval recommend` asks for confirmation before each Agent tool call, and `/session list` lists resumable conversations in this workspace.
+`/auth` chooses or updates provider authentication, `/help` lists slash commands, `/status` shows runtime and session status, `/mode approval recommend` keeps the Agent explaining and suggesting (no side-effecting tool runs automatically by default; read-only inspection may still run — see [Tool Approval](shell/approval.md)), and `/session list` lists resumable conversations in this workspace.
 
 Use `/session list --all` to include conversations from other workspaces. Resume a conversation from the workspace where it was created.
 

@@ -3,9 +3,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use cosh_types::audit::{AuditComponentName, AuditEventV1, MAX_AUDIT_RECORD_BYTES};
+use cosh_types::audit::{AuditComponentName, AuditEventV1, AuditSettings, MAX_AUDIT_RECORD_BYTES};
 use cosh_types::error::{CoshError, ErrorCode};
 use nix::fcntl::{Flock, FlockArg};
 use uuid::Uuid;
@@ -14,6 +15,17 @@ use uuid::Uuid;
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+mod budget;
+
+// Local peers wait before taking the nonblocking cross-process reservation lock.
+static WRITE_SERIALIZATION: Mutex<()> = Mutex::new(());
+
+pub(super) fn serialize_writes() -> Result<MutexGuard<'static, ()>, CoshError> {
+    WRITE_SERIALIZATION
+        .lock()
+        .map_err(|_| audit_error("serialize audit writers", None, "poisoned writer lock"))
+}
 
 /// Fixed maximum size of one active segment before rotation.
 pub const MAX_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -32,6 +44,9 @@ pub struct AuditSegmentWriter {
     root: PathBuf,
     component: AuditComponentName,
     active: Option<ActiveSegment>,
+    // The segment buffer must drop before its shared reservation lock.
+    budget_guard: Option<Flock<File>>,
+    settings: AuditSettings,
 }
 
 struct ActiveSegment {
@@ -68,6 +83,15 @@ impl AuditSegmentWriter {
     /// Returns a safe audit error when the root, directory permissions,
     /// segment create-new open, or advisory lock cannot be established.
     pub fn create(root: &Path, component: AuditComponentName) -> Result<Self, CoshError> {
+        Self::create_with_settings(root, component, AuditSettings::default())
+    }
+
+    /// Creates a writer with the caller's effective per-user audit limits.
+    pub fn create_with_settings(
+        root: &Path,
+        component: AuditComponentName,
+        settings: AuditSettings,
+    ) -> Result<Self, CoshError> {
         validate_root_path(root)?;
         ensure_private_dir(root)?;
         ensure_private_dir(&root.join("v1"))?;
@@ -76,6 +100,8 @@ impl AuditSegmentWriter {
             root: root.to_path_buf(),
             component,
             active: None,
+            budget_guard: None,
+            settings,
         })
     }
 
@@ -86,6 +112,33 @@ impl AuditSegmentWriter {
     /// Rejects invalid or oversized events before writing bytes and returns
     /// safe operation/basename context for I/O failures.
     pub fn append(
+        &mut self,
+        event: &mut AuditEventV1,
+        durability: AuditDurability,
+    ) -> Result<(), CoshError> {
+        let _serialization = serialize_writes()?;
+        if self.budget_guard.is_none() {
+            self.budget_guard = Some(
+                budget::lock(&self.root)
+                    .map_err(|error| io_error("lock audit budget", &self.root, error))?,
+            );
+        }
+        let result = self.append_locked(event, durability);
+        self.release_budget_if_flushed();
+        result
+    }
+
+    fn release_budget_if_flushed(&mut self) {
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|active| active.file.buffer().is_empty())
+        {
+            self.budget_guard = None;
+        }
+    }
+
+    fn append_locked(
         &mut self,
         event: &mut AuditEventV1,
         durability: AuditDurability,
@@ -113,6 +166,16 @@ impl AuditSegmentWriter {
             ));
         }
 
+        if let Some(active) = self.active.as_mut() {
+            active.bytes = active
+                .file
+                .get_ref()
+                .0
+                .metadata()
+                .map_err(|error| io_error("measure active segment", &active.active_path, error))?
+                .len()
+                .saturating_add(active.file.buffer().len() as u64);
+        }
         let needs_rotation = self.active.as_ref().is_some_and(|active| {
             active.bytes.saturating_add(bytes.len() as u64) > MAX_SEGMENT_BYTES
                 || active.date != utc_date(now)
@@ -131,6 +194,27 @@ impl AuditSegmentWriter {
             bytes.push(b'\n');
         }
 
+        let buffered = self
+            .active
+            .as_ref()
+            .map_or(0, |active| active.file.buffer().len() as u64);
+        budget::admit(
+            &self.root,
+            self.budget_guard
+                .as_ref()
+                .ok_or_else(|| audit_error("missing audit budget lock", None, "unlocked writer"))?,
+            &self
+                .active
+                .as_ref()
+                .ok_or_else(|| audit_error("missing audit segment", None, "inactive writer"))?
+                .file
+                .get_ref()
+                .0,
+            self.settings.max_disk_bytes,
+            buffered,
+            bytes.len() as u64,
+        )
+        .map_err(|error| io_error("admit audit record", &self.root, error))?;
         let active = self.active.as_mut().ok_or_else(|| {
             CoshError::new(
                 ErrorCode::AuditUnavailable,
@@ -166,7 +250,9 @@ impl AuditSegmentWriter {
     ///
     /// Returns a safe audit error when flush, sync, or rename fails.
     pub fn close(&mut self) -> Result<(), CoshError> {
-        self.close_active()
+        let result = self.close_active();
+        self.release_budget_if_flushed();
+        result
     }
 
     /// Returns the current active segment basename for diagnostics.
@@ -223,6 +309,26 @@ impl AuditSegmentWriter {
             .get_ref()
             .sync_data()
             .map_err(|error| io_error("sync segment", &active.active_path, error))?;
+        let metadata = active
+            .file
+            .get_ref()
+            .0
+            .metadata()
+            .map_err(|error| io_error("inspect segment", &active.active_path, error))?;
+        if metadata.len() == 0 {
+            let current = std::fs::symlink_metadata(&active.active_path)
+                .map_err(|error| io_error("inspect empty segment", &active.active_path, error))?;
+            #[cfg(unix)]
+            if (current.dev(), current.ino()) != (metadata.dev(), metadata.ino()) {
+                return Err(unsafe_path(
+                    "empty segment identity changed",
+                    &active.active_path,
+                ));
+            }
+            std::fs::remove_file(&active.active_path)
+                .map_err(|error| io_error("remove empty segment", &active.active_path, error))?;
+            return Ok(());
+        }
         let closed = closed_path(&active.active_path)?;
         close_without_replace(&active.active_path, &closed)
             .map_err(|error| io_error("close segment", &active.active_path, error))?;

@@ -1,5 +1,8 @@
 //! Task scopes release independent contexts and fail closed across owner death and teardown.
 
+#[path = "registration.rs"]
+mod registration;
+
 use super::*;
 use aw_service::Binding;
 
@@ -99,6 +102,7 @@ fn task_scopes_isolate_context_reject_nested_and_reclaim_capacity() {
             .client
             .call(
                 Operation::OpenEvent {
+                    result_status: None,
                     instance_id: binding.instance_id.clone(),
                     event: event(binding, "tool.before", "allow")
                 },
@@ -201,6 +205,7 @@ fn dead_worker_scope_is_reaped_without_releasing_live_parent() {
         .client
         .call(
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: child.instance_id.clone(),
                 event: event(&child, "tool.before", "allow")
             },
@@ -412,6 +417,7 @@ fn launcher_death_drains_all_owned_scopes_and_rejects_old_handles() {
         .client
         .call(
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: child.instance_id.clone(),
                 event: event(&child, "tool.before", "allow"),
             },
@@ -441,6 +447,7 @@ fn unacknowledged_handoff_expires_and_cannot_invoke_or_revive() {
         .client
         .call(
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: child.instance_id.clone(),
                 event: event(&child, "tool.before", "allow"),
             },

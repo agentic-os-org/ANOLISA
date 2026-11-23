@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { dirname, join } = require('node:path');
 const { runInNewContext } = require('node:vm');
 const test = require('node:test');
 
@@ -34,11 +35,16 @@ function viewer({ readFailure = false } = {}) {
       dependencies[index] = deps;
     },
   };
-  runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
-    exports, URLSearchParams,
+  const output = dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD);
+  const browser = {
     setTimeout: () => 0,
     Blob, URL: { createObjectURL: (blob) => { downloads.push(blob); return 'blob:test'; }, revokeObjectURL() {} },
-    document: { createElement: () => ({ click() {} }) },
+    document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
+  };
+  const download = {};
+  runInNewContext(readFileSync(process.env.AGENTSIGHT_DOWNLOAD_BUILD, 'utf8'), { exports: download, ...browser });
+  runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
+    exports, URLSearchParams, AbortController, ...browser,
     FileReader: class {
       constructor() { readers.push(this); }
       readAsText() { if (readFailure) throw new Error('read failed'); }
@@ -54,6 +60,7 @@ function viewer({ readFailure = false } = {}) {
         fetchAtifBySession: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
         fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
       };
+      if (name === '../utils/wsCkpt') return { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false };
       // The savings card reads its rate through this helper; the search tests do
       // not assert the card, so the pure baseline formula stands in here.
       if (name === '../utils/savings') return {
@@ -61,7 +68,10 @@ function viewer({ readFailure = false } = {}) {
       };
       if (name === '../utils/trajectoryTree') return require(process.env.AGENTSIGHT_TRAJECTORY_TREE_BUILD);
       if (name === '../utils/trajectoryTextFilter') return require(process.env.AGENTSIGHT_TRAJECTORY_FILTER_BUILD);
+      if (name === '../utils/optimizationStrategies') return require(process.env.AGENTSIGHT_STRATEGIES_BUILD);
       if (name === '../utils/roundModel') return require(process.env.AGENTSIGHT_ROUND_MODEL_BUILD);
+      if (name === '../utils/text') return require(join(output, '../utils/text.js'));
+      if (name === '../utils/download') return download;
       if (name.startsWith('../components/')) return {};
       throw new Error(`Unexpected ATIF viewer dependency ${name}`);
     },
@@ -167,10 +177,13 @@ test('switching an embedded subagent resets filtering for its own rounds', () =>
   assert.deepEqual(keys(page), [0, 1, 2]);
 });
 
-test('importing another document starts at its root instead of an old URL node', () => {
+test('importing another document starts at its root instead of an old URL node', async () => {
   const previous = trajectory('previous');
   previous.subagent_trajectories = [trajectory('child')];
-  const page = loaded(previous);
+  const page = viewer();
+  page.load('previous');
+  page.requests[0].resolve(previous);
+  await new Promise((resolve) => setImmediate(resolve));
   page.visitParams('type=session&id=previous&highlight_call_id=old-call');
   let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   graph.props.onSelect(graph.props.root.children[0]);
@@ -232,11 +245,11 @@ test('URL navigation still selects an embedded child after a successful import',
   const doc = trajectory('imported');
   doc.subagent_trajectories = [trajectory('child')];
   const page = loaded(doc);
-  page.visitParams('type=session&id=imported&node=child');
+  page.visitParams('node=child');
   page.nodes(() => false);
   let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   assert.deepEqual(graph.props.selectedPath, ['child']);
-  page.visitParams('type=session&id=imported');
+  page.visitParams('');
   page.nodes(() => false);
   graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   assert.deepEqual(Array.from(graph.props.selectedPath), []);

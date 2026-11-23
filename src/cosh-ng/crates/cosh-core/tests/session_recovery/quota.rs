@@ -363,7 +363,7 @@ fn clear_and_commit_share_the_snapshot_lock_and_freed_space_is_retried() {
         .arg("--session-control")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(serde_json::to_string(&json!({"action":"clear", "workspace_scope":workspace, "session_ids":[id], "protected_session_ids":[]})).unwrap().as_bytes()).unwrap();

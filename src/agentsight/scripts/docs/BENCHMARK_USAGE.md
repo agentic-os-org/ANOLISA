@@ -22,10 +22,11 @@ source /tmp/agentsight-bench-venv/bin/activate
 python -m pip install -r scripts/benchmark/requirements.txt
 ```
 
-Agent mode does not require k6. `tiktoken` verifies that repeated ` x` text
-contains one `cl100k_base` token per fragment. Its encoding data is downloaded
-and cached on first use, before the measurement window. The mock reports a
-synthetic input usage of 12 tokens per request.
+Agent mode does not require k6 or tiktoken. It uses the locally constructed
+fragment ` x`, counting each SSE delta as one synthetic test token and checking
+received counts against mock usage. No model vocabulary is downloaded; this
+validates load and protocol handling, not arbitrary model tokenization. The mock
+reports a synthetic input usage of 12 tokens per request.
 
 ## 2. Start 32 Agents at 100 tok/s each
 
@@ -166,8 +167,9 @@ bash scripts/benchmark/single_run/resource_run.sh \
   --output-dir /tmp/agentsight-resource-single
 ```
 
-The script prepares missing Python dependencies in an isolated cached venv,
-freezes the current working tree, and builds a release binary with Cargo's lock
+The HTTP/1.1 resource runner uses Python's standard library; privileged runs
+prepare an isolated cached venv without downloading packages. The script freezes
+the current working tree and builds a release binary with Cargo's lock
 file. Git/source mode needs the project's Rust and Linux eBPF build prerequisites;
 use `--agentsight-bin PATH` to supply a prebuilt executable instead. Builds and
 dependencies are cached under `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/`.
@@ -226,25 +228,40 @@ For existing binaries, use `--ab --baseline-bin PATH --candidate-bin PATH`.
 
 The terminal and `resource-report.txt` show average/peak RSS, their percentages of
 host RAM, average/P95/peak CPU, Load/Capture PASS or FAIL, and run status.
+The resource gate checks average CPU (25%) and average/peak RSS (265/300 MiB)
+only; P95 and peak CPU are diagnostic and do not affect the gate result.
 CPU includes all threads of the standalone AgentSight process: 100% means one
 logical CPU, and values can exceed 100%. The report records the host logical CPU
 count; mock-server and client processes are outside this scope.
 A/B shows RSS reductions in MiB and relative percent. CPU reductions use percentage
 points (`before - after`) and relative percent; negative values mean increased
 resource usage. A zero CPU baseline has no relative percentage. Host RAM share
-changes use percentage points. `resource-summary.json` records the measurements,
-version/tree IDs and binary hashes. Per-run CSV, capture reports and logs are under
-`run/`, or `before/` and `after/` in A/B mode.
+changes use percentage points. The A/B HTML reads the authoritative RSS/CPU
+statistics and `valid` flag from `resource-summary.json`; an invalid or
+unverified result is marked INVALID and does not show improvement verdicts.
+`resource-summary.json` records the measurements, version/tree IDs and binary
+hashes. Per-run CSV, capture reports, logs, and a
+self-contained `metrics-report.html` evaluation report are under `run/`, or
+`before/` and `after/` in A/B mode.
 
 The result is VALID only if the load passes, capture completeness and token
 accuracy are each at least 99.9%, the collector survives with valid resource
-samples, and available probe counters report no dropped events. Ring and
-userspace-channel drops are printed separately. These counters cover all probe
-types, so they do not identify which events were lost; any observed drops keep
-the result INVALID even if all requests have correct usage. Missing counters
-are shown as N/A; older binaries continue to use the request-level checks.
-Missing or invalid CPU samples, or CPU coverage below 95% of the load window,
-also make the result INVALID. An INVALID result suppresses all improvement calculations.
+samples, and the load-window/drain capture gate finds no drops. `probe_drops`
+keeps the cumulative ring and userspace-channel counters for compatibility;
+`probe_drop_phases` breaks each counter into `before_load`, `load`, `tail`, and
+`unattributed`. Only drops explicitly proven to precede the load start can be
+informational. Any positive `load`, `tail`, or `unattributed` value, or a counter
+reset (including reset-to-zero) makes the result INVALID, even when every request
+has correct usage. When the baseline drop count is positive, a missing or late
+baseline timestamp has the same effect. An empty or zero baseline count does not
+invalidate by itself, even if its timestamp is missing or late. The baseline's
+`counter_timestamp` must be strictly earlier than `agents/start.json.start`;
+it is recorded immediately after reading the counters, separately from the CPU
+sample's `monotonic_timestamp`. These counters cover all probe types, so they do
+not identify which events were lost. Missing counters are shown as N/A; older
+binaries continue to use the request-level checks. Missing or invalid CPU
+samples, or CPU coverage below 95% of the load window, also make the result
+INVALID. An INVALID result suppresses all improvement calculations.
 Success exits 0; invalid/failed runs exit nonzero; Ctrl+C exits 130 and preserves
 partial artifacts. Use a fresh output directory for each invocation. The default
 is `scripts/benchmark/results/resource-<UTC timestamp>-<PID>/`.
@@ -261,8 +278,8 @@ The first sample establishes a CPU baseline and leaves CPU fields empty. Average
 CPU is weighted by the actual measured interval, with CPU seconds reported too.
 P95 uses nearest-rank interval samples; peak CPU is the maximum interval average.
 Intervals crossing a window boundary contribute proportionally to their overlap.
-`metrics.csv` retains wall-clock timestamps and adds `monotonic_timestamp` and
-`cpu_interval_seconds` for these calculations. The original LoongCollector WSS
+`metrics.csv` retains wall-clock timestamps and adds `monotonic_timestamp`,
+`counter_timestamp`, and `cpu_interval_seconds` for these calculations. The original LoongCollector WSS
 target needs a separate measurement using the same original scope.
 
 ### 7.1 Measure the FFI library with a minimal C host

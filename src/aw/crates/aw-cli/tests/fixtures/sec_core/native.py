@@ -170,7 +170,9 @@ def collect(report, case, evidence, state):
         results = [row for request in requests for row in request["tool_results"]]
         assert len(results) == 1
         if report["case"] != "allow":
-            assert "Tool blocked by AW policy" in results[0]["content"]
+            expected = ("Tool blocked by AW policy" if report["case"] == "scan-deny"
+                else "AW hook failed; configured failure action blocked the tool")
+            assert expected in results[0]["content"]
     else:
         results = [
             json.loads(line)
@@ -240,7 +242,7 @@ def run(args, mode, root):
         save(config, configuration(args.agent, argv, args.bin, state, backend.socket))
         daemon = processes.start(
             "daemon",
-            [str(aw), "serve", "--config", str(config), "--state-dir", str(state)],
+            [str(aw), "service", "serve", "--config", str(config), "--state-dir", str(state)],
         )
         await_condition(
             lambda: (state / "aw.sock").exists() or processes.exited(daemon),
@@ -266,7 +268,7 @@ def run(args, mode, root):
         # Reap the launcher and descendants before checking zero live bindings.
         processes.stop(child)
         report["final_status"] = json.loads(
-            checked([aw, "status", "--config", config], env=environment).stdout
+            checked([aw, "service", "status", "--config", config], env=environment).stdout
         )
         backend.recover()
         if mode != "backend-error":

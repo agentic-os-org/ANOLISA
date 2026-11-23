@@ -3,11 +3,14 @@
 
 import json
 import os
+import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +21,9 @@ sys.path.insert(0, str(CONTRACT_DIR))
 
 import contract_runner
 import corpus
+
+sys.path.insert(0, corpus.HOOKS_DIR)
+import hook_utils
 
 RESPONSE_HOOK = REPO_ROOT / "adapters/tokenless/common/hooks/compress_response_hook.py"
 MOCK_TOKENLESS = CONTRACT_DIR / "mock_tokenless.py"
@@ -40,7 +46,11 @@ def post_tool_payload(call_id: str) -> dict:
         "session_id": "session-1",
         "tool_use_id": call_id,
         "tool_name": "Bash",
-        "tool_response": {"output": "x" * 80},
+        "tool_response": {
+            "stdout": json.dumps({"output": "x" * 400}),
+            "stderr": "warning",
+            "exit_code": 0,
+        },
     }
 
 
@@ -55,7 +65,7 @@ class PreToolContractTest(unittest.TestCase):
 
     def test_applied_rewrite_uses_protocol_v2(self) -> None:
         result = self.run_case("applied")
-        self.assertEqual(result.spawns, ["compress"])
+        self.assertEqual(result.spawns, [corpus.PRE_TOOL_COMMAND])
         self.assertEqual(
             result.envelope,
             {
@@ -101,11 +111,13 @@ class PreToolContractTest(unittest.TestCase):
             "error_disposition",
             "nonzero_exit",
             "malformed_stdout",
+            "old_response",
+            "future_response",
         ]:
             with self.subTest(behavior=behavior):
                 result = self.run_case(behavior)
                 self.assertEqual(result.envelope, {})
-                self.assertEqual(result.spawns, ["compress"])
+                self.assertEqual(result.spawns, [corpus.PRE_TOOL_COMMAND])
 
     def test_missing_binary_and_missing_call_id_do_not_spawn(self) -> None:
         self.assertEqual(self.run_case(None).envelope, {})
@@ -167,7 +179,14 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(self.requests()[-1]["input"]["capabilities"]["recovery"]["kind"], "none")
 
         second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
-        self.assertIn("hookSpecificOutput", second)
+        self.assertEqual(
+            second["hookSpecificOutput"]["updatedToolOutput"],
+            {
+                "stdout": json.dumps({"output": "x" * 20}, separators=(",", ":")),
+                "stderr": "warning",
+                "exit_code": 0,
+            },
+        )
         self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "none")
 
     def test_state_is_isolated_by_tool_call(self) -> None:
@@ -208,6 +227,14 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(requests[-2]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
+
+    def test_recovery_only_skips_adapters_without_recovery(self) -> None:
+        output = self.run_hook(
+            corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "qoder-cli",
+            "--recovery-only",
+        )
+        self.assertEqual(output, {})
+        self.assertFalse(self.request_log.exists())
 
     def test_qwenwork_rewrite_and_response_share_rtk_state(self) -> None:
         rewritten = self.run_hook(
@@ -260,11 +287,164 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertIn("compress_response_hook.py --agent-id qwencode", response)
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+class IsolatedRewriteProcessTest(unittest.TestCase):
+    def test_child_owns_its_session_and_keeps_all_streams(self) -> None:
+        code = (
+            "import json,os,sys; "
+            "print(json.dumps([os.getpid(),os.getpgrp(),os.getsid(0),sys.stdin.read()])); "
+            "sys.stderr.write('diagnostic')"
+        )
+        result = hook_utils._run_in_group([sys.executable, "-c", code], "request", 3)
+        pid, group, session, received = json.loads(result.stdout)
+        self.assertEqual((group, session), (pid, pid))
+        self.assertNotEqual(group, os.getpgrp())
+        self.assertEqual(received, "request")
+        self.assertEqual(result.stderr, "diagnostic")
+        self.assertEqual(result.returncode, 0)
+
+    def test_outer_timeout_ends_descendants_holding_output_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "survived"
+            ready = Path(tmp) / "ready"
+            descendant = (
+                "import pathlib,time; time.sleep(1); "
+                f"pathlib.Path({str(marker)!r}).write_text('survived')"
+            )
+            code = (
+                "import pathlib,subprocess,sys,time; "
+                f"child=subprocess.Popen([sys.executable,'-c',{descendant!r}]); "
+                f"pathlib.Path({str(ready)!r}).write_text(str(child.pid)); "
+                "time.sleep(60)"
+            )
+            started = time.monotonic()
+            result = hook_utils.run(
+                [sys.executable, "-c", code], "", timeout=0.3, isolated=True
+            )
+            self.assertIsNone(result)
+            self.assertTrue(ready.is_file(), "descendant did not start")
+            self.assertLess(time.monotonic() - started, 2)
+            time.sleep(1.1)
+            self.assertFalse(marker.exists(), "descendant survived the timeout")
+
+    def test_timeout_does_not_drain_pipes_held_by_detached_descendants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "detached-pid"
+            child = (
+                "import pathlib,subprocess,sys,time; "
+                "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+                "start_new_session=True); "
+                f"pathlib.Path({str(marker)!r}).write_text(str(p.pid)); "
+                "time.sleep(60)"
+            )
+            probe = (
+                "import sys; "
+                f"sys.path.insert(0,{corpus.HOOKS_DIR!r}); "
+                "import hook_utils; "
+                f"result=hook_utils.run([sys.executable,'-c',{child!r}],"
+                "'',timeout=1,isolated=True); print(result is None)"
+            )
+            with subprocess.Popen(
+                [sys.executable, "-c", probe],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as supervisor:
+                try:
+                    stdout, stderr = supervisor.communicate(timeout=4)
+                    self.assertEqual(supervisor.returncode, 0, stderr)
+                    self.assertEqual(stdout.strip(), "True")
+                    self.assertTrue(marker.is_file(), "detached child did not start")
+                finally:
+                    if supervisor.poll() is None:
+                        supervisor.kill()
+                        supervisor.wait(timeout=1)
+                    if marker.is_file():
+                        try:
+                            os.kill(int(marker.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+
 @unittest.skipUnless(
     os.path.exists(corpus.DEBUG_TOKENLESS_BIN),
     "tokenless debug binary not built",
 )
 class RealCorePreToolTest(unittest.TestCase):
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+    def test_rewrite_deadline_survives_a_killed_python_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            if any((parent / ".claude").exists() for parent in [root, *root.parents]):
+                self.skipTest("temporary directory has a .claude ancestor")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            pids = root / "pids"
+            git = bin_dir / "git"
+            git.write_text(
+                '#!/bin/sh\necho "$PPID $$" > "$TOKENLESS_TEST_PIDS"\nexec sleep 60\n'
+            )
+            git.chmod(0o700)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TOKENLESS_DATA_DIR": str(root / "data"),
+                "TOKENLESS_TEST_PIDS": str(pids),
+                "TOKENLESS_STATS_ENABLED": "0",
+                "TOKENLESS_SLS_ENABLED": "0",
+            }
+            request = hook_utils.build_pre_tool_request(
+                {"command": "git status"}, "qwenwork", "Bash", "command"
+            )
+            code = (
+                "import json,sys; "
+                f"sys.path.insert(0,{corpus.HOOKS_DIR!r}); "
+                "from hook_utils import run_compress; "
+                f"run_compress({corpus.DEBUG_TOKENLESS_BIN!r},json.load(sys.stdin),8,'pre_tool')"
+            )
+            with subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                cwd=root,
+            ) as hook:
+                try:
+                    hook.stdin.write(json.dumps(request))
+                    hook.stdin.close()
+                    deadline = time.monotonic() + 3
+                    while (
+                        not pids.exists() or not pids.stat().st_size
+                    ) and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(pids.exists(), "RTK did not start the stalled git")
+                    rewrite_pid, git_pid = map(int, pids.read_text().split())
+                    hook.kill()
+                    hook.wait(timeout=1)
+                    deadline = time.monotonic() + 7
+                    while time.monotonic() < deadline:
+                        proc_stat = Path(f"/proc/{git_pid}/stat")
+                        if proc_stat.exists():
+                            # Containers may leave dead orphans unreaped.
+                            state = proc_stat.read_text().rsplit(")", 1)[1].split()[0]
+                            if state in {"Z", "X"}:
+                                break
+                        try:
+                            os.kill(git_pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        os.killpg(rewrite_pid, signal.SIGKILL)
+                        self.fail("stalled git survived the rewrite deadline")
+                finally:
+                    if hook.poll() is None:
+                        hook.kill()
+                        hook.wait(timeout=1)
+
     def test_core_owns_rtk_execution_and_path_anchoring(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -273,25 +453,24 @@ class RealCorePreToolTest(unittest.TestCase):
             home.mkdir()
             bin_dir.mkdir()
             os.symlink(corpus.DEBUG_TOKENLESS_BIN, bin_dir / "tokenless")
+            # RTK is embedded: a stray PATH rtk must neither rewrite nor run.
             rtk = bin_dir / "rtk"
-            rtk.write_text(
-                "#!/bin/sh\n"
-                'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
-                'if [ "$1" = "rewrite" ]; then echo \'rtk grep --count error log\'; exit 0; fi\n'
-                "exit 1\n"
-            )
+            rtk.write_text("#!/bin/sh\nexit 97\n")
             rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR)
             env = {
                 **os.environ,
                 "HOME": str(home),
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TOKENLESS_DATA_DIR": str(root / "data"),
                 "TOKENLESS_AGENT_ID": "qoder-cli",
                 "TOKENLESS_STATS_ENABLED": "0",
                 "TOKENLESS_SLS_ENABLED": "0",
             }
+            payload = pre_tool_payload()
+            payload["tool_input"]["command"] = "git status"
             proc = subprocess.run(
                 [sys.executable, corpus.PRE_TOOL_HOOK],
-                input=json.dumps(pre_tool_payload()),
+                input=json.dumps(payload),
                 capture_output=True,
                 text=True,
                 env=env,
@@ -300,9 +479,24 @@ class RealCorePreToolTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             output = json.loads(proc.stdout)["hookSpecificOutput"]
             command = output["tool_input"]["command"]
-            self.assertIn(f" {rtk} grep --count error log", command)
+            tokens = shlex.split(command)
+            rtk_index = tokens.index("rtk")
+            launcher = Path(tokens[rtk_index - 1])
+            self.assertTrue(launcher.is_absolute())
+            self.assertEqual(
+                launcher.resolve(), Path(corpus.DEBUG_TOKENLESS_BIN).resolve()
+            )
+            self.assertEqual(tokens[rtk_index:], ["rtk", "git", "status"])
             self.assertIn("TOKENLESS_AGENT_ID=qoder-cli", command)
             self.assertEqual(output["updatedInput"]["timeout"], 30)
+            for command in ["grep error log", "env LANG=C timeout 30 rg --files"]:
+                payload["tool_input"]["command"] = command
+                proc = subprocess.run(
+                    [sys.executable, corpus.PRE_TOOL_HOOK], input=json.dumps(payload),
+                    capture_output=True, text=True, env=env, timeout=15,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout), {})
 
 
 if __name__ == "__main__":

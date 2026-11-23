@@ -380,3 +380,47 @@ fn terminate_current_process_matches_flag_and_pid() {
         "terminate_current_process did not terminate the test child"
     );
 }
+
+#[test]
+fn access_copy_live_registry_preserves_partial_save_and_rejects_non_boolean_flags() {
+    use std::os::unix::fs::PermissionsExt;
+    for (flag, expected) in [
+        ("true", true),
+        ("false", false),
+        ("\"true\"", false),
+        ("null", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("registry.sh");
+        std::fs::write(&script, format!(r#"#!/bin/sh
+read -r request
+printf '%s\n' '{{"type":"registry_response","request_id":"partial-save","success":false,"data":{{"provider_updated":{flag},"error_code":"io_error"}},"error":"session save failed"}}'
+"#)).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let prepared = super::super::super::PreparedInvocation {
+            program: script.to_string_lossy().into(),
+            args: vec![],
+            prompt: String::new(),
+        };
+        let mut process = super::spawn_process(
+            &prepared,
+            CoshApprovalMode::Recommend,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        let (send, _) = mpsc::channel();
+        let command = RegistryCommand {
+            request_id: "partial-save".into(),
+            domain: "auth".into(),
+            action: "activate".into(),
+            params: serde_json::Value::Null,
+            response_tx: send,
+        };
+        let error = super::execute_registry(&mut process, &command).unwrap_err();
+        super::stop_process(&mut process.child, Duration::from_millis(20));
+        assert!(
+            matches!(error, RegistryQueryError::Response { provider_updated, .. } if provider_updated == expected),
+            "{error:?}"
+        );
+    }
+}

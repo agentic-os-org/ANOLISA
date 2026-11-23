@@ -47,28 +47,38 @@ struct AgentTurn {
     tool_calls: Vec<ToolCall>,
     observations: Vec<ObservationResult>,
     metrics: Option<Metrics>,
-    /// Tool calls whose `*_output` has not arrived yet, innermost last. Codex
-    /// reports each command a call ran as an `item_completed` between the call
-    /// and its output, so an item belongs to the innermost call still open.
+}
+
+/// Calls stay pending across user steering boundaries.
+#[derive(Default)]
+struct PendingCalls {
+    /// Tool calls whose `*_output` has not arrived yet. Explicit item IDs
+    /// identify concurrent owners; the single-call fallback supports older
+    /// transcripts whose command-item IDs differ from their outer call ID.
     open_calls: Vec<String>,
     /// Whether one of those commands failed, keyed by the call it belongs to.
     command_failed: HashMap<String, bool>,
 }
 
-impl AgentTurn {
-    /// Attribute one `CommandExecution` item to the innermost open call.
+impl PendingCalls {
+    /// Attribute one `CommandExecution` item to its explicitly identified call.
     ///
-    /// The item has no `call_id`; the rollout orders it between its call and
-    /// that call's output, and one call can run several commands whose mixed
-    /// outcomes collapse into "this call failed if any of them did".
+    /// Current Codex uses the call ID as the item's `id`. Older nested-command
+    /// records can have a separate item ID; only a single open call makes that
+    /// fallback unambiguous. Any failed command makes its owning call fail.
     fn record_command(&mut self, item: &serde_json::Value) {
-        let Some(call_id) = self.open_calls.last() else {
+        let call_id = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|id| self.open_calls.iter().find(|call| call.as_str() == id))
+            .or_else(|| (self.open_calls.len() == 1).then(|| &self.open_calls[0]));
+        let Some(call_id) = call_id else {
             return;
         };
         let failed = item
             .get("status")
             .and_then(|v| v.as_str())
-            .is_some_and(|status| status == "failed")
+            .is_some_and(|status| matches!(status, "failed" | "declined"))
             || item
                 .get("exit_code")
                 .and_then(|v| v.as_i64())
@@ -84,7 +94,9 @@ impl AgentTurn {
             self.open_calls.remove(pos);
         }
     }
+}
 
+impl AgentTurn {
     fn is_empty(&self) -> bool {
         self.reasoning.is_empty()
             && self.messages.is_empty()
@@ -143,10 +155,11 @@ pub fn convert_codex_events(
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
     let mut turn: Option<AgentTurn> = None;
+    let mut pending = PendingCalls::default();
     // Latest turn_context values, applied to the next agent turn.
     let mut current_model: Option<String> = None;
     let mut current_effort: Option<serde_json::Value> = None;
-    // Cumulative usage from the last token_count event (authoritative totals).
+    // Latest cumulative usage, extended by any subsequent last-call-only events.
     let mut last_total_usage: Option<(u64, u64, u64)> = None;
     let mut previous_total_usage: Option<(u64, u64, u64)> = None;
 
@@ -213,6 +226,12 @@ pub fn convert_codex_events(
                         previous_total_usage = total;
                         if let Some(total) = total {
                             last_total_usage = Some(total);
+                        } else if let (Some(known), Some(delta)) =
+                            (&mut last_total_usage, incremental)
+                        {
+                            known.0 = known.0.saturating_add(delta.0);
+                            known.1 = known.1.saturating_add(delta.1);
+                            known.2 = known.2.saturating_add(delta.2);
                         }
                         if let Some((pt, ct, cache)) = incremental {
                             let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
@@ -225,13 +244,11 @@ pub fn convert_codex_events(
                 }
                 "item_completed" => {
                     // A `CommandExecution` item carries the exit verdict the
-                    // `*_output` text does not spell out; it has no `call_id`,
-                    // so it is attributed to the innermost call still open.
+                    // `*_output` text does not spell out; its ID identifies the
+                    // issuing call even when several calls overlap.
                     let item = payload.get("item").unwrap_or(&serde_json::Value::Null);
                     if payload_type_str(item) == "CommandExecution" {
-                        if let Some(t) = turn.as_mut() {
-                            t.record_command(item);
-                        }
+                        pending.record_command(item);
                     }
                 }
                 // `agent_message` duplicates the assistant response_item.
@@ -271,8 +288,14 @@ pub fn convert_codex_events(
                 }
                 "custom_tool_call" | "function_call" | "local_shell_call" => {
                     let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
-                    let call = extract_tool_call(payload);
-                    t.open_calls.push(call.tool_call_id.clone());
+                    let mut call = extract_tool_call(payload);
+                    if let Some(timestamp) = ts {
+                        call.extra.get_or_insert_with(HashMap::new).insert(
+                            "start_timestamp".into(),
+                            serde_json::Value::String(timestamp.into()),
+                        );
+                    }
+                    pending.open_calls.push(call.tool_call_id.clone());
                     t.tool_calls.push(call);
                 }
                 "custom_tool_call_output" | "function_call_output" | "local_shell_call_output" => {
@@ -283,20 +306,68 @@ pub fn convert_codex_events(
                         .unwrap_or("")
                         .to_string();
                     let content = joined_output(payload.get("output"));
-                    let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
-                    t.close_call(&call_id);
-                    let extra = t.command_failed.remove(&call_id).map(|failed| {
+                    pending.close_call(&call_id);
+                    let extra = pending.command_failed.remove(&call_id).map(|failed| {
                         HashMap::from([(
                             EXTRA_IS_ERROR.to_string(),
                             serde_json::Value::Bool(failed),
                         )])
                     });
-                    t.observations.push(ObservationResult {
-                        source_call_id: Some(call_id),
+                    let result = ObservationResult {
+                        source_call_id: Some(call_id.clone()),
                         content: Some(serde_json::Value::String(content)),
                         subagent_trajectory_ref: None,
                         extra,
+                    };
+                    if let Some(timestamp) = ts {
+                        // A user message can flush the issuing turn before the
+                        // result arrives. Timing must follow the same owner.
+                        let call = turn
+                            .as_mut()
+                            .and_then(|t| {
+                                t.tool_calls.iter_mut().find(|c| c.tool_call_id == call_id)
+                            })
+                            .or_else(|| {
+                                steps.iter_mut().rev().find_map(|step| {
+                                    step.tool_calls
+                                        .as_mut()?
+                                        .iter_mut()
+                                        .find(|c| c.tool_call_id == call_id)
+                                })
+                            });
+                        if let Some(call) = call {
+                            call.extra.get_or_insert_with(HashMap::new).insert(
+                                "result_timestamp".into(),
+                                serde_json::Value::String(timestamp.into()),
+                            );
+                        }
+                    }
+                    let current_owns_call = turn.as_ref().is_some_and(|t| {
+                        t.tool_calls.iter().any(|call| call.tool_call_id == call_id)
                     });
+                    let previous_owner = if current_owns_call {
+                        None
+                    } else {
+                        steps.iter_mut().rev().find(|step| {
+                            step.tool_calls.as_ref().is_some_and(|calls| {
+                                calls.iter().any(|call| call.tool_call_id == call_id)
+                            })
+                        })
+                    };
+                    if let Some(owner) = previous_owner {
+                        owner
+                            .observation
+                            .get_or_insert_with(|| Observation {
+                                results: Vec::new(),
+                            })
+                            .results
+                            .push(result);
+                    } else {
+                        // Unknown IDs retain the existing orphan-result behavior.
+                        ensure_turn(&mut turn, ts, &current_model, &current_effort)
+                            .observations
+                            .push(result);
+                    }
                 }
                 _ => {}
             },
@@ -306,8 +377,8 @@ pub fn convert_codex_events(
     }
     flush(&mut turn, &mut steps, &mut step_id);
 
-    // Prefer the cumulative totals reported by the last token_count event;
-    // fall back to summing per-step metrics.
+    // Prefer the latest cumulative total plus its last-call-only tail;
+    // without a cumulative snapshot, fall back to summing per-step metrics.
     let final_metrics =
         last_total_usage
             .or_else(|| sum_step_usage(&steps))
@@ -362,6 +433,8 @@ pub fn extract_private_metadata(
     // and counting only text-bearing assistant items left a step of that
     // trajectory unclaimed (qoder's counter counts turns for the same reason).
     let mut in_assistant_turn = false;
+    let mut boundary = 0usize;
+    let mut call_boundaries = HashMap::new();
 
     // Same era detection as `convert_codex_events`: newer CLIs emit
     // `event_msg/user_message` for the real user input, and role=user
@@ -396,6 +469,7 @@ pub fn extract_private_metadata(
                     user_count += 1;
                 }
                 in_assistant_turn = false;
+                boundary += 1;
             }
             // Token deltas are content of the turn they are charged to, the
             // condition `convert_codex_events` opens its turn with.
@@ -432,11 +506,39 @@ pub fn extract_private_metadata(
                     // turn either.
                     Some("user") if !has_user_event_msg => {
                         in_assistant_turn = false;
+                        boundary += 1;
                         if !joined_text(payload.get("content")).is_empty() {
                             user_count += 1;
                         }
                     }
                     _ => {}
+                }
+            }
+            "response_item"
+                if matches!(
+                    payload_type(e),
+                    "custom_tool_call" | "function_call" | "local_shell_call"
+                ) =>
+            {
+                call_boundaries.insert(extract_tool_call(payload).tool_call_id, boundary);
+                count_turn(&mut assistant_count, &mut in_assistant_turn);
+            }
+            "response_item"
+                if matches!(
+                    payload_type(e),
+                    "custom_tool_call_output" | "function_call_output" | "local_shell_call_output"
+                ) =>
+            {
+                let id = payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if call_boundaries
+                    .get(id)
+                    .is_none_or(|owner| *owner == boundary)
+                {
+                    count_turn(&mut assistant_count, &mut in_assistant_turn);
                 }
             }
             // Reasoning, tool calls and tool results are content of their turn

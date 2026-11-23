@@ -15,6 +15,8 @@ def test_scope_recovers_discovery_and_preserves_binding_across_two_crashes(recov
         policy["policyId"],
         "--name",
         "updated",
+        "--language",
+        "json",
         "--file",
         str(recovery.directory / "policy.json"),
     )
@@ -52,7 +54,7 @@ def test_process_exit_during_crash_cleans_binding_without_repinning_scope(recove
     recovery.restart()
     gate.release.set()
     until(
-        lambda: recovery.daemon.request("binding", "list"),
+        lambda remaining: recovery.daemon.request("binding", "list", timeout=remaining),
         lambda value: value["total"] == 0,
     )
     restored = recovery.daemon.request("scope", "get", "--scope-id", scope["scopeId"])

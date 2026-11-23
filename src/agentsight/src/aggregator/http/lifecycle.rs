@@ -293,6 +293,20 @@ impl HttpConnectionAggregator {
         // A returning keep-alive request consumes its own reserved slot. New
         // connections cannot steal that slot between a response and its next request.
         self.recently_completed.pop(id);
+        // Refuse a new Flow once the shared byte budget is exhausted. A state
+        // refresh for an existing Flow must stay admitted: its payload is
+        // already charged and rejecting here would drop an in-flight call.
+        if !self.last_activity.contains(id) && self.bytes_budget != 0 {
+            let retained = self.metrics().connection_cache_bytes;
+            if retained >= self.bytes_budget {
+                let budget = self.bytes_budget;
+                let message = format!(
+                    "[HttpAggregator] byte budget exhausted, reject new conn={id:?} | retained={retained} budget={budget}"
+                );
+                log::warn!("{message}");
+                return false;
+            }
+        }
         if self.connections.len() + self.recently_completed.len() >= self.connections.cap().get() {
             let Some(key) = self.eviction_candidate(now) else {
                 return false;
@@ -343,6 +357,7 @@ impl HttpConnectionAggregator {
         if self.connections.contains(&key) {
             self.abandon(&key, RemoveReason::Replaced);
         }
+        let new_flow = !self.last_activity.contains(&key);
         if !self.ensure_room(&key) {
             self.reject_capacity(key, state);
             return;
@@ -350,6 +365,23 @@ impl HttpConnectionAggregator {
         self.touch(&key);
         self.connections.put(key, state);
         self.refresh_retained(&key);
+        // The pre-insert check only sees the bytes charged so far. Reject the
+        // new Flow itself when its own payload pushes the cache over budget,
+        // instead of letting `enforce_limits` evict an unrelated active Flow.
+        if new_flow && self.bytes_budget != 0 {
+            let retained = self.metrics().connection_cache_bytes;
+            if retained > self.bytes_budget {
+                let budget = self.bytes_budget;
+                let message = format!(
+                    "[HttpAggregator] new conn={key:?} exceeds byte budget | retained={retained} budget={budget}"
+                );
+                log::warn!("{message}");
+                self.abandon(&key, RemoveReason::CapacityRejected);
+                self.retired_sse
+                    .put(key, (Instant::now(), RemoveReason::CapacityRejected));
+                return;
+            }
+        }
         self.enforce_connection_limits(&key);
     }
 

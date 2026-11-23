@@ -42,6 +42,8 @@ mod daily_terminal;
 mod diagnostics;
 #[path = "raw_cli/doctor.rs"]
 mod doctor;
+#[path = "raw_cli/ecs_trial.rs"]
+mod ecs_trial;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/external_hook.rs"]
@@ -51,6 +53,11 @@ mod failed_command;
 #[cfg(target_os = "linux")]
 #[path = "raw_cli/failopen.rs"]
 mod failopen;
+#[path = "raw_cli/failure_context.rs"]
+mod failure_context;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/health_banner.rs"]
+mod health_banner;
 #[path = "raw_cli/heavy.rs"]
 mod heavy;
 #[path = "raw_cli/host_executed.rs"]

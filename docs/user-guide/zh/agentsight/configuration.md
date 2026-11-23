@@ -17,7 +17,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200,
@@ -115,9 +115,10 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 阶段。物理占用超过 `max_db_size_mb` 时触发淘汰，并以逻辑占用降到上限的 90% 为目标。维护不会执行
 `VACUUM`，释放页会留在 SQLite freelist 中供后续写入复用。
 
-`check_interval_inserts` 已不再支持。`schema_version` 变化时配置格式整体替换：版本缺失或低于 v5 的文件
-会先备份，再替换为 schema v5，不会合并旧设置。自定义配置请从随包发布的 `agentsight.json` 开始修改，
-不要把旧字段复制到新文件。
+`check_interval_inserts` 已不再支持。`schema_version` 缺失或低于当前版本时，AgentSight 会先备份文件，
+将文件中的顶层键覆盖到当前默认配置上，再把 `schema_version` 设为 `6`。这是浅合并：如果已有 `storage`
+等某个配置节，该节会整体替代对应默认配置节，已移除的嵌套键不会自动迁移。自定义配置请从随包发布的
+`agentsight.json` 开始修改，不要把旧字段复制到合并后的文件。
 
 ## 功能开关
 
@@ -222,7 +223,13 @@ header；字节超限还包含 `truncated=true`。其他生命周期移除继续
 表示第一个参数含 `node`、下一个参数含 `claude` 的进程。
 
 随包发布的规则覆盖 Hermes、Codex、Runloop、cosh（`Cosh`）、cosh-ng（`CoshNG`）、OpenClaw、
-Claude Code、Qwen Code 和 AgentScope，共 31 条。
+Claude Code、Qwen Code、AgentScope 和 Qoder CLI，共 36 条。
+
+Qoder CLI 规则覆盖原生、带版本号的二进制和 Node 启动器，其旧版
+`*.qoder.sh` 网关已包含在 `https` 中。配置迁移会保留已有的 `cmdline`
+和 `https` 节；若自定义过这两节，请从随包文件追加 Qoder 规则。
+Linux 追踪需要 root 或文档规定的 BPF capabilities。协议支持范围为编码的
+HTTP/SSE 聊天端点，不代表覆盖全部 Qoder 产品或传输协议。
 
 添加自己的 Agent，追加规则后 reload：
 
@@ -306,16 +313,19 @@ sudo agentsight discover                                   # 跑一次自己的 
 
 ## schema_version 与升级
 
-`schema_version`（当前为 `5`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
+`schema_version`（当前为 `6`）标记配置格式版本。启动时 AgentSight 会与内置版本比对：
 
 - 相同或更新 → 保留文件不动；
-- 缺失或更旧 → 先复制为 `config.json.bak.<unix秒>`，再替换为当前默认配置。
+- 缺失或更旧 → 先复制为 `config.json.bak.<unix秒>`，再把用户配置的顶层键浅合并到当前默认配置中，
+  并将版本更新为当前值。
+
+已有顶层配置节会保留，缺失的顶层配置节会从默认配置补齐；配置节内部不会递归合并，已有配置节中的嵌套值
+保持原样。升级后请对照随包发布的 `agentsight.json` 检查已经废弃的嵌套字段，然后 reload 服务。
 
 schema v5 引入上述 HTTP 与 FFI 保留预算默认值，并下调 Probe 及延迟 GenAI 队列的字节预算。
-旧版本配置会先备份后整体替换，需要从备份重新应用自定义发现规则和设置。
 
 schema v4 把所有存储策略的按写入次数检查统一改为 `check_interval_secs`，并新增 `reuse`、`causal` 和
-`enforcement`。旧 schema 中的自定义项不会自动合并。请在新文件上重新应用需要的规则，然后 reload 服务。
+`enforcement`。这些配置节缺失时会通过浅合并补齐，已有自定义配置节保持不变。
 
 ## 环境变量
 
@@ -339,12 +349,65 @@ systemctl is-active agentsight.service
 sudo agentsight summary --last 1
 ```
 
-如果服务起不来，多半是 JSON 写坏了：
+JSON 语法错误不会阻止 `trace` 或 `serve` 运行。AgentSight 会记录解析错误，不修改原文件、不生成
+schema 备份，并使用内嵌默认配置；`serve` 同时禁用可选的 `tokenless_api` 集成。其他启动错误
+（包括非法的 `tokenless_api` 设置）仍可能阻止服务启动。可用以下命令检查文件和启动告警：
 
 ```bash
 python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
+
+## 工作区快照后端（Linux）
+
+可选的 `ws_ckpt` 配置指定 AgentSight 调用本机 ws-ckpt CLI 的方式：
+
+```json
+{
+  "ws_ckpt": {
+    "binary": "/usr/bin/ws-ckpt",
+    "restore_enabled": false,
+    "plugins": {
+      "example-openclaw": {
+        "runtime": "openclaw",
+        "config_path": "/home/example/.openclaw/ws-ckpt.json"
+      },
+      "example-hermes": {
+        "runtime": "hermes",
+        "config_path": "/home/example/.hermes/config.yaml"
+      }
+    }
+  }
+}
+```
+
+`binary` 默认使用 PATH 上的 `ws-ckpt`。AgentSight 通过 CLI 查询快照和文件差异，并在
+开启恢复后通过 CLI 发起 guarded 回滚。连接守护进程和校验对端 UID 都由 CLI 负责。
+
+守护进程使用自定义地址时，可用 `socket` 指定地址。AgentSight 通过子进程的
+`WS_CKPT_SOCKET` 将地址传给 CLI，取值顺序为 `socket` 配置、AgentSight 进程的
+`WS_CKPT_SOCKET` 环境变量、`/run/ws-ckpt/ws-ckpt.sock`。
+
+配置逐请求读取。Sight 使用 `rollback --guarded --json --check` 确认注册工作区，并检查
+CLI 是否支持 `diff --format json`。任一检查失败时隐藏快照和恢复入口，ATIF 轨迹照常
+显示。只读模式也适用。工具显式传入 workspace 时可省略 `plugins`，不从进程 cwd 推测
+工作区。
+
+`plugins` 的键必须匹配轨迹中的 ATIF agent 名称，并对应实际宿主实例。`runtime`
+支持 `openclaw`（持久化 JSON）或 `hermes`（YAML 中的 `plugins.ws-ckpt`）。如果 Hermes
+实例设置了 `HERMES_HOME`，请将 `config_path` 指向该实例的 `config.yaml`。可选
+`workspace_override` 表示该实例已知的环境覆盖值或宿主默认值；不能拿 Sight 的 HOME
+或环境代替。配置文件若在调用之后修改，不用当前值倒填历史工作区；实例不明确时保持
+未解析状态。
+
+纯自动快照也可使用绑定的插件配置。轨迹没有记录可用的 ws-ckpt 工作区操作时，
+Sight 会检查该实例是否配置了 `autoCheckpoint: true`，以及绑定和插件配置文件是否
+早于轨迹开始。轨迹中可确认的工作区操作优先。
+
+读取快照数据和执行恢复均要求 Dashboard 凭据，包括回环地址。Dashboard 可先检查轨迹
+能否定位到注册工作区，再决定是否提示登录。恢复还需显式配置
+`restore_enabled: true`，默认关闭。确认协议见[快照 API](data-and-storage.md#工作区快照-api)，
+页面操作见 [Step 快照交互](dashboard.md#在执行-step-中查看工作区快照)。
 
 ## Tokenless 统计 API
 
@@ -356,5 +419,6 @@ journalctl -u agentsight.service -n 30 --no-pager
 ```
 
 凭据文件保存与 `tokenless stats serve` 相同的 Bearer token。使用私有网络或 HTTPS
-代理。服务在启动时读取文件；修改后需重启 AgentSight。凭据仅保存在后端，非法配置
-会阻止启动。不配置此项时，保留现有的本地数据库集成方式。
+代理。服务在启动时读取文件；修改后需重启 AgentSight。凭据仅保存在后端，非法的
+`tokenless_api` 设置会阻止启动；共享文件整体存在 JSON 语法错误时则按上述契约降级。
+不配置此项时，保留现有的本地数据库集成方式。

@@ -2,70 +2,57 @@
 
 [English](../en/README.md)
 
-先读[架构总览](architecture.md)，了解 crate 依赖和代码入口。
-当前 Hook 调用与审计经过以下路径。
+设计文档解释实现责任、协议不变量和取舍。操作步骤见[开发者指南](../../../../../docs/developer-guide/zh/aw/index.md)。先读[架构](architecture.md)与[边界](architecture-boundaries.md)，再按修改对象查阅。
 
-源码归属、内部接口与后续发布工作的范围见[架构边界](architecture-boundaries.md)。
+`aw-package` 通过私有文件事务存储负责本地 Provider 管理与配置，`aw-exec`
+负责运行时文件读锁。发行 Make 目标与脚本构建交付件；独立安装的 Provider
+通过进程协议接入，不要求 AW 包记录。
 
-`aw-cli` 提供统一的 `aw` 入口；独立 `aw-package` 可执行文件已删除，Rust 库保留。
-安装和离线编辑直接调用 `aw-package`
-库，运行时命令调用 `aw-service`。此次拆分不改变 Hook 路径或协议版本。
+## 按任务读取开发规则
 
-```mermaid
-flowchart LR
-    Agent[原生 Agent] --> Adapter[aw-adapter]
-    Adapter --> Service[aw-service]
-    Service --> Host[aw-host]
-    Host --> Exec[aw-exec]
-    Exec --> Provider[Provider 进程]
-    Provider --> Backend[Tokenless 或 sec-core CLI]
-    Service --> Journal[aw-core FileJournal]
-```
+[AGENTS.md](../../../AGENTS.md) 定义产品合同与必读索引。修改对应领域前阅读适用规则。
 
-结果沿原路返回，由 Adapter 在原生接口中采用。
-`aw-core::Core` 的能力计划执行是另一套 API，见后文。
-
-## 沿一次请求阅读
-
-| 阅读顺序 | 负责的部分 |
+| 领域 | 开发规则 |
 | --- | --- |
-| [配置](configuration/configuration.md) | `aw-config` 在运行前校验期望配置 |
-| [策略更新边界](runtime/policy-reload.md) | 离线比较和显式空闲激活；外部接入仍在规划中 |
-| [Adapter 分发](adapters/adapter-dispatch.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
-| [本地服务](runtime/local-service.md)：受管根与独立任务 binding | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
-| [Provider Host](runtime/provider-host.md) | `aw-host` 准备 Provider，执行已准入的步骤 |
-| [Provider 协议](../../../../../docs/developer-guide/zh/aw/providers/protocol.md) | `aw-provider` 校验请求、响应和能力 |
-| [有界执行](runtime/bounded-execution.md) | `aw-exec` 管理命令传输和进程清理 |
+| 框架、Provider 与打包 | [所有权和合同](development/architecture.md) |
+| Agent、SDK 与 Hook Source 接入 | [语义、生命周期和支持证据](development/hooks.md) |
+| 文档与导航 | [读者、位置和生成能力说明](development/documentation.md) |
+| 源码布局、CI 与发布 | [验证和资源生命周期](development/validation.md) |
 
-## 按接入对象阅读
+## 请求执行
 
-| 接入对象 | 文档 |
+| 主题 | 合同 |
 | --- | --- |
-| 原生 Agent 回调 | [AgentScope](adapters/agentscope-adapter.md)、[Claude SDK](adapters/claude-sdk-adapter.md)、[Hermes](adapters/hermes-adapter.md)、[OpenClaw](adapters/openclaw-adapter.md)、[Pi](adapters/pi-adapter.md)、[QwenPaw](adapters/qwenpaw-adapter.md)；Qoder 见 [Adapter 分发](adapters/adapter-dispatch.md)与[本地服务](runtime/local-service.md) |
-| Provider 独立开发与收录 | [协作目录](../../../../../providers/README_zh.md)与[开发分发指南](../../../../../docs/developer-guide/zh/aw/providers/index.md) |
-| 安全 Provider 与后端就绪检查 | [sec-core Provider](providers/sec-core/sec-core-provider.md)，再读 [sec-core 健康检查](providers/sec-core/sec-core-health.md) |
-| Tokenless Provider | [接入参考](../../../../../docs/developer-guide/zh/aw/providers/tokenless.md) |
-| 打包和配置编辑 | [构建指南](../../../../../contribute/zh/aw/building.md)，再读[配置编辑](configuration/configuration-editing.md) |
-| 本地包数据库、预览、卸载和中断恢复 | [本地包管理](packaging/package-management.md) |
-| 只读查看状态 | [Provider 视图](../../../../../docs/developer-guide/zh/aw/providers/views.md)，独立于 Hook 准入 |
+| 配置 | [配置](configuration/configuration.md) · [编辑与原生来源](configuration/configuration-editing.md) |
+| 策略准入、Source 求解与路由编译 | [Core 准入](core-admission.md) |
+| 原生启动归属 | [登记与任务/根桥接](architecture.md#业务自管原生启动) · [业务集成](../../../../../docs/developer-guide/zh/aw/deployment/independent-instances.md) |
+| 原生接线 | [Adapter 分派](adapters/adapter-dispatch.md) |
+| 运行时 | [本地服务](runtime/local-service.md) · [策略更新](runtime/policy-reload.md) · [Provider Host](runtime/provider-host.md) · [有界执行](runtime/bounded-execution.md) |
+| 能力计划 | [Core 执行](core-execution.md) |
+| Provider 扩展 | [本地 Provider 管理](packaging/package-management.md) |
 
-## 审计、证据与能力计划
+## Adapter 与扩展
 
-| 主题 | 与 Hook 路径的关系 |
+[AgentScope](adapters/agentscope-adapter.md) · [Claude SDK](adapters/claude-sdk-adapter.md) · [Codex CLI](adapters/codex-adapter.md) · [DeepSeek Harness](adapters/adapter-dispatch.md#原生启动证据) · [Hermes](adapters/hermes-adapter.md) · [OpenClaw](adapters/openclaw-adapter.md) · [Pi](adapters/pi-adapter.md) · [QwenPaw](adapters/qwenpaw-adapter.md)
+
+| 主题 | 合同 |
 | --- | --- |
-| [Core 执行与存储](core-execution.md) | 服务复用 FileJournal；计划执行器由嵌入方另外接入 Host/Journal 接口 |
-| [AgentSight 只读连接器](integrations/agentsight/agentsight-readonly.md) | 供服务读取可选的外部观测数据 |
-| [证据与上下文](runtime/evidence-context.md) | 原生身份关联、观测和显式上下文冻结；Schema 由 `aw-contracts` 管理 |
-| [AgentSight 集成规划](integrations/agentsight/agentsight-integration.md) | 说明观测与后续覆盖率、增量导出、语义评估的关系；这些后续阶段尚未提供 |
+| 常驻任务与 Qoder SDK | [常驻 SDK](adapters/resident-sdk.md) |
+| MCP | [结构化 MCP](adapters/structured-mcp.md) · [Claude MCP](adapters/claude-mcp.md) |
+| 私有执行 | [执行租约](adapters/private-execution.md) |
+| sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [健康诊断](providers/sec-core/sec-core-health.md) |
 
-安装和日常使用见[用户指南](../../../../../docs/user-guide/zh/aw/index.md)。
+工具选择与格式错误事件的失败语义见 [Provider Host 合同](runtime/provider-host.md)；
+随附模板的名称与输入映射见 [sec-core 配置参考](../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
 
-[Qoder SDK Worker 接入](../../../../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)
-按 Query 注册回调，复用现有 Adapter 和服务契约。
+## 证据与观测
 
-[常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi / Claude 的每客户端任务准入、回调路由、fail-close 与释放边界。
+[公共运行与审计对象](runtime/public-objects.md) · [审计增量读取](runtime/audit-export.md)
 
-[Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。
+服务独立于 Sight 捕获公共元数据，按保留的来源身份和创建时间逐条投影已验证的 Journal 记录。
 
-常驻 SDK 模型响应在原生调度前进入 Adapter 的身份生产接点，服务负责递增登记和活动状态回收。
-[长期会话归属与限制](adapters/resident-sdk.md) 同时说明回调排空、MCP 调度和固定 Claude 传输。
+[来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)
+
+独立进程登记的身份、去重与 Ready 门禁见[本地服务](runtime/local-service.md#独立登记)。
+
+[应用自有 SDK 协议](runtime/native-sdk.md)

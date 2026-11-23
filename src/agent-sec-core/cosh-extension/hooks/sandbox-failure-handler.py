@@ -33,9 +33,11 @@ import json
 import re
 import sys
 
+from sandbox_authorization import all_shell_enabled
+
 # 沙箱命令的特征前缀/模式
 # sandbox-guard.py 生成的格式:
-#   /usr/local/bin/linux-sandbox --sandbox-policy-cwd "..." ... -- bash -c 'ORIGINAL_CMD'
+#   /usr/bin/linux-sandbox --sandbox-policy-cwd "..." ... -- bash -c 'ORIGINAL_CMD'
 # 若原始命令含 sudo，则格式为:
 #   ... -- bash -c 'COSH_RC=<base64> STRIPPED_CMD'
 _SANDBOX_CMD_RE = re.compile(
@@ -94,6 +96,14 @@ def is_sandbox_failure(tool_input_cmd: str, error_msg: str) -> bool:
 
 
 def main():
+    try:
+        all_shell = all_shell_enabled()
+    except ValueError:
+        all_shell = True
+    if all_shell:
+        # Policy authorization never permits an unsandboxed retry.
+        print("{}")
+        return
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):

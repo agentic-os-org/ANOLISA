@@ -1432,14 +1432,15 @@ class TestEventsHelpAndVersion:
                 "binding",
                 "scan-pii",
                 "capabilities",
+                "skillsec",
             ):
                 assert command in result.stdout
         else:
             assert "harden" in result.stdout
             assert "verify" in result.stdout
+            assert "skill-ledger" in result.stdout
         assert "scan-code" in result.stdout
         assert "events" in result.stdout
-        assert "skill-ledger" in result.stdout
         assert "scan-prompt" in result.stdout
 
         # Verify help structure

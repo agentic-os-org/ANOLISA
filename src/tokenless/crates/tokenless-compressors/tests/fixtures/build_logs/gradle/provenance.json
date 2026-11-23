@@ -1,0 +1,285 @@
+[
+  {
+    "file": "caffeine_cold.txt",
+    "environment": {
+      "repository": "ben-manes/caffeine",
+      "tag": "v3.3.1",
+      "commit": "aabb24230296101f179e425b71bb64d62ded3189",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-9.8.1-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        ":simulator:build"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "272b4cf465f4ebc5c7df93912c6b9b48211f97312b2418c1d00c0c6e04fee119",
+        "stderr": "e7011fa4dd729bdda355423c4f461f965e287e26877f63d3b4638ffe439b46ca",
+        "observed": "119ff1ec295eff60d58eedbdbf305c7728715161e192734702f756c7026a039a"
+      }
+    },
+    "stream": "observed",
+    "sha256": "119ff1ec295eff60d58eedbdbf305c7728715161e192734702f756c7026a039a"
+  },
+  {
+    "file": "caffeine_incremental.txt",
+    "environment": {
+      "repository": "ben-manes/caffeine",
+      "tag": "v3.3.1",
+      "commit": "aabb24230296101f179e425b71bb64d62ded3189",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-9.8.1-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        ":simulator:build"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "f7688a12443e60fa8c0d0e011694585ac42f9d4190249a82aa5be20fcf1c1d1b",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "f7688a12443e60fa8c0d0e011694585ac42f9d4190249a82aa5be20fcf1c1d1b"
+      }
+    },
+    "stream": "observed",
+    "sha256": "f7688a12443e60fa8c0d0e011694585ac42f9d4190249a82aa5be20fcf1c1d1b"
+  },
+  {
+    "file": "caffeine_failure.txt",
+    "environment": {
+      "repository": "ben-manes/caffeine",
+      "tag": "v3.3.1",
+      "commit": "aabb24230296101f179e425b71bb64d62ded3189",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-9.8.1-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        "buid"
+      ],
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "01365b3f1c955224a16dd11bdc5b4ef6a9b88145c6df0c1c0945be33144394fe",
+        "stderr": "a4a3ecff1b8d1901519968a7f8f80a4b3c74de5f7b571651ccc98029b9ab752d",
+        "observed": "824f6fc7397a2a49bff663a626dea07168ae37397c75e3b40313ed9e2cf197e0"
+      }
+    },
+    "stream": "observed",
+    "sha256": "824f6fc7397a2a49bff663a626dea07168ae37397c75e3b40313ed9e2cf197e0"
+  },
+  {
+    "file": "resilience4j_incremental.txt",
+    "environment": {
+      "repository": "resilience4j/resilience4j",
+      "tag": "v2.4.0",
+      "commit": "f1c3be8e79d09c70d457b2f89c3f89d03f1b5720",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-8.10-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        "build"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "708554dfe271317ff61b8277ca16695d40b45d0ac04ccc43812ca6e837a1d811",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "708554dfe271317ff61b8277ca16695d40b45d0ac04ccc43812ca6e837a1d811"
+      }
+    },
+    "stream": "observed",
+    "sha256": "708554dfe271317ff61b8277ca16695d40b45d0ac04ccc43812ca6e837a1d811"
+  },
+  {
+    "file": "resilience4j_clean_rebuild.txt",
+    "environment": {
+      "repository": "resilience4j/resilience4j",
+      "tag": "v2.4.0",
+      "commit": "f1c3be8e79d09c70d457b2f89c3f89d03f1b5720",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-8.10-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        "clean",
+        "build"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "c3f630f94a005dce925407588c80fedcd235a1d2bc206a4462620bfe82beed11",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observed": "c3f630f94a005dce925407588c80fedcd235a1d2bc206a4462620bfe82beed11"
+      }
+    },
+    "stream": "observed",
+    "sha256": "c3f630f94a005dce925407588c80fedcd235a1d2bc206a4462620bfe82beed11"
+  },
+  {
+    "file": "mockito_cold_excerpt.txt",
+    "environment": {
+      "repository": "mockito/mockito",
+      "tag": "v5.24.0",
+      "commit": "5a2f0f81cdafc9b34ddb4520db7f8866c787dac0",
+      "image": "eclipse-temurin:21-jdk",
+      "image_id": "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+      "distribution": [
+        "https://services.gradle.org/distributions/gradle-8.14.2-bin.zip"
+      ],
+      "java_version": "openjdk version \"21.0.13\" 2026-10-20 LTS\nOpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)"
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "GRADLE_USER_HOME=/work/gradle-home",
+        "--env",
+        "HOME=/work/home",
+        "--env",
+        "TZ=UTC",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        "type=bind,src=/work-host/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:088eb3b451a7f21a36c85e16eaf3944d3e68d47eab1e0eddb28254d1e50a59d1",
+        "./gradlew",
+        "build"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "0506a74d8b2d0699ab8bbbee4098d1fac7964d334d97cb3a9b8dd91ae0fe2f2b",
+        "stderr": "3d746cc7ae6655343e9bf80424b3e51f4a5132b92ecb4058a06a77bf1f214d13",
+        "observed": "54db3790c71bbb18446a7451d050b454da9613a800e0d8e7199ec487b744001c"
+      }
+    },
+    "stream": "stdout",
+    "sha256": "e6d09d3928775d4a57fe97dd3517dce845fc575aa957fd8a162111cdec13f5e6",
+    "lines": [
+      1,
+      789
+    ],
+    "source_sha256": "0506a74d8b2d0699ab8bbbee4098d1fac7964d334d97cb3a9b8dd91ae0fe2f2b",
+    "note": "Unmodified lines 1-789 excerpt from mockito/cold/stdout.txt (omits trailing lines 790-793 containing Build Scan publication URL)."
+  }
+]

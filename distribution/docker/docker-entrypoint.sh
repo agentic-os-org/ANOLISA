@@ -7,7 +7,7 @@ echo "[anolisa] Starting ANOLISA Agentic OS container..."
 # AgentSight: start if binary is available and eBPF capabilities are present
 # ---------------------------------------------------------------------------
 if command -v agentsight &>/dev/null; then
-  if capsh --print 2>/dev/null | grep -qE 'cap_bpf|cap_sys_admin'; then
+  if capsh --print 2>/dev/null | grep '^Current:' | grep -qE 'cap_sys_admin|cap_bpf.*cap_perfmon|cap_perfmon.*cap_bpf'; then
     echo "[anolisa] eBPF capabilities detected, starting agentsight..."
     if command -v agentsight-start &>/dev/null; then
       agentsight-start &

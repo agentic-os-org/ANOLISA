@@ -29,13 +29,9 @@
 ### 系统管理
 - **alinux-admin** — ALinux 4 系统管理（systemd、SSH、firewalld、NetworkManager）
 - **backup-restore** — 系统备份与恢复
-- **regex-mastery** — 正则表达式指南
-- **shell-scripting** — Bash/Zsh 脚本编写与自动化
 - **storage-resize** — 阿里云磁盘扩容（XFS/EXT4/Btrfs）
-- **upgrade-alinux-kernel** — ALinux 内核升级
 
 ### 开发运维
-- **github** — GitHub 工作流与集成
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
@@ -45,6 +41,20 @@
 
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
+
+## 已退场技能
+
+为聚焦系统运维，OS Skills 已将下列八个技能移出默认技能包，并结束对内置副本的常规维护。
+仍需这些能力的用户可按需使用上游技能、工具或官方文档。
+
+- `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
+- `humanizer` — [Humanizer](https://github.com/blader/humanizer)
+- `image-gen`
+- `pdf-reader`
+- `xlsx` — [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md)
+- `regex-mastery`
+- `shell-scripting`
+- `upgrade-alinux-kernel`
 
 ## 技能格式
 
@@ -86,12 +96,12 @@ anolisa install os-skills --backend raw
 
 GitHub Release 和 Preview 工作流从同一个源码提交生成 Linux x86_64 与 ARM64
 raw 压缩包。每个平台提供 `.tar.gz`、SHA256 校验和、CycloneDX SBOM 及其校验和。
-压缩包将已跟踪的技能目录安装到 `{datadir}/skills`，无需编译可执行程序。
+压缩包将[发布清单](packaging/released-skills.txt)中的技能安装到 `{datadir}/skills`。
 正式发布时 CI 校验 tag 与源码版本；本地发布流水线继续使用现有配置。
 
 ### 扩展安装
 
-一键安装全部技能：
+一次安装全部已发行技能：
 
 ```
 /extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
@@ -137,6 +147,21 @@ sudo yum install os-skills
 3. 可选添加 `scripts/` 和 `reference/` 目录。
 4. 在 Copilot Shell 中测试技能。
 5. 提交 Pull Request。
+
+脚本回归测试统一放在本组件的 `tests/` 目录。依赖、测试命令与组件归属规则见
+[贡献指南](../../CONTRIBUTING_zh.md#skill-回归测试与路径归属)。
+
+### 孵化与默认交付
+
+通过评审的技能可以留在原分类目录孵化。源码安装、发行包和 COSH 扩展都由发布清单
+决定默认交付范围。试用者可以按上面的手动安装说明，从经过评审的源码版本复制指定技能。
+
+源码安装和发布清单维护需要 Python 3.6 或更新版本及标准库。
+解释器选择方法见[源码安装说明](../../docs/user-guide/zh/os-skills/index.md#安装)。
+
+维护者同意纳入默认交付后，将目录加入 [`packaging/released-skills.txt`](packaging/released-skills.txt)，
+在仓库根目录运行 `python3 src/os-skills/packaging/cosh_manifests.py --write`，
+并在 `component.toml` 中维护适用的适配器登记。CI 核对 COSH 扩展和发布清单是否一致。
 
 ## 许可证
 

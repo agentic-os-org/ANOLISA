@@ -9,18 +9,25 @@ sys.dont_write_bytecode = True
 
 import ast
 import contextlib
+import errno
 import importlib.util
 import io
 import json
 import os
 import plistlib
+import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from test_compress_response_hook import _create_mock_tokenless
@@ -32,6 +39,19 @@ CONTRACT_MOCK = ROOT / "tests/contract/mock_tokenless.py"
 SPEC = importlib.util.spec_from_file_location("qwenwork_lifecycle", SOURCE / "scripts/lifecycle.py")
 lifecycle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(lifecycle)
+sys.path.insert(0, str(COMMON))
+sys.path.insert(0, str(COMMON.parent.parent))
+import hook_utils as utils
+import hook_dispatch
+
+qwenwork_adapter = hook_dispatch.load_adapter("qwenwork")
+claude_adapter = hook_dispatch.load_adapter("claude-code")
+REAL_BIN = os.environ.get("TOKENLESS_TEST_BIN")
+WORKSPACE_SHELL_TOOLS = (
+    "mcp__workspace__bash",
+    "mcp__qw-builtin__mcp_workspace_bash",
+    "mcp__qw-builtin__mcp__workspace__bash",
+)
 
 
 def snapshot(root: Path) -> dict:
@@ -58,6 +78,8 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.root = Path(sandbox.name).resolve()
         self.home = self.root / "home space '$;`"
         self.home.mkdir()
+        self.os_home = self.root / "system user home"
+        self.os_home.mkdir()
         self.adapters = self.root / "adapter source '$;`"
         self.source = self.adapters / "qwenwork"
         ignored = shutil.ignore_patterns("__pycache__", "*.pyc")
@@ -73,10 +95,14 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.target = self.data / "plugins-custom/tokenless"
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        # Isolate passwd-backed state in child Hooks without equating it to HOME.
+        (self.bin / "sitecustomize.py").write_text(
+            "import pwd\nfrom types import SimpleNamespace\n"
+            f"pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={str(self.os_home)!r})\n"
+        )
         (self.bin / "python3").symlink_to(sys.executable)
         (self.bin / "bash").symlink_to("/bin/bash")
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Darwin\n")
-        self.executable("rtk", "#!/bin/sh\nexit 0\n")
         _create_mock_tokenless(str(self.bin))
         self.forbidden_log = self.root / "forbidden-command.log"
         for name in ("qoderclicn", "killall", "pkill", "osascript"):
@@ -87,6 +113,7 @@ class QwenWorkInstallTests(unittest.TestCase):
             "TOKENLESS_QWENWORK_HOME": str(self.data),
             "QWEN_FORBIDDEN_LOG": str(self.forbidden_log),
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(self.bin),
         }
         for name in (
             "settings.json", "disabled.json", "blocked.json", "permissions.json",
@@ -107,6 +134,7 @@ class QwenWorkInstallTests(unittest.TestCase):
             mock.patch.dict(os.environ, self.env, clear=True),
             mock.patch.object(lifecycle, "PLUGIN_ROOT", self.source),
             mock.patch.object(lifecycle.platform, "system", return_value="Darwin"),
+            mock.patch.object(pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=str(self.os_home))),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -185,6 +213,40 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.assertIn("bundle identifier", error)
         self.assertFalse(self.target.exists())
 
+    def test_data_directory_notice_is_read_only_and_preserves_environment(self) -> None:
+        custom = str(self.root / "custom data '$;`")
+        for configured in (None, "", custom, "relative-data"):
+            with self.subTest(configured=configured), mock.patch.dict(os.environ):
+                if configured is None:
+                    os.environ.pop("TOKENLESS_DATA_DIR", None)
+                else:
+                    os.environ["TOKENLESS_DATA_DIR"] = configured
+                before = snapshot(self.root)
+                for action in (("detect",), ("install", "--dry-run")):
+                    out, error = self.run_action(*action)
+                    directory = configured or str(self.os_home / ".tokenless")
+                    source = "TOKENLESS_DATA_DIR" if configured else "default"
+                    if configured == "relative-data":
+                        self.assertIn("unavailable; configured value: 'relative-data'", out)
+                    else:
+                        self.assertIn(f"{directory} ({source})", out)
+                    self.assertIn("does not test sandbox write access", out)
+                    self.assertIn("desktop process environment", out)
+                    self.assertIn("commands can still run", out)
+                    self.assertIn("Hook-side compression statistics", out)
+                    self.assertIn("RTK's native database", out)
+                    self.assertEqual("must be an absolute path" in error, configured == "relative-data")
+                    self.assertEqual(os.environ.get("TOKENLESS_DATA_DIR"), configured)
+                self.assertEqual(snapshot(self.root), before)
+
+    def test_install_shows_notice_without_creating_data_directory(self) -> None:
+        directory = self.root / "configured data"
+        with mock.patch.dict(os.environ, {"TOKENLESS_DATA_DIR": str(directory)}):
+            out, _ = self.run_action("install")
+        self.assertIn(f"{directory} (TOKENLESS_DATA_DIR)", out)
+        self.assertIn("RTK statistics and execution receipts may be missing", out)
+        self.assertFalse(directory.exists())
+
     def test_invalid_plist_and_missing_version_are_actionable(self) -> None:
         info = self.app / "Contents/Info.plist"
         missing_version = plistlib.dumps({"CFBundleIdentifier": "cn.qwenwork.desktop.mac"})
@@ -235,13 +297,6 @@ class QwenWorkInstallTests(unittest.TestCase):
         shutil.move(str(self.bin / "tokenless"), user_bin)
         out, _ = self.run_action("detect")
         self.assertIn(str(user_bin), out)
-
-    def test_missing_rtk_warns_but_allows_install(self) -> None:
-        (self.bin / "rtk").unlink()
-        _, error = self.run_action("install")
-        self.assertIn("command rewriting is unavailable", error)
-        self.assertTrue(self.target.is_dir())
-        self.assertFalse((self.bin / "request.json").exists(), "detect must not invoke binaries")
 
     def test_unsupported_platform_rejects_install(self) -> None:
         before = snapshot(self.root)
@@ -636,10 +691,12 @@ class QwenWorkInstallTests(unittest.TestCase):
     def test_registered_non_bash_mcp_replaces_output_without_source_or_fhs(self) -> None:
         self.prepare_detached_plugin()
         self.assertEqual(set(self.hooks), {"PreToolUse", "PostToolUse"})
-        matcher = self.hooks["PreToolUse"][0]["matcher"]
-        for tool in ("Bash", "mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
-            self.assertIsNotNone(re.fullmatch(matcher, tool))
-        self.assertIsNone(re.fullmatch(matcher, "mcp__office__list_rows"))
+        pre_tool = self.hooks["PreToolUse"][0]
+        self.assertIn("--recovery-only", pre_tool["hooks"][0]["command"])
+        for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
+            self.assertIsNotNone(re.fullmatch(pre_tool["matcher"], tool), tool)
+        self.assertIsNone(re.fullmatch(pre_tool["matcher"], "mcp__office__list_rows"))
+        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(qwenwork_adapter._QWENWORK_WORKSPACE_SHELLS))
         self.assertNotIn("matcher", self.hooks["PostToolUse"][0])
         for event in self.hooks.values():
             self.assertIn("--agent-id qwenwork", event[0]["hooks"][0]["command"])
@@ -679,7 +736,7 @@ class QwenWorkInstallTests(unittest.TestCase):
         result = self.replay("PostToolUse", self.payload(response, "Bash"))
         self.assertEqual(
             result["hookSpecificOutput"]["updatedToolOutput"],
-            {**response, "stdout": response["stdout"][:40]},
+            response["stdout"][:40],
         )
 
     def use_contract_mock(self) -> None:
@@ -687,42 +744,170 @@ class QwenWorkInstallTests(unittest.TestCase):
         (self.bin / "tokenless").chmod(0o755)
         self.env["TOKENLESS_MOCK_REQUEST_LOG"] = str(self.root / "requests.jsonl")
 
-    def test_workspace_shell_aliases_rewrite_preserve_arguments_and_deduplicate(self) -> None:
+    def test_bare_retrieval_result_bypasses_posttool_compression(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
-        for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        payload = self.payload({"stdout": "original " * 500, "exit_code": 0}, "Bash")
+        payload["tool_input"] = {
+            "command": "tokenless retrieve abcdef0123456789abcdef01"
+        }
+        self.assertEqual(self.replay("PostToolUse", payload), {})
+        request = json.loads(
+            (self.root / "requests.jsonl").read_text().splitlines()[-1]
+        )
+        self.assertEqual(request["input"]["result_kind"], "retrieve")
+
+    def test_workspace_shell_aliases_leave_other_agents_unchanged(self) -> None:
+        before = snapshot(self.root)
+        for tool in WORKSPACE_SHELL_TOOLS:
             with self.subTest(tool=tool):
-                payload = self.payload("", tool)
+                payload = self.payload([{"type": "text", "text": '{"count": 2}'}], tool)
                 payload["cwd"] = str(self.root)
-                payload["tool_input"] = {
-                    "command": "git status",
-                    "dir_path": str(self.root),
-                    "timeout": 30,
-                    "sandbox_permissions": "use_default",
-                }
-                output = self.replay("PreToolUse", payload)["hookSpecificOutput"]
-                self.assertEqual(
-                    output["updatedInput"],
-                    {
-                        **payload["tool_input"],
-                        "command": "/mock/rtk git status",
-                    },
+                self.assertIs(claude_adapter.prepare_input(payload), payload)
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_workspace_data_directory_preserves_environment_across_cwds(self) -> None:
+        self.prepare_detached_plugin()
+        self.use_contract_mock()
+        mock_path = self.bin / "tokenless"
+        mock_path.rename(self.bin / "contract.py")
+        self.executable("tokenless", """#!/usr/bin/env python3
+import json
+import os
+import runpy
+from pathlib import Path
+
+with (Path(__file__).parent / "data-dir.json").open("w") as capture:
+    json.dump(os.environ.get("TOKENLESS_DATA_DIR"), capture)
+runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
+""")
+        other_cwd = self.root / "other workspace"
+        other_cwd.mkdir()
+        custom = self.root / "custom data '$;`"
+        for tool in WORKSPACE_SHELL_TOOLS:
+            for override in (None, "", str(custom)):
+                with self.subTest(tool=tool, override=override):
+                    self.env.pop("TOKENLESS_DATA_DIR", None)
+                    if override is not None:
+                        self.env["TOKENLESS_DATA_DIR"] = override
+                    state_dir = custom if override else self.os_home / ".tokenless"
+                    payload = self.payload("", tool)
+                    payload["cwd"] = str(self.root)
+                    payload["tool_input"] = {"command": "git status"}
+                    self.assertEqual(self.replay("PreToolUse", payload), {})
+                    for cwd in (self.root, other_cwd):
+                        payload["cwd"] = str(cwd)
+                        payload["tool_response"] = [
+                            {"type": "text", "text": '{"body":"' + "x" * 500 + '"}'}
+                        ]
+                        self.replay("PostToolUse", payload)
+                        self.assertEqual(
+                            json.loads((self.bin / "data-dir.json").read_text()), override
+                        )
+                        request = json.loads((self.root / "requests.jsonl").read_text().splitlines()[-1])
+                        self.assertEqual(request["input"]["output_optimization"], "none")
+                        self.assertEqual(request["input"]["content_origin"], "command_output")
+                    self.assertFalse(list((state_dir / "hook-state").glob("*")))
+                    self.assertFalse((self.root / ".tokenless").exists())
+                    self.assertFalse((other_cwd / ".tokenless").exists())
+                    self.assertFalse((self.home / ".tokenless").exists())
+
+    def test_workspace_invalid_data_directories_pass_through_without_writes(self) -> None:
+        self.prepare_detached_plugin()
+        regular = self.root / "regular-file"
+        regular.write_text("keep")
+        broken = self.root / "broken-link"
+        broken.symlink_to(self.root / "missing-target")
+        root_link = self.root / "root-link"
+        root_link.symlink_to("/")
+        loop = self.root / "loop"
+        loop.symlink_to(loop)
+        for directory in (
+            "/",
+            str(root_link),
+            str(regular),
+            str(regular / "child"),
+            str(self.root / "missing/../state"),
+            str(broken / "state"),
+            str(loop),
+        ):
+            with self.subTest(directory=directory):
+                self.env["TOKENLESS_DATA_DIR"] = directory
+                payload = self.payload(
+                    [{"type": "text", "text": "log " * 500}], "mcp__workspace__bash"
                 )
-                self.assertTrue(list((self.root / ".tokenless/hook-state").glob("*")))
-                self.assertFalse((self.home / ".tokenless").exists())
-                payload["tool_response"] = [
-                    {"type": "text", "text": '{"body":"' + "x" * 500 + '"}'}
-                ]
+                payload["cwd"] = str(self.root)
+                payload["tool_input"] = {"command": "git status"}
+                before = snapshot(self.root)
                 self.assertEqual(self.replay("PostToolUse", payload), {})
-                request = json.loads((self.root / "requests.jsonl").read_text().splitlines()[-1])
-                self.assertEqual(request["attribution"]["agent_id"], "qwenwork")
-                self.assertEqual(request["input"]["output_optimization"], "rtk")
-                self.assertEqual(request["input"]["content_origin"], "command_output")
+                with mock.patch.dict(os.environ, {"TOKENLESS_DATA_DIR": directory}):
+                    for action in (("detect",), ("install", "--dry-run")):
+                        # Detached source is deliberately absent; inspect the installed copy.
+                        with mock.patch.object(lifecycle, "PLUGIN_ROOT", self.target):
+                            out, error = self.run_action(*action)
+                        self.assertIn("unavailable", out)
+                        self.assertIn("hooks pass through", error)
+                self.assertEqual(snapshot(self.root), before)
+                self.assertFalse((self.bin / "spawn_log").exists())
+
+    def test_missing_trusted_home_never_falls_back_to_home_or_cwd(self) -> None:
+        for home in ("", "/", "relative-home", None):
+            with self.subTest(home=home):
+                patch = (
+                    mock.patch.object(pwd, "getpwuid", side_effect=KeyError("missing user"))
+                    if home is None
+                    else mock.patch.object(
+                        pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=home)
+                    )
+                )
+                with patch:
+                    before = snapshot(self.root)
+                    out, error = self.run_action("detect")
+                    self.assertIn("unavailable", out)
+                    self.assertIn("no trusted home directory", error)
+                    for tool in WORKSPACE_SHELL_TOOLS:
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            with contextlib.redirect_stderr(io.StringIO()):
+                                with self.assertRaises(SystemExit) as stopped:
+                                    qwenwork_adapter.prepare_input(
+                                        {"tool_name": tool, "cwd": str(self.root)}
+                                    )
+                        self.assertEqual(stopped.exception.code, 0)
+                        self.assertEqual(json.loads(output.getvalue()), {})
+                    self.assertEqual(snapshot(self.root), before)
+                    with mock.patch.dict(
+                        os.environ, {"TOKENLESS_DATA_DIR": str(self.root / "explicit")}
+                    ):
+                        self.assertEqual(
+                            utils.resolve_data_directory(), str(self.root / "explicit")
+                        )
+
+    def test_data_directory_resolves_symlink_prefix_without_writes(self) -> None:
+        link = self.root / "directory-link"
+        link.symlink_to(self.os_home)
+        with mock.patch.dict(os.environ, {"TOKENLESS_DATA_DIR": str(link / "new/state")}):
+            before = snapshot(self.root)
+            self.assertEqual(utils.resolve_data_directory(), str(self.os_home / "new/state"))
+            out, _ = self.run_action("detect")
+            self.assertIn(str(self.os_home / "new/state"), out)
+            self.assertEqual(snapshot(self.root), before)
+
+    def test_workspace_relative_data_directory_does_not_write_to_cwd(self) -> None:
+        self.prepare_detached_plugin()
+        self.env["TOKENLESS_DATA_DIR"] = "relative-data"
+        payload = self.payload([{"type": "text", "text": "log " * 500}], "mcp__workspace__bash")
+        payload["cwd"] = str(self.root)
+        payload["tool_input"] = {"command": "git status"}
+        self.assertEqual(self.replay("PostToolUse", payload), {})
+        self.assertFalse((self.root / "relative-data").exists())
+        self.assertFalse((self.root / ".tokenless").exists())
+        self.assertFalse((self.home / ".tokenless").exists())
+        self.assertFalse((self.bin / "spawn_log").exists())
 
     def test_workspace_text_blocks_use_text_slot_and_preserve_failure(self) -> None:
         self.prepare_detached_plugin()
         _create_mock_tokenless(str(self.bin), behavior="compress-text")
-        for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        for tool in WORKSPACE_SHELL_TOOLS:
             with self.subTest(tool=tool):
                 text = "plain shell log " * 200
                 payload = self.payload([{"type": "text", "text": text}], tool)
@@ -738,24 +923,45 @@ class QwenWorkInstallTests(unittest.TestCase):
                 payload["is_error"] = True
                 self.assertEqual(self.replay("PostToolUse", payload), {})
 
+    def test_workspace_json_blocks_compress_body(self) -> None:
+        self.prepare_detached_plugin()
+        body = json.dumps({"body": "数据" * 250, "count": 2}, ensure_ascii=False)
+        for tool in WORKSPACE_SHELL_TOOLS:
+            with self.subTest(tool=tool):
+                payload = self.payload([{"type": "text", "text": body}], tool)
+                payload["cwd"] = str(self.root)
+                payload["tool_input"] = {"command": "python3 report.py"}
+                result = self.replay("PostToolUse", payload)
+                replacement = result["hookSpecificOutput"]["updatedToolOutput"]
+                self.assertIsInstance(replacement, str)
+                self.assertEqual(json.loads(replacement), {"body": "数据" * 10, "count": 2})
+                request = json.loads((self.bin / "request.json").read_text())
+                self.assertEqual(request["content"], body)
+                self.assertEqual(request["tool_name"], "Bash")
+                self.assertEqual(request["content_origin"], "command_output")
+                self.assertEqual(request["command"], "python3 report.py")
+                self.assertTrue(request["capabilities"]["replace_with_text"])
+
     def test_workspace_unknown_blocks_and_invalid_cwd_pass_through(self) -> None:
         self.prepare_detached_plugin()
-        payload = self.payload([], "mcp__qw-builtin__mcp_workspace_bash")
-        payload["cwd"] = str(self.root)
         text = {"type": "text", "text": "log " * 500}
-        for blocks in (
-            [],
-            [text, text],
-            [{**text, "annotations": {}}],
-            [{"type": "image", "data": "image"}],
-            [{"type": "text", "text": {}}],
-        ):
-            payload["tool_response"] = blocks
-            self.assertEqual(self.replay("PostToolUse", payload), {})
-        payload["tool_response"] = [text]
-        for cwd in (None, "relative", str(self.root / "missing")):
-            payload["cwd"] = cwd
-            self.assertEqual(self.replay("PostToolUse", payload), {})
+        for tool in WORKSPACE_SHELL_TOOLS:
+            with self.subTest(tool=tool):
+                payload = self.payload([], tool)
+                payload["cwd"] = str(self.root)
+                for blocks in (
+                    [],
+                    [text, text],
+                    [{**text, "annotations": {}}],
+                    [{"type": "image", "data": "image"}],
+                    [{"type": "text", "text": {}}],
+                ):
+                    payload["tool_response"] = blocks
+                    self.assertEqual(self.replay("PostToolUse", payload), {})
+                payload["tool_response"] = [text]
+                for cwd in (None, "relative", str(self.root / "missing")):
+                    payload["cwd"] = cwd
+                    self.assertEqual(self.replay("PostToolUse", payload), {})
         self.assertFalse((self.bin / "spawn_log").exists())
 
     def test_private_binaries_are_used_without_changing_native_bash_output_shape(self) -> None:
@@ -767,47 +973,163 @@ class QwenWorkInstallTests(unittest.TestCase):
         result = self.replay("PostToolUse", self.payload(response, "Bash"))
         self.assertEqual(
             result["hookSpecificOutput"]["updatedToolOutput"],
-            {
-                **response,
-                "stdout": response["stdout"][:40],
-            },
+            response["stdout"][:40],
         )
         self.assertFalse((self.bin / "spawn_log").exists())
         request = json.loads((private_bin / "request.json").read_text())
+        self.assertEqual(
+            request["capabilities"]["recovery"],
+            {"kind": "shell" if sys.platform == "darwin" else "none"},
+        )
+        del self.hooks["PreToolUse"]
+        (self.target / "hooks/hooks.json").write_text(json.dumps({"hooks": self.hooks}))
+        self.replay("PostToolUse", self.payload(response, "Bash"))
+        request = json.loads((private_bin / "request.json").read_text())
         self.assertEqual(request["capabilities"]["recovery"], {"kind": "none"})
 
-    def test_registered_array_and_pretool_attribution(self) -> None:
+    @unittest.skipUnless(sys.platform == "darwin", "macOS private recovery bridge")
+    def test_private_recovery_without_global_path_and_concurrent_attribution(self) -> None:
+        self.prepare_detached_plugin()
+        private = self.target / "bin/tokenless"
+        private.parent.mkdir()
+        private.write_text(
+            "#!/usr/bin/env python3\nimport json, os, sys\n"
+            "if sys.argv[1] == 'retrieve':\n"
+            " print(json.dumps({'hash':sys.argv[2], 'env':{k:v for k,v in os.environ.items() "
+            "if k.startswith('TOKENLESS_') or k == 'DSH_TOKENLESS_STASH_DB'}}))\n"
+            "else:\n"
+            f" os.execv(sys.executable, [sys.executable, {str(CONTRACT_MOCK)!r}, *sys.argv[1:]])\n"
+        )
+        private.chmod(0o755)
+        (self.bin / "tokenless").unlink()
+        data = self.root / "custom state '$;`"
+        self.env.update(TOKENLESS_DATA_DIR=str(data), TOKENLESS_STASH_DB=str(data / "selected.db"))
+
+        def recover(index: int) -> tuple[dict, dict]:
+            key = f"{index:024x}"
+            payload = self.payload(
+                "original " * 400, "Bash" if index == 0 else WORKSPACE_SHELL_TOOLS[index - 1]
+            )
+            payload.update(
+                cwd=str(self.root), session_id=f"session-{index}", tool_use_id=f"call-{index}"
+            )
+            payload["tool_input"] = {
+                "command": f"tokenless retrieve '{key}'",
+                "dir_path": str(self.root),
+                "timeout": 30,
+                "sandbox_permissions": "use_default",
+            }
+            rewritten = self.replay("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
+            self.assertEqual(
+                rewritten, {**payload["tool_input"], "command": rewritten["command"]}
+            )
+            result = subprocess.run(
+                ["/bin/bash", "-c", rewritten["command"]],
+                capture_output=True,
+                text=True,
+                env={**self.env, "TOKENLESS_DATA_DIR": str(self.root / "wrong")},
+                check=True,
+            )
+            payload["tool_input"] = rewritten
+            self.assertEqual(self.replay("PostToolUse", payload), {})
+            return json.loads(result.stdout), payload
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(recover, range(4)))
+        for index, (result, _) in enumerate(results):
+            self.assertEqual(result["hash"], f"{index:024x}")
+            self.assertEqual(result["env"]["TOKENLESS_DATA_DIR"], str(data))
+            self.assertEqual(result["env"]["TOKENLESS_STASH_DB"], str(data / "selected.db"))
+            self.assertEqual(result["env"]["DSH_TOKENLESS_STASH_DB"], "")
+            self.assertEqual(result["env"]["TOKENLESS_SESSION_ID"], f"session-{index}")
+            self.assertEqual(result["env"]["TOKENLESS_TOOL_USE_ID"], f"call-{index}")
+            self.assertEqual(result["env"]["TOKENLESS_AGENT_ID"], "qwenwork")
+
+    def test_private_recovery_requires_complete_bridge_and_exact_command(self) -> None:
+        self.prepare_detached_plugin()
+        private = self.target / "bin/tokenless"
+        private.parent.mkdir()
+        shutil.copy2(self.bin / "tokenless", private)
+        key = "abcdef0123456789abcdef01"
+        payload = self.payload("", "Bash")
+        with mock.patch.dict(
+            os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
+        ), mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            qwenwork_adapter, "tokenless_retrieve_command_available", return_value=False
+        ):
+            self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
+            workspace = self.payload("", "mcp__workspace__bash")
+            workspace["tool_input"] = {"command": f"tokenless retrieve {key}", "timeout": 30}
+            with mock.patch.object(qwenwork_adapter, "_QWENWORK_RECOVERY", None):
+                recovery = qwenwork_adapter.recovery_pre_tool_input(workspace)
+                self.assertIsNotNone(recovery)
+                self.assertEqual(shlex.split(recovery["command"])[-3:], [str(private), "retrieve", key])
+                self.assertEqual(recovery["timeout"], 30)
+
+            workspace["tool_input"] = {"command": "git status"}
+            with mock.patch.object(qwenwork_adapter, "_prepare_qwenwork_recovery") as prepare:
+                self.assertIsNone(qwenwork_adapter.recovery_pre_tool_input(workspace))
+                prepare.assert_not_called()
+
+            qwenwork_adapter.prepare_input(payload)
+            self.assertTrue(qwenwork_adapter.recovery_available())
+            for command in (
+                f"tokenless retrieve {key}",
+                f"tokenless retrieve '{key.upper()}'",
+                f"tokenless retrieve '<<tokenless:{key}>>'",
+            ):
+                updated = qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": command})
+                self.assertIsNotNone(updated)
+                self.assertTrue(qwenwork_adapter.is_retrieve_result("Bash", updated))
+            for command in (
+                "tokenless retrieve bad",
+                f"tokenless retrieve {key}; echo extra",
+                f"tokenless retrieve {key} | cat",
+                f"tokenless retrieve {key} > out",
+                "tokenless retrieve $(id)",
+                f"tokenless retrieve {key} --stash-db other.db",
+                updated["command"] + " | cat",
+            ):
+                self.assertIsNone(qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": command}))
+                self.assertFalse(qwenwork_adapter.is_retrieve_result("Bash", {"command": command}))
+            with mock.patch.object(sys, "platform", "win32"):
+                qwenwork_adapter.prepare_input(payload)
+                self.assertFalse(qwenwork_adapter.recovery_available())
+            hooks = self.target / "hooks/hooks.json"
+            configuration = json.loads(hooks.read_text())
+            configuration["hooks"]["PreToolUse"] = []
+            hooks.write_text(json.dumps(configuration))
+            qwenwork_adapter.prepare_input(payload)
+            self.assertFalse(qwenwork_adapter.recovery_available())
+            self.assertIsNone(
+                qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
+            )
+
+    def test_registered_pretool_bypasses_other_commands_without_running_cli(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
-        result = self.replay("PostToolUse", self.payload([{"body": "x" * 500}]))
-        self.assertEqual(result["hookSpecificOutput"]["updatedToolOutput"], [{"body": "x" * 20}])
-        payload = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "git status", "description": "keep"},
-            "session_id": "sandbox", "tool_use_id": "pre-sandbox",
-        }
-        result = self.replay("PreToolUse", payload)
-        self.assertEqual(
-            result["hookSpecificOutput"]["updatedInput"],
-            {"command": "/mock/rtk git status", "description": "keep"},
-        )
-        requests = [
-            json.loads(line) for line in (self.root / "requests.jsonl").read_text().splitlines()
-        ]
-        self.assertEqual([request["operation"] for request in requests], ["post_tool", "pre_tool"])
-        for request in requests:
-            self.assertEqual(request["attribution"]["agent_id"], "qwenwork")
-        # The persisted RTK state must prevent a second transformation.
-        post = self.payload({"body": "x" * 500}, "Bash")
-        post["tool_use_id"] = "pre-sandbox"
-        self.assertEqual(self.replay("PostToolUse", post), {})
+        payload = self.payload("", "Bash")
+        payload["cwd"] = str(self.root)
+        key = "abcdef0123456789abcdef01"
+        for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
+            payload["tool_name"] = tool
+            for command in (
+                "git status",
+                f"tokenless retrieve {key} | cat",
+                f"tokenless retrieve {key}; git status",
+                f"tokenless retrieve {key} --stash-db other.db",
+            ):
+                with self.subTest(tool=tool, command=command):
+                    payload["tool_input"] = {"command": command, "description": "keep"}
+                    self.assertEqual(self.replay("PreToolUse", payload), {})
+        self.assertFalse((self.root / "requests.jsonl").exists())
+        self.assertFalse((self.root / ".tokenless" / "hook-state").exists())
 
     def test_dispatcher_fails_open_on_linux_invalid_input_and_missing_resources(self) -> None:
         self.prepare_detached_plugin()
         payload = self.payload({"body": "x" * 500})
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Linux\n")
-        for event in ("PreToolUse", "PostToolUse"):
-            self.assertEqual(self.replay(event, payload), {})
+        self.assertEqual(self.replay("PostToolUse", payload), {})
         self.assertFalse((self.bin / "spawn_log").exists())
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Darwin\n")
         self.assertEqual(self.replay("PostToolUse", "not json"), {})
@@ -827,6 +1149,160 @@ class QwenWorkInstallTests(unittest.TestCase):
             (self.bin / "spawn_log").exists(),
             "missing local hooks must not fall back to FHS/source",
         )
+
+
+class DataDirectoryPlatformTests(unittest.TestCase):
+    def test_missing_windows_roots_fail_promptly_without_writes(self) -> None:
+        probes = []
+
+        class MissingWindowsPath(PureWindowsPath):
+            def lstat(self) -> os.stat_result:
+                probes.append(str(self))
+                if len(probes) > 3:
+                    raise AssertionError("ancestor search did not terminate at the missing root")
+                raise FileNotFoundError(errno.ENOENT, "missing Windows root", str(self))
+
+        for configured in (
+            "Z:\\tokenless",
+            "Z:\\",
+            "\\\\server\\missing\\tokenless",
+            "\\\\server\\missing\\",
+        ):
+            with self.subTest(configured=configured), contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"TOKENLESS_DATA_DIR": configured}))
+                stack.enter_context(mock.patch.object(utils, "Path", MissingWindowsPath))
+                writes = [
+                    stack.enter_context(
+                        mock.patch(target, side_effect=AssertionError("unexpected write"))
+                    )
+                    for target in ("os.mkdir", "builtins.open", "io.open")
+                ]
+                root = PureWindowsPath(configured).anchor
+                expected = [configured] if configured == root else [configured, root]
+                probes.clear()
+                with self.assertRaises(FileNotFoundError) as error:
+                    utils.resolve_data_directory()
+                self.assertEqual(error.exception.filename, root)
+                self.assertEqual(probes, expected)
+
+                probes.clear()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    lifecycle._data_directory_notice(utils.resolve_data_directory)
+                self.assertEqual(probes, expected)
+                self.assertIn("unavailable", stdout.getvalue())
+                self.assertIn("missing Windows root", stderr.getvalue())
+                self.assertIn("hooks pass through", stderr.getvalue())
+                self.assertEqual(os.environ["TOKENLESS_DATA_DIR"], configured)
+                for operation in writes:
+                    operation.assert_not_called()
+
+    def test_windows_profile_uses_process_token_and_closes_handle(self) -> None:
+        import ctypes
+
+        for failure in (None, "token", "size", "profile"):
+            with self.subTest(failure=failure):
+                kernel, security, profiles = mock.Mock(), mock.Mock(), mock.Mock()
+                kernel.GetCurrentProcess.return_value = 123
+
+                def open_token(process: int, access: int, token: Any) -> bool:
+                    self.assertEqual((process, access), (123, 0x0008))
+                    token._obj.value = 456
+                    return failure != "token"
+
+                def get_profile(token: Any, buffer: Any, size: Any) -> bool:
+                    self.assertEqual(token.value, 456)
+                    if buffer is None:
+                        size._obj.value = 0 if failure == "size" else 256
+                        return False
+                    buffer.value = r"C:\Users\system-user"
+                    return failure != "profile"
+
+                security.OpenProcessToken.side_effect = open_token
+                profiles.GetUserProfileDirectoryW.side_effect = get_profile
+                with mock.patch.object(
+                    ctypes, "WinDLL", create=True, side_effect=[kernel, security, profiles]
+                ):
+                    if failure:
+                        with self.assertRaises(OSError):
+                            utils._windows_profile_directory()
+                    else:
+                        self.assertEqual(
+                            utils._windows_profile_directory(), r"C:\Users\system-user"
+                        )
+                self.assertEqual(kernel.CloseHandle.call_count, int(failure != "token"))
+
+
+@unittest.skipUnless(REAL_BIN, "set TOKENLESS_TEST_BIN to existing Tokenless/RTK binaries")
+class RealDataDirectoryTests(unittest.TestCase):
+    def test_hook_state_matches_real_cli_with_changed_home(self) -> None:
+        """Probe existing binaries without executing rewritten commands or recording stats."""
+        binary_dir = Path(REAL_BIN).resolve()
+        with tempfile.TemporaryDirectory(prefix="tokenless-real-path-") as temporary:
+            root = Path(temporary).resolve()
+            custom = root / "custom '$;` data"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "PATH": str(binary_dir) + os.pathsep + os.environ.get("PATH", ""),
+                "TOKENLESS_STATS_ENABLED": "0",
+                "TOKENLESS_SLS_ENABLED": "0",
+                "TOKENLESS_COMPRESSION_ENABLED": "1",
+                "DSH_SHELL": "0",
+            }
+            env.pop("QODER_PLUGIN_ROOT", None)
+            for override in (None, "", str(custom)):
+                with self.subTest(override=override):
+                    env.pop("TOKENLESS_DATA_DIR", None)
+                    if override is not None:
+                        env["TOKENLESS_DATA_DIR"] = override
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        # Empty attribution prevents RTK receipt registration. The
+                        # returned command exposes the real CLI's validated path.
+                        request = utils.build_pre_tool_request(
+                            {"command": "git status"}, "qwenwork", "Bash", "command"
+                        )
+                        result = subprocess.run(
+                            [str(binary_dir / "tokenless"), "compress"],
+                            input=json.dumps(request),
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                            timeout=15,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        response = json.loads(result.stdout)["result"]
+                        self.assertEqual(response["action"], "replace_arguments")
+                        command = response["arguments"]["command"]
+                        cli_directory = next(
+                            part.split("=", 1)[1]
+                            for part in shlex.split(command)
+                            if part.startswith("TOKENLESS_DATA_DIR=")
+                        )
+                        qwenwork_adapter.prepare_input(
+                            {"tool_name": "mcp__workspace__bash", "cwd": str(root)}
+                        )
+                        identity = uuid.uuid4().hex
+                        marker = Path(
+                            utils._optimization_state_path("qwenwork", identity, identity)
+                        )
+                        created = [
+                            path
+                            for path in (marker.parent, marker.parent.parent)
+                            if not path.exists()
+                        ]
+                        try:
+                            # Do not prune unrelated user sessions during this opt-in probe.
+                            with mock.patch.object(utils, "_prune_optimization_states"):
+                                utils.mark_rtk_optimized("qwenwork", identity, identity)
+                            self.assertTrue(marker.is_file())
+                            self.assertEqual(marker.parent.parent, Path(cli_directory))
+                            self.assertEqual(os.environ.get("TOKENLESS_DATA_DIR"), override)
+                            self.assertFalse((root / ".tokenless").exists())
+                        finally:
+                            marker.unlink(missing_ok=True)
+                            for path in created:
+                                path.rmdir()
 
 
 if __name__ == "__main__":

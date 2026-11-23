@@ -177,6 +177,11 @@ impl SseStream {
         Ok(())
     }
 
+    /// 保留完整 SSE 帧，同时复用有界的跨记录组帧逻辑。
+    pub(crate) fn retain_raw_events(&mut self) {
+        self.lines.reducer.retain_raw = true;
+    }
+
     /// Respect an explicit DashScope mode; otherwise retain compatible prefix detection.
     pub(crate) fn set_native_incremental(&mut self, enabled: Option<bool>) {
         self.lines.reducer.native_incremental = enabled;

@@ -1,0 +1,34 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "bench-qwen/qwen3.8-max-0902"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "bench-qwen": {
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "apiKey": "${DASHSCOPE_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "models": [
+          {
+            "id": "qwen3.8-max-0902",
+            "name": "Qwen3.8 Max 0902 snapshot",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 1000000,
+            "maxTokens": 65536
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "slots": {
+      "memory": "none"
+    }
+  }
+}

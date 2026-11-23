@@ -1,6 +1,6 @@
 # ws-ckpt Plugin 设计文档
 
-> ws-ckpt 插件在 Agent 对话生命周期中**自动**为工作区建快照,出错能 rollback。本文档同时覆盖 [Hermes 插件](../src/plugins/hermes/)（Python）和 [OpenClaw 插件](../src/plugins/openclaw/)（TypeScript）——两者行为一致,差异仅在宿主 runtime 的 hook API 与语言生态。
+> ws-ckpt 插件在 Agent 对话生命周期中**自动**为工作区建快照,出错能 rollback。本文档同时覆盖 [Hermes 插件](../src/plugins/hermes/)（Python）和 [OpenClaw 插件](../src/plugins/openclaw/)（TypeScript）——两者共享自动快照与回滚行为；工具接口的差异在下文单独说明。
 >
 > 架构总览见 [ws-ckpt-design.md](./ws-ckpt-design.md)。
 
@@ -54,7 +54,7 @@ Plugin 在每个 Agent 回合结束时（`agent_end` / `on_session_end`）自动
 1. **用户心智匹配** — "回退到上一步"的自然含义是"上一回合结束时"
 2. **快照数可控** — 典型 10-50 回合/会话，配合 auto-cleanup 完全可控
 3. **不和 read-only 纠缠** — per-tool-call 会对 read/search 也建快照，过滤成本高
-4. **避开锁冲突** — `agent_end` 时 tool 已停手，`check_workspace_quiescent` 几乎不冲突
+4. **避开锁冲突** — `agent_end` 时 tool 已停手，`check_workspace_quiescent` 通常不冲突；但它要求最近 200 ms 内没有写相关事件，tool 刚写完时会在持有工作区写锁的情况下多等至多一个窗口，后台写者（dev server、日志追加等）持续写入时本 turn 的快照会以 `WriteLockConflict` 跳过（插件当前不重试）
 
 代价是 **turn 内中间状态不可回退**。这是有意取舍——Agent 的中间状态本来就不稳定(半写完的代码、中途崩溃的 patch),保留意义不大。需要中间状态的用户走 `ws-ckpt-checkpoint` 工具显式建快照。
 
@@ -134,10 +134,17 @@ Plugin 把以下七个工具用 OpenAI Function Calling 格式注册到 runtime:
 | `ws-ckpt-config` | 查看 / 更新 plugin 配置 | — | `action`, `key`, `value` |
 | `ws-ckpt-checkpoint` | 手动创建快照 | `id` | `message`, `workspace` |
 | `ws-ckpt-rollback` | 回滚到指定快照或沿 parent 链回退或预览回滚 | — | `target`, `num_ancestors`/`numAncestors`, `workspace`, `preview` |
-| `ws-ckpt-list` | 列出工作区所有快照 | — | — |
+| `ws-ckpt-list` | 列出工作区快照；Hermes 可显式分页 | — | Hermes: `limit`, `cursor` |
 | `ws-ckpt-diff` | 对比两个快照 | `from`, `to` | — |
 | `ws-ckpt-delete` | 删除指定快照 | `snapshot` | `workspace` |
 | `ws-ckpt-status` | 查看 daemon + 工作区状态 | — | — |
+
+### Hermes 的 ws-ckpt-list 分页
+
+Hermes 接收可选 `limit` / `cursor`，返回单页 `{success, snapshots, next_cursor}` JSON 字符串；
+不传这两个键时保留完整表格 `{success, output}`。显式 null 无效，游标原样传递，
+仅 `next_cursor: null` 表示完成。校验与字段保留规则见[列表分页设计](design/list-pagination_zh.md#hermes-工具分页)。
+OpenClaw 的列表接口不在此变更范围。
 
 ### ws-ckpt-rollback 的 DAG 祖先回退
 

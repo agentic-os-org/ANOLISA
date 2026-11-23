@@ -93,6 +93,7 @@ fn readiness_timeout_cancels_and_reaps_owned_agent() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -109,6 +110,7 @@ fn successful_native_startup_preserves_exit_status() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     )
@@ -128,6 +130,7 @@ fn readiness_failure_retains_short_cleanup_with_long_shutdown_grace() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(6),
+        true,
         Some(ready),
         |_| {},
     );
@@ -144,6 +147,7 @@ fn process_exit_is_not_hook_readiness() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -162,6 +166,7 @@ fn unrelated_live_pid_cannot_attest_readiness_and_owned_agent_is_reaped() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -180,6 +185,7 @@ fn spawn_failure_returns_without_starting_a_readiness_watcher() {
         &AtomicI32::new(0),
         &AtomicBool::new(false),
         Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {}
     )

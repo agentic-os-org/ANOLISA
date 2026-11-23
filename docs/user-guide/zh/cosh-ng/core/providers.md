@@ -2,7 +2,26 @@
 
 [English](../../../en/cosh-ng/core/providers.md)
 
-交互式终端使用 `/auth`。托管或 headless 环境请在系统或用户配置文件中定义 Provider；项目配置不能添加凭据或 Provider 定义。
+交互式终端可使用 `/auth` 配置模型。托管或 headless 环境请在系统或用户配置文件中定义 Provider；项目配置不能添加凭据或 Provider 定义。
+
+## ECS 免配置接入
+
+在支持此能力的 Cosh Shell/Core 中，ECS 用户尚未选择 Provider、设置端点或提供凭据时，自然语言触发的模型请求会尝试默认免配置接入，无需先执行 `/auth`。已经配置的模型继续使用原配置。该路径需要服务端支持 ECS 实例身份交换。
+
+免配通道模型固定为 `auto`，项目／用户配置、环境变量、CLI 模型参数、运行时模型
+切换和会话恢复均不能修改。需要指定模型时，可用 `/auth` 配置其它 Provider；
+使用默认免配接入不需要先运行 `/auth`。
+
+免配置仅指无需手动填写模型凭据，不代表永久免费。当前处于体验阶段，后续将提供每月免费额度；用尽后停止调用，用户可自行购买加油包或开通按量付费。可用额度和付费方式以控制台实际提供的内容为准，Cosh 不会自动开通付费。
+
+首次使用若需要开通，终端会直接显示二维码和[操作系统控制台链接](https://console.aliyun.com/alinux/welcome?source=cosh)。使用当前 ECS 所属账号开通后，Cosh 自动检查并继续当前问题，无需回到终端确认。临时凭据只保存在内存，接近过期时在下次请求前自动换取；不会写入模型配置或要求保存 AK/SK。
+
+- `Esc` 取消当前等待；取消的问题不会自动重发。
+- `n` 打开“不再提示”设置，可选本次 Shell 会话或以后。关闭后同时停止自动接入操作系统控制台模型服务。
+- 本次会话的选择随 Shell 退出而结束；长期选择保存在 `~/.copilot-shell/cosh/preferences.toml`，不随 `/new` 或 Core 重启重置。会话屏蔽会显示单独的生效确认；尚未配置模型时，随后再次提问的配置提示使用 Shell 当前选择的语言。
+- `/auth` 可配置其他模型，也可显式重新启用免配置接入；重新启用不会重发已取消的问题。
+
+只有服务端明确返回额度不足时才显示额度不足提示，不自动重试；可前往操作系统控制台查看，或通过 `/auth` 切换模型服务。网络、权限和身份交换失败分别报告，不当作未开通。
 
 ## 在交互式终端选择 Provider
 
@@ -96,3 +115,5 @@ model = "qwen3.7-plus"
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun 凭据 |
 
 缺少 key 时，交互式 Core 会请求认证。独立 headless client 必须回复该 control request，或在启动前配置凭据。配置层规则见[配置](../configuration.md)，control protocol 见 [Headless 模式](headless-mode.md)。
+
+已配置的 OpenAI-compatible Provider 在建立模型流时返回 HTTP 401 或 403，本轮以 Provider 错误结束，问题保留在会话中。回到 Shell 提示符后，可用 `/auth` 更新凭据或切换 Provider，再重新提问。

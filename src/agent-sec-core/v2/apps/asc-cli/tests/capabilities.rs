@@ -49,6 +49,7 @@ fn the_default_view_covers_every_agent_capability_pair_in_stable_order() {
                 .map(move |capability| ((*agent).to_owned(), (*capability).to_owned()))
         })
         .collect();
+    expected.push(("cosh".to_owned(), "sandbox".to_owned()));
     expected.sort_unstable();
     assert_eq!(pairs, expected);
 }
@@ -64,6 +65,58 @@ fn every_pair_can_be_selected_individually() {
             assert!(rendered.starts_with(&format!("[{agent}]")), "{rendered}");
             assert!(rendered.contains(capability), "{rendered}");
         }
+    }
+}
+
+#[test]
+fn sandbox_view_is_cosh_only_and_rejects_ambiguous_switches() {
+    for (raw, effective, mode) in [
+        ("true", serde_json::json!(true), "all-shell"),
+        (" TRUE ", serde_json::json!(true), "all-shell"),
+        ("1", serde_json::json!(true), "all-shell"),
+        ("0", serde_json::json!(false), "dangerous"),
+        ("false", serde_json::json!(false), "dangerous"),
+        ("invalid", serde_json::json!("invalid"), "blocked"),
+    ] {
+        let env = environment(&[("AGENT_SEC_COSH_SANDBOX_ALL_SHELL", raw)]);
+        let records = query(&env, None, Some("sandbox")).expect("sandbox filter");
+        let payload: serde_json::Value =
+            serde_json::from_str(&render_json(&records).expect("serializes")).expect("valid JSON");
+        assert_eq!(payload.as_array().expect("array").len(), 1);
+        let record = &payload[0];
+        assert_eq!(record["agent"], "cosh");
+        assert_eq!(record["mode"], mode);
+        assert_eq!(record["env"].as_object().unwrap().len(), 3);
+        assert_eq!(
+            record["env"]["AGENT_SEC_COSH_SANDBOX_ALL_SHELL"]["effective"],
+            effective
+        );
+        assert_eq!(
+            record["env"]["AGENT_SEC_COSH_SANDBOX_ALL_SHELL"]["default"],
+            false
+        );
+    }
+}
+
+#[test]
+fn command_permission_inputs_keep_literal_values() {
+    let source = "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE";
+    let preset = "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS";
+    for raw in [None, Some("command"), Some(" COMMAND "), Some("")] {
+        let mut env = environment(&[(preset, "/Run time/Runtime.Cedar")]);
+        if let Some(value) = raw {
+            env.insert(source.into(), value.into());
+        }
+        let records = query(&env, Some("cosh"), Some("sandbox")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&records).unwrap()).unwrap();
+        assert_eq!(value[0]["env"][source]["effective"], raw.unwrap_or("fixed"));
+        assert_eq!(value[0]["env"][source]["default"], "fixed");
+        assert_eq!(
+            value[0]["env"][preset]["effective"],
+            "/Run time/Runtime.Cedar"
+        );
+        assert_eq!(value[0]["env"][preset]["default"], "");
     }
 }
 

@@ -6,10 +6,10 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError};
 use ws_ckpt_common::{
-    validate_checkpoint_id_v2, validate_workspace_id_v2, ErrorCode, GuardedCheckpointEvidenceV2,
-    GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2, GuardedRollbackEvidenceV2,
-    GuardedRollbackOutcomeV2, GuardedRollbackRejectionCodeV2, Response, SnapshotMeta,
-    WorkspaceGenerationTokenV2, GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
+    validate_checkpoint_id_v2, validate_snapshot_id, validate_workspace_id_v2, ErrorCode,
+    GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2,
+    GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, GuardedRollbackRejectionCodeV2, Response,
+    SnapshotMeta, WorkspaceGenerationTokenV2, GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
     GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2, LIVE_CHILD,
 };
 
@@ -270,7 +270,7 @@ pub(crate) async fn checkpoint(
             "snapshot was created but durable evidence save failed; reconcile before retrying: {error:#}"
         ));
     }
-    workspace.index = next_index;
+    workspace.replace_index(next_index);
     Response::GuardedCheckpointV2Ok { evidence }
 }
 
@@ -545,7 +545,20 @@ pub(crate) async fn rollback(
             format!("failed to durably reserve guarded rollback operation: {error:#}"),
         );
     }
+    // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
     workspace.index = started_index;
+
+    let path = Path::new(registered_path);
+    let pause = match crate::fs_watcher::WorkspaceWatcher::pause_for_rollback(path) {
+        Ok(pause) => pause,
+        Err(error) => {
+            let response = rollback_rejected(
+                GuardedRollbackRejectionCodeV2::WriteLockConflict,
+                format!("failed to detach the old write watcher: {error:#}"),
+            );
+            return abort_reserved_rollback(state, &mut workspace, operation_id, response).await;
+        }
+    };
 
     // Revalidate all mutable provider state after the durable intent write. The
     // digest comparison is the final completed await before backend rollback,
@@ -595,7 +608,10 @@ pub(crate) async fn rollback(
         return abort_reserved_rollback(state, &mut workspace, operation_id, response).await;
     }
 
-    if let Err(error) = state.backend.rollback(ws_id, target_snapshot_id).await {
+    if let Err(error) = state
+        .rollback_with_watcher(ws_id, path, target_snapshot_id, pause)
+        .await
+    {
         // Admission refuses before the workspace is moved: release the
         // reservation so the operation stays retryable (#7234).
         if error.downcast_ref::<CreateAdmissionRefused>().is_some() {
@@ -627,11 +643,6 @@ pub(crate) async fn rollback(
     };
 
     update_live_head(&mut workspace.index, target_snapshot_id);
-    // The backend swapped the live subvolume (rename aside + snapshot
-    // recreate + delete); the inotify watch still names the retired inode,
-    // so re-arm it or every later guarded checkpoint's quiescence check —
-    // including this operation's own pre-flight on a retry — is a no-op.
-    state.rearm_watcher(ws_id, std::path::Path::new(registered_path));
     let succeeded = GuardedRollbackOutcomeV2::Succeeded {
         resulting_generation,
     };
@@ -739,7 +750,7 @@ fn validate_rollback_request(
             message,
         )));
     }
-    if let Err(message) = validate_checkpoint_id_v2(target_snapshot_id) {
+    if let Err(message) = validate_snapshot_id(target_snapshot_id) {
         return Err(Box::new(rollback_rejected(
             GuardedRollbackRejectionCodeV2::InvalidSnapshotId,
             message,
@@ -866,6 +877,7 @@ async fn abort_reserved_rollback(
     aborted.guarded_rollbacks.remove(operation_id);
     match crate::index_store::save_durable(&state.index_dir(&workspace.ws_id), &aborted).await {
         Ok(()) => {
+            // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
             workspace.index = aborted;
             rejection
         }

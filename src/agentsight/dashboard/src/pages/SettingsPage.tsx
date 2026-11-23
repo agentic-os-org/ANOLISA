@@ -52,8 +52,9 @@ const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
   }, [load]);
 
   const save = useCallback(async (): Promise<boolean> => {
+    if (loading || limitMb === null) return false;
     const value = Number(input);
-    if (!Number.isInteger(value) || value < 0 || (value > 0 && value < MIN_STORAGE_LIMIT_MB)) {
+    if (!input.trim() || !Number.isInteger(value) || value < 0 || (value > 0 && value < MIN_STORAGE_LIMIT_MB)) {
       setError(t('comp.settings.storage.invalid'));
       return false;
     }
@@ -61,14 +62,21 @@ const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
       await saveStorageLimit(value);
       setLimitMb(value);
       setError(null);
-      const status = await fetchStorageStatus();
-      setTotalBytes(status.total_physical_bytes);
-      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       return false;
     }
-  }, [input, t]);
+    // The POST already committed. A failed usage read cannot turn it into a
+    // failed save or leave the previous usage looking current.
+    try {
+      const status = await fetchStorageStatus();
+      setTotalBytes(status.total_physical_bytes);
+    } catch (cause) {
+      setTotalBytes(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+    return true;
+  }, [input, loading, limitMb, t]);
 
   React.useImperativeHandle(ref, () => ({ save }));
 

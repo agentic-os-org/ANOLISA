@@ -2,9 +2,42 @@
 
 [中文版](../../../zh/cosh-ng/core/providers.md)
 
-Use `/auth` in the interactive terminal. For a managed or headless setup,
+Use `/auth` to configure a model in the interactive terminal. For a managed or headless setup,
 define the provider in the system or user config file; project config cannot
 add credentials or provider definitions.
+
+## Automatic model access on ECS
+
+With a compatible Cosh Shell/Core, a user-initiated model request on ECS can use
+automatic access to OS Console model service without `/auth` when no provider, endpoint, or credentials
+have been selected. Existing model configurations keep their current behavior.
+This path uses the fixed model `auto`; project/user configuration, environment
+variables, CLI model overrides, runtime model switches, and resumed sessions
+cannot change it. Use `/auth` to configure another provider for a specific model.
+You do not need to run `/auth` before using automatic access.
+This path requires server support for ECS instance identity exchange.
+
+Automatic access removes manual credential setup; it does not promise a permanently free service. Monthly free allowances will be introduced after the current preview period. Once the available allowance is exhausted, requests stop unless the user purchases a top-up or explicitly enables pay-as-you-go. OS Console determines current availability and quota; Cosh never enables paid access automatically.
+
+When activation is required, the terminal displays a QR code and the
+[OS Console link](https://console.aliyun.com/alinux/welcome?source=cosh). Activate with the account
+that owns the ECS instance. Cosh checks automatically and resumes the current
+question without confirmation. Temporary credentials stay in memory and are
+refreshed before subsequent requests as expiry approaches; no AK/SK is saved.
+
+- `Esc` cancels the current wait. Cancelled questions are never replayed automatically.
+- `n` opens automatic access preferences for this Shell session or future sessions. Disabling
+  the prompt also stops automatic model access.
+- Session preferences end when the Shell exits. Persistent preferences live in
+  `~/.copilot-shell/cosh/preferences.toml` and survive `/new` or a Core restart.
+  Session suppression displays its own confirmation. When no model is configured,
+  subsequent questions show setup guidance in the Shell's selected language.
+- Use `/auth` to configure another model or explicitly re-enable automatic access.
+  Re-enabling does not replay a cancelled question.
+
+An explicit server quota failure produces a quota warning without automatic
+retries; check OS Console or use `/auth` to change providers. Network, permission, and identity errors
+are reported separately from activation requirements.
 
 ## Choose a provider interactively
 
@@ -122,3 +155,8 @@ If a key is missing, interactive Core asks for authentication. A standalone
 headless client must answer that control request or configure credentials before
 startup. See [Configuration](../configuration.md) for file-layer rules and
 [Headless mode](headless-mode.md) for the control protocol.
+
+If a configured OpenAI-compatible provider returns HTTP 401 or 403 when
+opening the model stream, the turn ends with the provider error and the
+question remains in the session. From the Shell prompt, use `/auth` to
+update credentials or switch providers before asking again.

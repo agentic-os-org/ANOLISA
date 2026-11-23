@@ -35,7 +35,9 @@ pub(super) fn event_updates_pending_tool_status(event: &GovernedEvent) -> bool {
 
 pub(super) fn should_render_governance_block(event: &GovernedEvent) -> bool {
     match &event.event {
-        AgentEvent::StatusChanged { .. } | AgentEvent::Recommendation { .. } => false,
+        AgentEvent::EcsTrialState { .. }
+        | AgentEvent::StatusChanged { .. }
+        | AgentEvent::Recommendation { .. } => false,
         AgentEvent::ToolCall { .. }
         | AgentEvent::UserQuestion { .. }
         | AgentEvent::Action { .. }

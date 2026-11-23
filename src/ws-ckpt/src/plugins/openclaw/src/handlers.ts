@@ -98,6 +98,9 @@ export async function handleRollback(
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
   }
+  if (typeof preview !== "boolean") {
+    return { text: "'preview' must be a boolean", isError: true };
+  }
   const trimmed = target?.trim();
 
   if (trimmed && numAncestors !== undefined) {
@@ -109,8 +112,8 @@ export async function handleRollback(
       isError: true,
     };
   }
-  if (numAncestors !== undefined && (!Number.isFinite(numAncestors) || numAncestors < 1)) {
-    return { text: "'numAncestors' must be >= 1", isError: true };
+  if (numAncestors !== undefined && (!Number.isInteger(numAncestors) || numAncestors < 1)) {
+    return { text: "'numAncestors' must be an integer >= 1", isError: true };
   }
 
   const resolvedWs = workspace?.trim() || pluginState.resolvedConfig?.workspace;

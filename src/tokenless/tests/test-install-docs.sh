@@ -22,15 +22,15 @@ DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/tokenless/troubleshooting.md"
 DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/tokenless/troubleshooting.md"
 DOC_README_EN="$TOKENLESS_ROOT/README.md"
 DOC_README_ZH="$TOKENLESS_ROOT/README_zh.md"
-PACKAGE_NPM_JS="$TOKENLESS_ROOT/npm/scripts/package-npm.js"
+PACKAGE_NPM_JS="$TOKENLESS_ROOT/packaging/npm/package-npm.js"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
-# Managed Skill bundle. `anolisa adapter enable os-skills <framework>` deploys
-# only the skills a component manifest declares, and the RPM flattens
-# src/os-skills/<category>/<skill>/ into {datadir}/skills/<skill>/, so a
-# SKILL.md that is missing from the bundle lists ships but is never deployed.
+# Managed Skill bundle. The release catalog selects which source Skills the RPM
+# ships. The component manifest tells `anolisa adapter enable os-skills <framework>`
+# how to deploy those Skills from {datadir}/skills/<skill>/.
 OS_SKILLS_ROOT="$REPO_ROOT/src/os-skills"
+BUNDLE_RELEASE_CATALOG="$OS_SKILLS_ROOT/packaging/release_catalog.py"
 BUNDLE_COMPONENT="$OS_SKILLS_ROOT/component.toml"
 BUNDLE_DISTRIBUTION="$REPO_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml"
 OS_SKILLS_INDEX_EN="$OS_SKILLS_ROOT/README.md"
@@ -40,7 +40,7 @@ SKILL_NAME="install-tokenless"
 for f in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART" "$DOC_EN_MANUAL" "$DOC_ZH_MANUAL" \
          "$DOC_SKILL" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$INSTALL_SH" "$UNINSTALL_SH" \
          "$DOC_README_EN" "$DOC_README_ZH" "$PACKAGE_NPM_JS" \
-         "$BUNDLE_COMPONENT" "$BUNDLE_DISTRIBUTION" \
+         "$BUNDLE_COMPONENT" "$BUNDLE_DISTRIBUTION" "$BUNDLE_RELEASE_CATALOG" \
          "$OS_SKILLS_INDEX_EN" "$OS_SKILLS_INDEX_ZH" "$DOC_SKILL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
@@ -85,8 +85,8 @@ for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   hasnt "$doc" "Windows or Linux with musl" "$lang QUICKSTART no longer merges Windows with musl"
   hasnt "$doc" "Windows 或使用 musl" "$lang QUICKSTART no longer merges Windows with musl (zh)"
 done
-has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: pending registry publication \| Not supported, use WSL2 \|' "en QUICKSTART separates Windows npm publication from curl support"
-has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：等待 registry 发布 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates Windows npm publication from curl support"
+has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: supported \| Not supported, use WSL2 \|' "en QUICKSTART separates native Windows npm from curl support"
+has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：支持 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates native Windows npm from curl support"
 for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   has "$doc" '@anolisa/tokenless-win32-x64' "manual lists the Windows npm build target"
   has "$doc" 'os: win32, linux, darwin' "manual quotes the current npm platform manifest"
@@ -124,7 +124,7 @@ has "$DOC_SKILL" "--purge" "SKILL documents the opt-in runtime-data purge"
 hasnt "$DOC_SKILL" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon" "SKILL drops the blanket curl uninstall block"
 hasnt "$DOC_SKILL" "rm -rf ~/.tokenless" "SKILL no longer deletes runtime data unconditionally"
 has "$DOC_SKILL" "anolisa uninstall tokenless" "SKILL keeps the anolisa CLI uninstall path"
-has "$DOC_SKILL" "Windows is not supported" "SKILL states the Windows boundary"
+has "$DOC_SKILL" "Bash workflow requires WSL2 on Windows" "SKILL states the Windows workflow boundary"
 
 # --- troubleshooting: the curl method has an upgrade/uninstall story too -------
 # "Upgrade and uninstall" is the reference page the Quick Start links to, and it
@@ -144,7 +144,7 @@ for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
 done
 
 # --- component README: the public install routes it advertises are real -------
-# npm/scripts/package-npm.js copies this README straight into the published npm
+# packaging/npm/package-npm.js copies this README straight into the published npm
 # package, so a README that denies the npm route contradicts the installation
 # the reader just completed.
 has "$PACKAGE_NPM_JS" "join(rootPkgDir, 'README.md')" \
@@ -160,14 +160,14 @@ for doc in "$DOC_README_EN" "$DOC_README_ZH"; do
 done
 hasnt "$DOC_README_EN" "are not a public" "en README no longer denies the npm route"
 hasnt "$DOC_README_ZH" "目前不能通过公开的" "zh README no longer denies the npm route"
-has "$DOC_README_EN" "still has no published package" "en README keeps the accurate Intel macOS caveat"
-has "$DOC_README_ZH" "Intel Mac" "zh README keeps the accurate Intel macOS caveat"
-has_re "$DOC_EN_QUICKSTART" 'tokenless-darwin-x64`.*not published yet' \
-  "en QUICKSTART marks the darwin-x64 platform package as unpublished"
-has_re "$DOC_ZH_QUICKSTART" 'tokenless-darwin-x64`.*尚未发布' \
-  "zh QUICKSTART marks the darwin-x64 platform package as unpublished"
-has "$DOC_SKILL" "Intel macOS (x86_64) has no published platform package" \
-  "SKILL states the Intel macOS boundary for the npm method"
+has "$DOC_README_EN" "packages are available from 0.9.0" "en README records published platform packages"
+has "$DOC_README_ZH" "从 0.9.0 开始提供" "zh README records published platform packages"
+hasnt "$DOC_EN_QUICKSTART" 'not published yet' \
+  "en QUICKSTART no longer marks platform packages as unpublished"
+hasnt "$DOC_ZH_QUICKSTART" '尚未发布' \
+  "zh QUICKSTART no longer marks platform packages as unpublished"
+has "$DOC_SKILL" 'Intel macOS (x86_64) uses the published' \
+  "SKILL states the published Intel macOS npm route"
 
 # --- Skill bundle: the new Skill must be deployable through the managed path --
 # declared_skills <manifest> <framework> prints one declared skill name per line.
@@ -233,20 +233,23 @@ for fw in openclaw hermes; do
   pass "manifests os-skills component.toml [$fw] declares only skills that exist on disk"
 done
 
-# The component manifest is the authoritative bundle: every skill on disk must be
-# reachable through it, or the RPM installs a directory no agent ever loads.
+# Every released Skill must be reachable through both source adapters.
+released_skill_manifests=$(python3 "$BUNDLE_RELEASE_CATALOG" paths "$OS_SKILLS_ROOT") \
+  || fail "cannot read the os-skills release catalog"
+grep -qxF "./ai/$SKILL_NAME/SKILL.md" <<< "$released_skill_manifests" \
+  || fail "the os-skills release catalog is missing $SKILL_NAME"
 missing_bundle_entries=0
 while IFS= read -r skill_md; do
   name=$(basename "$(dirname "$skill_md")")
   for fw in openclaw hermes; do
     declared_skills "$BUNDLE_COMPONENT" "$fw" | grep -qxF "$name" || {
-      echo "FAIL src/os-skills/component.toml [$fw] is missing the on-disk skill '$name'" >&2
+      echo "FAIL src/os-skills/component.toml [$fw] is missing the released skill '$name'" >&2
       missing_bundle_entries=1
     }
   done
-done < <(find "$OS_SKILLS_ROOT" -mindepth 3 -maxdepth 3 -type f -name SKILL.md | sort)
+done <<< "$released_skill_manifests"
 [ "$missing_bundle_entries" = "0" ] || exit 1
-pass "every on-disk OS Skill is declared in both bundle lists of the component manifest"
+pass "every released OS Skill is declared in both bundle lists of the component manifest"
 
 has "$BUNDLE_COMPONENT" 'source = "{datadir}/skills/install-tokenless/"' \
   "the component bundle points at the flattened RPM skill path"
@@ -276,19 +279,17 @@ has "$UNINSTALL_SH" "another installation has taken over that path" \
   "uninstall.sh refuses a recorded path another installer replaced"
 has "$UNINSTALL_SH" "file_digest" "uninstall.sh verifies the recorded file identity"
 
-# --- Intel macOS: distinguish build support from registry availability --------
-# The release builds Intel Mac artifacts, but npm and the curl npm path need
-# the matching platform package on the registry. Source builds remain Linux-only.
+# --- Intel macOS: npm is published; source builds remain Linux-only ----------
 has_re "$DOC_EN_QUICKSTART" \
-  '^\| macOS x86_64 \| Not currently supported \| Pending registry publication \| Pending registry publication \| Pending registry publication \|$' \
-  "en QUICKSTART marks Intel macOS npm routes pending publication"
+  '^\| macOS x86_64 \| Not currently supported \| Supported \| Supported \(npm path\) \| Supported \(npm path\) \|$' \
+  "en QUICKSTART marks Intel macOS npm routes supported"
 has_re "$DOC_ZH_QUICKSTART" \
-  '^\| macOS x86_64 \| 暂不支持 \| 等待 registry 发布 \| 等待 registry 发布 \| 等待 registry 发布 \|$' \
-  "zh QUICKSTART marks Intel macOS npm routes pending publication"
-hasnt "$DOC_EN_QUICKSTART" "npm and curl ship prebuilt binaries on macOS x86_64" \
-  "en QUICKSTART no longer claims prebuilt Intel macOS binaries"
-hasnt "$DOC_ZH_QUICKSTART" "npm 和 curl 方式在 macOS x86_64 上提供预编译二进制" \
-  "zh QUICKSTART no longer claims prebuilt Intel macOS binaries"
+  '^\| macOS x86_64 \| 暂不支持 \| 支持 \| 支持（npm 路径） \| 支持（npm 路径） \|$' \
+  "zh QUICKSTART marks Intel macOS npm routes supported"
+has "$DOC_EN_QUICKSTART" 'uses the published `@anolisa/tokenless-darwin-x64` package' \
+  "en QUICKSTART identifies the published Intel macOS package"
+has "$DOC_ZH_QUICKSTART" '使用已发布的 `@anolisa/tokenless-darwin-x64` 软件包' \
+  "zh QUICKSTART identifies the published Intel macOS package"
 hasnt "$DOC_EN_QUICKSTART" 'Use Method C with `TOKENLESS_FORCE_BUILD=1` there' \
   "en QUICKSTART does not send Intel macOS to a forced source build"
 hasnt "$DOC_ZH_QUICKSTART" '该平台请使用方式 C 并设置 `TOKENLESS_FORCE_BUILD=1`' \
@@ -444,7 +445,7 @@ for f in "$MAKEFILE" "$TEST_NPM_POSTINSTALL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
 has "$MAKEFILE" "test-npm-postinstall-strict" "the Makefile has a strict postinstall test target"
-has "$MAKEFILE" "test-install-script test-install-docs test-npm-postinstall-strict" \
+has "$TOKENLESS_ROOT/packaging/npm.mk" "test-install-script test-install-docs test-npm-postinstall-strict" \
   "npm packaging runs the install-method suite where a usable node is guaranteed"
 has "$TEST_NPM_POSTINSTALL" "TOKENLESS_REQUIRE_NODE" \
   "the postinstall test can require a usable interpreter instead of skipping"
@@ -499,14 +500,15 @@ has "$DOC_ZH_TROUBLE" "只有确实被替换过才恢复" \
   "zh troubleshooting documents that an untouched foreign tree is not rebuilt"
 
 # --- QUICKSTART: the install matrix keeps the documented priority order ------
-# specs/documentation-standard.md fixes the installation priority every component
-# doc has to follow: anolisa CLI first, the RPM package second, a source build
-# last. A method matrix that lists npm and curl ahead of RPM steers Alinux users
-# away from the managed package and towards routes that create no component record.
+# specs/documentation-standard.md puts the anolisa CLI first wherever it supports
+# the target and leaves the order of the other supported channels to each
+# component. Tokenless lists the RPM package right after the CLI: a method matrix
+# that lists npm and curl ahead of RPM steers Alinux users away from the managed
+# package and towards routes that create no component record.
 SPEC_DOC_STANDARD="$REPO_ROOT/specs/documentation-standard.md"
 [ -f "$SPEC_DOC_STANDARD" ] || { echo "FAIL missing file: $SPEC_DOC_STANDARD" >&2; exit 1; }
-has "$SPEC_DOC_STANDARD" 'RPM package (`yum install`)' \
-  "the documentation standard still fixes the priority this asserts against"
+has "$SPEC_DOC_STANDARD" '(`anolisa install <component>`) when supported for that target' \
+  "the documentation standard still puts the anolisa CLI first"
 
 matrix_line() { grep -nF -- "$2" "$1" | head -1 | cut -d: -f1; }
 check_matrix_order() {

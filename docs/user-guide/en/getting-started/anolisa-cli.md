@@ -75,6 +75,32 @@ as a version lock, the command fails without substituting another version.
 If ANOLISA cannot identify the system's package manager, follow the reported
 instructions to install missing dependencies manually, then retry.
 
+For raw installations where you manage dependencies yourself, use `--no-deps`:
+
+```bash
+anolisa install tokenless --backend raw --no-deps
+anolisa install --all --backend raw --no-deps
+anolisa --dry-run install tokenless --backend raw --no-deps
+```
+
+This skips ANOLISA's runtime dependency resolution, checks (including declared
+platform requirements), automatic installation, and rechecks in both user and
+system mode. It applies only to this install invocation. Artifact verification,
+installation contract and conflict checks, hooks, and service setup still run;
+ensure the required dependencies are available before using the component.
+Without the flag, dependency handling is unchanged. RPM rejects `--no-deps`,
+including when RPM is selected by configuration or an existing installation.
+
+After an actual successful installation, stderr reports:
+
+> Runtime dependency checks and installation were skipped (--no-deps). Ensure required dependencies are available before use.
+
+`--quiet` hides this reminder, and `--json` keeps stdout as JSON. A batch prints
+the reminder once if at least one component was installed, including partial
+success. Failed installs, already-installed results, and dry-runs do not print
+it. The reminder does not change the exit code. Dry-run plans omit the runtime
+dependency provisioning step when `--no-deps` is set.
+
 ### uninstall
 
 Remove one installation from the selected scope:
@@ -214,6 +240,15 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+`anolisa status <component>` shows the installation and its associated adapters.
+`anolisa adapter status` checks each existing adapter and displays its recorded
+enable time when available. For sec-core or Tokenless running through AW, both
+commands point to `aw inspect --config /path/to/aw.yaml --json`, including when
+the component index is unavailable. Use the absolute path to the launch
+configuration. Run the query as the user who started the AW service, with the
+same `XDG_RUNTIME_DIR` setting, to check Provider status and recent executions.
+See the [AW command reference](../aw/cli-reference.md#aw-inspect).
+
 For OpenClaw plugins, `adapter enable` accepts the plugin's declared capabilities
 by default. ANOLISA adds `--accept-capabilities` to installation and activation
 only when the corresponding command's help advertises it. To withhold these
@@ -277,6 +312,31 @@ package source and preserves `cleanup_failed` when enable was interrupted or cle
 needs a retry, even if the active link matches. Retry enable or complete disable to resolve it. Runtime loading is reported as `unknown`; an existing link
 does not prove a running OpenCode process loaded it. `--dry-run` previews the
 operation without modifying plugin files or receipts.
+
+#### Cosh
+
+```bash
+anolisa adapter enable sec-core cosh
+anolisa adapter status sec-core
+anolisa adapter disable sec-core cosh
+```
+
+Enable selects and enables ANOLISA's delivered user extension through the native
+cosh registry, including when an RPM also supplies the system copy. Cosh must
+support conditional adapter source cleanup; older versions fail before files
+are changed and report that cosh-ng needs updating. `COSH_CORE_PATH` can select
+the native executable; `COSH_HOME` selects its extension and state root.
+
+Status checks the selected identity, enabled catalog state, and receipt files.
+Conflicts or disabled extensions report `degraded`; resident-session loading
+remains `unknown`. Restart existing cosh sessions after enable or disable.
+Disable removes only the ANOLISA-owned user copy and clears its matching user
+selection; package-owned system files and later source choices are preserved.
+When a component upgrade changes its extension identity, re-enable removes the
+previous managed copy and releases its matching selection before replacing the
+receipt. Failed cleanup retains the prior receipt; failed activation retains
+the replacement receipt so disable or re-enable can retry. Resolve changed
+managed files before re-enabling or disabling an extension.
 
 #### QwenWorkCN (macOS)
 

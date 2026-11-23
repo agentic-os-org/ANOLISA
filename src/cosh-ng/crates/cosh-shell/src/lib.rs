@@ -1,3 +1,11 @@
+#![recursion_limit = "256"]
+
+// Shared renderer tests run once in the library; private runtime helpers stay in both targets.
+#[cfg(test)]
+macro_rules! library_tests {
+    ($($item:item)*) => {$($item)*};
+}
+
 #[path = "adapter/public.rs"]
 pub mod adapter;
 #[path = "agent/public.rs"]
@@ -39,6 +47,8 @@ pub mod parser;
 #[cfg(test)]
 #[path = "input/path_prompt_tests.rs"]
 mod path_prompt_tests;
+#[allow(dead_code, unused_imports)]
+mod process;
 #[allow(dead_code)]
 #[path = "question/public.rs"]
 mod question;
@@ -47,6 +57,9 @@ mod question;
 mod question_presentation_tests;
 #[path = "raw_input/public.rs"]
 pub mod raw_input;
+#[cfg(test)]
+#[path = "tools/readonly_rules/git_hooks_9514_tests.rs"]
+mod readonly_git_hooks_9514_tests;
 #[cfg(test)]
 #[path = "tools/readonly_interceptor_tests.rs"]
 mod readonly_interceptor_tests;

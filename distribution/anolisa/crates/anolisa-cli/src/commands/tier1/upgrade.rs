@@ -2202,7 +2202,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     })?;
     outcome.operation_id = Some(audit.operation_id.clone());
 
-    // Refresh package-owned component contracts only after state persisted.
+    // Refresh distribution-owned component contracts only after state persisted.
     // This heals stale snapshots left by external yum/dnf upgrades without
     // exposing a new contract when the corresponding state write failed.
     for (component, package) in outcome

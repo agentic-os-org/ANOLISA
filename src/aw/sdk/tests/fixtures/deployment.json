@@ -1,0 +1,191 @@
+{
+  "configuration": {
+    "apiVersion": "aw/v1alpha1",
+    "kind": "AWConfiguration",
+    "metadata": {
+      "name": "descriptor-sdk"
+    },
+    "spec": {
+      "daemon": {
+        "startup": "external",
+        "endpoint": "auto",
+        "state_dir": "/tmp/aw-descriptor-fixture"
+      },
+      "execution": {
+        "guarantee": "native_hook",
+        "default_event_budget_ms": 1000
+      },
+      "audit": {
+        "enabled": true,
+        "payload": "metadata_only"
+      },
+      "agents": {
+        "app": {
+          "adapter": "qoder-sdk",
+          "argv": ["/absent/native-agent"]
+        }
+      },
+      "providers": {},
+      "events": {
+        "input.submit": {
+          "enabled": true,
+          "required": true,
+          "steps": []
+        }
+      }
+    }
+  },
+  "descriptor": {
+    "version": "aw-deployment/v1alpha1",
+    "configuration_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "target": "app",
+    "profile": {
+      "adapter": "qoder-sdk",
+      "version": "public-hooks/v1",
+      "entrypoint": "sdk-worker"
+    },
+    "endpoint": "/tmp/aw-descriptor-fixture/aw.sock",
+    "wait_for_input_submit": true,
+    "availability": "required"
+  },
+  "invalid": [
+    {
+      "name": "version",
+      "path": ["version"],
+      "value": "aw-deployment/v99",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "missing",
+      "path": ["endpoint"],
+      "remove": true,
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "extra",
+      "path": ["extra"],
+      "value": "secret",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "profile-extra",
+      "path": ["profile", "extra"],
+      "value": "secret",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "profile-version",
+      "path": ["profile", "version"],
+      "value": "public-hooks/v2",
+      "error": "sdk_descriptor_profile_mismatch"
+    },
+    {
+      "name": "profile-entry",
+      "path": ["profile", "entrypoint"],
+      "value": "wrong",
+      "error": "sdk_descriptor_profile_mismatch"
+    },
+    {
+      "name": "profile-adapter",
+      "path": ["profile", "adapter"],
+      "value": "qwenpaw",
+      "error": "sdk_descriptor_profile_mismatch"
+    },
+    {
+      "name": "profile-blank",
+      "path": ["profile", "version"],
+      "value": " ",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "target",
+      "path": ["target"],
+      "value": "foreign",
+      "error": "sdk_descriptor_target_mismatch"
+    },
+    {
+      "name": "target-shape",
+      "path": ["target"],
+      "value": "app/name",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "relative-endpoint",
+      "path": ["endpoint"],
+      "value": "relative.sock",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "nul-endpoint",
+      "path": ["endpoint"],
+      "value": "/tmp/aw\u0000.sock",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "boolean-string",
+      "path": ["wait_for_input_submit"],
+      "value": "false",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "boolean-integer",
+      "path": ["wait_for_input_submit"],
+      "value": 1,
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "boolean-null",
+      "path": ["wait_for_input_submit"],
+      "value": null,
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "availability",
+      "path": ["availability"],
+      "value": "allow",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "digest-shape",
+      "path": ["configuration_sha256"],
+      "value": "AA",
+      "error": "sdk_descriptor_invalid"
+    },
+    {
+      "name": "digest-stale",
+      "path": ["configuration_sha256"],
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "error": "sdk_descriptor_stale"
+    }
+  ],
+  "unicode_profile": [
+    { "name": "next-line-only", "value": "\u0085", "valid": false },
+    {
+      "name": "mixed-whitespace",
+      "value": " \u0085\u2007\u202f",
+      "valid": false
+    },
+    { "name": "byte-order-mark-content", "value": "\ufeff", "valid": true },
+    { "name": "zero-width-space-content", "value": "\u200b", "valid": true },
+    { "name": "file-separator-content", "value": "\u001c", "valid": true },
+    { "name": "non-ascii-profile", "value": "配置😀", "valid": true }
+  ],
+  "duplicate": [
+    {
+      "key": "target",
+      "replacement": "\"target\":\"app\",\"target\":"
+    },
+    {
+      "key": "target",
+      "replacement": "\"t\\u0061rget\":\"app\",\"target\":"
+    },
+    {
+      "key": "adapter",
+      "replacement": "\"adapter\":\"qoder-sdk\",\"adapter\":"
+    },
+    {
+      "key": "adapter",
+      "replacement": "\"ad\\u0061pter\":\"qoder-sdk\",\"adapter\":"
+    }
+  ]
+}

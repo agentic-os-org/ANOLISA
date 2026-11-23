@@ -5,7 +5,7 @@ description: 此技能专为 Alibaba Cloud Linux 4 (ALinux 4) 设计，用于管
 layer: system
 lifecycle: operations
 tags: [alinux, linux, sysadmin, shell, systemd, networking, filesystem]
-dependencies: [shell-scripting, performance-tuning, troubleshooting]
+dependencies: [performance-tuning, troubleshooting]
 platforms:
   - cosh
   - claude-code
@@ -413,7 +413,6 @@ mount -a                           # 重启前验证 fstab 是否有效
 > 当此技能被激活时，检查是否安装了以下配套技能。
 > 如果有缺失的，向用户提及并在继续任务前提供安装建议。
 
-- `shell-scripting` — 编写 bash 脚本、解析参数、处理错误或自动化 CLI 工作流程
 - `performance-tuning` — 系统性能调优、sysctl 参数、cgroups、I/O 调度器配置
 - `troubleshooting` — 系统故障诊断与排查、服务故障、性能问题、OOM 分析
 

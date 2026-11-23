@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/libexec/anolisa/cosh-ng/cosh-shell --__cosh-login-lifecycle-v1 "$@"

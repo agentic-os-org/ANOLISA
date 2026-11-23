@@ -234,8 +234,54 @@ cp "$SOURCE_DIR/skillfs-views.toml" "$TMP_ROOT/views-before.toml"
 
 printf 'passthrough-ok\n' > "$SOURCE_DIR/primary-skill/assets/info.txt"
 
+# Make normalization deterministic even on hosts without uv in PATH.
+mkdir -p "$TMP_ROOT/bin"
+printf '#!/bin/sh\nexit 99\n' > "$TMP_ROOT/bin/uv"
+chmod +x "$TMP_ROOT/bin/uv"
+cat >> "$SOURCE_DIR/primary-skill/SKILL.md" <<'SKILLFS_MULTILINE_FIXTURE'
+
+```sh
+pip install skillfs-normalization-control
+cat > notes.txt <<EOF
+pip install requests
+EOF
+cat <<'EOF'
+pip install requests
+EOF
+cat <<-"EOF"
+	pip install requests
+	EOF
+echo hello \
+pip install requests
+echo "hello
+pip install requests
+"
+echo 'hello
+pip install requests
+'
+echo `printf hello
+pip install requests
+`
+echo $(printf hello
+pip install requests
+)
+pip install skillfs-normalization-control
+```
+
+```sh
+cat << \
+EOF
+pip install requests
+EOF
+```
+pip install skillfs-normalization-control
+SKILLFS_MULTILINE_FIXTURE
+cp "$SOURCE_DIR/primary-skill/SKILL.md" "$TMP_ROOT/primary-source.md"
+sed 's/^pip install skillfs-normalization-control$/uv pip install skillfs-normalization-control/' \
+	"$TMP_ROOT/primary-source.md" > "$TMP_ROOT/primary-served.md"
+
 info "启动 FUSE 挂载"
-"$BIN" mount "$SOURCE_DIR" "$MOUNT_DIR" \
+PATH="$TMP_ROOT/bin:$PATH" "$BIN" mount "$SOURCE_DIR" "$MOUNT_DIR" \
 	--foreground \
 	--skill-discover-root "$MOUNT_DIR/skills" \
 	--pid-file "$PID_FILE" \
@@ -262,6 +308,11 @@ assert_not_contains "$SKILLS_LIST" "secondary-skill" "secondary 技能不直接�
 
 PRIMARY_MD="$(cat "$MOUNT_DIR/skills/primary-skill/SKILL.md")"
 assert_contains "$PRIMARY_MD" "name: primary-skill" "可读取 primary SKILL.md"
+cmp -s "$TMP_ROOT/primary-served.md" "$MOUNT_DIR/skills/primary-skill/SKILL.md" \
+	|| fail "Mounted reads changed multiline shell data or skipped standalone normalization"
+cmp -s "$TMP_ROOT/primary-source.md" "$SOURCE_DIR/primary-skill/SKILL.md" \
+	|| fail "Normalization changed the source SKILL.md"
+pass "Mounted reads preserve multiline shell data and normalize standalone commands"
 
 PASSTHROUGH_CONTENT="$(cat "$MOUNT_DIR/skills/primary-skill/assets/info.txt")"
 assert_equals "$PASSTHROUGH_CONTENT" "passthrough-ok" "物理文件透传正确"

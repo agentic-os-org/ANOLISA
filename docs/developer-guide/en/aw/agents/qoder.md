@@ -1,0 +1,203 @@
+# Qoder CLI
+
+[中文版](../../../zh/aw/agents/qoder.md)
+
+Run source examples from `src/aw`; build AW with the [integration tutorial](../integration.md) first.
+
+## Build and start Qoder
+
+AW is not yet available through `anolisa install` or an RPM. Developers can
+build it on Linux with rustup and the repository's pinned toolchain. Install
+Qoder CLI separately and verify its version. From `src/aw`:
+
+```bash
+cargo build --locked -p aw-cli --bin aw
+qodercli --version
+target/debug/aw config validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
+```
+
+The [Qoder example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qoder.yaml)
+uses `argv: [qodercli]`. To select a particular installation, replace that entry
+with the absolute path of its executable. `--agent qoder` selects the named
+entry under `spec.agents`; the name is yours to choose, while `adapter: qoder`
+selects the framework.
+
+The verified baseline is CLI 1.1.64. AW records the installed bare SemVer output. Integration requires `--settings`, literal `args` command Hooks, `PreToolUse`/`PostToolUse`, callback identity and exit-code-2 denial.
+
+`PostToolUse` and `PostToolUseFailure` both enter `tool.after`. Public audit
+records derive `resultStatus` from the native callback and its structured
+exit, signal or interruption fields; `resultDigest` covers the normalized
+result. Missing result metadata remains `projection_unavailable` during
+[audit export](../reference/cli.md), identifying the gap for consumers.
+
+For example, name the target `qodercli` and select your installed executable:
+
+```yaml
+agents:
+  qodercli:
+    adapter: qoder
+    argv: [/absolute/path/to/qodercli]
+```
+
+Merge that block under `spec` in your complete configuration, then run
+`aw run --config /absolute/aw.yaml --agent qodercli`. The target name is separate
+from the native executable name and version.
+
+This example consumes Hook input and returns `{}` before and after tools. It
+adds no restriction and is not a security policy. Ask Qoder to run a harmless
+read-only tool to exercise both callbacks. A reply produced without a tool call
+does not exercise them. Arguments after `--` go to Qoder, for example:
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder -- -p 'Read the current directory name with a tool.'
+```
+
+AW opens Qoder's native terminal interface, then returns to the original shell
+when Qoder exits. It releases that session's binding and unfinished work. The
+shared daemon remains available to later sessions using the same configuration.
+
+```bash
+target/debug/aw service status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw service stop --config crates/aw-service/examples/aw.qoder.yaml
+```
+
+## Prepare native startup
+
+Install the startup Hooks once while Qoder is stopped, then use the usual `qoder`
+or `qodercli` command. The configured `argv[0]` must resolve to the actual
+`qodercli` executable; a shell dispatcher may launch it, but AW does not infer an
+arbitrary wrapper's executable. `HOME/.qoder` and the selected startup directory
+must be canonical, same-user private directories (mode `0700`). Setup preserves
+existing settings and user Hooks.
+
+```bash
+mkdir -p "$HOME/.local/state/aw"
+target/debug/aw instance setup --config aw.yaml --agent qoder \
+  --directory "$HOME/.local/state/aw/qoder-startup"
+qoder
+# Or use native print mode:
+qoder -p 'Review this harmless prompt.'
+```
+
+`SessionStart` prepares and confirms the instance from a direct native callback.
+The initial `aw.yaml` policy applies before the first submission. Each owner has
+its own PID, start identity, session and service-generation binding, so multiple
+Qoder processes can share the prepared profile. While the selected instance is
+idle, edit the permitted policy fields and run:
+
+```bash
+target/debug/aw update --config aw.yaml --instance INSTANCE_ID
+```
+
+Print requests read their initial policy at startup; updates cannot interrupt an
+active request. Existing native argument limits still apply: custom settings
+sources, disabled Hooks, worktrees, resume and remote entrypoints require a
+separate supported integration. A missing or stale startup binding blocks input
+and before-tool callbacks. Normal `SessionEnd` releases runtime assets. After an
+abnormal owner exit, wait for service cleanup and remove the installation:
+
+```bash
+target/debug/aw instance setup --remove --config aw.yaml --agent qoder \
+  --directory "$HOME/.local/state/aw/qoder-startup"
+```
+
+Removal refuses live owners, reclaims only confirmed stale owner records and
+owned assets, and removes exact installed groups while retaining user changes.
+Edited AW groups must be restored before removal can proceed. If the service socket
+is absent, removal only confirms owner exit and removes its private local assets;
+it does not assert a successful service drain. An interrupted unpublished claim
+can be removed after its owner exits, but malformed contents never select other
+files for deletion. Native print
+acceptance verifies input blocking before any model request; tool updates and
+multiple-owner isolation also have deterministic service tests. Existing TUI
+[attachment](../deployment/independent-instances.md) remains available for the
+supported idle-process entrypoint.
+
+## Check user submissions
+
+Ordinary print and terminal launches support `input.submit` through Qoder's
+`UserPromptSubmit` command Hook. Add the existing sec-core `scan_user_input`
+steps from [submission checks](../../../../user-guide/en/aw/security.md#check-user-submissions)
+to the same configuration. The Provider receives the submitted `prompt` as
+`input.text`; a block effect or `on_error: block` failure exits the native Hook
+with code 2 and prevents the model request. `on_error: report` permits the input
+after recording a check failure.
+
+The native `session_id` and `request_set_id` identify one submission across
+parallel or sequential AW steps. Missing identities fail according to the
+step's failure action. Existing native Hooks remain enabled; their subsequent
+context additions are outside the submitted-text snapshot. Reloadable and attached TUI routes also dispatch this event before the model
+request. The stable callback uses the active policy while the request keeps
+its revision until native idle confirmation. Ordinary CLI bindings
+retain replay records for at most 1,024 distinct checked submissions; start a
+new CLI session before that limit.
+
+## Manage a native terminal session
+
+For Qoder CLI 1.1.73, start the terminal normally with an exclusive private HOME
+profile, then attach before its first request. Set the matching executable in
+`spec.agents.qoder.argv` in `aw.yaml`. From the directory containing that file:
+
+```bash
+aw connect --agent qoder --pid "$QODER_PID"
+aw update --agent qoder
+```
+
+Set `QODER_PID` to the terminal process you started. Attachment verifies its
+start identity and native settings adoption before marking the instance Ready.
+Edit only policy fields in `aw.yaml`, then run the update command between
+requests. Active requests, tools and uncertain cleanup reject updates. With
+multiple instances, use `--instance INSTANCE_ID` to select one explicitly.
+
+This route supports `input.submit`, `tool.before` and `tool.after`. Print mode,
+headless fast hooks and a profile shared by another Qoder process are rejected.
+The automated attachment fixture covers adding and removing input denial before
+model dispatch. Authenticated 1.1.73 TUI acceptance verifies tool denial, tool
+execution after an idle update, and detach/reattach preserving the native process
+and user settings.
+
+Remove the attachment after the terminal is idle:
+
+```bash
+aw disconnect --agent qoder --pid "$QODER_PID"
+```
+
+AW restores only its owned settings entries. See [policy updates](../deployment/policy-updates.md)
+for revision checks and recovery after an interrupted attachment.
+
+## Keep existing Hooks and scheduling
+
+Qoder continues to load its normal user, project and local settings. AW creates
+session-specific callback entries without editing those files. To include an
+existing JSON file that you normally pass through Qoder's `--settings`, use:
+
+```bash
+target/debug/aw run --config ./aw.yaml --agent qoder --native-settings ./qoder.settings.json
+```
+
+AW preserves that file's other fields and Hook entries, adds its callbacks and
+passes the merged settings to Qoder. Each AW step becomes a separate synchronous
+native Hook. Qoder determines serial or parallel execution, including how the
+new callbacks coexist with other matching Hooks.
+
+Set `spec.agents.qoder.qoder.sequential: true` to mark the generated groups as
+sequential. If any matching synchronous Qoder group requests sequential
+execution, all matching synchronous Hooks run in sequence. Omitting this field
+or setting it to false does not override an existing group's true value.
+Steps in one native event share the AW budget; later callbacks do not reset it.
+
+This adapter supports scripts whose input remains unchanged across AW steps.
+Sequential input-rewrite chains are not supported: if a command returns
+`updatedInput`, a later callback with changed input is rejected and follows that
+step's `on_error`. Forwarding native bytes does not promise every native effect
+combination or approval flow.
+
+The launcher rejects settings and arguments that would disable or replace its
+Hooks rather than overriding a user's disabled-hook choice. This includes raw
+`--settings`, `--setting-sources`, `--headless-fast-hooks` and conflicting native
+settings. Custom configuration roots, alternate Qoder configuration-directory
+modes, resumed sessions, remote sessions and worktree launch are outside the current adapter's
+scope. Pass short options separately rather than combining them, and launch from
+the intended working directory. Existing native Hooks remain
+responsible for their own behavior and audit records.

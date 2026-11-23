@@ -652,6 +652,7 @@ mod tests {
 
     #[test]
     fn bounded_excerpt_home_path_redaction_does_not_block_delivery() {
+        let _guard = crate::diagnostics::test_env::env_guard();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tester".to_string());
         let dir = std::env::temp_dir().join(format!(
             "cosh-shell-evidence-excerpt-home-path-{}",

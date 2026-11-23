@@ -475,7 +475,12 @@ pub struct ToolCallRecord {
     pub start: f64,      // offset in seconds from trajectory start
     pub dur: f64,        // duration in seconds
     pub cmd: String,     // command summary (truncated)
-    pub err: bool,       // whether the call returned an error
+    /// Complete command for in-memory analysis, separate from the preview.
+    /// Excluded from serialized performance summaries and prompts so their
+    /// argument previews remain bounded.
+    #[serde(skip)]
+    pub command: Option<String>,
+    pub err: bool, // whether the call returned an error
     /// File/path argument this call acts on, when the tool takes one
     /// (file_path / path / notebook_path / filePath). `cmd` is a JSON blob
     /// truncated at ~50 chars, so consumers needing the target read this.

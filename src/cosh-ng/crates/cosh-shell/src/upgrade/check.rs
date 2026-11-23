@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -149,7 +149,7 @@ pub(crate) fn read_cached_notice(running_version: &str) -> Option<UpgradeNotice>
     }
     // The login thread waits for this bounded check, so no shutdown owner is needed.
     let rpm_installation = (cache.method == DetectionMethod::Rpm)
-        .then(|| rpm_installation_for_executable(&ProbeProcesses::default(), &executable))
+        .then(|| rpm_installation_for_executable(&ProbeProcesses::default(), &executable, None))
         .flatten();
     cached_notice(&cache, running_version, rpm_installation.as_ref())
 }
@@ -186,7 +186,7 @@ fn cached_notice(
 /// `rpm` is missing, the probe times out, or the binary is not RPM-owned.
 pub(crate) fn current_executable_rpm_package() -> Option<String> {
     let executable = current_executable()?;
-    rpm_installation_for_executable(&ProbeProcesses::default(), &executable)
+    rpm_installation_for_executable(&ProbeProcesses::default(), &executable, None)
         .map(|installation| format!("{}-{}", installation.package, installation.evr))
 }
 
@@ -206,10 +206,12 @@ fn detect_upgrade(
     processes: &ProbeProcesses,
     running_version: &str,
     executable: &Path,
+    startup_path: Option<&str>,
 ) -> Option<DetectionResult> {
     tracing::debug!(executable = %executable.display(), %running_version, "detecting upgrade source");
-    if let Some(scope) = anolisa_owner_scope(processes, executable) {
-        let verdict = detect_with_anolisa(processes, COMPONENT, running_version, scope)?;
+    if let Some(scope) = anolisa_owner_scope(processes, executable, startup_path) {
+        let verdict =
+            detect_with_anolisa(processes, COMPONENT, running_version, scope, startup_path)?;
         return Some(DetectionResult {
             executable: executable.to_path_buf(),
             method: DetectionMethod::Anolisa,
@@ -217,8 +219,15 @@ fn detect_upgrade(
         });
     }
 
-    if let Some(installation) = rpm_installation_for_executable(processes, executable) {
-        let verdict = detect_with_rpm(processes, &installation.package, &installation.evr, None)?;
+    if let Some(installation) = rpm_installation_for_executable(processes, executable, startup_path)
+    {
+        let verdict = detect_with_rpm(
+            processes,
+            &installation.package,
+            &installation.evr,
+            None,
+            startup_path,
+        )?;
         return Some(DetectionResult {
             executable: executable.to_path_buf(),
             method: DetectionMethod::Rpm,
@@ -235,8 +244,12 @@ fn detect_with_anolisa(
     component: &str,
     running_version: &str,
     scope: AnolisaScope,
+    startup_path: Option<&str>,
 ) -> Option<UpgradeVerdict> {
     let mut command = Command::new("anolisa");
+    if let Some(path) = startup_path {
+        command.env("PATH", path);
+    }
     command.args([
         "--install-mode",
         scope.as_str(),
@@ -326,8 +339,15 @@ fn parse_anolisa_output(
     }))
 }
 
-fn anolisa_owner_scope(processes: &ProbeProcesses, executable: &Path) -> Option<AnolisaScope> {
+fn anolisa_owner_scope(
+    processes: &ProbeProcesses,
+    executable: &Path,
+    startup_path: Option<&str>,
+) -> Option<AnolisaScope> {
     let mut command = Command::new("anolisa");
+    if let Some(path) = startup_path {
+        command.env("PATH", path);
+    }
     command.args(["status", COMPONENT, "--json"]);
     let output = match run_bounded_command(processes, command, ANOLISA_TIMEOUT) {
         Some(output) => output,
@@ -378,9 +398,13 @@ fn anolisa_status_owner_scope(bytes: &[u8], executable: &Path) -> Option<Anolisa
 fn rpm_installation_for_executable(
     processes: &ProbeProcesses,
     executable: &Path,
+    startup_path: Option<&str>,
 ) -> Option<RpmInstallation> {
-    let rpm = find_in_path(OsStr::new("rpm"))?;
+    let rpm = find_in_path(OsStr::new("rpm"), startup_path)?;
     let mut ownership = Command::new(rpm);
+    if let Some(path) = startup_path {
+        ownership.env("PATH", path);
+    }
     ownership.args([
         OsStr::new("-qf"),
         OsStr::new("--qf"),
@@ -412,6 +436,7 @@ fn parse_rpm_installation(stdout: &[u8]) -> Option<RpmInstallation> {
 fn rpm_installation_for_executable(
     _processes: &ProbeProcesses,
     _executable: &Path,
+    _startup_path: Option<&str>,
 ) -> Option<RpmInstallation> {
     None
 }
@@ -422,11 +447,12 @@ fn detect_with_rpm(
     package: &str,
     installed_evr: &str,
     upgrade_command: Option<&str>,
+    startup_path: Option<&str>,
 ) -> Option<UpgradeVerdict> {
-    let (manager, program) = if let Some(path) = find_in_path(OsStr::new("dnf")) {
+    let (manager, program) = if let Some(path) = find_in_path(OsStr::new("dnf"), startup_path) {
         ("dnf", path)
     } else {
-        ("yum", find_in_path(OsStr::new("yum"))?)
+        ("yum", find_in_path(OsStr::new("yum"), startup_path)?)
     };
     check_package_manager(
         processes,
@@ -435,6 +461,7 @@ fn detect_with_rpm(
         package,
         installed_evr,
         upgrade_command,
+        startup_path,
     )
 }
 
@@ -444,6 +471,7 @@ fn detect_with_rpm(
     _package: &str,
     _installed_evr: &str,
     _upgrade_command: Option<&str>,
+    _startup_path: Option<&str>,
 ) -> Option<UpgradeVerdict> {
     None
 }
@@ -456,8 +484,12 @@ fn check_package_manager(
     package: &str,
     installed_evr: &str,
     upgrade_command: Option<&str>,
+    startup_path: Option<&str>,
 ) -> Option<UpgradeVerdict> {
     let mut command = Command::new(program);
+    if let Some(path) = startup_path {
+        command.env("PATH", path);
+    }
     command.args(["check-update", package]);
     let output = run_bounded_command(processes, command, PACKAGE_MANAGER_TIMEOUT)?;
     classify_package_manager_output(
@@ -519,8 +551,10 @@ fn canonical_path(path: impl AsRef<Path>) -> Option<PathBuf> {
     Some(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
-fn find_in_path(program: &OsStr) -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
+fn find_in_path(program: &OsStr, startup_path: Option<&str>) -> Option<PathBuf> {
+    let paths = startup_path
+        .map(OsString::from)
+        .or_else(|| env::var_os("PATH"))?;
     env::split_paths(&paths)
         .map(|directory| directory.join(program))
         .find(|path| is_executable_file(path))

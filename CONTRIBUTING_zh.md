@@ -12,10 +12,11 @@
 
 ## 推荐的贡献方向
 
-如果希望寻找贡献方向，推荐优先参考 [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap) 中的组件专题。
+如果希望寻找适合自身背景与本地环境的切入点，建议先阅读[贡献方向与类目](contribute/zh/tracks.md)，或浏览 [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap) 中的组件专题。
+关于社区角色梯队、分级决策与组件生命周期，请参阅[社区治理](GOVERNANCE_zh.md)。
 也欢迎提交 bug 报告、bug 修复，以及其他 Issue 和 PR。
 
-Roadmap 中的专题是候选方向，不代表排期承诺，也不代表任务已可认领。实现这些方向时，按以下 Issue 流程推进：
+Roadmap 中的专题为候选方向，实际排期与认领以对应 Issue 为准。完整的标签含义与 `/claim` 说明见 [Roadmap、Issue 与认领流程](contribute/zh/workflow.md)，推进步骤如下：
 
 1. 检索是否已有覆盖该方向的 Issue。如果没有，创建 Issue，链接原 Discussion 并说明拟实现的范围。
 2. 开始实现前，与组件 owner 确认当前版本、范围和验收标准。
@@ -35,7 +36,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 | agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
 | tokenless | `src/tokenless/` | 完整开发在 Linux；发布的 CLI 二进制和 npm adapter 支持 macOS x64/arm64 | `tokenless` | `tokenless` | `make build`、`make lint`、`make test` |
 | agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
-| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 静态 Markdown skill 定义和 shell 资源；`make build` 用于确认没有编译步骤 |
+| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 源码安装需要 Python 3.6+；无需编译；使用 Python 3.11 运行[组件回归测试](#skill-回归测试与路径归属) |
 | anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
 | SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
@@ -47,7 +48,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 - TypeScript 插件、adapter 和网站需要 Node.js 与 npm，版本要求以各包的 `package.json` 和构建说明为准。
 - Rust 组件需要 stable Rust 工具链。若组件固定了工具链版本或增加了原生库，请遵循对应的 `AGENTS.md`。
-- `agent-sec-core` 使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)。`os-skills` 主要由静态 Markdown 和 shell 资源组成，不负责仓库的 Python 环境。
+- `agent-sec-core` 使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)。`os-skills` 的源码安装和发布清单工具需要 Python **3.6+** 及标准库，源码安装可通过 `PYTHON3=/path/to/python3` 选择解释器。组件回归测试在独立虚拟环境中使用 Python **3.11**。
 - 修改 `agentsight` eBPF probe 时需要 `clang` 和 `libbpf` 头文件。
 
 ## Fork 并创建分支
@@ -161,6 +162,32 @@ cargo test --workspace
 CI 会根据变更路径追加 coverage、打包、前端、adapter 和集成任务。修改生成包或框架
 adapter 时请查看 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)。
 
+### Skill 回归测试与路径归属
+
+修改 Skill 脚本的贡献者应将组件回归测试放在 `src/os-skills/tests/`。
+SkillFS 的测试放在 `src/skillfs/tests/`，包括其内置 `skillfs-mount` 脚本的测试。
+原来的 `tests/os-skills/` 已收敛到这两个组件目录。仓库级 `tests/` 用于共享测试
+入口和跨组件测试。
+
+在仓库根目录使用 Python 3.11 和虚拟环境执行：
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+.venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
+```
+
+OS Skills 套件覆盖 Skill 脚本及安装、打包布局，PDF 回归测试使用固定版本的
+PyMuPDF 依赖。上面的 SkillFS 命令只检查 Python 日志使用统计脚本，不能替代
+Linux 上的 Rust 或 FUSE 检查。两个套件均接入各自组件的 prebuilt CI 工作流。
+
+维护组件归属时，`.github/components.json` 的 `path_prefixes` 登记源码根目录，
+`supporting_paths` 登记这些目录之外的组件专属文件。以斜杠结尾表示目录，其他
+附属路径精确匹配文件。例如，OS Skills 专属的 prebuilt action 和工作流归属
+OS Skills，共用构建 action 和发布工作流仍按共享范围维护。同步更新
+`.github/CODEOWNERS` 中对应的组件条目，CI 会检查两处声明一致。
+
 ## Commit 规范
 
 Commit 规则正文见 [`specs/commit-message-standard.md`](specs/commit-message-standard.md)：
@@ -211,19 +238,23 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 - PR 模板记录了风险、兼容性和回滚考虑。
 - 需要同步的文档和双语对应文件都已更新。
 
+### Draft PR 与认领规则
+
+在早期探索或未完成自检时可使用 **Draft PR**（`isDraft=true`），完成准备后再点击 **Ready for review**（`isDraft=false`）进入正式评审与合入门禁：
+
+- 仅创建 Draft PR **不会**自动认领或锁定对应 Issue。如需在开发期间占锁，请先在可认领 Issue 中评论 `/claim`（见 [`.github/TRIAGE.md`](.github/TRIAGE.md#claiming-community-work)）。
+- 除非作者在评论中明确请求早期反馈，否则 Draft PR 不会进入正式代码评审。
+- 认领 Issue 后如需更多时间，请在 Issue 中简短回复进展；无法继续时请及时评论 `/unclaim`。连续 7 天无可见进展时维护者可能礼貌跟进，满 14 天无进展（仅静置 Draft PR 不计为正式提交）时维护者可评论 `/unclaim` 释放认领。
+- 当关联 Issue 已由其他正式 PR 合入解决或关闭时，未合入的正式撞车 PR 会由维护者致谢、说明结论并关闭；尚未转为 Ready for review 的 Draft PR 不阻塞原 Issue 结案。
+
+完整的生命周期矩阵与自动化规则见 [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md)（[中文评审参考](specs/issue-claim-and-pr-lifecycle_zh.md)）。
+
 ## 文档同步
 
-文档变更必须遵循 [`specs/documentation-standard.md`](specs/documentation-standard.md)，并保持中英文页面语义等价。两种语言中的命令示例必须完全相同。根指南只做跨组件总览，完整用法和架构内容放在以下规范位置。
+按[文档规范 §5 的 PR 文档更新规则](specs/documentation-standard.md#5-pr-documentation-update-rules)
+确定同一 PR 中需要更新的页面。保持中英文页面语义等价，两种语言的命令示例完全相同。
 
-| 变更 | 同一 PR 中需要更新 |
-| --- | --- |
-| CLI 命令或 flag | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 配置选项 | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 安装方式 | 涉及的共享安装/快速开始页面、组件手册和组件 README。 |
-| 架构或协议 | `src/<component>/docs/design/`。 |
-| 新增组件 | 根 README，必要时更新 `NOTICE`。 |
-
-日常功能和修复 PR 更新 README 与 user-guide 页面。发布版本 bump PR 再把面向用户的变更汇总到 `CHANGELOG*.md`。
+发布版本升级 PR 将用户可感知的变更汇总到 `CHANGELOG*.md`。
 
 ## 许可证
 

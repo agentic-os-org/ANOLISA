@@ -60,6 +60,70 @@ pub struct SubagentTrajectoryRef {
 /// merely mentions "error".
 pub const EXTRA_IS_ERROR: &str = "is_error";
 
+/// Marks a system step as the complete prompt for the next request, replacing
+/// prior system instructions. Unmarked system steps remain additive messages.
+pub const EXTRA_SYSTEM_PROMPT_SNAPSHOT: &str = "system_prompt_snapshot";
+
+/// Marks the start of a complete request's non-system context in [`Step::extra`].
+/// Clear accumulated user, assistant and tool-result history before this step;
+/// system instructions follow their separate snapshot convention. Replayed
+/// messages carry [`Step::is_copied_context`] and do not represent new executions.
+/// Without this marker, documents retain incremental conversation semantics.
+pub const EXTRA_REQUEST_CONTEXT_SNAPSHOT: &str = "request_context_snapshot";
+
+/// The outcome a tool-result envelope declares, when it declares one.
+///
+/// Providers disagree about how to spell the out-of-band failure flag: Anthropic
+/// writes `is_error`, real agent traces carry the camelCase `isError`, and some
+/// tools report `success` or an `error` status instead. Reading only one
+/// spelling leaves the others indistinguishable from "declared nothing", which
+/// [`ObservationResult::is_error`] documents as *unknown* — not as success — so
+/// every consumer falls back to scanning free text for error words and a
+/// successful call whose output merely mentions "no such file or directory"
+/// turns into a reported failure.
+///
+/// Precedence: an explicit flag first, then `success`, and an `error` status
+/// wins over either polarity — a payload that says `is_error: false` and
+/// `status: error` contradicts itself, and both directions resolve towards the
+/// failure. The interruption detector and the grader still hold their own
+/// inline copies of this precedence and agree with it today; routing them
+/// through this function is left to a follow-up so this change stays additive.
+///
+/// Returns `None` when the envelope declares nothing.
+pub fn declared_tool_failure(envelope: &serde_json::Value) -> Option<bool> {
+    let status_is_error = envelope
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
+    if let Some(is_error) = envelope
+        .get(EXTRA_IS_ERROR)
+        .or_else(|| envelope.get("isError"))
+        .and_then(|value| value.as_bool())
+    {
+        return Some(is_error || status_is_error);
+    }
+
+    if let Some(success) = envelope.get("success").and_then(|value| value.as_bool()) {
+        return Some(!success || status_is_error);
+    }
+
+    status_is_error.then_some(true)
+}
+
+/// The `extra` map carrying a declared outcome, both polarities.
+///
+/// `false` is written as well as `true`: [`ObservationResult::is_error`] reads an
+/// absent key as unknown, so dropping the negative polarity hands consumers a
+/// flag-less payload and lets the text heuristic re-judge a call the provider
+/// already declared successful.
+pub fn is_error_extra(is_error: bool) -> HashMap<String, serde_json::Value> {
+    HashMap::from([(
+        EXTRA_IS_ERROR.to_string(),
+        serde_json::Value::Bool(is_error),
+    )])
+}
+
 /// Whether two identifiers name the same tool call.
 ///
 /// Comparison first accepts the original identifiers case-insensitively. It
@@ -83,6 +147,39 @@ pub fn same_call_id(a: &str, b: &str) -> bool {
             .collect()
     };
     normalized(a) == normalized(b)
+}
+
+/// Resolve an echoed tool-call ID against the original IDs in its scope.
+///
+/// An exact ID takes precedence over tolerant echoes. Without an exact match,
+/// return an owner only when all matching candidates name the same original ID.
+/// Repeated occurrences of that ID are allowed; distinct aliases are ambiguous.
+/// Empty echoes and empty candidate IDs do not identify a call.
+pub fn resolve_call_id<'a>(
+    echo: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    if echo.is_empty() {
+        return None;
+    }
+    let mut owner = None;
+    let mut ambiguous = false;
+    for candidate in candidates {
+        if candidate == echo {
+            return Some(candidate);
+        }
+        if !candidate.is_empty() && same_call_id(candidate, echo) {
+            if owner.is_some_and(|previous| previous != candidate) {
+                ambiguous = true;
+            }
+            owner = Some(candidate);
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        owner
+    }
 }
 
 /// A single observation result from a tool call or action.
@@ -420,20 +517,36 @@ impl AtifTrajectory {
         serde_json::to_value(self)
     }
 
-    /// Validate step_id sequence (1-based, contiguous).
+    /// Validate step_id sequences (1-based, contiguous) in this trajectory and
+    /// in every embedded subagent trajectory.
+    ///
+    /// Each trajectory numbers its own steps from 1, so a child is validated
+    /// independently of its parent and siblings.
     ///
     /// # Errors
-    /// Returns a message describing the first out-of-sequence step.
+    /// Returns a message describing the first out-of-sequence step. Nested
+    /// failures name the trajectory that owns the step.
     pub fn validate_step_ids(&self) -> Result<(), String> {
+        self.validate_step_ids_in("")
+    }
+
+    fn validate_step_ids_in(&self, context: &str) -> Result<(), String> {
         for (i, step) in self.steps.iter().enumerate() {
             if step.step_id != i + 1 {
                 return Err(format!(
-                    "Step at index {} has step_id={}, expected {}",
+                    "{context}Step at index {} has step_id={}, expected {}",
                     i,
                     step.step_id,
                     i + 1
                 ));
             }
+        }
+        for (index, child) in self.subagent_trajectories.iter().flatten().enumerate() {
+            let label = match child.trajectory_id.as_deref() {
+                Some(id) if !id.trim().is_empty() => id.to_string(),
+                _ => format!("#{index}"),
+            };
+            child.validate_step_ids_in(&format!("{context}Subagent trajectory {label}: "))?;
         }
         Ok(())
     }
@@ -492,6 +605,56 @@ mod tests {
             subagent_trajectories: None,
             extra: None,
         }
+    }
+
+    #[test]
+    fn declared_failure_reads_every_spelling_and_lets_error_status_win() {
+        // The three spellings the pipeline serves, both polarities. A missing
+        // answer is None (unknown), never an implicit success.
+        let cases = [
+            (serde_json::json!({"is_error": true}), Some(true)),
+            (serde_json::json!({"is_error": false}), Some(false)),
+            (serde_json::json!({"isError": true}), Some(true)),
+            (serde_json::json!({"isError": false}), Some(false)),
+            (serde_json::json!({"success": false}), Some(true)),
+            (serde_json::json!({"success": true}), Some(false)),
+            (serde_json::json!({"status": "error"}), Some(true)),
+            (serde_json::json!({"status": "ERROR"}), Some(true)),
+            (serde_json::json!({"status": "complete"}), None),
+            (serde_json::json!({"content": "done"}), None),
+        ];
+        for (payload, expected) in cases {
+            assert_eq!(
+                declared_tool_failure(&payload),
+                expected,
+                "payload {payload}"
+            );
+        }
+
+        // An explicit success contradicted by an error status resolves towards
+        // the failure, matching the detector and the grader.
+        assert_eq!(
+            declared_tool_failure(&serde_json::json!({"is_error": false, "status": "error"})),
+            Some(true)
+        );
+        assert_eq!(
+            declared_tool_failure(&serde_json::json!({"success": true, "status": "error"})),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn is_error_extra_keeps_the_success_polarity() {
+        for flag in [true, false] {
+            let extra = is_error_extra(flag);
+            assert_eq!(
+                extra.get(EXTRA_IS_ERROR),
+                Some(&serde_json::Value::Bool(flag))
+            );
+        }
+        // `false` must be written rather than omitted: absent means unknown,
+        // and the text heuristic would re-judge a declared success.
+        assert!(is_error_extra(false).contains_key(EXTRA_IS_ERROR));
     }
 
     #[test]
@@ -594,6 +757,81 @@ mod tests {
         let mut traj = minimal_trajectory();
         traj.steps[0].step_id = 5;
         assert!(traj.validate_step_ids().is_err());
+    }
+
+    fn atif_json(trajectory_id: &str, step_ids: &[u64], subagents: &[String]) -> String {
+        let steps = step_ids
+            .iter()
+            .map(|id| format!(r#"{{"step_id": {id}, "source": "user", "message": "synthetic"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let children = if subagents.is_empty() {
+            String::new()
+        } else {
+            format!(r#", "subagent_trajectories": [{}]"#, subagents.join(", "))
+        };
+        format!(
+            r#"{{"schema_version": "ATIF-v1.7", "session_id": "synthetic-run",
+                "trajectory_id": "{trajectory_id}",
+                "agent": {{"name": "fixture", "version": "fixture"}},
+                "steps": [{steps}]{children}}}"#
+        )
+    }
+
+    /// A root sequence that is valid says nothing about the sequences embedded
+    /// under it: the SDK imports and consumes subagent trajectories as ordinary
+    /// trajectories, so a child that starts at 2 has to be rejected too.
+    #[test]
+    fn validate_rejects_a_child_that_does_not_start_at_one() {
+        let json = atif_json("parent", &[1], &[atif_json("child", &[2], &[])]);
+        let error = validate_trajectory_str(&json).expect_err("a child starting at 2 must fail");
+        assert!(
+            error.contains("child"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_grandchild_gap() {
+        let grandchild = atif_json("grandchild", &[1, 3], &[]);
+        let child = atif_json("child", &[1], &[grandchild]);
+        let json = atif_json("parent", &[1], &[child]);
+        let error = validate_trajectory_str(&json).expect_err("a grandchild gap must fail");
+        assert!(
+            error.contains("grandchild"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_later_sibling() {
+        let json = atif_json(
+            "parent",
+            &[1],
+            &[
+                atif_json("first", &[1], &[]),
+                atif_json("second", &[1, 2, 4], &[]),
+            ],
+        );
+        let error = validate_trajectory_str(&json).expect_err("the later sibling must fail");
+        assert!(
+            error.contains("second"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_nested_and_independently_numbered_trajectories() {
+        let grandchild = atif_json("grandchild", &[1], &[]);
+        let json = atif_json(
+            "parent",
+            &[1, 2],
+            &[
+                atif_json("child", &[1, 2], &[grandchild]),
+                atif_json("sibling", &[1, 2, 3], &[]),
+            ],
+        );
+        validate_trajectory_str(&json).expect("each trajectory numbers its own steps from 1");
     }
 
     #[test]
@@ -770,5 +1008,27 @@ mod tests {
             let json = serde_json::to_string(&source).unwrap();
             assert_eq!(json, format!("\"{}\"", source.as_str()));
         }
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::resolve_call_id;
+    #[test]
+    fn exact_ids_win_in_either_iteration_order() {
+        for ids in [["call_x", "callx"], ["callx", "call_x"]] {
+            assert_eq!(resolve_call_id("callx", ids), Some("callx"));
+        }
+        assert_eq!(resolve_call_id("CALL", ["call", "CALL"]), Some("CALL"));
+    }
+    #[test]
+    fn only_unique_nonempty_aliases_can_resolve() {
+        assert_eq!(resolve_call_id("callx", ["call_x", "call-x"]), None);
+        assert_eq!(
+            resolve_call_id("callx", ["call_x", "call_x"]),
+            Some("call_x")
+        );
+        assert_eq!(resolve_call_id("", [""]), None);
+        assert_eq!(resolve_call_id("unknown", ["call_x"]), None);
     }
 }

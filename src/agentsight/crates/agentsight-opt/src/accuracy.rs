@@ -107,3 +107,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod command_evidence_tests;

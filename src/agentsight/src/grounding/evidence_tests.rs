@@ -1512,6 +1512,36 @@ fn a_serialized_json_payload_still_grounds_its_literal() {
 }
 
 #[test]
+fn a_semicolon_delimited_column_still_grounds_its_literal() {
+    // `sqlite3 .separator ';'`, `psql -F';'` and `find -printf '%p;%s\n'`
+    // delimit a column with a semicolon, which the extractor already treats as
+    // a structural separator. Unlike a comma, a semicolon also ends the value
+    // when something follows it (it separates shell commands too), so both
+    // column positions must ground, like the pipe form above.
+    for (class, literal) in [
+        (ClaimClass::Path, "/tmp/report.txt"),
+        (ClaimClass::Version, "v1.2.3"),
+    ] {
+        for text in [format!("1;{literal}"), format!("{literal};1")] {
+            let mut pool = Vec::new();
+            push_entry(&mut pool, 3, Some("source".into()), &text);
+            assert!(
+                matches!(ground_one(
+                    &Claim {
+                        text: literal.into(),
+                        class,
+                        value: None,
+                    },
+                    &pool
+                ), Grounding::Grounded {
+                    step_id: 3, source_call_id: Some(id) } if id == "source"),
+                "a semicolon delimiter must not hide {literal} in {text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_comma_delimited_column_still_grounds_its_literal() {
     // The CSV form of the sqlite3 column above (`sqlite3 -csv`, `psql --csv`):
     // the comma is one of the extractor's structural separators, so a value

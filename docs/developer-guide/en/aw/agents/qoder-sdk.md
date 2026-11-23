@@ -1,0 +1,312 @@
+# Qoder SDK
+
+[中文版](../../../zh/aw/agents/qoder-sdk.md)
+
+For application-owned startup with explicit native fallback, see the [TypeScript SDK](../deployment/native-sdk.md).
+
+## Dependencies and factories
+
+Verified baseline: `@qoder-ai/qoder-agent-sdk@1.0.56` with bundled international Worker 1.1.78. Use Node.js 22+, install the SDK in the application directory and retain SDK authentication. AW accepts other SDK/Worker releases with the required native interfaces and records their actual versions. Package identity, the declared site, Hook dispatch, invocation identity and Query cleanup remain checked at launch and use.
+Set a target under `spec` in a complete AW configuration.
+
+```yaml
+agents:
+  sdk:
+    adapter: qoder-sdk
+    argv: [node, /absolute/application/worker.mjs]
+```
+Use managed daemon and Query factories, closing both in finally.
+
+```javascript
+import { startDaemon, query, accessTokenFromEnv } from "@qoder-ai/qoder-agent-sdk";
+import { pathToFileURL } from "node:url";
+
+const prompt = process.argv[2];
+if (!prompt) throw new Error("A prompt is required");
+const bridge = process.env.AW_QODER_SDK_BRIDGE
+  ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
+const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
+const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
+let daemon, current, stopping = false, cleanup, initialized;
+function close() {
+  return cleanup ??= (async () => {
+    // Creation failures are reported by the main task; still close its daemon.
+    await initialized.catch(() => {});
+    try { await current?.return(); }
+    finally { await daemon?.stop(); }
+  })();
+}
+function stop() {
+  stopping = true; // A service also closes its HTTP/queue admission here.
+  void close().catch(error => { console.error(error); process.exitCode = 1; });
+}
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+initialized = (async () => {
+  daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+  if (!stopping) current = await makeQuery({ prompt, options: {
+    daemon, cwd: process.cwd(), settingSources: [],
+  } });
+})();
+try {
+  await initialized;
+  if (!stopping) {
+    for await (const message of current) {
+      if (stopping) break;
+      console.log(JSON.stringify(message));
+    }
+  }
+} finally {
+  try { await close(); }
+  finally {
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+  }
+}
+```
+## Launch and validate
+
+```bash
+aw config validate --config /absolute/aw.yaml
+aw run --config /absolute/aw.yaml --agent sdk -- "Your task"
+aw service status --config /absolute/aw.yaml
+aw service stop --config /absolute/aw.yaml
+```
+
+`startDaemon()` confirms daemon readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
+For security composition, use the [SDK example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml), replace paths and start sec-core first.
+
+The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
+Skill resolution respects the Query's `settingSources`: `user` and `project`
+enable their catalogs, while `local` adds no Skill catalog. Project settings can
+enable `.agents/skills`. Same-name assets in multiple enabled directories, including
+case variants and native-unloadable assets, produce `skill_resolution_error`. Use
+unique names or narrow `settingSources`. Model-only Skills remain supported even
+when absent from the refresh response's displayable list.
+Local Workflow scripts in any enabled user/project source produce a resolution
+error, including unrelated filenames and directory entrypoints (`workflow.js` or
+`index.js`). The Worker converts JavaScript metadata into Skills, and the public
+API cannot prove which signing root was selected. Remove those local Workflow
+assets or exclude their source before enabling required Skill checks.
+A Query that has attempted native `Read` cannot establish a project's selected
+Skill source: the Worker can retain dynamically discovered Skills across reloads.
+With project sources enabled, later Skill checks return `skill_resolution_error`,
+including after failed/denied reads or idle policy updates. Start a new Query or
+use `settingSources: ["user"]` from Query creation for required Skill checks.
+
+## Start from the application
+
+A Node application can prepare its own AW instance and keep its normal startup
+command. Add the following once, before importing the bridge and creating a
+daemon or Query. The existing service must use the same `aw.yaml`; its `sdk`
+target must describe this application's Node executable and entrypoint.
+
+```javascript
+import { execFileSync } from "node:child_process";
+
+const instance = JSON.parse(execFileSync("aw", [
+  "instance", "prepare", "--agent", "sdk",
+], { encoding: "utf8", timeout: 30000, maxBuffer: 1048576 }));
+Object.assign(process.env, instance.environment);
+```
+
+Continue through the managed factories above. Preparation returns a pending
+instance; `startDaemon()` or initialized `createQuery()` confirms native readiness.
+Keep preparation failures fatal. Every protected Query must use the returned
+bridge, including new and resumed Queries. An application already running without
+that integration needs one restart.
+
+From the directory containing `aw.yaml`, start and inspect the application:
+
+```bash
+node /absolute/application/worker.mjs
+aw service status --config aw.yaml
+aw update --agent sdk
+```
+
+Run the status and update commands in another terminal. Edit `aw.yaml` before
+updating; pause Query creation and close active Queries first. Multiple workers
+require `aw update --instance INSTANCE` to select one explicitly.
+The same resident policy, native configuration and cleanup rules apply to both
+startup modes. After closing all Queries and stopping the daemon, release the
+prepared instance in the application's `finally` block:
+
+```javascript
+execFileSync("aw", ["instance", "release", "--binding", instance.binding],
+  { encoding: "utf8", timeout: 10000 });
+```
+
+## Native configuration
+
+Ordinary resident Queries retain native user/project/local settings, unknown keys,
+plugin paths, MCP configuration, Hook order, permissions and sessions. AW does not
+modify SDK or Worker files. The verified releases are SDK 1.0.54 / Worker 1.1.74
+and SDK 1.0.56 / Worker 1.1.78, with CN/global parser checks and global authenticated
+acceptance on Linux arm64. Other releases require validation of the interfaces AW uses.
+
+AW checks the input visible at its public `PreToolUse` callback. Native Hooks and
+permission handling can rewrite arguments afterward; those later arguments are
+not checked again at a final execution boundary. Post policy records retain the
+input snapshot checked by AW, while application Hooks receive native payloads.
+Native denial retains precedence. Hook commands and skill interpolation remain
+outside the model-tool boundary. This integration does not provide OS containment.
+Keep native Hooks enabled throughout the Query lifetime. Initialization rejects
+an effective `disableAllHooks: true` or `hooksConfig.enabled: false`, and rejects `hooksConfig.headlessFastMode: true`
+and the `headless-fast-hooks` CLI override before releasing
+a prompt; changing Hook availability during an active Query is unsupported.
+
+Omit `settingSources` to retain native defaults, or pass the application's native
+source list. Pass settings, plugins, Hooks and permissions unchanged. Route probes,
+ordinary Queries, warmed Queries and daemon creation through the bridge; configured
+AW admission failures must propagate. Application entries support `.js` and `.mjs`.
+
+Use `await bridge.startup({options})` for one-shot prewarming. It initializes without
+a prompt and checks scope validity again on `warm.query(prompt)`. Await `warm.close()`
+for an unused instance. Each warm object accepts one Query and holds its instance
+and task scope until closed; close it before an idle policy update. Follow
+[traffic readiness](../deployment/lifecycle.md#prepare-before-accepting-traffic)
+to overlap its preparation with configured input scanners. SDK/Worker files remain
+unchanged when AW starts and stops; removing AW integration means restarting
+through the application's native factories.
+
+Native in-process SDK MCP servers retain schema transforms and defaults: AW checks
+the parsed handler input, then checks the final SDK response after output validation
+and error conversion. Model callbacks delegate to that Query-owned MCP boundary.
+Cancellation retains the handler finalizer and scope until cleanup completes.
+External MCP callbacks check arguments visible at the public Hook; remote-server
+internals remain the server's responsibility. The explicit managed MCP/private
+execution factory below keeps its existing no-transform contract.
+
+For Pilot, retain its native Stop settings and grant the runtime wrapper using
+`qoder_sdk.runtime_launchers`. The wrapper must launch the selected SDK Worker;
+preserve its preload assets and environment. Explicit `declarative_plugins: true`
+and Queries using `awNativeExecutionFactory` retain their existing restrictive
+profiles below. Query dispatch and native MCP adoption still use private SDK
+interfaces, which require regression checks when upgrading the SDK.
+
+## Application constraints
+
+| Item | Requirement |
+| --- | --- |
+| Shutdown | Handle TERM/INT in both ordinary and `--reloadable` workers; stop admission and await cleanup before exiting. Without handlers, Node exits immediately and AW forcibly reclaims remaining SDK children. |
+| Factory coverage | Route every protected Query through the Bridge; direct native factories bypass AW checks |
+| Native settings | Ordinary resident Queries retain native configuration. Explicit declarative/command-consumer profiles retain their restrictions. Transport replacement remains unsupported; runtime wrappers/imports require [execution-asset grants](../configuration.md#qoder-sdk-execution-assets). |
+| Permissions and input | Preserve native denial; check public Hook input. Subsequent native rewrites remain unchecked before execution. |
+| Environment and authentication | Queries sharing a daemon cannot override env/auth; use native `daemon.auth()` for credential changes or separate daemons for different credentials |
+| Post checks | Ordinary resident Queries adopt `replace_result` for one text slot via `updatedToolOutput`, including `/file/content` in native `Read` text results; file metadata remains intact and PII checks also scan the retained envelope; `withhold_result` closes delivery on check failure. Restricted `--reloadable` mode remains observation-only. |
+| AgentSight | Each acknowledged Query owns bounded callback observation and closes it with its scope. Native session/tool-call association is verified; AgentSight source process identity requires separate verification and unavailable evidence retains unknown coverage |
+| Worktree | Ordinary callbacks carry parent Query cwd, so policies needing actual execution cwd cannot use worktrees; restricted mode rejects them |
+
+Cleanup waits for native Query, Hook, permission, credential and MCP callbacks to drain. Failed or timed-out private lease cleanup fences new work; fix the cause and restart the worker.
+
+## Managed MCP and private execution
+
+Use `await bridge.createSdkMcpServer(options)`, creating a new server for each Query. The native integration provides Query identity; `parentIdentity: "required"` requests a model tool ID and is rejected.
+AW rejects schema default/transform changes to approved arguments before entering the handler. Post failures use `withhold_result`; native structured results are retained.
+
+Opt into private execution with `options.awExecutionFactory`. Handlers consume `executionEnvironment()`; results are redacted before Post and delivery. Built-in Bash has no environment injection seam.
+See [private execution](../../../../../src/aw/docs/design/en/adapters/private-execution.md) for API and cleanup ordering, and [structured MCP](../../../../../src/aw/docs/design/en/adapters/structured-mcp.md) for identity.
+
+## Native Bash command consumers
+
+Use `options.awNativeExecutionFactory` when built-in Bash must run through an
+application-owned credential consumer. Grant the wrapper executable in the
+[execution-asset configuration](../configuration.md#qoder-sdk-execution-assets)
+first. Ordinary daemon and direct Queries support this factory; `--reloadable`
+rejects it.
+
+Merge the options below into the existing Query factory, retaining `daemon`,
+`cwd` and `settingSources: []`. The application supplies `approveTool`, its
+native permission callback, and `acquireConsumer`, which acquires a command-bound
+ticket and owns the execution process tree.
+
+```javascript
+export function nativeBashOptions(bridge, approveTool, acquireConsumer) {
+  return {
+    permissionMode: "default",
+    canUseTool: approveTool,
+    awNativeExecutionFactory: async (context, control) => {
+      const consumer = await acquireConsumer(context, control);
+      return {
+        version: bridge.NATIVE_COMMAND_WRAPPER_VERSION,
+        commandWrapper: {
+          executable: consumer.executable,
+          ticket: consumer.ticket,
+        },
+        settle: (control) => consumer.settle(control),
+        release: () => consumer.release(),
+      };
+    },
+  };
+}
+```
+
+Every wrapper Query requires an explicit `canUseTool` callback and `default` or
+`acceptEdits` mode. Creation and permission changes reject bypass/auto and other
+modes. Every Bash Hook also checks the Worker-reported mode before acquisition.
+PreTool retains the logical command through native rule evaluation; only an
+explicit callback allowance publishes the wrapper through the SDK permission
+result. Application Hooks cannot rewrite the approved input.
+
+The factory receives frozen `{invocationId, nativeToolUseId, sessionId,
+policyRevision, toolName, input}` and `{signal}`. Its lease accepts exactly the
+four fields shown above; `commandWrapper` accepts only `executable` and `ticket`.
+The ticket is 16–256 base64url characters. The admitted executable receives two
+arguments: the ticket and the base64url-encoded original command. Bind the ticket
+to that command, isolate credentials, preserve the exit status and redact output.
+Native rules, the permission callback, AW policies and application Post input
+use the logical command; later execution metadata can show the wrapper handle.
+Use an opaque, short-lived ticket and keep it valid while approval is pending.
+
+`settle({signal})` must confirm that the process tree and consumer finalizers
+have ended, including after native timeout-backgrounding. Normal completion has
+no fixed task-length cap. Cancellation asks the consumer to stop and join within
+the shared cleanup deadline; bound acquisition and honor its signal. Clean up
+partial acquisition before throwing.
+AW holds finite-input EOF and native shutdown until consumer acknowledgement,
+then drains native work and original callbacks before `release()` revokes the
+ticket. Native rejection before publication releases the unused ticket without
+calling `settle`. If settlement or cleanup fails, retain ownership, diagnose the
+failure and restart the fenced worker. Ordering invariants are in the
+[execution design](../../../../../src/aw/docs/design/en/adapters/private-execution.md#native-bash-consumers).
+
+## Final tool-result gate
+
+SDK 1.0.57 / Worker 1.1.81 on Linux arm64 and x64 supports an opt-in
+`security.violation` gate for one foreground Bash Query. Enable that event with
+`required: true` and structured Provider steps using `on_error: block`.
+`tool.after` remains observation-only in this profile; use `on_error: report` there.
+Launch with `aw run`, use the managed daemon, and pass a string prompt plus
+`settingSources: []`, `persistSession: false`, `tools: ["Bash"]`, and `model: "auto"`.
+The returned Query exposes iteration and `close()`.
+
+AW verifies the SDK and bundled Worker fingerprints before launch, installs
+process-local Node loader patches, and holds the first prompt until both the
+Worker instrumentation and native Hooks are ready. Installed package files stay
+unchanged. After application Post Hooks, the gate checks the serialized legacy
+request immediately before native request encoding. It binds each Bash result
+to its native session, call and arguments, and invokes the existing AW Provider
+chain. Denial, timeout, invalid identity or Provider failure substitutes
+`AW withheld the final tool result`; changed replay bytes are also withheld.
+
+This profile requires the global package and native legacy transport. Custom
+models/transports, SDK context mutation, MCP, plugins, background tool requests,
+additional user/notification turns, context compaction and policy updates are
+unsupported. A changed original context or an uncovered result envelope aborts
+model dispatch. Other published releases retain ordinary Post behavior; a
+required final gate rejects an unverified build before application launch.
+
+Five `final-1.0.57-*` cases in the [native matrix](../../../../../src/aw/tests/native-matrix.json)
+exercise safe output, post-AW mutation, timeout, Provider error and failed native
+Bash with hosted inference. The failure case verifies PostFailure, final `is_error`
+and model text quoting checked stderr. They require an authorized Qoder PAT and assert actual assistant
+output, policy records, unchanged packages and released processes/events.
+The network payload uses native encoding; the checked plaintext is the encoding
+input, and the hosted assistant response supplies delivery evidence.
+
+## Updates and long-running work
+
+Ordinary mode [updates policies](../deployment/policy-updates.md) after all Queries fully close; the next Query takes the new snapshot.
+Restricted `--reloadable` can update between requests in one Query. It requires an explicit daemon, `msg_lifecycle_v1` and native idle confirmation, and rejects strict Post, private leases, goals, background scheduling and worktrees.
+Consume Query output continuously; if consumption stops, stop dispatch and call `close()` or `return()`. This mode has no fixed output buffer limit and retains the 1024 Hook association and 64 active claims per kind limits.
+See the [update contract](../../../../../src/aw/docs/design/en/runtime/policy-reload.md) for the complete restricted entrypoint list.

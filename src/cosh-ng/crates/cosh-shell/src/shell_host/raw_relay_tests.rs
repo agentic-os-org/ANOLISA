@@ -1,3 +1,4 @@
+use super::input_events::latest_capture_submission_generation;
 use super::*;
 use crate::raw_input::UserPtyInputGeneration;
 
@@ -179,11 +180,80 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("draw queued candidate");
 
     assert_eq!(output, b"BACKGROUND\r\n\r\x1b[2Kprompt> /cancel");
+}
+
+#[test]
+fn suggestion_redraw_moves_over_list_and_blank_row_and_keeps_one_prompt() {
+    let presentation = PromptPresentation::new(false);
+    let lines = vec![
+        "┃ Cosh AI  可以直接提问".to_string(),
+        "  › 1. q1".to_string(),
+        "  Tab 填入".to_string(),
+    ];
+    let mut output = Vec::new();
+    super::input_events::redraw_suggestion_list(
+        &mut output,
+        &lines,
+        "prompt> ",
+        "q1",
+        &presentation,
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.starts_with("\x1b[?7l\x1b[4A"));
+    assert!(text.contains("\n\r\x1b[2Kprompt> "));
+    assert!(text.ends_with("\x1b[?7h"));
+    assert_eq!(text.matches("┃ Cosh AI").count(), 1);
+}
+
+#[test]
+fn prompt_local_cycle_shows_number_and_question_once() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("surface-local");
+    let mut output = Vec::new();
+    let mut echoed = 0;
+    let (_, mut replay) = tracker_for_test();
+    let mut presentation = PromptPresentation::new(false);
+    let payload = crate::raw_input::SuggestionSurfacePayload {
+        variants: vec![vec!["a".to_string()], vec!["b".to_string()]],
+        labels: vec!["1.".to_string(), "2.".to_string()],
+        ids: vec!["c0".to_string(), "c1".to_string()],
+        rows: 40,
+        width: 80,
+        height: 24,
+    };
+    presentation.selection_surface_mut().publish(
+        payload,
+        0,
+        3,
+        "prompt> ",
+        parser.display_position(),
+    );
+    sender
+        .send(crate::raw_input::RawInputEvent::PromptGhostCycle {
+            text: "q1".to_string(),
+            suggestion_id: Some("c1".to_string()),
+            generation: 3,
+        })
+        .unwrap();
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut replay,
+        &mut presentation,
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains(" › 2. q1"), "{text}");
+    assert_eq!(text.matches("q1").count(), 1);
 }
 
 #[test]
@@ -321,7 +391,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
-    let prompt_presentation = PromptPresentation::new(false);
+    let mut prompt_presentation = PromptPresentation::new(false);
 
     let barrier_count = |parser: &OscParser, component| {
         parser
@@ -349,7 +419,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("drain pty writes");
     assert_eq!(
@@ -374,7 +444,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("drain post-prompt write");
     assert_eq!(
@@ -402,7 +472,7 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("drain post-command write");
 
@@ -444,7 +514,7 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         "prompt$ ",
         &mut 0,
         &mut prompt_replay,
-        &PromptPresentation::new(false),
+        &mut PromptPresentation::new(false),
     )
     .unwrap();
     assert!(!parser
@@ -468,7 +538,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
-    let prompt_presentation = PromptPresentation::new(false);
+    let mut prompt_presentation = PromptPresentation::new(false);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -483,7 +553,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         "",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("draw candidate hint");
 
@@ -504,7 +574,7 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
     let mut output = Vec::new();
     let mut echoed = 0usize;
     // Status symbols enabled: candidate redraws must still not publish.
-    let prompt_presentation = PromptPresentation::new(true);
+    let mut prompt_presentation = PromptPresentation::new(true);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -528,13 +598,13 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
-        &prompt_presentation,
+        &mut prompt_presentation,
     )
     .expect("draw isolated candidate states");
 
     assert_eq!(
         String::from_utf8(output).expect("utf8 output"),
-        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\n\r\x1b[2Kprompt> "
+        "\r\x1b[2Kprompt> 你好\r\x1b[2Kprompt> 你好\r\n\r\x1b[2Kprompt> "
     );
 }
 
@@ -549,7 +619,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut output = Vec::new();
         let mut echoed = 0usize;
-        let prompt_presentation = PromptPresentation::new(false);
+        let mut prompt_presentation = PromptPresentation::new(false);
 
         sender
             .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -564,7 +634,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
             prompt,
             &mut echoed,
             &mut prompt_replay,
-            &prompt_presentation,
+            &mut prompt_presentation,
         )
         .expect("draw candidate hint");
 
@@ -1066,6 +1136,7 @@ fn prompt_restore_waits_through_passive_observer_cycles() {
     let restore = RawObserverAction::RestorePrompt {
         ghost_text: Some("analyze failure".to_string()),
         ghost_route: Default::default(),
+        suggestion_surface: None,
     };
     let mut pending = None;
     remember_pending_prompt_restore(&restore, &mut pending);
@@ -1082,6 +1153,7 @@ fn active_observer_action_supersedes_waiting_prompt_restore() {
     let restore = RawObserverAction::RestorePrompt {
         ghost_text: Some("analyze failure".to_string()),
         ghost_route: Default::default(),
+        suggestion_surface: None,
     };
     let mut pending = Some(restore);
 
@@ -1098,6 +1170,7 @@ fn foreground_passthrough_cancels_waiting_prompt_restore() {
     let restore = RawObserverAction::RestorePrompt {
         ghost_text: Some("analyze failure".to_string()),
         ghost_route: Default::default(),
+        suggestion_surface: None,
     };
     let mut pending = Some(restore);
 
@@ -1110,6 +1183,14 @@ fn foreground_passthrough_cancels_waiting_prompt_restore() {
 
 #[test]
 fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
+    for (stale_replay, pending) in [(false, true), (true, true), (true, false)] {
+        for ghost in [None, Some("objdump")] {
+            assert_prompt_fragment_restore(stale_replay, pending, ghost);
+        }
+    }
+}
+
+fn assert_prompt_fragment_restore(stale_replay: bool, pending: bool, ghost: Option<&str>) {
     let mut parser = parser_for_test("fragmented-prompt-ghost");
     feed_shell_ready(&mut parser);
     parser
@@ -1118,6 +1199,16 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     let mut output = Vec::new();
     let mut display_start = 0;
     let (_generation, mut prompt_replay) = tracker_for_test();
+    if stale_replay {
+        parser.feed(b"[root@host]# ").expect("feed cached prompt");
+        prompt_replay.arm_for_replay(parser.last_prompt_display());
+        parser
+            .feed(b"\x1b[?1h\x1b=\x1b[?2004h")
+            .expect("feed zsh mode tail");
+    }
+    if !pending {
+        display_start = parser.display_position();
+    }
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut prompt_presentation = PromptPresentation::new(false);
@@ -1131,8 +1222,9 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         &mut output,
         &input_mode,
         RawObserverAction::RestorePrompt {
-            ghost_text: Some("objdump".to_string()),
+            ghost_text: ghost.map(str::to_string),
             ghost_route: Default::default(),
+            suggestion_surface: None,
         },
         &mut display_start,
         &mut prompt_replay,
@@ -1144,6 +1236,21 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     )
     .expect("restore prompt");
     assert_eq!(action, RawObserverAction::Continue);
+    if stale_replay {
+        assert!(
+            String::from_utf8_lossy(&output)
+                .matches("[root@host]# ")
+                .count()
+                == 1,
+            "a new restore must not deduplicate the prompt against an earlier ghost: {:?}",
+            output
+        );
+    }
+
+    if !pending {
+        assert!(prompt_replay.is_armed());
+        assert!(prompt_replay.strip(parser.last_prompt_display()).is_empty());
+    }
 
     parser
         .feed(b"\x1b[?2004h[root@host]# ")
@@ -1158,11 +1265,15 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     )
     .expect("write prompt fragment");
 
-    assert!(
-        output.ends_with(b"\x1b7\x1b[?7l\x1b[2m objdump\x1b[0m\x1b[?7h\x1b8"),
-        "{}",
-        String::from_utf8_lossy(&output)
-    );
+    if ghost.is_some() {
+        assert!(
+            output.ends_with(b"\x1b7\x1b[?7l\x1b[2m objdump\x1b[0m\x1b[?7h\x1b8"),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+    } else {
+        assert!(output.ends_with(b"[root@host]# "));
+    }
 }
 
 #[test]
@@ -1175,7 +1286,7 @@ fn capture_batch_is_drained_under_mode_lock_before_observe() {
     let mut parser = parser_for_test("inline-capture-batch");
     let mut output = Vec::new();
     let (_, mut replay) = tracker_for_test();
-    let presentation = PromptPresentation::new(false);
+    let mut presentation = PromptPresentation::new(false);
     let mut echoed = 0;
     let action = observe_with_input_mode_lock(
         &mut |view: ShellEventView<'_>, _: &mut Vec<u8>| {
@@ -1198,7 +1309,7 @@ fn capture_batch_is_drained_under_mode_lock_before_observe() {
                 "prompt> ",
                 &mut echoed,
                 &mut replay,
-                &presentation,
+                &mut presentation,
             )?);
             Ok(())
         },

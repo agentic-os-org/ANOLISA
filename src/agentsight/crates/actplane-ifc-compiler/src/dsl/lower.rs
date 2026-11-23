@@ -468,6 +468,81 @@ mod tests {
     }
 
     #[test]
+    fn exec_interior_star_pattern_warns_as_never_matching() {
+        // An interior '*' cannot be expressed by the comm matcher (exact or
+        // prefix on the basename); the lowering keeps the star in the literal
+        // and the engine matches that literal byte-exactly. No ordinary
+        // process name contains a literal '*', so the rule can never fire —
+        // the same silent dead-matcher class the endpoint (five-octet) and
+        // path (mid-star) warnings cover for their kinds.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block exec "py*env" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("py*env") && w.contains("never fire")),
+            "interior-star exec pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+        // Pin the lowered matcher: the literal keeps the star, matched exactly.
+        let cfg: CConfig = unsafe { std::ptr::read_unaligned(c.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_eq!(cfg.rules[0].m, M_EXACT);
+        let lit = cfg.rules[0].target.split(|b| *b == 0).next().unwrap_or(&[]);
+        assert_eq!(lit, b"py*env");
+    }
+
+    #[test]
+    fn exec_star_suffix_and_basename_patterns_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            source P = exec "python*"
+            rule r:
+              block exec "**/git" if P
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "prefix and basename exec patterns must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn exec_interior_star_warns_on_every_exec_surface() {
+        // Cover source patterns, both xform gate kinds, `after exec` gates,
+        // and `since exec` invalidators in addition to the rule target above.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            source BAD = exec "no*de"
+            endorse REVIEWED by exec "ap*prove"
+            declassify BAD by exec "san*itize"
+            rule r:
+              block exec "bash" if true unless after exec "gre*p" since exec "py*env" "run"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        for pat in ["no*de", "ap*prove", "san*itize", "gre*p", "py*env"] {
+            assert!(
+                c.warnings
+                    .iter()
+                    .any(|w| w.contains(pat) && w.contains("never fire")),
+                "exec surface pattern '{pat}' must warn: {:?}",
+                c.warnings
+            );
+        }
+    }
+
+    #[test]
     fn exec_wildcard_patterns_match_any_comm() {
         assert_eq!(lower_exec("*"), (M_ANY, String::new()));
         assert_eq!(lower_exec("**"), (M_ANY, String::new()));
@@ -659,6 +734,91 @@ mod tests {
             "five-octet pattern must produce a compile warning: {:?}",
             c.warnings
         );
+    }
+
+    /// The engine matches endpoint rules with `(ip & mask) == net` where `ip`
+    /// is the user-supplied sockaddr of connect(2), read at syscall entry.
+    /// connect() to 0.0.0.0 is valid on Linux (it reaches loopback), so a
+    /// match-nothing sentinel of `(0, /32)` is not match-nothing: it is
+    /// byte-identical to the legitimate pattern `endpoint "0.0.0.0"` and fires
+    /// on those connections. The only pair that never matches under the ABI is
+    /// `(net != 0, mask == 0)`: `ip & 0 == net` is false for every `ip`.
+    fn assert_never_matches(net: u32, mask: u32) {
+        let (zero_net, zero_mask) = lower_ipv4("0.0.0.0");
+        assert!(
+            net != zero_net || mask != zero_mask,
+            "sentinel collides with the literal pattern `endpoint \"0.0.0.0\"` \
+             (connect to 0.0.0.0 reaches loopback on Linux)"
+        );
+        assert_eq!(mask, 0, "never-match requires a zero mask");
+        assert_ne!(net, 0, "a zero net with a zero mask is match-any");
+        // spot-check the ABI's own arithmetic: no ip satisfies it
+        for ip in [0u32, 1, 0xff, 0x00ff_ffff, 0x7f00_0001, u32::MAX] {
+            assert_ne!(
+                ip & mask,
+                net,
+                "sentinel (net={net}, mask={mask}) matches ip={ip}"
+            );
+        }
+    }
+
+    #[test]
+    fn match_nothing_endpoint_rule_sentinel_is_unreachable() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block connect endpoint "*.internal"
+              because "x"
+            "#,
+        )
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_never_matches(cfg.rules[0].ipv4, cfg.rules[0].ipv4_mask);
+    }
+
+    #[test]
+    fn match_nothing_endpoint_source_sentinel_is_unreachable() {
+        // A 100-byte label exceeds the 63-byte DNS label limit, so resolution
+        // fails deterministically regardless of the resolver environment.
+        let host = format!("{}.invalid", "x".repeat(100));
+        let pol = crate::dsl::parse::parse(&format!(
+            r#"source NET = endpoint "{host}"
+            rule r:
+              block exec "sh" if NET
+              because "x""#
+        ))
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_updates, 2, "endpoint source lowers connect+recv");
+        for u in &cfg.updates[..cfg.n_updates as usize] {
+            assert_never_matches(u.ipv4, u.ipv4_mask);
+        }
+    }
+
+    #[test]
+    fn match_nothing_unless_target_sentinel_is_unreachable() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block connect endpoint "*" unless target "*.internal"
+              because "x"
+            "#,
+        )
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        // `unless target` fails closed: the exception must never be satisfied
+        // (a satisfied exception skips the rule), for any observed ip.
+        assert_eq!(cfg.rules[0].cond_kind, C_TARGET);
+        assert_eq!(cfg.rules[0].cond_neg, 0);
+        assert_never_matches(cfg.rules[0].cond_ipv4, cfg.rules[0].cond_ipv4_mask);
     }
 
     #[test]
@@ -894,9 +1054,20 @@ fn lower_numeric_ipv4(pat: &str) -> Option<(u32, u32)> {
     if k == 0 { None } else { Some((net, mask)) }
 }
 
+/// The engine matches endpoint events with `(ip & mask) == net`, where `ip`
+/// is the user-supplied sockaddr of connect(2) read at syscall entry.
+/// connect() to 0.0.0.0 is valid on Linux — the kernel routes it to loopback
+/// — so `(0, /32)` is not a match-nothing sentinel: it is byte-identical to
+/// the legitimate pattern `endpoint "0.0.0.0"` and fires on those
+/// connections. The only pair that never matches under the ABI is
+/// `(net != 0, mask == 0)`: `ip & 0 == net` is false for every `ip`. No
+/// user pattern lowers to it (match-any `"*"` is `(0, 0)`; every other
+/// representable pattern has at least one 0xff mask octet).
+const NEVER_MATCH_ENDPOINT: (u32, u32) = (1, 0);
+
 #[cfg(test)]
 fn lower_ipv4(pat: &str) -> (u32, u32) {
-    lower_numeric_ipv4(pat).unwrap_or((0, u32::MAX))
+    lower_numeric_ipv4(pat).unwrap_or(NEVER_MATCH_ENDPOINT)
 }
 
 fn hostname_candidate(pat: &str) -> Option<&str> {
@@ -949,6 +1120,7 @@ struct Ctx {
     endpoint_resolutions: HashMap<String, Vec<String>>,
     endpoint_cond_warned: std::collections::HashSet<String>,
     path_warned: std::collections::HashSet<String>,
+    exec_star_warned: std::collections::HashSet<String>,
     warnings: Vec<String>,
 }
 impl Ctx {
@@ -972,7 +1144,7 @@ impl Ctx {
                     "endpoint pattern '{pat}' resolved to no IPv4 addresses at compile time; \
                      it lowers to a match-nothing matcher, so connect/recv to it never matches"
                 ));
-                vec![(0, u32::MAX)]
+                vec![NEVER_MATCH_ENDPOINT]
             } else {
                 addrs.into_iter().map(|addr| (addr, u32::MAX)).collect()
             }
@@ -987,7 +1159,7 @@ impl Ctx {
                  (wildcard or non-IPv4 literal); it lowers to a match-nothing matcher, \
                  so connect/recv to it never matches"
             ));
-            vec![(0, u32::MAX)]
+            vec![NEVER_MATCH_ENDPOINT]
         };
         self.endpoint_cache.insert(pat.to_string(), matches.clone());
         matches
@@ -1009,7 +1181,10 @@ impl Ctx {
                  exception is void"
             ));
         }
-        if negate { (0, 0) } else { (0, u32::MAX) }
+        // The `unless` branch must also never be satisfied: a satisfied
+        // exception skips the rule, and `(0, /32)` would be satisfied by a
+        // connect to 0.0.0.0, silently re-opening the voided exception.
+        if negate { (0, 0) } else { NEVER_MATCH_ENDPOINT }
     }
 
     fn add_update(&mut self, spec: UpdateSpec<'_>) -> Result<(), String> {
@@ -1103,12 +1278,13 @@ impl Ctx {
         lowered
     }
 
-    /// Path-target lowering with the same widening warning as
-    /// `lower_path_warned`; exec/connect/recv targets use other matchers and
-    /// never warn here.
+    /// Lower a target with matcher-specific warnings: exec warns on dead
+    /// interior stars, paths warn on widening, and connect/recv never warn here.
     fn lower_target_warned(&mut self, op: u8, kind: Kind, pat: &str) -> (u8, String) {
         let lowered = lower_target(op, kind, pat);
-        if op != OP_EXEC && op != OP_CONNECT && op != OP_RECV {
+        if op == OP_EXEC {
+            self.warn_dead_exec_star(pat, &lowered);
+        } else if op != OP_CONNECT && op != OP_RECV {
             self.warn_absolute_mid_star(pat, &lowered);
         }
         lowered
@@ -1126,6 +1302,25 @@ impl Ctx {
             ));
         }
     }
+
+    /// Warn once per pattern when an exec pattern's lowering keeps a literal
+    /// `*` inside its matcher literal: the comm matcher only expresses
+    /// exact/prefix/any, so an interior (or doubled) star is not consumed as
+    /// a glob and the engine ends up matching the star byte-exactly. No
+    /// ordinary process name contains a literal `*`, so the lowered matcher
+    /// can never fire — the exec-kind twin of the endpoint match-nothing and
+    /// path widening warnings.
+    fn warn_dead_exec_star(&mut self, pat: &str, lowered: &(u8, String)) {
+        if lowered.1.contains('*') && self.exec_star_warned.insert(pat.to_string()) {
+            self.warnings.push(format!(
+                "exec pattern '{pat}' lowers to a match on the literal '{}' with an \
+                 unconsumed '*' (the comm matcher cannot express interior stars and \
+                 matches its literal byte-exactly), and no ordinary process name \
+                 contains '*', so the matcher can never fire",
+                lowered.1
+            ));
+        }
+    }
     /// Returns (gate bit, gate slot index). The index is what the engine uses to
     /// look up the gate's epoch for staleness; the bit is the v1 latching mask.
     fn gate_bit(
@@ -1136,7 +1331,9 @@ impl Ctx {
     ) -> Result<(u64, u32), String> {
         let (low_op, m, lit) = match gate_op {
             Op::Exec => {
-                let (m, l) = lower_exec(pat);
+                let lowered = lower_exec(pat);
+                self.warn_dead_exec_star(pat, &lowered);
+                let (m, l) = lowered;
                 (OP_EXEC, m, l)
             }
             Op::Read | Op::Open => {
@@ -1194,7 +1391,9 @@ impl Ctx {
         arg: Option<&str>,
     ) -> Result<u64, String> {
         let (m, lit) = if op == OP_EXEC {
-            lower_exec(pat)
+            let lowered = lower_exec(pat);
+            self.warn_dead_exec_star(pat, &lowered);
+            lowered
         } else {
             self.lower_target_warned(op, kind, pat)
         };
@@ -1453,6 +1652,7 @@ pub fn compile_with_labels(
         endpoint_resolutions: HashMap::new(),
         endpoint_cond_warned: std::collections::HashSet::new(),
         path_warned: std::collections::HashSet::new(),
+        exec_star_warned: std::collections::HashSet::new(),
         warnings: Vec::new(),
     };
     for name in &sorted_labels {
@@ -1466,7 +1666,9 @@ pub fn compile_with_labels(
         let bit = ctx.label_bit(&s.label)?;
         let (op, m, lit, ipv4, ipv4_mask) = match s.kind {
             Kind::Exec => {
-                let (m, lit) = lower_exec(&s.pattern);
+                let lowered = lower_exec(&s.pattern);
+                ctx.warn_dead_exec_star(&s.pattern, &lowered);
+                let (m, lit) = lowered;
                 (OP_EXEC, m, lit, 0, 0)
             }
             Kind::File => {
@@ -1520,7 +1722,9 @@ pub fn compile_with_labels(
     }
     for x in &pol.xforms {
         let bit = ctx.label_bit(&x.label)?;
-        let (m, lit) = lower_exec(&x.gate);
+        let lowered = lower_exec(&x.gate);
+        ctx.warn_dead_exec_star(&x.gate, &lowered);
+        let (m, lit) = lowered;
         ctx.add_update(UpdateSpec {
             op: OP_EXEC,
             m,

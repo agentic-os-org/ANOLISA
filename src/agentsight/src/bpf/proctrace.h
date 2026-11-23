@@ -64,7 +64,7 @@ struct proc_stdout_data {
 
 // Exit event specific data (fixed length, follows header)
 struct proc_exit_data {
-    s32 exit_code;          // Process exit code
+    s32 raw_exit_status;    // Raw wait(2) status for the completed thread group
 };
 
 // Legacy process event structure (kept for backward compatibility)

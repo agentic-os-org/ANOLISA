@@ -365,7 +365,9 @@ runner 工作目录的 owner、权限和 umask。
 
 **[TARGET V2][IMPLEMENTED] DPROC-UDS-002 服务端身份认证**：
 `asc-daemon-client` 在 connect 成功后、首次 write 前，对同一连接 fd 读取 Linux
-`SO_PEERCRED`，要求服务端 UID 为 0。凭据读取失败或 UID 不符返回独立的
+`SO_PEERCRED`，要求服务端 UID 为 0。跨 PID namespace 时内核可返回 PID=0，
+凭据读取必须允许该值，认证仅判断 UID，不要求共享 PID namespace。
+凭据读取失败或 UID 不符返回独立的
 `ServerIdentity` 错误，关闭连接，不发送请求、不重试、不回退本地实现；非 Linux
 返回不支持认证的错误。期望 UID 不从 socket 文件属主、客户端 UID 或响应 JSON 推导。
 服务 UID 是信任域；该检查不区分其它 root 进程，也不能保护同 UID 的不可信 Agent。
@@ -380,6 +382,8 @@ runner 工作目录的 owner、权限和 umask。
 可执行 fixture：`tests/v2/e2e/test_daemon_process_e2e.py::test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket`
 验证 socket 文件属主改为 root 的非 root 伪服务仍被真实 Rust CLI 和 native health probe 拒绝，
 服务端不得收到请求字节；该用例需要 root 的跨 UID 进程环境，编译或单元测试不替代该验收。
+同文件的 `test_dproc_uds_002_authenticates_uid_with_zero_peer_pid` 使用 user/PID namespace
+确认内核实际返回 PID=0，并验证 CLI 和 health probe 接受 UID=0、拒绝非 root UID 且不发送请求。
 普通 workspace CI 统一启用默认关闭的 `asc-daemon-client/testing` feature，并设置
 `AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`，允许非 root 模拟服务执行协议和业务测试，
 普通测试无需修改。身份认证回归单独使用默认配置执行；RPM 构建和 E2E 不启用该 feature
@@ -417,6 +421,26 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
 PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
 SkillSec 持久化与激活恢复见第 11 节。
+
+**DPROC-V2-SANDBOX-TEMPLATE-1**：基于 ANOLISA
+`8b1c1c0bd040711f22ca86fbe8673d2af77aa1a1` 的全 shell 授权改动，由核心包交付
+`/etc/agent-sec/sandbox/permissions.json.template`（root:root 0644，目录 0755）。
+源码安装遵循 `CONFIGDIR` 并同步渲染 Hook 读取路径；RPM 标记 `%config(noreplace)`，
+源码重复安装保留管理员配置。raw 使用 `{etcdir}/sec-core/sandbox/permissions.json.template`
+（默认 `/etc/anolisa/sec-core/sandbox/permissions.json.template`），遵循安装器既有路径所有权，
+同步渲染独立的 `sandbox_paths.py`；不扩大 ANOLISA 可写目录范围。配置属于 CLI prepare 的权限来源，不成为 daemon 新参数、
+RPC 或 PAP 发布入口。仅 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1/true` 选择默认模板；
+删除旧权限文件环境覆盖，关闭模式继续原有路径。原始命令（含 sudo）交给 PDP，模板错误
+或依赖失败阻断；finish 不依赖模板或开关状态且不重跑命令。配置修改影响后续 prepare，
+不改变已接受的决定。模板和父目录的信任校验、实际安装及升级保留分别由
+`asc-cli/src/sandbox/hook/template/tests.rs`、`tests/v2/packaging/test_delivery.py`、
+`tests/packaging/test-skillsec-install.sh` 和 Linux Host 集成测试验证；构建通过不代表
+真实 Cosh 验收通过。回退时恢复先前组件并关闭开关，保留管理员模板，不迁移 daemon 状态。
+
+配套 Cosh NG 支持 Hook 元数据 `require_output_when_env`，将 sandbox-guard 的空输出
+检查绑定全 shell 开关。开启或非法值时空输出进入现有失败阻断流程；关闭时及未声明该
+字段的其他 extension 保持兼容。仅配置 `fail_open=false` 的旧 Cosh NG 仍将成功退出的
+extension 空输出视为透传，不能作为本功能的宿主验收版本。
 
 **DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
 `./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
@@ -519,6 +543,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-024 | V2 分包回滚到旧 V2 `agent-sec-cli` 服务包时，保留事务前的服务启用策略和运行状态；`tests/test-component-rpm-rollback.py` 验证真实 RPM 事务顺序，`tests/v2/packaging/test_rpm_service_migration.py` 验证状态恢复。前者使用隔离 rpmdb 和模拟 systemd，不替代真实 daemon 就绪验收 |
 | DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
@@ -645,6 +670,9 @@ CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；�
 领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
 `/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
 scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
 默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
 登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
 DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。
@@ -758,3 +786,213 @@ obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒�
 组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
 `v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
 以上不替代安装态不同 UID/systemd 验收。
+
+## 14. [TARGET V2] Secret Gateway 进程、权限与数据目录（DPROC-GW）
+
+Cedar HTTP 网关由 daemon 提供六个
+`gateway.*` 方法：`enable`、`disable`、`key.remove`、`key.list` 仅允许 UDS peer UID 0；
+`status` 为 LocalUser，root 可见全部、非 root 仅见自己拥有的 Scope；`ca` 为认证本机 peer
+的 LocalUser 全局公开 CA 查询，无 owner/Scope 限制。移除 KeyAdd、`key.add`、
+`credentials` 及 RPC，不留别名。凭据 Policy/Scope 管理仍要求 root，普通 file 权限不变。
+
+本节是未开放 Gateway 的内部终态契约，以 ANOLISA `89fe4fec0` 为基线，结合
+`46738d58d` Cedar 注入设计；响应算法沿用 `46e2a8682`，不代表本轮安装态验收已通过。
+授权来自 canonical Policy/Scope/Binding 与非秘密 pair 关联。HTTP Cedar 使用精确
+`seccore.system@2`，`network.send`、`HttpEndpoint.host`、实际 `context.input.scheme/method/path`。
+`@modify`、`@real_token_file`、`@fake_token_file`、`@inject_header`、`@inject_format`、
+`@response_rewrite` 均显式必填。最后一个仅接受 `"true"` / `"false"` 注解字符串，降低为
+Plan/Decision 的必填 JSON bool；缺失、旧模式或其它值拒绝，不默认、不兼容旧值。
+`true` 替换实际注入响应的 headers、未压缩正文与 trailers，`false` 全部不替换。
+指定 header 的请求注入独立，不检查请求 body。响应算法与压缩/SSE/固定队列限制及
+fail-closed 边界以 [网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写) 为准；
+开启改写仍可能经 gzip 等压缩 body 把 real 返回 Agent，不新增缓存/编码/队列配置参数。
+原生 JSON 文件策略、schema revision 1 和既有 OS PDP 不变；原生凭据执行删除，HTTP
+不接入通用 PDP。旧 Gateway 策略/Store/plan/快照/投影明确拒绝，无迁移、覆盖或推断转换。
+Scope 固定完整源码和 pair 关联快照、持续 process selector 与非 root owner UID。
+不同 file/credential Policy 可在同一个 Scope 分别执行，单 Policy 不混合。
+
+root 提交 Policy 前，准备 daemon 主机上的两个规范绝对文件，如 `/secure/github-real`、
+`/secure/github-fake`。相对路径、`~`、环境展开、NUL、`.`/`..` 在任何读取前拒绝，CLI/RPC
+不改路径。先纯校验和 root 授权，才安全读 private/root-owned/regular/single-link 文件并
+原子登记；配对是 opaque pair ID，不是路径。部署/恢复只使用 Store 与 canonical 关联，
+不重读源文件，文件改动不是轮换。生成和人工登记共用等长可见 ASCII 整串至少 80% 差异
+校验（`mismatch_count * 5 >= length * 4`，含前缀及标点）。
+
+`key generate-fake --real-token-file ... --output ... --format auto` 是独立纯本地入口，
+默认 auto、无 daemon、不登记/授权、不输出 Token；未知启发式明确拒绝。输出通过 O_EXCL
+创建 0600 文件，不覆盖。无进程时也能准备 Scope 的已登记 fake/port/plan，再 enable、
+`gateway ca` 查询共享 CA、自行从 fake 文件配置 Agent 后启动，无 GH_TOKEN/GITHUB_TOKEN
+默认映射。约两秒 discovery 创建 Binding，核验完整身份、UID/组并接管后代；新后代继承
+实例 cgroup。不保证 first packet、已有连接或迁移期间并发后代保护，部分失败保留清理责任。
+查询不迁移调用者或修改环境；dispatch 45s、CLI 默认 60s、加载 20s。
+
+root `key remove <pairid>` 全局退役指定配对及所有引用授权；旧 fake 永久 tombstone，
+不可重导入复活，无自动轮换。remove 返回 `{pairid:"<pairid>"}`，list 返回
+`{pairids:["<pairid>"]}`，只列 active opaque ID，不输出秘密/摘要；enable/disable 成功 `{}`。
+status 返回 `{enabled, ready, scopes:[{scopeId,bindings}]}`；`ca` 无 Scope 参数且仅返回
+`{caBundlePath}`，各 Scope 共用 CA，不构成证书隔离。ready 同时要求 enabled、cgroup v2、
+unit active、loaded generation 匹配、实际 CA 可用；已启用 status 每次重查 cgroup，失败
+`ready=false`。CA 查询核验全部 ready 条件，失败不返回路径或部分配置，无凭据 owner 检查。
+generation/fence/tombstone 保留在内部。网关 ready 不替代 Binding `READY` 与引流完成。
+
+enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
+`CGROUP2_SUPER_MAGIC`，且 daemon 自身 `/proc/self/cgroup` 视图存在 `0::` 条目；
+证据不可读或非 v2 时失败。apply 在每次发布前检查，包括已启用状态恢复；默认关闭恢复不
+运行此预检，不会仅因 cgroup v2 不可用而失败。不自动降级为 v1，不修改挂载；这不是完整
+内核/nft 能力预检，nft `socket cgroupv2` 不独立探测，仍可能在实际规则应用时失败。
+
+数据面是独立的 `agent-sec-gateway.service`，以无特权 `agent-sec-gw` 运行固定版本的
+mitmproxy standalone 构建，不继承 daemon 权限。daemon 仅经 drop-in
+`agent-sec-core.service.d/gateway.conf` 增加 `CAP_NET_ADMIN`，用于替换 nftables 表
+`inet agent_sec_gateway`；Binding 实例 cgroup 通过 systemd D-Bus 创建。网关账户主组必须
+同名且无其他成员，Scope owner 和进程不得具备读取网关秘密的 UID/组权限，准备、接管与
+下发均须核验。cgroup 是分类边界，同 UID 多 Scope 不能防止该用户读取彼此 fake。
+V2 `agent-sec-core` RPM 包含 addon、policy 模块、网关 unit、daemon drop-in、installer 和
+provenance；标准策略只交付 `gateway/github.cedar` 可读源码，source/raw/RPM 按安装布局
+同步交付和卸载，不交付 `github.json` 或 `github-policy.json` wrapper。源码资产不自动
+导入；`policy create/update --file` 缺省读取 raw Cedar，schema 默认为 `seccore.system@1`，
+HTTP 凭据策略须显式指定 `--schema-revision 2`。`--language json` 保留原生 JSON 模板与
+Cedar envelope 导入，禁止额外 schema 参数覆盖 envelope 的引用。
+详见 [网关设计 §2.1](V2_SECRET_GATEWAY_DESIGN_zh.md#21-policy-authoring)。构建只 staging 到 `DESTDIR`。
+安装自动启动基础 daemon，但网关默认关闭：
+不启动代理、不创建网关账户、不携带或下载 mitmproxy、不添加引流。未配置凭据 Scope、
+没有保存网关状态的初始安装，daemon 启动和重启也不创建网关 runtime、凭据目录或 nft 表；
+默认关闭不跳过既有 assignment 或此前已启用状态的同步恢复。管理员显式安装 standalone，
+再配置 Policy/Scope 并 enable。源码 staging 不是最终 RPM 已构建/验收的证明。
+最终卸载在存在运行 manifest 或代理 active 时，先经 daemon 执行 disable，再停止两个服务；
+disable 失败则拒绝卸载。升级不执行该清理，手动安装的 mitmproxy 和持久凭据不由 RPM 删除。
+raw 包包含相同网关静态资产，由组件 manifest 渲染 unit 和卸载脚本路径；基础 daemon
+声明 `enable=false/start=false`，gateway unit 仅作为文件交付，其启停仍由 daemon 独占，
+不进入 ANOLISA 通用组件重启操作。安装不执行网关初始化。raw 卸载通过严格 `pre_uninstall`
+钩子完成上述撤流，失败不停止服务、不删除文件；raw 升级不因新增网关资产而启用或重启代理。
+
+持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
+`/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
+两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
+secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。
+
+本次 Cedar 配对及 bool 响应契约不兼容旧 Gateway 数据，包括 `PreparedPolicy`、Scope
+`policySnapshots`、Binding 内嵌 Policy 与 pinnedScope。旧原生凭据规则即使含 bool，也不能
+直接沿用为新 Cedar 配对策略；旧注解/Plan 中的模式字符串同样拒绝。
+Gateway 尚未对外开放，本次不提供旧数据迁移或滚动升级支持，不推断转换、不丢弃秘密
+及 tombstone、不在恢复/加载中覆盖不可变快照。只更新标准资产、latest revision 或运行
+Plan 不足。内部旧环境需先备份并在旧版本按生命周期撤销和清理，再显式登记新配对、
+新 Policy/Scope；退役 fake 不可复活。回退先确认撤流，再使用配套旧二进制、addon 和完整
+旧格式备份，不能沿用新数据。完整边界见
+[网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+
+主动 `disable` 先应用 nft delete 事务撤流，成功后停止 unit，两步均成功后才通过
+`remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 外的全部内容（包括 `status/`），
+并保存 `enabled=false`；持久 key 与 canonical Policy/Scope assignment 保留。执行投影不保存
+第二套授权规则，只保存 Scope owner/port/revoked fence、Binding 责任与完整实例身份。
+撤流失败立即返回，不停止 unit、不删文件、不修改期望 `enabled`；unit 停止失败也立即返回
+并保留运行文件与期望 `enabled`，但引流已撤除，
+须显式重试 disable。文件清理或状态保存失败均明确返回错误，须核查期望状态与清理责任并
+重试，不能把任一错误当作完整关闭。成功关闭保留公开 CA 的原路径，避免已有配置悬空；
+`/run` 在主机重启后仍会丢失，CA 不保证跨重启保留。恢复直连不会替换 fake，fake 仍不能用于
+GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
+
+本版本是可用性优先的有限 fail-open：nft 仅以 `meta nfproto ipv4` 匹配 canonical 有效且已
+接管的 credential Binding 实例 TCP 80/443，同 Scope 多实例共享端口。没有 UDP/443 drop
+或 filter chain。IPv6 与 HTTP/3/QUIC 不引流、不强制回退或拒绝，放行但不保护，fake 原样
+发送，鉴权可能失败。
+已进入 IPv4 代理的 HTTP(S) 仍执行原安全校验；HTTPS 全部执行 TLS MITM，无 fake 不等于
+TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
+（`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
+
+显式指定 `agent-sec-daemon serve --enable-gateway` 时，原有 Gateway 装配路径在启动
+Binding worker 前恢复 file Scope 删除屏障并同步执行
+`GatewayService.recover()`，开放 UDS 请求前再执行 `PapService.recover_scopes()`；不设置
+独立 gateway 恢复 Job。Apply claim 的 SQLite 事务核对 canonical Scope 仍为 `Active`，
+防止删除中的 assignment 重新部署策略。网关构造读取投影失败时，先停止旧代理、撤流并
+删除运行时快照，再返回错误；持久投影和凭据不删除，清理失败显式报告且不跳过其它清理。
+网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
+不阻塞原有 file-policy daemon readiness。
+当前 daemon 默认 `disable_gateway=true`，保留 file Scope 恢复但不装配 Gateway Runtime、
+凭证登记及执行端口；相关请求明确不可用。该模式只检查本地职责：Gateway 状态目录、凭据目录、
+运行目录存在或不可读取（包括符号链接），以及任意状态的凭证 Scope，均拒绝启动；不删除数据。
+部署方须保证无外部代理或残留路由；此模式不会调用 systemd/nftables 证明宿主无残留。
+凭据 Policy 的正常提交先持久化 Credential Store，尚未创建 Scope 的已登记凭据也由目录
+检查拦截；仅保留 Policy 元数据不构成网关执行责任，新增凭据 Scope 仍须 Gateway 执行端口。
+仅提供 `--enable-gateway` 作为启动开关，将该值设为 false，恢复原有
+构造、恢复及失败清理路径。该启动参数不修改保存的 enabled 状态；数据面关闭时仍须
+另行调用 `agent-sec-cli gateway enable`。未装配 Gateway 时，该运行时命令不可用。
+已有 Gateway 状态的部署须在启动命令中添加 `--enable-gateway`；默认启动仍会拒绝，
+但无需降级二进制即可恢复管理。systemd 通过 drop-in 清空再完整覆盖 `ExecStart`，保留
+原有路径和参数并追加该选项，随后 daemon-reload、重启。
+该默认值变更不迁移或清除已有职责。启用管理时，Gateway 恢复仍在 RPC ready 前同步完成；
+此处不实现异步或运行时惰性初始化。
+file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
+管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
+generation 在每次尝试前持久化且不复用；网关恢复、撤销或首次 enable 失败时停止 unit、
+撤流并删除运行目录，保留 canonical intent。systemd `active` 不代表网关已加载，发布流程等待
+`status/health.json` 的 loadedGeneration 等于当前 generation 后才更新引流。
+unit 在启动前和停止后都删除 `status/health.json`，避免上一个进程的报告在新进程绑定监听端口前被当作已加载。
+恢复重新读取 canonical Scope/Binding 与固定 Policy 快照，并核验 boot ID、PID namespace、
+PID/start time 和执行 cgroup；不能仅凭保存的 PID 接管新进程。多实例共享 Scope fake；同
+Scope 的重叠父子树复用已拥有的 cgroup，不迁移已受保护成员，非重叠实例仍独立。Binding
+在接入未受保护成员前持久保存根路径及共享路径引用；重试只增加经过核验的引用，不丢弃
+已有责任。保留跨 Scope 拒绝；先删父或先删子都不撤除其它 Binding 仍引用的路径，实例
+退出只清理自身 Binding，不撤销共享 grant。多个 Scope 可显式共用指定 fake；Scope 删除
+关闭 admission、撤销本 Scope 授权，其他 Active Scope 仍有效；最后 Active Scope 删除
+永久 tombstone，零实例 Scope 同样处理。恢复先全量核对 canonical 关联再恢复缓存，
+不得因恢复顺序误退役。清理责任保留到完成。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
+在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
+等待其实际调用结束。网关等待不占用 Binding timer；file-only Scope 和 credential Scope
+使用独立变更锁，混合 Scope 归 credential 域。空 Scope 也释放端口，
+不删除 real、不停止 Agent。全局 key retirement 撤销所有 Scope 对该凭据的 fake。
+await 后须重新验证 canonical 授权，过时操作不得恢复引流。
+
+| ID | 必须验证 | 验证入口 |
+|---|---|---|
+| DPROC-GW-001 | 六个方法、旧 key.add/credentials 拒绝、共享 CA 查询、分发与权限；凭据 root 限制不改变普通 file 权限 | `asc-daemon-protocol/tests/pap_contract.rs` |
+| DPROC-GW-002 | Scope 准备/删除、Binding 实例/后代身份、UID 查询、稳定 fake、generation、失败收敛、组隔离、目录权限 | `asc-gateway-runtime/src/tests.rs` |
+| DPROC-GW-003 | unit、drop-in 与静态文件 staging、安装/卸载边界 | `tests/v2/packaging/test_systemd.py` |
+| DPROC-GW-004 | 真实 CLI Cedar Policy/Scope、startup-before-agent、discovery/systemd/nft；mock REST 注入 real、`true` 未压缩回显为 fake，`false` 与压缩 body 不保证 fake；Git clone/fetch/push；跨 Scope、配对幂等、共享 Scope/最后退役、opaque pair remove、生成/人工 fake 80% 校验、源文件删除后恢复与旧数据拒绝、多实例与重启稳定 fake、空 Scope 删除；域外/UDP 放行；daemon/proxy 重启；关闭仅保留 CA | `tests/v2/systemd/test_gateway.py`；显式 `ASC_GATEWAY_E2E_USER`，本机 `198.18.0.1`、临时 CA 与 dummy Token，不访问外网 |
+| DPROC-GW-005 | 默认启动时通过认证 health、file Policy/Scope 可用、Gateway 方法与新凭据 Policy 不可用、正常退出；已有 Gateway 目录或悬空符号链接时非零退出、不开放 RPC 且保留原状态；同一份已有状态通过 `--enable-gateway` 恢复管理接口，不强制开启 disabled 代理 | `tests/v2/e2e/test_gateway_opt_out_e2e.py` |
+
+响应开关按 [网关设计 §6](V2_SECRET_GATEWAY_DESIGN_zh.md#6-交付与验证边界) 的内部 mock
+矩阵验收，真实 GitHub/其他外部 API 不作为验收条件。源码、代理黑盒与最终安装制品需
+分别验证；Gateway 尚未对外开放，本次不交付旧数据迁移，不能从源码检查或测试矩阵
+推导最终安装验收通过或已发布支持。
+默认启动 E2E 验证 Gateway 接口不可用且无 nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。
+
+## V2 sandbox 执行与授权接入（DPROC-SANDBOX-001）
+
+`sandbox run --permissions <file> -- <command>` 是明确的本地执行入口：只消费调用方提供的
+OS 权限和命令，不访问 daemon、不读取其数据库、不取得策略审批。它不是 daemon 故障时的 fallback。
+其余命令继续遵循已有 daemon 所有权规则。上层应用需要授权时使用 `asc-pep-runtime`，
+通过现有 client/UDS 调用 `authorization.evaluate/claim/report`；daemon 始终不执行目标命令。
+
+daemon 默认启用授权，空策略集返回 DENY。独立授权配置文件已移除，决定接收期限固定为
+60 秒。升级时移除启动命令及 systemd drop-in 中的 `--authorization-config` 参数，并将
+必要环境约束迁移为 PAP 管理的 Cedar；不自动转换旧配置。daemon 与授权客户端须同步
+升级到公共 PARC 请求结构。请求通过 context.agent.agent_type 提供可选分类，Cosh Hook
+使用 cosh。
+本阶段不认证 Agent 身份/类型，不要求 UID 登记；类型只用于策略分类匹配。
+内核 peer UID 仍用于 claim/report 的凭据归属校验，不参与策略主体选择。
+每次 evaluate 从 PAP 单个事务读取全部当前策略，排除原生 JSON 与全裸 principal header 的
+Cedar 源码，混合 header 整份报错。有效集摘要覆盖成员、revision、schema 与正文；缓存锁覆盖
+读取及加载，版本未变才复用，完整候选成功才替换。创建、删除和资格变更在下一次请求刷新；
+空集默认拒绝，读取或加载失败清空缓存。旧 baseline/task 配置不再读取，不自动把限制变成授权并集。
+Scope/Binding 的选择、固定版本、部署和清理均不改变。
+PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运行不再因该期限失败，
+策略更新不撤回已接收的决定。MODIFY 在事实齐备时由 PDP 同次完成最终授权；缺事实才 DEFER。
+
+`make build-sandbox` 生成静态 Linux helper，发布验证拒绝动态加载器或 DT_NEEDED。
+严格模式要求具备 FD 挂载能力的非 setuid bubblewrap、user namespace；请求 noexec 时还需 mount_setattr。
+缺少能力即拒绝，不回退旧权限模式。helper 安装约束并降权后启动目标，外层 supervisor
+等待安装与退出，不接管宿主信号，不提供主动取消或目标运行超时；安装等待超过 30 秒则清理。
+父进程退出或主目标结束时清理后代；宿主被外部终止时不保证回执。旧底层 CLI 接口保留原语义。
+
+| 验收 | 可执行 fixture |
+|---|---|
+| 无 daemon 的纯 CLI、实际文件/网络/noexec 约束 | `tests/e2e/linux-sandbox/strict_cli.py`、`linux-sandbox/tests/suite/strict_runtime.rs` |
+| TTY 输入、默认信号行为、父进程退出及后台子进程清理 | `v2/apps/asc-cli/tests/sandbox.rs`（`ASC_SANDBOX_INTEGRATION=1`） |
+| Cosh Hook 授权、一次性交接、拒绝清理、越界写保护 | `tests/e2e/linux-sandbox/authorized_cli.py` 与原版 Cosh 的 `cosh_host.py` 端到端用例 |
+| 真实授权、ask 后直行、版本更新、双存储回执 | `tests/e2e/linux-sandbox/authorized_cli.py` |
+| agent_type 分类匹配、PAP 全集刷新、删除后空集 DENY | `tests/e2e/linux-sandbox/authorized_cli.py`；`v2/apps/asc-daemon/src/authorization.rs` |
+| 新请求策略不改写已有 Scope/Binding 快照 | `v2/crates/asc-pap/tests/pap_service.rs::request_policy_resolution_does_not_rewrite_existing_scope_or_binding` |
+
+这些 fixture 不替代 RPM/systemd、多架构或完整 DPROC 安装验收。可执行命令由
+`.github/workflows/ci.yaml` 维护。

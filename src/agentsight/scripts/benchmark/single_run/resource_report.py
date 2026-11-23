@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_stats import numeric, percentile
+from check_resource_limits import LIMITS
 from collect_metrics import read_internal_metrics
 
 
@@ -23,15 +24,21 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     cpu: list[float] = []
     cpu_seconds = covered = 0.0
     complete = True
+    rss_complete = True
     previous_end: float | None = None
     for index, row in enumerate(rows):
         timestamp = numeric(row.get("monotonic_timestamp"))
         if timestamp is None:
             complete = False
+            rss_complete = False
             continue
         value = numeric(row.get("rss_mb"))
-        if start <= timestamp < end and value is not None and value >= 0:
-            rss.append(value)
+        if start <= timestamp < end:
+            if value is not None and value >= 0:
+                rss.append(value)
+            else:
+                # A missing peak cannot be inferred from the remaining points.
+                rss_complete = False
         interval = numeric(row.get("cpu_interval_seconds"))
         if interval is None or interval <= 0:
             # The initial RSS sample establishes the CPU baseline and has no interval.
@@ -66,6 +73,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
         "rss_average_mib": sum(rss) / len(rss) if rss else None,
         "rss_peak_mib": max(rss) if rss else None,
         "samples": len(rss),
+        "rss_samples_valid": rss_complete and bool(rss),
         "cpu_average_pct": cpu_seconds / covered * 100 if covered else None,
         "cpu_p95_pct": percentile(cpu),
         "cpu_peak_pct": max(cpu) if cpu else None,
@@ -76,11 +84,74 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     }
 
 
+DROP_PHASES = ("before_load", "load", "tail", "unattributed")
+
+
+def counter_phase_deltas(
+    rows: list[dict[str, str]],
+    key: str,
+    start: float | None,
+    end: float | None,
+    final: float | None,
+    baseline: float | None,
+    baseline_timestamp: float | None,
+) -> dict[str, float]:
+    """Split cumulative counters by sample phase; resets stay gated as unattributed."""
+    phases = {phase: 0.0 for phase in DROP_PHASES}
+    previous = baseline if baseline is not None and baseline >= 0 else 0.0
+    if previous > 0:
+        if (
+            baseline_timestamp is not None
+            and start is not None
+            and baseline_timestamp < start
+        ):
+            phases["before_load"] = previous
+        else:
+            phases["unattributed"] = previous
+    for row in rows:
+        value = numeric(row.get(key))
+        if value is None or value < 0:
+            continue
+        timestamp = numeric(
+            row.get("counter_timestamp", row.get("monotonic_timestamp"))
+        )
+        if timestamp is None or start is None or end is None:
+            phase = "unattributed"
+        elif timestamp < start:
+            phase = "before_load"
+        elif timestamp < end:
+            phase = "load"
+        else:
+            phase = "tail"
+        if value < previous:
+            phases["unattributed"] = max(1.0, phases["unattributed"] + value)
+        else:
+            phases[phase] += value - previous
+        previous = value
+    if final is not None and final >= 0:
+        if final < previous:
+            phases["unattributed"] = max(1.0, phases["unattributed"] + final)
+        else:
+            phases["tail"] += final - previous
+    return phases
+
+
+def drops_require_failure(probe_drop_phases: dict[str, dict[str, float]]) -> bool:
+    """Only pre-load drops are informational; every other attribution remains fatal."""
+    return any(
+        phases[phase] > 0
+        for phases in probe_drop_phases.values()
+        for phase in ("load", "tail", "unattributed")
+    )
+
+
 def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     """Gate load-window resources on both capture correctness and usable CPU samples."""
     worker = read_json(directory / "worker-result.json")
     load = read_json(directory / "agent-summary.json")
     capture = read_json(directory / "report.json")
+    if not isinstance(capture, dict):
+        capture = {"invalid": True}
     safety_stop = read_json(directory / "safety-stop.json")
     rows: list[dict[str, str]] = []
     evictions: list[float] = []
@@ -90,12 +161,18 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "channel_dropped": [],
     }
     final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    baseline_metrics = read_json(directory / "metrics-baseline.json")
     invalid_counters: set[str] = set()
     for key in drop_samples:
         value = numeric(final_metrics.get(key))
         if value is not None and value >= 0:
             drop_samples[key].append(value)
         elif key in final_metrics:
+            invalid_counters.add(key)
+        baseline = numeric(baseline_metrics.get(key))
+        if baseline is not None and baseline >= 0:
+            drop_samples[key].append(baseline)
+        elif baseline_metrics.get(key) not in (None, ""):
             invalid_counters.add(key)
     counter_samples = {"eviction_count": evictions, **drop_samples}
     metrics = directory / "metrics.csv"
@@ -114,6 +191,18 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     window = read_json(directory / "agents/start.json")
     start, end = numeric(window.get("start")), numeric(window.get("end"))
     window_valid = start is not None and end is not None and end > start
+    probe_drop_phases = {
+        key: counter_phase_deltas(
+            rows,
+            key,
+            start,
+            end,
+            numeric(final_metrics.get(key)),
+            numeric(baseline_metrics.get(key)),
+            numeric(baseline_metrics.get("counter_timestamp")),
+        )
+        for key in drop_samples
+    }
     resources = resource_stats(rows, start, end) if window_valid else resource_stats([], 0, 0)
     tail = resource_stats(rows, end, math.inf) if window_valid else None
     average, peak = resources["rss_average_mib"], resources["rss_peak_mib"]
@@ -122,18 +211,28 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         resource_error = "missing or invalid load measurement window"
     elif invalid_counters:
         resource_error = "invalid internal counter samples: " + ", ".join(sorted(invalid_counters))
-    elif not resources["samples"] or not resources["cpu_samples_valid"]:
+    elif not resources["rss_samples_valid"] or not resources["cpu_samples_valid"]:
         resource_error = "missing or invalid RSS/CPU samples in the load window"
     elif resources["cpu_measurement_seconds"] < (end - start) * 0.95:
         resource_error = "CPU samples cover less than 95% of the load window"
     total = worker.get("host_memory_mib")
     load_status = "PASS" if load.get("passed") is True else "FAIL" if load else "UNVERIFIED"
-    probe_drops = {key: max(values) if values else None for key, values in drop_samples.items()}
-    events_dropped = any(value is not None and value > 0 for value in probe_drops.values())
+    probe_drops = {
+        key: max(values) if values else None for key, values in drop_samples.items()
+    }
+    events_dropped = drops_require_failure(probe_drop_phases)
+    sent = capture.get("sent")
+    conflicts = capture.get("conflicts")
+    quality = {}
+    for key in ("completeness_ratio", "token_accuracy"):
+        value = capture.get(key)
+        quality[key] = numeric(value) if type(value) in (int, float) else None
     capture_ok = (
-        capture.get("sent", 0) > 0
-        and capture.get("completeness_ratio", 0) >= 0.999
-        and (capture.get("token_accuracy") or 0) >= 0.999
+        type(sent) is int
+        and sent > 0
+        and type(conflicts) is int
+        and conflicts == 0
+        and all(value is not None and 0.999 <= value <= 1 for value in quality.values())
         and not events_dropped
         and not invalid_counters.intersection(drop_samples)
     )
@@ -145,7 +244,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     ffi = read_json(directory / "ffi-consumer.json") if source.get("mode") == "ffi" else None
     ffi_error = None
     if ffi is not None:
-        expected = capture.get("sent", 0) + len(
+        expected = (sent if type(sent) is int and sent > 0 else 0) + len(
             read_json(directory / "clients-ready.json").get("request_ids", [])
         )
         if not ffi.get("completed") or worker.get("trace_returncode") != 0:
@@ -167,10 +266,26 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and not safety_stop
         and ffi_error is None
     )
-    capture_counts = {
-        key: capture.get(key)
-        for key in ("sent", "matched", "complete", "missing_count", "token_correct")
-    }
+    capture_counts = {}
+    for key in (
+        "sent",
+        "matched",
+        "complete",
+        "missing_count",
+        "token_correct",
+        "rejected",
+        "rejected_request_count",
+        "capacity_rejected_events",
+        "conflicts",
+        "unexplained_loss",
+        "admitted_completeness",
+    ):
+        value = capture.get(key)
+        if key == "admitted_completeness":
+            field_valid = type(value) in (int, float) and 0 <= value <= 1
+        else:
+            field_valid = type(value) is int and value >= 0
+        capture_counts[key] = value if field_valid else None
     if capture_counts["missing_count"] is None and isinstance(capture.get("missing_ids"), list):
         capture_counts["missing_count"] = len(capture["missing_ids"])
     return {
@@ -189,11 +304,12 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "load": load_status,
         "capture": capture_status,
         "capture_source": capture.get("capture_source"),
-        "capture_completeness": capture.get("completeness_ratio"),
-        "capture_token_accuracy": capture.get("token_accuracy"),
+        "capture_completeness": quality["completeness_ratio"],
+        "capture_token_accuracy": quality["token_accuracy"],
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,
+        "probe_drop_phases": probe_drop_phases,
         "ffi_consumer": ffi,
         "ffi_error": ffi_error,
         "ffi_dropped": numeric(final_metrics.get("ffi_dropped", "0")) if ffi is not None else None,
@@ -254,6 +370,11 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
         "Main statistics cover the load window; response drain is reported separately.",
         "CPU average is time-weighted; CPU P95/peak are interval samples, RSS peak is sampled.",
         "Intervals crossing the load boundary are split proportionally by overlap.",
+        (
+            f"Resource gate: average CPU {LIMITS['cpu_average_pct'][1]}%, "
+            f"average/peak RSS {LIMITS['rss_average_mib'][1]}/"
+            f"{LIMITS['rss_peak_mib'][1]} MiB; P95/peak CPU are diagnostic."
+        ),
     ]
     settings = read_json(output / "settings.json")
     if settings:
@@ -349,8 +470,20 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
             f"ring={drop_count(drops['ring_buffer_dropped'])}; "
             f"channel={drop_count(drops['channel_dropped'])}"
         )
-        if any(value is not None and value > 0 for value in drops.values()):
-            lines.append(f"{label} capture failed: probe events were dropped")
+        for counter, phases in run["probe_drop_phases"].items():
+            lines.append(
+                f"{label} {counter} phases: before_load={drop_count(phases['before_load'])}; "
+                f"load={drop_count(phases['load'])}; drain={drop_count(phases['tail'])}; "
+                f"unattributed={drop_count(phases['unattributed'])}"
+            )
+        if drops_require_failure(run["probe_drop_phases"]):
+            lines.append(
+                f"{label} capture failed: probe events were dropped during load/drain or were unattributed"
+            )
+        elif any(value is not None and value > 0 for value in drops.values()):
+            lines.append(
+                f"{label} probe drops were confined to pre-load and did not fail the load/drain capture gate"
+            )
         if run["capture"] == "FAIL":
             counts = {
                 key: str(value) if value is not None else "N/A"

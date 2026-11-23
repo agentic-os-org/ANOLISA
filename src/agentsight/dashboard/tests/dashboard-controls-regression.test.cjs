@@ -129,6 +129,64 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+for (const cached of [{ summary: 'older cached evaluation' }, null]) {
+  test(`a background evaluation lookup cannot replace a completed manual result (${cached ? 'cached' : 'empty'})`, async () => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs(['fetchTraces', 'fetchLatestEvaluation']);
+    const EvaluationPanel = () => null;
+    const dependencies = {
+      recharts: {},
+      'react-router-dom': { useNavigate: () => () => {}, useSearchParams: () => [new URLSearchParams(), () => {}] },
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': { ...stubs, conversationInterruptionKey: (s, c) => `${s}:${c}` },
+      '../utils/datetime': { formatNsPadded: () => 'time' },
+      '../utils/timeseriesBuckets': {},
+      '../components/EvaluationPanel': { EvaluationPanel },
+    };
+    for (const name of ['InterruptionBadge', 'InterruptionPanel', 'EvaluationBadge', 'DateTimePicker', 'CopyButton', 'SessionIdHelp', 'SessionResourceChart']) {
+      dependencies[`../components/${name}`] = componentStub(name);
+    }
+    const { TraceSubTable } = loadPageModule('src/pages/ConversationList.tsx', dependencies, driver,
+      '\nmodule.exports.TraceSubTable = TraceSubTable;');
+    const props = { sessionId: 'session', detailsId: 'details', conversationInterruptionCounts: new Map() };
+    let rendered = driver.render(TraceSubTable, props);
+    rendered.effects[0]();
+    calls.fetchTraces[0].resolve(['first', 'second'].map((conversation_id) => ({
+      conversation_id, call_count: 1, total_input_tokens: 10, total_output_tokens: 5,
+      start_ns: 1, end_ns: 2, user_query: 'question', model: 'model',
+    })));
+    await settle();
+    rendered = driver.render(TraceSubTable, props);
+    rendered.effects[1]();
+    assert.deepEqual(calls.fetchLatestEvaluation.map(call => call.args[0]), ['first', 'second']);
+    // Open the evaluation disclosure while its automatic cached lookup waits.
+    const buttons = collectElements(rendered.element, node => node.type === 'button');
+    const button = buttons.find(node => node.props.onClick?.toString().includes('setExpandedEvaluationPanel'));
+    assert.ok(button);
+    button.props.onClick({ stopPropagation() {} });
+    rendered = driver.render(TraceSubTable, props);
+    const panel = collectElements(rendered.element, node => node.type === EvaluationPanel)[0];
+    const fresh = { summary: 'fresh manual evaluation' };
+    panel.props.onResult(fresh);
+    calls.fetchLatestEvaluation[0].resolve(cached);
+    const other = { summary: 'other conversation evaluation' };
+    calls.fetchLatestEvaluation[1].resolve(other);
+    await settle();
+    rendered = driver.render(TraceSubTable, props);
+    assert.equal(collectElements(rendered.element, node => node.type === EvaluationPanel)[0].props.initialResult, fresh);
+    assert.equal(driver.slots[6].value.get('second'), other,
+      'protecting the manual result must still hydrate unrelated rows');
+  });
+}
+
+// Mirrors the shared helper's contract: the evidence link may only name a case
+// belonging to a visible (agent-filtered) violation row. The real derivation is
+// covered against the compiled module in apiClient-regression.
+const firstCorrelatedCaseIdStub = (violations, agentIdFilter) => (
+  (agentIdFilter ? violations.filter((v) => v.agent_id === agentIdFilter) : violations)
+    .find((v) => v.case_id)?.case_id
+);
+
 for (const [label, model, tools, idle, expected] of [
   ['half-second model', 0.5, 0, 0, [['model', 0.5]]],
   ['one-second model', 1, 0, 0, [['model', 1]]],
@@ -151,7 +209,7 @@ for (const [label, model, tools, idle, expected] of [
       'react-router-dom': { useNavigate: () => () => {}, useParams: () => ({}) },
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
       '../utils/apiClient': {},
-      '../components/CopyButton': {},
+      '../utils/clipboard': { copyText: () => {} },
       '../utils/formatDuration': duration,
       '../utils/accuracyAttribution': {},
       '../utils/richText': {},
@@ -227,6 +285,7 @@ test('conversation-list: model names cannot overwrite the time-axis label', () =
     '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
     '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
     '../components/SessionResourceChart': {},
+    '../components/CopyButton': componentStub('CopyButton'),
   }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
   const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
   const sourceData = [
@@ -317,6 +376,7 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
     // carry no bindings, so the stored-mode fallback is enough.
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../components/Pagination': componentStub('Pagination'),
   };
@@ -400,12 +460,234 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
 
   assert.equal(
     driver.slots[19].value,
-    14,
-    "the offset must be clamped to the shortened list's last index",
+    0,
+    'shrinking from 25 to 15 rows (<= limit 20) must align offset back to page 1 (0), not row 14',
   );
-  assert.equal(violationRows(rendered.element).length, 1,
-    'the clamped page must not be empty: it must fall back to the remaining row');
+  assert.equal(
+    violationRows(rendered.element).length,
+    15,
+    'all 15 remaining violations must be visible once Pagination hides itself for total <= limit',
+  );
+
+  // Multi-page shrink: 45 violations on page 3 (offset 40) shrinking to 35
+  // must land on page 2 (offset 20, showing 15 rows), not an unaligned offset 34.
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[2].resolve(health);
+  calls.fetchEnforcementBindings[2].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[2].resolve({
+    violations: Array.from({ length: 45 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  driver.slots[19].setter(40);
+  rendered = driver.render(page);
+  assert.equal(violationRows(rendered.element).length, 5, 'sanity: offset 40 shows the last five of 45 rows');
+
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[3].resolve(health);
+  calls.fetchEnforcementBindings[3].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[3].resolve({
+    violations: Array.from({ length: 35 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(
+    driver.slots[19].value,
+    20,
+    'shrinking from 45 to 35 rows must align offset to the last full page start (20), not row 34',
+  );
+  assert.equal(
+    violationRows(rendered.element).length,
+    15,
+    'page 2 of 35 rows must render all 15 rows on that page',
+  );
+
+  // Boundary: exact single-page shrink (20 rows) and empty list (0 rows).
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[4].resolve(health);
+  calls.fetchEnforcementBindings[4].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[4].resolve({
+    violations: Array.from({ length: 20 }, (_, i) => violation(i)),
+  });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(driver.slots[19].value, 0, 'shrinking to exactly one page (20 rows) must reset offset to 0');
+  assert.equal(violationRows(rendered.element).length, 20, 'all 20 rows must render on page 1');
+
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[5].resolve(health);
+  calls.fetchEnforcementBindings[5].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[5].resolve({ violations: [] });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  if (typeof rendered.effects[2] === 'function') rendered.effects[2]();
+  rendered = driver.render(page);
+
+  assert.equal(driver.slots[19].value, 0, 'shrinking to an empty list must keep offset at 0');
+  assert.equal(violationRows(rendered.element).length, 0, 'empty list renders zero violation rows');
 });
+
+test('read-denial template is capability-gated and submits a file read binding', async () => {
+  for (const supported of [false, true]) {
+    const driver = createHooksDriver();
+    const requests = [];
+    const page = loadPageModule('src/pages/RiskEnforcementPage.tsx', {
+      'react-router-dom': { useSearchParams: () => [new URLSearchParams(), () => {}] },
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': {
+        fetchEnforcementHealth: async () => ({ ready: true, capabilities: { file_read_protection: supported } }),
+        fetchEnforcementBindings: async () => ({ bindings: [] }),
+        fetchEnforcementViolations: async () => ({ violations: [] }),
+        enforcementSupportsMode: () => false,
+        enforcementViolationTotal: () => 0,
+        createFileReadBinding: async (request) => requests.push(request),
+        createCredentialBinding: async () => assert.fail('read denial must not apply a credential policy'),
+      },
+      '../utils/enforcementMode': {
+        effectiveBindingMode: () => 'enforce',
+        firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
+      },
+      '../components/Pagination': componentStub('Pagination'),
+    }, driver).RiskEnforcementPage;
+    let rendered = driver.render(page);
+    rendered.effects[0]();
+    await settle();
+    rendered = driver.render(page);
+    const template = collectElements(rendered.element, (node) => node.type === 'select')[0];
+    template.props.onChange({ target: { value: 'deny_read' } });
+    rendered = driver.render(page);
+    const required = collectElements(rendered.element, (node) => node.type === 'input' && node.props.required);
+    ['fixture', '123', '/tmp/secret.key'].forEach((value, index) => required[index].props.onChange({ target: { value } }));
+    rendered = driver.render(page);
+    const submit = collectElements(rendered.element, (node) => node.type === 'button' && node.props.type === 'submit')[0];
+    assert.equal(submit.props.disabled, !supported);
+    await collectElements(rendered.element, (node) => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+    assert.equal(requests.length, supported ? 1 : 0);
+    if (supported) assert.deepEqual(requests[0], { agent_id: 'fixture', root_pid: 123, path: '/tmp/secret.key', session_id: undefined });
+  }
+});
+
+async function renderRiskEnforcementCapabilities(capabilities) {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchEnforcementHealth',
+    'fetchEnforcementBindings',
+    'fetchEnforcementViolations',
+  ]);
+  const driver = createHooksDriver();
+  const pageModule = loadPageModule('src/pages/RiskEnforcementPage.tsx', {
+    'react-router-dom': { useSearchParams: () => [new URLSearchParams(), () => {}] },
+    '../i18n': {
+      useI18n: () => ({ t: (key, params) => params?.mode ? `${key} ${params.mode}` : key }),
+      useLocaleTag: () => 'en-US',
+    },
+    '../utils/apiClient': {
+      ...stubs,
+      createCredentialBinding: async () => {},
+      detachEnforcementBinding: async () => {},
+      enforcementSupportsMode: () => true,
+      enforcementViolationTotal: (violations) => violations.length,
+    },
+    '../utils/enforcementMode': {
+      effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
+    },
+    '../components/Pagination': componentStub('Pagination'),
+  }, driver);
+
+  const rendered = driver.render(pageModule.RiskEnforcementPage);
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[0].resolve({
+    ready: true,
+    backend: 'actplane',
+    capabilities,
+    message: null,
+  });
+  calls.fetchEnforcementBindings[0].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[0].resolve({ violations: [] });
+  await settle();
+  await settle();
+  return driver.render(pageModule.RiskEnforcementPage).element;
+}
+
+function collectText(node, out = []) {
+  if (node == null || typeof node === 'boolean') return out;
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, out);
+    return out;
+  }
+  if (typeof node === 'object') collectText(node.children, out);
+  return out;
+}
+
+const productionCapabilities = {
+  max_active_bindings: 10,
+  credential_observe: true,
+  credential_audit: true,
+  credential_enforce: false,
+  policy_handoff: false,
+  alternate_pid_retarget: false,
+  test_development: false,
+};
+
+for (const { name, capabilities, expected, absent } of [
+  {
+    name: 'file delete guard reports its runtime mode',
+    capabilities: {
+      ...productionCapabilities,
+      file_delete_guard: true,
+      file_delete_guard_mode: 'inode',
+    },
+    expected: ['risk.capability.prod', 'risk.capability.fileDeleteGuardWithMode inode'],
+    absent: ['risk.capability.testDev'],
+  },
+  {
+    name: 'legacy health without guard fields keeps the existing display',
+    capabilities: productionCapabilities,
+    expected: ['risk.capability.prod'],
+    absent: ['risk.capability.fileDeleteGuard'],
+  },
+  {
+    name: 'test backend and a mode-less guard keep independent labels',
+    capabilities: {
+      ...productionCapabilities,
+      credential_enforce: true,
+      policy_handoff: true,
+      test_development: true,
+      file_delete_guard: true,
+      file_delete_guard_mode: null,
+    },
+    expected: ['risk.capability.testDev', 'risk.capability.fileDeleteGuard'],
+    absent: ['risk.capability.prod', 'risk.capability.fileDeleteGuardWithMode'],
+  },
+]) {
+  test(`risk enforcement: ${name}`, async () => {
+    const text = collectText(await renderRiskEnforcementCapabilities(capabilities));
+    for (const value of expected) {
+      assert.ok(text.includes(value), `missing ${value} in ${JSON.stringify(text)}`);
+    }
+    for (const prefix of absent) {
+      assert.ok(!text.some((value) => value.startsWith(prefix)),
+        `unexpected ${prefix} in ${JSON.stringify(text)}`);
+    }
+  });
+}
 
 // ─── Bug 5: the sessions stat card reports a page instead of the total ───────
 
@@ -450,6 +732,7 @@ test('conversation-list: case variants across buckets form one model series', ()
     '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
     '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
     '../components/SessionResourceChart': {},
+    '../components/CopyButton': componentStub('CopyButton'),
   }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
   const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
   const sourceData = [
@@ -505,3 +788,159 @@ test('conversation-list: case variants across buckets form one model series', ()
   assert.equal(collectElements(ordinary.element, (node) => node.type === recharts.Bar).length, 2,
     'unrelated models stay separate');
 });
+
+test('conversation-list: session disclosure and time presets expose accessible state', async () => {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchSessions',
+    'fetchTraces',
+    'fetchAgentNames',
+    'fetchTimeseries',
+    'fetchInterruptionCount',
+    'fetchInterruptionStats',
+    'fetchInterruptionSessionCounts',
+    'fetchInterruptionConversationCounts',
+    'fetchLatestEvaluation',
+    'fetchTokenSavings',
+  ]);
+  const driver = createHooksDriver();
+  const DateTimePicker = () => null;
+  const recharts = Object.fromEntries([
+    'LineChart', 'Line', 'BarChart', 'Bar', 'XAxis', 'YAxis', 'CartesianGrid',
+    'Tooltip', 'Legend', 'ResponsiveContainer',
+  ].map((name) => [name, Object.assign(() => null, { displayName: name })]));
+  const page = loadPageModule('src/pages/ConversationList.tsx', {
+    recharts,
+    'react-router-dom': {
+      useNavigate: () => () => {},
+      useSearchParams: () => [new URLSearchParams(), () => {}],
+    },
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+    '../utils/apiClient': {
+      ...stubs,
+      conversationInterruptionKey: (sessionId, conversationId) => `${sessionId}:${conversationId}`,
+      UNASSIGNED_INTERRUPTION_BUCKET: '__unassigned__',
+    },
+    '../utils/datetime': { formatNsPadded: () => '2026-10-28 00:00:00' },
+    '../utils/timeseriesBuckets': { fillModelBuckets: () => [], fillTokenBuckets: () => [] },
+    '../components/InterruptionBadge': componentStub('InterruptionBadge'),
+    '../components/InterruptionPanel': componentStub('InterruptionPanel'),
+    '../components/EvaluationBadge': componentStub('EvaluationBadge'),
+    '../components/EvaluationPanel': componentStub('EvaluationPanel'),
+    '../components/DateTimePicker': { DateTimePicker },
+    '../components/SessionIdHelp': componentStub('SessionIdHelp'),
+    '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../components/CopyButton': componentStub('CopyButton'),
+  }, driver);
+
+  let rendered = driver.render(page.ConversationList);
+  for (const effect of rendered.effects) effect();
+  calls.fetchAgentNames[0].resolve([]);
+  calls.fetchSessions[0].resolve([{
+    session_id: 'customer session 1',
+    conversation_count: 1,
+    first_seen_ns: 1,
+    last_seen_ns: 2,
+    total_input_tokens: 3,
+    total_output_tokens: 4,
+    model: 'gpt-4o',
+    agent_name: 'fixture-agent',
+  }]);
+  calls.fetchTimeseries[0].resolve({ token_series: [], model_series: [] });
+  calls.fetchInterruptionCount[0].resolve(null);
+  calls.fetchInterruptionStats[0].resolve([]);
+  calls.fetchInterruptionSessionCounts[0].resolve([]);
+  calls.fetchInterruptionConversationCounts[0].resolve([]);
+  calls.fetchTokenSavings[0].resolve({ sessions: [] });
+  await settle();
+  await settle();
+  rendered = driver.render(page.ConversationList);
+
+  const nodeText = (node) => {
+    if (node == null || typeof node === 'boolean') return '';
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(nodeText).join('');
+    return nodeText(node.children);
+  };
+  const presets = (element) => collectElements(element, (node) => node.type === 'button')
+    .filter((node) => /^common\.last(?:1h|6h|24h|7d)$/.test(nodeText(node)));
+  let buttons = presets(rendered.element);
+  assert.equal(buttons.length, 4);
+  assert.deepEqual(buttons.map((button) => button.props['aria-pressed']), [false, false, true, false],
+    'the default last-24-hours range must expose its selected preset');
+
+  buttons[0].props.onClick();
+  rendered = driver.render(page.ConversationList);
+  buttons = presets(rendered.element);
+  assert.equal(buttons[0].props['aria-pressed'], true);
+  assert.deepEqual(buttons.slice(1).map((button) => button.props['aria-pressed']), [false, false, false]);
+
+  const startPicker = collectElements(rendered.element, (node) => node.type === DateTimePicker)
+    .find((node) => node.props.label === 'common.startTime');
+  startPicker.props.onChange(12345);
+  rendered = driver.render(page.ConversationList);
+  for (const button of presets(rendered.element)) assert.equal(button.props['aria-pressed'], false);
+
+  const disclosure = collectElements(rendered.element, (node) => node.type === 'button'
+    && typeof node.props['aria-expanded'] === 'boolean')[0];
+  assert.ok(disclosure, 'the session ID must be a native disclosure button');
+  assert.equal(disclosure.props.type, 'button');
+  assert.equal(disclosure.props['aria-expanded'], false);
+  assert.ok(disclosure.props['aria-label'].includes('customer session 1'));
+  assert.match(disclosure.props['aria-controls'], /^session-details-\d+$/,
+    'the controlled ID must remain a single DOM-safe IDREF for arbitrary session IDs');
+  assert.equal(collectElements(disclosure, (node) => node.props?.['aria-hidden'] === 'true').length, 1,
+    'the decorative expansion arrow must be hidden from assistive technology');
+
+  let propagationStopped = false;
+  disclosure.props.onClick({ stopPropagation: () => { propagationStopped = true; } });
+  assert.ok(propagationStopped, 'the button click must not also toggle through the row handler');
+  rendered = driver.render(page.ConversationList);
+  const expanded = collectElements(rendered.element, (node) => node.type === 'button'
+    && typeof node.props['aria-expanded'] === 'boolean')[0];
+  assert.equal(expanded.props['aria-expanded'], true);
+  const details = collectElements(rendered.element, (node) => node.type?.name === 'TraceSubTable')[0];
+  assert.ok(details, 'the disclosure must render the session details');
+  assert.equal(details.props.detailsId, expanded.props['aria-controls']);
+
+  expanded.props.onClick({ stopPropagation: () => {} });
+  rendered = driver.render(page.ConversationList);
+  assert.equal(collectElements(rendered.element, (node) => node.type?.name === 'TraceSubTable').length, 0);
+});
+
+
+for (const outcome of ['success', 'failure', 'unmount']) {
+  test(`agent activity: superseded poll ${outcome} cannot change the displayed snapshot`, async t => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs(['fetchAgentHealth']);
+    const { AgentActivitySection } = loadPageModule('src/pages/AgentHealthPage.tsx', {
+      '../utils/apiClient': stubs,
+      '../i18n': { useI18n: () => ({ t: (key, args) => key + (args ? JSON.stringify(args) : '') }), useLocaleTag: () => 'en-US', INTERRUPTION_TYPES: [] },
+      '../utils/datetime': { formatNs: String },
+      '../constants/policyIds': {},
+      '../components/CacheDiagnosisPanel': componentStub('CacheDiagnosisPanel'),
+    }, driver, '\nexports.AgentActivitySection = AgentActivitySection;');
+    const previousInterval = global.setInterval, previousClear = global.clearInterval;
+    let poll;
+    global.setInterval = fn => { poll = fn; return 1; };
+    global.clearInterval = () => {};
+    t.after(() => { global.setInterval = previousInterval; global.clearInterval = previousClear; });
+    const fixture = name => ({ agents: [{ agent_name: name, source: 'trajectories', trajectory_steps: 9, trajectory_tokens: 100, last_seen_ns: 0 }], warnings: [name] });
+    const cleanup = driver.render(AgentActivitySection).effects[0]();
+    poll();
+    calls.fetchAgentHealth[1].resolve(fixture('new-agent'));
+    await settle();
+    const snapshot = () => JSON.stringify(driver.render(AgentActivitySection).element);
+    const expected = snapshot();
+    assert.ok(expected.includes('new-agent'));
+    if (outcome === 'unmount') {
+      poll();
+      cleanup();
+      calls.fetchAgentHealth[2].resolve(fixture('after-unmount'));
+    }
+    if (outcome === 'failure') calls.fetchAgentHealth[0].reject(new Error('obsolete failure'));
+    else calls.fetchAgentHealth[0].resolve(fixture('old-agent'));
+    await settle();
+    assert.equal(snapshot(), expected, 'metrics and source warnings belong to the newest live poll');
+    cleanup();
+  });
+}

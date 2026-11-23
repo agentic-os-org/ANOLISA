@@ -31,7 +31,7 @@ Two units are installed:
 
 | Unit | Role |
 |---|---|
-| `agentsight.service` | Runs `/usr/local/bin/agentsight-start`, which supervises `agentsight trace` and `agentsight serve --host 0.0.0.0` |
+| `agentsight.service` | Runs `/usr/bin/agentsight-start`, which supervises `agentsight trace` and `agentsight serve --host 0.0.0.0` |
 | `agentsight-enforcer.service` | Optional ActPlane enforcement daemon; pulled in by the main unit and required for the Risk Enforcement page |
 
 What the packaged unit gives you:
@@ -56,6 +56,72 @@ sudo systemctl reload agentsight.service     # after editing config.json
 
 Because the unit binds the Dashboard to `0.0.0.0`, restrict TCP 7396 in your firewall or cloud
 security group before exposing the host.
+
+### Enable system-level file deletion protection
+
+The packaged enforcer unit defaults to `ACTPLANE_PINNED_PROFILE=credential-exfiltration`.
+It retains credential-to-network blocking but does not reserve the write-rule hooks needed
+for file deletion protection. Even with BPF-LSM active, `ready=true` does not imply
+`capabilities.file_delete_guard=true`. When protection is unavailable, the startup log
+reports the requested profile and activation requirements. SecCore continues to reject
+Apply with `AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE`; it does not silently allow it.
+
+Before activation, verify that `/sys/kernel/security/lsm` lists `bpf`. The enforcer and
+its target may share either the host's initial PID namespace or a container's default PID
+namespace; `hostPID: true` / `--pid=host` is not required for a same-container target. The
+`agent-file-guard` profile supplies file protection hooks, but switching to it removes
+`credential-exfiltration` credential-to-network blocking. These profiles are not independent
+switches that can be enabled together.
+Schedule a maintenance window and retain the original binding configuration: switching
+rebuilds an incompatible pinned engine, and restarting clears runtime bindings, leaving a
+protection gap during the transition.
+
+```bash
+sudo systemctl edit agentsight-enforcer.service
+```
+
+Save this drop-in:
+
+```ini
+[Service]
+Environment=ACTPLANE_PINNED_PROFILE=agent-file-guard
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agentsight-enforcer.service
+sudo journalctl -u agentsight-enforcer.service -n 50 --no-pager
+
+# This loopback GET health check needs no token and does not apply policies
+curl --fail --silent --show-error \
+  http://127.0.0.1:7396/api/enforcement/health
+```
+
+This token-free example only applies to a loopback GET. Remote requests and policy
+mutations require the existing [Dashboard authentication](data-and-storage.md) credential.
+
+After verifying `ready=true` and `capabilities.file_delete_guard=true`, re-apply file
+deletion protection bindings through SecCore. If the capability remains false, check
+BPF-LSM, the selected profile, and engine load logs; do not bypass the capability gate.
+`/run/agentsight/enforcer.sock` uses an internal versioned protocol, not HTTP for
+`curl --unix-socket`. To roll back, set the same drop-in back to `credential-exfiltration`,
+restart the enforcer, and re-apply the original bindings. Restarting only the enforcer
+does not require stopping AgentSight capture or the Dashboard.
+
+### Recover a crashed pre-5.15 tracepoint holder
+
+On kernels before 5.15, the installing enforcer keeps tracepoints attached and pins a
+`tp_holder_<kernel-pid>_<start>` marker under the ActPlane pin root (by default,
+`/sys/fs/bpf/actplane/v1`). After a crash, a restart in a nested or container-default PID
+namespace may be unable to prove whether that holder is still alive. Startup then fails with
+recovery guidance and leaves the pin root unchanged; an invisible holder is never treated as
+stale automatically.
+
+Stop the previous enforcer from the host or the PID namespace where it ran, and confirm that
+the old holder process has exited. Only after confirming that no holder remains, manually
+remove the stale ActPlane pin root (or the root configured by `ACTPLANE_BPF_PIN_ROOT`), restart
+the enforcer, and verify the health and startup log again. Never remove a shared pin root merely
+because the marker's process is invisible from the current container.
 
 ## Foreground run for troubleshooting
 
@@ -86,8 +152,18 @@ sudo ./target/release/agentsight trace &
 sudo ./target/release/agentsight serve --host 0.0.0.0
 ```
 
-`make build` alone skips the enforcer and `serve` then logs `AgentSight enforcement unavailable` at
-every start.
+Capture and analysis run directly from the checkout. Risk Enforcement additionally needs the
+enforcer daemon running; building it does not start it.
+
+### Install the source build as a service
+
+To install the built runtime and manage it with systemd instead:
+
+```bash
+sudo make install-core
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentsight.service
+```
 
 ## Containers and sidecars
 
@@ -103,10 +179,18 @@ The ANOLISA container entrypoint (`distribution/docker/docker-entrypoint.sh`) al
 checks for `cap_bpf`/`cap_sys_admin`, starts `agentsight-start` when they are present, and otherwise
 prints the exact `docker run` flags to add instead of failing silently.
 
+On kernels that still charge BPF maps to `RLIMIT_MEMLOCK` (before 5.11, and vendor 5.10 kernels such
+as Alibaba Cloud Linux 5.10), the 64 KiB container default is far too small and probe creation fails
+with `EPERM`. `agentsight trace` raises the limit itself when it holds `CAP_SYS_RESOURCE`, so add
+`--cap-add CAP_SYS_RESOURCE` (Kubernetes: `SYS_RESOURCE`), or start the container with
+`--ulimit memlock=-1`. When neither is possible, the probe creation error states the effective limit
+and these remedies.
+
 For a Kubernetes sidecar, the same three things matter:
 
-1. capabilities — `securityContext.capabilities.add: ["BPF", "PERFMON"]`, or `privileged: true` on
-   platforms that do not support fine-grained eBPF capabilities;
+1. capabilities — `securityContext.capabilities.add: ["BPF", "PERFMON"]` (plus `SYS_RESOURCE` on the
+   memlock-charging kernels above), or `privileged: true` on platforms that do not support
+   fine-grained eBPF capabilities;
 2. host visibility — the sidecar must share the Agent container's PID namespace
    (`shareProcessNamespace: true`) so it can see Agent processes and attach uprobes;
 3. BTF — mount `/sys/kernel/btf` read-only from the host.
@@ -158,9 +242,10 @@ kubectl -n agentsight rollout status ds/agentsight
 kubectl -n agentsight port-forward ds/agentsight 7396:7396   # then open http://localhost:7396
 ```
 
-The manifest requests `BPF` + `PERFMON` + `SYS_PTRACE` capabilities (the last one is needed to
-read `/proc/<pid>/maps` of another uid's process once it is non-dumpable; without it such Agents
-are silently skipped), mounts host `/sys/kernel/btf` read-only, and persists data to hostPath
+The manifest requests `BPF` + `PERFMON` + `SYS_PTRACE` + `SYS_RESOURCE` capabilities (`SYS_PTRACE` is
+needed to read `/proc/<pid>/maps` of another uid's process once it is non-dumpable; without it such
+Agents are silently skipped. `SYS_RESOURCE` lets AgentSight lift `RLIMIT_MEMLOCK` on memlock-charging
+kernels), mounts host `/sys/kernel/btf` read-only, and persists data to hostPath
 `/var/log/sysak`; resource limits mirror the packaged systemd unit (300m CPU / 350Mi memory). It
 talks to no Kubernetes API, so no RBAC is needed. The pod runs only the trace and serve workers
 (`agentsight-start`), so the Risk Enforcement page has no data in this form. To override

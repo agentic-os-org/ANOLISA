@@ -13,20 +13,39 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod policy;
 #[cfg(test)]
 mod tests;
+mod validity;
 
 pub(super) struct Owner {
-    parent: Option<String>,
-    process: Process,
-    cancelled: Arc<AtomicBool>,
-    acknowledge_by: Option<Instant>,
+    pub(super) parent: Option<String>,
+    pub(super) provider_session: Option<String>,
+    pub(super) process: Process,
+    pub(super) independent: bool,
+    pub(super) native: bool,
+    pub(super) sdk: Option<crate::Availability>,
+    pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) acknowledge_by: Option<Instant>,
+    policy_confirmed: bool,
+    validity: Option<validity::Validity>,
 }
 
 impl Runtime {
     pub(super) fn check_scope_owner(&self, id: &str) -> Result<()> {
+        self.scope_owner(id, true)
+    }
+
+    pub(super) fn check_scope_cleanup(&self, id: &str) -> Result<()> {
+        self.scope_owner(id, false)
+    }
+
+    fn scope_owner(&self, id: &str, execution: bool) -> Result<()> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         if let Some(owner) = owners.get(id) {
+            if execution && owner.independent && !owner.native && owner.parent.is_none() {
+                return Err(rejected("registration_requires_scope"));
+            }
             if owner.acknowledge_by.is_some() {
                 return Err(rejected("scope_unacknowledged"));
             }
@@ -34,6 +53,11 @@ impl Runtime {
                 return Err(rejected("scope_closing"));
             }
             owner.process.check()?;
+            if execution {
+                if let Some(validity) = &owner.validity {
+                    validity.check()?;
+                }
+            }
             if let Some(parent) = &owner.parent {
                 let root = owners
                     .get(parent)
@@ -47,7 +71,11 @@ impl Runtime {
         Ok(())
     }
 
-    pub(super) fn acknowledge_scope(&self, id: &str) -> Result<Value> {
+    pub(super) fn acknowledge_scope(
+        self: &Arc<Self>,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<Value> {
         let instances = self
             .instances
             .lock()
@@ -72,6 +100,9 @@ impl Runtime {
             .ok_or_else(|| rejected("scope_parent_unavailable"))?;
         root.process.check()?;
         owner.process.check()?;
+        if !owner.policy_confirmed {
+            return Err(rejected("scope_policy_unconfirmed"));
+        }
         if root.cancelled.load(Ordering::Acquire)
             || owner.cancelled.load(Ordering::Acquire)
             || !owner
@@ -80,7 +111,8 @@ impl Runtime {
         {
             return Err(rejected("scope_acknowledgement_expired"));
         }
-        let metadata = json!({"parent_instance_id": parent});
+        let metadata = json!({"parent_instance_id": parent,
+            "policy_revision": instances.get(id).and_then(Option::as_ref).map(|instance| instance.host.revision())});
         let owner = owners
             .get_mut(id)
             .ok_or_else(|| rejected("scope_unavailable"))?;
@@ -91,19 +123,36 @@ impl Runtime {
             owner.cancelled.store(true, Ordering::Release);
             return Err(error);
         }
+        let cancellation = Arc::clone(&owner.cancelled);
+        let pid = owner.process.metadata()["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or_else(|| rejected("scope_process_identity"))?;
+        drop(owners);
+        drop(instances);
+        // A committed ACK must remain fenced if optional-worker initialization
+        // fails. Maintenance owns reclamation even when the caller loses its reply.
+        let started = self
+            .start_observation(id, deadline)
+            .and_then(|_| self.report_run(id, crate::RunOutcome::Started { pid }));
+        if let Err(error) = started {
+            cancellation.store(true, Ordering::Release);
+            return Err(error);
+        }
         Ok(json!({"acknowledged": true}))
     }
 
     pub(super) fn scope_allows_observation(&self, id: &str) -> Result<bool> {
+        self.check_scope_cleanup(id)?;
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
-        Ok(!owners.get(id).is_some_and(|owner| owner.parent.is_some())
-            && !owners
+        Ok(owners.get(id).is_some_and(|owner| owner.parent.is_some())
+            || !owners
                 .values()
                 .any(|owner| owner.parent.as_deref() == Some(id)))
     }
 
     pub(super) fn own_instance(&self, id: &str, pid: u32) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let instances = self
             .instances
             .lock()
@@ -122,7 +171,13 @@ impl Runtime {
             id.into(),
             Owner {
                 parent: None,
+                provider_session: None,
+                independent: false,
+                native: false,
+                sdk: None,
                 acknowledge_by: None,
+                policy_confirmed: true,
+                validity: None,
                 process,
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
@@ -134,14 +189,14 @@ impl Runtime {
         &self,
         parent: &str,
         pid: u32,
-        context: ProcessContext,
+        mut context: ProcessContext,
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let id = self.identifier()?;
         let cancellation = Arc::new(AtomicBool::new(false));
-        let (bytes, target, capabilities) = {
+        let (bytes, target, capabilities, prepared_host) = {
             // Match close's lock order. The reservation is visible before preparation starts.
             let mut instances = self
                 .instances
@@ -152,14 +207,40 @@ impl Runtime {
                 .get(parent)
                 .and_then(Option::as_ref)
                 .filter(|instance| {
-                    !instance.closing && instance.reload.is_none() && instance.observation.is_none()
+                    !instance.closing
+                        && (instance.hermes_gateway()
+                            || instance
+                                .reload
+                                .as_ref()
+                                .is_none_or(|reload| reload.resident))
                 })
                 .ok_or_else(|| rejected("scope_parent_unavailable"))?;
             let owner = owners
                 .get(parent)
-                .filter(|owner| owner.parent.is_none() && !owner.cancelled.load(Ordering::Acquire))
+                .filter(|owner| {
+                    owner.parent.is_none()
+                        && (!owner.native || instance.hermes_gateway())
+                        && !owner.cancelled.load(Ordering::Acquire)
+                })
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
+            if owner.native {
+                instance
+                    .reload
+                    .as_ref()
+                    .ok_or_else(|| rejected("bridge_not_ready"))?
+                    .admit_gateway_scope(pid)?;
+                context.environment = instance.context.environment.clone();
+                context.stderr_bytes = instance.context.stderr_bytes;
+            } else if let Some(reload) = &instance.reload {
+                reload.admit_scope(pid)?;
+            }
+            if owner.acknowledge_by.is_some() {
+                return Err(rejected("registration_not_ready"));
+            }
+            let independent = owner.independent;
+            let sdk = owner.sdk;
+            let policy_confirmed = owner.native || (instance.reload.is_none() && sdk.is_none());
             if instances.len() >= self.limits.bindings {
                 return Err(self.overload("binding_limit"));
             }
@@ -167,13 +248,21 @@ impl Runtime {
                 instance.bytes.clone(),
                 instance.host.target().to_owned(),
                 instance.host.capabilities().clone().into(),
+                (owner.native && context.cwd == instance.context.cwd)
+                    .then(|| Arc::clone(&instance.host)),
             );
             instances.insert(id.clone(), None);
             owners.insert(
                 id.clone(),
                 Owner {
                     parent: Some(parent.into()),
+                    provider_session: independent.then(|| format!("scope-{id}")),
+                    independent,
+                    native: false,
+                    sdk,
                     acknowledge_by: Some(deadline + Duration::from_secs(5)),
+                    policy_confirmed,
+                    validity: None,
                     process,
                     cancelled: Arc::clone(&cancellation),
                 },
@@ -182,31 +271,35 @@ impl Runtime {
         };
         // Host accepts one cancellation flag; propagate connection loss into the
         // same flag used by parent close and process-death maintenance.
-        let finished = AtomicBool::new(false);
-        let prepared = thread::scope(|scope| {
-            scope.spawn(|| {
-                while !finished.load(Ordering::Acquire) {
-                    if cancelled.load(Ordering::Acquire)
-                        || self.stopped.load(Ordering::Acquire)
-                        || Instant::now() >= deadline
-                    {
-                        cancellation.store(true, Ordering::Release);
-                        break;
+        let prepared = if let Some(host) = prepared_host {
+            Ok(host)
+        } else {
+            let finished = AtomicBool::new(false);
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !finished.load(Ordering::Acquire) {
+                        if cancelled.load(Ordering::Acquire)
+                            || self.stopped.load(Ordering::Acquire)
+                            || Instant::now() >= deadline
+                        {
+                            cancellation.store(true, Ordering::Release);
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(2));
                     }
-                    thread::sleep(Duration::from_millis(2));
-                }
-            });
-            let result = self.prepare(
-                &bytes,
-                &id,
-                &target,
-                capabilities,
-                context.clone(),
-                (deadline, &cancellation),
-            );
-            finished.store(true, Ordering::Release);
-            result
-        });
+                });
+                let result = self.prepare(
+                    &bytes,
+                    &id,
+                    &target,
+                    capabilities,
+                    context.clone(),
+                    (deadline, &cancellation),
+                );
+                finished.store(true, Ordering::Release);
+                result.map(Arc::new)
+            })
+        };
         let mut instances = self
             .instances
             .lock()
@@ -239,7 +332,7 @@ impl Runtime {
             self.lifecycle_record(
                 "task_scope",
                 &id,
-                json!({"parent_instance_id": parent, "process": owners[&id].process.metadata()}),
+                json!({"parent_instance_id": parent, "process": owners[&id].process.metadata(), "policy_revision": host.revision()}),
             )?;
             self.contexts.activate(&id)?;
             Ok(host)
@@ -294,6 +387,7 @@ impl Runtime {
                 {
                     entry.cancelled.store(true, Ordering::Release);
                 }
+                self.cancel_shadow(|owner| children.iter().any(|id| id == owner))?;
             }
             for child in children {
                 let ready = self
@@ -323,6 +417,7 @@ impl Runtime {
     }
 
     pub(super) fn maintain_scopes(&self) -> Result<()> {
+        self.maintain_validity()?;
         let expired = {
             let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
             owners
@@ -362,5 +457,37 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+}
+
+impl Owner {
+    /// Return a pending deadline; expired bridge leases are already fenced.
+    pub(in crate::runtime) fn maintenance_deadline(&self) -> Option<Instant> {
+        self.acknowledge_by
+            .into_iter()
+            .chain(self.validity.as_ref().map(|validity| validity.deadline))
+            .filter(|deadline| *deadline > Instant::now())
+            .min()
+    }
+
+    pub(super) fn independent(
+        process: Process,
+        native: bool,
+        sdk: Option<crate::Availability>,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            parent: None,
+            provider_session: None,
+            process,
+            cancelled,
+            independent: true,
+            native,
+            sdk,
+            acknowledge_by: Some(deadline),
+            policy_confirmed: true,
+            validity: None,
+        }
     }
 }

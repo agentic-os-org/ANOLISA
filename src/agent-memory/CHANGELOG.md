@@ -7,6 +7,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.16] - 2026-11-13
+
+### Fixed
+
+- `mem_snapshot_restore` preserves a separate pre-restore tree for every successful restore, including repeated restores of the same snapshot within one second. Existing recovery directories are never overwritten, and legacy rollback leftovers no longer block new restores. Failed trash creation or moves retain old data in that attempt's rollback directory and report its path; failure to reserve a rollback directory stops restoration before moving live files. Snapshot archives, MCP arguments and successful responses are unchanged. Retained trash and rollback data require manual cleanup; keep these directories intact when downgrading (#10007).
+
+## [0.2.15] - 2026-11-12
+
+### Fixed
+
+- `mem_import` validates memory and task paths before an overwrite clears existing Markdown files, and saves a private, synced AMA backup whose path is returned as `Backup:`. Unsafe paths skip the whole-store clear, while valid entries still import and may replace matching paths; backup failures stop the operation before clearing. Dry runs validate without writing or creating backups. Pause other writers during overwrite and retain space for backups, which require manual removal; later write failures can still leave a partial import (#9929).
+- `mem_snapshot_restore` and mount-open snapshot reclamation now share a per-mount lock across processes, preventing competing restores or cleanup from changing an active restore's staging files. A busy lock makes restore fail with a retryable error and makes reclamation skip that sweep. Restart all `serve` processes sharing a mount after upgrading; do not delete `.anolisa/.restore.lock` while any process uses the mount. Other file writers are not coordinated by this lock (#9898).
+- Snapshot reclamation validates aged archives even when their sidecars parse, discards invalid archives, and retains backups with opening or filesystem read errors for a later retry. Valid metadata and archive-named directories remain intact; `mem_snapshot_list` hides missing or non-regular archives without scanning their contents. Mount opening now reads every eligible paired archive in full, increasing startup I/O. Disable `[memory.snapshot_reclaim].enabled` to stop future cleanup; rollback cannot recover already discarded archives (#9911).
+- Failed startup and incremental index writes now retry automatically with delays increasing from 1 to 64 seconds, without another file change or a server restart. While recovery is pending, `memory_search` reports an incomplete index instead of successful empty or partial results; file tools, including `mem_grep`, remain available (#9928).
+- `mem_grep` continues searching after invalid UTF-8 lines and preserves the original line numbers of later matches, instead of silently dropping the remainder of the file (#9904).
+- `mem_list` warns only when an additional matching entry is omitted, so a complete listing of exactly 5000 entries no longer reports truncation; the 5000-entry cap remains (#9905).
+
+## [0.2.14] - 2026-11-08
+
+### Changed
+
+- **Breaking for source installations:** `make install` now defaults to `AWPRJ=anolisa`, placing the adapter in the shared ANOLISA namespace while preserving unrelated files in that adapter tree. To keep managing an existing independent installation, pass `AWPRJ=` explicitly; to migrate, first run `make uninstall AWPRJ=` with the original profile and path overrides. This source-install change leaves runtime configuration paths and RPM/raw payload layouts unchanged (#9462).
+- Raw archives no longer claim ANOLISA's distribution-owned discovery contract, avoiding installation collisions with its pre-staged registry. Raw installation requires ANOLISA 0.3.21 or later (#9351).
+
+### Added
+
+- Reclaim abandoned snapshot files and restore staging directories when opening a memory mount, with a default age threshold of 24 hours. Corrupt snapshot sidecars are repaired only after validating the archive; invalid archives are discarded and healthy pairs are retained. Configure `[memory.snapshot_reclaim]` to disable cleanup or change `min_artifact_age_secs`; values below 60 seconds fail startup in TOML and are ignored with a warning through the environment override. Across processes, protection of active operations relies on this age threshold, so keep it longer than snapshot creation or restoration can take (#9219).
+
+### Fixed
+
+- Concurrent memory clients now serialize index schema upgrades, preventing duplicate migrations from disabling an otherwise usable search index. This does not repair an already damaged index (#9302).
+- Failed `mem_snapshot` calls clean up incomplete archives and archives created by that call without a completed sidecar, preventing repeated failures from silently consuming disk. Cleanup failures are logged (#9145).
+- Consolidation preserves quoted paths and date words beside path separators instead of rewriting filenames containing terms such as `today` or `昨天`; ordinary date phrases in prose still normalize (#7935).
+- `mem_grep` clips oversized lines at a complete UTF-8 character boundary, preventing long Chinese text and other multibyte input from crashing the worker. The existing line-length limit remains (#9408).
+- Starting the index watcher no longer duplicates the mount's root descriptor, avoiding the panic previously caused by that duplication under file-descriptor exhaustion (#3523).
+- OpenClaw plugin removal delegates configuration and managed-file changes to OpenClaw, preserving included and custom configuration files. A missing host CLI or leftover plugin paths now produces an error; an already-unregistered plugin succeeds only when both known plugin paths are absent (#9271).
+
+## [0.2.13] - Unreleased
+
+### Changed
+
+- Choose the memory runtime and OpenClaw integration separately using the core and plugins RPMs.
+- Raw installations render the MCP command for the selected binary directory.
+
+### Fixed
+
+- Honor configured embedding provider environment fields when the provider is selected in TOML; changing embedding models can require rebuilding vectors.
+- Prevent retired OpenClaw plugin instances from restarting their memory worker during reload or disposal.
+- Avoid publishing vectors for files whose text indexing failed in the same pass; a later successful scan retries them.
+- Reject overlapping ambiguous `mem_edit` matches before changing content.
+- Report `mem_export` scan or read errors instead of silently producing an incomplete archive.
+- Clean up incomplete destinations after failed `mem_promote` or create-only `mem_write` calls so they can be retried.
+- Restore nonempty read-only snapshot directories with their permissions intact and clean up failed staging before retry.
+
+## [0.2.12] - 2026-10-28
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.12, enforces persisted capture consent on each automatic OpenClaw observation through `memory_capture`, including changes made by another client; denied or failed captures remain retryable and successful captures appear in `memory_auto_created`. Upgrade the server and adapter together; an older server rejects the new hook call without falling back to manual observation. Manual writes remain available and existing observations are not relabeled (#8865)
+- **agent-memory**: Attributes new observations to `MCP_CLIENT_NAME` immediately, so the observing agent can recall them under isolated scope and another agent's filtered search excludes them. Existing untagged index rows are not backfilled by restarting or running `mem_index_refresh` (#7776)
+- **agent-memory**: Prepares complete replacements for `mem_edit` and `mem_write` overwrites before publishing them, preserving original content on preparation failures. Replacement requires readable/writable directories on one filesystem, Linux procfs and space for the new content; custom ownership and host security-label policies need validation, and other hard links retain old content. A reported post-publication sync failure means the new content is already visible; read it before retrying (#8982)
+- **agent-memory**: Restores only the requested file with `mem_revert`, preserving Git HEAD, staged changes and other files' pending edits; its response now identifies the source commit. Stage the restored file explicitly before a manual commit if its previous contents remain staged (#9082)
+- **agent-memory**: Validates gzip checksums and completion before publishing a restored snapshot, so damaged or truncated archives fail while the current memory files remain intact (#7631)
+- **agent-memory**: Watches memory changes before startup indexing, refreshes resized files even when their timestamps are unchanged, and preserves newly indexed children when an old file becomes a directory, keeping keyword and vector results current across these startup cases. Rewrites retaining both timestamp and size remain outside the scan fingerprint's guarantee (#8880, #9127, #9089)
+- **agent-memory**: Treats dotted filenames and `AND`, `NOT`, and `OR` as literal keyword-search text, so agents can recall terms such as `config.toml` without search-syntax errors; space-separated terms retain the existing all-term search and partial-match fallback (#8012)
+- **agent-memory**: Reports unreadable search-index rows with recovery guidance instead of returning successful empty or partial results, making keyword, vector and hybrid search failures visible without creating spurious interests or lessons from failed searches (#8854)
+- **agent-memory**: Preserves complete Unicode characters when shortening OpenClaw recall queries, preventing split emoji and malformed query prefixes (#4730)
+- **agent-memory**: Bounds session-log tail reads to 1 MiB and preserves UTF-8 boundaries, so oversized recent entries no longer make log reads fail or falsely appear empty; an oversized entry may still be returned as a partial tail (#7896)
+- **agent-memory**: Normalizes ASCII control characters in imported AMA frontmatter keys, values and list items to spaces, preventing injected metadata lines or premature frontmatter termination; these characters are intentionally not preserved during import (#4626)
+- **agent-memory**: Preserves concept and file rankings in `memory_summary` after AMA export/import and keeps literal commas, quotes and backslashes within single-line list entries, so summary counts remain accurate without rewriting existing imported files (#8862)
+- **agent-memory**: Preserves complete `MEMORY.md` link destinations when shortening long titles or descriptions, allowing agents to follow long paths while retaining the overall index size limit (#3621)
+- **agent-memory**: Returns valid unified patches from `mem_diff` with one pair of file headers and correctly escaped control characters in filenames, so consumers can parse and apply the result (#3575)
+- **agent-memory**: Keeps supersession markers inside valid leading frontmatter and logs failed index updates while retaining new facts, avoiding edits to ordinary note bodies and making repeated consolidation conflicts diagnosable (#3517, #3532)
+- **agent-memory**: Leaves unrepresentable `N days ago` and `N 天前` phrases unchanged during consolidation, preventing date overflow failures and accidental replacement with today's date (#9144)
+- **agent-memory**: Honors `ANOLISA_DRY_RUN=1` in OpenClaw install and uninstall scripts, previewing the applicable actions without installing, removing files or rewriting configuration; installation may still run the read-only CLI help probe (#7755)
+- **agent-memory**: Lists all 38 runtime tools in the packaged MCP catalog, enabling descriptor-based clients to discover the previously omitted session, summary, context, profile and index-refresh tools (#9148)
+
 ## [0.2.11] - 2026-10-25
 
 ### Fixed

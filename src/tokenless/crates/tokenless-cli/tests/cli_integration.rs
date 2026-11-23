@@ -170,17 +170,29 @@ fn data_dir_env_routes_stats_and_stash_databases() {
         );
     }
 
-    let stash_output = fixture
+    let stash_db = fixture.data_dir.join("stash.db");
+    let missing_output = fixture
         .command()
         .args(["retrieve", "abcdef0123456789abcdef01"])
         .output()
         .unwrap();
-    assert!(!stash_output.status.success());
-    assert!(
-        fixture.data_dir.join("stash.db").is_file(),
-        "retrieve stderr: {}",
-        String::from_utf8_lossy(&stash_output.stderr)
-    );
+    assert_eq!(missing_output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&missing_output.stderr);
+    assert!(error.contains("stash database not found at"), "{error}");
+    assert!(error.contains(&*stash_db.to_string_lossy()), "{error}");
+    assert!(!stash_db.exists());
+
+    let payload = "payload from the data directory";
+    let store = SqliteStore::new(&stash_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
+    drop(store);
+    let output = fixture
+        .command()
+        .args(["retrieve", &hash])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout.as_slice(), payload.as_bytes());
 }
 
 #[test]
@@ -217,15 +229,19 @@ fn stash_db_env_takes_precedence_over_data_dir() {
     let explicit_dir = fixture.data_dir.join("explicit");
     std::fs::create_dir_all(&explicit_dir).unwrap();
     let explicit_db = explicit_dir.join("stash.db");
+    let payload = "payload from the explicit stash";
+    let store = SqliteStore::new(&explicit_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
+    drop(store);
 
     let output = fixture
         .command()
         .env("TOKENLESS_STASH_DB", &explicit_db)
-        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .args(["retrieve", &hash])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(explicit_db.is_file());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout.as_slice(), payload.as_bytes());
     assert!(!fixture.data_dir.join("stash.db").exists());
 }
 
@@ -979,21 +995,33 @@ fn write_only_compression_reclaims_expired_stash_payloads() {
 
 #[test]
 fn retrieve_missing_hash() {
-    let output = tokenless_bin()
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    drop(SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap());
+    let output = fixture
+        .command()
         .args(["retrieve", "000000000000000000000000"])
         .output()
         .unwrap();
-    // Should fail gracefully (hash not found), not panic
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no stashed payload for hash"));
 }
 
 #[test]
 fn retrieve_invalid_hash() {
-    let output = tokenless_bin()
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
         .args(["retrieve", "not-a-valid-hash"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid stash hash"));
+    assert!(!fixture.data_dir.exists());
 }
 
 #[test]
@@ -2003,7 +2031,7 @@ fn spawn_with_stdin(
 }
 
 #[test]
-fn locked_stats_warn_without_changing_compression_or_retrieval() {
+fn locked_stats_do_not_change_compression_or_retrieval() {
     let fixture = TempDataDir::new().expect("create isolated data directory");
     std::fs::create_dir_all(&fixture.data_dir).unwrap();
     let stats_db = fixture.data_dir.join("stats.db");
@@ -2069,7 +2097,7 @@ fn locked_stats_warn_without_changing_compression_or_retrieval() {
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
             assert_eq!(output.stdout, baseline.stdout, "{args:?}");
             let stderr = String::from_utf8(output.stderr).unwrap();
-            if enabled == "1" {
+            if enabled == "1" && args[0] != "retrieve" {
                 assert_eq!(
                     stderr.matches("[tokenless-stats] WARNING:").count(),
                     1,
@@ -2242,7 +2270,7 @@ fn build_log_request(content: &str, status: &str, session_id: &str) -> String {
 }
 
 #[test]
-fn diff_opt_in_round_trips_git_patch_and_original() {
+fn diff_defaults_on_and_round_trips_git_patch_and_original() {
     for (ending, quote_path) in [
         ("\n", "true"),
         ("\n", "false"),
@@ -2330,7 +2358,15 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         git(&["update-index", "--refresh"]);
 
         let state = temp.path().join("data");
-        for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        for enabled in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+        ] {
             let mut command = tokenless_bin();
             command
                 .env("TOKENLESS_DATA_DIR", &state)
@@ -2355,7 +2391,7 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
             );
             let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             let result = &response["result"];
-            if enabled.is_none() || enabled == Some("0") {
+            if matches!(enabled, Some("0" | "false")) {
                 assert_eq!(result["disposition"], "passthrough");
                 assert_eq!(result["output"], diff);
                 assert_eq!(result["stash_keys"], serde_json::json!([]));
@@ -2426,6 +2462,181 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
 }
 
 #[test]
+fn mixed_region_storage_failure_rolls_back_other_regions_in_either_order() {
+    // The small region attempts a one-element tail write but keeps its
+    // original representation. The large region successfully truncates.
+    let small = serde_json::to_string(&vec![0; 137]).unwrap();
+    let large = serde_json::to_string(&(0..2000).collect::<Vec<_>>()).unwrap();
+    for small_first in [true, false] {
+        for fail_small in [false, true] {
+            let fixture = TempDataDir::new().unwrap();
+            std::fs::create_dir_all(&fixture.data_dir).unwrap();
+            let stash_db = fixture.data_dir.join("stash.db");
+            drop(SqliteStore::new(&stash_db).unwrap());
+            if fail_small {
+                rusqlite::Connection::open(&stash_db)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_small_array BEFORE INSERT ON stash
+                         WHEN NEW.payload = '[0]'
+                         BEGIN SELECT RAISE(FAIL, 'injected region write failure'); END;",
+                    )
+                    .unwrap();
+            }
+            let (first, second) = if small_first {
+                (&small, &large)
+            } else {
+                (&large, &small)
+            };
+            let content = format!("before\n{first}\nbetween\n{second}\nafter\n");
+            let output = spawn_with_stdin(
+                fixture
+                    .command()
+                    .env("TOKENLESS_MIXED_CONTENT_ENABLED", "1")
+                    .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                    .env("TOKENLESS_STATS_ENABLED", "0")
+                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                &["compress"],
+                &build_log_request(&content, "success", "mixed-partial-failure"),
+            );
+            let store = SqliteStore::new(&stash_db).unwrap();
+            if fail_small {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(output.stdout.is_empty());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("1 stash write operation(s) failed")
+                );
+                assert_eq!(store.len(), 0, "small_first={small_first}");
+            } else {
+                assert!(output.status.success(), "{:?}", output);
+                let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let result = &response["result"];
+                assert_eq!(result["disposition"], "applied");
+                let keys = result["stash_keys"].as_array().unwrap();
+                assert_eq!(keys.len(), 1);
+                assert_eq!(store.len(), 1);
+                assert!(store.retrieve(keys[0].as_str().unwrap()).unwrap().is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_region_after_a_protected_fence_respects_the_line_window() {
+    let table = (0..40)
+        .map(|index| format!("{index},record-{index}-{}", "payload ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    for prefix_lines in [199, 200, 207] {
+        let fixture = TempDataDir::new().unwrap();
+        let prefix = format!("```python\n{}```\n", "pass\n".repeat(prefix_lines - 2));
+        let content = format!("{prefix}```csv\n{table}\r\n```\n");
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_MIXED_CONTENT_ENABLED", "1")
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &build_log_request(&content, "success", "mixed-line-window"),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        if prefix_lines < 200 {
+            assert_eq!(result["disposition"], "applied");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["tabular_compaction"])
+            );
+            assert!(result["output"].as_str().unwrap().starts_with(&prefix));
+        } else {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], content);
+        }
+    }
+}
+
+#[test]
+fn mixed_content_compression_follows_its_opt_in_switch() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let table = (0..40)
+        .map(|index| format!("{index},record-{index}-{}", "payload ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let body = serde_json::to_string_pretty(
+        &(0..40)
+            .map(|index| {
+                serde_json::json!({
+                    "id": index,
+                    "message": format!("record-{index}-{}", "x".repeat(60)),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let content = format!("HEAD /api/items HTTP/1.1\n\n{body}\n\n```csv\n{table}\n```\n\ndone\n");
+    for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", fixture.data_dir.join("mixed"))
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env_remove("TOKENLESS_MIXED_CONTENT_ENABLED")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0");
+        if let Some(value) = enabled {
+            command.env("TOKENLESS_MIXED_CONTENT_ENABLED", value);
+        }
+        let output = spawn_with_stdin(
+            &mut command,
+            &["compress"],
+            &build_log_request(&content, "success", "mixed-integration"),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        if enabled.is_none() || enabled == Some("0") {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], content);
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["disposition"], "applied");
+        // Both regions route: the JSON region may select TOON or cleanup
+        // (policy-dependent), but the tabular region always compacts.
+        let operations = result["applied_operations"].as_array().unwrap();
+        assert!(
+            operations.contains(&serde_json::json!("tabular_compaction")),
+            "{operations:?}"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|op| ["toon", "json_cleanup"].contains(&op.as_str().unwrap())),
+            "{operations:?}"
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.len() < content.len());
+        // Surrounding prose is byte-for-byte.
+        assert!(compressed.starts_with("HEAD /api/items HTTP/1.1\n\n"));
+        assert!(compressed.ends_with("\n\ndone\n"));
+        // The fence label survives untouched.
+        assert!(compressed.contains("```csv\n"));
+    }
+}
+
+#[test]
 fn compress_post_tool_reduces_and_restores_build_logs() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -2477,6 +2688,67 @@ fn compress_post_tool_reduces_and_restores_build_logs() {
 }
 
 #[test]
+fn compress_post_tool_unittest_logs_preserve_summary_and_recover_original() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut content = (0..83)
+        .map(|index| format!("test_case_{index:03} (__main__.ExampleTests) ... ok\n"))
+        .collect::<String>();
+    content.push_str(
+        "\n----------------------------------------------------------------------\nRan 83 tests in 0.295s\n\nOK\n",
+    );
+    for (status, recovery, disposition) in [
+        ("success", "shell", "applied"),
+        ("success", "none", "no_savings"),
+        ("error", "shell", "tool_error"),
+    ] {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(&content, status, "unittest-log")).unwrap();
+        request["input"]["capabilities"]["recovery"]["kind"] = recovery.into();
+        request["input"]["command"] = "python -m unittest -v".into();
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["disposition"], disposition);
+        if disposition != "applied" {
+            assert_eq!(result["output"], content);
+            assert_eq!(result["applied_operations"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.ends_with("Ran 83 tests in 0.295s\n\nOK\n"));
+        let hash = extract_hash(compressed).unwrap();
+        let retrieve = fixture.command().args(["retrieve", hash]).output().unwrap();
+        assert!(retrieve.status.success());
+        let marker = compressed.lines().find(|line| line.contains(hash)).unwrap();
+        assert_eq!(
+            compressed.replace(
+                &format!("{marker}\n"),
+                &String::from_utf8(retrieve.stdout).unwrap(),
+            ),
+            content
+        );
+    }
+}
+
+#[test]
 fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -2517,6 +2789,85 @@ fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
             .unwrap()
             .contains("ENV_DEPENDENCY_MISSING")
     );
+}
+
+#[test]
+fn pnpm_post_tool_compacts_layout_and_recovers_progress_through_protocol() {
+    let input =
+        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt");
+    for (recovery, after_tokens) in [
+        (serde_json::json!({"kind": "none"}), 256),
+        (serde_json::json!({"kind": "shell"}), 184),
+        (
+            serde_json::json!({"kind": "tool", "name": "tokenless_retrieve"}),
+            188,
+        ),
+    ] {
+        let fixture = TempDataDir::new().expect("isolated CLI data directory");
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "pnpm-install")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery.clone();
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["before_tokens"], 332);
+        assert_eq!(result["after_tokens"], after_tokens);
+        if recovery["kind"] == "none" {
+            assert_eq!(result["recoverability"], "lossless");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["build_log_reduction"])
+            );
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+        let retrieve = serde_json::json!({
+            "protocol_version": 2,
+            "operation": "retrieve",
+            "attribution": request["attribution"],
+            "input": {
+                "hash_or_marker": result["stash_keys"][0],
+                "visible_markers": result["stash_keys"],
+            },
+        });
+        let output = spawn_with_stdin(&mut fixture.command(), &["compress"], &retrieve.to_string());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recovered: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            recovered["result"]["payload"],
+            input
+                .split_inclusive('\n')
+                .skip(12)
+                .take(7)
+                .collect::<String>()
+        );
+    }
 }
 
 #[test]
@@ -2588,32 +2939,47 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 
 #[test]
 #[cfg(unix)]
-fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+fn compress_pre_tool_runs_rewrites_through_the_embedded_rtk() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
+    // A stray `rtk` on PATH must play no part: RTK is linked into tokenless.
     let bin_dir = tempfile::tempdir().unwrap();
-    let rtk = bin_dir.path().join("rtk");
-    std::fs::write(
-        &rtk,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
+    let stray = bin_dir.path().join("rtk");
+    std::fs::write(&stray, "#!/bin/sh\nexit 97\n").unwrap();
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&rtk).unwrap().permissions();
+        let mut permissions = std::fs::metadata(&stray).unwrap().permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&rtk, permissions).unwrap();
+        std::fs::set_permissions(&stray, permissions).unwrap();
     }
+    let path = std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    // RTK reads permission rules and its own configuration from the home directory.
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("alpha.txt"), "").unwrap();
+    let isolate = |command: &mut Command| {
+        command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("TOKENLESS_STATS_ENABLED", "0");
+    };
+
     let request = serde_json::json!({
         "protocol_version": 2,
         "operation": "pre_tool",
         "attribution": {"agent_id": "integration-agent"},
         "input": {
             "tool_name": "Bash",
-            "arguments": {"command": "grep error log"},
+            "arguments": {"command": "ls", "timeout": 30},
             "command_field": "command",
             "capabilities": {
                 "replace_arguments": true,
@@ -2621,24 +2987,583 @@ fn compress_pre_tool_resolves_the_independent_rtk_binary() {
             }
         }
     });
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env(
-                "PATH",
-                std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
-                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-                ))
-                .unwrap(),
-            )
-            .env("TOKENLESS_STATS_ENABLED", "0"),
-        &["compress"],
-        &request.to_string(),
+    let mut compress = fixture.command();
+    isolate(&mut compress);
+    let output = spawn_with_stdin(&mut compress, &["compress"], &request.to_string());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["action"], "replace_arguments");
     assert_eq!(response["result"]["output_optimization"], "rtk");
+    assert_eq!(response["result"]["arguments"]["timeout"], 30);
+    let rewritten = response["result"]["arguments"]["command"].as_str().unwrap();
+    assert!(rewritten.ends_with(" rtk ls"), "{rewritten}");
+    assert!(rewritten.contains("tokenless"), "{rewritten}");
+
+    // The rewritten command is self-contained: this binary runs RTK's `ls`.
+    let mut shell = Command::new("sh");
+    isolate(&mut shell);
+    let executed = shell
+        .args(["-c", rewritten])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("alpha.txt"));
+}
+
+/// How the caller of a stalled rewrite runs `tokenless compress`.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq)]
+enum StalledCaller {
+    /// Shares its process group with the CLI, as the hook adapters do.
+    SharedGroup,
+    /// Starts the CLI in a group of its own, as AW and the Python SDK do.
+    OwnGroup,
+    /// Hands the CLI a full stderr pipe that it never reads.
+    FullStderr,
+    /// Makes the CLI the first command of a job-control pipeline: the CLI
+    /// leads a group that also holds the command reading its output.
+    Pipeline,
+    /// Runs the rewrite child that `compress` starts, behind a full stderr pipe.
+    ChildBehindFullStderr,
+}
+
+/// Returns a fixture whose `workspace` has no `.claude` ancestor, so RTK asks
+/// `git` for the project root.
+#[cfg(unix)]
+fn fixture_without_claude_ancestor() -> TempDataDir {
+    let fixtures = [TempDataDir::new(), TempDataDir::new_external()];
+    for fixture in fixtures.into_iter().flatten() {
+        let root = fixture.root.canonicalize().unwrap();
+        if !root.ancestors().any(|dir| dir.join(".claude").exists()) {
+            return fixture;
+        }
+    }
+    panic!("every temporary root has a `.claude` ancestor; point TMPDIR elsewhere");
+}
+
+/// Returns `tokenless compress`, set up for a PreTool rewrite in a workspace
+/// whose `git rev-parse` never answers, as on a hung mount, and the file that
+/// the stub `git` writes its PID to. The fixture owns the workspace.
+#[cfg(unix)]
+fn compress_behind_stalled_git() -> (TempDataDir, std::process::Command, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+
+    let fixture = fixture_without_claude_ancestor();
+    let bin_dir = fixture.root.join("bin");
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    for dir in [&bin_dir, &home, &workspace] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let pid_file = fixture.root.join("git.pid");
+    let git = bin_dir.join("git");
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap();
+    let mut compress = fixture.command();
+    compress.arg("compress");
+    compress
+        .current_dir(&workspace)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    (fixture, compress, pid_file)
+}
+
+/// A PreTool request that RTK rewrites only after asking `git` for the project root.
+#[cfg(unix)]
+fn stalled_git_request() -> String {
+    serde_json::json!({
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "tool_name": "Bash",
+            "arguments": {"command": "git status"},
+            "command_field": "command",
+            "capabilities": {"replace_arguments": true, "block_and_suggest": false}
+        }
+    })
+    .to_string()
+}
+
+/// Runs a PreTool rewrite behind a stalled `git` and checks that the CLI ends
+/// within its limit together with `git`.
+#[cfg(unix)]
+fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    if caller == StalledCaller::ChildBehindFullStderr {
+        compress.arg("--rewrite-child");
+    }
+    // AW, the SDK and a job-control shell start the CLI as a group leader, and
+    // `compress` starts its rewrite child that way too.
+    if matches!(
+        caller,
+        StalledCaller::OwnGroup | StalledCaller::Pipeline | StalledCaller::ChildBehindFullStderr
+    ) {
+        compress.process_group(0);
+    }
+    // Held open, so a write to the full pipe blocks instead of failing.
+    let mut _stderr_reader = None;
+    if matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        let (reader, writer) = full_pipe();
+        _stderr_reader = Some(reader);
+        compress.stderr(writer);
+    }
+
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    // A job-control shell starts the reader in the group of the pipeline's first command.
+    let mut reader = (caller == StalledCaller::Pipeline).then(|| {
+        std::process::Command::new("cat")
+            .stdin(child.stdout.take().unwrap())
+            .stdout(Stdio::null())
+            .process_group(child.id() as i32)
+            .spawn()
+            .unwrap()
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    // A regression can hang the CLI for good, so the test bounds its own wait.
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("tokenless compress still running after 20 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout).unwrap();
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr).unwrap();
+    }
+
+    let stderr = String::from_utf8_lossy(&stderr);
+    // A workspace below a `.claude` directory would pass without RTK running git.
+    assert!(pid_file.exists(), "RTK never ran git: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    if caller == StalledCaller::ChildBehindFullStderr {
+        // The child kills its whole group, itself included.
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{stderr}");
+    } else {
+        assert_eq!(status.code(), Some(1), "{status:?}: {stderr}");
+    }
+    assert!(stdout.is_empty());
+    if !matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        assert!(
+            stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+            "{stderr}"
+        );
+    }
+    if let Some(reader) = &mut reader {
+        // The reader shares the CLI's group and must see end of input, not a signal.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader_status = loop {
+            if let Some(status) = reader.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = reader.kill();
+                panic!("the pipeline's reader did not see the end of its input");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(reader_status.success(), "{reader_status:?}");
+    }
+    let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_gone(pid) {
+        assert!(Instant::now() < deadline, "stalled git {pid} survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Returns both ends of a blocking pipe whose buffer is already full.
+#[cfg(unix)]
+fn full_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: F_GETFL and F_SETFL only read and change the flags of this descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    loop {
+        match writer.write(&[b'x'; 4096]) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill the pipe: {error}"),
+        }
+    }
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+    (reader, writer)
+}
+
+/// Treats a zombie as gone: a container without an init process may never reap it.
+#[cfg(unix)]
+fn process_gone(pid: libc::pid_t) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| matches!(rest.trim_start().chars().next(), Some('Z' | 'X')));
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_the_callers_group() {
+    // The test process survives only if the CLI spares the group it shared.
+    assert_stalled_rewrite_ends_with_git(StalledCaller::SharedGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_its_own_group() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::OwnGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::FullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_but_not_the_rest_of_its_pipeline() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::Pipeline);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::ChildBehindFullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_runs_no_rtk_outside_a_process_group_of_its_own() {
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+
+    // Started directly, the child shares this test's group, which a timeout
+    // could not end without ending the test as well.
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    compress.arg("--rewrite-child");
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        // SAFETY: the stub only sleeps; ending it early affects nothing else.
+        unsafe { libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL) };
+        panic!("RTK ran git without owning the processes it starts: {stderr}");
+    }
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("cannot bound the RTK rewrite: `compress --rewrite-child` runs only"),
+        "{stderr}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5), "{stderr}");
+}
+
+/// Returns the PID of the rewrite child that `compress` started.
+#[cfg(target_os = "linux")]
+fn rewrite_child_of(compress: u32) -> libc::pid_t {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // The parent PID is the second field after the parenthesized name.
+            let parent = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|parent| parent.parse::<u32>().ok());
+            if parent == Some(compress) {
+                return entry.file_name().to_str().unwrap().parse().unwrap();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compress started no rewrite child"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn killing_compress_leaves_no_rewrite_child_waiting_on_a_locked_stats_database() {
+    use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    // Opening the stats recorder waits up to 5 s for this lock before the
+    // rewrite starts, and RTK then waits on the stalled `git`.
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let lock = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
+    lock.execute_batch("CREATE TABLE held (x); BEGIN EXCLUSIVE;")
+        .unwrap();
+    compress
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .process_group(0);
+    let started = Instant::now();
+    let mut outer = compress.spawn().unwrap();
+    outer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let child = rewrite_child_of(outer.id());
+    // Past reading its request, the child waits on the lock.
+    std::thread::sleep(Duration::from_millis(500));
+    // As the SDK and AW do at their limits, end only the group of `compress`.
+    // SAFETY: `compress` leads its own group, which holds nothing of the test's.
+    unsafe { libc::killpg(outer.id() as libc::pid_t, libc::SIGKILL) };
+    outer.wait().unwrap();
+    let deadline = started + Duration::from_secs(7);
+    while !process_gone(child) {
+        if Instant::now() > deadline {
+            // SAFETY: the child leads its own group, which the test started.
+            unsafe { libc::killpg(child, libc::SIGKILL) };
+            panic!("rewrite child {child} outlived its deadline after compress was killed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let pid: libc::pid_t = pid.trim().parse().unwrap();
+        assert!(
+            process_gone(pid),
+            "stalled git {pid} survived its rewrite child"
+        );
+    }
+    drop(lock);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, _pid_file) = compress_behind_stalled_git();
+    // RTK takes the `.claude` directory as the project root without asking
+    // `git`, so the rewrite returns at once and the response write blocks.
+    std::fs::create_dir(fixture.root.join("workspace/.claude")).unwrap();
+    // Held open, so the write blocks instead of failing.
+    let (_stdout_reader, writer) = full_pipe();
+    compress
+        .arg("--rewrite-child")
+        .process_group(0)
+        .stdout(writer);
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    drop(compress);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("the rewrite child still blocks writing its response after 10 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    assert!(
+        stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rtk_subcommand_forwards_help_and_version_flags() {
+    let output = tokenless_bin().args(["rtk", "--version"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    // Usage names the embedding command, so pasted hints stay runnable.
+    let output = tokenless_bin().args(["rtk", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
+}
+
+#[test]
+fn rtk_subcommand_consumes_the_option_terminator_before_the_command() {
+    // The marker is consumed instead of forwarded: RTK would execute it as a
+    // program and exit 127.
+    let output = tokenless_bin()
+        .args(["rtk", "--", "--version"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    let output = tokenless_bin()
+        .args(["rtk", "--", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
+
+    // A delimiter with no command is not a program: RTK reports the same
+    // missing-command error as an empty command line.
+    let bare = tokenless_bin().args(["rtk"]).output().unwrap();
+    let marked = tokenless_bin().args(["rtk", "--"]).output().unwrap();
+    assert_eq!(marked.status.code(), bare.status.code());
+    assert_eq!(marked.stderr, bare.stderr);
+
+    // The delimiter no longer blocks RTK's fallback: an unknown program fails
+    // the same way with and without it.
+    let missing = format!("tokenless-missing-{}", std::process::id());
+    let bare = tokenless_bin()
+        .args(["rtk", missing.as_str()])
+        .output()
+        .unwrap();
+    let marked = tokenless_bin()
+        .args(["rtk", "--", missing.as_str()])
+        .output()
+        .unwrap();
+    assert!(!bare.status.success(), "{bare:?}");
+    assert_eq!(marked.status.code(), bare.status.code());
+    assert_eq!(marked.stderr, bare.stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn rtk_subcommand_runs_the_same_command_with_and_without_the_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("note.txt"), "x").unwrap();
+
+    // `--` selects the same command as naming it directly.
+    let direct = tokenless_bin()
+        .args(["rtk", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let marked = tokenless_bin()
+        .args(["rtk", "--", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert_eq!(marked.status.code(), direct.status.code(), "{marked:?}");
+    assert_eq!(marked.stdout, direct.stdout);
+    assert!(!marked.stdout.is_empty());
+
+    // The delimiter may follow RTK's pre-command options.
+    let output = tokenless_bin()
+        .args(["rtk", "-v", "--", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, direct.stdout);
+
+    // A delimiter after the command belongs to the command.
+    let output = tokenless_bin()
+        .args(["rtk", "run", "--", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
 }
 
 #[test]
@@ -2647,6 +3572,23 @@ fn compress_exit_contract_rejects_v1_and_operation_failures() {
     let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], v1);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+
+    for version in [1, 3] {
+        let mut request: serde_json::Value = serde_json::from_str(&post_tool_request_json(
+            "original output",
+            false,
+            "version-mismatch",
+        ))
+        .unwrap();
+        request["protocol_version"] = serde_json::json!(version);
+        let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], &request.to_string());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("unsupported protocol_version {version}"))
+        );
+    }
 
     let unauthorized = serde_json::json!({
         "protocol_version": 2,
@@ -3052,6 +3994,125 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
     }
 }
 
+#[test]
+fn html_long_code_block_is_compressed_and_recovers_the_original_page() {
+    let fixture = TempDataDir::new().expect("isolated data directory");
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    // Removing the script must save enough to accept the complete code block,
+    // including its long fences, rather than merely returning a no-savings view.
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Code reference</title></head><body>\
+         <p>This reference preserves code examples and their exact delimiters \
+         so they can be used without changing their meaning.</p>\
+         <pre><code class=\"language-sh\">a{run}b</code></pre>\
+         <script>{}</script></body></html>",
+        "var padding = 12345;".repeat(32 * 1024)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&build_log_request(&html, "success", "html-long-code")).unwrap();
+    request["input"]["tool_name"] = "WebFetch".into();
+    request["input"]["content_origin"] = "api_response".into();
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "html");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(rendered.contains(&format!("\n{fence}sh\na{run}b\n{fence}\n")));
+    assert!(!rendered.contains("var padding"));
+    assert!(rendered.len() < html.len());
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success(), "{retrieved:?}");
+    assert_eq!(retrieved.stdout, html.as_bytes());
+}
+
+#[test]
+fn html_zero_rowspan_preserves_columns_and_recovers_the_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("data");
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Service inventory</title></head><body>\
+         <p>This service inventory records deployment regions, service names, \
+         and instance counts for the production environment.</p>\
+         <table><thead><tr><th>Region</th><th>Service</th><th>Count</th></tr></thead>\
+         <tbody><tr><td rowspan=\"0\">EU</td><td>api</td><td>10</td></tr>\
+         <tr><td>worker</td><td>20</td></tr></tbody></table>\
+         <script>{}</script></body></html>",
+        "var padding = 12345; ".repeat(100)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&post_tool_request_json(&html, true, "html-zero-rowspan")).unwrap();
+    request["input"]["capabilities"]["replace_with_text"] = true.into();
+    let output = spawn_with_stdin(
+        tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(
+        rendered.contains(
+            "| Region | Service | Count |\n| --- | --- | --- |\n\
+         | EU | api | 10 |\n|  | worker | 20 |"
+        ),
+        "{rendered}"
+    );
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", &state)
+        .env_remove("TOKENLESS_STASH_DB")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success());
+    assert_eq!(retrieved.stdout, html.as_bytes());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Fail-soft warnings must survive an unwritable stderr (fd 2 → /dev/full)
 // ─────────────────────────────────────────────────────────────────────
@@ -3250,57 +4311,134 @@ fn corrupt_stats_warnings_survive_an_unwritable_stderr() {
     );
 }
 
+#[cfg(unix)]
 #[test]
-#[cfg(target_os = "linux")]
-fn stash_purge_warning_survives_an_unwritable_stderr() {
+fn retrieve_from_nonwritable_directory_after_last_writer_closes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: geteuid only reads the process's effective UID.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let Some(fixture) = TempDataDir::new() else {
         return;
     };
-    let stash_db = fixture.data_dir.join("stash-no-purge.db");
     std::fs::create_dir_all(&fixture.data_dir).unwrap();
-    // A real stash table whose rows cannot be deleted (a BEFORE DELETE
-    // trigger that aborts): the store opens cleanly — none of its
-    // open-time statements delete — but the lazy-purge sweep on every
-    // retrieve fails, while the retrieve SELECT keeps working.
-    let payload = "stash-purge-payload";
-    let hash = tokenless_ccr::compute_key(payload.as_bytes());
+    let stash = fixture.data_dir.join("stash.db");
+    let writer = SqliteStore::new(&stash).unwrap();
+    let payload = "read-only directory stash payload";
+    let hash = writer.stash(payload).unwrap().key;
+    drop(writer);
+
+    let entries = || {
+        let mut names: Vec<_> = std::fs::read_dir(&fixture.data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    let retrieve = || {
+        std::fs::set_permissions(&fixture.data_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .args(["retrieve", &hash])
+            .output();
+        std::fs::set_permissions(&fixture.data_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        output.unwrap()
+    };
+
+    // An older writer or an external SQLite connection leaves only the main DB.
+    let legacy = rusqlite::Connection::open(&stash).unwrap();
+    legacy
+        .execute(
+            "UPDATE stash SET payload = ? WHERE hash = ?",
+            [payload, &hash],
+        )
+        .unwrap();
+    drop(legacy);
+    assert_eq!(entries(), ["stash.db"]);
+    let output = retrieve();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(entries(), ["stash.db"]);
+
+    // The updated writer retains the sidecars even for existing entries.
+    drop(SqliteStore::new(&stash).unwrap());
+    let original_entries = entries();
+    assert_eq!(
+        original_entries,
+        ["stash.db", "stash.db-shm", "stash.db-wal"]
+    );
+    let original_stash = std::fs::read(&stash).unwrap();
+    let output = retrieve();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(entries(), original_entries);
+    assert_eq!(std::fs::read(&stash).unwrap(), original_stash);
+}
+
+#[test]
+fn retrieve_leaves_the_stash_unchanged_when_stats_are_unavailable() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    std::fs::write(&stats_db, b"invalid SQLite file").unwrap();
+    let payload = "read-only stash payload";
+    let store = SqliteStore::new(&stash_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
     let conn = rusqlite::Connection::open(&stash_db).unwrap();
-    conn.execute_batch(&format!(
-        "CREATE TABLE stash (
-             hash TEXT PRIMARY KEY,
-             payload TEXT NOT NULL,
-             expires_at INTEGER NOT NULL,
-             generation INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE TABLE stash_metadata(
-             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-             last_generation INTEGER NOT NULL CHECK(last_generation >= 0));
-         CREATE TRIGGER block_lazy_purge BEFORE DELETE ON stash
-         BEGIN SELECT RAISE(ABORT, 'lazy purge blocked'); END;
-         INSERT INTO stash(hash, payload, expires_at, generation)
-         VALUES ('{hash}', '{payload}', 9999999999, 0);
-         INSERT INTO stash(hash, payload, expires_at, generation)
-         VALUES ('bbbbbbbbbbbbbbbbbbbbbbbb', 'expired-payload', 0, 0);"
-    ))
+    conn.execute(
+        "INSERT INTO stash(hash, payload, expires_at)
+         VALUES ('bbbbbbbbbbbbbbbbbbbbbbbb', 'expired-payload', 0)",
+        [],
+    )
     .unwrap();
     drop(conn);
+    drop(store);
+    let original_stash = std::fs::read(&stash_db).unwrap();
 
-    let mut command = fixture.command();
-    command
-        .env("TOKENLESS_STATS_ENABLED", "0")
-        .env("TOKENLESS_SLS_ENABLED", "0")
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
         .args(["retrieve", &hash])
-        .arg("--stash-db")
-        .arg(&stash_db)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::from(dev_full()));
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "the stash lazy-purge warning must not kill the retrieval (exit {})",
-        output.status.code().unwrap_or(-1)
-    );
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout.as_slice(), payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(std::fs::read(&stash_db).unwrap(), original_stash);
+}
+
+#[test]
+fn retrieve_with_rejected_stats_override_keeps_captured_output_clean() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let writer = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = "payload despite a rejected stats override";
+    let hash = writer.stash(payload).unwrap().key;
+    drop(writer);
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_DB", "relative-stats.db")
+        .args(["retrieve", &hash])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(fixture.data_dir.join("stats.db").is_file());
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -4249,4 +5387,1300 @@ fn mode_mismatch_notice_survives_an_unwritable_stderr() {
                 ]);
         },
     );
+}
+
+#[test]
+fn maven_post_tool_retains_recovery_when_no_layout_can_be_planned() {
+    let routine = (0..60)
+        .map(|index| format!("[INFO] Compiling module {index} of the project with a fairly long descriptive line\n"))
+        .collect::<String>();
+    let transfers = (0..20)
+        .map(|index| {
+            format!(
+                "Downloading from central: https://repo.maven.apache.org/maven2/org/example/mod-{index}/1.0/mod-{index}-1.0.jar\n\
+                 Progress (1): 4.0/20 kB\rProgress (1): 20 kB\r                    \rDownloaded from central: https://repo.maven.apache.org/maven2/org/example/mod-{index}/1.0/mod-{index}-1.0.jar (20 kB at 50 kB/s)\n"
+            )
+        })
+        .collect::<String>();
+    for input in [
+        format!(
+            "$ mvn -q verify\n{routine}[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\nDownloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\nexit code: 0\n"
+        ),
+        format!(
+            "$ mvn verify\n[INFO] ----------------< org.example:sample >----------------\n[INFO] Building Sample 1.0\n[INFO]   from pom.xml\n[INFO] ----------------[ jar ]----------------\n[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n{transfers}exit code: 0\n"
+        ),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let request = build_log_request(&input, "success", "maven-recovery");
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+        let compressed = result["output"].as_str().unwrap();
+        let marker = compressed
+            .split_inclusive('\n')
+            .find(|line| line.contains("lines omitted."))
+            .unwrap();
+        let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+        let payload = store
+            .retrieve(result["stash_keys"][0].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(compressed.replacen(marker, &payload, 1), input);
+    }
+}
+
+#[test]
+fn maven_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input =
+        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt");
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "maven")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+}
+
+#[test]
+fn gradle_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt"
+    );
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "gradle")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/gradle/caffeine_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(failed, "error", "gradle-error");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+}
+
+#[test]
+fn gradle_post_tool_retains_generic_recovery_when_no_task_layout_saves_tokens() {
+    let progress = (1..=20)
+        .map(|index| {
+            format!("processing generated gradle resource file {index} of 20 in sample module\n")
+        })
+        .collect::<String>();
+    let input = format!(
+        "$ ./gradlew customTask\n\
+         > Task :app:compilingStep1\n\
+         {progress}\
+         > Task :app:runningStep2\n\
+         BUILD SUCCESSFUL in 2s\n\
+         2 actionable tasks: 2 executed\n\
+         exit code: 0\n"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(&input, "success", "gradle-recovery");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "build_log");
+    assert_eq!(result["recoverability"], "retrievable");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let compressed = result["output"].as_str().unwrap();
+    let marker = compressed
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = store
+        .retrieve(result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(compressed.replacen(marker, &payload, 1), input);
+}
+
+#[test]
+fn ctest_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/ctest/brotli_serial.txt"
+    );
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "ctest")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/ctest/libgit2_offline_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(failed, "error", "ctest-error");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+
+    // Parallel interleaving with `|| true`: slow failing test's Start stays verbatim.
+    let mut masked_parallel_fail =
+        String::from("Test project /work/build\n      Start  1: suite/slow_fail\n");
+    for id in 2..=13 {
+        let ord = id - 1;
+        let tag = format!("#{id}");
+        let name = format!("suite/fast_{ord:02}");
+        masked_parallel_fail.push_str(&format!("      Start {id:2}: {name}\n"));
+        masked_parallel_fail.push_str(&format!(
+            "{ord:2}/13 Test {tag:>3}: {name} .................................   Passed    0.01 sec\n"
+        ));
+    }
+    masked_parallel_fail.push_str(
+        "13/13 Test  #1: suite/slow_fail ................................***Failed    1.25 sec\n\
+         assertion failed: expected ok\n",
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(
+        &masked_parallel_fail,
+        "success",
+        "ctest -j 2 --output-on-failure || true",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["recoverability"], "lossless");
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+    let compressed = result["output"].as_str().unwrap();
+    assert!(compressed.contains("      Start  1: suite/slow_fail\n"));
+    assert!(compressed.contains("***Failed"));
+    assert!(!compressed.lines().any(|line| {
+        line == "s\t1" || (line.starts_with("S\t") && line.contains("suite/slow_fail"))
+    }));
+
+    // Multi-block parallel `-j 2` passing run across MAX_ROWS stays >65% compacted end-to-end.
+    let mut parallel_400 =
+        String::from("Test project /work/build\n      Start   1: pkg/sub/case_0001\n");
+    for id in 2..=400 {
+        let ord = id - 1;
+        let tag = format!("#{}", ord);
+        let prev = format!("pkg/sub/case_{ord:04}");
+        let curr = format!("pkg/sub/case_{id:04}");
+        parallel_400.push_str(&format!("      Start {id:>3}: {curr}\n"));
+        parallel_400.push_str(&format!(
+            "{ord:>3}/400 Test {tag:>4}: {prev} ...............................   Passed    0.01 sec\n"
+        ));
+    }
+    parallel_400.push_str(
+        "400/400 Test #400: pkg/sub/case_0400 ...............................   Passed    0.01 sec\n\
+         \n100% tests passed, 0 tests failed out of 400\n",
+    );
+    let large_fixture = TempDataDir::new().unwrap();
+    let large_request =
+        build_log_request(&parallel_400, "success", "ctest -j 2 --output-on-failure");
+    let large_output = spawn_with_stdin(
+        large_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &large_request,
+    );
+    assert!(
+        large_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&large_output.stderr)
+    );
+    let large_response: serde_json::Value = serde_json::from_slice(&large_output.stdout).unwrap();
+    assert_eq!(large_response["protocol_version"], 2);
+    let large_result = &large_response["result"];
+    assert_eq!(large_result["disposition"], "applied");
+    assert_eq!(large_result["recoverability"], "lossless");
+    assert_eq!(large_result["stash_keys"], serde_json::json!([]));
+    let large_compressed = large_result["output"].as_str().unwrap();
+    assert!(
+        !large_compressed
+            .lines()
+            .any(|line| line.trim_start().starts_with("Start "))
+    );
+    let before_tokens = large_result["before_tokens"].as_u64().unwrap();
+    let after_tokens = large_result["after_tokens"].as_u64().unwrap();
+    assert!(
+        after_tokens * 100 < before_tokens * 35,
+        "expected >65% savings, got {before_tokens} -> {after_tokens}"
+    );
+}
+
+#[test]
+fn ctest_post_tool_retains_generic_recovery_when_no_test_layout_saves_tokens() {
+    let progress = (1..=20)
+        .map(|index| {
+            format!("processing generated ctest fixture file {index} of 20 in sample suite\n")
+        })
+        .collect::<String>();
+    let input = format!(
+        "$ ctest --test-dir /work/build\n\
+         Test project /work/build\n\
+               Start  1: runningCustomHarness\n\
+         {progress}\
+          1/1 Test  #1: runningCustomHarness .............   Passed    0.10 sec\n\
+         \n\
+         100% tests passed, 0 tests failed out of 1\n\
+         exit code: 0\n"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(&input, "success", "ctest-recovery");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "build_log");
+    assert_eq!(result["recoverability"], "retrievable");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let compressed = result["output"].as_str().unwrap();
+    let marker = compressed
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = store
+        .retrieve(result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(compressed.replacen(marker, &payload, 1), input);
+}
+
+// Reuses tokenless-compressors' shared test decoder directly to avoid a duplicate copy;
+// #[allow(dead_code)] silences strip_sgr, which only the compressor suites call.
+#[allow(dead_code)]
+mod literal_oracle {
+    include!("../../tokenless-compressors/tests/common/literal_oracle.rs");
+}
+
+#[test]
+fn cmake_build_post_tool_preserves_v2_lossless_contract_without_stash() {
+    for (fixture_tag, input) in [
+        (
+            "cmake --build /work/build-ninja",
+            include_str!(
+                "../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_ninja_cold.txt"
+            ),
+        ),
+        (
+            "cmake --build /work/build-make -j 2",
+            include_str!(
+                "../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_make_cold.txt"
+            ),
+        ),
+    ] {
+        for recovery in [
+            serde_json::json!({"kind":"none"}),
+            serde_json::json!({"kind":"shell"}),
+            serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+        ] {
+            let fixture = TempDataDir::new().unwrap();
+            let mut request: serde_json::Value =
+                serde_json::from_str(&build_log_request(input, "success", fixture_tag)).unwrap();
+            request["input"]["capabilities"]["recovery"] = recovery;
+            let output = spawn_with_stdin(
+                fixture
+                    .command()
+                    .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                    .env("TOKENLESS_STATS_ENABLED", "0")
+                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                &["compress"],
+                &request.to_string(),
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["protocol_version"], 2);
+            let result = &response["result"];
+            assert_eq!(result["disposition"], "applied");
+            assert_eq!(result["content_type"], "build_log");
+            assert_eq!(result["recoverability"], "lossless");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["build_log_reduction"])
+            );
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            assert!(
+                !result["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("tokenless retrieve")
+            );
+            assert!(
+                result["after_tokens"].as_u64().unwrap()
+                    < result["before_tokens"].as_u64().unwrap()
+            );
+            let database = fixture.data_dir.join("stash.db");
+            if database.exists() {
+                assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+            }
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/brotli_unknown_target_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(
+        failed,
+        "error",
+        "cmake --build /work/build-ninja --target bad",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+
+    let mut partial_fail = String::new();
+    for step in 1..=10 {
+        partial_fail.push_str(&format!(
+            "[{step}/12] Building CXX object src/CMakeFiles/app.dir/mod_{step:02}.cpp.o\n"
+        ));
+    }
+    partial_fail.push_str(concat!(
+        "[11/12] Building CXX object src/CMakeFiles/app.dir/broken.cpp.o\n",
+        "FAILED: src/CMakeFiles/app.dir/broken.cpp.o \n",
+        "src/broken.cpp:12:5: error: use of undeclared identifier 'missing'\n",
+        "ninja: build stopped: subcommand failed.\n",
+    ));
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(
+        &partial_fail,
+        "success",
+        "cmake --build /work/build-ninja || true",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["recoverability"], "lossless");
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+    let compressed = result["output"].as_str().unwrap();
+    assert!(compressed.contains("CMake/Ninja templates"));
+    assert!(compressed.contains("FAILED: src/CMakeFiles/app.dir/broken.cpp.o \n"));
+    assert!(
+        compressed.contains("src/broken.cpp:12:5: error: use of undeclared identifier 'missing'\n")
+    );
+    assert!(compressed.contains("ninja: build stopped: subcommand failed.\n"));
+}
+
+#[test]
+fn cmake_build_post_tool_retains_generic_recovery_when_no_build_layout_saves_tokens() {
+    let progress = (1..=20)
+        .map(|index| {
+            format!("processing generated codegen fixture file {index} of 20 in sample target\n")
+        })
+        .collect::<String>();
+    let input = format!(
+        "$ cmake --build /work/build-ninja\n\
+         [1/2] Building CXX object src/CMakeFiles/app.dir/main.cpp.o\n\
+         {progress}\
+         [2/2] Linking CXX executable bin/app\n\
+         exit code: 0\n"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(&input, "success", "cmake-build-recovery");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "build_log");
+    assert_eq!(result["recoverability"], "retrievable");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let compressed = result["output"].as_str().unwrap();
+    let marker = compressed
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = store
+        .retrieve(result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(compressed.replacen(marker, &payload, 1), input);
+}
+
+#[test]
+fn cmake_build_post_tool_handles_custom_head_and_scored_or_generic_fallbacks() {
+    let custom_comment = format!(
+        "[  5%] Preparing build metadata\n{}",
+        (1..=16)
+            .map(|i| {
+                let pct = (i * 95) / 16 + 5;
+                format!("[{pct:3}%] Building CXX object CMakeFiles/lib.dir/module_{i:02}.cpp.o\n")
+            })
+            .collect::<String>()
+    );
+    let custom_fixture = TempDataDir::new().unwrap();
+    let custom_request = build_log_request(&custom_comment, "success", "cmake --build build");
+    let custom_output = spawn_with_stdin(
+        custom_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &custom_request,
+    );
+    assert!(custom_output.status.success());
+    let custom_json: serde_json::Value = serde_json::from_slice(&custom_output.stdout).unwrap();
+    assert_eq!(custom_json["result"]["disposition"], "applied");
+    assert_eq!(custom_json["result"]["recoverability"], "lossless");
+    assert_eq!(custom_json["result"]["stash_keys"], serde_json::json!([]));
+    assert!(
+        custom_json["result"]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("[  5%] Preparing build metadata\nCMake/Ninja templates")
+    );
+
+    let ninja_then_cargo = format!(
+        "ninja: no work to do.\n{}",
+        (1..=30)
+            .map(|i| format!("   Compiling pkg_{i:02} v0.1.{i}\n"))
+            .collect::<String>()
+    );
+    let cargo_fixture = TempDataDir::new().unwrap();
+    let cargo_request = build_log_request(&ninja_then_cargo, "success", "ninja && cargo build");
+    let cargo_output = spawn_with_stdin(
+        cargo_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &cargo_request,
+    );
+    assert!(cargo_output.status.success());
+    let cargo_json: serde_json::Value = serde_json::from_slice(&cargo_output.stdout).unwrap();
+    assert_eq!(cargo_json["result"]["disposition"], "applied");
+    assert_eq!(cargo_json["result"]["content_type"], "build_log");
+    assert_eq!(cargo_json["result"]["recoverability"], "retrievable");
+    assert_eq!(
+        cargo_json["result"]["stash_keys"].as_array().unwrap().len(),
+        1
+    );
+
+    let configure_then_build = format!(
+        "$ cmake -S src -B build -G Ninja && cmake --build build --parallel 1\n\
+         -- The CXX compiler identification is GNU 13.3.0\n\
+         -- Configuring done (0.1s)\n\
+         {}\
+         exit code: 0\n",
+        (1..=24)
+            .map(|i| format!("[{i}/24] Building CXX object CMakeFiles/app.dir/unit_{i:02}.cpp.o\n"))
+            .collect::<String>()
+    );
+    let generic_fixture = TempDataDir::new().unwrap();
+    let generic_request =
+        build_log_request(&configure_then_build, "success", "cmake-configure-build");
+    let generic_output = spawn_with_stdin(
+        generic_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &generic_request,
+    );
+    assert!(generic_output.status.success());
+    let generic_json: serde_json::Value = serde_json::from_slice(&generic_output.stdout).unwrap();
+    assert_eq!(generic_json["result"]["disposition"], "applied");
+    assert_eq!(generic_json["result"]["content_type"], "build_log");
+    assert_eq!(generic_json["result"]["recoverability"], "retrievable");
+    assert_eq!(
+        generic_json["result"]["stash_keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    const CMAKE_BUILD_HEADER: &str =
+        "CMake/Ninja templates (id<TAB>fields; interleave with literals): ";
+
+    let ninja_then_make = format!(
+        "{}\
+         make: Entering directory '/work/make'\n\
+         {}\
+         make: Leaving directory '/work/make'\n",
+        (1..=9)
+            .map(|i| format!(
+                "[{i}/9] Building CXX object CMakeFiles/app.dir/src/mod_{i:02}.cpp.o\n"
+            ))
+            .collect::<String>(),
+        (1..=24)
+            .map(|i| {
+                format!("cc -O2 -Wall -Iinclude -c src/unit_{i:02}.c -o build/unit_{i:02}.o\n")
+            })
+            .collect::<String>()
+    );
+    let lossless_mixed_fixture = TempDataDir::new().unwrap();
+    let mut lossless_mixed_request: serde_json::Value = serde_json::from_str(&build_log_request(
+        &ninja_then_make,
+        "success",
+        "cmake --build build && make -C make",
+    ))
+    .unwrap();
+    lossless_mixed_request["input"]["capabilities"]["recovery"] =
+        serde_json::json!({"kind":"none"});
+    let lossless_mixed_output = spawn_with_stdin(
+        lossless_mixed_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &lossless_mixed_request.to_string(),
+    );
+    assert!(lossless_mixed_output.status.success());
+    let lossless_mixed_json: serde_json::Value =
+        serde_json::from_slice(&lossless_mixed_output.stdout).unwrap();
+    let lossless_after_tokens = lossless_mixed_json["result"]["after_tokens"]
+        .as_u64()
+        .unwrap();
+
+    let mixed_fixture = TempDataDir::new().unwrap();
+    let mixed_request = build_log_request(
+        &ninja_then_make,
+        "success",
+        "cmake --build build && make -C make",
+    );
+    let mixed_output = spawn_with_stdin(
+        mixed_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &mixed_request,
+    );
+    assert!(mixed_output.status.success());
+    let mixed_json: serde_json::Value = serde_json::from_slice(&mixed_output.stdout).unwrap();
+    let mixed_result = &mixed_json["result"];
+    assert_eq!(mixed_result["disposition"], "applied");
+    assert_eq!(mixed_result["content_type"], "build_log");
+    assert_eq!(mixed_result["recoverability"], "retrievable");
+    assert_eq!(mixed_result["stash_keys"].as_array().unwrap().len(), 1);
+    let mixed_out = mixed_result["output"].as_str().unwrap();
+    assert!(mixed_out.contains("CMake/Ninja templates"));
+    assert!(mixed_out.contains("lines omitted."));
+    let mixed_after_tokens = mixed_result["after_tokens"].as_u64().unwrap();
+    assert!(mixed_after_tokens < lossless_after_tokens);
+    assert!(mixed_after_tokens < mixed_result["before_tokens"].as_u64().unwrap());
+    let mixed_marker = mixed_out
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let mixed_store = SqliteStore::new(mixed_fixture.data_dir.join("stash.db")).unwrap();
+    let mixed_payload = mixed_store
+        .retrieve(mixed_result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let stash_restored = mixed_out.replacen(mixed_marker, &mixed_payload, 1);
+    assert_eq!(
+        literal_oracle::decode(&stash_restored, CMAKE_BUILD_HEADER),
+        ninja_then_make
+    );
+
+    let fmt_inc = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/cmake_build/fmt_make_incremental.txt"
+    );
+    let fmt_wheels = format!(
+        "$ cmake --build /work/fmt-build && python wheel.py\n\
+         {fmt_inc}\
+         {}\
+         exit code: 0\n",
+        (1..=60)
+            .map(|i| format!("Processing wheel {i} of 60\n"))
+            .collect::<String>()
+    );
+    let fmt_lossless_fixture = TempDataDir::new().unwrap();
+    let mut fmt_lossless_req: serde_json::Value = serde_json::from_str(&build_log_request(
+        &fmt_wheels,
+        "success",
+        "cmake --build /work/fmt-build && python wheel.py",
+    ))
+    .unwrap();
+    fmt_lossless_req["input"]["capabilities"]["recovery"] = serde_json::json!({"kind":"none"});
+    let fmt_lossless_out = spawn_with_stdin(
+        fmt_lossless_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &fmt_lossless_req.to_string(),
+    );
+    assert!(fmt_lossless_out.status.success());
+    let fmt_lossless_json: serde_json::Value =
+        serde_json::from_slice(&fmt_lossless_out.stdout).unwrap();
+    let fmt_lossless_tokens = fmt_lossless_json["result"]["after_tokens"]
+        .as_u64()
+        .unwrap();
+
+    let fmt_wheel_fixture = TempDataDir::new().unwrap();
+    let fmt_wheel_req = build_log_request(
+        &fmt_wheels,
+        "success",
+        "cmake --build /work/fmt-build && python wheel.py",
+    );
+    let fmt_wheel_out = spawn_with_stdin(
+        fmt_wheel_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &fmt_wheel_req,
+    );
+    assert!(fmt_wheel_out.status.success());
+    let fmt_wheel_json: serde_json::Value = serde_json::from_slice(&fmt_wheel_out.stdout).unwrap();
+    let fmt_wheel_result = &fmt_wheel_json["result"];
+    assert_eq!(fmt_wheel_result["disposition"], "applied");
+    assert_eq!(fmt_wheel_result["content_type"], "build_log");
+    assert_eq!(fmt_wheel_result["recoverability"], "retrievable");
+    assert_eq!(fmt_wheel_result["stash_keys"].as_array().unwrap().len(), 1);
+    let fmt_wheel_text = fmt_wheel_result["output"].as_str().unwrap();
+    assert!(fmt_wheel_text.contains(CMAKE_BUILD_HEADER));
+    assert!(fmt_wheel_text.contains("lines omitted."));
+    assert!(fmt_wheel_result["after_tokens"].as_u64().unwrap() < fmt_lossless_tokens);
+    let fmt_marker = fmt_wheel_text
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let fmt_store = SqliteStore::new(fmt_wheel_fixture.data_dir.join("stash.db")).unwrap();
+    let fmt_payload = fmt_store
+        .retrieve(fmt_wheel_result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        literal_oracle::decode(
+            &fmt_wheel_text.replacen(fmt_marker, &fmt_payload, 1),
+            CMAKE_BUILD_HEADER,
+        ),
+        fmt_wheels
+    );
+
+    let custom_steps_input = format!(
+        "$ cmake --build /work/build\n\
+         {}\
+         [21/22] Building C object CMakeFiles/app.dir/main.c.o\n\
+         [22/22] Linking C static library libapp.a\n\
+         exit code: 0\n",
+        (1..=20)
+            .map(|i| format!(
+                "[{i}/22] Building generated review artifact {i:02} for the project metadata index\n"
+            ))
+            .collect::<String>()
+    );
+    let custom_steps_fixture = TempDataDir::new().unwrap();
+    let custom_steps_req =
+        build_log_request(&custom_steps_input, "success", "cmake --build /work/build");
+    let custom_steps_out = spawn_with_stdin(
+        custom_steps_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &custom_steps_req,
+    );
+    assert!(custom_steps_out.status.success());
+    let custom_steps_json: serde_json::Value =
+        serde_json::from_slice(&custom_steps_out.stdout).unwrap();
+    assert_eq!(custom_steps_json["result"]["disposition"], "no_savings");
+    assert_eq!(
+        custom_steps_json["result"]["applied_operations"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        custom_steps_json["result"]["stash_keys"],
+        serde_json::json!([])
+    );
+    assert_eq!(custom_steps_json["result"]["output"], custom_steps_input);
+
+    let ctrl_cc = "cc -O2 -Wall -Iinclude -c src/unit_12.c\x1b[0K -o build/unit_12.o\n";
+    let ninja_then_ctrl_make = format!(
+        "{}\
+         make: Entering directory '/work/make'\n\
+         {}\
+         make: Leaving directory '/work/make'\n",
+        (1..=9)
+            .map(|i| format!(
+                "[{i}/9] Building CXX object CMakeFiles/app.dir/src/mod_{i:02}.cpp.o\n"
+            ))
+            .collect::<String>(),
+        (1..=24)
+            .map(|i| {
+                if i == 12 {
+                    ctrl_cc.to_owned()
+                } else {
+                    format!("cc -O2 -Wall -Iinclude -c src/unit_{i:02}.c -o build/unit_{i:02}.o\n")
+                }
+            })
+            .collect::<String>()
+    );
+    let ctrl_fixture = TempDataDir::new().unwrap();
+    let ctrl_req = build_log_request(
+        &ninja_then_ctrl_make,
+        "success",
+        "cmake --build build && make -C make",
+    );
+    let ctrl_cli_out = spawn_with_stdin(
+        ctrl_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &ctrl_req,
+    );
+    assert!(ctrl_cli_out.status.success());
+    let ctrl_json: serde_json::Value = serde_json::from_slice(&ctrl_cli_out.stdout).unwrap();
+    let ctrl_result = &ctrl_json["result"];
+    assert_eq!(ctrl_result["disposition"], "applied");
+    assert_eq!(ctrl_result["recoverability"], "retrievable");
+    // Keeping row 12 verbatim splits the 24-row Make run into 11- and 12-row Stash blocks.
+    assert_eq!(ctrl_result["stash_keys"].as_array().unwrap().len(), 2);
+    let ctrl_text = ctrl_result["output"].as_str().unwrap();
+    assert!(ctrl_text.contains(ctrl_cc));
+    let ctrl_markers = ctrl_text
+        .split_inclusive('\n')
+        .filter(|line| line.contains("lines omitted."))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(ctrl_markers.len(), 2);
+    let ctrl_store = SqliteStore::new(ctrl_fixture.data_dir.join("stash.db")).unwrap();
+    let mut ctrl_restored = ctrl_text.to_owned();
+    for (marker, key) in ctrl_markers
+        .iter()
+        .zip(ctrl_result["stash_keys"].as_array().unwrap())
+    {
+        let payload = ctrl_store.retrieve(key.as_str().unwrap()).unwrap().unwrap();
+        assert!(!payload.contains("\x1b[0K"));
+        ctrl_restored = ctrl_restored.replacen(marker, &payload, 1);
+    }
+    assert_eq!(
+        literal_oracle::decode(&ctrl_restored, CMAKE_BUILD_HEADER),
+        ninja_then_ctrl_make
+    );
+
+    let interleaved_input = format!(
+        "$ cmake --build /work/build && python postprocess.py\n\
+         {}\
+         exit code: 0\n",
+        (1..=30)
+            .map(|i| format!(
+                "[{i}/30] Building CXX object CMakeFiles/app.dir/src/unit_{i:02}.cpp.o\n\
+                 Processing item {i} of 30\n"
+            ))
+            .collect::<String>()
+    );
+    let interleaved_fixture = TempDataDir::new().unwrap();
+    let interleaved_req = build_log_request(
+        &interleaved_input,
+        "success",
+        "cmake --build /work/build && python postprocess.py",
+    );
+    let interleaved_out = spawn_with_stdin(
+        interleaved_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &interleaved_req,
+    );
+    assert!(interleaved_out.status.success());
+    let interleaved_json: serde_json::Value =
+        serde_json::from_slice(&interleaved_out.stdout).unwrap();
+    let interleaved_result = &interleaved_json["result"];
+    assert_eq!(interleaved_result["disposition"], "applied");
+    assert_eq!(interleaved_result["recoverability"], "retrievable");
+    assert_eq!(
+        interleaved_result["stash_keys"].as_array().unwrap().len(),
+        1
+    );
+    assert!(interleaved_result["after_tokens"].as_u64().unwrap() < 120);
+    let interleaved_text = interleaved_result["output"].as_str().unwrap();
+    let interleaved_marker = interleaved_text
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let interleaved_store =
+        SqliteStore::new(interleaved_fixture.data_dir.join("stash.db")).unwrap();
+    let interleaved_payload = interleaved_store
+        .retrieve(interleaved_result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        interleaved_text.replacen(interleaved_marker, &interleaved_payload, 1),
+        interleaved_input
+    );
+
+    let c_tail = (21..=32)
+        .map(|i| format!("[{i}/32] Building C object CMakeFiles/lib.dir/src/unit_{i:02}.c.o\n"))
+        .collect::<String>();
+    let unicode_anchored_input = format!(
+        "$ cmake --build /work/build\n\
+         [1/32] Building generated review artifact 01 for the project metadata index\n\
+         {}\
+         {c_tail}\
+         exit code: 0\n",
+        (2..=20)
+            .map(|i| format!(
+                "[{i}/32] \u{1f527} Building generated review artifact {i:02} for the project metadata index\n"
+            ))
+            .collect::<String>()
+    );
+    let unicode_head_input = format!(
+        "{}{c_tail}",
+        (1..=20)
+            .map(|i| format!(
+                "[{i}/32] \u{1f527} Building generated review artifact {i:02} for the project metadata index\n"
+            ))
+            .collect::<String>()
+    );
+    for unicode_input in [unicode_anchored_input, unicode_head_input] {
+        let fixture = TempDataDir::new().unwrap();
+        let req = build_log_request(&unicode_input, "success", "cmake --build /work/build");
+        let out = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &req,
+        );
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let result = &json["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        let text = result["output"].as_str().unwrap();
+        assert!(text.contains(CMAKE_BUILD_HEADER));
+        assert!(text.contains("[20/32] \u{1f527} Building generated review artifact 20"));
+        assert_eq!(
+            literal_oracle::decode(text, CMAKE_BUILD_HEADER),
+            unicode_input
+        );
+    }
+
+    let tab_custom_input = format!(
+        "$ cmake --build /work/build\n{}{}",
+        (1..=24)
+            .map(|i| {
+                format!("[{i}/41] Processing\tgenerated build resource {i:02} for the project metadata index\n")
+            })
+            .collect::<String>(),
+        (25..=41)
+            .map(|i| {
+                let idx = i - 24;
+                format!("[{i}/41] Building C object CMakeFiles/app.dir/src/unit_{idx:02}.c.o\n")
+            })
+            .collect::<String>(),
+    );
+    let tab_fixture = TempDataDir::new().unwrap();
+    let tab_req = build_log_request(&tab_custom_input, "success", "cmake --build /work/build");
+    let tab_out = spawn_with_stdin(
+        tab_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &tab_req,
+    );
+    assert!(tab_out.status.success());
+    let tab_json: serde_json::Value = serde_json::from_slice(&tab_out.stdout).unwrap();
+    let tab_result = &tab_json["result"];
+    assert_eq!(tab_result["disposition"], "applied");
+    assert_eq!(tab_result["content_type"], "build_log");
+    assert_eq!(tab_result["recoverability"], "lossless");
+    assert_eq!(tab_result["stash_keys"], serde_json::json!([]));
+    let tab_text = tab_result["output"].as_str().unwrap();
+    assert!(tab_text.contains(CMAKE_BUILD_HEADER));
+    assert!(tab_text.contains("[18/41] Processing\tgenerated build resource 18"));
+    assert_eq!(
+        literal_oracle::decode(tab_text, CMAKE_BUILD_HEADER),
+        tab_custom_input
+    );
+
+    let ninja_warn_input = format!(
+        "ninja: warning: premature end of file; recovering\n{}",
+        (1..=16)
+            .map(|i| format!("[{i}/16] Building C object CMakeFiles/app.dir/src/unit_{i:02}.c.o\n"))
+            .collect::<String>(),
+    );
+    let warn_fixture = TempDataDir::new().unwrap();
+    let warn_req = build_log_request(&ninja_warn_input, "success", "ninja -C /work/build");
+    let warn_out = spawn_with_stdin(
+        warn_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &warn_req,
+    );
+    assert!(warn_out.status.success());
+    let warn_json: serde_json::Value = serde_json::from_slice(&warn_out.stdout).unwrap();
+    let warn_result = &warn_json["result"];
+    assert_eq!(warn_result["disposition"], "applied");
+    assert_eq!(warn_result["content_type"], "build_log");
+    assert_eq!(warn_result["recoverability"], "lossless");
+    assert_eq!(warn_result["stash_keys"], serde_json::json!([]));
+    assert!(
+        warn_result["after_tokens"].as_u64().unwrap()
+            < warn_result["before_tokens"].as_u64().unwrap()
+    );
+    let warn_text = warn_result["output"].as_str().unwrap();
+    assert!(warn_text.starts_with("ninja: warning: premature end of file; recovering\n"));
+    assert!(warn_text.contains(CMAKE_BUILD_HEADER));
+    assert_eq!(
+        literal_oracle::decode(warn_text, CMAKE_BUILD_HEADER),
+        ninja_warn_input
+    );
+
+    let make_tab_prefix = (1..=24)
+        .map(|i| {
+            let pct = (i * 100) / 40;
+            format!(
+                "[{pct:>3}%] \tProcessing generated build resource {i:02} for the project metadata index\n"
+            )
+        })
+        .collect::<String>();
+    let make_compile_tail = (25..=40)
+        .map(|i| {
+            let pct = (i * 100) / 40;
+            let idx = i - 24;
+            format!("[{pct:>3}%] Building C object CMakeFiles/app.dir/src/unit_{idx:02}.c.o\n")
+        })
+        .collect::<String>();
+    for make_tab_case in [
+        format!("$ cmake --build /work/build\n{make_tab_prefix}{make_compile_tail}"),
+        format!("{make_tab_prefix}{make_compile_tail}"),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let req = build_log_request(&make_tab_case, "success", "cmake --build /work/build");
+        let out = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &req,
+        );
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let result = &json["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let text = result["output"].as_str().unwrap();
+        assert!(text.contains(CMAKE_BUILD_HEADER));
+        assert!(text.contains("] \tProcessing generated build resource 18"));
+        assert_eq!(
+            literal_oracle::decode(text, CMAKE_BUILD_HEADER),
+            make_tab_case
+        );
+    }
 }

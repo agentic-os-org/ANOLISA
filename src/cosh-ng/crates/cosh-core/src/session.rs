@@ -340,7 +340,7 @@ impl fmt::Display for SessionError {
             } => write!(
                 formatter,
                 "per-user task budget of {budget_bytes} bytes is full ({projected_bytes} bytes \
-                 projected after commit) and nothing may be evicted for it"
+                 projected during atomic commit) and nothing may be evicted for it"
             ),
         }
     }

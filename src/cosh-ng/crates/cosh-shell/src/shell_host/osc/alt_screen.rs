@@ -30,14 +30,18 @@ impl AltScreenTracker {
         let mut window = std::mem::take(&mut self.carry);
         window.extend_from_slice(data);
         let mut latest: Option<(usize, bool)> = None;
-        for (seq, active) in TOGGLES {
-            let mut from = 0;
-            while let Some(pos) = super::find_bytes(&window[from..], seq) {
-                let at = from + pos;
-                if latest.is_none_or(|(best, _)| at >= best) {
-                    latest = Some((at, active));
+        // Every toggle starts with ESC, so a window without one cannot match
+        // any of them; skip the six scans and keep only the carry update.
+        if window.contains(&0x1b) {
+            for (seq, active) in TOGGLES {
+                let mut from = 0;
+                while let Some(pos) = super::find_bytes(&window[from..], seq) {
+                    let at = from + pos;
+                    if latest.is_none_or(|(best, _)| at >= best) {
+                        latest = Some((at, active));
+                    }
+                    from = at + seq.len();
                 }
-                from = at + seq.len();
             }
         }
         if let Some((_, active)) = latest {
@@ -75,6 +79,35 @@ mod tests {
         assert!(tracker.active());
         // Unrelated output leaves the state untouched.
         tracker.observe(b"plain output");
+        assert!(tracker.active());
+    }
+
+    #[test]
+    fn control_free_chunks_keep_state_and_the_split_toggle_carry() {
+        let mut tracker = AltScreenTracker::default();
+        tracker.observe(b"\x1b[?1049h");
+        assert!(tracker.active());
+        for _ in 0..3 {
+            tracker.observe(b"1\r\n2\r\n3\r\n");
+        }
+        assert!(tracker.active());
+        // The carry keeps only the last MAX_SEQ-1 bytes, so a split toggle
+        // is bridged when nothing longer than that intervenes.
+        tracker.observe(b"tail\x1b[?10");
+        tracker.observe(b"");
+        tracker.observe(b"49l");
+        assert!(!tracker.active());
+        tracker.observe(b"more plain output");
+        assert!(!tracker.active());
+        // Intervening output longer than the carry drops the partial
+        // sequence; that is the pre-existing carry bound, not a fast path.
+        tracker.observe(b"tail\x1b[?10");
+        tracker.observe(b"plain");
+        tracker.observe(b"49l");
+        assert!(!tracker.active());
+        tracker.observe(b"more plain output");
+        assert!(!tracker.active());
+        tracker.observe(b"\x1b[?47h");
         assert!(tracker.active());
     }
 }

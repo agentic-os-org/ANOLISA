@@ -1,7 +1,10 @@
 # Component Onboarding Standard
 
+[中文版（评审参考）](component-onboarding_zh.md)
+
 > Canonical checklist and rules for introducing a new component into the ANOLISA monorepo.
 > Both human contributors and AI agents MUST follow this specification when adding a new component.
+> This English text is authoritative. The Chinese companion is for reference.
 
 `src/<name>/` is the default location for runtime components. Distribution tooling
 lives under `distribution/`; retained deprecated components live under
@@ -88,7 +91,18 @@ The scaffold PR must demonstrate that the component passes all applicable qualit
 - **Version coherence**: version in `Cargo.toml` (or `package.json`), component contract (`.anolisa/component.toml` if present), and CHANGELOG latest **released** entry MUST be identical. This check applies at **release/version-bump PRs**, not at scaffold time (scaffold PRs only have `[Unreleased]`).
 - **Example config parsability**: every file under `examples/` MUST be parsable by the language's standard parser (e.g. `tomllib` for TOML). Add a unit test that round-trips or deserializes each example config.
 - **Doc–code name alignment**: state names, enum variants, API field names, and CLI subcommand names referenced in README / AGENTS.md MUST exactly match the source code identifiers. Review diffs against `grep` on the enum/struct definitions.
-- **Quick Start runnability**: the README quick-start section MUST work in a source-checkout scenario (not only after system install). If paths like `/etc/...` are required, provide a dev-mode alternative or explicit setup step.
+- **Quick Start and availability**: for a released user-facing component, the
+  README's Quick Start MUST lead with a verified workflow using a supported
+  published artifact or installation channel. Before release, label any
+  verified user workflow as Preview. Identify its version or commit, artifact
+  source, and limitations. If no verified Preview is available, state that there is
+  no supported user installation yet and put source-checkout verification in
+  the contribution guide. A successful source build does not establish release
+  availability. State required setup and privileges, including for system paths
+  such as `/etc/...`. For a supported source-install option, link to the
+  reusable build section of the contribution guide as described in §4.6 of
+  [the documentation standard](documentation-standard.md)
+  instead of duplicating the build recipe.
 - **TODO discipline**: unimplemented behaviors acknowledged during review MUST be annotated in code as `TODO(<target-version>): <description>` (e.g. `TODO(v0.2): implement drain + kill`).
 
 ---
@@ -155,7 +169,7 @@ Copy into your PR description when introducing a new component:
 - [ ] License field: `license = "Apache-2.0"` in Cargo.toml / package.json
 - [ ] Quality gates: fmt + lint + test pass locally
 - [ ] Version coherence: Cargo.toml / contract / CHANGELOG versions match (release PRs only)
-- [ ] README quick-start works in source-checkout scenario
+- [ ] README reflects release or Preview availability; source-checkout verification and reusable build instructions belong in the contribution guide (§2.5)
 
 ### Conditional (check applicable items)
 - [ ] Rust: listed in AGENTS.md §3 conventions scope
@@ -184,6 +198,8 @@ Before approving a new-component PR, verify:
 5. `src/<name>/Cargo.toml` (or equivalent) contains `license = "Apache-2.0"`
 6. `src/<name>/CHANGELOG.md` exists and has `[Unreleased]` header
 7. `src/<name>/README_zh.md` and `CHANGELOG_zh.md` exist (or tracked as follow-up for non-Chinese contributors)
+8. README reflects the verified workflow and availability for the component's
+   release stage, and links to the contribution build instructions if applicable (§2.5)
 
 ### 5.2 Future Automation (CI check, not yet implemented)
 
@@ -208,10 +224,10 @@ Planned invariants for a `check-component-registry` CI job:
 | Version number divergence | §2.5: version coherence |
 | Example configs unparsable | §2.5: example config parsability |
 | Doc names != code identifiers | §2.5: doc–code name alignment |
-| Quick Start requires system paths | §2.5: quick start runnability |
+| Quick Start implies that a checkout build is available as a release | §2.5: verify and label the user workflow by release stage |
 | CI not wired in scaffold PR | §2.2 + §2.4: CI in same PR |
 | Lint failures shipped | §2.5: lint gate must pass locally |
 
 ---
 
-*Last updated: 2026-07-05*
+*Last updated: 2026-11-06*

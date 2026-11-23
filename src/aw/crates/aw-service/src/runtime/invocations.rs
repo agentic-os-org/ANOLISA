@@ -14,6 +14,8 @@ use std::{
 pub(super) struct State {
     pub(super) ledger: Option<Ledger>,
     pub(super) legacy_used: bool,
+    pub(super) submissions: Option<super::submissions::Ledger>,
+    pub(super) legacy_submissions: bool,
 }
 
 #[derive(Default)]
@@ -25,6 +27,7 @@ pub(super) struct Ledger {
 pub(super) struct Invocation {
     sequence: u64,
     digest: [u8; 32],
+    executed: Option<[u8; 32]>,
     session: Option<String>,
     closing: bool,
 }
@@ -65,6 +68,25 @@ fn digest(tool: &str, input: &Value) -> Result<[u8; 32]> {
 mod tests;
 
 impl Ledger {
+    pub(super) fn rewrite(&mut self, original: &Value, input: &Value) -> Result<()> {
+        self.check(original)?;
+        let call = original["tool"]["call_id"]
+            .as_str()
+            .ok_or_else(|| rejected("invocation_identity"))?;
+        let tool = original["tool"]["native_name"]
+            .as_str()
+            .ok_or_else(|| rejected("invocation_identity"))?;
+        let entry = self
+            .active
+            .get_mut(call)
+            .ok_or_else(|| rejected("invocation_retired_or_unknown"))?;
+        if entry.executed.is_some() {
+            return Err(rejected("invocation_already_rewritten"));
+        }
+        entry.executed = Some(digest(tool, input)?);
+        Ok(())
+    }
+
     pub(super) fn check_close(&self, session: &str, call: &str) -> Result<()> {
         if !self
             .active
@@ -98,6 +120,7 @@ impl Ledger {
             Invocation {
                 sequence,
                 digest: digest(tool, input)?,
+                executed: None,
                 session: None,
                 closing: false,
             },
@@ -120,7 +143,14 @@ impl Ledger {
         let tool = value["tool"]["native_name"]
             .as_str()
             .ok_or_else(|| rejected("invocation_identity"))?;
-        if invocation.digest != digest(tool, &value["tool"]["input"])?
+        if (if matches!(
+            value["name"].as_str(),
+            Some("tool.after" | "security.violation")
+        ) {
+            invocation.executed.unwrap_or(invocation.digest)
+        } else {
+            invocation.digest
+        }) != digest(tool, &value["tool"]["input"])?
             || invocation
                 .session
                 .as_ref()
@@ -134,8 +164,7 @@ impl Ledger {
 }
 
 impl Runtime {
-    fn invocation_ledger(&self, id: &str) -> Result<Arc<Mutex<State>>> {
-        self.check_scope_owner(id)?;
+    pub(super) fn invocation_ledger(&self, id: &str) -> Result<Arc<Mutex<State>>> {
         let instances = self
             .instances
             .lock()
@@ -149,6 +178,7 @@ impl Runtime {
     }
 
     pub(super) fn enable_invocations(&self, id: &str) -> Result<Value> {
+        self.check_scope_owner(id)?;
         let state = self.invocation_ledger(id)?;
         let mut state = state.lock().map_err(|_| rejected("state_poisoned"))?;
         if state.ledger.is_some() {
@@ -180,6 +210,7 @@ impl Runtime {
         {
             return Err(rejected("invocation_input_invalid"));
         }
+        self.check_scope_owner(id)?;
         let ledger = self.invocation_ledger(id)?;
         let mut ledger = ledger.lock().map_err(|_| rejected("state_poisoned"))?;
         let ledger = ledger
@@ -211,8 +242,9 @@ impl Runtime {
         call: &str,
         deadline: Instant,
     ) -> Result<Value> {
+        self.check_scope_cleanup(id)?;
         let ledger = self.invocation_ledger(id)?;
-        let (hooks, opening) = {
+        let (hooks, opening, facts) = {
             let instances = self
                 .instances
                 .lock()
@@ -221,7 +253,11 @@ impl Runtime {
                 .get(id)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| rejected("unknown_instance"))?;
-            (Arc::clone(&instance.hooks), Arc::clone(&instance.hook_open))
+            (
+                Arc::clone(&instance.hooks),
+                Arc::clone(&instance.hook_open),
+                Arc::clone(&instance.native_facts),
+            )
         };
         // Closing excludes new opens before cancelling and waiting for workers.
         // Do not hold the opening lock while waiting for Provider completion.
@@ -241,7 +277,7 @@ impl Runtime {
             entry.session.clone()
         };
         if let Some(session) = &session {
-            for phase in ["tool.before", "tool.after"] {
+            for phase in ["tool.before", "tool.after", "security.violation"] {
                 self.close_hook(id, phase, session, call, deadline)?;
             }
         }
@@ -254,10 +290,15 @@ impl Runtime {
             .ok_or_else(|| rejected("invocation_protocol_required"))?;
         let mut hooks = hooks.lock().map_err(|_| rejected("state_poisoned"))?;
         if let Some(session) = session {
-            for phase in ["tool.before", "tool.after"] {
+            for phase in ["tool.before", "tool.after", "security.violation"] {
                 hooks.remove(&hooks::correlation(phase, &session, call)?);
             }
         }
+        facts
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .claims
+            .retain(|(_, candidate, _), _| candidate != call);
         ledger.active.remove(call);
         Ok(json!({"retired":true}))
     }

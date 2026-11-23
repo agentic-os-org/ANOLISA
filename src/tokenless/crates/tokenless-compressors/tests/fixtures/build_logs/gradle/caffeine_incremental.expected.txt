@@ -1,0 +1,68 @@
+Starting a Gradle Daemon, 1 incompatible and 1 stopped Daemons could not be reused, use --status for details
+Parallel Configuration Cache is an incubating feature.
+Configuration on demand is an incubating feature.
+Calculating task graph as configuration cache cannot be reused because the file system entry 'gradle/plugins/.settings/org.eclipse.core.resources.prefs' has been created.
+Gradle templates (id<TAB>fields; interleave with literals): {"rows":51,"literals":[["> Task :"," SKIPPED"],["> Task :"," UP-TO-DATE"],["> Task :"," NO-SOURCE"],["> Task :",":classes UP-TO-DATE"],["> Task :",":jar UP-TO-DATE"]]}
+0	plugins:checkKotlinGradlePluginConfigurationErrors
+1	plugins:generateExternalPluginSpecBuilders
+1	plugins:extractPrecompiledScriptPluginPlugins
+1	plugins:compilePluginsBlocks
+1	plugins:generatePrecompiledScriptPluginAccessors
+1	plugins:generateScriptPluginAdapters
+1	plugins:compileKotlin
+2	plugins:compileJava
+1	plugins:pluginDescriptors
+1	plugins:processResources
+3	plugins
+4	plugins
+1	caffeine:downloadCaffeine
+1	caffeine:processJavaPoetResources
+2	caffeine:processResources
+1	simulator:downloadCaffeine
+1	simulator:processResources
+2	caffeine:processCodeGenResources
+1	caffeine:compileJavaPoetJava
+1	caffeine:javaPoetClasses
+1	caffeine:generateLocalCaches
+1	simulator:sourcesJar
+2	simulator:processTestResources
+1	caffeine:generateNodes
+1	caffeine:compileJava
+3	caffeine
+1	caffeine:compileCodeGenJava
+1	caffeine:codeGenClasses
+4	caffeine
+1	caffeine:javadoc
+1	simulator:compileJava
+3	simulator
+4	simulator
+1	simulator:startScripts
+1	simulator:compileTestJava
+1	simulator:distZip
+1	simulator:distTar
+0	simulator:forbiddenApisMain
+1	simulator:testClasses
+0	simulator:forbiddenApisTest
+1	simulator:forbiddenApis
+0	simulator:pmdMain
+0	simulator:pmdTest
+0	simulator:spotbugsMain
+0	simulator:spotbugsTest
+1	simulator:javadoc
+1	simulator:javadocJar
+1	simulator:assemble
+1	simulator:test
+1	simulator:check
+1	simulator:build
+
+[Incubating] Problems report is available at: file:///work/source/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 23s
+30 actionable tasks: 30 up-to-date
+Configuration cache entry stored.

@@ -8,6 +8,16 @@ pub struct QuestionPanelPresentation<'a> {
     pub(crate) title: Option<&'a str>,
     pub(crate) keys_prefix: Option<&'a str>,
     pub(crate) instruction: Option<&'a str>,
+    /// Terminal rows available to the panel. The content budget reserves the last
+    /// row for the trailing newline, so a panel written from the top of the screen
+    /// never scrolls its own title away.
+    pub(crate) max_rows: Option<u16>,
+}
+
+impl QuestionPanelPresentation<'_> {
+    fn has_text_override(&self) -> bool {
+        self.title.is_some() || self.keys_prefix.is_some() || self.instruction.is_some()
+    }
 }
 
 impl<'a> QuestionPanelPresentation<'a> {
@@ -17,8 +27,15 @@ impl<'a> QuestionPanelPresentation<'a> {
             title: Some(title),
             keys_prefix: Some(keys_prefix),
             instruction: Some(instruction),
+            max_rows: None,
         }
     }
+}
+
+/// Content rows a bounded panel may use; the floor keeps title, one content row
+/// and the keys line renderable on pathological terminals.
+pub(super) fn row_budget(max_rows: Option<u16>) -> Option<u16> {
+    max_rows.map(|max| max.saturating_sub(1).max(3))
 }
 
 pub(super) fn instruction_rows(
@@ -27,7 +44,7 @@ pub(super) fn instruction_rows(
     width: usize,
     presentation: QuestionPanelPresentation<'_>,
 ) -> u16 {
-    if presentation == QuestionPanelPresentation::default() {
+    if !presentation.has_text_override() {
         return wrapped_row_count(
             &default_instruction(model, i18n, selected_option(model)),
             width,
@@ -50,7 +67,7 @@ pub(super) fn instruction_text(
         .instruction
         .map(str::to_owned)
         .unwrap_or_else(|| default_instruction(model, i18n, selected_option));
-    if include_prefix && presentation != QuestionPanelPresentation::default() {
+    if include_prefix && presentation.has_text_override() {
         format!(
             "{}{}",
             presentation

@@ -34,7 +34,9 @@ cosh-cli checkpoint diff --workspace /home/agent/project --from before-change --
 cosh-cli checkpoint restore before-change --workspace /home/agent/project
 ```
 
-Optional controls include `--pin` and `--metadata <json>` on `create`, `--force` and `--workspace <path>` on `delete`, and `--keep <count>` on `cleanup`. `list` and `status` can omit `--workspace` to query all workspaces known to the daemon.
+Optional controls include `--metadata <json>` on `create`, `--force` and `--workspace <path>` on `delete`, and `--keep <count>` on `cleanup`. `list` and `status` can omit `--workspace` to query all workspaces known to the daemon.
+
+`create` does not offer snapshot pinning: every snapshot it records is eligible for automatic cleanup by the daemon's count and age policies.
 
 `recover` delegates workspace validation to the daemon, so it also accepts an
 original path that is missing after interrupted initialization. When recovery

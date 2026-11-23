@@ -7,11 +7,22 @@ callbacks, the local service manages bindings and events, the Host invokes
 Providers, and the Adapter returns results to the Agent. The Agent owns model
 calls, tool scheduling, and permission approval.
 
+DeepSeek Harness adds a launch-scoped plugin for submission and tool events.
+For `security.violation`, the Adapter also installs a Node preload in the Agent
+process. The pinned Agent loop awaits the final Provider decision after native
+result finalization and before Session commit. The preload is removed from
+inherited `NODE_OPTIONS` after registration, and Providers use the original
+launch environment. This path covers the verified headless top-level tool
+delivery on DSH `0.2.1-rc.5`; see [Adapter dispatch](adapters/adapter-dispatch.md#native-startup-evidence)
+for its identity, lifecycle and excluded paths.
+
 Resident SDK support uses the service's owned root and per-task child bindings.
 The root policy stays immutable; each task pins its own cwd and environment,
 keeps replay fences until release, and is reclaimed when its owner exits.
 Native factories remain Adapter responsibilities. See
 [task scope lifecycle](runtime/local-service.md#resident-hosts-and-task-scopes).
+
+Application-owned processes enter the Service registration transaction through `aw instance`. Service verifies the Unix peer, owner start identity and Ready, reuses production preparation and task scopes, and releases only owned AW resources. See [independent registration](runtime/local-service.md#independent-registration).
 
 ## User workflow
 
@@ -30,45 +41,61 @@ maintained separately under `providers/`.
 
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
-| `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, exec, host, package, provider, service |
-| `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
-| `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
-| `aw-host` | Prepare Providers and execute admitted Hook steps | config, exec, provider |
-| `aw-provider` | Validate Provider messages and capability admission | config |
+| `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, core, exec, host, package, provider, service |
+| `aw-service` | Local service, client, runtime state and cached Instance/Scope route snapshots | adapter, config, contracts, core, exec, host, provider |
+| `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, core, exec, provider |
+| `aw-host` | Prepare Providers and execute admitted Hook steps | config, core, exec, provider |
+| `aw-provider` | Validate Provider messages and view contracts | None |
 | `aw-exec` | Bound process lifetimes and output; hold managed package files; clean up owned processes | None |
 | `aw-config` | Parse configuration and validate fields and static references | None |
-| `aw-core` | Capability plan executor, Host/Journal ports, and FileJournal | contracts |
-| `aw-contracts` | Schemas, canonical encoding, and cross-record validation | None |
-| `aw-package` | Local package database, plans, durable transactions and configuration APIs; `aw-build` | config, exec |
+| `aw-core` | Hook policy admission, Source resolver, pure route compilation, capability plan executor, Host/Journal ports, and FileJournal | config, contracts, provider |
+| `aw-contracts` | Schemas, canonical encoding, Source/plan contracts, and cross-record validation | None |
+| `aw-package` | Provider admission, private extension transactions and AW configuration | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
-on `aw-service`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
-depend on `aw-cli`. The `aw` frontend calls package APIs in-process. The standalone
-`aw-package` executable has been removed; the crate and `aw-build` remain.
+on `aw-service`; tests in `aw-provider` also depend on `aw-config`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
+depend on `aw-cli`. The `aw` frontend calls AW configuration and local-extension APIs in-process.
+The standalone `aw-package` executable has been removed; its crate remains.
+AW CLI builds use `make -C src/aw build`; archive assembly uses
+`make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` and ordinary scripts under
+`distribution/packaging/aw/`. Extension records, file verification and durable
+transactions live in the private `aw-package::store` module. Runtime file leases
+live in `aw-exec`, independently of package database access.
 
 The public `aw` tree uses one typed Clap declaration for parsing and help.
 Admitted options call existing handlers without reparsing argv. Internal Hook
 and lifecycle callbacks retain their protocol parser and failure replies.
-Software installation, configuration and removal all use this `aw` tree;
+AW extension installation, configuration and removal use this `aw` tree;
 the removal of the other executable does not change service messages,
 Provider effects or existing file ownership records.
 
 ### Local package operations
 
-`aw-cli` calls `aw-package::plan` to inspect a local bundle or selected removal.
+`aw-cli` calls `aw-package::plan` for admitted local Provider extensions or
+selected removal. Every input must use
+`package.json` and declare `aw-provider/v1alpha1`; `manifest.json`, AW core and
+ordinary backend bundles are rejected. The facade exposes an opaque admitted plan, not generic
+package inspection or installation APIs. The file engine remains private to
+`aw-package`; generic software ownership belongs to the distributor or native
+package manager.
 The plan contains package/version decisions, exact file changes and blockers;
 planning never creates a prefix, lock or database. `plan::execute` reacquires
-database then prefix write locks, rechecks the snapshot and runs the shared
+database then prefix write locks, rechecks the snapshot and runs the private
 transaction backend. A durable `installed.json` replacement commits the change.
 Unfinished operations require explicit `aw recover`, which finishes committed
 cleanup or restores the previous files without overwriting conflicting bytes.
 
-New package facts live in `$XDG_STATE_HOME/aw/packages` (HOME fallback) or the
-explicit root-managed raw scope `/var/lib/aw/packages`. A sole
-`.aw-packages/aw-core.json` locator identifies that database from a prefix.
+AW extension records remain in `$XDG_STATE_HOME/aw/packages` (HOME fallback) or
+the explicit root-managed raw scope `/var/lib/aw/packages`. The
+`.local-packages/installation.json` locator identifies that database and its
+manager from a prefix. AW queries and writes reject foreign-manager locators
+and do not follow their databases.
+No automatic database transfer or duplicate ownership is performed.
+Externally installed Providers use explicit `transport.argv` and the process
+protocol without a package record. Native RPM ownership stays with RPM; this
+local raw extension workflow does not import or replace it.
 Queries and configuration generation can follow it without guessing another
-user's XDG location. Old component JSON is archived during the first successful
-package write, then replaced by this locator, which old installers reject.
+user's XDG location.
 Removing the last package retains an empty registration and locator for safe
 reinstallation. RPM/DEB backends and cross-prefix dependency selection remain
 outside this implementation.
@@ -91,8 +118,20 @@ blocked. See [local package management](packaging/package-management.md).
 
 These implementations each own an independent Cargo workspace and lockfile at
 the repository root. They connect as separate processes and are not part of the
-ten framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
+ten framework crates. Tokenless Provider tests also depend on the sec-core Provider.
+sec-core coverage tests use host, adapter and package as test-only dependencies to exercise generated configuration,
+normalization and the real Provider process together. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](../../../../../docs/developer-guide/en/aw/providers/index.md).
+
+## Native configuration ownership
+
+`aw-config` validates ordered source references without parsing native content.
+The offline editor changes only those AW-owned references. Embedding Adapters
+use `aw-adapter::configuration` to call their original loader, retain its output
+or live handle, and obtain immutable scope through existing Provider admission.
+The native loader owns precedence, relative paths, credentials and updates;
+the service retains runtime activation and policy revisions. See the
+[editing contract](configuration/configuration-editing.md#native-source-ownership).
 
 ## One Hook request
 
@@ -111,23 +150,74 @@ can develop and distribute Providers independently; see the [collaboration guide
 Native Hook scripts also run through `aw-exec`, preserving raw output and exit
 status without a Provider handshake. AgentSight is a separate optional observation
 source; read-only `aw inspect` views do not participate in Hook admission.
+Service-owned public runtime metadata persists through the same Journal even
+when Sight is disabled. Qoder SDK and QwenPaw keep metadata callbacks when no
+policy steps are configured; only explicit native outcomes become result facts.
+See [public objects](runtime/public-objects.md#runtime-production-and-projection)
+for retained identities, bounded deduplication and projection boundaries.
+
+Skill checks reuse `tool.before` and the existing opaque `event.native` extension.
+The Qoder SDK or QwenPaw Adapter supplies `aw_skill` (requested name, canonical
+directory and source) or a resolution error. The sec-core Provider invokes the
+public read-only Ledger check and maps trust states; directory authorization and
+signing stay with the backend administrator. The Adapter pins or refreshes the
+actual native object and rejects source changes across checking. See the
+[Skill integration contract](../../../../../docs/developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading).
 
 ### Explicit policy updates
 
-Opt-in `aw run --reloadable` installs stable Adapter entrypoints. `aw update`
-addresses an existing instance and asks `aw-service` to prepare a new immutable
-Host outside the request gate, then publish it only after a final idle/revision
+Supported resident factories and prepared native startup install Adapter update
+boundaries; `aw run --reloadable` selects a separate restricted bridge.
+`aw update` addresses an existing instance and asks
+`aw-service` to prepare a new immutable Host outside the request gate, then publish it only after a final idle/revision
 check under that gate. The service retains the bootstrap identity while each
 instance owns its active policy. Native Adapters report request/tool lifetimes
 and preserve scheduling and adoption; Provider protocols and Core plan execution
 are unchanged. See [policy reload](runtime/policy-reload.md)
 for version pins, busy rejection, process association and acceptance boundaries.
 
+### Application-owned native startup
+
+`instance setup` installs explicitly selected startup assets without creating an
+instance. On native startup, the application invokes `instance prepare` as a
+direct child. The CLI reuses Adapter validation/configuration and Service
+registration, returns private bridge assets, and leaves the registration pending.
+The original owner confirms native readiness before dispatch. This preserves one
+ownership chain from the Unix peer and process start identity to the instance.
+
+Ordinary SDK factories and QwenPaw use child task Scopes. Qoder, OpenClaw and Hermes use
+admitted native root bridges, whose request and tool lifetimes fence policy
+updates. Root lifecycle calls remain owner-authenticated; native callback peers
+must belong to the owner tree. The root mode does not permit direct callbacks on
+ordinary SDK roots. Prepared Qoder TUI and print processes confirm native root
+readiness through SessionStart. External attachment to an existing Qoder TUI
+retains its boundary before the first request.
+
+The configured service identity remains fixed while each instance owns its policy
+revision. Preparing with an edited configuration validates only permitted policy
+changes before reusing that service. Cleanup releases the instance's Provider
+work and staged assets while application process ownership stays external.
+Neither startup wiring nor process discovery alone proves Ready. Provider
+protocols, Core effect admission and Host invocation remain shared.
+See [application-owned integration](../../../../../docs/developer-guide/en/aw/deployment/independent-instances.md)
+for setup, owner confirmation and rollback, and [policy updates](../../../../../docs/developer-guide/en/aw/deployment/policy-updates.md)
+for framework-specific cleanup boundaries.
+
 ### Where `aw-core` fits
 
-The current Hook path is `aw-service → aw-host → aw-exec`. The service reuses
-`aw-core::journal::FileJournal` for audit storage, without calling
-`Core::prepare/execute`.
+Hook preparation routes through `aw_core::admission` via
+`Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`,
+and Hook event execution runs along `aw-service → aw-host → aw-exec` (see
+[Core admission](core-admission.md)). `aw_core::routes` compiles admitted steps
+and event budgets into immutable `PreparedRoutes` snapshots cached on each
+`aw-service` `Instance` and child task `Scope` so `ScopePolicy` and
+`sdk_callback` share one precomputed route table with O(1) lookup.
+`aw_core::resolver` provides side-effect-free multi-source Hook resolution over
+projected `HookRequirement` slices and `aw_contracts::source::SourceCapability`
+candidates into a single-control-owner `aw_contracts::hook_plan::ResolvedHookPlan`
+(verified offline via Shadow Plan equivalence against `admission::preflight`).
+The service also reuses `aw-core::journal::FileJournal` for audit storage,
+without calling `Core::prepare/execute`.
 
 `aw-core::Core` is a separate capability-plan API. Its embedding caller supplies
 `ProviderHost`, `Clock`, and `Journal`; it uses `aw-contracts` to validate plans
@@ -149,12 +239,14 @@ and packaging scope.
 | --- | --- |
 | `crates/aw-cli/src/bin/`, `crates/aw-cli/src/lib.rs`, `crates/aw-cli/src/cli/` | CLI entrypoints, launcher and RPC coordination |
 | `crates/aw-cli/src/command.rs`, `crates/aw-cli/src/command/` | Typed public command declaration, generated help and handler dispatch |
-| `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
+| `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service, cached Instance/Scope route snapshots, and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
-| `crates/aw-core/src/journal.rs` | Durable audit storage |
-| `crates/aw-package/src/{database,open_bundle,plan,transaction}.rs` | Package records, local bundle verification, preview and durable file changes |
+| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/admission/`, `crates/aw-core/src/resolver.rs`, `crates/aw-core/src/routes.rs`, `crates/aw-core/src/journal.rs` | Hook policy admission rules/types, pure multi-source Hook resolver, immutable `PreparedRoutes` compilation, and durable audit storage |
+| `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | Private records, local verification, planning and durable extension file changes |
+| `crates/aw-package/src/configuration/`, `crates/aw-package/src/config_edit.rs` | AW configuration rendering and safe offline editing |
+| `../../distribution/packaging/aw/` | Independent AW archives, integration backend builds and concrete configuration templates |
 | `crates/aw-exec/src/packages.rs` | Shared runtime ownership of known installed files |
-| `crates/aw-contracts/src/registry.rs` | Contract schemas embedded in the program |
+| `crates/aw-contracts/src/registry.rs`, `crates/aw-contracts/src/source.rs`, `crates/aw-contracts/src/hook_plan.rs` | Contract schemas embedded in the program, plus versioned `SourceCapability`, `ResolvedHookPlan`, `Coverage`, and 16-Hook `CapabilityCell` contracts |
 | `../../providers/agent-sec-core/`, `../../providers/tokenless/` | Concrete Providers, configuration examples, and tests |
 | `crates/aw-adapter/src/` | Shared native dialects and catalog for launcher and service |
 | `crates/aw-adapter/native/` | Packaged Python/JavaScript native bridge assets |
@@ -173,12 +265,21 @@ development environment and checks.
 | Active capability, plan and evidence schemas | `aw-contracts/schemas/` |
 | Configuration | `aw-config/schemas/` |
 | Provider messages and View protocol | `aw-provider/schemas/` |
+| Native bridge data | The Adapter |
 | Provider private configuration and backend data | The concrete Provider directory |
 
-`aw-contracts/schemas/` contains only registered, tested contracts, currently 23.
+`aw-contracts/schemas/` contains only registered, tested contracts. The
+[Registry](../../../crates/aw-contracts/src/registry.rs) lists the active schemas;
+the [inventory test](../../../crates/aw-contracts/tests/schemas.rs) requires every
+schema file to be registered.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
-use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
-in this repository and were removed. Their contents remain in Git history.
+use v2 inputs and outputs; offline deployment descriptors use
+`deployment-descriptor-v1alpha1` (`aw-deployment/v1alpha1`); and Hook Source
+declarations and resolved single-control-owner plans use
+`source-capability-v1alpha1` (`aw-source-capability/v1alpha1`) and
+`resolved-hook-plan-v1alpha1` (`aw-resolved-hook-plan/v1alpha1`). Eight
+unregistered capability v1 drafts had no consumers in this repository and were
+removed. Their contents remain in Git history.
 
 New Providers can declare operations within the existing events and effects,
 owning their private configuration and backend data. Adding a Core capability or
@@ -191,8 +292,10 @@ preserve their bytes, `$id`, registry names and canonical digest vectors.
 Qoder SDK integration uses `options.hooks` on each Query. The foreground worker
 selects the Adapter's daemon and Query factories. The daemon factory admits
 runtime launch options and registers its identity before a Query can use it.
-Tool dispatch reuses the existing CLI callback →
-service → Host → Provider path. The application retains daemon and Query
+Ordinary Queries open acknowledged child scopes with their own cwd/environment;
+the Adapter registers model-produced identities before native dispatch and
+retires them after the native queue and original callbacks drain. Tool dispatch
+uses CLI scope transport → service → Host → Provider. The application retains daemon and Query
 ownership; no SDK-specific service operation or Provider is introduced.
 
 Reloadable Qoder SDK Queries reuse the stable dispatcher and service policy gate.
@@ -200,7 +303,8 @@ The Adapter owns message admission and native queue/close completion; the CLI
 transports lifecycle frames through the existing bridge RPC. See the
 [policy reload contract](runtime/policy-reload.md#qoder-sdk-request-admission).
 
-[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
+[Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi, Claude and ordinary Qoder SDK Queries.
+[Codex CLI Adapter](adapters/codex-adapter.md) uses native command Hooks to run ordered AW steps and checks the original-input boundary before launching a local session.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
 
@@ -211,7 +315,7 @@ MCP dispatch and the pinned Claude transport.
 
 ## Caller-owned native attachment
 
-`aw install --pid` reuses the existing configuration and Adapter preparation,
+`aw connect --pid` reuses the existing configuration and Adapter preparation,
 Bind/Host admission, EnableReload, AssociateProcess and stable dispatch. The CLI
 owns the private attachment record and service binding. `aw-adapter` owns Qoder
 settings merging/confirmation and QwenPaw plugin API installation/removal;
@@ -219,7 +323,18 @@ its bounded loopback HTTP transport uses the workspace's existing `reqwest`.
 The existing service process-identity helper is shared with the CLI.
 
 The native callback confirms readiness before the caller dispatches input.
-Later `aw update` uses the existing idle activation gate. `install --remove`
+Later `aw update` uses the existing idle activation gate. `aw disconnect --agent TARGET --pid PID`
 uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.
+
+Language SDKs own shared Admission over Instance/Task. Native Sources install
+capture and choose the configured input or first-tool boundary. Qoder and the
+configured QwenPaw entry reuse it; QwenPaw additionally retains its resident
+result guard. Service/Host/executor keep policy authority and Provider execution.
+See [SDK ownership](runtime/native-sdk.md#deferred-after-only-task-admission).
+
+Public audit consumers use `aw audit-export` → `aw-service::audit_export` →
+`aw-core::journal::reader`. The reader pins owned storage and verifies bounded
+source chains; Service projects retained public objects without a control RPC.
+See [incremental audit reads](runtime/audit-export.md) for cursors and gaps.

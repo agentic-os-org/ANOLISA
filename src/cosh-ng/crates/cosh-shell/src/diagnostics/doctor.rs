@@ -8,14 +8,11 @@
 //! command renders the same report as an inline card; the diagnostics bundle
 //! projects it into the stable bundle schema.
 
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use crate::config::CoshConfig;
 use crate::diagnostics::health::{
-    doctor_status, finding_remediation, run_env_collectors, run_health_scan_with_options,
-    HealthCollector, HealthReportBuilder, HealthScanMode, HealthScanOptions, HealthScanReport,
-    HealthSeverity, HealthUnavailableReason,
+    doctor_status, finding_remediation, HealthCollector, HealthScanReport, HealthUnavailableReason,
 };
 use crate::{I18n, MessageId};
 
@@ -27,19 +24,7 @@ use crate::{I18n, MessageId};
 /// - Otherwise: run the resource scan (when enabled) and always run the
 ///   environment collectors, merging both into one report.
 pub(crate) fn run_doctor_report(config: &CoshConfig, cwd: &Path) -> HealthScanReport {
-    let options = HealthScanOptions::from_env();
-    let started_at_ms = options.started_at_ms;
-    let fixture_mode = matches!(options.mode, HealthScanMode::Fixture(_));
-
-    let mut builder = HealthReportBuilder::for_started_at(started_at_ms);
-    if let Some(base) = run_health_scan_with_options(&config.health, options) {
-        builder.merge_report(base);
-    }
-    if !fixture_mode {
-        run_env_collectors(&mut builder, config, cwd, 0);
-    }
-
-    builder.finish(now_millis().max(started_at_ms))
+    super::health::runtime::run_supervised_doctor_report(config, cwd)
 }
 
 /// Run the doctor report against the process working directory, falling back
@@ -50,8 +35,8 @@ pub(crate) fn run_doctor_report(config: &CoshConfig, cwd: &Path) -> HealthScanRe
 /// `/health` slash command instead passes the child shell cwd explicitly to
 /// [`run_doctor_report`].
 pub(crate) fn run_doctor_report_from_process_cwd(config: &CoshConfig) -> HealthScanReport {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    run_doctor_report(config, &cwd)
+    // Resolve the inherited cwd inside the supervised worker, where filesystem lookup is bounded.
+    run_doctor_report(config, Path::new("."))
 }
 
 /// Render a report as human-readable plain-text lines for `cosh-shell doctor`.
@@ -106,16 +91,35 @@ pub(crate) fn format_doctor_report_plain(report: &HealthScanReport, i18n: I18n) 
         }
     }
 
-    for item in &report.unavailable {
+    let gaps = if report.check_results.is_empty() {
+        report
+            .unavailable
+            .iter()
+            .map(|gap| (collector_token(gap.collector), gap))
+            .collect::<Vec<_>>()
+    } else {
+        report
+            .check_results
+            .iter()
+            .flat_map(|check| {
+                check
+                    .gaps
+                    .iter()
+                    .map(move |gap| (check.compatibility_id(), gap))
+            })
+            .collect()
+    };
+    for (label, item) in gaps {
         lines.push(format!(
             "[{}] {}: {}",
             item.severity.label(),
-            collector_token(item.collector),
+            label,
             i18n.t(unavailable_reason_message(item.reason))
         ));
     }
 
-    if report.findings.is_empty() && report.unavailable.is_empty() {
+    if report.findings.is_empty() && report.unavailable.is_empty() && !report.checks_done.is_empty()
+    {
         lines.push(i18n.t(MessageId::DoctorAllHealthy).to_string());
     }
 
@@ -144,15 +148,9 @@ fn unavailable_reason_message(reason: HealthUnavailableReason) -> MessageId {
         HealthUnavailableReason::CommandMissing => MessageId::HealthUnavailableCommandMissing,
         HealthUnavailableReason::Timeout => MessageId::HealthUnavailableTimeout,
         HealthUnavailableReason::Unsupported => MessageId::HealthUnavailableUnsupported,
+        HealthUnavailableReason::MissingContext => MessageId::HealthBannerUnavailableLabel,
         HealthUnavailableReason::ParseError => MessageId::HealthUnavailableParseError,
     }
-}
-
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -163,8 +161,18 @@ mod tests {
     use crate::config::Language;
     use crate::diagnostics::health::{
         report_exit_code, HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport,
-        UnavailableCollector,
+        HealthSeverity, UnavailableCollector,
     };
+
+    #[test]
+    fn disabled_checks_do_not_render_all_passed() {
+        let mut builder = crate::diagnostics::health::HealthReportBuilder::for_started_at(1);
+        builder.declare_check(HealthCollector::Memory, false);
+        let report = builder.finish(2);
+        let lines = format_doctor_report_plain(&report, en());
+        assert!(!lines.iter().any(|line| line.contains("all checks passed")));
+        assert_eq!(crate::diagnostics::health::report_exit_code(&report), 0);
+    }
 
     fn en() -> I18n {
         I18n::new(Language::EnUs)

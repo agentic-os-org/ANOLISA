@@ -90,8 +90,11 @@ impl RuntimeDispatcher {
         output: &mut W,
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let batch = snapshot.batch_since(state.control.event_cursor());
+        crate::runtime::login::invitation::observe_user_activity(state, batch.events);
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
         crate::auth::ecs_poll::poll(adapter, state, output)?;
+        crate::auth::trial::poll(adapter, state, output)?;
+        crate::runtime::login::invitation::render_at_idle(state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])
     }
 
@@ -165,21 +168,23 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         adapter.name(),
     )?;
+    crate::auth::trial::consume(action_events, state, output)?;
     // Task forms reuse Question/TextQuestion captures. Route them first and
     // reserve their answer events so QuestionConsumer never emits a false
     // "No pending question" notice for Task-owned input.
     crate::slash::render_task_form_actions(action_events, state, output, event_index_base)?;
     crate::slash::render_task_snapshot_actions(action_events, state, output, event_index_base)?;
-    let question_actions =
-        QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
-    RuntimeDispatcher::apply_actions(question_actions, state);
-    crate::auth::runtime::render_auth_card_actions(
+    crate::runtime::startup::session::handle_initial_question_actions(
         action_events,
         adapter,
         state,
         output,
         event_index_base,
     )?;
+    let question_actions =
+        QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
+    RuntimeDispatcher::apply_actions(question_actions, state);
+    crate::auth::render_auth_card_actions(action_events, adapter, state, output, event_index_base)?;
     // Hook-action disambiguation panel (#1629): route focus/answer/cancel
     // events for the pending hook-action question panel.
     crate::slash::hooks::render_hook_action_card_actions(
@@ -428,6 +433,9 @@ fn poll_inline_runtime_without_shell_events<W: Write>(
         return Ok(());
     }
 
+    if state.startup_session.compact {
+        crate::runtime::startup::session::render_initial_question(&[], adapter, state, output)?;
+    }
     render_startup_health_banner(state, output)?;
     if state.shell_at_prompt {
         render_pending_upgrade_notice_at_idle_prompt(state, output)?;

@@ -35,6 +35,7 @@ RUN_OUTPUT_SUBDIR = "run"
 EVALUATE_OUTPUT_SUBDIR = "evaluate"
 ANALYZE_TRACES_OUTPUT_SUBDIR = "analyze-traces"
 TOKENLESS_RUN_OPTION = "tokenless"
+HEADROOM_RUN_OPTION = "headroom"
 
 
 class CommandUsageError(ValueError):
@@ -56,6 +57,19 @@ def command_output_dir(output_root: Path, command_name: str) -> Path:
     return output_root / command_name
 
 
+def _read_instance_list(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise CommandUsageError(f"Cannot read --instances-file {path}: {exc}") from exc
+    instance_ids = list(
+        dict.fromkeys(value for line in text.splitlines() if (value := line.strip()) and not value.startswith("#"))
+    )
+    if not instance_ids:
+        raise CommandUsageError(f"--instances-file {path} contains no instance IDs")
+    return instance_ids
+
+
 def run_instances_command(
     *,
     agent: str,
@@ -67,13 +81,18 @@ def run_instances_command(
     slice_range: str | None,
     filter_regex: str | None,
     instance_id: str | None,
+    instances_file: Path | None = None,
     workers: int,
     docker_pull_registry: str | None,
     use_skill: bool,
     skills_dir: Path | None = None,
     tokenless: bool,
+    headroom: bool = False,
     per_case_prompt: bool,
     prompts_dir: Path | None = None,
+    base_config: Path | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
     redo: bool,
     verbose: bool,
 ) -> RunReport:
@@ -88,13 +107,18 @@ def run_instances_command(
         slice_range=slice_range,
         filter_regex=filter_regex,
         instance_id=instance_id,
+        instances_file=instances_file,
         workers=workers,
         docker_pull_registry=docker_pull_registry,
         use_skill=use_skill,
         skills_dir=skills_dir,
         tokenless=tokenless,
+        headroom=headroom,
         per_case_prompt=per_case_prompt,
         prompts_dir=prompts_dir,
+        base_config=base_config,
+        temperature=temperature,
+        seed=seed,
     )
     setup_logging(settings.output.output_dir, verbose=verbose, suffix=RUN_OUTPUT_SUBDIR)
     return RunSession(settings, redo=redo).execute()
@@ -111,21 +135,35 @@ def build_run_settings(
     slice_range: str | None,
     filter_regex: str | None,
     instance_id: str | None,
+    instances_file: Path | None = None,
     workers: int,
     docker_pull_registry: str | None,
     use_skill: bool,
     skills_dir: Path | None = None,
     tokenless: bool,
+    headroom: bool = False,
     per_case_prompt: bool,
     prompts_dir: Path | None = None,
+    base_config: Path | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
 ) -> Settings:
     """Build validated run settings from CLI values."""
     if use_skill and per_case_prompt:
         raise CommandUsageError("--use-skill and --per-case-prompt are mutually exclusive")
+    if tokenless and headroom:
+        raise CommandUsageError("--tokenless and --headroom are mutually exclusive")
     if tokenless and not agent_supports_run_option(agent, TOKENLESS_RUN_OPTION):
         raise CommandUsageError(f"--tokenless is not supported by agent '{agent}'")
+    if headroom and not agent_supports_run_option(agent, HEADROOM_RUN_OPTION):
+        raise CommandUsageError(f"--headroom is not supported by agent '{agent}'")
 
-    instance_ids = [item.strip() for item in instance_id.split(",")] if instance_id else None
+    if instances_file is not None and instance_id is not None:
+        raise CommandUsageError("--instances-file and --instance-id are mutually exclusive")
+    if instances_file is None:
+        instance_ids = [item.strip() for item in instance_id.split(",")] if instance_id else None
+    else:
+        instance_ids = _read_instance_list(instances_file)
     return Settings(
         agent=AgentConfig(
             name=agent,
@@ -136,8 +174,12 @@ def build_run_settings(
             use_skill=use_skill,
             skills_dir=skills_dir,
             tokenless=tokenless,
+            headroom=headroom,
             per_case_prompt=per_case_prompt,
             prompts_dir=prompts_dir,
+            base_config=base_config,
+            temperature=temperature,
+            seed=seed,
         ),
         dataset=DatasetConfig(
             subset=subset,

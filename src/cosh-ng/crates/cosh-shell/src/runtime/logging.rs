@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use tracing_subscriber::EnvFilter;
 
 /// Per-user log retention: today and the preceding two UTC dates. Approved by the user as a per-user total
@@ -198,13 +199,25 @@ fn open_log_file(dir: &std::path::Path, prefix: &str) -> std::io::Result<std::fs
         .mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(dir.join(format!("{prefix}.{}", today_suffix())))?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "log is not a regular file",
         ));
     }
+    ensure_log_owner(&metadata)?;
     Ok(file)
+}
+
+fn ensure_log_owner(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if metadata.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "log belongs to another user",
+        ));
+    }
+    Ok(())
 }
 
 fn acquire_budget_lock(
@@ -276,7 +289,11 @@ fn ensure_private_log_dir(dir: &std::path::Path) -> std::io::Result<()> {
             ));
         }
     }
-    std::fs::create_dir_all(dir)?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -455,6 +472,7 @@ fn reclaim_log_file(path: &std::path::Path) -> std::io::Result<()> {
                     "managed log is not a regular file",
                 ));
             }
+            ensure_log_owner(&metadata)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -513,7 +531,7 @@ fn managed_logs(
             continue;
         };
         let meta = std::fs::symlink_metadata(&path)?;
-        if meta.file_type().is_file() {
+        if meta.file_type().is_file() && meta.uid() == nix::unistd::geteuid().as_raw() {
             logs.push((path, date, meta.modified()?, meta.len()));
         }
     }

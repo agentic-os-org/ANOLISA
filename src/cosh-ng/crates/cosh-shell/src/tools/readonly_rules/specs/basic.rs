@@ -426,18 +426,6 @@ pub(super) const BASENAME: ReadonlySpec = ReadonlySpec {
     }),
 };
 
-pub(super) const PRINTENV: ReadonlySpec = ReadonlySpec {
-    command: "printenv",
-    validator: Validator::Generic(GenericSpec {
-        short_flags: "0",
-        long_flags: &["--null"],
-        value_flags: &[],
-        deny_flags: &[],
-        path_mode: PathMode::Unchecked,
-        bare_number_max: 0,
-    }),
-};
-
 pub(super) const ECHO: ReadonlySpec = ReadonlySpec {
     command: "echo",
     validator: Validator::Generic(GenericSpec {

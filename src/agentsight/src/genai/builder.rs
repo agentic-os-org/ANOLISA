@@ -34,7 +34,6 @@ impl BuildOutput {
             return;
         };
         let Some(http) = results.iter_mut().find_map(|result| match result {
-            AnalysisResult::Http(http) => Some(http),
             AnalysisResult::HttpContext(context) => Some(&mut context.http),
             _ => None,
         }) else {
@@ -263,7 +262,6 @@ impl GenAIBuilder {
             }
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
-                AnalysisResult::Http(h) => Some(h),
                 AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             });
@@ -429,6 +427,22 @@ impl GenAIBuilder {
             match_body.as_deref(),
         );
 
+        // The Qoder CLI gateway encodes its request body with a substituted
+        // Base64 alphabet, so `json_body` cannot read it. The live analysis
+        // path decodes the wire body through `MessageParser`; the pending
+        // record has to read the same fields or a drained Qoder call loses
+        // its query, model, streaming flag and body session id. The match key
+        // above keeps the raw wire body. For Qoder the completing call hashes
+        // the decoded JSON (`context.request` via `pending_match_key_json`),
+        // so the two keys differ and an idle-drain row is not reconciled with
+        // a later normal completion. This gap predates this change and is left
+        // untouched here.
+        let decoded_wire_body = crate::analyzer::message::MessageParser::decode_request_body(
+            &request.path,
+            request.body(),
+        );
+        let body_for_fields = body.as_ref().or(decoded_wire_body.as_ref());
+
         // A SysOM POP request wraps the LLM parameters in a JSON string
         // (`llmParamString`). The match key above deliberately keeps the raw
         // outer body (the completing call builds the same key from it), but
@@ -436,12 +450,11 @@ impl GenAIBuilder {
         // decoded object: reading the wrapper left `stream`, `model`, the
         // messages and the conversation keys empty on every drained SysOM
         // call.
-        let decoded_llm_body = body
-            .as_ref()
+        let decoded_llm_body = body_for_fields
             .and_then(|value| value.get("llmParamString"))
             .and_then(|value| value.as_str())
             .and_then(|params| serde_json::from_str::<serde_json::Value>(params).ok());
-        let llm_body = decoded_llm_body.as_ref().or(body.as_ref());
+        let llm_body = decoded_llm_body.as_ref().or(body_for_fields);
 
         // Determine if streaming
         let is_sse = llm_body
@@ -533,11 +546,32 @@ impl GenAIBuilder {
         let call_kind =
             super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
 
-        // Extract model from request body JSON "model" field
+        // Extract model from the request body. A Qoder gateway request has no
+        // top-level `model`: it names the model under `model_config`, the same
+        // two fields `QoderCliParser::parse_request` reads. Filter each
+        // candidate for empty text before falling back, so a Qoder body with
+        // `model: ""` and a real `key` still resolves to `key` like the live
+        // parser does.
         let model = llm_body
-            .and_then(|v| v.get("model"))
-            .and_then(|m| m.as_str())
-            .filter(|s| !s.is_empty())
+            .and_then(|v| {
+                v.get("model")
+                    .and_then(|m| m.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        v.get("model_config").and_then(|config| {
+                            config
+                                .get("model")
+                                .and_then(|m| m.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    config
+                                        .get("key")
+                                        .and_then(|k| k.as_str())
+                                        .filter(|s| !s.is_empty())
+                                })
+                        })
+                    })
+            })
             .map(|s| s.to_string());
 
         // Extract provider from request path
@@ -565,6 +599,20 @@ impl GenAIBuilder {
                 body.as_ref()
                     .and_then(|b| b.get("metadata"))
                     .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            })
+            // Qoder names its session at the top level of the decoded gateway
+            // body. `call_builder.rs` already reads it from there for the live
+            // record, so the pending record must not fall back to the
+            // pid/query crash bucket while the real session is in the body.
+            .or_else(|| {
+                if !crate::parser::llm::is_qoder_path(&request.path) {
+                    return None;
+                }
+                llm_body
+                    .and_then(|b| b.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|session| !session.trim().is_empty())
+                    .map(str::to_owned)
             });
 
         // 双层兜底计算 session_id / conversation_id（详见上方注释）。
@@ -573,26 +621,35 @@ impl GenAIBuilder {
         let agent_name_str = agent_name.as_deref().unwrap_or("");
         let pid_i32 = conn_id.pid as i32;
 
-        let session_id = metadata_session
+        let session_id = metadata_session.or_else(|| {
+            // Mapper first (same order as call_builder.rs): a FileWrite
+            // from this pid already revealed the real session UUID, which
+            // groups the crash-drain record with the normal calls of the
+            // same session instead of an isolated crash bucket (#2059).
+            //
+            // Known limitation: pid_map has no lifecycle bound, so a
+            // recycled pid whose new process has not yet written a session
+            // file can surface the previous process's mapping here. This
+            // mis-groups only orphan calls that would otherwise get a
+            // synthetic crash hash, and needs pid reuse + zero FileWrite +
+            // drain to coincide — accepted instead of lifecycle tracking.
+            response_mapper
+                .get_session_by_pid(conn_id.pid)
+                .map(str::to_string)
+        });
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            agent_name_str,
+            pid_i32,
+            &first_user_text,
+            &last_user_text,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id
             .or_else(|| {
-                // Mapper first (same order as call_builder.rs): a FileWrite
-                // from this pid already revealed the real session UUID, which
-                // groups the crash-drain record with the normal calls of the
-                // same session instead of an isolated crash bucket (#2059).
-                //
-                // Known limitation: pid_map has no lifecycle bound, so a
-                // recycled pid whose new process has not yet written a session
-                // file can surface the previous process's mapping here. This
-                // mis-groups only orphan calls that would otherwise get a
-                // synthetic crash hash, and needs pid reuse + zero FileWrite +
-                // drain to coincide — accepted instead of lifecycle tracking.
-                response_mapper
-                    .get_session_by_pid(conn_id.pid)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                self.id_resolver
-                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+                session_key
+                    .as_ref()
+                    .and_then(|key| self.id_resolver.peek_session_id_with_key(key))
             })
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
@@ -603,9 +660,9 @@ impl GenAIBuilder {
                     0,
                 ))
             });
-        let conversation_id = self
-            .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
+        let conversation_id = conversation_key
+            .as_ref()
+            .and_then(|key| self.id_resolver.peek_conversation_id_with_key(key))
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
@@ -622,12 +679,9 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver.finish_conversation(
-            agent_name_str,
-            pid_i32,
-            &last_user_text,
-            user_message_count,
-        );
+        if let Some(key) = &conversation_key {
+            self.id_resolver.finish_conversation_with_key(key);
+        }
 
         Some(PendingCallInfo {
             call_id,
@@ -683,12 +737,20 @@ impl GenAIBuilder {
         // shared part merger below.
         for event in sse_events {
             if let Some(json) = event.json_body() {
-                // Extract model from first chunk that has it
+                // Extract model from first chunk that has it (Gemini spells it
+                // `modelVersion`).
                 if model.is_none() {
-                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
-                        if !m.is_empty() {
-                            model = Some(m.to_string());
-                        }
+                    let m = json
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .filter(|m| !m.is_empty())
+                        .or_else(|| {
+                            json.get("modelVersion")
+                                .and_then(|v| v.as_str())
+                                .filter(|m| !m.is_empty())
+                        });
+                    if let Some(m) = m {
+                        model = Some(m.to_string());
                     }
                 }
                 // Anthropic nests the model inside message_start's message
@@ -724,8 +786,17 @@ impl GenAIBuilder {
                     let id = json
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
-                        .filter(|id| !id.is_empty());
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| {
+                            json.get("responseId")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        })
+                        .or_else(|| {
+                            json.pointer("/message/id")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        });
                     if let Some(id) = id {
                         trace_id = Some(id.to_string());
                     }
@@ -908,6 +979,40 @@ mod tests {
             source_event: ssl_event,
             reassembled_body: None,
         }
+    }
+
+    /// Encode a body the way the Qoder gateway does: standard Base64, a
+    /// substituted alphabet, `$` for padding, and swapped outer thirds.
+    fn qoder_encode(value: &serde_json::Value) -> String {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        const ALPHABET: &[u8; 64] =
+            b"_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!";
+        const STANDARD_ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes: Vec<u8> = STANDARD
+            .encode(value.to_string())
+            .bytes()
+            .map(|byte| {
+                if byte == b'=' {
+                    b'$'
+                } else {
+                    ALPHABET[STANDARD_ALPHABET
+                        .iter()
+                        .position(|candidate| *candidate == byte)
+                        .expect("standard Base64 alphabet")]
+                }
+            })
+            .collect();
+        let third = bytes.len() / 3;
+        String::from_utf8(
+            [
+                &bytes[bytes.len() - third..],
+                &bytes[third..bytes.len() - third],
+                &bytes[..third],
+            ]
+            .concat(),
+        )
+        .expect("the encoded body is ASCII")
     }
 
     /// Build a zero-copy `ParsedSseEvent` whose single `data:` line is `data`.
@@ -1119,6 +1224,202 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sse_enrichment_keeps_provider_tool_calls() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_srv","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":1}"#),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("provider tool calls must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &parsed[0].parts[1],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("mcptoolu_1")
+                    && name == "github_search"
+                    && arguments == &Some(serde_json::json!({"q": "drain"}))
+        ));
+        assert_eq!(
+            crate::genai::semantic::tool_call_ids_json(&parsed).as_deref(),
+            Some(r#"["srvtoolu_1","mcptoolu_1"]"#)
+        );
+    }
+
+    #[test]
+    fn test_parse_request_body_keeps_provider_tool_blocks() {
+        let result_types = [
+            "tool_result",
+            "web_search_tool_result",
+            "web_fetch_tool_result",
+            "code_execution_tool_result",
+            "bash_code_execution_tool_result",
+            "text_editor_code_execution_tool_result",
+            "tool_search_tool_result",
+            "mcp_tool_result",
+        ];
+        let results: Vec<_> = result_types
+            .iter()
+            .map(|kind| serde_json::json!({"type": kind, "tool_use_id": kind, "content": "ok"}))
+            .collect();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "rust"}},
+                    {"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "github_search",
+                     "input": {"q": "drain"}}
+                ]},
+                {"role": "user", "content": results}
+            ]
+        });
+        let req = GenAIBuilder::parse_request_body(&body.to_string()).expect("body parses");
+        assert_eq!(req.messages[0].parts.len(), 2);
+        assert!(matches!(
+            &req.messages[0].parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &req.messages[0].parts[1],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("mcptoolu_1")
+                    && name == "github_search"
+                    && arguments == &Some(serde_json::json!({"q": "drain"}))
+        ));
+        assert_eq!(req.messages[1].parts.len(), result_types.len());
+        for (part, kind) in req.messages[1].parts.iter().zip(result_types.iter()) {
+            assert!(matches!(
+                part,
+                MessagePart::ToolCallResponse { id, response }
+                    if id.as_deref() == Some(*kind)
+                        && response == &serde_json::json!("ok")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_anthropic_provider_tool_results_match_live_and_drain() {
+        let chunks = serde_json::json!([
+            {"type":"message_start","message":{"id":"msg_results","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"rust\"}"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com/rust"}]}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"mcp_tool_result","tool_use_id":"mcptoolu_err","content":"rate limited","is_error":true}},
+            {"type":"content_block_stop","index":2},
+            {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Done."}},
+            {"type":"content_block_stop","index":3},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+        ]);
+        let live = crate::analyzer::message::AnthropicParser::parse_response(&chunks)
+            .expect("the live parser must keep the complete turn");
+        assert_eq!(live.content.len(), 4);
+        assert!(matches!(
+            &live.content[0],
+            crate::analyzer::message::AnthropicContentBlock::ToolUse { id, .. }
+                if id == "srvtoolu_1"
+        ));
+        assert!(matches!(
+            &live.content[1],
+            crate::analyzer::message::AnthropicContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == "srvtoolu_1"
+        ));
+        assert!(matches!(
+            &live.content[2],
+            crate::analyzer::message::AnthropicContentBlock::ToolResult { is_error, .. }
+                if *is_error == Some(true)
+        ));
+        assert!(matches!(
+            &live.content[3],
+            crate::analyzer::message::AnthropicContentBlock::Text { text, .. }
+                if text == "Done."
+        ));
+
+        let events: Vec<_> = chunks
+            .as_array()
+            .expect("chunks are an array")
+            .iter()
+            .map(|chunk| make_sse_event(&chunk.to_string()))
+            .collect();
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("the drain must keep the complete turn");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip");
+        let parts = &parsed[0].parts;
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCallResponse { id, response }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && response == &serde_json::json!([
+                        {"type":"web_search_result","url":"https://example.com/rust"}
+                    ])
+        ));
+        assert!(matches!(
+            &parts[2],
+            MessagePart::ToolCallResponse { id, response }
+                if id.as_deref() == Some("mcptoolu_err")
+                    && response == &serde_json::json!({
+                        "content": "rate limited",
+                        "is_error": true
+                    })
+        ));
+        assert!(matches!(
+            &parts[3],
+            MessagePart::Text { content } if content == "Done."
+        ));
+    }
+
+    #[test]
     fn test_extract_sse_enrichment_captures_streamed_tool_calls() {
         // A pure tool-calling turn: the old walker only read delta.content,
         // so output_messages was None; the shared merger now keeps the
@@ -1270,6 +1571,25 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].parts.is_empty());
         assert_eq!(messages[0].finish_reason.as_deref(), Some("SAFETY"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_extracts_gemini_model_version_and_response_id() {
+        let events = vec![make_sse_event(
+            r#"{"candidates":[{"content":{"parts":[{"text":"partial answer"}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_gemini_123"}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_123"));
+
+        // Empty primary `model` / `id` strings must still fall back to `modelVersion` / `responseId`.
+        let empty_primary = vec![make_sse_event(
+            r#"{"model":"","id":"","candidates":[{"content":{"parts":[{"text":"partial answer"}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_gemini_456"}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&empty_primary)
+            .expect("enrichment with empty primary fields");
+        assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_456"));
     }
 
     #[test]
@@ -1689,6 +2009,111 @@ mod tests {
         assert!(pending.user_query.as_deref() == Some("hello"));
     }
 
+    #[test]
+    fn test_build_pending_from_request_gemini_uses_user_text_for_crash_ids() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        }"#;
+        let req = make_request("/v1beta/models/gemini-2.5-pro:generateContent", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::from([(1_u32, "gemini-agent".to_string())]);
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("Gemini request creates a pending row");
+
+        assert_eq!(pending.user_query.as_deref(), Some("second question"));
+        let expected_session = crate::genai::id_resolver::crash_fallback_id(
+            "session",
+            "gemini-agent",
+            1,
+            "first question",
+            0,
+        );
+        let expected_conversation = crate::genai::id_resolver::crash_fallback_id(
+            "conversation",
+            "gemini-agent",
+            1,
+            "second question",
+            2,
+        );
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some(expected_session.as_str())
+        );
+        assert_eq!(
+            pending.conversation_id.as_deref(),
+            Some(expected_conversation.as_str())
+        );
+
+        let input: serde_json::Value = serde_json::from_str(
+            pending
+                .input_messages
+                .as_deref()
+                .expect("messages are recorded"),
+        )
+        .expect("input messages are valid JSON");
+        assert_eq!(input[0]["content"], "first question");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["content"], "second question");
+    }
+
+    #[test]
+    fn test_build_pending_from_request_gemini_keeps_parallel_tool_messages() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "inspect files"}]},
+                {"role": "model", "parts": [
+                    {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                    {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                ]},
+                {"role": "user", "parts": [
+                    {"functionResponse": {
+                        "name": "list_dir",
+                        "response": {"entries": ["a", "b"]}
+                    }},
+                    {"functionResponse": {
+                        "name": "read_file",
+                        "response": {"content": "a body"}
+                    }}
+                ]}
+            ]
+        }"#;
+        let req = make_request("/v1beta/models/gemini-2.5-pro:generateContent", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::from([(1_u32, "gemini-agent".to_string())]);
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("Gemini request creates a pending row");
+
+        assert_eq!(pending.user_query.as_deref(), Some("inspect files"));
+        let input: serde_json::Value = serde_json::from_str(
+            pending
+                .input_messages
+                .as_deref()
+                .expect("messages are recorded"),
+        )
+        .expect("input messages are valid JSON");
+        let messages = input.as_array().expect("messages are an array");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "list_dir");
+        assert_eq!(
+            messages[1]["tool_calls"][1]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["content"], r#"{"entries":["a","b"]}"#);
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["content"], r#"{"content":"a body"}"#);
+        assert!(messages[2].get("tool_call_id").is_none());
+        assert!(messages[3].get("tool_call_id").is_none());
+    }
+
     /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
     /// The pending builder read the wrapper only, so a drained SysOM call
     /// lost its model, streaming flag, messages and user query — every
@@ -1749,6 +2174,97 @@ mod tests {
         assert!(pending.input_messages.is_none());
         assert!(pending.user_query.is_none());
         assert!(!pending.is_sse);
+    }
+
+    /// Qoder CLI encodes the gateway body with its own Base64 alphabet, so
+    /// `ParsedRequest::json_body()` cannot read it. The live analysis path
+    /// decodes the wire body through `MessageParser::decode_request_body`,
+    /// but the pending builder read only JSON: a drained Qoder call lost its
+    /// user query, model, streaming flag and body session id, and every
+    /// crash/idle record from one process collapsed into the same fallback
+    /// conversation bucket.
+    #[test]
+    fn test_build_pending_from_request_decodes_the_qoder_gateway_body() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "system": "Be concise",
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model_config": {"key": "fixture-model"},
+            "parameters": {"max_tokens": 32},
+            "stream": true
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.user_query.as_deref(), Some("Find the fixture"));
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
+        assert!(pending.is_sse, "stream:true lives inside the encoded body");
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert!(pending.input_messages.is_some());
+        assert!(pending.system_instructions.is_some());
+    }
+
+    /// Qoder gateway bodies carry `model_config: {"model": "", "key": ...}`
+    /// in real traffic (the live `QoderCliParser::parse_request` fixture uses
+    /// this shape). Each model candidate must be filtered for empty text
+    /// before the fallback, otherwise the empty `model` wins and the pending
+    /// record loses the model the live call would report.
+    #[test]
+    fn test_build_pending_from_request_qoder_empty_model_falls_back_to_key() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000002",
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model_config": {"model": "", "key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
+    }
+
+    /// An empty top-level `model` must not shadow the `model_config` fallback
+    /// either, matching `QoderCliParser::parse_request`.
+    #[test]
+    fn test_build_pending_from_request_empty_top_level_model_falls_back() {
+        let builder = GenAIBuilder::new();
+        let body = qoder_encode(&serde_json::json!({
+            "messages": [{"role": "user", "content": "Find the fixture"}],
+            "model": "",
+            "model_config": {"key": "fixture-model"}
+        }));
+        let req = make_request(
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?Encode=1",
+            &body,
+        );
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a Qoder gateway request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("fixture-model"));
     }
 
     #[test]
@@ -1843,9 +2359,10 @@ mod tests {
         // 同固定文本的下一轮对话重新锚定。
         let builder = GenAIBuilder::new();
         let pid = 1i32;
-        let text = "hello";
-        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
-        let req = make_request("/v1/chat/completions", body);
+        let text = "雪|\"\n\0".repeat(128 * 1024);
+        let body = serde_json::json!({"model":"gpt-4","messages":[{"role":"user","content":text}]})
+            .to_string();
+        let req = make_request("/v1/chat/completions", &body);
         let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
 
@@ -1861,18 +2378,20 @@ mod tests {
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
-        builder
+        let pending = builder
             .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
+        assert_eq!(pending.conversation_id.as_deref(), Some(turn1.as_str()));
+        assert_eq!(pending.user_query.as_deref(), Some(text.as_str()));
 
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,

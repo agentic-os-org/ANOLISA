@@ -141,14 +141,18 @@
             "name",
             "agent",
             "session_id",
-            "tool",
             "native"
           ],
           "properties": {
             "name": {
               "enum": [
+                "session.start",
+                "input.submit",
                 "tool.before",
-                "tool.after"
+                "tool.after",
+                "turn.stop",
+                "session.end",
+                "security.violation"
               ]
             },
             "agent": {
@@ -164,12 +168,15 @@
                   "enum": [
                     "qoder",
                     "openclaw",
+                    "deepseek-harness",
                     "hermes",
                     "qwenpaw",
                     "pi",
                     "claude-sdk",
                     "qoder-sdk",
-                    "agentscope"
+                    "sdk",
+                    "agentscope",
+                    "codex"
                   ]
                 },
                 "binding_id": {
@@ -262,10 +269,249 @@
             },
             "native": {
               "type": "object"
+            },
+            "turn_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              }
             }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "name": {
+                    "const": "input.submit"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "turn_id",
+                  "input"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "tool": false
+                }
+              },
+              "else": {
+                "if": {
+                  "properties": {
+                    "name": {
+                      "const": "turn.stop"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "turn_id"
+                  ],
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "tool": false,
+                    "input": false
+                  }
+                },
+                "else": {
+                  "if": {
+                    "properties": {
+                      "name": {
+                        "enum": [
+                          "session.start",
+                          "session.end"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "session_id": {
+                        "type": "string"
+                      },
+                      "tool": false,
+                      "turn_id": false,
+                      "input": false
+                    }
+                  },
+                  "else": {
+                    "required": [
+                      "tool"
+                    ],
+                    "properties": {
+                      "turn_id": false,
+                      "input": false
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "decision": {
+          "const": true
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "operation",
+        "config_revision",
+        "budget_ms",
+        "input_digest",
+        "config",
+        "binding",
+        "method",
+        "event_name",
+        "obligation"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
           }
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "input_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "minLength": 71,
+          "maxLength": 71
+        },
+        "config": {
+          "type": "object"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "method": {
+          "const": "execute_obligation"
+        },
+        "event_name": {
+          "enum": [
+            "session.start",
+            "input.submit",
+            "tool.before",
+            "tool.after",
+            "turn.stop",
+            "session.end",
+            "security.violation"
+          ]
+        },
+        "obligation": {
+          "$ref": "#/$defs/obligation"
         }
       }
     }
-  ]
+  ],
+  "$defs": {
+    "bindingIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-zA-Z0-9._-]"
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "instance_id",
+        "workspace_id",
+        "task_version",
+        "candidate_id",
+        "config_revision"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "task_version": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      }
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/bindingIdentifier"
+        },
+        "parameters": {
+          "type": "object",
+          "maxProperties": 32
+        }
+      }
+    }
+  }
 }

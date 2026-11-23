@@ -5,34 +5,23 @@
 This reference is for integration and maintenance. For installation and daily use,
 see the [user guide](../../../../user-guide/en/aw/security.md).
 
-`aw-provider-sec-core` lets an AW policy call the existing `agent-sec-cli scan-code`
-command. You choose which tool inputs contain code and whether reported risks
+`aw-provider-sec-core` lets an AW policy invoke sec-core via the public `agent-sec-cli`
+commands (`--transport cli`, default) or directly over the local V2 daemon Unix
+socket (`--transport daemon`). You choose which tool inputs contain code and whether reported risks
 produce an observation or a block candidate. sec-core supplies the scanner and
 rules; AW supplies configuration, protocol validation and bounded invocation.
 
-This is a Linux source delivery for local Provider integration. The integrated Preview is described separately below. The
-Provider does not start either daemon, install Agent Hooks or persist AW audits.
-Tool-after support records an observation; it does not scan or replace results.
-
-For a prebuilt AW service + Qoder + sec-core integration, use the
-[Preview package guide](../../../../user-guide/en/aw/installation.md). The standalone source bridge below
-is also available.
-
-For the general component integration path, start with the
-[AW walkthrough](../integration.md). sec-core's CLI
-and daemon remain an independently managed backend; the AW service owns AW
-audit storage. See [container persistence](../native-agents.md#containers-and-persistent-data).
-The Preview generator maps Qoder `Bash` and OpenClaw `exec` inputs. Before using
-QwenPaw or Hermes, add and validate their actual tool names and input pointers
-in `config.tools`; an unmapped tool is observed without scanning.
+See the [user guide](../../../../user-guide/en/aw/security.md) for installation and backend setup. This page covers input mapping, failures and standalone bridge validation.
 
 ## Prerequisites and build
 
 Install sec-core using the [sec-core guide](../../../../user-guide/en/agent-sec-core/index.md).
-This bridge requires the Rust V2 CLI with `--socket`, `--timeout-ms` and
-`scan-code --code --language --mode`, plus an accessible, running sec-core daemon.
-Check the deployed CLI's help; the legacy Python CLI is not certified by this
-bridge. AW adds no command or dependency to sec-core.
+Both transports require an accessible, running Rust V2 sec-core daemon (`--socket`).
+`--transport daemon` connects directly over its Unix socket without `agent-sec-cli`,
+except for `check_skill`. `--transport cli` (default) and `check_skill` also require
+the Rust V2 CLI (`--cli`) supporting `--socket`, `--timeout-ms` and
+`scan-code --code --language --mode`. Check the deployed CLI's help; the legacy
+Python CLI is not certified by this bridge. AW adds no command or dependency to sec-core.
 
 Build the AW Provider and local Host example from source:
 
@@ -45,38 +34,63 @@ cargo build --locked -p aw-host --example host
 The Provider binary is `../../providers/agent-sec-core/target/debug/aw-provider-sec-core`. Its invocation is:
 
 ```text
-aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
+aw-provider-sec-core [--transport cli|daemon] [--cli ABSOLUTE_PATH] --socket ABSOLUTE_PATH [--wait-for-backend]
 ```
 
-`--cli` selects the public `agent-sec-cli` executable; `--socket` selects its
-existing daemon. Both paths are required and absolute. `--help` prints usage.
+`--transport` selects `cli` (default) or `daemon`. `--socket` selects the existing
+daemon Unix socket and is always required and absolute. `--cli` selects the public
+`agent-sec-cli` executable as an absolute path; it is required for `--transport cli`
+and optional for `--transport daemon` unless the policy calls `check_skill`.
+`--help` prints usage.
 The process reads one EOF-terminated AW Provider JSON request on stdin and writes
 one response on stdout. It is normally launched by the Host, not interactively.
 
-## Packaged backend and explicit health diagnostics
+## Overlap backend and Agent startup
 
-The Preview sec-core Provider package includes `agent-sec-cli`,
-`agent-sec-daemon`, and `agent-sec-daemon-health` from the same source build.
-Their hashes and executable modes are covered by the component receipt in both
-split and all-in-one installations. Official systemd/configuration templates are
-included under `share/aw/providers/sec-core/` as reference assets; installing the
-AW package does not register a service or modify `/etc`.
+Append `--wait-for-backend` to the Provider's `transport.argv` to let the
+service owner start sec-core in parallel with the Agent. Keep AW Service
+readiness, policy admission and native Hook installation before protected work.
+The bridge still leaves daemon startup and shutdown to the external owner.
 
-Reuse an existing root `agent-sec-core.service` and its socket. For a new system
-backend, use the [sec-core installation guide](../../../../user-guide/en/agent-sec-core/index.md)
-and the official system package's service lifecycle. Its current component
-manifest advertises Linux x86_64; a locally built AW ARM64 package does not imply
-an official sec-core ARM64 release. The source `make install-core-v2` target can
-consume the packaged binaries through `V2_BIN_BUILD_DIR`, but overwrites its
-system binary/unit destinations and must not be run over an existing managed
-installation. Do not point a root service at a user-writable AW prefix.
+```text
+aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH --wait-for-backend
+```
+
+Pass `--transport daemon` (default `cli`) to execute `scan_code`, `scan_prompt`, `scan_user_input`, `scan_tool_input`, `scan_tool_output`, and `check_final_tool_output` directly over the local sec-core V2 daemon socket (`SO_PEERCRED` UID 0 check, strict `DaemonRequest` / `TraceCarrierV1` `version: 1` framing, and zero retries). When `--transport daemon` is used without `--cli`, `describe` omits `check_skill` so Host preparation rejects `check_skill` policies at admission time; switch back to `--transport cli` to roll back.
+
+Discovery, configuration validation and `observe_tool` do not wait. A scan or
+Skill check waits only while the configured socket is absent, within the same
+invocation budget used by the actual check. Socket appearance does not prove
+health or a safe verdict: `--transport cli` still relies on the public CLI, while
+`--transport daemon` verifies `SO_PEERCRED` UID `0` directly before exchanging one
+strict V2 `DaemonRequest` frame. Neither mode retries failed scans.
+A missing socket at the deadline, an invalid socket path or a failed check remains
+a Provider error, handled by the configured `on_error` action. Without this flag,
+the existing immediate CLI invocation is unchanged.
+
+Paths that need no backend keep their local result: an unmapped tool configured
+as `observe`, plain Pi input with no requested Skill, and an empty Prompt scan
+do not wait. Input and effect validation also complete before any backend wait.
+
+For predictable first-request latency, warm the capabilities actually used by the
+policy in the background while the App initializes. Record App readiness,
+capability readiness and the first protected response separately. Waiting only
+on the first request shifts cold initialization into that request's latency.
+
+## External backend and explicit health diagnostics
+
+The Provider package contains the bridge, schema, examples and configuration
+resources, not `agent-sec-cli`, `agent-sec-daemon` or `agent-sec-daemon-health`.
+Install and maintain these through the [sec-core guide](../../../../user-guide/en/agent-sec-core/index.md)
+and the backend's own service lifecycle. Reuse its actual socket. Root services
+must not execute programs from user-writable installations.
 
 An installer or diagnostic consumer can explicitly query the installed helper:
 
 ```bash
-AW_SEC_PROVIDER="$AW_PREVIEW_PREFIX/libexec/aw/providers/sec-core"
+AW_SEC_PROVIDER="$AW_EXTENSION_PREFIX/libexec/aw/providers/sec-core"
 "$AW_SEC_PROVIDER/aw-provider-sec-core" --health \
-  --helper "$AW_SEC_PROVIDER/agent-sec-daemon-health" \
+  --helper "$(command -v agent-sec-daemon-health)" \
   --socket /run/agent-sec-core/daemon.sock
 ```
 
@@ -101,39 +115,105 @@ target admitted a Provider or that a scanner found no risk. This does not change
 Diagnostic success/failure does not replace each invocation's configured
 `on_error` behavior; backend loss still blocks when `on_error: block` applies.
 
-AW uninstall removes its receipt-owned helper/templates but retains the
+AW uninstall removes only its managed bridge/resources and retains the
 independently managed system service, `/etc` configuration and backend data.
 Upgrade or remove that backend through its owning system package. AW currently
 has no automatic service installation, upgrade or removal bridge.
 
+## Warm input scanners
+
+For a target using fast Prompt checks and input PII checks, prepare the same
+daemon's scanners before accepting traffic. These commands were verified with
+sec-core 1.2.0; check the deployed CLI's help when using another release:
+
+```bash
+SEC_CORE_SOCKET=/run/agent-sec-core/daemon.sock
+agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-prompt warmup --mode fast
+printf 'AW startup readiness\n' | \
+  agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-pii --stdin --source user_input --format json
+```
+
+Prompt warmup must succeed and the harmless PII probe must return
+`verdict: pass`. A daemon health reply alone does not establish scanner readiness.
+Keep the backend's actual identity, Skill directories and startup configuration;
+warmup must reach the socket used by `transport.argv`. Each real input is still
+scanned. See [traffic readiness](../deployment/lifecycle.md#prepare-before-accepting-traffic)
+for overlapping scanner preparation with a framework's admitted request object.
+
 ## Configure a Provider
 
 Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)
-to `aw.sec-core.yaml` and replace its executable and socket paths. The sample
-starts in `mode: observe` with `on_error: report` so local evaluation does not
-request blocking. For blocking, set `mode: block` and admit `[observe, block]`
-in the before step. `on_error: block` separately requests blocking on execution
-failure; a failure is never reported as a scanner risk verdict.
+to `aw.sec-core.yaml` and replace its executable and socket paths. It selects
+Qoder CLI `Bash` with `native:qoder:Bash`, maps `Bash` to `/command`, and uses
+`mode: block`, `[observe, block]` and `on_error: block`. Both before scanning and
+after observation use this explicit range. Other native tools, MCP calls and
+new tool names retain native behavior and produce `skipped` for these steps.
+A skip carries no security approval; native permission denial remains effective.
+
+Step and event selectors intersect. For a selected call, missing mappings,
+invalid extraction input, timeouts, Provider crashes and backend failures block
+execution through `on_error: block`. Missing event identity is an input failure
+before selection. Scanner risks retain their separate `code_risk` result.
+Use `mode: observe` with `on_error: report` only for an explicit observation policy.
+
+The shipped templates use these exact names; all mappings select `/command`:
+
+| Template | Native selector | Provider mapping key |
+| --- | --- | --- |
+| Distribution / Qoder CLI | `native:qoder:Bash` | `Bash` |
+| Distribution / OpenClaw | `native:openclaw:exec` | `exec` |
+| SDK security / Qoder SDK | `native:qoder-sdk:Bash` | `bash` |
+| SDK security / QwenPaw | `native:qwenpaw:execute_shell_command` | `execute_shell_command` |
+
+The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+adds application Hooks with their own selectors and failure actions. Native
+argument changes must pass the Adapter's existing reauthorization path or be
+rejected before dispatch. A previous scan does not authorize changed arguments.
+Structured MCP authorization uses its own policy contract; a shell/Python input
+mapping does not grant remote MCP permission.
+
+Host selectors accept `*`, standard names `bash`, `file_read`, `file_write`, or
+`native:<adapter>:<native_name>`. A native selector matches the event's Adapter
+and retained `event.tool.native_name`. Provider `config.tools` independently
+uses normalized `event.tool.name` keys, so configure both against the Adapter's
+event fields. For example, a native Qoder `Bash` call can be selected with
+`native:qoder:Bash`; its Provider mapping uses the normalized tool name.
 
 The Provider's private `config` accepts:
 
 | Field | Meaning |
 | --- | --- |
 | `version` | Required, exactly `1` |
-| `mode` | Required, `observe` or `block`; only affects `scan_code` |
-| `tools` | Required object with 1–128 exact normalized tool names |
+| `mode` | Required, `observe` or `block`; affects `scan_code` and `check_skill` |
+| `unmapped_tool` | Optional, `error` (default) or `observe`; controls `scan_code` for a selected tool with no mapping |
+| `prompt` | Optional `{mode: observe\|block, scan_mode: fast}` for `scan_prompt` |
+| `pii` | Optional `{input_mode: observe\|block, output_mode: observe\|replace_result}`; input mode covers user/tool input; output mode covers tool results |
+| `skill` | Optional boolean, default `false`; enables `check_skill` |
+| `tools` | Up to 128 exact normalized code tool names; may be omitted when `skill`, `prompt` or `pii` is configured |
 | `tools.<name>.language` | `bash` or `python` |
 | `tools.<name>.input_pointer` | JSON Pointer into `event.tool.input`; the selected value must be a string |
 
 Unknown fields, unsupported languages and invalid pointers are rejected.
 An empty pointer selects a root string. `/command` selects a field;
-`/items/0` selects an array element. Names are case-sensitive. Unmapped tools
-produce `observe/tool_unmapped`, which means they were not scanned. A mapped tool
-with missing or non-string code fails with `invalid_tool_input`.
+`/items/0` selects an array element. Names are case-sensitive and use
+`event.tool.name`; `native_name` does not select a mapping. A selected unmapped
+tool returns the Provider error `tool_unmapped` by default, without candidate
+effects. This strict default also applies to existing configurations that omit
+`unmapped_tool`. To retain observation without scanning for such tools, set
+`unmapped_tool: observe` explicitly; the result is `observe/tool_unmapped`.
+
+`mode: observe` records mapped scan results without blocking on risk. It does
+not suppress missing-mapping, extraction or backend errors. A mapped tool with
+missing or non-string code fails with `invalid_tool_input`, including when
+`unmapped_tool: observe` is set. Keep observation-only error handling explicit
+with `on_error: report`.
 
 | Operation | Event | Result |
 | --- | --- | --- |
 | `scan_code` | `tool.before` | `ok: true, verdict: pass` → `observe/code_pass`; `warn` or `deny` → `observe/code_risk` or `block/code_risk`, according to `mode` |
+| `check_skill` | `tool.before`, `input.submit` | Valid signed content → `observe/skill_pass`; other completed trust states observe or block according to `mode` |
 | `observe_tool` | `tool.after` | `observe/tool_observed`; no scanner call |
 
 `describe`, private-config validation and after observation do not contact
@@ -154,14 +234,259 @@ reason codes and the bound input digest, not source code, findings or CLI stderr
 The CLI receives code through argv, subject to OS argument visibility and size
 limits. No stdin/file fallback is provided by this CLI contract.
 
+## User submission checks
+
+Claude SDK 0.2.88 / CLI 2.1.161 foreground and resident factories use the same operations. The [Claude example](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml) contains the text-only configuration; the [Agent guide](../agents/claude-sdk.md#check-user-text-before-submission) specifies supported input and recovery.
+
+The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+adds `input.submit` to ordinary resident Qoder SDK 1.0.56 / Worker 1.1.78 and
+QwenPaw 2.2.2.post1 / AgentScope 2.0.10 launches. Keep the native application's
+configuration, permissions, model and startup. Add this Provider setting and
+submit step to that configuration:
+
+```yaml
+# spec.providers.security.config
+prompt: {mode: block, scan_mode: fast}
+pii: {input_mode: block, output_mode: observe}
+# spec.events
+input.submit:
+  enabled: true
+  required: true
+  steps:
+    - id: scan-prompt
+      provider: security
+      operation: scan_prompt
+      effects: [observe, block]
+      on_error: block
+    - id: scan-user-pii
+      provider: security
+      operation: scan_user_input
+      effects: [observe, block]
+      on_error: block
+```
+
+`scan_prompt` reads `event.input.text` and performs a fast prompt scan using the
+selected transport. With `--transport cli` (default), it calls the public V2 CLI
+`scan-prompt --mode fast --source user_input --format json`, with text on stdin.
+With `--transport daemon`, it sends an `action.prompt_scan` RPC (`mode: "fast"`,
+`source: "user_input"`) directly over the daemon Unix socket. Both modes use the
+configured daemon socket and remaining timeout. Fast mode runs L1 rules;
+`standard`, `strict`, ML model options and `multi_turn` are rejected by
+private-config validation. Whitespace-only text needs no scanner call. All other
+responses must identify a completed rule-engine scan of the entire stripped input:
+truncation, missing layers, degradation, empty/malformed output or CLI failure
+returns a Provider error. Prompt Scanner's `ok=false` plus `warn`/`deny` is a
+completed risk decision. `prompt.mode` selects observation or blocking on risk;
+`on_error` separately controls failures. Responses expose `prompt_pass` or
+`prompt_risk` without findings or raw text.
+
+`scan_user_input` reads the same complete `event.input.text` through the shared
+PII scanner transport. With `--transport cli`, it calls
+`scan-pii --stdin --format json --source user_input`; with `--transport daemon`,
+it sends an `action.pii_scan` RPC directly. It checks the scan source, byte count
+and completion state, retaining the turn's trace context and remaining budget.
+`pii.input_mode` controls risk blocking; errors follow `on_error`. Responses
+contain only `pii_pass` or `pii_risk`. The `output_mode` field belongs to the
+shared PII configuration; this operation never replaces user text.
+
+Qoder awaits the public `UserPromptSubmit` snapshot and returns a native block
+decision on denial. Existing native Hook decisions remain effective. QwenPaw
+awaits the checks before native reply admission and memory insertion. Fresh user
+text is scanned once; confirmation, interruption and external execution-result
+events resume the native workflow without resubmitting old text. A rejected
+QwenPaw submission leaves the next fresh input usable after scope cleanup.
+Both Adapters issue a fresh turn UUID, retain session identity and share one event
+budget across all steps. Submission events contain no tool/call identity.
+
+Only text submission is covered. QwenPaw non-text user blocks are mapping errors
+subject to `on_error`. Restricted reloadable entrypoints reject this event at
+admission; use ordinary resident mode. Keep each PII/Prompt check under one chosen
+native or AW policy to avoid duplicate scans; AW does not remove user Hooks.
+
+## Tool PII policy
+
+The [two-framework example](../../../../../providers/agent-sec-core/examples/aw.tool-pii.yaml)
+adds input PII, code scanning and output PII to one Provider. `scan_tool_input`
+scans the complete tool arguments with source `tool_input`; a risk
+returns `block/pii_risk` when `pii.input_mode: block`. `scan_tool_output` scans
+the actual complete result with source `tool_output`. Pass returns
+`observe/pii_pass`; observe modes return `observe/pii_risk` for risks.
+
+Structured arguments and results are scanned as JSON to retain field/value context,
+then each decoded string value and object key is scanned separately. This preserves
+newlines, tabs and custom-rule anchors. A plain string is scanned directly.
+All scans, including the retained-envelope check, share the invocation's remaining
+budget; an exhausted budget fails the check.
+
+With `pii.output_mode: replace_result`, a risky result requires an Adapter-authorized
+text projection. The Provider clears that single text value in a private copy
+and scans the retained envelope within the same budget. Only a clean retained
+envelope yields `replace_result` with the fixed message
+`Sensitive data detected by AW; content withheld.` It never adopts backend
+redacted text. A missing or ambiguous slot, or sensitive retained fields, returns
+`unsupported_pii_result`. Native error state and result metadata remain intact.
+Safe failed-tool results retain their original error semantics; a Qoder
+`PostToolUseFailure` containing PII is withheld because that callback cannot
+replace the native error text.
+
+Configure input `on_error: block` and output `on_error: withhold_result` for
+required checks. CLI/backend unavailability (including a non-root peer with
+`--transport daemon`), nonzero exits or daemon/protocol errors, empty or malformed
+responses, wrong source, truncated or incomplete scans, byte-count mismatch and
+invalid or failed custom rules produce errors, separately from risk. With
+`--transport cli`, text travels over stdin; with `--transport daemon`, it is sent
+over the root-owned daemon's Unix socket. Provider responses contain neither source
+text nor findings. The shared PII transport also supports `Source::UserInput` for
+submission consumers.
+
+Qoder SDK ordinary resident Queries return the native `updatedToolOutput` directive;
+restricted `--reloadable` mode rejects replacement at admission. QwenPaw ordinary
+App replies buffer selected replacement/withholding tool streams, including the
+Coordinator's public stream, until final adoption. Select supported native tools
+explicitly for production. Multiple text blocks, media, managed MCP and background
+result delivery need their own native acceptance; a Post callback alone does not
+establish replacement support for those modes.
+
+Choose AW or native PII for each tool phase. Explicitly remove the native PII
+PreToolUse/PostToolUse registrations when AW owns those phases, retaining any
+UserPromptSubmit registration needed for user text. AW preserves native settings
+and does not remove Hooks. Keeping both tool registrations causes duplicate scans.
+
+## Validate Skills before loading
+
+Reuse the Provider from the [SDK policy example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+for Qoder SDK, QwenPaw and AgentScope. Set `config.skill: true` and
+add a `tool.before` step with `operation: check_skill`, `effects: [observe, block]`,
+`on_error: block`, and selectors `native:qoder-sdk:Skill`,
+`native:qwenpaw:Skill` and `native:agentscope:Skill`. The shared `mode: block` allows only `pass`.
+`tools` continues to map code inputs; Skill checks do not need an input pointer.
+A Skill-only Provider may omit `tools` when `skill: true`.
+
+The Adapter supplies `event.native.aw_skill` with the requested `name`, canonical
+`directory` and `source`. Resolution failures supply an `error_code` instead.
+The Provider never derives paths from framework names: it calls
+`agent-sec-cli skill-ledger check DIRECTORY` with the remaining budget.
+The daemon administrator must authorize the actual canonical directories and
+make their files accessible. AW neither expands that authorization nor signs Skills.
+Use the [Skill Ledger guide](../../../../user-guide/en/agent-sec-core/skill-ledger.md)
+to review, scan and sign content separately.
+
+Pi Coding Agent uses the same operation on `input.submit`. Its Adapter supplies
+`native.aw_skill_request` and the resolved `native.aw_skill`; matching names are
+required. Pi also supplies `aw_skill.digest`, the `sha256:<hex>` of the captured raw
+`SKILL.md` bytes. The existing V2 `check` response supplies an authenticated
+`manifestHash`. After `pass`, the Provider reads the local `.skill-meta/latest.json`
+regular file (up to 8 MiB), removes `manifestHash` and `signature`, recursively sorts
+object keys and hashes compact JSON with SHA-256. The computed hash must equal the
+CLI result; the manifest must bind the selected canonical directory, V2 format and
+`pass` status. Its `fileHashes["SKILL.md"]` must then match Pi's captured digest.
+The Provider identity needs read access to that artifact. Missing, unreadable,
+changed or forged artifacts and snapshot mismatches produce `skill_drifted`, which
+blocks under `mode: block` even with `on_error: report`. A missing or invalid CLI
+manifest hash is a Provider error handled by `on_error`; use `block` for required
+trust. This consumes existing Ledger fields and artifacts. Explicit `null` values for both fields mean ordinary text and produce
+`observe/skill_not_requested` without a backend call. Missing metadata is an error.
+The description declares `event_adapters: {"input.submit": ["pi"]}` for this operation.
+Other Adapters are rejected during admission regardless of `on_error`. Use a separate
+Pi configuration; other Agents retain their applicable tool-time checks. See [Pi Skill submissions](../agents/pi.md#validate-skill-submissions).
+
+| Ledger status | Reason code | `mode: block` |
+| --- | --- | --- |
+| `pass` | `skill_pass` | Continue native loading |
+| `none` | `skill_unsigned` | Block |
+| `drifted` | `skill_drifted` | Block |
+| `warn`, `deny` | `skill_warn`, `skill_deny` | Block |
+| `tampered` | `skill_tampered` | Block |
+| `error`, malformed/empty output, transport failure or timeout | Provider error | Apply `on_error` |
+
+Ledger exit 1 can contain a completed negative trust state; it is decoded as
+such. A nonzero exit with `pass`, an unknown status, a signal, or other exit code
+is an error. Risk decisions and failed checks remain separate in AW auditing.
+`mode: observe` reports trust states without blocking; `ask` is unsupported.
+Choose either AW or the native Skill Ledger Hook for this check to avoid
+performing it twice. Existing native permission refusals retain authority.
+
+Skill checking uses the supported ordinary `aw run` factories; Qoder SDK and
+QwenPaw `--reloadable` admission rejects it. Idle updates retain each Adapter's
+existing support and task snapshot boundary. Resolution and pinning run only when a Skill check is
+selected; other policies keep native Skill behavior.
+
+Qoder SDK 1.0.56 / Worker 1.1.78 checks a unique local asset among the catalogs
+enabled by the Query's `settingSources`, including explicitly enabled
+`.agents/skills`. Frontmatter `name` is a display name; nested directories use
+the leaf name. Same-name assets in multiple directories, including names differing
+only in case, produce `skill_resolution_error`. This also applies when the native
+parser would skip one asset: the control API exposes no selected path to prove
+which fallback would execute. Use unique names or limit the enabled sources.
+AW refreshes the native cache before checking and rejects source edits across
+refresh and Provider execution. The refresh response is a UI list and does not
+gate model-only Skills such as `user-invocable: false`; native invocation and
+permission rules continue to apply. Local Workflow scripts in any enabled
+user/project catalog produce a resolution error, including scripts whose filename
+differs from their metadata name and directory entrypoints `workflow.js`/`index.js`.
+Their JavaScript metadata can introduce a competing Skill without a provable
+selected signing root; remove these assets or exclude their source for required
+Skill checks. This conservative boundary also applies when native Workflows are
+disabled, because their effective gate is not exposed by the control API.
+Native `Read` can populate a dynamic Skill cache that survives `reload_skills`.
+The control API cannot identify its selected path. Once a Query has attempted
+`Read`, Skill checking with project sources enabled returns `skill_resolution_error`,
+even if the read failed/was denied or a later idle update enables checking.
+Use a fresh Query or select `settingSources: ["user"]` from Query creation for
+required Skill checks. Source reads and policy updates never clear this fence.
+Legacy command resources, dynamic ancestor
+conflicts, additional directories and sources without a local resolved directory
+produce resolution errors. Plugin-qualified names and built-in Skill sources
+are unsupported. The checked public Hook argument snapshot retains the Adapter's
+existing contract for subsequent native argument changes.
+
+Standalone AgentScope 2.0.6 and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 use
+the same actual SkillViewer resolver and activated
+Toolkit groups. Native duplicate-name precedence selects the object. AW verifies
+that its in-memory markdown matches `SKILL.md`, checks its canonical directory,
+and pins that object for this invocation. Source edits during checking block
+loading. Unavailable or memory-only sources fail resolution. Concurrent calls
+retain separate snapshots. AW decodes supplied files with AgentScope's UTF-8-SIG
+semantics, including BOM. The stock QwenPaw 2.2.2.post1 App runtime cache itself
+skips BOM assets before AW runs; that native loading path remains unsupported.
+Standalone AgentScope 2.0.6 also skips BOM files in its native loader. Its
+`skill-objects` suite checks the actual Toolkit; `skill-provider` exercises
+the real AW and sec-core Provider with a controlled Ledger CLI and model HTTP
+endpoint, including trust states, backend failure, timeout and next-model
+instruction withholding. Real signing/daemon authorization stays covered by
+the Qoder SDK/QwenPaw Ledger suites. Read-file loading, automatic context
+injection and Skill-internal commands require their own policies.
+
+Hermes local chat uses `native:hermes:skill_view` with the same Provider and
+`check_skill` step. The Adapter obtains the actual native registry handler and
+`_locate_skill` selection, checks its canonical directory, and pins raw `SKILL.md`
+text before native preprocessing. Directory aliases and native project precedence
+are preserved. Source edits, a changed handler or a competing selection cannot
+replace the checked content. Concurrent invocations retain independent snapshots.
+Native disabled, platform and quarantine gates retain authority.
+
+The supported source is a local directory's main manifest. Plugin-qualified
+Skills, legacy flat files and `file_path` references produce resolution errors;
+use `on_error: block` to deny them. Slash/preload injection and direct reads need
+separate boundaries. Skill scripts/templates retain native execution after the
+trust decision and need their own execution policies. The `skill-provider` suite
+uses the real AW, Provider and Hermes CLI with a controlled Ledger CLI and local
+model endpoint; signing and daemon authorization remain in the existing Ledger suites.
+
+## Trace correlation
+
+The bridge passes native IDs to sec-core through the JSON `--trace-context` argument, with `agent_name` set to the Adapter name. It reads `trace_id`, `session_id`, `run_id`, `call_id` and `tool_call_id` from `event.native`, accepting snake_case and camelCase aliases. OpenClaw uses `native.event` then `native.context`; Hermes uses `native` then `native.extra`.
+Qoder, Qoder SDK and Claude SDK prefer native `tool_use_id` for the tool call; Pi, QwenPaw and AgentScope use `native.tool_call.id`. Missing native IDs remain absent; AW-generated IDs are kept separate.
+Values must be strings. The bridge trims surrounding whitespace, omits empty values and caps each value at 256 Unicode characters including the `...[truncated]` suffix. Field precedence is defined in [trace_context.rs](../../../../../providers/agent-sec-core/src/trace_context.rs).
+
 ## Try candidate effects locally
 
 From `src/aw`, after editing `aw.sec-core.yaml` and setting `mode: block`:
 
 ```bash
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"echo safe"}'
-./target/debug/examples/host aw.sec-core.yaml tool.before shell '{"command":"rm -rf /"}'
-./target/debug/examples/host aw.sec-core.yaml tool.after shell '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"echo safe"}'
+./target/debug/examples/host aw.sec-core.yaml tool.before Bash '{"command":"rm -rf /"}'
+./target/debug/examples/host aw.sec-core.yaml tool.after Bash '{"command":"echo safe"}'
 ```
 
 These commands submit synthetic tool events; they do not execute the code being

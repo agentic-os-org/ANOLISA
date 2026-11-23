@@ -6,10 +6,17 @@ use std::collections::BTreeMap;
 
 #[test]
 fn delayed_query_cannot_reclaim_a_released_instance_session() {
-    let mut contexts = Contexts::new(include_bytes!(
-        "../../../../aw-config/examples/aw.minimal.yaml"
-    ))
-    .unwrap();
+    let configuration = aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap();
+    let mut contexts = Contexts::new(&configuration).unwrap();
+    assert!(std::ptr::eq(
+        contexts.registry,
+        crate::public_projection::registry().unwrap()
+    ));
     contexts.sources.insert(
         "qoder".into(),
         Settings {
@@ -88,6 +95,7 @@ fn poisoned_audit_prevents_context_publication() {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),
@@ -105,6 +113,7 @@ fn poisoned_audit_prevents_context_publication() {
         .unwrap();
     let instance = binding["instance_id"].as_str().unwrap();
     let handle = runtime.handle(Operation::OpenEvent {
+        result_status: None,
         instance_id:instance.into(), event:json!({"name":"tool.after", "agent":{"adapter":"qoder","binding_id":"qoder","instance_id":instance},
             "tool":{"input":{},"result":"private candidate"},"native":{}}),
     }, deadline, &cancelled).unwrap();
@@ -122,6 +131,14 @@ fn poisoned_audit_prevents_context_publication() {
     assert!(!runtime.audit.healthy());
     let stored = std::fs::read_dir(directory.path().join("journal"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
         .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .collect::<String>();
     assert!(!stored.contains("context_frozen"));

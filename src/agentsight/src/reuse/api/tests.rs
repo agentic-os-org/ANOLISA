@@ -9,6 +9,129 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 use super::*;
 use crate::reuse::label::LabelAction;
 
+#[actix_web::test]
+async fn a_delayed_model_response_cannot_replace_a_newer_trajectory_verdict() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    for change_source in [false, true] {
+        let (trajectories, labels) = stores(if change_source {
+            "judge-revision"
+        } else {
+            "judge-unchanged"
+        });
+        let trajectories = Arc::new(trajectories);
+        let labels = Arc::new(labels);
+        insert(&trajectories, "s1", &failing_atif());
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &TriageConfig::default(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let source = Arc::clone(&trajectories);
+        let destination = Arc::clone(&labels);
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "client did not send its request");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + length {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            let request: serde_json::Value = serde_json::from_slice(&bytes[header_end..]).unwrap();
+            assert!(request["messages"].to_string().contains("looking"));
+            // This happens after the old document was sent and before its answer.
+            if change_source {
+                insert(&source, "s1", &substantive_atif());
+                run_triage(
+                    Some(&source),
+                    &destination,
+                    &TriageQuery {
+                        session_id: Some("s1".into()),
+                        limit: None,
+                    },
+                    &TriageConfig::default(),
+                )
+                .unwrap();
+            }
+            let verdict = serde_json::json!({"label":"bad","reason":"fixture old response","cited_steps":[2]});
+            let body = serde_json::json!({"id":"fixture","object":"chat.completion","created":0,"model":"fixture",
+                "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":verdict.to_string()}}],
+                "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let client = LlmClient::with_config(url, "fixture-placeholder", "fixture");
+        let report = actix_web::rt::time::timeout(
+            Duration::from_secs(15),
+            run_judgements(&trajectories, &labels, &client, &JudgeQuery::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.join().unwrap();
+        let row = labels.get_label("s1").unwrap().unwrap();
+        if change_source {
+            assert_eq!(report.judged, 0);
+            assert_eq!(report.skipped, 1);
+            assert_eq!(report.judged_bad, 0);
+            assert_eq!(row.auto_label, TrajectoryLabel::Good);
+            assert!(row.llm_label.is_none());
+            assert!(
+                labels
+                    .events("s1")
+                    .unwrap()
+                    .iter()
+                    .all(|e| e.action != "llm_judge")
+            );
+        } else {
+            assert_eq!(report.judged, 1);
+            assert_eq!(row.llm_label, Some(TrajectoryLabel::Bad));
+        }
+    }
+}
+
 fn tmp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("reuse-api-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -91,6 +214,139 @@ fn insert_raw(store: &TrajectoryStore, session_id: &str, atif_json: &str) {
             file_mtime_ns: 1,
         })
         .unwrap();
+}
+
+#[test]
+fn unchanged_decision_owned_rows_regain_the_verified_fast_path() {
+    for model_decision in [false, true] {
+        let (trajectories, labels) = stores(if model_decision {
+            "checked-model-decision"
+        } else {
+            "checked-human-decision"
+        });
+        insert(&trajectories, "checked", &substantive_atif());
+        let config = TriageConfig::default();
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        if model_decision {
+            labels
+                .record_judgement(
+                    "checked",
+                    &crate::reuse::judge::JudgeVerdict {
+                        label: TrajectoryLabel::Good,
+                        reason: "fixture".into(),
+                        cited_steps: vec![2],
+                        downgraded: false,
+                    },
+                )
+                .unwrap();
+        } else {
+            labels
+                .apply_decision("checked", LabelAction::Confirm, "fixture", None)
+                .unwrap();
+        }
+        let collected =
+            trajectories.list_summaries(None, None, None, 1).unwrap()[0].collected_at_ns;
+        let before = labels.get_label("checked").unwrap().unwrap();
+        assert!(!is_fresh(&before, &config.version(), collected));
+        let report = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(report.labelled, 0);
+        let after = labels.get_label("checked").unwrap().unwrap();
+        assert_eq!(after.updated_at_ns, before.updated_at_ns);
+        assert_eq!(after.triage_checked_at_ns, Some(collected));
+        assert!(is_fresh(&after, &config.version(), collected));
+        assert!(!is_fresh(&after, &config.version(), collected + 1));
+        assert!(!is_fresh(&after, "different-rules", collected));
+    }
+}
+
+#[test]
+fn decisions_after_recollection_do_not_mark_old_triage_fresh() {
+    for model_decision in [false, true] {
+        let (trajectories, labels) = stores(if model_decision {
+            "model-freshness"
+        } else {
+            "human-freshness"
+        });
+        let config = TriageConfig::default();
+        insert(&trajectories, "s1", &failing_atif());
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        insert(&trajectories, "s1", &substantive_atif());
+        if model_decision {
+            labels
+                .record_judgement(
+                    "s1",
+                    &crate::reuse::judge::JudgeVerdict {
+                        label: TrajectoryLabel::Bad,
+                        reason: "old assessment".into(),
+                        cited_steps: vec![2],
+                        downgraded: false,
+                    },
+                )
+                .unwrap();
+        } else {
+            labels
+                .apply_decision(
+                    "s1",
+                    LabelAction::Override(TrajectoryLabel::Bad),
+                    "fixture",
+                    None,
+                )
+                .unwrap();
+        }
+        let report = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            report.labelled, 1,
+            "later decisions must not hide changed content"
+        );
+        let stored = labels.get_label("s1").unwrap().unwrap();
+        assert_eq!(stored.auto_label, TrajectoryLabel::Good);
+        assert_eq!(
+            stored.source_content_hash,
+            content_hash(&substantive_atif())
+        );
+        assert!(
+            stored.llm_label.is_none(),
+            "old model judgement is invalidated"
+        );
+        assert_eq!(
+            stored.human_label,
+            (!model_decision).then_some(TrajectoryLabel::Bad)
+        );
+        let repeat = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(repeat.labelled, 0);
+        assert_eq!(repeat.unchanged, 1);
+    }
 }
 
 #[test]
@@ -187,6 +443,55 @@ fn repeated_runs_reach_trajectories_beyond_the_first_page() {
         !second.truncated,
         "with every row labelled there is nothing left to continue"
     );
+}
+
+#[test]
+fn a_re_collection_with_identical_bytes_does_not_hold_the_window() {
+    // The collector bumps `collected_at_ns` on every upsert, even when the
+    // bytes are identical. The unchanged fast path used to leave the label's
+    // update time behind, so every later run re-examined that row, filled the
+    // `limit` window with it and starved older trajectories.
+    let (trajectories, labels) = stores("recollected");
+    insert(&trajectories, "older", &substantive_atif());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "newest", &substantive_atif());
+    let query = TriageQuery {
+        limit: Some(1),
+        ..TriageQuery::default()
+    };
+    let config = TriageConfig::default();
+
+    let first = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(first.labelled, 1, "the newest row fills the window");
+    assert!(first.truncated);
+
+    // Re-collect the newest row with the same bytes: the collector timestamp
+    // moves, the content hash does not.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "newest", &substantive_atif());
+
+    let second = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(second.unchanged, 1);
+    assert_eq!(
+        second.labelled, 0,
+        "the re-collected row still filled the window"
+    );
+    assert!(second.truncated);
+    assert!(
+        labels.get_label("older").unwrap().is_none(),
+        "precondition: the older row is still unlabelled"
+    );
+
+    // The second run verified the identical bytes and recorded that version,
+    // so this run skips the row during the scan and reaches the older work.
+    let third = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(third.unchanged, 1);
+    assert_eq!(
+        third.labelled, 1,
+        "the verified row must not occupy the window"
+    );
+    assert!(!third.truncated);
+    assert!(labels.get_label("older").unwrap().is_some());
 }
 
 #[test]
@@ -670,4 +975,22 @@ fn overriding_feeds_the_rule_misfire_statistics() {
     let stats = label_stats(&labels).unwrap();
     assert!(!stats.is_empty());
     assert!(stats.iter().all(|s| s.overridden == 1 && s.confirmed == 0));
+}
+
+#[test]
+fn a_label_removed_during_the_unchanged_path_is_not_a_batch_failure() {
+    // Retention deletes the oldest unconfirmed rows, which is exactly the
+    // population on the unchanged fast path, so a row can vanish after the
+    // window listed it. That skips the row; a real store failure still fails
+    // the batch.
+    assert!(
+        tolerate_removed_label(Err(crate::reuse::ReuseStoreError::UnknownSession(
+            "s1".to_string()
+        )))
+        .is_ok()
+    );
+    assert!(
+        tolerate_removed_label(Err(crate::reuse::ReuseStoreError::Poisoned)).is_err(),
+        "a real store error must still fail the batch"
+    );
 }

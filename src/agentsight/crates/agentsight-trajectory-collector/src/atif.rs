@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use agentsight_atif::{
-    same_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
-    Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
+    resolve_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
+    Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION,
 };
 
 /// Event types to skip entirely.
@@ -36,6 +36,7 @@ pub fn convert_qoder_events(
     };
 
     let mut steps: Vec<Step> = Vec::new();
+    let mut unmatched_tool_results = Vec::new();
     let mut step_id: usize = 0;
     let mut total_prompt_tokens: u64 = 0;
     let mut total_completion_tokens: u64 = 0;
@@ -66,14 +67,16 @@ pub fn convert_qoder_events(
             let mixed_event = !tool_results.is_empty() && has_text_block(&content);
             let result_ts = e.get("timestamp").and_then(|v| v.as_str());
 
-            // A user event that only carries tool_results is not a user turn:
-            // the results answer an earlier agent step's tool calls and must
-            // merge into that step's observation. Attaching them to "the
-            // previous step" used to put them on an intervening user step
-            // (overwriting each other when several events arrived), hiding
-            // them from analyzers that pair a step's results with its calls.
+            let unmatched =
+                merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+            // Partial transcripts can omit an issuing call. Preserve its
+            // result as metadata without inventing a user turn or call owner.
             if !tool_results.is_empty() && !mixed_event {
-                let _ = merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+                if let Some(observation) = observation_from_tool_results(&unmatched) {
+                    unmatched_tool_results.push(
+                        serde_json::json!({"timestamp": result_ts, "results": observation.results}),
+                    );
+                }
                 i += 1;
                 continue;
             }
@@ -81,16 +84,7 @@ pub fn convert_qoder_events(
             // Regular user message
             step_id += 1;
             let text = extract_text_from_content(&content);
-            // Mixed replies answer their issuing calls too. Keep unmatched
-            // replayed results on the user step, without replacing earlier
-            // observations or attaching known results to intervening text.
-            let observation = if mixed_event {
-                let unmatched =
-                    merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
-                observation_from_tool_results(&unmatched)
-            } else {
-                None
-            };
+            let observation = observation_from_tool_results(&unmatched);
             steps.push(Step {
                 step_id,
                 timestamp: e
@@ -228,9 +222,15 @@ pub fn convert_qoder_events(
                 }
 
                 // Process content blocks
-                let content_blocks = match msg.get("content").and_then(|v| v.as_array()) {
-                    Some(arr) => arr,
-                    None => continue,
+                let content_blocks = match msg.get("content") {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    Some(serde_json::Value::String(text)) => {
+                        if !text.is_empty() {
+                            message_parts.push(text.clone());
+                        }
+                        continue;
+                    }
+                    _ => continue,
                 };
                 for block in content_blocks {
                     let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -317,37 +317,9 @@ pub fn convert_qoder_events(
                 is_copied_context: None,
             });
 
-            // Collect tool_results that follow
-            let mut k = j;
-            while k < events.len() {
-                let ne = &events[k];
-                let nt = ne.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if SKIP_TYPES.contains(&nt) {
-                    k += 1;
-                    continue;
-                }
-                if nt == "user" {
-                    let nc = ne
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    let trs = extract_tool_results(&nc);
-                    // A mixed event (tool_result + genuine text) is a user
-                    // turn, exactly as the main loop classifies it above.
-                    // Consuming it here would drop the user's text entirely;
-                    // break instead so the main loop emits the user step.
-                    if !trs.is_empty() && !has_text_block(&nc) {
-                        let result_ts = ne.get("timestamp").and_then(|v| v.as_str());
-                        let _ = merge_tool_results_into_agent_steps(&mut steps, &trs, result_ts);
-                        k += 1;
-                        continue;
-                    }
-                }
-                break;
-            }
-
-            i = k;
+            // Route every following user event through the same ownership and
+            // replay handling, including result-only events after an assistant.
+            i = j;
             continue;
         }
 
@@ -379,7 +351,12 @@ pub fn convert_qoder_events(
         final_metrics,
         continued_trajectory_ref: None,
         subagent_trajectories: None,
-        extra: None,
+        extra: (!unmatched_tool_results.is_empty()).then(|| {
+            HashMap::from([(
+                "unmatched_tool_results".into(),
+                serde_json::json!(unmatched_tool_results),
+            )])
+        }),
     })
 }
 
@@ -473,13 +450,7 @@ fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option
     let results = tool_results
         .iter()
         .map(|tr| {
-            let extra = if tr.is_error {
-                let mut m = HashMap::new();
-                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                Some(m)
-            } else {
-                None
-            };
+            let extra = tr.is_error.map(agentsight_atif::is_error_extra);
             ObservationResult {
                 source_call_id: Some(tr.tool_use_id.clone()),
                 content: Some(serde_json::Value::String(tr.content.clone())),
@@ -496,7 +467,9 @@ fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option
 struct ExtractedToolResult {
     tool_use_id: String,
     content: String,
-    is_error: bool,
+    /// The outcome the block declared, if it declared one. `None` is *unknown*,
+    /// not success: it preserves the text fallback for flag-less traces.
+    is_error: Option<bool>,
 }
 
 /// Extract `tool_result` blocks from a user-message `content` array.
@@ -538,13 +511,23 @@ fn extract_tool_results(content: &serde_json::Value) -> Vec<ExtractedToolResult>
                     .collect();
                 text_parts.join("\n")
             }
+            // An explicit null is "the producer recorded no output", not the
+            // four-character string "null": stringifying it here hands every
+            // consumer of the observation a result the tool never produced.
+            serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
 
-        let is_error = obj
-            .get("is_error")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // The block itself carries `is_error` for the Claude/Qoder envelope, but
+        // an MCP result is often a JSON-encoded object under `content` — the
+        // shape the eBPF-side converter and the grader both look through. Read
+        // it the same way so the same bytes get the same outcome.
+        let is_error = agentsight_atif::declared_tool_failure(block).or_else(|| {
+            serde_json::from_str::<serde_json::Value>(content_str.trim())
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .and_then(|envelope| agentsight_atif::declared_tool_failure(&envelope))
+        });
 
         results.push(ExtractedToolResult {
             tool_use_id,
@@ -571,14 +554,9 @@ fn has_text_block(content: &serde_json::Value) -> bool {
 
 /// Merge tool results into the observation of the agent step owning the calls.
 ///
-/// The post-assistant scan consumes contiguous result-only user events, but a
-/// mixed `tool_result`+text event or a plain user turn stops it; those results
-/// then reach the main loop. They still answer the earlier agent step's calls,
-/// and downstream analyzers pair a step's observations with that same step's
-/// calls (`agentsight-opt::trace`), so results are merged into the owning
-/// agent step instead of replacing its observation or landing on a user step.
-/// Results the scan already collected are extended, never overwritten.
-/// Returns unowned results for a mixed user event to retain as replayed context.
+/// Downstream analyzers pair a step's observations with that same step's calls,
+/// so known results extend the owning agent step. Return unowned results for
+/// the caller to keep on a mixed user step or in `extra["unmatched_tool_results"]`.
 fn merge_tool_results_into_agent_steps(
     steps: &mut [Step],
     tool_results: &[ExtractedToolResult],
@@ -586,18 +564,28 @@ fn merge_tool_results_into_agent_steps(
 ) -> Vec<ExtractedToolResult> {
     let mut unmatched = Vec::new();
     for tr in tool_results {
-        // Most recent owner wins: each call is issued by exactly one step, and
-        // searching backwards also covers results arriving after an
-        // intervening user turn.
-        let Some(idx) = steps.iter().rposition(|step| {
-            step.source == StepSource::Agent
-                && step.tool_calls.as_ref().is_some_and(|tcs| {
-                    tcs.iter()
-                        .any(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
-                })
+        let owner = resolve_call_id(
+            &tr.tool_use_id,
+            steps
+                .iter()
+                .filter(|step| step.source == StepSource::Agent)
+                .flat_map(|step| step.tool_calls.iter().flatten())
+                .map(|call| call.tool_call_id.as_str()),
+        )
+        .map(String::from);
+        let Some(idx) = owner.as_ref().and_then(|id| {
+            steps.iter().rposition(|step| {
+                step.source == StepSource::Agent
+                    && step
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .any(|call| &call.tool_call_id == id)
+            })
         }) else {
-            // The mixed-event caller can retain replayed context on its user
-            // step; result-only carriers keep the existing discard policy.
+            // Mixed events retain replayed context on their user step;
+            // result-only carriers preserve unowned results in
+            // extra["unmatched_tool_results"].
             unmatched.push(tr.clone());
             continue;
         };
@@ -607,7 +595,7 @@ fn merge_tool_results_into_agent_steps(
             if let Some(tcs) = step.tool_calls.as_mut() {
                 for tc in tcs
                     .iter_mut()
-                    .filter(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
+                    .filter(|tc| Some(&tc.tool_call_id) == owner.as_ref())
                 {
                     let mut extra = tc.extra.take().unwrap_or_default();
                     extra.insert(
@@ -619,15 +607,9 @@ fn merge_tool_results_into_agent_steps(
             }
         }
 
-        let extra = if tr.is_error {
-            let mut m = HashMap::new();
-            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-            Some(m)
-        } else {
-            None
-        };
+        let extra = tr.is_error.map(agentsight_atif::is_error_extra);
         let result = ObservationResult {
-            source_call_id: Some(tr.tool_use_id.clone()),
+            source_call_id: owner,
             content: Some(serde_json::Value::String(tr.content.clone())),
             subagent_trajectory_ref: None,
             extra,
@@ -705,6 +687,37 @@ mod tests {
         let obs = traj.steps[0].observation.as_ref().unwrap();
         let extra = obs.results[0].extra.as_ref().unwrap();
         assert_eq!(extra["is_error"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn test_convert_records_a_declared_success() {
+        // `is_error: false` on a successful result whose output mentions a
+        // missing path. Only the `true` polarity used to be carried, so this
+        // result reached the grounding classifier flag-less and its free text
+        // was read as a failure.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t9\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"grep: /root: No such file or directory\",\"is_error\":false}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].is_error(), Some(false));
+    }
+
+    #[test]
+    fn test_convert_records_an_encoded_envelope_outcome() {
+        // An MCP result serialised as a JSON string under `content`: the
+        // declared `isError: false` lives inside the envelope, not on the
+        // block, and used to be dropped.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t9\",\"name\":\"mcp__fs\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"{\\\"content\\\":\\\"cat: /root/x: No such file or directory\\\",\\\"isError\\\":false}\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].is_error(), Some(false));
     }
 
     #[test]
@@ -949,5 +962,29 @@ mod tests {
         let traj = convert_qoder_events(&[], "qoder").unwrap();
         assert!(traj.steps.is_empty());
         assert!(traj.final_metrics.is_none());
+    }
+
+    #[test]
+    fn test_convert_null_tool_result_is_empty_not_the_text_null() {
+        // An explicit null content is "the tool produced no output", not the
+        // four-character string "null". Stringifying it fabricated a result
+        // the tool never produced, which the analyzers then scanned as real
+        // output.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t8\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t8\",\"content\":null}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0]
+            .observation
+            .as_ref()
+            .expect("the null result still attaches to its call");
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t8"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String(String::new())),
+            "a null tool result records no text"
+        );
     }
 }

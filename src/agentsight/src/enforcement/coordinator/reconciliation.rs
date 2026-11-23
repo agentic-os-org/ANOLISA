@@ -170,6 +170,7 @@ where
         .filter(|intent| !reconciled_credential_ids.contains(&intent.request.binding_id))
     {
         persist_reconciled_credential_apply(
+            client,
             store,
             &intent.request,
             client.apply_credential_policy(intent.request.clone(), required_subscription_id),
@@ -378,7 +379,7 @@ fn replace_failure_code(code: &str) -> Option<ReplaceFailureCode> {
         "binding_conflict" | "missing_binding" => Some(ReplaceFailureCode::BindingConflict),
         "stale_process" => Some(ReplaceFailureCode::StaleProcess),
         "compile_failure" => Some(ReplaceFailureCode::CompileFailure),
-        "kernel_failure" => Some(ReplaceFailureCode::KernelFailure),
+        "kernel_failure" | "unsupported_environment" => Some(ReplaceFailureCode::KernelFailure),
         _ => None,
     }
 }
@@ -399,11 +400,15 @@ fn persist_reconciled_apply(
 }
 
 fn persist_reconciled_credential_apply(
+    client: &(impl DesiredStateClient + ?Sized),
     store: &EnforcementStore,
     request: &ApplyCredentialPolicy,
     result: Result<Binding, EnforcementError>,
 ) -> Result<(), EnforcementCoordinatorError> {
     match result {
+        Ok(acknowledged) if acknowledged.state == BindingState::Degraded => {
+            reject_partial_credential(client, store, request, acknowledged)?;
+        }
         Ok(acknowledged) => {
             if !super::super::store::credential_binding_matches_request(request, &acknowledged) {
                 return Err(EnforcementStoreError::InvalidCredentialPolicySnapshot {
@@ -425,6 +430,44 @@ fn persist_reconciled_credential_apply(
     Ok(())
 }
 
+/// 拒绝部分覆盖的凭据确认；先留下可管理的清理记录，避免隐藏 Binding 或自动重放循环。
+pub(super) fn reject_partial_credential(
+    client: &(impl DesiredStateClient + ?Sized),
+    store: &EnforcementStore,
+    request: &ApplyCredentialPolicy,
+    mut binding: Binding,
+) -> Result<(), EnforcementCoordinatorError> {
+    let mut identity = binding.clone();
+    identity.state = BindingState::Enforced;
+    if !super::super::store::credential_binding_matches_request(request, &identity) {
+        return Err(EnforcementStoreError::InvalidCredentialPolicySnapshot {
+            binding_id: request.binding_id,
+            reason: "partial acknowledgement does not match structured intent".into(),
+        }
+        .into());
+    }
+    log::warn!(
+        "credential binding {} has incomplete coverage: {:?}",
+        request.binding_id,
+        binding.message
+    );
+    binding.state = BindingState::Detaching;
+    binding.message = Some("credential protection coverage incomplete; cleanup pending".into());
+    // 必须先保存清理意图，否则 detach 后存储失败会再次重放 Pending 意图。
+    // 此处写入失败时保留后端状态；存储恢复后 reconciliation 重试，不承诺已经清理。
+    store.upsert_credential_binding(&binding, &request.policy)?;
+    match client.detach(request.binding_id) {
+        Ok(()) => {}
+        Err(EnforcementError::Remote { code, .. }) if code == "missing_binding" => {}
+        Err(error) => return Err(error.into()),
+    }
+    binding.state = BindingState::Failed;
+    binding.domain_id = None;
+    binding.message = Some("credential protection rejected: incomplete process coverage".into());
+    store.upsert_credential_binding(&binding, &request.policy)?;
+    Ok(())
+}
+
 /// Returns whether a remote code is a terminal desired-binding rejection.
 pub(super) fn is_binding_rejection(code: &str) -> bool {
     matches!(
@@ -434,6 +477,9 @@ pub(super) fn is_binding_rejection(code: &str) -> bool {
             | "stale_process"
             | "compile_failure"
             | "kernel_failure"
+            | "unsupported_environment"
+            | "preexisting_writable_map"
+            | "preexisting_writable_fd"
     )
 }
 
@@ -455,6 +501,12 @@ pub(super) fn remote_rejection_message(code: &str, _message: &str) -> String {
         "stale_process" => "enforcer rejected desired binding: process identity is stale",
         "compile_failure" => "enforcer rejected desired binding: policy compilation failed",
         "kernel_failure" => "enforcer rejected desired binding: kernel attachment failed",
+        "unsupported_environment" => {
+            "enforcer rejected desired binding: unsupported environment; run the enforcer on the host or with host PID visibility"
+        }
+        "preexisting_writable_map" | "preexisting_writable_fd" => {
+            "enforcer rejected desired binding: target tree holds pre-existing write access"
+        }
         _ => REJECTION_FALLBACK,
     };
     sanitize_operator_message(operator_message)

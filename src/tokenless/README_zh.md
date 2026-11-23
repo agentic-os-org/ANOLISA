@@ -5,12 +5,24 @@
 LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
 随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
-并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
+并让 `sudo` 命令保持原样。RTK 恢复提示使用 `tokenless rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
+
+进入 PostTool 的 Maven 输出可在保留全部记录的同时共享重复字面量模板及下载 URL 前缀，
+无需 Stash。识别范围、输出还原方法与验证限制参见 [Maven 构建输出](../../docs/user-guide/zh/tokenless/index.md#maven-构建输出)。
+
+进入 PostTool 的 Gradle 输出可在保留全部记录、失败任务与诊断输出的同时共享重复任务后缀与
+模块路径前缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [Gradle 构建输出](../../docs/user-guide/zh/tokenless/index.md#gradle-构建输出)。
+
+进入 PostTool 的 CTest 输出可在保留全部测试顺序、失败状态、诊断输出与汇总尾注的同时共享重复
+`/` 与 `::` 测试名前缀以及点线填充，支持串行 `Start`/结果成对行与 `-j` 并行交错流，无需
+Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输出](../../docs/user-guide/zh/tokenless/index.md#ctest-测试输出)。
+
+进入 PostTool 的 Ninja（`[k/N]`）与非冗长 CMake Unix Makefiles（`[PPP%]`）构建进度输出可在保留编译诊断、失败输出与记录顺序的同时共享重复动作词、目录前缀与目标后缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [CMake 与 Ninja 构建输出](../../docs/user-guide/zh/tokenless/index.md#cmake-与-ninja-构建输出)。
 
 ## 核心能力
 
@@ -18,14 +30,23 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
-| Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
-| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
-| Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
-| HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
+| Build Log 压缩 | 取决于具体负载 | 清理 SGR 颜色，并可恢复地缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C 和通用命令日志的常规进度；pnpm 还可在无需恢复时压紧已识别的通知、依赖清单和装饰条布局，保留全部任务相关事实 |
+| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
+| Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
+| 混合内容区域压缩 | 取决于工作负载 | 通过 `TOKENLESS_MIXED_CONTENT_ENABLED=1` 显式开启：对既非完整结构化文档、也无法被其他领域处理的工具输出，识别显式定界的 typed region——标注 `json`/`csv`/`tsv` 的 fenced code block 与括号平衡的裸 JSON 文档——并用与独立文档相同的压缩器和策略逐段压缩。周围文本逐字节保留，压缩器拒绝的区域逐字节保留，选择 TOON 的 JSON 区域同步更新 fence label。默认关闭 |
+| HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 就地将受支持的富文本子树转写为混合 Markdown，同时原地保留行内 `<svg>`、JSON 数据 `<script>` 载荷、`data-*`/`aria-*` 属性、表单状态等局部 HTML 语义并保持外层 JSON 结构，对含屏幕隐藏/不可读文字或可执行脚本等全局风险的值保持原样；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
+| 浏览器快照重编码 | 取决于工作负载 | 默认开启：把命令或 API 返回的 Playwright MCP 无障碍快照无损重编码为 TSV 记录表，仅对交互角色去除冗余 `cursor=pointer`，重复 URL 前缀仅在字符与估算 Token 双降时经 legend 共享；包装、尾注与全部 ref 原样保留，无法解析的输入整体透传，完整原文经 Stash 可取回。chrome-devtools-mcp uid 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）；通过 `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 或 SDK `browser_snapshot_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
-| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
+| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
+
+pnpm 布局压紧无需恢复，保留通知正文、全部依赖事实、包总数和完成信息；只有省略的进度
+需要 Stash/retrieve。遇到警告、脚本或未知正文后，停止解析剩余后缀。
+这不会让 `pnpm install` 豁免 PreTool RTK 改写：仅处理符合现有归属规则、实际进入 PostTool
+的原始输出。详见 [pnpm 安装输出](../../docs/user-guide/zh/tokenless/index.md#pnpm-安装输出)。
+布局压紧和进度缩减可同时生效，共用现有 `build_log_reduction` 标签；`recoverability` 区分
+仅布局的 `lossless` 与包含省略的 `retrievable`。Protocol v2 和 SDK 枚举保持不变。
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
 结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、排版开销、可移除的 Schema 元数据、
@@ -88,15 +109,19 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损实时 PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
+SDK、QwenPaw 和 AgentScope 继承与 CLI 相同的压缩环境开关，显式 `TokenlessConfig`
+参数优先。Diff 裁剪默认开启。各宿主的剩余边界见
+[压缩覆盖与协议限制](../../docs/user-guide/zh/tokenless/framework-integration.md#压缩覆盖与协议限制)。
+
+- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和实时 PostTool 优化，提供按会话授权的静态恢复工具；宿主 Prompt Hook 不支持替换 Schema
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 透传 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
 - **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
-- **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；V1 插件缺少静态恢复授权，Schema 透传
+- **DeepSeek Harness 插件** — 通过 DSH 工具生命周期接入 RTK 重试建议、响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
 
@@ -105,8 +130,11 @@ OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_cal
 结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
 Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
-本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
-候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
+RTK 回退仅接受无损候选。其他结果可通过静态 `tokenless_retrieve` 工具恢复 HTML、Diff、浏览器快照、
+日志缩减和 JSON 截断的原文；宿主工具策略需允许该工具。缺少工具注册 API 或会话 UUID 时
+只接受无损候选。提交 prompt 时从当前历史刷新 Marker 授权；compaction 撤销旧授权，直到
+下次提交 prompt 时根据保留历史重建。新压缩结果仍可立即恢复。会话结束清空授权，新会话不能沿用其他会话的
+权限。取回原文不会再次压缩。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
 PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Content Block 透传。不再注册
 独立的持久化压缩 hook，避免重复压缩和重复统计。Fail-open 保留宿主交付的结果，
 包括此前发生的截断。2026.8.2 等旧版宿主在注册 middleware 后会把文本限制在
@@ -132,8 +160,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 首选 ANOLISA CLI 安装已发布的组件。
 
 安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`
-和 `rtk` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
-`PATH`。
+也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入 `PATH`。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
@@ -156,7 +183,7 @@ sudo anolisa --install-mode system adopt tokenless
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
 另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
-提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+提供预编译的 `tokenless` 二进制以及随包分发的 Agent adapter，需要
 Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
 curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
 
@@ -170,8 +197,8 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 `~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
 下对应框架的脚本启用。curl 安装脚本会把它创建的内容记录到
 `~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
-回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
-adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
+回执只删除这些路径；其源码构建路径是 CLI-only（没有 adapter），并需要
+Git 和 `patch` 下载固定版本的 RTK 源码。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
 完整的方式对照见 `docs/user-guide/zh/tokenless/index.md`。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
@@ -186,12 +213,10 @@ adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样�
 全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
 机器上没有可用 CLI。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
-仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
-optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
-因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
-回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
-受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
+已发布的 npm 软件包支持 Linux x86_64/aarch64、macOS Apple Silicon 和
+Intel Mac，以及 Windows x64。`@anolisa/tokenless-darwin-x64` 和
+`@anolisa/tokenless-win32-x64` 从 0.9.0 开始提供。独立安装脚本在 macOS 上使用
+npm，并拒绝回退到源码构建：它会报错退出而不执行 `cargo`。Windows 请直接使用 npm。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
@@ -277,12 +302,12 @@ cd Token-Less
 make setup
 ```
 
-源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
-二进制也位于同一个目录，并部署开发所需的全部 adapter。
+源码安装会把 `tokenless` 放在 `~/.local/bin`，并部署开发所需的全部 adapter。
+RTK 已链接进 `tokenless`，改写后的命令通过 `tokenless rtk` 执行。
 
 ### 构建 Python SDK
 
-框架开发者可以从源码构建进程内 Python API：
+框架开发者可以从源码构建 Python API：
 
 ```bash
 make python-wheel
@@ -297,8 +322,9 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 命令不包含 Python Extension。
 
 `anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
-Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
-TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
+Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口，并内置对应平台的
+`tokenless` 可执行文件来运行改写后的命令；TOON 已链接进原生 Runtime，
+不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
 但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
 [Python SDK 指南](../../docs/developer-guide/zh/sdk/tokenless/index.md)，AgentScope 挂载见
 [AgentScope SDK 集成](../../docs/developer-guide/zh/sdk/tokenless/agentscope.md)，产品 Adapter 见
@@ -325,11 +351,11 @@ Session，再传入启用 Tokenless 的 Session。
 
 ### OpenCode 安装
 
-Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
-仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+V1 `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，
+Common Hook 因此保留原始 Schema。响应压缩和命令重写仍然可用；OpenCode V2 插件 API 需要单独迁移。
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
-RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+RTK 命令重写和响应/TOON 压缩；`tool.definition` 保持工具 Schema 原样。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
@@ -358,24 +384,23 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 
 ### 千问办公插件（Windows x64 本地模式）
 
-Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
-Hook，不支持 Windows ARM64。Windows 软件包尚未发布，请按
-[Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并打包，
+Windows x64 支持原生 `tokenless.exe`、npm 启动器和千问办公 PowerShell
+Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。
+源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
 
-Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
-是否改写由 RTK 决定，不支持的命令透传。PowerShell PostTool 输出按共享命令输出策略处理，
-保留 RTK 去重和文件内容保护。
+Python Adapter 注册 PowerShell `PostToolUse` Hook。Bash 和 PowerShell 命令按原始参数执行。
+PostTool 使用共享命令输出策略并保护文件内容。
 参见[Windows 安装与验证](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
 
 ### 千问办公插件（macOS）
 
 `qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
-PreToolUse 匹配两种 Shell 的工具名；
-PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
+适配器为**所有工具**注册 `PostToolUse`，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
-保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
-与 Qoder CLI、Qwen Code、QwenPaw 独立。
+统计归属为 `qwenwork`。工作区 Shell Hook 的数据库使用系统用户的 `~/.tokenless`，
+或 `TOKENLESS_DATA_DIR` 指定的有效绝对路径。仅用于恢复的 `PreToolUse` Hook 将独立的
+`tokenless retrieve <hash>` 命令转发给插件自带的 CLI（如果存在），并以只读方式打开同一份 Stash。
 
 运行 `anolisa install tokenless` 后，退出千问办公，再显式旁加载插件：
 
@@ -387,7 +412,7 @@ anolisa adapter status tokenless
 
 完成后重启千问办公并开启新会话，在应用内检查激活状态。CLI 验证受管理文件，
 加载和激活状态保持 `unknown`。旁加载不修改 settings，也不自动启用已禁用的插件。
-Linux VM 会话仍不受支持。工作区 Shell 的状态保存在对话工作目录中，
+Linux VM 会话仍不受支持。工作区 Shell 的状态遵循 Tokenless 数据目录设置，
 其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
 安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公macos)。
@@ -539,13 +564,13 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 应用有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
 
 两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
-环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。
+环境错误提示和逐调用归属。原生 Wheel 直接链接 TOON，并通过内置的 `tokenless` 可执行文件运行改写后的命令，不搜索系统可执行文件。
 宿主对象和流式 chunk 保持不变，只转换复制后的调用参数和最终模型可见文本。Tool Ready
 仍保持硬关闭。
 
 ## Raw 打包
 
-Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
+Raw 打包接收同一目录中已经构建好的 `tokenless`，并按照
 组件维护的稳定目录结构生成制品：
 
 ```bash
@@ -575,7 +600,7 @@ npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
 `linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。
@@ -679,6 +704,21 @@ tokenless env-check --tool Shell --fix
 安装产物检查与可选的真实 Agent 任务见
 [发布前回归测试](tests/release_regression/README_zh.md)，分别报告工具输出节省和恢复开销。
 
+要回放 OpenClaw 插件加载和 compaction 契约，先运行 `make test-adapters` 构建 debug CLI
+和插件。使用 Node.js 24.15.0，将宿主安装到临时目录，再运行显式的契约测试目标：
+
+```bash
+openclaw_test_root="$(mktemp -d)"
+npm install --prefix "$openclaw_test_root" --ignore-scripts --no-audit --no-fund openclaw@2026.6.6
+make test-openclaw-host-contract OPENCLAW_TEST_DIST="$openclaw_test_root/node_modules/openclaw/dist"
+```
+
+最低支持版 2026.6.6 和 2026.8.2 均已通过这项回放；将安装版本换成 `openclaw@2026.8.2`
+即可验证后者。最低版本已在自动 compaction 时触发 `after_compaction`。此目标必须提供
+`OPENCLAW_TEST_DIST`，缺少时直接失败，不会跳过宿主测试。它检查 manifest 工具注册、
+compaction 立即撤权、新结果恢复，以及 Core 接受的三种恢复引用，包括历史
+`<<tokenless:HASH>>` Marker。测试只调用本地 Core 和宿主回调，不调用模型。
+
 要用本地脚本模型检查 OpenClaw 的实时交付边界，先构建 CLI 和插件，再执行
 与本地 Docker 镜像对应的命令：
 
@@ -707,7 +747,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 
 ## 前置依赖
 
-- **Rust** toolchain >= 1.89 — RTK（edition 2024）所需
+- **Rust** toolchain >= 1.91 — 工作区 MSRV，RTK 同样需要
 - **just** — 用于下载并应用 RTK Patch
 - **Git** — 用于通过 justfile 下载 RTK 源码
 - **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部

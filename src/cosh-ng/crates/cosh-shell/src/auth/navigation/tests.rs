@@ -356,3 +356,62 @@ fn editing_skips_identity_by_field_name_not_position() {
     assert_eq!(auth.phase, AuthPhase::FillingField);
     assert_eq!(auth.current_field_info().unwrap().name, "base_url");
 }
+
+#[test]
+fn publish_fix_guide_escape_returns_through_each_menu() {
+    use crate::auth::host::AuthHost;
+    use crate::auth::runtime::handle_auth_back;
+    use crate::runtime::state::InlineState;
+    for phase in [
+        AuthPhase::SelectingProvider,
+        AuthPhase::ProviderAction { provider_idx: 0 },
+        AuthPhase::ConfirmDelete { provider_idx: 0 },
+    ] {
+        let mut auth = filling_state(0, &[]);
+        auth.existing_providers.push(saved_provider("saved"));
+        auth.phase = phase.clone();
+        let mut state = InlineState::default();
+        state.auth.host = AuthHost::Guide;
+        state.auth.state = Some(auth);
+        handle_auth_back(&mut state, &mut Vec::new()).unwrap();
+        assert!(!state.auth.exit_requested, "{phase:?} exited management");
+        let expected = if matches!(phase, AuthPhase::ConfirmDelete { .. }) {
+            AuthPhase::ProviderAction { provider_idx: 0 }
+        } else {
+            AuthPhase::ManagingProviders
+        };
+        assert_eq!(state.auth.state.as_ref().unwrap().phase, expected);
+    }
+}
+
+#[test]
+fn publish_fix_leaving_edit_discards_all_unsubmitted_fields() {
+    use crate::auth::host::AuthHost;
+    use crate::auth::runtime::handle_auth_back;
+    use crate::runtime::state::InlineState;
+    let mut auth = filling_state(
+        0,
+        &[
+            ("provider_id", "saved"),
+            ("security_token", "old-secret"),
+            ("model", "unsaved-model"),
+        ],
+    );
+    auth.existing_providers.push(saved_provider("saved"));
+    auth.editing_provider_name = Some("saved".into());
+    let mut state = InlineState::default();
+    state.auth.host = AuthHost::Guide;
+    state.auth.state = Some(auth);
+    handle_auth_back(&mut state, &mut Vec::new()).unwrap();
+    assert_eq!(
+        state.auth.state.as_ref().unwrap().phase,
+        AuthPhase::ProviderAction { provider_idx: 0 }
+    );
+    assert!(state
+        .auth
+        .state
+        .as_ref()
+        .unwrap()
+        .collected_values
+        .is_empty());
+}

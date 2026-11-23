@@ -141,6 +141,13 @@ pub struct ProviderConfig {
     pub explicit_cache: Option<bool>,
 }
 
+impl ProviderConfig {
+    pub(crate) fn is_ecs_identity(&self) -> bool {
+        self.provider_type.as_deref() == Some("aliyun")
+            && self.auth_source.as_deref() == Some("ecs_identity")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -239,6 +246,11 @@ pub struct HookDefinition {
     /// PreToolUse hook failure must never silently authorize a tool call.
     #[serde(default)]
     pub fail_open: bool,
+    /// Require nonempty output when this child environment variable is set,
+    /// except for `0` or `false` (case-insensitive, surrounding whitespace ignored).
+    /// Unset preserves legacy behavior; invalid values require output.
+    #[serde(default)]
+    pub require_output_when_env: Option<String>,
     /// Environment variables injected into this hook's child process only.
     /// The child inherits the parent environment first, so an entry here
     /// overrides an inherited value of the same name. The host never calls
@@ -265,6 +277,9 @@ pub struct SkillsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub custom_paths: Vec<String>,
+    /// Additional package roots, below user and extension skills in priority.
+    #[serde(default)]
+    pub system_paths: Vec<String>,
 }
 
 /// Configuration for locally managed MCP client connections.
@@ -568,6 +583,7 @@ struct PartialHooksConfig {
 struct PartialSkillsConfig {
     enabled: Option<bool>,
     custom_paths: Option<Vec<String>>,
+    system_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -744,6 +760,10 @@ fn apply_project_layer(
         );
         layer.hooks = None;
     }
+    // Package roots belong to system/user configuration, not repository content.
+    if let Some(ref mut skills) = layer.skills {
+        skills.system_paths = None;
+    }
     apply_common_layers(config, &layer, false);
 }
 
@@ -842,6 +862,9 @@ fn apply_skills_layer(config: &mut SkillsConfig, layer: &PartialSkillsConfig) {
     }
     if let Some(ref value) = layer.custom_paths {
         config.custom_paths = value.clone();
+    }
+    if let Some(ref value) = layer.system_paths {
+        config.system_paths = value.clone();
     }
 }
 
@@ -1022,13 +1045,12 @@ impl CoreConfig {
     }
 
     pub fn resolve_provider(&self) -> ResolvedProvider {
-        let provider_name = self
-            .ai
-            .active_provider
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        let provider_name = self.ai.active_provider.as_deref().unwrap_or("default");
+        self.resolve_named_provider(provider_name)
+    }
 
-        let provider_cfg = self.ai.providers.get(&provider_name);
+    pub(crate) fn resolve_named_provider(&self, provider_name: &str) -> ResolvedProvider {
+        let provider_cfg = self.ai.providers.get(provider_name);
 
         // SysOM's API host, kept deliberately separate from `base_url`.
         //
@@ -1055,12 +1077,15 @@ impl CoreConfig {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
 
-        let model = self
-            .ai
-            .active_model
-            .clone()
-            .or_else(|| provider_cfg.and_then(|p| p.model.clone()))
-            .unwrap_or_else(|| "qwen-max".to_string());
+        let model = if provider_cfg.is_some_and(ProviderConfig::is_ecs_identity) {
+            crate::auth::trial_policy::MODEL.to_string()
+        } else {
+            self.ai
+                .active_model
+                .clone()
+                .or_else(|| provider_cfg.and_then(|p| p.model.clone()))
+                .unwrap_or_else(|| "qwen-max".to_string())
+        };
 
         let provider_type = provider_cfg
             .and_then(|p| p.provider_type.clone())
@@ -1131,8 +1156,10 @@ impl ResolvedProvider {
             return false;
         }
         if self.provider_type == "aliyun" {
-            return self.auth_source.as_deref() != Some("ecs_ram_role")
-                && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
+            return !matches!(
+                self.auth_source.as_deref(),
+                Some("ecs_ram_role" | "ecs_identity")
+            ) && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
         }
         self.api_key.is_empty()
     }
@@ -1143,6 +1170,28 @@ impl ResolvedProvider {
 pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     let dir = config_dir();
     persist_config_to_dir(config, &dir)
+}
+
+mod guarded;
+pub(crate) use guarded::{lock as lock_user_config, replace as replace_user_config};
+
+/// Wizard-initiated persistence: ownership-checked, no-follow, and never
+/// treating an unreadable document as an empty one.
+pub fn persist_config_guarded(config: &CoreConfig) -> Result<(), String> {
+    let dir = config_dir();
+    guarded::verify_dir(&dir)?;
+    guarded::verify_target(&dir.join("config.toml"))?;
+    persist_config_inner(config, &dir, true)
+}
+
+#[cfg(test)]
+pub fn persist_config_guarded_to_dir(
+    config: &CoreConfig,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    guarded::verify_dir(dir)?;
+    guarded::verify_target(&dir.join("config.toml"))?;
+    persist_config_inner(config, dir, true)
 }
 
 /// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
@@ -1162,11 +1211,33 @@ fn is_ai_section_header(line: &str) -> bool {
 }
 
 fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    persist_config_inner(config, dir, false)
+}
+
+fn persist_config_inner(
+    config: &CoreConfig,
+    dir: &std::path::Path,
+    guard: bool,
+) -> Result<(), String> {
+    if guard {
+        guarded::verify_dir(dir)?;
+    } else {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    }
 
     let config_path = dir.join("config.toml");
+    let _lock = guarded::lock(dir, guard)?;
 
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let existing = if guard {
+        guarded::verify_target(&config_path)?;
+        guarded::read_existing(&config_path)?
+    } else {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("Failed to read config: {error}")),
+        }
+    };
 
     let mut preserved = String::new();
     let mut in_ai_section = false;
@@ -1252,23 +1323,7 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         preserved.push('\n');
     }
 
-    let pid = std::process::id();
-    let tmp_path = dir.join(format!("config.toml.tmp.{pid}"));
-    std::fs::write(&tmp_path, &preserved).map_err(|e| format!("Failed to write config: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        let _ = std::fs::set_permissions(&tmp_path, perms);
-    }
-
-    std::fs::rename(&tmp_path, &config_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("Failed to rename config: {e}")
-    })?;
-
-    Ok(())
+    guarded::replace(dir, &config_path, &preserved, guard)
 }
 
 fn escape_toml_value(s: &str) -> String {
@@ -1490,6 +1545,18 @@ mod tests {
         let config = CoreConfig::load_from_paths(Some(&system), Some(&user), None, false);
 
         assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
+    }
+
+    #[test]
+    fn ecs_identity_model_is_fixed_without_changing_other_providers() {
+        for (source, expected) in [("ecs_identity", "auto"), ("ecs_ram_role", "chosen-model")] {
+            let config: CoreConfig = toml::from_str(&format!(
+                "[ai]\nactive_provider = 'trial'\nactive_model = 'chosen-model'\n\
+                 [ai.providers.trial]\ntype = 'aliyun'\nauth_source = '{source}'\nmodel = 'provider-model'\n"
+            ))
+            .unwrap();
+            assert_eq!(config.resolve_provider().model, expected, "{source}");
+        }
     }
 
     #[test]
@@ -1994,6 +2061,30 @@ active_model = "project-model"
     }
 
     #[test]
+    fn skill_package_paths_merge_without_project_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system.toml");
+        let user = tmp.path().join("user.toml");
+        let project = tmp.path().join("project.toml");
+        std::fs::write(&system, "[skills]\nsystem_paths = [\"/opt/skills\"]\n").unwrap();
+        std::fs::write(&user, "[skills]\nenabled = true\n").unwrap();
+        std::fs::write(
+            &project,
+            "[skills]\nsystem_paths = [\"/project/packages\"]\ncustom_paths = [\"/project/skills\"]\n",
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), Some(&project), false);
+        assert_eq!(config.skills.system_paths, vec!["/opt/skills"]);
+        assert_eq!(config.skills.custom_paths, vec!["/project/skills"]);
+        assert!(config.skills.enabled);
+
+        std::fs::write(&user, "[skills]\nsystem_paths = []\n").unwrap();
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), Some(&project), false);
+        assert!(config.skills.system_paths.is_empty());
+    }
+
+    #[test]
     fn bare_config_preserves_user_provider_but_ignores_project_and_runtime_extensions() {
         let tmp = tempfile::TempDir::new().unwrap();
         let user_path = tmp.path().join("user-config.toml");
@@ -2014,6 +2105,7 @@ enabled = true
 [skills]
 enabled = true
 custom_paths = ["/user/skills"]
+system_paths = ["/opt/skills"]
 "#,
         )
         .unwrap();
@@ -2036,6 +2128,7 @@ active_model = "project-model"
         assert_eq!(config.hooks.enabled_override, Some(false));
         assert!(!config.skills.enabled);
         assert!(config.skills.custom_paths.is_empty());
+        assert!(config.skills.system_paths.is_empty());
         assert!(!config.session.auto_persist);
         assert!(project_path.exists());
     }
@@ -2170,6 +2263,23 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
             "https://sysom.cn-shanghai.aliyuncs.com"
         );
         assert_eq!(reloaded.access_key_id, "new-ak");
+    }
+
+    #[test]
+    fn persist_user_config_refuses_to_save_without_shared_lock() {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("config.toml");
+        let original = "[ui]\nlanguage = \"zh-CN\"\n";
+        std::fs::write(&path, original).expect("seed config");
+        std::fs::create_dir(dir.path().join(".config.toml.lock")).expect("unavailable lock");
+
+        let error = persist_config_to_dir(&CoreConfig::default(), dir.path())
+            .expect_err("require the config lock");
+        assert!(error.contains("config lock"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read config"),
+            original
+        );
     }
 
     #[test]

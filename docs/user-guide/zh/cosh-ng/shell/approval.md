@@ -10,9 +10,11 @@ Agent使用受保护工具前，`cosh`可能显示审批卡片。允许操作前
 
 | 模式 | 行为 |
 |------|------|
-| `recommend` | 只解释和建议，不发出工具调用。 |
+| `recommend` | 只解释和建议；除显式 `allowed_tools` 外不自动执行有副作用的工具，只读检查仍可能运行。 |
 | `auto` | 默认模式。符合条件的只读或低风险工具可以自动执行；高风险、受保护或外部操作会先询问。 |
 | `trust` | 二次确认后，本次会话中的Provider工具请求自动执行。 |
+
+显式配置的 `agent.allowed_tools` 条目优先于模式限制。
 
 在 `auto` 模式下，符合条件的简单只读命令可以使用 `2>/dev/null` 或
 `2>>/dev/null` 抑制 stderr，无需审批卡片。支持重定向操作符后的空格，
@@ -27,8 +29,9 @@ find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null
 自动执行资格。执行结果保留 stdout 和退出状态，命令失败时也不例外。
 
 启用 tokenless RTK 重写后，被包裹的命令
-（`env TOKENLESS_* … /usr/bin/rtk <命令>`，或 RTK 自己输出绝对路径时的
-`/usr/bin/rtk <命令>`）保持相同的豁免资格：
+（Tokenless 链接 RTK 时为 `env TOKENLESS_* … /usr/bin/tokenless rtk <命令>`；
+使用单独的 RTK 时为 `env TOKENLESS_* … /usr/bin/rtk <命令>`，或 RTK 自己输出
+绝对路径时的 `/usr/bin/rtk <命令>`）保持相同的豁免资格：
 cosh 评估被包裹的只读命令，并执行包裹后的形态，
 因此 RTK 的输出压缩在免审批路径上仍然生效。
 `TOKENLESS_DATA_DIR` 与会话的 tokenless 状态目录不一致时，仍需审批。
@@ -38,6 +41,27 @@ cosh 评估被包裹的只读命令，并执行包裹后的形态，
 做出的修改不会同步，`GIT_*` 变量也不会传入。因此，时区、locale 和 Git
 相关结果可能与在该 shell 中执行相同命令不同。需要 shell 当前环境的命令，
 请直接在前台 shell 中执行。
+
+`printenv` 不在内置只读白名单中。默认 `auto` 模式下它需要审批卡片：分类器无法
+判断哪些变量名存有敏感值，而裸 `printenv` 会输出全部环境变量。该门禁只移除
+`printenv` 的内置只读自动批准；显式信任设置与运行时只读配置仍然生效：匹配显式
+命令信任键（`trusted_commands`）的请求在 `auto` 模式下仍可免卡执行，`trust` 在
+二次确认后自动执行 Provider 工具请求，`shell.readonly` 覆盖与
+`shell.readonly_disabled` 继续控制只读资格（见[配置](../configuration.md)）。
+
+### auto 模式下的 git 命令
+
+默认 `auto` 模式下，所有 git 命令都需要审批卡片，没有内建的 git 免审批
+例外。git 会读取所在仓库的 `.git/config` 与 `.gitattributes`，而这些文件
+可以指定 git 自行执行的程序：索引刷新时的 `core.fsmonitor`、生成补丁时的
+`diff.<driver>.textconv`、验证签名时的 `gpg.program`、partial clone 按需
+抓取缺失对象时的远端传输（`core.sshCommand`、凭据助手），以及分页器。
+前台 shell 还可能把看似字面量的参数展开（bash 通配、zsh `EXTENDED_GLOB`）
+成进入上述路径的选项。只读分类器看不到仓库配置，也看不到 shell 展开，
+因此 git 命令改为先询问，而不是自动执行。
+
+非 git 的只读命令保持原有免审批行为。如需让特定 git 命令免卡片执行，
+请显式使用 trust 模式或 `shell.readonly` 覆盖；两者都是操作者的明确选择。
 
 使用下面的命令二次确认trust模式：
 

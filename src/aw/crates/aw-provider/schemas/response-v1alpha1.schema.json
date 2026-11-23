@@ -88,6 +88,61 @@
                 "minItems": 1,
                 "maxItems": 5,
                 "uniqueItems": true
+              },
+              "event_adapters": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 16,
+                "propertyNames": {
+                  "enum": [
+                    "session.start",
+                    "input.submit",
+                    "tool.before",
+                    "tool.after",
+                    "permission.request",
+                    "compact.before",
+                    "compact.after",
+                    "subagent.start",
+                    "subagent.stop",
+                    "turn.stop",
+                    "session.end",
+                    "model.before_request",
+                    "runtime.observed",
+                    "runtime.exited",
+                    "security.violation",
+                    "coverage.changed"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "not": {
+                      "pattern": "[^a-z0-9-]"
+                    }
+                  }
+                }
+              },
+              "binding": {
+                "const": true
+              },
+              "decision": {
+                "const": true
+              },
+              "obligation_kinds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/obligationKind"
+                },
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": true
               }
             }
           },
@@ -185,6 +240,9 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 1048576
+              },
+              "input": {
+                "type": "object"
               }
             },
             "allOf": [
@@ -217,11 +275,61 @@
                     }
                   }
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "replace_input"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "input"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "input"
+                    ]
+                  }
+                }
               }
             ]
           },
           "minItems": 0,
           "maxItems": 64
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "block",
+            "ask",
+            "abstain"
+          ]
+        },
+        "obligations": {
+          "type": "array",
+          "maxItems": 8,
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/obligationKind"
+              },
+              "parameters": {
+                "type": "object",
+                "maxProperties": 32
+              }
+            }
+          }
         }
       }
     },
@@ -260,6 +368,56 @@
           }
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "request_id",
+        "status",
+        "input_digest",
+        "obligation_status"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "aw-provider/v1alpha1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[^!-~]"
+          }
+        },
+        "status": {
+          "const": "ok"
+        },
+        "input_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "minLength": 71,
+          "maxLength": 71
+        },
+        "obligation_status": {
+          "enum": [
+            "completed",
+            "skipped"
+          ]
+        }
+      }
     }
-  ]
+  ],
+  "$defs": {
+    "obligationKind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-zA-Z0-9._-]"
+      }
+    }
+  }
 }

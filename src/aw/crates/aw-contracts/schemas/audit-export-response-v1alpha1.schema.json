@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/audit-export/response/v1alpha1",
+  "title": "AW public audit export response v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "source_id",
+    "result",
+    "error"
+  ],
+  "properties": {
+    "api_version": {
+      "const": "audit-export.aw/v1alpha1"
+    },
+    "source_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "result": {
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "keys",
+                "inventory_digest",
+                "next_cursor",
+                "changed",
+                "limits"
+              ],
+              "properties": {
+                "type": {
+                  "const": "enumerate"
+                },
+                "keys": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "minLength": 64,
+                    "maxLength": 64
+                  }
+                },
+                "inventory_digest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "next_cursor": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source_id",
+                        "inventory_digest",
+                        "after",
+                        "through"
+                      ],
+                      "properties": {
+                        "source_id": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        },
+                        "inventory_digest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        },
+                        "after": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        },
+                        "through": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "changed": {
+                  "type": "boolean"
+                },
+                "limits": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "page",
+                    "inventory_entries",
+                    "chain_bytes",
+                    "chain_records",
+                    "response_bytes"
+                  ],
+                  "properties": {
+                    "page": {
+                      "const": 64
+                    },
+                    "inventory_entries": {
+                      "const": 10000
+                    },
+                    "chain_bytes": {
+                      "const": 8388608
+                    },
+                    "chain_records": {
+                      "const": 4096
+                    },
+                    "response_bytes": {
+                      "const": 1048576
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "chain_id",
+                "event",
+                "records",
+                "cursor",
+                "tip",
+                "caught_up",
+                "terminal",
+                "limits"
+              ],
+              "properties": {
+                "type": {
+                  "const": "read"
+                },
+                "chain_id": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "minLength": 64,
+                  "maxLength": 64
+                },
+                "event": {
+                  "$ref": "https://agentic-os.sh/schemas/aw/runtime/execution-event/v1alpha1"
+                },
+                "records": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "$ref": "https://agentic-os.sh/schemas/aw/audit/record/v1alpha1"
+                  }
+                },
+                "cursor": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "source_id",
+                    "chain_id",
+                    "consumed",
+                    "observed_tip"
+                  ],
+                  "properties": {
+                    "source_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "chain_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    },
+                    "consumed": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "sequence",
+                        "digest"
+                      ],
+                      "properties": {
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4095
+                        },
+                        "digest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        }
+                      }
+                    },
+                    "observed_tip": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "sequence",
+                        "digest"
+                      ],
+                      "properties": {
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4095
+                        },
+                        "digest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$",
+                          "minLength": 64,
+                          "maxLength": 64
+                        }
+                      }
+                    }
+                  }
+                },
+                "tip": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "sequence",
+                    "digest"
+                  ],
+                  "properties": {
+                    "sequence": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4095
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$",
+                      "minLength": 64,
+                      "maxLength": 64
+                    }
+                  }
+                },
+                "caught_up": {
+                  "type": "boolean"
+                },
+                "terminal": {
+                  "type": "boolean"
+                },
+                "limits": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "page",
+                    "inventory_entries",
+                    "chain_bytes",
+                    "chain_records",
+                    "response_bytes"
+                  ],
+                  "properties": {
+                    "page": {
+                      "const": 64
+                    },
+                    "inventory_entries": {
+                      "const": 10000
+                    },
+                    "chain_bytes": {
+                      "const": 8388608
+                    },
+                    "chain_records": {
+                      "const": 4096
+                    },
+                    "response_bytes": {
+                      "const": 1048576
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "enum": [
+            "invalid_request",
+            "export_unavailable",
+            "source_missing",
+            "source_invalid",
+            "source_changed",
+            "projection_invalid",
+            "projection_unavailable",
+            "unsupported_history",
+            "history_incomplete",
+            "response_limit",
+            "cancelled",
+            "storage_unavailable",
+            "access_denied",
+            "history_missing",
+            "history_corrupt",
+            "read_limit",
+            "history_changed"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "error": {
+          "type": "null"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "result": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "result": {
+          "type": "null"
+        }
+      }
+    }
+  ]
+}

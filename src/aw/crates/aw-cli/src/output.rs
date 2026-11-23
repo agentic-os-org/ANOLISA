@@ -7,6 +7,7 @@ use std::{
 };
 
 mod plans;
+pub(crate) mod projection;
 mod queries;
 mod terminal;
 
@@ -43,12 +44,17 @@ pub(crate) enum Outcome {
         config: PathBuf,
         provider_template: String,
     },
-    Uninstalled,
+    Uninstalled {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        preserved: Vec<aw_package::plan::PreservedFile>,
+    },
     ConfigurationEdited {
         changed: bool,
     },
     ConfigurationChecked {
         policy_update_scope: bool,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        projected_out_steps: Vec<projection::ProjectedOutStep>,
     },
     PackagesListed {
         inventory: aw_package::database::Inventory,
@@ -171,8 +177,15 @@ enum ResultView<'a> {
 mod mutation;
 
 pub(crate) enum ValidationError {
-    Io(std::io::Error),
-    Configuration(aw_config::Error),
+    Io {
+        source: std::io::Error,
+        input: Option<&'static str>,
+    },
+    Configuration {
+        source: aw_config::Error,
+        input: Option<&'static str>,
+    },
+    Projection(projection::Error),
 }
 
 struct Failure {
@@ -254,16 +267,19 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             terminal::escape(&config.to_string_lossy()),
             terminal::escape(provider_template)
         ),
-        Outcome::Uninstalled => {
-            "Removed package files; external configuration and state retained".into()
+        Outcome::Uninstalled { .. } => {
+            "Removed package records and verified files; external configuration and state retained"
+                .into()
         }
         Outcome::ConfigurationEdited { changed: true } => "Updated configuration".into(),
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
         Outcome::ConfigurationChecked {
             policy_update_scope: false,
+            ..
         } => "configuration valid".into(),
         Outcome::ConfigurationChecked {
             policy_update_scope: true,
+            ..
         } => "policy update scope valid; runtime activation is not checked".into(),
         Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
             return queries::human(outcome, options);
@@ -274,6 +290,23 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
+    if let Outcome::Uninstalled { preserved } = outcome {
+        for file in preserved {
+            writeln!(
+                stdout,
+                "KEPT PATH {}: {}",
+                terminal::escape(&file.path),
+                terminal::escape(&file.reason)
+            )?;
+        }
+    }
+    if let Outcome::ConfigurationChecked {
+        projected_out_steps,
+        ..
+    } = outcome
+    {
+        projection::human(projected_out_steps, &mut stdout)?;
+    }
     if options.verbose {
         let detail = match outcome {
             Outcome::Installed { .. } => {
@@ -282,8 +315,8 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             Outcome::Configured { .. } => {
                 "Configuration was created offline; no service reload was requested."
             }
-            Outcome::Uninstalled => {
-                "Owned package files were removed; external configuration and state were retained."
+            Outcome::Uninstalled { .. } => {
+                "Verified selected files were removed; retained paths are no longer package-owned."
             }
             Outcome::ConfigurationEdited { changed: true } => {
                 "A validated configuration was published; no runtime reload was requested."
@@ -347,20 +380,37 @@ pub(crate) fn complete_validation(
     result: Result<Outcome, ValidationError>,
 ) -> crate::cli::Result<crate::cli::Exit> {
     let result = result.map_err(|error| {
-        let (code, message, human) = match error {
-            ValidationError::Io(error) => (
+        let (code, message, human, input) = match error {
+            ValidationError::Io { source, input } => (
                 ErrorCode::Io,
                 "A configuration file could not be read",
-                error.to_string(),
+                source.to_string(),
+                input,
             ),
-            ValidationError::Configuration(error) => (
+            ValidationError::Configuration { source, input } => (
                 ErrorCode::InvalidConfiguration,
                 "Configuration validation failed",
+                source.to_string(),
+                input,
+            ),
+            ValidationError::Projection(error) => (
+                ErrorCode::InvalidConfiguration,
+                match error {
+                    projection::Error::StepLimit { .. } => {
+                        "Configured target exceeds the service step limit"
+                    }
+                    projection::Error::Admission(_) => "Configuration projection failed",
+                },
                 error.to_string(),
+                None,
             ),
         };
         Failure {
-            human,
+            // Comparison roles only annotate human output; JSON retains its fixed diagnostic.
+            human: match input {
+                Some(input) => format!("{input}: {human}"),
+                None => human,
+            },
             diagnostic: Diagnostic {
                 code,
                 message,
@@ -566,7 +616,9 @@ mod tests {
             format: 1,
             command: "uninstall",
             result: ResultView::Succeeded {
-                result: &Outcome::Uninstalled,
+                result: &Outcome::Uninstalled {
+                    preserved: Vec::new(),
+                },
             },
             mutation: Some(mutation::Summary::from(&report)),
             warnings: mutation::warnings(&report),

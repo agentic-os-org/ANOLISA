@@ -47,17 +47,14 @@ fn bounded_raw_queue_keeps_rejected_ownership_and_drains_complete_payloads_in_or
     assert_eq!(scheduler.bytes, bytes);
     assert_eq!(scheduler.len(), 1);
     let mapper = ResponseSessionMapper::new();
+    let builder = GenAIBuilder::new();
     for (index, id) in ["paced-first", "paced-second"].iter().enumerate() {
         let raw = scheduler.pop().unwrap();
         assert_eq!(scheduler.bytes, 0);
         let mut analysis = Analyzer::new().analyze_for_delivery(&raw, true);
         drop(raw);
-        let (mut output, _) = GenAIBuilder::new().build_for_owned_delivery(
-            &analysis,
-            &mapper,
-            &HashMap::new(),
-            false,
-        );
+        let (mut output, _) =
+            builder.build_for_owned_delivery(&analysis, &mapper, &HashMap::new(), false);
         output.take_raw_bodies(&mut analysis);
         drop(analysis);
         assert_eq!(output.events.len(), 1);
@@ -77,6 +74,14 @@ fn bounded_raw_queue_keeps_rejected_ownership_and_drains_complete_payloads_in_or
         let GenAISemanticEvent::LLMCall(call) = saved else {
             panic!("expected LLM call")
         };
+        use sha2::{Digest, Sha256};
+        let conversation = format!(
+            "{:x}",
+            Sha256::digest(format!("conversation{id}").as_bytes())
+        );
+        assert_eq!(call.metadata["conversation_id"], conversation[..32]);
+        let session = format!("{:x}", Sha256::digest(b"sessionpaced-first"));
+        assert_eq!(call.metadata["session_id"], session[..32]);
         assert!(
             call.request
                 .raw_body
@@ -128,6 +133,47 @@ fn runtime_paces_real_delivery_and_reports_queue_accounting() {
 }
 
 #[test]
+fn unused_pending_bytes_allow_capture_receiving_while_cpu_admission_is_busy() {
+    let mut fixture = RuntimeFixture::new(100);
+    let mut aggregator = Aggregator::new();
+    let first = capture(&mut aggregator, "buffered-first", &"a".repeat(4096));
+    let second = capture(&mut aggregator, "buffered-second", &"b".repeat(4096));
+    let bytes = first.retained_bytes() + second.retained_bytes();
+    // Keep both captures inside the reserved half; the other half stays
+    // available to deferred delivery and SQLite local retries.
+    fixture.runtime_limits.pending_genai_max_bytes = bytes * 2;
+    fixture.runtime_limits.pending_genai_max_count = 2;
+    let budget = fixture.completions.budget.clone().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _permit = budget.acquire(WorkClass::Maintenance).unwrap();
+        ready_tx.send(()).unwrap();
+        // A bounded timeout lets the old blocking behavior fail rather than hang.
+        let _ = release_rx.recv_timeout(Duration::from_millis(300));
+    });
+    ready_rx.recv().unwrap();
+    fixture.process_aggregated_results(vec![first, second]);
+    assert_eq!(fixture.completions.len(), 2);
+    assert_eq!(fixture.completions.bytes, bytes);
+    assert!(fixture.completions.bytes <= fixture.runtime_limits.pending_genai_max_bytes / 2);
+    assert!(fixture.rows().is_empty());
+    release_tx.send(()).unwrap();
+    worker.join().unwrap();
+    fixture.flush_completions();
+    assert_eq!(fixture.rows(), ["buffered-first", "buffered-second"]);
+    assert_eq!(fixture.completions.bytes, 0);
+}
+
+#[test]
+fn raw_queue_allowance_reserves_half_of_the_shared_pending_bytes() {
+    assert_eq!(shared_completion_bytes(1024, 0), 512);
+    assert_eq!(shared_completion_bytes(1024, 768), 256);
+    assert_eq!(shared_completion_bytes(1024, 1024), 0);
+    assert_eq!(shared_completion_bytes(1, 0), 0);
+}
+
+#[test]
 fn runtime_preserves_fifo_under_backpressure_and_delivers_oversized_captures() {
     let mut fixture = RuntimeFixture::new(100);
     fixture.runtime_limits.pending_genai_max_count = 1;
@@ -163,6 +209,37 @@ fn runtime_without_pacing_delivers_immediately() {
     fixture.process_aggregated_results(vec![result]);
     assert_eq!(fixture.rows(), ["immediate-runtime"]);
     assert_eq!(fixture.completions.len(), 0);
+}
+
+#[test]
+fn busy_maintenance_expires_deferred_genai_without_an_idle_event_loop() {
+    let mut fixture = RuntimeFixture::new(0);
+    let log_path = fixture.directory.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    std::fs::File::create(&log_path).unwrap();
+    fixture.genai_exporters.push(Box::new(logtail));
+    fixture.process_aggregated_results(vec![capture(
+        &mut Aggregator::new(),
+        "busy-deferred",
+        "payload",
+    )]);
+    assert_eq!(fixture.pending_genai.len(), 1);
+    assert!(fixture.rows().is_empty());
+
+    for pending in &mut fixture.pending_genai.entries {
+        pending.created_at = Instant::now() - PENDING_SESSION_TIMEOUT;
+    }
+    fixture.last_drain_check = Instant::now() - Duration::from_secs(2);
+    fixture.tick();
+
+    assert_eq!(fixture.pending_genai.len(), 0);
+    assert_eq!(fixture.rows(), ["busy-deferred"]);
 }
 
 #[test]

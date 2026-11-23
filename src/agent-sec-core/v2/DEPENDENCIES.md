@@ -3,13 +3,15 @@
 `Cargo.lock` pins the resolved dependency graph; it does not establish that the
 sources are available offline or that the dependencies have been security-audited.
 The workspace currently has registry and local path dependencies, with no ActPlane
-Git dependency. The Adapter emits the supported DSL subset; compiler acceptance
-belongs to the actual AgentSight/ActPlane deployment.
+Git dependency. The Translator emits native-policy DSL or structured Cedar
+file-protection JSON; target-side validation belongs to the deployed PEP.
 
 ## HTTP/TLS and unsafe inventory
 
 | Dependency path | Purpose and review boundary |
 |---|---|
+| `asc-pap -> asc-policy-cedar -> cedar-policy / cedar-policy-core` | Cedar create/update admission. The frontend checks the exact embedded schema; policy-types and protocol crates remain independent of the SDK. No schema registry or deployment I/O. |
+| `asc-policy-cedar -> miette` | Reuses Cedar's diagnostic dependency to retain policy IDs and byte locations in RPC errors; no terminal renderer or new registry package. |
 | `asc-daemon / asc-cli -> asc-observability[runtime] -> opentelemetry_sdk / tracing-opentelemetry` | Local context and stderr diagnostics only. No OTLP exporter, HTTP client or TLS provider in this path. |
 | `asc-agentsight-client -> ureq -> rustls / rustls-webpki -> ring` | AgentSight API HTTP/TLS. ureq 2.12.1 explicitly selects the ring provider for its default TLS config. This Client is wired into the daemon through Policy Runtime. |
 | `rustls -> ring` | The AgentSight client crypto boundary contains unsafe/native code. Workspace-local unsafe prohibition does not establish a zero-unsafe dependency tree. |
@@ -23,7 +25,7 @@ belongs to the actual AgentSight/ActPlane deployment.
 | `asc-capability-code-scan -> fancy-regex` | Backtracking regex engine for the code-scan rule set, needed because the rules use look-around that `regex` does not support. The crate itself contains no `unsafe`; its `regex-automata` dependency does. |
 | `asc-capability-code-scan -> yaml-rust2` | Parses the embedded code-scan rule documents. Pure Rust with no `unsafe` in the crate itself; pulls `encoding_rs`, `simdutf8`, `hashlink` and `arraydeque`, which do contain `unsafe`. |
 | `asc-sqlite-kernel -> rusqlite -> libsqlite3-sys` | Event persistence. The `bundled` feature compiles the amalgamated SQLite C sources, so the resolved SQLite version is pinned by the crate rather than by the host. The FFI layer contains unsafe/native code outside the workspace-local `unsafe_code = "forbid"` boundary, same class as `tokio -> libc`. Requires a C toolchain at build time. `agent-sec-core.spec.v2.in` already lists gcc/clang among the required build tools, but as a comment (lines 39-46) stating they are supplied by the CI image rather than declared as `BuildRequires`; this change does not alter that arrangement. Builds outside CI must install a C compiler. |
-| `asc-sqlite-kernel -> rustix` | Only the `fs` and `process` feature subsets, for `flock()` advisory locking and `getuid()`. Chosen over raw `libc` because it wraps the syscalls safely and therefore keeps `unsafe_code = "forbid"` intact; `File::lock()` is unavailable at MSRV 1.88. |
+| `asc-sqlite-kernel -> rustix` | Only the `fs` and `process` feature subsets, for `flock()` advisory locking and `getuid()`. Chosen over raw `libc` because it wraps the syscalls safely and therefore keeps `unsafe_code = "forbid"` intact. The original Rust 1.88 baseline lacked `File::lock()`; raising the minimum to 1.89 does not change the current locking implementation. |
 | `asc-daemon -> asc-event-sink -> asc-persistence-sqlite` | The daemon now persists code-scan audit events through explicit JSONL and SQLite paths. This brings the bundled SQLite C dependency into the daemon normal graph; each configured write path remains independently fail-open, matching v1 bookkeeping. |
 
 YAML parsing is back in this workspace, so the earlier statement that no YAML
@@ -46,8 +48,8 @@ cargo tree -p asc-capability-code-scan --edges normal --locked
 cargo tree -p asc-daemon --edges normal,build --locked
 ```
 
-The daemon's normal/build graph includes Policy Runtime, the AgentSight Adapter
-and Client, and the Client's ureq/rustls/ring dependencies. Runtime itself depends
+The daemon's normal/build graph includes Policy Runtime, the PEP Translator
+and Client, the Cedar SDK, and the Client's ureq/rustls/ring dependencies. Runtime itself depends
 only on generic policy ports and std threads. Reconciliation adds local path
 crates to the daemon graph without adding registry packages to Cargo.lock. Verify
 the executable dependency boundary separately from workspace tests:
@@ -80,6 +82,17 @@ Local tracing adds no C/CMake crypto toolchain. The daemon includes ring through
 its AgentSight Client and bundled SQLite through event persistence. The V2 RPM
 spec (`agent-sec-core.spec.v2.in`) builds this workspace independently of V1.
 A developer workspace build does not establish RPM/systemd acceptance.
+
+## Secret gateway data plane
+
+The gateway data plane is not a Cargo dependency. It runs the official
+mitmproxy standalone build, a PyInstaller bundle that carries its own Python
+interpreter, OpenSSL and Python packages; none of it links into the daemon.
+`gateway/mitmproxy.provenance` pins the version, download URLs and SHA-256
+digests per architecture. Upstream publishes no checksum files, so the digests
+were computed from the official downloads and must be re-derived on every
+version change. The addon under `gateway/addon/` uses only the Python standard
+library and the mitmproxy addon API; its tests run against the pinned binary.
 
 ## Release checks
 

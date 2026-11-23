@@ -312,6 +312,19 @@ fn stabilize_relative_since(
     Ok(())
 }
 
+/// Fixed local-integrity boundary reported by `audit status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditIntegrityBoundary {
+    /// Whether events carry cryptographic tamper evidence.
+    pub cryptographic_tamper_evidence: bool,
+    /// Whether readers verify per-segment sequence continuity.
+    pub sequence_continuity_check: bool,
+    /// Whether local audit files qualify as non-repudiation evidence.
+    pub non_repudiation: bool,
+    /// Operator guidance shared with the audit design contract.
+    pub note: &'static str,
+}
+
 /// Audit store health and effective policy summary.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditStatus {
@@ -344,6 +357,8 @@ pub struct AuditStatus {
     pub diagnostics: Vec<AuditReadDiagnostic>,
     /// Whether reader safety limits truncated evaluation.
     pub safety_truncated: bool,
+    /// Local tamper-evidence boundary; local files are not non-repudiation evidence.
+    pub integrity_boundary: AuditIntegrityBoundary,
 }
 
 /// Evaluates store health without requiring live UI state.
@@ -378,6 +393,14 @@ pub fn audit_status(
         legacy_files: read.legacy_files,
         diagnostics: read.diagnostics,
         safety_truncated: read.truncated,
+        integrity_boundary: AuditIntegrityBoundary {
+            cryptographic_tamper_evidence: false,
+            sequence_continuity_check: true,
+            non_repudiation: false,
+            note: "Local audit files are not tamper-proof against a same-uid or privileged \
+attacker; do not use them as non-repudiation evidence. Compliance-grade immutability requires an \
+externally managed sink correlated by local trace IDs.",
+        },
     })
 }
 

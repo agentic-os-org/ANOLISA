@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -31,12 +32,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
 
 
+def _strip_yaml_comment(value: str) -> str:
+    """Remove scalar comments without interpreting hashes inside quoted values."""
+    quote = value[0] if value[:1] in ('"', "'") else None
+    position = 1 if quote else 0
+    while position < len(value):
+        character = value[position]
+        if quote:
+            if quote == '"' and character == "\\":
+                position += 2
+                continue
+            if character == quote:
+                if quote == "'" and value[position + 1 : position + 2] == "'":
+                    position += 2
+                    continue
+                quote = None
+        elif character == "#" and (position == 0 or value[position - 1] in " \t"):
+            return value[:position].rstrip(" \t")
+        position += 1
+    return value
+
+
 def _load_yaml_simple(path: Path) -> dict:
     """Minimal YAML parser for flat task.yaml files (no external deps)."""
     import re
 
     result = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip()
             if not line or line.startswith("#"):
@@ -44,11 +66,15 @@ def _load_yaml_simple(path: Path) -> dict:
             # Stop at nested structures (prompt:, tools:, services:, etc.)
             if re.match(r"^\w", line) and ":" in line:
                 key, _, value = line.partition(":")
-                value = value.strip()
+                key = key.strip()
+                if key in ("task_id", "task_name", "difficulty", "category"):
+                    value = _strip_yaml_comment(value.strip(" \t"))
+                else:
+                    value = value.strip()
                 # Strip quotes
                 if value and value[0] in ('"', "'"):
                     value = value.strip("\"'")
-                result[key.strip()] = value
+                result[key] = value
             elif not line.startswith(" ") and not line.startswith("\t"):
                 # Top-level key with nested value (e.g. "prompt:")
                 key = line.rstrip(":")
@@ -58,14 +84,16 @@ def _load_yaml_simple(path: Path) -> dict:
 
 
 def scan_tasks(prefix_filter: str | None = None,
-               difficulty_filter: str | None = None) -> list[dict]:
+               difficulty_filter: str | None = None,
+               tasks_dir: Path | None = None) -> list[dict]:
     """Scan task directories and return list of task info dicts."""
-    if not TASKS_DIR.exists():
-        print(f"ERROR: tasks directory not found: {TASKS_DIR}", file=sys.stderr)
+    root = tasks_dir if tasks_dir is not None else TASKS_DIR
+    if not root.is_dir():
+        print(f"ERROR: tasks directory not found: {root}", file=sys.stderr)
         sys.exit(1)
 
     tasks = []
-    for d in sorted(TASKS_DIR.iterdir()):
+    for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
         task_yaml = d / "task.yaml"
@@ -84,6 +112,7 @@ def scan_tasks(prefix_filter: str | None = None,
             continue
 
         tasks.append({
+            "directory_name": d.name,
             "task_id": task_id,
             "task_name": meta.get("task_name", ""),
             "difficulty": difficulty,
@@ -137,7 +166,7 @@ def print_grouped(tasks: list[dict]):
     print(f"{'='*60}\n")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="List and group claw-eval tasks by prefix and difficulty",
     )
@@ -146,10 +175,23 @@ def main():
     parser.add_argument("--difficulty",
                         choices=["simple", "easy", "medium", "hard", "expert"],
                         help="Filter by difficulty")
+    parser.add_argument("--tasks-dir", type=Path, default=None,
+                        help="Task root directory (default: claw-eval/tasks)")
+    parser.add_argument("--format", choices=["grouped", "json", "names"], default="grouped",
+                        help="Grouped text, JSON metadata, or exact directory names")
 
     args = parser.parse_args()
 
-    tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty)
+    tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty, tasks_dir=args.tasks_dir)
+    if args.format in ("json", "names") and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if args.format == "json":
+        print(json.dumps(tasks, ensure_ascii=False, indent=2))
+        return
+    if args.format == "names":
+        for task in tasks:
+            print(task["directory_name"])
+        return
     if not tasks:
         print("No tasks found matching the filters.")
         return

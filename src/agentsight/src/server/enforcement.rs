@@ -13,7 +13,7 @@ use std::sync::Arc;
 use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, HealthStatus, PolicyMode,
+    DestinationScope, FileProtectionTargetKind, HealthStatus, PolicyMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use super::AppState;
 use crate::enforcement::{
-    EnforcementCoordinatorError, canonical_policy_file, read_process_start_time,
-    resolve_and_read_target, resolve_to_host_pid,
+    EnforcementCoordinatorError, canonical_policy_directory, canonical_policy_file,
+    read_process_start_time,
 };
 
 /// Bounded evidence list query.
@@ -42,6 +42,16 @@ pub(super) struct FileBindingRequest {
     session_id: Option<String>,
     root_pid: i32,
     path: PathBuf,
+    /// Rejected when true. Read protection has its own route so that a server
+    /// without it answers 404 instead of ignoring this field and applying an
+    /// open-only policy.
+    #[serde(default)]
+    deny_read: bool,
+    /// Scope of `path`; omitted means `exact_file`. Only the read route accepts
+    /// `directory_tree`. A server without tree support ignores the field and
+    /// then rejects the directory as a non-regular file instead of narrowing it.
+    #[serde(default)]
+    kind: Option<FileProtectionTargetKind>,
 }
 
 /// Product fields for a taint-aware credential exfiltration binding.
@@ -565,18 +575,7 @@ pub(super) async fn apply_binding(
             false,
         );
     }
-    let mut request = body.into_inner();
-    // Replace namespace-local PID with host PID so the enforcer seeds cap_task
-    // with the PID that BPF handle_fork will actually use.
-    let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
-    if host_pid != request.root_pid {
-        log::info!(
-            "resolved namespace PID {} to host PID {}",
-            request.root_pid,
-            host_pid
-        );
-        request.root_pid = host_pid;
-    }
+    let request = body.into_inner();
     run_binding(move || coordinator.apply(request)).await
 }
 
@@ -586,10 +585,44 @@ pub(super) async fn apply_file_binding(
     data: web::Data<AppState>,
     body: web::Json<FileBindingRequest>,
 ) -> HttpResponse {
+    if body.deny_read {
+        return error_response(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "file_read_route_required",
+            "read protection requires POST /api/enforcement/file-read-bindings",
+            false,
+        );
+    }
+    if body.kind == Some(FileProtectionTargetKind::DirectoryTree) {
+        return error_response(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "file_read_route_required",
+            "directory_tree targets require POST /api/enforcement/file-read-bindings",
+            false,
+        );
+    }
+    apply_exact_file_binding(data, body.into_inner(), false).await
+}
+
+/// Builds and applies an AgentSight-owned read-denial policy for one exact
+/// file or, with `kind=directory_tree`, every regular file below a directory.
+#[post("/enforcement/file-read-bindings")]
+pub(super) async fn apply_file_read_binding(
+    data: web::Data<AppState>,
+    body: web::Json<FileBindingRequest>,
+) -> HttpResponse {
+    apply_exact_file_binding(data, body.into_inner(), true).await
+}
+
+async fn apply_exact_file_binding(
+    data: web::Data<AppState>,
+    request: FileBindingRequest,
+    deny_read: bool,
+) -> HttpResponse {
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
-    let request = match build_file_binding(body.into_inner()) {
+    let request = match build_file_binding(request, deny_read) {
         Ok(request) => request,
         Err(message) => {
             log::warn!("rejecting file enforcement binding: {message}");
@@ -797,9 +830,7 @@ fn public_health(mut status: HealthStatus) -> HealthStatus {
 }
 
 fn validate_target_identity(root_pid: i32, expected_start_time: u64) -> Result<(), String> {
-    // resolve_and_read_target handles namespace PID translation + start-time check.
-    let (_host_pid, actual_start_time) =
-        resolve_and_read_target(root_pid, expected_start_time).map_err(|e| e.to_string())?;
+    let actual_start_time = read_process_start_time(root_pid).map_err(|error| error.to_string())?;
     if actual_start_time != expected_start_time {
         return Err(format!(
             "PID {root_pid} start time changed: expected {expected_start_time}, found {actual_start_time}"
@@ -808,24 +839,54 @@ fn validate_target_identity(root_pid: i32, expected_start_time: u64) -> Result<(
     Ok(())
 }
 
-fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String> {
+fn build_file_binding(request: FileBindingRequest, deny_read: bool) -> Result<ApplyPolicy, String> {
     let agent_id = request.agent_id.trim();
     if agent_id.is_empty() || agent_id.len() > 128 {
         return Err("agent_id must contain 1 to 128 characters".into());
     }
-    let path = canonical_policy_file(&request.path).map_err(|error| error.to_string())?;
+    let kind = request.kind.unwrap_or(FileProtectionTargetKind::ExactFile);
+    if !deny_read && kind != FileProtectionTargetKind::ExactFile {
+        return Err("directory_tree targets are only supported for read denial".into());
+    }
+    let tree = kind == FileProtectionTargetKind::DirectoryTree;
+    let path = if tree {
+        canonical_policy_directory(&request.path)
+    } else {
+        canonical_policy_file(&request.path)
+    }
+    .map_err(|error| error.to_string())?;
     let process_start_time =
         read_process_start_time(request.root_pid).map_err(|error| error.to_string())?;
     let binding_id = Uuid::new_v4();
     let path = path
         .to_str()
         .ok_or_else(|| "path must be valid UTF-8".to_string())?;
-    let policy_dsl = format!(
-        "source AGENT = exec \"**\"\n\
+    let file_protection_policy =
+        deny_read.then(|| agentsight_enforcement_protocol::FileProtectionPolicy {
+            version: agentsight_enforcement_protocol::FILE_PROTECTION_POLICY_VERSION,
+            topology_mode:
+                agentsight_enforcement_protocol::FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![agentsight_enforcement_protocol::FileProtectionTarget {
+                path: path.into(),
+                kind,
+                protections: agentsight_enforcement_protocol::FileProtections {
+                    delete: false,
+                    ordinary_write: false,
+                    read: true,
+                },
+                exclusions: vec![],
+            }],
+        });
+    let policy_dsl = if deny_read {
+        String::new()
+    } else {
+        format!(
+            "source AGENT = exec \"**\"\n\
          rule agentsight-file-open:\n\
            block open file \"{path}\" if AGENT\n\
            because \"AgentSight sensitive file policy\"\n"
-    );
+        )
+    };
     Ok(ApplyPolicy {
         binding_id,
         agent_id: agent_id.into(),
@@ -835,10 +896,23 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
             .filter(|value| !value.is_empty()),
         root_pid: request.root_pid,
         process_start_time,
-        policy_id: format!("agentsight-file-open:{binding_id}"),
-        policy_revision: FILE_POLICY_REVISION.into(),
+        policy_id: if tree {
+            format!("agentsight-tree-deny-read:{binding_id}")
+        } else if deny_read {
+            format!("agentsight-file-deny-read:{binding_id}")
+        } else {
+            format!("agentsight-file-open:{binding_id}")
+        },
+        policy_revision: if tree {
+            "agentsight-tree-deny-read-v1".into()
+        } else if deny_read {
+            "agentsight-file-deny-read-v1".into()
+        } else {
+            FILE_POLICY_REVISION.into()
+        },
         policy_dsl,
         policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy,
     })
 }
 
@@ -1767,18 +1841,70 @@ mod tests {
         let path = std::env::temp_dir().join(format!("agentsight-secret-{}", Uuid::new_v4()));
         fs::write(&path, b"fixture").expect("fixture file should exist");
 
-        let binding = build_file_binding(FileBindingRequest {
-            agent_id: " qoder ".into(),
-            session_id: Some(" session-1 ".into()),
-            root_pid: child.id() as i32,
-            path: path.clone(),
-        })
+        let binding = build_file_binding(
+            FileBindingRequest {
+                agent_id: " qoder ".into(),
+                session_id: Some(" session-1 ".into()),
+                root_pid: child.id() as i32,
+                path: path.clone(),
+                deny_read: false,
+                kind: None,
+            },
+            false,
+        )
         .expect("valid request should build");
 
         assert_eq!(binding.agent_id, "qoder");
         assert_eq!(binding.session_id.as_deref(), Some("session-1"));
         assert_eq!(binding.root_pid, child.id() as i32);
         assert!(binding.process_start_time > 0);
+        let denied = build_file_binding(
+            FileBindingRequest {
+                agent_id: "qoder".into(),
+                session_id: None,
+                root_pid: child.id() as i32,
+                path: path.clone(),
+                deny_read: false,
+                kind: None,
+            },
+            true,
+        )
+        .expect("read-denial binding should build a structured policy");
+        assert!(denied.policy_dsl.is_empty());
+        assert!(
+            denied.file_protection_policy.as_ref().unwrap().targets[0]
+                .protections
+                .read
+        );
+        assert!(denied.validate_payload().is_ok());
+        let tree_root = std::env::temp_dir().join(format!("agentsight-tree-{}", Uuid::new_v4()));
+        fs::create_dir(&tree_root).expect("fixture directory should exist");
+        let tree_request = |kind| FileBindingRequest {
+            agent_id: "qoder".into(),
+            session_id: None,
+            root_pid: child.id() as i32,
+            path: tree_root.clone(),
+            deny_read: false,
+            kind: Some(kind),
+        };
+        let tree = build_file_binding(tree_request(FileProtectionTargetKind::DirectoryTree), true)
+            .expect("directory read-denial binding should build");
+        let tree_target = &tree.file_protection_policy.as_ref().unwrap().targets[0];
+        assert_eq!(tree_target.kind, FileProtectionTargetKind::DirectoryTree);
+        assert!(tree_target.protections.read);
+        assert!(!tree_target.protections.delete && !tree_target.protections.ordinary_write);
+        assert!(tree.policy_id.starts_with("agentsight-tree-deny-read:"));
+        assert!(tree.validate_payload().is_ok());
+        assert!(
+            build_file_binding(tree_request(FileProtectionTargetKind::DirectoryTree), false)
+                .is_err(),
+            "the open route must not accept directory trees"
+        );
+        assert!(
+            build_file_binding(tree_request(FileProtectionTargetKind::ExactFile), true).is_err(),
+            "an exact-file read target must not name a directory"
+        );
+        fs::remove_dir(&tree_root).expect("fixture directory should be removed");
         assert_eq!(binding.policy_revision, "agentsight-file-open-v1");
         assert!(binding.policy_id.starts_with("agentsight-file-open:"));
         assert!(binding.policy_dsl.contains("source AGENT = exec \"**\""));
@@ -1911,6 +2037,7 @@ mod tests {
             policy_revision: "7".into(),
             policy_dsl: "fixture".into(),
             policy_mode: Some(PolicyMode::Audit),
+            file_protection_policy: None,
         };
         let active = Binding {
             request: request.clone(),
@@ -1964,12 +2091,17 @@ mod tests {
     fn rejects_unsafe_file_binding_inputs() {
         let directory = std::env::temp_dir();
         assert!(
-            build_file_binding(FileBindingRequest {
-                agent_id: "".into(),
-                session_id: None,
-                root_pid: 1,
-                path: directory,
-            })
+            build_file_binding(
+                FileBindingRequest {
+                    agent_id: "".into(),
+                    session_id: None,
+                    root_pid: 1,
+                    path: directory,
+                    deny_read: false,
+                    kind: None,
+                },
+                false
+            )
             .is_err()
         );
 
@@ -1983,12 +2115,17 @@ mod tests {
         fs::write(&path, b"fixture").expect("fixture file should exist");
 
         assert!(
-            build_file_binding(FileBindingRequest {
-                agent_id: "qoder".into(),
-                session_id: None,
-                root_pid: std::process::id() as i32,
-                path: path.clone(),
-            })
+            build_file_binding(
+                FileBindingRequest {
+                    agent_id: "qoder".into(),
+                    session_id: None,
+                    root_pid: std::process::id() as i32,
+                    path: path.clone(),
+                    deny_read: false,
+                    kind: None,
+                },
+                false
+            )
             .is_err()
         );
 
@@ -2031,12 +2168,17 @@ mod tests {
             assert_eq!(actual_process_name, expected_process_name);
 
             assert!(
-                build_file_binding(FileBindingRequest {
-                    agent_id: "qoder".into(),
-                    session_id: None,
-                    root_pid: child.id() as i32,
-                    path: path.clone(),
-                })
+                build_file_binding(
+                    FileBindingRequest {
+                        agent_id: "qoder".into(),
+                        session_id: None,
+                        root_pid: child.id() as i32,
+                        path: path.clone(),
+                        deny_read: false,
+                        kind: None,
+                    },
+                    false
+                )
                 .is_err()
             );
 
@@ -2180,6 +2322,7 @@ mod tests {
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         };
         let binding = public_binding(Binding {
             request,

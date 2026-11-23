@@ -33,6 +33,16 @@ def numeric_measurement(value: float | bool | None) -> float | None:
         return None
 
 
+def bounded_measurement(
+    value: float | bool | None, *, maximum: float | None = None
+) -> float | None:
+    """Read a nonnegative measurement, optionally bounded by its physical domain."""
+    number = numeric_measurement(value)
+    if number is None or number < 0 or (maximum is not None and number > maximum):
+        return None
+    return number
+
+
 def lifecycle_gate(value: float | bool | None) -> bool | None:
     """Return an exact boolean lifecycle value.
 
@@ -46,47 +56,45 @@ def evaluate(
     summary: dict[str, Any], thresholds: dict[str, float], scenario: str = "capacity"
 ) -> dict[str, Any]:
     """Apply frozen capacity gates, treating missing measurements as inconclusive."""
-    input_qps = numeric_measurement(metric(summary, "input_qps"))
-    effective_qps = numeric_measurement(metric(summary, "effective_qps"))
+    input_qps = bounded_measurement(metric(summary, "input_qps"))
+    effective_qps = bounded_measurement(metric(summary, "effective_qps"))
     checks = {
         "throughput_ratio": (
             (
                 effective_qps / input_qps
-                if input_qps is not None
-                and input_qps > 0
-                and effective_qps is not None
+                if input_qps is not None and input_qps > 0 and effective_qps is not None
                 else None
             ),
             ">=",
             thresholds["min_throughput_ratio"],
         ),
         "http_success_rate": (
-            numeric_measurement(metric(summary, "http_success_rate")),
+            bounded_measurement(metric(summary, "http_success_rate"), maximum=1),
             ">=",
             thresholds["min_http_success_rate"],
         ),
         "trace_completeness": (
-            numeric_measurement(metric(summary, "trace_completeness")),
+            bounded_measurement(metric(summary, "trace_completeness"), maximum=1),
             ">=",
             thresholds["min_trace_completeness"],
         ),
         "token_accuracy": (
-            numeric_measurement(metric(summary, "token_accuracy")),
+            bounded_measurement(metric(summary, "token_accuracy"), maximum=1),
             ">=",
             thresholds["min_token_accuracy"],
         ),
         "latency_p99_ms": (
-            numeric_measurement(metric(summary, "latency_ms", "p99")),
+            bounded_measurement(metric(summary, "latency_ms", "p99")),
             "<=",
             thresholds["max_p99_ms"],
         ),
         "drop_rate": (
-            numeric_measurement(metric(summary, "drop_rate")),
+            bounded_measurement(metric(summary, "drop_rate"), maximum=1),
             "<=",
             thresholds["max_drop_rate"],
         ),
         "rss_max_mb": (
-            numeric_measurement(metric(summary, "resources", "rss_mb", "max")),
+            bounded_measurement(metric(summary, "resources", "rss_mb", "max")),
             "<=",
             thresholds["max_rss_mb"],
         ),

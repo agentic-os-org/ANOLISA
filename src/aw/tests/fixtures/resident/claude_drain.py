@@ -83,6 +83,13 @@ async def run(root, source):
                 receiving = asyncio.create_task(consume())
                 try:
                     await asyncio.wait_for(entered.wait(), 10)
+                    # Interrupt caller cleanup after AW adoption; cancelling an
+                    # in-flight scope RPC intentionally invalidates that scope.
+                    async with asyncio.timeout(5):
+                        while not ledger.active or any(
+                            entry.phase != "adopted" for entry in ledger.active.values()
+                        ):
+                            await asyncio.sleep(0.01)
                     await asyncio.wait_for(client.interrupt(), 5)
                     await asyncio.wait_for(cleaning.wait(), 5)
                     await asyncio.wait_for(draining.wait(), 5)

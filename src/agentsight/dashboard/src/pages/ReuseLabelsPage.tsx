@@ -157,12 +157,23 @@ export const ReuseLabelsPage: React.FC = () => {
     [rows],
   );
 
-  /** Replaces one row in place, so a decision does not reorder the list under
-   * the reader's cursor. */
+  /** Keep matching rows in place, and remove decisions outside the current
+   * queue from both the list and its selection. */
   const replaceRow = (updated: SessionLabelView) => {
+    const matches = (!labelFilterRef.current || updated.effective_label === labelFilterRef.current)
+      && (!stateFilterRef.current || updated.confirm_state === stateFilterRef.current);
     setRows((current) =>
-      current.map((row) => (row.session_id === updated.session_id ? updated : row)),
+      current.flatMap((row) => row.session_id === updated.session_id
+        ? (matches ? [updated] : []) : [row]),
     );
+    if (!matches) {
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(updated.session_id);
+        return next;
+      });
+      setSelectMode('');
+    }
   };
 
   const runAction = async (key: string, action: () => Promise<void>) => {

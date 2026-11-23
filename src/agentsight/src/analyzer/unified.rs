@@ -35,8 +35,8 @@ use crate::tokenizer::get_global_tokenizer;
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
 use super::token::merge_usage_from_event;
 use super::{
-    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
-    TokenRecord, TokenUsage,
+    AnalysisResult, AuditAnalyzer, HttpContext, HttpRecord, MessageParser, ParsedApiMessage,
+    TokenParser, TokenRecord, TokenUsage,
 };
 
 /// Token count result for request messages
@@ -80,6 +80,43 @@ fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> 
         messages.insert(0, serde_json::json!({"role": "system", "content": system}));
     }
     Some(messages)
+}
+
+/// Estimate input tokens for callers that retain their own empty-message semantics.
+///
+/// A failed render has no formatted output to carry the tool definitions, so the
+/// raw fallback must count them alongside the messages.
+pub(crate) fn estimate_input_tokens(
+    mut messages: Vec<serde_json::Value>,
+    tools_json: Option<Vec<serde_json::Value>>,
+    tokenizer: &LlmTokenizer,
+) -> usize {
+    for msg in &mut messages {
+        if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            for tool_call in tool_calls {
+                if let Some(function) = tool_call.get_mut("function") {
+                    if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                            function["arguments"] = parsed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
+        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+        Err(e) => {
+            log::warn!("Failed to apply chat template: {e}, falling back to raw count");
+            messages
+                .iter()
+                .chain(tools_json.iter().flatten())
+                .filter_map(|value| serde_json::to_string(value).ok())
+                .map(|text| tokenizer.count(&text).unwrap_or(0))
+                .sum()
+        }
+    }
 }
 
 /// Count tokens in a request JSON using the provided tokenizer and chat template
@@ -456,7 +493,8 @@ impl Analyzer {
     ///
     /// Returns `AnalysisResult::Audit` for LLM calls and process actions,
     /// `AnalysisResult::Token` for SSE streams containing token usage,
-    /// or `AnalysisResult::Message` for parsed LLM API request/response bodies.
+    /// `AnalysisResult::Message` for parsed LLM API request/response bodies,
+    /// and `AnalysisResult::HttpContext` carrying the raw HTTP exchange.
     pub fn analyze_aggregated(&self, result: &AggregatedResult) -> Vec<AnalysisResult> {
         if let Some(metadata) = context::resource_abandonment(result) {
             return metadata;
@@ -479,43 +517,66 @@ impl Analyzer {
             return results;
         }
 
-        // 2. Token analysis - extract from SSE events or non-streaming JSON body
-        let mut token_result = match result {
-            AggregatedResult::SseComplete(pair) => {
-                let pid = pair.request.source_event.pid;
-                let comm = pair.request.source_event.comm_str();
-                self.extract_token_from_sse(
-                    &pair.response.sse_events,
-                    pair.response.sse_continuation_bytes.as_deref(),
-                    pid,
-                    &comm,
-                )
+        let is_responses_sub_endpoint = match result {
+            AggregatedResult::HttpComplete(pair) | AggregatedResult::SseComplete(pair) => {
+                crate::parser::llm::is_responses_sub_endpoint(&pair.request.path)
             }
-            AggregatedResult::ResponseOnly { response, .. } if !response.sse_events.is_empty() => {
-                let pid = response.pid();
-                let comm = response.parsed.source_event.comm_str();
-                self.extract_token_from_sse(
-                    &response.sse_events,
-                    response.sse_continuation_bytes.as_deref(),
-                    pid,
-                    &comm,
-                )
-            }
-            AggregatedResult::HttpComplete(pair) => {
-                let pid = pair.request.source_event.pid;
-                let comm = pair.request.source_event.comm_str();
-                self.extract_token_from_json_body(
-                    pair.response.parsed.json_body().as_ref(),
-                    pid,
-                    &comm,
-                )
+            AggregatedResult::RequestOnly { request, .. } => {
+                crate::parser::llm::is_responses_sub_endpoint(&request.path)
             }
             AggregatedResult::Http2StreamComplete(stream) => {
-                let pid = stream.pid();
-                let comm = stream.comm();
-                self.extract_token_from_json_body(stream.response_json_body().as_ref(), pid, &comm)
+                crate::parser::llm::is_responses_sub_endpoint(&stream.path())
             }
-            _ => None,
+            _ => false,
+        };
+
+        // 2. Token analysis - extract from SSE events or non-streaming JSON body
+        let mut token_result = if is_responses_sub_endpoint {
+            None
+        } else {
+            match result {
+                AggregatedResult::SseComplete(pair) => {
+                    let pid = pair.request.source_event.pid;
+                    let comm = pair.request.source_event.comm_str();
+                    self.extract_token_from_sse(
+                        &pair.response.sse_events,
+                        pair.response.sse_continuation_bytes.as_deref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::ResponseOnly { response, .. }
+                    if !response.sse_events.is_empty() =>
+                {
+                    let pid = response.pid();
+                    let comm = response.parsed.source_event.comm_str();
+                    self.extract_token_from_sse(
+                        &response.sse_events,
+                        response.sse_continuation_bytes.as_deref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::HttpComplete(pair) => {
+                    let pid = pair.request.source_event.pid;
+                    let comm = pair.request.source_event.comm_str();
+                    self.extract_token_from_json_body(
+                        pair.response.parsed.json_body().as_ref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::Http2StreamComplete(stream) => {
+                    let pid = stream.pid();
+                    let comm = stream.comm();
+                    self.extract_token_from_json_body(
+                        stream.response_json_body().as_ref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                _ => None,
+            }
         };
 
         // 5. Token consumption analysis - breakdown by message role
@@ -531,7 +592,7 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
-            if token_result.is_none() && http_record.is_sse {
+            if !is_responses_sub_endpoint && token_result.is_none() && http_record.is_sse {
                 if let Some(body) = &http_record.response_body {
                     // An HTTP/2 SSE body has no `ParsedSseEvent`s, so the h2
                     // path never reaches `extract_token_from_sse`; this array is
@@ -597,12 +658,19 @@ impl Analyzer {
                 results.push(AnalysisResult::Audit(audit_record));
             }
 
-            results.push(AnalysisResult::Http(http_record));
+            // The legacy path has always persisted every HTTP record, so the
+            // context keeps its pre-serialized bodies and raw retention.
+            results.push(AnalysisResult::HttpContext(HttpContext::new(
+                true,
+                http_record,
+                None,
+                None,
+            )));
         }
 
         if let Some(record) = token_result {
             results.push(AnalysisResult::Token(record));
-        } else {
+        } else if !is_responses_sub_endpoint {
             // Fallback: manually compute tokens using get_global_tokenizer
             if let Some(record) = self.compute_tokens_manually(result) {
                 results.push(AnalysisResult::Token(record));
@@ -635,12 +703,16 @@ impl Analyzer {
         }
         match result {
             AggregatedResult::HttpComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 let resp_body = pair.response.parsed.json_body();
                 self.analyze_message(&pair.request.path, req_body.as_ref(), resp_body.as_ref())
             }
             AggregatedResult::SseComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 // For SSE responses, parse from SSE events
                 self.analyze_message_with_sse(
                     &pair.request.path,
@@ -649,7 +721,9 @@ impl Analyzer {
                 )
             }
             AggregatedResult::RequestOnly { request, .. } => {
-                let req_body = request.json_body();
+                let req_body = request
+                    .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()));
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
             AggregatedResult::Http2StreamComplete(stream) => {
@@ -657,7 +731,9 @@ impl Analyzer {
                 if path.is_empty() {
                     return None;
                 }
-                let req_body = stream.request_json_body();
+                let req_body = stream.request_json_body().or_else(|| {
+                    MessageParser::decode_request_body(&path, stream.request_body_str()?.as_bytes())
+                });
                 if let Some(sse_json) = stream.response_sse_json_array() {
                     return self
                         .message
@@ -925,64 +1001,14 @@ impl Analyzer {
         // Extract provider from path
         let provider = manual_provider_from_path(path);
 
-        // Count input tokens from request messages using chat template. The
-        // same parser as `count_request_tokens`: OpenAI chat completions,
-        // Responses `input` + `instructions`, DashScope native `input.messages`
-        // and the Anthropic top-level `system`.
-        let messages_owned: Option<Vec<serde_json::Value>> = request_messages(request_json_ref);
-
-        let input_tokens = if let Some(messages) = messages_owned {
-            if messages.is_empty() {
-                0
-            } else {
-                // Clone messages for in-place modification of tool_calls.arguments
-                let mut msgs = messages;
-
-                // Process tool_calls arguments: parse JSON string to object in place
-                for msg in msgs.iter_mut() {
-                    if let Some(tool_calls) =
-                        msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
-                    {
-                        for tool_call in tool_calls.iter_mut() {
-                            if let Some(func) = tool_call.get_mut("function") {
-                                if let Some(args) = func.get("arguments") {
-                                    if let Some(args_str) = args.as_str() {
-                                        // Try to parse arguments string as JSON object
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<serde_json::Value>(args_str)
-                                        {
-                                            func["arguments"] = parsed;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> =
-                    crate::parser::llm::extract_tools_view(request_json_ref);
-                let tools_slice = tools_json.as_deref();
-
-                // Apply chat template with tools to get the actual prompt sent to LLM
-                match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
-                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
-                    Err(e) => {
-                        log::warn!("Failed to apply chat template: {e}, falling back to raw count");
-                        // Fallback: count raw message content
-                        let mut total = 0u64;
-                        for msg in &msgs {
-                            if let Ok(msg_str) = serde_json::to_string(msg) {
-                                total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
-                            }
-                        }
-                        total
-                    }
-                }
-            }
-        } else {
-            0
+        let input_tokens = match request_messages(request_json_ref) {
+            Some(messages) if messages.is_empty() => 0,
+            Some(messages) => estimate_input_tokens(
+                messages,
+                crate::parser::llm::extract_tools_view(request_json_ref),
+                &tokenizer,
+            ) as u64,
+            None => 0,
         };
 
         // Count output tokens from SSE events content. The shared merge counts
@@ -1039,6 +1065,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1088,6 +1115,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1129,6 +1157,7 @@ impl Analyzer {
             AggregatedResult::RequestOnly { request, .. } => {
                 let request_body = request
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = request.body();
@@ -1157,7 +1186,10 @@ impl Analyzer {
                 })
             }
             AggregatedResult::Http2StreamComplete(stream) => {
-                let request_body = stream.request_body_str();
+                let request_body = stream.request_body_str().map(|body| {
+                    MessageParser::decode_request_body(&stream.path(), body.as_bytes())
+                        .map_or(body, |value| value.to_string())
+                });
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)
@@ -1754,10 +1786,42 @@ mod tests {
             .analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream))
             .into_iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord")
+            .expect("Analyzer must emit HttpContext")
+    }
+
+    #[test]
+    fn http2_responses_retrieval_sse_usage_is_not_counted_again() {
+        let analyzer = Analyzer::new();
+        let stored_response = serde_json::json!({
+            "id": "resp_h2",
+            "object": "response",
+            "model": "gpt-4o",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 8,
+                "total_tokens": 28,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }
+        });
+        let stream =
+            build_sse_http2_stream("/v1/responses/resp_h2", br#"{}"#, Some(&stored_response));
+
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+        assert!(
+            results.iter().all(|result| !matches!(
+                result,
+                AnalysisResult::Token(_) | AnalysisResult::Audit(_)
+            )),
+            "HTTP/2 SSE recovery must not turn a retrieval into a second call: {results:?}"
+        );
+        assert!(results.iter().any(|result| matches!(
+            result,
+            AnalysisResult::HttpContext(context) if context.http.path == "/v1/responses/resp_h2"
+        )));
     }
 
     /// An HTTP/2 SSE stream splits Anthropic usage across events and ends with a
@@ -1857,10 +1921,10 @@ mod tests {
         let http = results
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord");
+            .expect("Analyzer must emit HttpContext");
         assert_eq!(http.first_output_timestamp_ns, Some(1_000_000_000));
         assert!(http.is_sse);
 
@@ -1937,10 +2001,10 @@ mod tests {
         let http = results
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord");
+            .expect("Analyzer must emit HttpContext");
         assert!(http.is_sse, "native SSE response must be observed");
 
         let builder = GenAIBuilder::new();

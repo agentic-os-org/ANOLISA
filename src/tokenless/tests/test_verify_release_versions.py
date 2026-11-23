@@ -36,10 +36,13 @@ every environment that stamps templates has; they skip without it.
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -72,10 +75,7 @@ def _requirements_text(path_version: str, wheel_version: str) -> str:
 class TestReferencedWheelVersions(unittest.TestCase):
     def test_prerelease_version_captured_whole(self):
         """A pre-release version must not be truncated at the first dash."""
-        text = (
-            "anolisa_tokenless-0.9.0-rc.1-cp311-cp311-"
-            "manylinux_2_28_x86_64.whl\n"
-        )
+        text = "anolisa_tokenless-0.9.0-rc.1-cp311-cp311-" "manylinux_2_28_x86_64.whl\n"
         self.assertEqual(_referenced_wheel_versions(text), {"0.9.0-rc.1"})
 
     def test_normalized_prerelease_version(self):
@@ -143,9 +143,7 @@ class TestRequirementsReferenceContract(unittest.TestCase):
 
     def test_prerelease_release_with_normalized_wheel_filename_accepted(self):
         """Contract (a): Cargo 0.9.0-rc.1 plus wheel filename 0.9.0rc1."""
-        self.assert_accepts(
-            "0.9.0-rc.1", _requirements_text("0.9.0-rc.1", "0.9.0rc1")
-        )
+        self.assert_accepts("0.9.0-rc.1", _requirements_text("0.9.0-rc.1", "0.9.0rc1"))
 
     def test_unnormalized_wheel_filename_rejected(self):
         """Contract (b): a wheel filename keeping 0.9.0-rc.1 is pip-rejected."""
@@ -168,9 +166,7 @@ class TestRequirementsReferenceContract(unittest.TestCase):
         self.assert_accepts("9.8.7", _requirements_text("9.8.7", "9.8.7"))
 
     def test_unstamped_template_rejected(self):
-        self.assert_rejects(
-            "0.9.0-rc.1", "anolisa-tokenless @ .../v@VERSION@/...\n", "@VERSION@"
-        )
+        self.assert_rejects("0.9.0-rc.1", "anolisa-tokenless @ .../v@VERSION@/...\n", "@VERSION@")
 
     def test_normalized_release_tag_rejected(self):
         """The normalized Python spelling must not leak into the tag path.
@@ -233,7 +229,7 @@ class TestWheelVersionHelper(unittest.TestCase):
         self.assertIn("usage:", result.stderr)
 
 
-def _stamp_templates(version: str) -> tuple:
+def _stamp_templates(version: str, *, generate_contract: bool = True) -> tuple:
     """Copy the production stamping inputs to a temp root and run make over them.
 
     The copy is the real Makefile, every real `*.in` template and the real
@@ -245,10 +241,7 @@ def _stamp_templates(version: str) -> tuple:
     """
     root = Path(tempfile.mkdtemp(prefix="tokenless-wheel-version-test."))
     shutil.copy2(_COMPONENT / "Makefile", root / "Makefile")
-    (root / "packaging" / "raw").mkdir(parents=True)
-    for script in (_COMPONENT / "packaging" / "raw").iterdir():
-        if script.is_file():
-            shutil.copy2(script, root / "packaging" / "raw" / script.name)
+    shutil.copytree(_COMPONENT / "packaging", root / "packaging")
     for template in _COMPONENT.rglob("*.in"):
         relative = template.relative_to(_COMPONENT)
         if relative.parts[0] == "target":
@@ -257,12 +250,14 @@ def _stamp_templates(version: str) -> tuple:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(template, target)
     (root / "Cargo.toml").write_text(
-        "[workspace]\nmembers = []\n\n[workspace.package]\n"
-        f'version = "{version}"\n',
+        "[workspace]\nmembers = []\n\n[workspace.package]\n" f'version = "{version}"\n',
         encoding="utf-8",
     )
+    targets = ["stamp-adapter-templates"]
+    if generate_contract:
+        targets.append("generate-component-contract")
     result = subprocess.run(
-        ["make", "-B", "stamp-adapter-templates"],
+        ["make", "-B", *targets],
         cwd=root,
         capture_output=True,
         text=True,
@@ -277,7 +272,7 @@ def _verify_stamped_tree(root: Path) -> subprocess.CompletedProcess:
             sys.executable,
             "packaging/raw/verify-release.py",
             ".",
-            ".anolisa/component.toml",
+            "target/packaging/anolisa/component.toml",
         ],
         cwd=root,
         capture_output=True,
@@ -295,6 +290,85 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
     form pip rejects"), so no prerelease raw package could be assembled.
     """
 
+    def test_generated_raw_contract_keeps_legacy_compatibility(self) -> None:
+        root, stamped = _stamp_templates("9.8.7")
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        with (root / "target/packaging/anolisa/component.toml").open("rb") as stream:
+            contract = tomllib.load(stream)
+        self.assertEqual(contract["component"]["contract"]["min_anolisa_version"], "0.3.21")
+        self.assertEqual(len(contract["adapters"]), 11)
+        for adapter in contract["adapters"]:
+            self.assertNotIn("backends", adapter, adapter["framework"])
+        self.assertEqual(_verify_stamped_tree(root).returncode, 0)
+
+    def test_plugin_stamping_does_not_generate_anolisa_contract(self) -> None:
+        root, stamped = _stamp_templates("9.8.7", generate_contract=False)
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        self.assertFalse((root / ".anolisa").exists())
+        self.assertFalse((root / "target/packaging/anolisa/component.toml").exists())
+        plugin_build = subprocess.run(
+            ["make", "-n", "build-openclaw-plugin", "build-dsh-plugin"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(plugin_build.returncode, 0, plugin_build.stderr)
+        self.assertNotIn("Generating component contract", plugin_build.stdout)
+        generated = subprocess.run(
+            ["make", "generate-component-contract"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        self.assertEqual(_verify_stamped_tree(root).returncode, 0)
+
+    def test_source_archive_regenerates_contract_from_packaging_template(self) -> None:
+        fixture, stamped = _stamp_templates("9.8.7", generate_contract=False)
+        self.addCleanup(shutil.rmtree, fixture, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        work = Path(tempfile.mkdtemp(prefix="tokenless-contract-source-"))
+        self.addCleanup(shutil.rmtree, work, True)
+        root = work / "tokenless"
+        shutil.move(fixture, root)
+        tools = work / "tools"
+        tools.mkdir()
+        for command, argument in (("cargo", "clean"), ("just", "setup-rtk")):
+            script = tools / command
+            script.write_text(f'#!/bin/sh\n[ "$1" = "{argument}" ] || exit 93\n')
+            script.chmod(0o755)
+        exported = subprocess.run(
+            ["make", "dist"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
+        )
+        self.assertEqual(exported.returncode, 0, exported.stdout + exported.stderr)
+        extracted = work / "extracted"
+        extracted.mkdir()
+        with tarfile.open(work / "tokenless-9.8.7.tar.gz") as archive:
+            names = set(archive.getnames())
+            self.assertIn("tokenless/packaging/anolisa/component.toml.in", names)
+            self.assertIn("tokenless/Makefile", names)
+            self.assertNotIn("tokenless/.anolisa/component.toml", names)
+            self.assertNotIn("tokenless/target/packaging/anolisa/component.toml", names)
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(extracted, filter="data")
+            else:
+                archive.extractall(extracted)
+        source = extracted / "tokenless"
+        generated = subprocess.run(
+            ["make", "generate-component-contract"],
+            cwd=source,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        self.assertEqual(_verify_stamped_tree(source).returncode, 0)
+
     def assert_stamps_and_verifies(self, version: str, wheel: str) -> str:
         root, stamped = _stamp_templates(version)
         self.addCleanup(shutil.rmtree, root, True)
@@ -304,9 +378,7 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
             f"make -B stamp-adapter-templates failed for {version}: "
             f"{stamped.stdout[-400:]} {stamped.stderr[-400:]}",
         )
-        requirements = (
-            root / "adapters" / "tokenless" / "qwenpaw" / "requirements.txt"
-        )
+        requirements = root / "adapters" / "tokenless" / "qwenpaw" / "requirements.txt"
         text = requirements.read_text(encoding="utf-8")
         self.assertIn(f"/tokenless/v{version}/", text)
         self.assertIn(f"anolisa_tokenless-{wheel}-cp311-abi3-", text)
@@ -334,6 +406,76 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
         text = self.assert_stamps_and_verifies("9.8.7", "9.8.7")
         self.assertEqual(text.count("/tokenless/v9.8.7/"), 4)
         self.assertEqual(text.count("anolisa_tokenless-9.8.7-cp311-abi3-"), 4)
+
+
+@unittest.skipUnless(shutil.which("make"), "the stamping pipeline needs make")
+class TestDecodeGuard(unittest.TestCase):
+    """An unreadable release artifact is reported with its path, not a traceback.
+
+    `verify_versions` reads `Cargo.toml`, the install contract and the stamped
+    QwenPaw requirements through `read_text(encoding="utf-8")`. Decoding happens
+    before parsing, so a non-UTF-8 file raises `UnicodeDecodeError`, which is a
+    `ValueError` and therefore invisible to an `except OSError` guard: the gate
+    exited with a traceback instead of `ERROR: cannot read <path>: ...`. The
+    message has to name the file, because `str(UnicodeDecodeError)` carries only
+    a byte position.
+    """
+
+    VERSION = "9.8.7"
+
+    def stamped_tree(self) -> Path:
+        root, stamped = _stamp_templates(self.VERSION)
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        return root
+
+    def contract_of(self, root: Path) -> Path:
+        return root / "target/packaging/anolisa/component.toml"
+
+    def test_a_readable_tree_is_still_verified(self) -> None:
+        """Control: the harness reaches the reads the other cases corrupt."""
+        root = self.stamped_tree()
+        self.assertEqual(_module.verify_versions(root, self.contract_of(root)), self.VERSION)
+
+    def test_undecodable_cargo_manifest_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        (root / "Cargo.toml").write_bytes(b"[workspace.package]\nversion = \"9.\xff\"\n")
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, self.contract_of(root))
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("Cargo.toml", message)
+        self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
+
+    def test_undecodable_contract_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        contract = self.contract_of(root)
+        contract.write_bytes(b'[component]\nname = "tokenless\xff"\n')
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, contract)
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("component.toml", message)
+
+    def test_undecodable_requirements_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        requirements = root / "adapters/tokenless/qwenpaw/requirements.txt"
+        requirements.write_bytes(b"anolisa-tokenless @ \xff\n")
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, self.contract_of(root))
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("requirements.txt", message)
+
+    def test_undecodable_contract_is_reported_by_the_frameworks_reader(self) -> None:
+        root = self.stamped_tree()
+        contract = self.contract_of(root)
+        contract.write_bytes(b'[component]\nname = "tokenless\xff"\n')
+        with self.assertRaises(SystemExit) as raised:
+            _module.read_contract_frameworks(contract)
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("component.toml", message)
 
 
 if __name__ == "__main__":

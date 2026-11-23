@@ -1,12 +1,35 @@
 //! Offline Provider and event-step editing with validated, atomic publication.
 //! No operation starts an Agent, discovers capabilities or executes a Hook.
 
+mod native;
 mod publication;
 
 use crate::{require, Error, Result};
 use publication::Snapshot;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+
+/// Reads exact configuration bytes under the editor's owned-file trust boundary.
+///
+/// This preserves the file, path, ACL and snapshot checks of
+/// [`ConfigurationEditor::open`] without parsing or rewriting the document.
+///
+/// # Errors
+/// Rejects unsupported deployment filesystems, unsafe paths, oversized files and concurrent changes.
+pub fn read_configuration_bytes(path: &Path) -> Result<Vec<u8>> {
+    publication::deployment_bytes(path)
+}
+
+/// Loads a validated document under the same private-file rules as `aw config show`.
+///
+/// # Errors
+/// Rejects unsafe paths, concurrent changes and invalid configuration.
+pub fn read_configuration(path: &Path) -> Result<aw_config::Configuration> {
+    let snapshot = publication::read(path)?;
+    aw_config::Validator::new()
+        .and_then(|validator| validator.parse(&snapshot.bytes))
+        .map_err(configuration_error)
+}
 
 /// A validated configuration snapshot and its unpublished edits.
 ///

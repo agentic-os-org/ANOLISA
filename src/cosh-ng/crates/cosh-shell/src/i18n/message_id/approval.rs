@@ -219,3 +219,15 @@ macro_rules! approval_trust_catalog_ids {
         );
     };
 }
+
+// Trailing segment: appended after all existing segments so every
+// pre-existing MessageId discriminant stays stable.
+macro_rules! approval_git_repo_config_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalRiskPhraseGitRepoConfigExecution,
+        );
+    };
+}

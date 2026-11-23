@@ -4,7 +4,8 @@
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
 代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
-存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
+存储。安全扫描本地运行，无 Token 消耗；可选的 Intent 提案使用云模型，可能产生费用。
+适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
@@ -12,6 +13,21 @@
 **AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa)，当前状态为 **Aligned**。
 
 AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
+
+Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- command`，
+按明确的文件和网络权限在本地执行，无需 daemon。`--permissions` 接受原有 OS permission JSON
+或 Cedar 源码；Cedar 会转换为进程树共用的粗粒度权限。`PermissionInput` 和 Cosh sandbox Hook
+使用相同输入生成每次 PDP 权限申请。权限格式、运行要求与隔离边界见
+[Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
+`asc-pep-runtime::PepRuntime` 接入策略授权，daemon 默认启用授权并读取 PAP 管理的
+Cedar 策略；适用策略集为空时拒绝请求。Policy 更新成功后，后续授权请求使用新版本。
+Cosh 通过 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 接入这条流程，使用原生审批界面和
+已安装的默认权限模板。所有已接入的 `shell` / `run_shell_command` 调用，包括普通
+Python 脚本和含 `sudo` 的原始命令，均经过授权。开关默认关闭；配置、权限边界和失败
+处理见 Sandbox 指南。
+设置 `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` 并提供明确的 Cedar
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 预设，可按每次原始命令和 cwd 生成权限
+申请。候选不更新 PAP；澄清、生成失败和转换失败均阻断执行。
 
 ## 背景
 
@@ -35,7 +51,7 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Skill Ledger** | 基于 Ed25519 签名的 Skill 完整性账本，仅追加版本链 | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent 生命周期事件记录、会话复盘报告、交互式审查 TUI | `agent-sec-cli observability` |
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
-| **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
+| **Sandbox** | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） | `agent-sec-cli sandbox run` |
 
 V2 源码构建会将 `agent-sec-daemon` 作为 host-level
 `agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的
@@ -43,7 +59,10 @@ CLI 命令与集成 capability surface。
 
 ## V2 SkillSec 与 Policy CLI
 
-Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
+使用 `agent-sec-cli skillsec status` 查看状态，或运行 `agent-sec-cli skillsec --help`。
+旧命令 `skill-ledger` 保留为行为一致的兼容别名；现有 Hook 能力 ID、环境变量及存储数据保持不变。
+
+Rust V2 核心通过 `agent-sec-cli skillsec` 命令提供 **SkillSec**：本地扫描、系统密钥签名、版本历史、
 人工决策、回滚及 SkillFS 激活由一个 root daemon 统一处理。所有本地用户均可管理已启用的默认目录、
 管理员配置范围或已认证 SkillFS 挂载内的 Skill。daemon 启动后自动授权并在后台扫描系统默认目录
 及所有本地账户 HOME 下的标准 Skill 目录，这些位置无需用户配置。`enableDefaultSkillDirs: false`
@@ -73,14 +92,49 @@ Rust V2 客户端在发送请求前校验连接对端的内核 peer UID 为 0。
 daemon 自己拥有的叶目录权限会先修复为 `0700`。
 两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
 详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
-PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
+PolicyTemplate 是包含通用规则的可复用策略；PEP Translator 对原生 JSON 支持文件删除 block 规则。
+Policy create/update 命令缺省直接读取 Cedar 原文，并携带精确 schema 引用完成准入校验和源码保存；
+`--language json` 保留原生 JSON 模板和 Cedar 源码封装；
+Cedar `forbid` 删除/普通写入限制已接入翻译与部署。原生 JSON 文件策略请求及保存快照保持
+原有格式。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
+
+**兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
+assignment。请更新脚本，使用 `--pid`、`--process-name`、`--executable` 或 `--cmdline-arg`
+选择目标进程；最后一种 selector 通过完整命令行参数识别由解释器承载的进程。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
 [上下文示例与日志限制](v2/README.md#native-opentelemetry-tracing)。
+
+`agent-sec-cli intent propose` 将可组合的读取、具体写操作、程序执行和全网络规则
+生成未批准的 Cedar 候选。命令只接收 `--task` 与 `--ttl`：不采集工作目录或附件路径，
+程序也不追加任何允许或禁止，模型写出的策略就是全部授权。在 daemon 环境启用
+`ASC_INTENT_ENABLED=true` 并配置 `DASHSCOPE_API_KEY`；任务正文发送给云模型，
+不读取也不发送文件正文。模型从 draft v1 直接写出原生 Cedar（不含逐字段 evidence），
+Rust 解析并校验，不改写其语义。纯禁止不补允许，无法表达的限制明确拒绝。
+CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼容。
+候选不会批准、安装或执行策略。详见
+[Intent 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent从任务生成待审候选)。
+
+源码中的 V2 API `intent.propose_command` 面向 hook 集成，接收 `command` 和 `cwd`，
+返回 Cedar 候选或澄清原因；CLI 通过 `agent-sec-cli intent propose-command` 暴露该接口。
+两者都不更新 base policy、不映射 OS 权限，也不执行命令；
+可选的 Cosh 动态 Hook 将候选与明确的运行预设合并，沿用已有 PDP/sandbox 生命周期。详见
+[单次命令 Cedar API](docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)。
+
+`agent-sec-cli intent init` 从显式规则在本地生成经过校验的 Cedar，
+无需 daemon、模型或网络：
+
+```bash
+agent-sec-cli intent init --deny-network
+agent-sec-cli intent init --allow-read '/data/**' --allow-write '/data/out/**' --deny-network
+```
+
+输出是未批准的预览：forbid 优先于 permit，未被 permit 列出的一切默认拒绝。详见
+[Intent init 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent-init从显式规则本地生成-cedar)。
 
 ## 安全防护架构
 
@@ -142,7 +196,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
 ├── docs/design/               # 设计文档
 ├── tests/                     # 单元测试、集成测试、打包测试、端到端测试
-├── .anolisa/component.toml    # ANOLISA 组件契约
+├── packaging/anolisa/         # ANOLISA 组件契约
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM 打包 spec 模板
@@ -219,7 +273,7 @@ agent-sec-cli --version
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -232,15 +286,23 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、GnuPG 和
-`jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
-集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
-要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
-然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
-`--ignore-deps` 跳过检查。
+仓库脚本会为构建准备 Node.js 22 或更高版本和系统 `python3`，再在安装到宿主前
+检查声明的运行时依赖。后端只支持 system 文件安装；使用 `--no-install` 可以只编译
+而不安装。已准备好依赖的主机可以用 `--ignore-deps` 跳过依赖准备与检查。
+Agent hook 使用宿主的 `python3`；Qoder 插件安装器要求 Python >= 3.11, < 3.12。
 
-源码构建不会在 ANOLISA 状态中注册组件。请使用已安装的集成脚本，不要继续执行
-`anolisa adapter enable`。具体入口见
+默认源码布局使用 `PREFIX=/usr/local`、`AWPRJ=anolisa`：程序安装到
+`/usr/local/bin`，框架资源安装到
+`/usr/local/share/anolisa/agent-sec-core/adapters`。文件安装不会启动 daemon，也不
+修改框架的用户配置。已有源码安装请先按
+[旧 systemd unit 迁移](../../docs/user-guide/zh/agent-sec-core/index.md#迁移旧源码安装的服务)
+保留管理员设置并处理旧 `/etc/systemd/system` 覆盖项。部署接入前，再按
+[daemon 启动与健康检查](../../docs/user-guide/zh/agent-sec-core/index.md#启动源码安装的-daemon)
+完成验证。自定义 prefix 和 namespace 时，在仓库根目录运行
+`make -C src/agent-sec-core layout`，以输出的布局为准。
+
+源码构建不会在 ANOLISA 状态中注册组件。请使用框架的用户运行已安装的接入脚本，
+不要加 `sudo`，也不要继续执行 `anolisa adapter enable`。具体入口见
 [源码集成入口](../../docs/user-guide/zh/agent-sec-core/index.md#源码集成入口)。
 
 通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。
@@ -361,13 +423,16 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
-V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.1.2"`；
 覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
 正式版 OpenClaw `>=2026.5.12` 在模型运行入口扫描，记录为 `source=model_input`；
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
+
+`test` 等测试标记只有匹配完整词时才会降低置信度；`latest 13812345678` 保留手机号 finding，
+`test-only` 仍沿用原有的测试上下文处理。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 
@@ -513,7 +578,11 @@ agent-sec-cli observability schema
 
 ## Security Events
 
-安全事件会同时写入 JSONL 与 SQLite 存储。使用 `agent-sec-cli events` 查询该存储：
+安全事件会同时写入 JSONL 与 SQLite 存储。
+
+如果追加中断后 JSONL 文件末尾缺少换行，写入器会保留原有字节，并用换行将下一条记录隔开。它不会修复损坏记录，也不会更改独立的 SQLite 存储。
+
+使用 `agent-sec-cli events` 查询该存储。
 
 V2 查询使用 UDS peer UID：普通用户读取自身事件，root 读取全部 UID。
 使用原始 session ID 筛选；root 返回所有 UID 下匹配该 ID 的事件。

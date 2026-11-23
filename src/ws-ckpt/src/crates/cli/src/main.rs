@@ -9,20 +9,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
-    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
-    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
-    RecoveryPreview, Request, Response, SnapshotListItem, WorkspacePolicyJson,
-    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+    decode_payload, default_auto_cleanup_keep, encode_frame, escape_terminal_text,
+    load_config_file, load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention,
+    DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
+    SnapshotListItem, StatusReport, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
+    DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
     GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, MAX_LIST_PAGE_ITEMS, OVERVIEW_JSON_SCHEMA,
 };
 
 use std::cell::RefCell;
 
+mod rollback;
+
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
 const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
 const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
+/// Watcher-health sidecar timeout for `status`: interactive, and the
+/// daemon-side computation is a lock walk over registered workspaces, so
+/// it gets more headroom than the post-command advisory poll.
+const WATCHER_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const DEFAULT_LIST_PAGE_LIMIT: u32 = 1000;
 
 // JSON output buffer: handlers stage their payload here so main() can wrap
@@ -79,13 +85,14 @@ struct ConfigArgs {
     #[arg(long, conflicts_with_all = ["enable_auto_cleanup", "disable_auto_cleanup", "auto_cleanup_keep", "auto_cleanup_interval", "health_check_interval", "img_size", "img_max_percent"])]
     reset: bool,
 
-    /// Set health check interval in seconds (0 disables the scheduler loop).
+    /// Set periodic health diagnostic interval in seconds (0 disables diagnostics).
+    /// The advisory cache still refreshes at the default interval when set to 0.
     /// Global-only.
     #[arg(long)]
     health_check_interval: Option<u64>,
 
-    /// Set target image size in GB (image will be grown/shrunk at next daemon restart).
-    /// Global-only.
+    /// Set target image size in GiB, minimum 5 (image will be grown/shrunk at
+    /// next daemon restart). Global-only.
     #[arg(long)]
     img_size: Option<u64>,
 
@@ -123,7 +130,7 @@ struct ConfigArgs {
 enum Commands {
     /// Start the ws-ckpt daemon (manual mode)
     Daemon {
-        /// btrfs filesystem mount point
+        /// BtrfsLoop image mount point. BtrfsBase uses backend.btrfs-base.btrfs_mount.
         #[arg(long, default_value = DEFAULT_MOUNT_PATH)]
         mount_path: PathBuf,
 
@@ -167,7 +174,7 @@ enum Commands {
 
     /// Rollback workspace to a specific snapshot
     Rollback {
-        /// Workspace path or ID (absolute path, relative path, or workspace ID)
+        /// Workspace path or ID. Guarded modes use the registered path, except --result uses the workspace ID
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
@@ -182,6 +189,22 @@ enum Commands {
         /// Preview file changes without executing rollback
         #[arg(long)]
         preview: bool,
+
+        /// Use an exact guarded preview, confirmed execution, or durable result lookup
+        #[arg(long, requires = "json", conflicts_with = "num_ancestors")]
+        guarded: bool,
+
+        /// Return a single versioned JSON result
+        #[arg(long)]
+        json: bool,
+
+        /// Check the guarded protocol for a registered workspace path
+        #[arg(long, requires = "guarded", conflicts_with_all = ["to", "preview", "result"])]
+        check: bool,
+
+        /// Query guarded evidence for a workspace ID and the operation read from stdin
+        #[arg(long, requires = "guarded", conflicts_with_all = ["to", "preview"])]
+        result: bool,
     },
 
     /// Delete a specific snapshot
@@ -235,6 +258,10 @@ enum Commands {
         /// Target snapshot (ID or name); omit to diff against current workspace
         #[arg(long, short = 't', value_parser = snapshot_id_value_parser())]
         to: Option<String>,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 
     /// Show daemon and workspace status
@@ -329,6 +356,7 @@ enum PluginRuntime {
 async fn main() {
     let cli = Cli::parse();
     let is_daemon = matches!(cli.command, Commands::Daemon { .. });
+    let rollback_json = matches!(cli.command, Commands::Rollback { json: true, .. });
     let start = std::time::Instant::now();
 
     match run(cli).await {
@@ -341,12 +369,17 @@ async fn main() {
                         map.insert("elapsed_secs".to_string(), serde_json::json!(elapsed));
                     }
                     println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                    if rollback_json && !rollback::succeeded(&data) {
+                        process::exit(1);
+                    }
                 } else {
                     println!("Completed in {:.3}s", elapsed);
                 }
             }
             // Post-command soft advisory: best-effort, silent on failure.
-            print_health_advisory_if_needed().await;
+            if !rollback_json {
+                print_health_advisory_if_needed().await;
+            }
         }
         Err(e) => {
             let elapsed = start.elapsed().as_secs_f64();
@@ -371,6 +404,56 @@ async fn main() {
     }
 }
 
+fn load_daemon_config(
+    config_path: &std::path::Path,
+    mount_path: PathBuf,
+    socket: PathBuf,
+    log_level: String,
+) -> Result<DaemonConfig> {
+    let file_config = load_config_file(config_path).with_context(|| {
+        format!(
+            "Failed to load {}; refusing default backend selection",
+            config_path.display()
+        )
+    })?;
+    Ok(DaemonConfig {
+        mount_path,
+        socket_path: socket,
+        log_level,
+        auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
+        auto_cleanup_keep: file_config
+            .auto_cleanup_keep
+            .clone()
+            .unwrap_or_else(default_auto_cleanup_keep),
+        auto_cleanup_interval_secs: file_config
+            .auto_cleanup_interval_secs
+            .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS),
+        health_check_interval_secs: file_config
+            .health_check_interval_secs
+            .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
+        backend_type: file_config.backend.r#type.clone(),
+        btrfs_mount: file_config
+            .backend
+            .btrfs_base
+            .as_ref()
+            .and_then(|b| b.btrfs_mount.clone()),
+        img_size: file_config
+            .backend
+            .btrfs_loop
+            .as_ref()
+            .and_then(|b| b.img_size)
+            .unwrap_or(DEFAULT_IMG_SIZE_GB),
+        img_max_percent: file_config
+            .backend
+            .btrfs_loop
+            .as_ref()
+            .and_then(|b| b.img_max_percent)
+            .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0),
+        min_free_bytes: 512 * 1024 * 1024,
+        min_free_percent: 1.0,
+    })
+}
+
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Daemon {
@@ -378,46 +461,12 @@ async fn run(cli: Cli) -> Result<()> {
             socket,
             log_level,
         } => {
-            // Load auto-cleanup settings from config file
-            let file_config = load_config_file(std::path::Path::new(CONFIG_FILE_PATH))
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "Warning: failed to load {}: {}, using defaults",
-                        CONFIG_FILE_PATH, e
-                    );
-                    Default::default()
-                });
-            let config = DaemonConfig {
+            let config = load_daemon_config(
+                std::path::Path::new(CONFIG_FILE_PATH),
                 mount_path,
-                socket_path: socket,
+                socket,
                 log_level,
-                auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
-                auto_cleanup_keep: file_config
-                    .auto_cleanup_keep
-                    .clone()
-                    .unwrap_or_else(default_auto_cleanup_keep),
-                auto_cleanup_interval_secs: file_config
-                    .auto_cleanup_interval_secs
-                    .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS),
-                health_check_interval_secs: file_config
-                    .health_check_interval_secs
-                    .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
-                backend_type: file_config.backend.r#type.clone(),
-                img_size: file_config
-                    .backend
-                    .btrfs_loop
-                    .as_ref()
-                    .and_then(|b| b.img_size)
-                    .unwrap_or(DEFAULT_IMG_SIZE_GB),
-                img_max_percent: file_config
-                    .backend
-                    .btrfs_loop
-                    .as_ref()
-                    .and_then(|b| b.img_max_percent)
-                    .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0),
-                min_free_bytes: 512 * 1024 * 1024,
-                min_free_percent: 1.0,
-            };
+            )?;
             ws_ckpt_daemon::run_daemon(config).await?;
         }
         Commands::Init { workspace } => {
@@ -472,7 +521,33 @@ async fn run(cli: Cli) -> Result<()> {
             to,
             num_ancestors,
             preview,
+            guarded,
+            json,
+            check,
+            result,
         } => {
+            if json {
+                let mode = if check {
+                    rollback::Mode::Check
+                } else if result {
+                    rollback::Mode::Result
+                } else if preview {
+                    rollback::Mode::Preview
+                } else {
+                    rollback::Mode::Execute
+                };
+                emit_json(
+                    rollback::run_json(
+                        resolve_workspace_arg(&workspace),
+                        to,
+                        num_ancestors,
+                        guarded,
+                        mode,
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
             if to.is_none() && num_ancestors.is_none() {
                 anyhow::bail!("either --snapshot/-s or --num-ancestors/-n must be specified");
             }
@@ -549,6 +624,7 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             from,
             to,
+            format,
         } => {
             let request = Request::Diff {
                 workspace: resolve_workspace_arg(&workspace),
@@ -557,14 +633,19 @@ async fn run(cli: Cli) -> Result<()> {
             };
 
             let response = send_request_to_daemon(&request).await?;
-            handle_diff_response(response)?;
+            handle_diff_response(response, &format)?;
         }
         Commands::Status { workspace, format } => {
             let request = Request::Status {
                 workspace: workspace.as_deref().map(resolve_workspace_arg),
             };
             let response = send_request_to_daemon(&request).await?;
-            handle_status_response(response, &format)?;
+            // Watcher health rides a sidecar request so the bincode status
+            // layout stays byte-compatible with older daemons and the
+            // cosh-ng mirror (#7592 review). An older daemon fails the
+            // request and the section is simply omitted.
+            let watcher_health = fetch_watcher_health().await;
+            handle_status_response(response, &format, watcher_health)?;
         }
         Commands::Cleanup { workspace, keep } => {
             let request = Request::Cleanup {
@@ -637,17 +718,85 @@ fn generate_auto_id() -> String {
 }
 
 const ADAPTER_RELATIVE_ROOT: &str = "anolisa/adapters/ws-ckpt";
+const STANDALONE_ADAPTER_RELATIVE_ROOT: &str = "ws-ckpt/adapters";
 const SYSTEM_ADAPTER_DATA_DIRS: [&str; 2] = ["/usr/share", "/usr/local/share"];
 
-fn plugin_adapter_roots(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = SYSTEM_ADAPTER_DATA_DIRS
-        .iter()
-        .map(|data_dir| PathBuf::from(data_dir).join(ADAPTER_RELATIVE_ROOT))
-        .collect::<Vec<_>>();
+fn executable_install_prefix(path: &Path) -> Option<&Path> {
+    let bin = path.parent()?;
+    if bin.file_name()? == "bin" {
+        bin.parent()
+    } else {
+        None
+    }
+}
+
+fn plugin_adapter_roots(
+    home: Option<&Path>,
+    executable: Option<&Path>,
+    target_dir: Option<&Path>,
+    system_data_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(prefix) = target_dir {
+        for relative in [ADAPTER_RELATIVE_ROOT, STANDALONE_ADAPTER_RELATIVE_ROOT] {
+            roots.push(prefix.join("share").join(relative));
+        }
+    }
+    if let Some(prefix) = executable.and_then(executable_install_prefix) {
+        // Prefer the independent resources installed alongside this binary.
+        let root = prefix.join("share").join(STANDALONE_ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots.extend(
+        system_data_dirs
+            .iter()
+            .map(|data_dir| data_dir.join(ADAPTER_RELATIVE_ROOT)),
+    );
     if let Some(home) = home {
         roots.push(home.join(".local/share").join(ADAPTER_RELATIVE_ROOT));
     }
+    // The binary prefix permits namespaced installations outside /usr/local.
+    if let Some(prefix) = executable.and_then(executable_install_prefix) {
+        let root = prefix.join("share").join(ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    for data_dir in system_data_dirs {
+        let root = data_dir.join(STANDALONE_ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots
+}
+
+fn plugin_script_prefix<'a>(adapter_dir: &Path, executable: Option<&'a Path>) -> Option<&'a Path> {
+    let prefix = executable.and_then(executable_install_prefix)?;
+    let adapter_root = adapter_dir.parent()?;
+    let standard_prefix = prefix == Path::new("/usr") || prefix == Path::new("/usr/local");
+    if adapter_root == prefix.join("share").join(STANDALONE_ADAPTER_RELATIVE_ROOT)
+        || (!standard_prefix && adapter_root == prefix.join("share").join(ADAPTER_RELATIVE_ROOT))
+    {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn plugin_script_command(script: &Path, adapter_dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("bash");
+    command.arg(script);
+    if std::env::var_os("ANOLISA_TARGET_DIR").is_none() {
+        let executable = std::env::current_exe().ok();
+        if let Some(prefix) = plugin_script_prefix(adapter_dir, executable.as_deref()) {
+            // The adapter scripts use this prefix to find its plugin and skill payloads.
+            command.env("ANOLISA_TARGET_DIR", prefix);
+        }
+    }
+    command
 }
 
 fn resolve_plugin_adapter_dir(
@@ -686,7 +835,17 @@ fn handle_plugin(action: PluginAction) -> Result<()> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let adapter_roots = plugin_adapter_roots(home.as_deref());
+    let executable = std::env::current_exe().ok();
+    let target_dir = std::env::var_os("ANOLISA_TARGET_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let system_data_dirs = SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from);
+    let adapter_roots = plugin_adapter_roots(
+        home.as_deref(),
+        executable.as_deref(),
+        target_dir.as_deref(),
+        &system_data_dirs,
+    );
     handle_plugin_with_adapter_roots(action, &adapter_roots)
 }
 
@@ -731,8 +890,7 @@ fn handle_plugin_with_adapter_roots(action: PluginAction, adapter_roots: &[PathB
 
     if let PluginAction::Install { .. } = &action {
         let detect_script = adapter_dir.join(detect_script);
-        let detect_code = std::process::Command::new("bash")
-            .arg(&detect_script)
+        let detect_code = plugin_script_command(&detect_script, &adapter_dir)
             .status()
             .with_context(|| format!("failed to run {}", detect_script.display()))?
             .code()
@@ -755,8 +913,7 @@ fn handle_plugin_with_adapter_roots(action: PluginAction, adapter_roots: &[PathB
     }
 
     let script_path = adapter_dir.join(&action_script);
-    let status = std::process::Command::new("bash")
-        .arg(&script_path)
+    let status = plugin_script_command(&script_path, &adapter_dir)
         .status()
         .with_context(|| format!("failed to run {}", script_path.display()))?;
 
@@ -801,59 +958,105 @@ fn resolve_workspace_arg(workspace: &str) -> String {
 
 /// Send a request to the daemon via Unix Socket and receive a response
 async fn send_request_to_daemon(request: &Request) -> Result<Response> {
-    let socket_path = get_socket_path();
-
-    let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-        match e.kind() {
-            std::io::ErrorKind::NotFound => {
+    match send_request(request, configured_peer_uid()?).await {
+        Ok(response) => Ok(response),
+        Err(IpcFailure::Connect(error)) => match error.kind() {
+            io::ErrorKind::NotFound => {
                 eprintln!("\x1b[31m\u{2717} Daemon is not running.\x1b[0m");
                 eprintln!("  Start the systemd service `ws-ckpt`, or its daemon container.");
                 process::exit(1);
             }
-            std::io::ErrorKind::ConnectionRefused => {
+            io::ErrorKind::ConnectionRefused => {
                 eprintln!(
                     "\x1b[33m\u{26a0} Daemon is starting up. Please retry in a few seconds.\x1b[0m"
                 );
                 process::exit(1);
             }
-            _ => {}
-        }
-        anyhow::anyhow!(
-            "Failed to connect to ws-ckpt daemon ({}): {}",
-            socket_path.display(),
-            e
-        )
-    })?;
+            _ => Err(IpcFailure::Connect(error).into_error()),
+        },
+        Err(error) => Err(error.into_error()),
+    }
+}
 
-    // Send request
-    let frame = encode_frame(request)?;
+enum IpcFailure {
+    Connect(io::Error),
+    BeforeSend(anyhow::Error),
+    PossiblyApplied(anyhow::Error),
+}
+
+impl IpcFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Connect(error) => anyhow::Error::new(error).context(format!(
+                "Failed to connect to ws-ckpt daemon ({})",
+                get_socket_path().display()
+            )),
+            Self::BeforeSend(error) | Self::PossiblyApplied(error) => error,
+        }
+    }
+}
+
+fn effective_uid() -> Result<u32> {
+    // The credentials on a local socket pair describe the process that created it.
+    let (stream, _peer) = UnixStream::pair()?;
+    Ok(stream.peer_cred()?.uid())
+}
+
+fn configured_peer_uid() -> Result<Option<u32>> {
+    (std::env::var("WS_CKPT_REQUIRE_TRUSTED_PEER").as_deref() == Ok("1"))
+        .then(effective_uid)
+        .transpose()
+}
+
+fn verify_peer(stream: &UnixStream, caller_uid: u32) -> Result<()> {
+    let uid = stream
+        .peer_cred()
+        .context("read ws-ckpt peer credentials")?
+        .uid();
+    anyhow::ensure!(
+        uid == 0 || uid == caller_uid,
+        "untrusted ws-ckpt socket peer UID {uid}"
+    );
+    Ok(())
+}
+
+async fn send_request(
+    request: &Request,
+    trusted_peer_uid: Option<u32>,
+) -> std::result::Result<Response, IpcFailure> {
+    let mut stream = UnixStream::connect(get_socket_path())
+        .await
+        .map_err(IpcFailure::Connect)?;
+    if let Some(uid) = trusted_peer_uid {
+        verify_peer(&stream, uid).map_err(IpcFailure::BeforeSend)?;
+    }
+
+    let frame = encode_frame(request).map_err(|error| IpcFailure::BeforeSend(error.into()))?;
+    // write_all can fail after transmitting part of the request.
+    exchange_frame(&mut stream, &frame)
+        .await
+        .map_err(IpcFailure::PossiblyApplied)
+}
+
+async fn exchange_frame(stream: &mut UnixStream, frame: &[u8]) -> Result<Response> {
     stream
-        .write_all(&frame)
+        .write_all(frame)
         .await
         .context("failed to send request")?;
-
-    // Read response: 4-byte LE length + payload
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
+    let len = stream
+        .read_u32_le()
         .await
         .context("failed to read response length")?;
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        anyhow::bail!(
-            "Response frame too large: {} bytes (max {})",
-            len,
-            MAX_FRAME_SIZE
-        );
-    }
-    let mut payload = vec![0u8; len as usize];
+    anyhow::ensure!(
+        len <= MAX_FRAME_SIZE,
+        "Response frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
+    );
+    let mut payload = vec![0; len as usize];
     stream
         .read_exact(&mut payload)
         .await
         .context("failed to read response payload")?;
-
-    let response: Response = decode_payload(&payload)?;
-    Ok(response)
+    Ok(decode_payload(&payload)?)
 }
 
 /// Best-effort pre-view reload. `None` = global only; `Some(ws)` = global + that ws.
@@ -882,39 +1085,9 @@ async fn silent_reload(req: &Request) {
 
 /// Silent IPC: errors bubble up so the caller can ignore them; never `process::exit`.
 async fn try_send_request_to_daemon_silent(request: &Request) -> Result<Response> {
-    let socket_path = get_socket_path();
-
-    let mut stream = UnixStream::connect(&socket_path)
+    send_request(request, configured_peer_uid()?)
         .await
-        .context("connect to daemon (silent)")?;
-
-    let frame = encode_frame(request)?;
-    stream
-        .write_all(&frame)
-        .await
-        .context("send request (silent)")?;
-
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .context("read response length (silent)")?;
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        anyhow::bail!(
-            "Response frame too large: {} bytes (max {})",
-            len,
-            MAX_FRAME_SIZE
-        );
-    }
-    let mut payload = vec![0u8; len as usize];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .context("read response payload (silent)")?;
-
-    let response: Response = decode_payload(&payload)?;
-    Ok(response)
+        .map_err(IpcFailure::into_error)
 }
 
 /// Emit a best-effort advisory to stderr when any threshold is crossed.
@@ -983,26 +1156,39 @@ async fn print_health_advisory_if_needed() {
 async fn handle_response(response: Response, original_request: &Request) -> Result<()> {
     match response {
         Response::InitOk { ws_id } => {
-            println!("\x1b[32m✓ Workspace initialized: {}\x1b[0m", ws_id);
+            println!(
+                "\x1b[32m✓ Workspace initialized: {}\x1b[0m",
+                escape_terminal_text(&ws_id)
+            );
         }
         Response::CheckpointOk { snapshot_id } => {
-            println!("\x1b[32m✓ Checkpoint created: {}\x1b[0m", snapshot_id);
+            println!(
+                "\x1b[32m✓ Checkpoint created: {}\x1b[0m",
+                escape_terminal_text(&snapshot_id)
+            );
         }
         Response::RollbackOk { from, to } => {
             println!(
                 "\x1b[32m✓ Rolled back workspace {} to snapshot: {}\x1b[0m",
-                from, to
+                escape_terminal_text(&from),
+                escape_terminal_text(&to)
             );
         }
         Response::DeleteOk { target } => {
-            println!("\x1b[32m✓ Deleted: {}\x1b[0m", target);
+            println!(
+                "\x1b[32m✓ Deleted: {}\x1b[0m",
+                escape_terminal_text(&target)
+            );
         }
         Response::RecoverWithWarning { workspace, warning } => {
-            eprintln!("WARNING: {}", warning);
-            println!("Workspace recovered: {}", workspace);
+            print_recovery_warning(&warning);
+            println!("Workspace recovered: {}", escape_terminal_text(&workspace));
         }
         Response::RecoverOk { workspace } => {
-            println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+            println!(
+                "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                escape_terminal_text(&workspace)
+            );
         }
         Response::Error {
             code: ErrorCode::ConfirmationRequired,
@@ -1137,13 +1323,6 @@ fn snapshot_item_json(item: &SnapshotListItem) -> Result<serde_json::Value> {
     }
 }
 
-fn list_item_workspace(item: &SnapshotListItem) -> &str {
-    match item {
-        SnapshotListItem::Full(entry) => &entry.workspace,
-        SnapshotListItem::Summary(summary) => &summary.workspace,
-    }
-}
-
 fn render_snapshot_list(
     snapshots: Vec<SnapshotListItem>,
     next_cursor: Option<String>,
@@ -1166,10 +1345,18 @@ fn render_snapshot_list(
         return Ok(());
     }
 
+    write_snapshot_table(&mut io::stdout().lock(), &snapshots, next_cursor.as_deref())
+}
+
+fn write_snapshot_table(
+    writer: &mut impl Write,
+    snapshots: &[SnapshotListItem],
+    next_cursor: Option<&str>,
+) -> Result<()> {
     if snapshots.is_empty() {
-        println!("No snapshots found.");
+        writeln!(writer, "No snapshots found.")?;
         if let Some(cursor) = next_cursor {
-            println!("Next cursor: {cursor}");
+            writeln!(writer, "Next cursor: {cursor}")?;
         }
         return Ok(());
     }
@@ -1188,63 +1375,68 @@ fn render_snapshot_list(
     let hdr_date_owned = format!("CREATED (UTC{local_offset})");
     let hdr_date = hdr_date_owned.as_str();
     let hdr_msg = "MESSAGE";
-    let id_len = |item: &SnapshotListItem| match item {
-        SnapshotListItem::Full(entry) => {
-            entry.id.len() + usize::from(entry.meta.missing) * " [MISSING]".len()
-        }
-        SnapshotListItem::Summary(summary) => {
-            summary.id.len()
-                + usize::from(summary.missing) * " [MISSING]".len()
-                + " [SUMMARY]".len()
-        }
-    };
-    let w_ws = snapshots
+    let rows: Vec<_> = snapshots
         .iter()
-        .map(|item| list_item_workspace(item).len())
+        .map(|item| {
+            let (workspace, id, created_at, pinned, message) = match item {
+                SnapshotListItem::Full(entry) => (
+                    entry.workspace.as_str(),
+                    if entry.meta.missing {
+                        format!("{} [MISSING]", entry.id)
+                    } else {
+                        entry.id.clone()
+                    },
+                    entry.meta.created_at,
+                    entry.meta.pinned,
+                    entry.meta.message.as_deref().unwrap_or("-").to_string(),
+                ),
+                SnapshotListItem::Summary(summary) => (
+                    summary.workspace.as_str(),
+                    format!(
+                        "{}{} [SUMMARY]",
+                        summary.id,
+                        if summary.missing { " [MISSING]" } else { "" }
+                    ),
+                    summary.created_at,
+                    summary.pinned,
+                    format!("details omitted: {}", summary.omitted_fields.join(", ")),
+                ),
+            };
+            (
+                escape_terminal_text(workspace),
+                escape_terminal_text(&id),
+                created_at,
+                pinned,
+                escape_terminal_text(&message),
+            )
+        })
+        .collect();
+    let w_ws = rows
+        .iter()
+        .map(|row| row.0.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_ws.len());
-    let w_snap = snapshots
+    let w_snap = rows
         .iter()
-        .map(id_len)
+        .map(|row| row.1.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_snap.len());
     let w_date = 19_usize.max(hdr_date.len());
-    println!(
+    writeln!(
+        writer,
         "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
         hdr_ws, hdr_snap, hdr_date, hdr_msg,
-    );
-    println!(
+    )?;
+    writeln!(
+        writer,
         "{}",
         "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
-    );
-    for item in &snapshots {
-        let (workspace, id, created_at, pinned, message) = match item {
-            SnapshotListItem::Full(entry) => (
-                entry.workspace.as_str(),
-                if entry.meta.missing {
-                    format!("{} [MISSING]", entry.id)
-                } else {
-                    entry.id.clone()
-                },
-                entry.meta.created_at,
-                entry.meta.pinned,
-                entry.meta.message.as_deref().unwrap_or("-").to_string(),
-            ),
-            SnapshotListItem::Summary(summary) => (
-                summary.workspace.as_str(),
-                format!(
-                    "{}{} [SUMMARY]",
-                    summary.id,
-                    if summary.missing { " [MISSING]" } else { "" }
-                ),
-                summary.created_at,
-                summary.pinned,
-                format!("details omitted: {}", summary.omitted_fields.join(", ")),
-            ),
-        };
-        println!(
+    )?;
+    for (workspace, id, created_at, pinned, message) in &rows {
+        writeln!(
+            writer,
             "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
             workspace,
             id,
@@ -1253,11 +1445,14 @@ fn render_snapshot_list(
                 .format("%Y-%m-%d %H:%M:%S"),
             pinned,
             message,
-        );
+        )?;
     }
-    println!("\nTotal: {} snapshot(s)", snapshots.len());
+    writeln!(writer, "\nTotal: {} snapshot(s)", snapshots.len())?;
     if let Some(cursor) = next_cursor {
-        println!("More snapshots are available. Next cursor: {cursor}");
+        writeln!(
+            writer,
+            "More snapshots are available. Next cursor: {cursor}"
+        )?;
     }
     Ok(())
 }
@@ -1274,18 +1469,20 @@ fn handle_list_page_response(response: Response, format: &str, explicit_page: bo
 }
 
 /// Handle DiffOk response, formatting diff entries.
-fn handle_diff_response(response: Response) -> Result<()> {
+fn handle_diff_response(response: Response, format: &str) -> Result<()> {
     match response {
         Response::DiffOk { changes } => {
-            print_diff_entries(&changes);
+            if format == "json" {
+                emit_json(serde_json::json!({ "changes": changes }));
+            } else {
+                print_diff_entries(&changes);
+            }
         }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
             process::exit(1);
         }
-        _ => {
-            eprintln!("\x1b[33mUnexpected response type\x1b[0m");
-        }
+        _ => anyhow::bail!("unexpected response type while reading diff"),
     }
     Ok(())
 }
@@ -1332,35 +1529,93 @@ fn format_diff_entry(entry: &ws_ckpt_common::DiffEntry) -> String {
     let detail = entry
         .detail
         .as_deref()
-        .map(|detail| format!(" ({})", escape_diff_text(detail)))
+        .map(|detail| format!(" ({})", escape_terminal_text(detail)))
         .unwrap_or_default();
     format!(
         "{}  {}{}\x1b[0m",
         marker,
-        escape_diff_text(&entry.path),
+        escape_terminal_text(&entry.path),
         detail
     )
 }
 
-fn escape_diff_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        // Backslashes distinguish literal escape text from encoded controls.
-        if character.is_control() || character == '\\' {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
+fn print_recovery_warning(warning: &str) {
+    if let Some(formatted) = warning.strip_prefix('\n') {
+        eprintln!("WARNING: {formatted}");
+    } else {
+        // Older daemons may interpolate raw paths into the warning.
+        eprintln!("WARNING: {}", escape_terminal_text(warning));
     }
-    escaped
 }
 
 /// Handle StatusOk response, formatting the status report.
-fn handle_status_response(response: Response, format: &str) -> Result<()> {
+/// Fetch watcher health from the daemon. `None` on any error, timeout, or
+/// older daemon (which cannot decode the request and drops the
+/// connection): the caller then omits the section instead of failing
+/// `status`.
+async fn fetch_watcher_health() -> Option<(Vec<String>, u64)> {
+    match tokio::time::timeout(
+        WATCHER_HEALTH_TIMEOUT,
+        try_send_request_to_daemon_silent(&Request::WatcherHealth),
+    )
+    .await
+    {
+        Ok(Ok(Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            watcher_queue_overflows,
+        })) => Some((workspaces_without_watcher, watcher_queue_overflows)),
+        _ => None,
+    }
+}
+
+/// Restrict the global watcher-health sidecar to the workspaces the status
+/// report actually covers.
+///
+/// The sidecar request carries no scope parameter (its shape is
+/// wire-frozen: `Request::WatcherHealth` is a unit variant), so the daemon
+/// answers with every registered workspace's watcher state. A scoped
+/// `status --workspace A` must not import unrelated workspaces' failures:
+/// with healthy A and degraded B it used to list only A under
+/// `workspaces` but B under `workspaces_without_watcher` (#7592 review).
+/// For a global report the filter is the identity — both lists enumerate
+/// the same registered workspaces.
+fn scope_watcher_health_to_report(
+    health: Option<(Vec<String>, u64)>,
+    report: &StatusReport,
+) -> Option<(Vec<String>, u64)> {
+    health.map(|(workspaces_without_watcher, watcher_queue_overflows)| {
+        let scoped: Vec<String> = workspaces_without_watcher
+            .into_iter()
+            .filter(|degraded| report.workspaces.iter().any(|ws| &ws.ws_id == degraded))
+            .collect();
+        (scoped, watcher_queue_overflows)
+    })
+}
+
+/// Handle StatusOk response.
+///
+/// `watcher_health` is the sidecar data from [`fetch_watcher_health`];
+/// `None` means the daemon did not answer it (older daemon or timeout) and
+/// the watcher section is omitted.
+fn handle_status_response(
+    response: Response,
+    format: &str,
+    watcher_health: Option<(Vec<String>, u64)>,
+) -> Result<()> {
     match response {
         Response::StatusOk { report } => {
+            // Scope the global sidecar to the workspaces this report covers
+            // before rendering (#7592 review).
+            let watcher_health = scope_watcher_health_to_report(watcher_health, &report);
             if format == "json" {
-                emit_json(serde_json::to_value(&report)?);
+                let mut value = serde_json::to_value(&report)?;
+                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
+                {
+                    value["workspaces_without_watcher"] =
+                        serde_json::json!(workspaces_without_watcher);
+                    value["watcher_queue_overflows"] = serde_json::json!(watcher_queue_overflows);
+                }
+                emit_json(value);
             } else {
                 println!("\x1b[1mDaemon Status\x1b[0m");
                 println!("  Uptime: {} seconds", report.uptime_secs);
@@ -1376,9 +1631,32 @@ fn handle_status_response(response: Response, format: &str) -> Result<()> {
                     println!("  {:<25} {:<40} SNAPSHOTS", "WORKSPACE", "PATH");
                     println!("  {}", "-".repeat(75));
                     for ws in &report.workspaces {
-                        println!("  {:<25} {:<40} {}", ws.ws_id, ws.path, ws.snapshot_count);
+                        println!(
+                            "  {:<25} {:<40} {}",
+                            escape_terminal_text(&ws.ws_id),
+                            escape_terminal_text(&ws.path),
+                            ws.snapshot_count
+                        );
                     }
                     println!("\n  Total: {} workspace(s)", report.workspaces.len());
+                }
+                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
+                {
+                    if !workspaces_without_watcher.is_empty() {
+                        println!(
+                            "\x1b[33m  Watcher: {} workspace(s) run without a live file \
+                             watcher (change detection degraded): {}\x1b[0m",
+                            workspaces_without_watcher.len(),
+                            escape_terminal_text(&workspaces_without_watcher.join(", "))
+                        );
+                    }
+                    if *watcher_queue_overflows > 0 {
+                        println!(
+                            "\x1b[33m  Watcher: the shared inotify queue overflowed {} \
+                             time(s); dropped events forced quiescence re-checks\x1b[0m",
+                            watcher_queue_overflows
+                        );
+                    }
                 }
             }
         }
@@ -1892,9 +2170,10 @@ async fn handle_global_config_update(
 ) -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
 
-    // Load existing config
-    let mut fc =
-        load_config_file(path).map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
+    // Parse without range validation so this update can repair an
+    // out-of-range value; save_config_file validates the result.
+    let mut fc = load_config_file_unvalidated(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
 
     // Apply updates
     if let Some(interval) = health_check_interval {
@@ -2078,6 +2357,23 @@ fn unlanded_global_settings(
     }
     let saved_loop = saved.backend.btrfs_loop.as_ref();
     let landed_loop = landed.backend.btrfs_loop.as_ref();
+    let saved_mount = saved
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|base| base.btrfs_mount.as_deref());
+    let landed_mount = landed
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|base| base.btrfs_mount.as_deref());
+    if saved_mount != landed_mount {
+        unlanded.push(format!(
+            "backend btrfs_mount: file has {}, daemon has {}",
+            shown(saved_mount.map(|path| path.display())),
+            shown(landed_mount.map(|path| path.display()))
+        ));
+    }
     let (saved_size, landed_size) = (
         saved_loop.and_then(|b| b.img_size),
         landed_loop.and_then(|b| b.img_size),
@@ -2261,11 +2557,11 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             let resp = send_request_to_daemon(&req).await?;
             match resp {
                 Response::RecoverWithWarning { workspace, warning } => {
-                    eprintln!("WARNING: {}", warning);
-                    println!("Workspace recovered: {}", workspace);
+                    print_recovery_warning(&warning);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::RecoverOk { workspace } => {
-                    println!("Workspace recovered: {}", workspace);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::Error { code, message } => {
                     eprintln!(
@@ -2329,11 +2625,14 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         let resp = send_request_to_daemon(&req).await?;
         match resp {
             Response::RecoverWithWarning { workspace, warning } => {
-                eprintln!("WARNING: {}", warning);
-                println!("Workspace recovered: {}", workspace);
+                print_recovery_warning(&warning);
+                println!("Workspace recovered: {}", escape_terminal_text(&workspace));
             }
             Response::RecoverOk { workspace } => {
-                println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+                println!(
+                    "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                    escape_terminal_text(&workspace)
+                );
             }
             Response::Error { code, message } => {
                 eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
@@ -2351,6 +2650,71 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
 
 #[cfg(test)]
 mod tests {
+    struct ConfigFixture(std::path::PathBuf);
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ws-ckpt-daemon-config-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("config.toml"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn daemon_entry_loads_mount_pin_and_preserves_explicit_runtime_arguments() {
+        let temp = ConfigFixture::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, "[backend]\ntype = 'btrfs-base'\n[backend.btrfs-base]\nbtrfs_mount = '/mnt/chosen mount'\n[backend.btrfs-loop]\nimg_size = 16\n").unwrap();
+        let config = super::load_daemon_config(
+            &path,
+            "/loop-override".into(),
+            "/socket-override".into(),
+            "debug".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            config.btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/mnt/chosen mount"))
+        );
+        assert_eq!(config.backend_type, "btrfs-base");
+        assert_eq!(config.mount_path, std::path::Path::new("/loop-override"));
+        assert_eq!(config.socket_path, std::path::Path::new("/socket-override"));
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.img_size, 16);
+    }
+
+    #[test]
+    fn daemon_entry_defaults_only_when_config_is_missing() {
+        let temp = ConfigFixture::new();
+        let path = temp.0.join("config.toml");
+        let load =
+            || super::load_daemon_config(&path, "/loop".into(), "/socket".into(), "info".into());
+        assert!(load().unwrap().btrfs_mount.is_none());
+        for content in [
+            "invalid = [toml",
+            "[backend.btrfs-base]\nbtrfs_mount = 'relative'\n",
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert!(
+                format!("{:#}", load().unwrap_err()).contains("refusing default backend selection")
+            );
+        }
+    }
+
     use super::*;
     use clap::Parser;
 
@@ -2402,6 +2766,61 @@ mod tests {
         assert_eq!(format_diff_entry(&literal), "\x1b[32m+  file\\\\n\x1b[0m");
         assert_eq!(format_diff_entry(&control), "\x1b[32m+  file\\n\x1b[0m");
     }
+
+    fn report_for(ws_ids: &[&str]) -> ws_ckpt_common::StatusReport {
+        ws_ckpt_common::StatusReport {
+            uptime_secs: 1,
+            workspaces: ws_ids
+                .iter()
+                .map(|ws_id| ws_ckpt_common::WorkspaceInfo {
+                    ws_id: (*ws_id).to_string(),
+                    path: format!("/tmp/{ws_id}"),
+                    snapshot_count: 0,
+                })
+                .collect(),
+            fs_total_bytes: 1000,
+            fs_used_bytes: 500,
+        }
+    }
+
+    #[test]
+    fn scoped_status_does_not_import_unrelated_watcher_failures() {
+        // #7592 review: `status --workspace ws-a` reports only ws-a, so a
+        // globally degraded ws-b must not appear under
+        // `workspaces_without_watcher`.
+        let report = report_for(&["ws-a"]);
+        assert_eq!(
+            scope_watcher_health_to_report(Some((vec!["ws-b".to_string()], 2)), &report),
+            Some((vec![], 2)),
+            "unrelated workspaces must be filtered out of the scoped output"
+        );
+        // The scoped workspace's own degradation stays visible...
+        assert_eq!(
+            scope_watcher_health_to_report(
+                Some((vec!["ws-a".to_string(), "ws-b".to_string()], 2)),
+                &report
+            ),
+            Some((vec!["ws-a".to_string()], 2)),
+            "the scoped workspace's own degradation must stay visible"
+        );
+        // ...and a missing sidecar (older daemon) stays missing.
+        assert_eq!(scope_watcher_health_to_report(None, &report), None);
+    }
+
+    #[test]
+    fn global_status_keeps_every_watcher_failure() {
+        // A global report covers every registered workspace, so the filter
+        // must be the identity there.
+        let report = report_for(&["ws-a", "ws-b"]);
+        assert_eq!(
+            scope_watcher_health_to_report(
+                Some((vec!["ws-a".to_string(), "ws-b".to_string()], 1)),
+                &report
+            ),
+            Some((vec!["ws-a".to_string(), "ws-b".to_string()], 1)),
+        );
+    }
+
     fn assert_existing_plugin_install_behavior(
         runtime: PluginRuntime,
         runtime_dir: &str,
@@ -2452,13 +2871,97 @@ mod tests {
     #[test]
     fn plugin_adapter_roots_cover_supported_install_locations() {
         assert_eq!(
-            plugin_adapter_roots(Some(Path::new("/home/test"))),
+            plugin_adapter_roots(
+                Some(Path::new("/home/test")),
+                Some(Path::new("/opt/custom/bin/ws-ckpt")),
+                None,
+                &SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from),
+            ),
             vec![
+                PathBuf::from("/opt/custom/share/ws-ckpt/adapters"),
                 PathBuf::from("/usr/share/anolisa/adapters/ws-ckpt"),
                 PathBuf::from("/usr/local/share/anolisa/adapters/ws-ckpt"),
                 PathBuf::from("/home/test/.local/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/opt/custom/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/usr/share/ws-ckpt/adapters"),
+                PathBuf::from("/usr/local/share/ws-ckpt/adapters"),
             ]
         );
+    }
+
+    #[test]
+    fn plugin_adapter_roots_include_explicit_target_dir() {
+        let roots = plugin_adapter_roots(
+            None,
+            None,
+            Some(Path::new("/opt/custom")),
+            &SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from),
+        );
+        assert_eq!(
+            &roots[..2],
+            &[
+                PathBuf::from("/opt/custom/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/opt/custom/share/ws-ckpt/adapters"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_script_prefix_keeps_standalone_payload_with_the_local_binary() {
+        let executable = Path::new("/usr/local/bin/ws-ckpt");
+        assert_eq!(
+            plugin_script_prefix(
+                Path::new("/usr/local/share/ws-ckpt/adapters/openclaw"),
+                Some(executable),
+            ),
+            Some(Path::new("/usr/local"))
+        );
+        assert_eq!(
+            plugin_script_prefix(
+                Path::new("/usr/local/share/anolisa/adapters/ws-ckpt/openclaw"),
+                Some(executable),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plugin_adapter_resolution_prefers_standalone_and_falls_back_to_anolisa() {
+        let prefix =
+            std::env::temp_dir().join(format!("ws-ckpt-independent-prefix-{}", std::process::id()));
+        let executable = prefix.join("bin/ws-ckpt");
+        let root = prefix.join("share/ws-ckpt/adapters");
+        let runtime = root.join("hermes");
+        let system_data_dir = prefix.join("system/share");
+        let system_runtime = system_data_dir.join(ADAPTER_RELATIVE_ROOT).join("hermes");
+        let _ = std::fs::remove_dir_all(&prefix);
+        for adapter in [&runtime, &system_runtime] {
+            std::fs::create_dir_all(adapter).unwrap();
+            std::fs::write(adapter.join("detect-hermes.sh"), "").unwrap();
+            std::fs::write(adapter.join("install-hermes.sh"), "").unwrap();
+        }
+        let roots = plugin_adapter_roots(None, Some(&executable), None, &[system_data_dir]);
+        let selected = resolve_plugin_adapter_dir(
+            "hermes",
+            &["detect-hermes.sh", "install-hermes.sh"],
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(selected, runtime);
+        assert_eq!(
+            plugin_script_prefix(&selected, Some(&executable)),
+            Some(prefix.as_path())
+        );
+        std::fs::remove_dir_all(&runtime).unwrap();
+        let fallback = resolve_plugin_adapter_dir(
+            "hermes",
+            &["detect-hermes.sh", "install-hermes.sh"],
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(fallback, system_runtime);
+        assert_eq!(plugin_script_prefix(&fallback, Some(&executable)), None);
+        std::fs::remove_dir_all(&prefix).unwrap();
     }
 
     #[test]
@@ -2926,6 +3429,7 @@ mod tests {
                 to,
                 num_ancestors,
                 preview,
+                ..
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to.as_deref(), Some("msg1-step1"));
@@ -2953,6 +3457,7 @@ mod tests {
                 to,
                 num_ancestors,
                 preview,
+                ..
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to, None);
@@ -3292,6 +3797,112 @@ mod tests {
         ));
     }
 
+    fn control_snapshot_items() -> Vec<SnapshotListItem> {
+        let created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        vec![
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}".into(),
+                workspace: "/tmp/工作区\nforged\tpath\\n".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: true,
+                    message: Some("note\r\nforged\t\u{7f}\\n".into()),
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+            SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+                id: "tab\there".into(),
+                workspace: "/tmp/short".into(),
+                created_at,
+                pinned: true,
+                missing: true,
+                omitted_fields: vec!["message\nforged".into()],
+            }),
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "normal".into(),
+                workspace: "/tmp/normal".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: false,
+                    message: None,
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+        ]
+    }
+
+    #[test]
+    fn list_table_escapes_controls_and_aligns_escaped_columns() {
+        let mut output = Vec::new();
+        write_snapshot_table(&mut output, &control_snapshot_items(), Some("next-page")).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.chars().any(|c| c.is_control() && c != '\n'));
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 8, "{output}");
+        assert!(lines[2].contains(r"/tmp/工作区\nforged\tpath\\n"));
+        assert!(lines[2].contains(r"evil\nINJECTED-ROW\t\u{1b}[31m\u{85} [MISSING]"));
+        assert!(lines[2].ends_with(r"note\r\nforged\t\u{7f}\\n"));
+        assert!(lines[3].contains(r"tab\there [MISSING] [SUMMARY]"));
+        assert!(lines[3].ends_with(r"details omitted: message\nforged"));
+        assert!(lines[4].ends_with("false  -"));
+        assert_eq!(lines[6], "Total: 3 snapshot(s)");
+        assert_eq!(
+            lines[7],
+            "More snapshots are available. Next cursor: next-page"
+        );
+
+        let snapshot_column = lines[0].find("SNAPSHOT").unwrap();
+        let date_column = lines[0].find("CREATED").unwrap();
+        for (row, id) in lines[2..5].iter().zip([r"evil\n", r"tab\there", "normal"]) {
+            let snapshot_text: String = row.chars().skip(snapshot_column).collect();
+            assert!(snapshot_text.starts_with(id), "{row}");
+            let date_start = row
+                .find(
+                    &chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                        .unwrap()
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                )
+                .unwrap();
+            assert_eq!(row[..date_start].chars().count(), date_column);
+        }
+    }
+
+    #[test]
+    fn list_json_preserves_control_fields_in_full_and_summary_entries() {
+        for explicit_page in [false, true] {
+            let _ = take_json_output();
+            let snapshots = control_snapshot_items();
+            let expected: Vec<_> = snapshots
+                .iter()
+                .map(|item| snapshot_item_json(item).unwrap())
+                .collect();
+            render_snapshot_list(snapshots, Some("next".into()), "json", explicit_page).unwrap();
+            let output = take_json_output().unwrap();
+            let entries = if explicit_page {
+                assert_eq!(output["next_cursor"], "next");
+                &output["snapshots"]
+            } else {
+                &output
+            };
+            assert_eq!(entries, &serde_json::Value::Array(expected));
+            assert_eq!(entries[0]["id"], "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}");
+            assert_eq!(entries[0]["workspace"], "/tmp/工作区\nforged\tpath\\n");
+            assert_eq!(entries[0]["meta"]["message"], "note\r\nforged\t\u{7f}\\n");
+            assert_eq!(entries[1]["id"], "tab\there");
+            let encoded = serde_json::to_string(&output).unwrap();
+            assert!(!encoded.contains('\n'));
+            assert!(encoded.contains(r"evil\nINJECTED-ROW\t"));
+        }
+    }
+
     #[test]
     fn aggregate_list_combines_pages_into_one_json_array() {
         let _ = take_json_output();
@@ -3477,13 +4088,48 @@ mod tests {
                 workspace,
                 from,
                 to,
+                format,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(from, "msg1-step0");
                 assert_eq!(to, Some("msg2-step0".to_string()));
+                assert_eq!(format, "text");
             }
             _ => panic!("expected Diff"),
         }
+    }
+
+    #[test]
+    fn parse_diff_json_against_live() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Diff { to: None, format, .. } if format == "json"));
+    }
+
+    #[test]
+    fn parse_diff_rejects_invalid_format() {
+        let error = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "jso",
+        ])
+        .err()
+        .expect("invalid diff format must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
@@ -4048,6 +4694,34 @@ mod tests {
             health_check_interval_secs: Some(30),
             ..Default::default()
         };
+        assert!(unlanded_global_settings(&saved, &saved).is_empty());
+    }
+
+    #[test]
+    fn btrfs_pin_only_difference_names_saved_and_daemon_values() {
+        let pin = |path: &str| ws_ckpt_common::FileConfig {
+            backend: ws_ckpt_common::BackendConfig {
+                btrfs_base: Some(ws_ckpt_common::BtrfsBaseConfig {
+                    btrfs_mount: Some(PathBuf::from(path)),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let saved = pin("/data mount");
+        let unset = ws_ckpt_common::FileConfig::default();
+        assert_eq!(
+            unlanded_global_settings(&saved, &unset),
+            ["backend btrfs_mount: file has /data mount, daemon has unset"]
+        );
+        assert_eq!(
+            unlanded_global_settings(&unset, &saved),
+            ["backend btrfs_mount: file has unset, daemon has /data mount"]
+        );
+        assert_eq!(
+            unlanded_global_settings(&saved, &pin("/old")),
+            ["backend btrfs_mount: file has /data mount, daemon has /old"]
+        );
         assert!(unlanded_global_settings(&saved, &saved).is_empty());
     }
 

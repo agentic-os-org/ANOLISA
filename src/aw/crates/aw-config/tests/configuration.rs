@@ -222,7 +222,7 @@ fn references_and_duplicate_step_ids_are_checked_even_in_disabled_steps() {
 }
 
 #[test]
-fn final_guard_must_be_linked_enabled_and_read_only() {
+fn final_guard_may_be_independent_but_linked_guards_must_be_valid() {
     let mut value = example();
     value["spec"]["events"]["security.violation"]["enabled"] = json!(false);
     value["spec"]["events"]["security.violation"]["required"] = json!(false);
@@ -238,7 +238,7 @@ fn final_guard_must_be_linked_enabled_and_read_only() {
         .as_object_mut()
         .unwrap()
         .remove("guard");
-    assert!(parse(&value).is_err());
+    assert!(parse(&value).is_ok());
     value = example();
     value["spec"]["events"]["security.violation"]["steps"][0]["effects"] = json!(["replace_input"]);
     assert!(parse(&value).is_err());
@@ -286,6 +286,9 @@ fn exact_native_selectors_cover_custom_tools_without_regex_semantics() {
         ]),
     ] {
         let mut value = example();
+        for adapter in ["qwenpaw", "agentscope", "hermes", "openclaw"] {
+            value["spec"]["agents"][adapter] = json!({"adapter":adapter,"argv":["/bin/true"]});
+        }
         value["spec"]["events"]["tool.before"]["match"]["tools"] = tools;
         assert!(parse(&value).is_ok());
     }
@@ -682,3 +685,6 @@ fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
     value["spec"]["daemon"]["limits"] = json!({"history_calls":1024});
     assert!(parse(&value).is_err());
 }
+
+#[path = "configuration/submission.rs"]
+mod submission;

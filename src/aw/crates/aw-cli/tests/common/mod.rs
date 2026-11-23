@@ -86,6 +86,7 @@ impl Fixture {
         Operation::Bind {
             target: "target".into(),
             capabilities: Capabilities {
+                failure_actions: Default::default(),
                 adapter: "qoder".into(),
                 version: "fixture-version".into(),
                 entrypoint: "fixture-entrypoint".into(),
@@ -240,6 +241,7 @@ pub fn open(client: &Client, binding: &Binding, value: Value) -> EventHandle {
         client
             .call(
                 Operation::OpenEvent {
+                    result_status: None,
                     instance_id: binding.instance_id.clone(),
                     event: value,
                 },

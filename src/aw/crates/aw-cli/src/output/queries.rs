@@ -43,7 +43,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                                 match installation.scope {
                                     Scope::User => "user",
                                     Scope::System => "system",
-                                    Scope::Unknown => "not recorded",
                                 },
                                 match installation.manager {
                                     Manager::Raw => "AW",
@@ -52,8 +51,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                                 },
                                 match installation.registration {
                                     Registration::Registered => "package database",
-                                    Registration::LegacyUnregistered =>
-                                        "older installation records",
                                 }
                             )?;
                         }
@@ -118,6 +115,5 @@ fn source(value: InventorySource) -> &'static str {
     match value {
         InventorySource::Absent => "no package database",
         InventorySource::Database => "package database",
-        InventorySource::Legacy => "older installation records",
     }
 }

@@ -1,18 +1,31 @@
 //! Stable userspace benchmarks for AgentSight parsing, aggregation, and metrics overhead.
 
+#[cfg(target_os = "linux")]
 use agentsight::ResponseSessionMapper;
+#[cfg(target_os = "linux")]
 use agentsight::aggregator::Aggregator;
+#[cfg(target_os = "linux")]
 use agentsight::analyzer::Analyzer;
+#[cfg(target_os = "linux")]
 use agentsight::event::Event;
+#[cfg(target_os = "linux")]
 use agentsight::genai::GenAIBuilder;
+#[cfg(target_os = "linux")]
 use agentsight::parser::{ParsedMessage, Parser};
+#[cfg(target_os = "linux")]
 use agentsight::probes::sslsniff::SslEvent;
+#[cfg(target_os = "linux")]
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(target_os = "linux")]
 use metrics_exporter_prometheus::PrometheusBuilder;
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
+#[cfg(target_os = "linux")]
 use std::rc::Rc;
 
+#[cfg(target_os = "linux")]
 fn ssl_event(payload: Vec<u8>, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {
     Rc::new(SslEvent {
         source: 0,
@@ -30,6 +43,7 @@ fn ssl_event(payload: Vec<u8>, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn openai_request(payload_bytes: usize) -> Vec<u8> {
     let body = serde_json::json!({
         "model": "benchmark-model",
@@ -45,6 +59,7 @@ fn openai_request(payload_bytes: usize) -> Vec<u8> {
     .into_bytes()
 }
 
+#[cfg(target_os = "linux")]
 fn openai_response() -> Vec<u8> {
     let body = serde_json::json!({
         "id": "benchmark-response",
@@ -65,6 +80,7 @@ fn openai_response() -> Vec<u8> {
     .into_bytes()
 }
 
+#[cfg(target_os = "linux")]
 fn http2_data_frame() -> Vec<u8> {
     let payload = br#"{"delta":"benchmark"}"#;
     let payload_len = payload.len();
@@ -84,6 +100,7 @@ fn http2_data_frame() -> Vec<u8> {
     frame
 }
 
+#[cfg(target_os = "linux")]
 fn benchmark_parser(criterion: &mut Criterion) {
     let parser = Parser::new();
     let http1_request = ssl_event(openai_request(4096), 1, 1_000_000_000);
@@ -151,6 +168,7 @@ fn benchmark_parser(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(target_os = "linux")]
 struct PipelineInputs<'a> {
     parser: &'a Parser,
     analyzer: &'a Analyzer,
@@ -160,6 +178,7 @@ struct PipelineInputs<'a> {
     response: &'a SslEvent,
 }
 
+#[cfg(target_os = "linux")]
 fn run_userspace_pipeline(
     inputs: &PipelineInputs<'_>,
     aggregator: &mut Aggregator,
@@ -188,6 +207,7 @@ fn run_userspace_pipeline(
         .sum()
 }
 
+#[cfg(target_os = "linux")]
 fn bench_pipeline(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     name: &str,
@@ -208,6 +228,7 @@ fn bench_pipeline(
     });
 }
 
+#[cfg(target_os = "linux")]
 fn benchmark_userspace_pipeline(criterion: &mut Criterion) {
     let parser = Parser::new();
     let analyzer = Analyzer::new();
@@ -263,6 +284,7 @@ fn benchmark_userspace_pipeline(criterion: &mut Criterion) {
     println!("\nAgentSight pipeline metrics:\n{snapshot}");
 }
 
+#[cfg(target_os = "linux")]
 fn emit_noop_metrics() {
     metrics::counter!("agentsight_benchmark_events_total", "stage" => "noop").increment(1);
     metrics::gauge!("agentsight_benchmark_queue_bytes", "stage" => "noop").set(4096.0);
@@ -270,6 +292,7 @@ fn emit_noop_metrics() {
         .record(0.000_001);
 }
 
+#[cfg(target_os = "linux")]
 fn emit_recorded_metrics() {
     metrics::counter!("agentsight_benchmark_events_total", "stage" => "recorded").increment(1);
     metrics::gauge!("agentsight_benchmark_queue_bytes", "stage" => "recorded").set(4096.0);
@@ -277,6 +300,7 @@ fn emit_recorded_metrics() {
         .record(0.000_001);
 }
 
+#[cfg(target_os = "linux")]
 fn benchmark_metrics_overhead(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("metrics");
     group.bench_function("no_recorder", |bencher| {
@@ -300,6 +324,7 @@ fn benchmark_metrics_overhead(criterion: &mut Criterion) {
     black_box(handle.render());
 }
 
+#[cfg(target_os = "linux")]
 fn benchmark_streaming(criterion: &mut Criterion) {
     use agentsight::config::RuntimeLimits;
     use agentsight::parser::ParseResult;
@@ -393,6 +418,7 @@ fn benchmark_streaming(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(target_os = "linux")]
 criterion_group!(
     benches,
     benchmark_parser,
@@ -400,4 +426,11 @@ criterion_group!(
     benchmark_metrics_overhead,
     benchmark_streaming
 );
+#[cfg(target_os = "linux")]
 criterion_main!(benches);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("AgentSight pipeline benchmarks require Linux.");
+    std::process::exit(1);
+}

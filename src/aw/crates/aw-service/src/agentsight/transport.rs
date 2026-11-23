@@ -128,7 +128,10 @@ impl Transport {
         })?;
         let status = response.status().as_u16();
         match status {
-            200 | 404 => {}
+            200 => {}
+            // A 404 conflates source absence and missing data. Its body is not
+            // evidence and need not be JSON, so discard it without metering.
+            404 => return Ok((status, Value::Null)),
             401 | 403 => return Err(Error::Authentication),
             300..=399 => return Err(Error::Redirect),
             _ => return Err(Error::Http(status)),
@@ -163,12 +166,7 @@ impl Transport {
             return Err(Error::Limit);
         }
         *remaining -= bytes.len();
-        // A 404 from this API conflates source absence and missing data. Its body is not evidence.
-        let value = if status == 404 {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?
-        };
+        let value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
         Ok((status, value))
     }
 }
@@ -210,7 +208,83 @@ fn read_authorization(path: &Path) -> Result<HeaderValue, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
+        os::unix::fs::PermissionsExt,
+        time::Duration,
+    };
+
+    fn serve_404(response: &'static [u8]) -> (Url, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let expires = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                assert!(Instant::now() < expires, "fixture accept deadline exceeded");
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0; 1024];
+            let count = stream.read(&mut request).unwrap();
+            assert!(count > 0);
+            stream.write_all(response).unwrap();
+        });
+        (
+            endpoint(&format!("http://127.0.0.1:{port}")).unwrap(),
+            server,
+        )
+    }
+
+    #[test]
+    fn a_404_body_is_not_parsed_or_charged_as_source_evidence() {
+        let cases: [(&[u8], usize); 4] = [
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1024,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1024,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+                1,
+            ),
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                1024,
+            ),
+        ];
+        for (response, budget) in cases {
+            let (origin, server) = serve_404(response);
+            let transport = Transport::new(&origin, Path::new("")).unwrap();
+            let mut remaining = budget;
+            let result = transport.get(
+                origin.join("/api/trajectories/session").unwrap(),
+                Instant::now() + Duration::from_secs(2),
+                &mut remaining,
+            );
+            server.join().unwrap();
+            let (status, value) = result.unwrap();
+            assert_eq!(status, 404);
+            assert_eq!(value, Value::Null);
+            assert_eq!(remaining, budget);
+        }
+    }
 
     #[test]
     fn credentials_are_loaded_and_attached_only_for_https() {

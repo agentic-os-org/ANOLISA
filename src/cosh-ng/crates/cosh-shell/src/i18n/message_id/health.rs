@@ -123,3 +123,58 @@ macro_rules! health_ids {
         );
     };
 }
+
+macro_rules! health_guidance_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!($remaining, $($ids,)* HealthMetricUsed,);
+    };
+}
+
+// The v3.7 health-volume keys live in a trailing segment so every existing
+// MessageId discriminant stays stable.
+macro_rules! health_volume_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HealthOomScopeCurrentCgroup,
+            HealthEvidenceVolumeAvailable,
+            HealthEvidenceInodeFree,
+            HealthEvidenceOomCounterWindow,
+            HealthFindingMountReadonly,
+            HealthInsightMountReadonly,
+            HealthEvidenceMountReadonly,
+            HealthFindingCgroupMemoryPressure,
+            HealthInsightCgroupMemoryPressure,
+            HealthEvidenceCgroupQuota,
+            HealthEvidenceCgroupQuotaZero,
+            HealthFindingPressureHigh,
+            HealthInsightPressureHigh,
+            HealthEvidencePressureAvg,
+            HealthFindingConntrackCapacity,
+            HealthInsightConntrackCapacity,
+            HealthEvidenceConntrack,
+            HealthTryInspectSystemCapacity,
+            HealthPromptInspectSystemCapacity,
+            HealthTryReasonSystemCapacity,
+            HealthFindingExt4Error,
+            HealthInsightExt4Error,
+            HealthFindingJournalError,
+            HealthInsightJournalError,
+            HealthFindingXfsShutdown,
+            HealthInsightXfsShutdown,
+            HealthFindingBlockIoError,
+            HealthInsightBlockIoError,
+            HealthEvidenceFsDevice,
+            HealthFindingHungTask,
+            HealthInsightHungTask,
+            HealthFindingSoftLockup,
+            HealthInsightSoftLockup,
+            HealthEvidenceHungTask,
+            HealthEvidenceSoftLockup,
+            HealthFindingExt4ReadonlyRemount,
+            HealthTryInspectFilesystemEvent,
+            HealthPromptInspectFilesystemEvent,
+        );
+    };
+}

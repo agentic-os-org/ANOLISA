@@ -4,7 +4,11 @@ mod claude_stream;
 mod control;
 #[path = "protocol/ecs_probe.rs"]
 mod ecs_probe;
+#[path = "protocol/provider_activation.rs"]
+mod provider_activation;
 #[path = "protocol/provider_lifecycle.rs"]
 mod provider_lifecycle;
+#[path = "protocol/registry_receipts.rs"]
+mod registry_receipts;
 #[path = "protocol/session_management.rs"]
 mod session_management;

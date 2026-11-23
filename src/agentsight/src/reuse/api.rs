@@ -350,10 +350,11 @@ pub fn run_triage(
     };
 
     // The trajectories this run will read, each paired with its stored label as
-    // it stood when the window was filled. A targeted run's window is the one
-    // requested id; a batch run fills it during the scan below.
-    let window: Vec<(String, Option<SessionLabel>)> = match &query.session_id {
-        Some(id) => vec![(id.clone(), labels.get_label(id)?)],
+    // it stood when the window was filled and the collector timestamp that was
+    // current for that label. A targeted run has no summary, so it carries no
+    // timestamp and does not need the unchanged fast path.
+    let window: Vec<(String, Option<SessionLabel>, Option<i64>)> = match &query.session_id {
+        Some(id) => vec![(id.clone(), labels.get_label(id)?, None)],
         None => {
             // Label lookup is by primary key, so the whole set can be read once
             // instead of asking per summary during the scan.
@@ -388,13 +389,13 @@ pub fn run_triage(
                     report.truncated = true;
                     break;
                 }
-                window.push((summary.session_id, existing));
+                window.push((summary.session_id, existing, Some(summary.collected_at_ns)));
             }
             window
         }
     };
 
-    for (session_id, existing) in window {
+    for (session_id, existing, collected_at_ns) in window {
         report.examined += 1;
         let Some(record) = trajectories
             .get(&session_id)
@@ -418,7 +419,15 @@ pub fn run_triage(
         if let Some(existing) = existing {
             if existing.source_content_hash == hash && existing.triage_version == version {
                 if existing.identity != identity {
-                    labels.set_identity(&session_id, &identity)?;
+                    tolerate_removed_label(labels.set_identity(&session_id, &identity))?;
+                }
+                // Record the version that was verified, so the next run takes
+                // the freshness fast path instead of re-reading this row and
+                // occupying a `limit` slot forever.
+                if let Some(collected_at_ns) = collected_at_ns {
+                    tolerate_removed_label(
+                        labels.mark_triage_checked(&session_id, collected_at_ns),
+                    )?;
                 }
                 report.unchanged += 1;
                 tally_override(&existing, &mut report);
@@ -440,17 +449,38 @@ pub fn run_triage(
     Ok(report)
 }
 
+/// Tolerate a label row removed between the window read and a fast-path write.
+///
+/// Retention deletes the oldest unconfirmed rows, which is exactly the
+/// population that reaches the unchanged path, so a row can disappear after it
+/// was listed. That is not a batch failure: a later collection re-creates it
+/// and the next run verifies it again. Real store errors still propagate.
+fn tolerate_removed_label(result: std::result::Result<(), ReuseStoreError>) -> Result<()> {
+    match result {
+        Ok(()) | Err(ReuseStoreError::UnknownSession(_)) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Whether a stored label can be trusted without reading the trajectory.
 ///
 /// The content digest cannot be recomputed from a payload-free summary, so
 /// `collected_at_ns` is the next best signal: the collector bumps it on every
-/// upsert, so a record written after the label's last update is spotted here
-/// and goes on to the exact hash comparison. A decision recorded after a
-/// re-collection can move `updated_at_ns` past `collected_at_ns` and postpone
-/// the recompute until the next re-collection; postponing leaves the stored
-/// verdict in place, so a skip can never surface a different one.
+/// upsert. Human/model decisions also update the label, but do not establish
+/// that automatic triage read the latest source. Only use that write time when
+/// neither decision owns it; a coincident timestamp forces a safe hash check.
+/// An unchanged batch check records its source timestamp separately, so later
+/// batches can skip verified decision-owned rows without repeated parsing.
 fn is_fresh(label: &SessionLabel, version: &str, collected_at_ns: i64) -> bool {
-    label.triage_version == version && collected_at_ns <= label.updated_at_ns
+    let automatic_update = (label.decided_at_ns != Some(label.updated_at_ns)
+        && label.llm_at_ns != Some(label.updated_at_ns))
+    .then_some(label.updated_at_ns);
+    let verified_at_ns = automatic_update
+        .into_iter()
+        .chain(label.triage_checked_at_ns)
+        .max();
+    label.triage_version == version
+        && verified_at_ns.is_some_and(|verified| collected_at_ns <= verified)
 }
 
 /// Counts a row whose human decision is in force and contradicts the rules.
@@ -536,18 +566,39 @@ pub async fn run_judgements(
             report.skipped += 1;
             continue;
         };
+        let source_hash = content_hash(&atif_json);
+        if labels
+            .get_label(&session_id)?
+            .is_none_or(|label| label.source_content_hash != source_hash)
+        {
+            report.skipped += 1;
+            continue;
+        }
         match super::judge::judge_last_round(client, &doc).await {
             Ok(verdict) => {
-                if verdict.downgraded {
-                    report.downgraded += 1;
+                // Collection can replace the document during the network wait.
+                // The store's transaction also guards against a concurrent
+                // triage write between this read and persisting the verdict.
+                let still_current = trajectories
+                    .get_atif_json(&session_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|json| content_hash(&json) == source_hash);
+                if !still_current {
+                    report.skipped += 1;
+                    continue;
                 }
-                match verdict.label {
-                    TrajectoryLabel::Good => report.judged_good += 1,
-                    TrajectoryLabel::Bad => report.judged_bad += 1,
-                    _ => report.judged_unclear += 1,
-                }
-                match labels.record_judgement(&session_id, &verdict) {
-                    Ok(_) => report.judged += 1,
+                match labels.record_judgement_if_current(&session_id, &verdict, &source_hash) {
+                    Ok(Some(_)) => {
+                        report.judged += 1;
+                        report.downgraded += usize::from(verdict.downgraded);
+                        match verdict.label {
+                            TrajectoryLabel::Good => report.judged_good += 1,
+                            TrajectoryLabel::Bad => report.judged_bad += 1,
+                            _ => report.judged_unclear += 1,
+                        }
+                    }
+                    Ok(None) => report.skipped += 1,
                     Err(error) => {
                         log::warn!("reuse: storing a judgement for {session_id} failed: {error}");
                         report.failed += 1;

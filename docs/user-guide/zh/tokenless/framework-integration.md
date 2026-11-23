@@ -11,15 +11,15 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
-| cosh-ng | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
+| cosh-ng | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | 透传；缺少静态恢复工具 |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 在模型消费前替换单文本工具结果 | Core 为可替换文本选择 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
-| 千问办公（macOS） | `qwenwork` | — | 替换原生 Bash 和工作区 Shell 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
+| 千问办公（macOS） | `qwenwork` | — | 将独立恢复命令转发给随插件提供的 CLI | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
-| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
-| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
+| DeepSeek Harness | `dsh` | 未注册 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
+| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | V1 插件透传 |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
 
@@ -27,7 +27,33 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 
 Cosh-NG 使用的 Adapter 值为 `cosh`，扩展仍使用现有的 `.copilot-shell` 目录。
 
-Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook）；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。
+QwenPaw 和 AgentScope SDK 集成提供静态恢复工具及当前模型调用的 Marker 授权，因此 Schema 压缩实际生效。Cosh-NG 的 `BeforeModel` 和 OpenCode V1 的 `tool.definition` 调用 Common Hook 时没有声明这一恢复能力，Core 会保留原始 Schema。Qwen Code 则在注册时跳过尚不支持的 `BeforeModel` 事件。
+
+### 压缩覆盖与协议限制
+
+可替换的文本结果统一进入 Core 的候选路由：JSON/TOON、构建日志、CSV/TSV、搜索路径、
+HTML、Diff 裁剪和浏览器快照重编码。内容来源、可恢复性和收益门禁仍然生效，不代表每个结果
+都会被压缩。QwenPaw 与 AgentScope 在构造 SDK 配置时继承
+`TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_SEARCH_PATH_SHARING_ENABLED`、
+`TOKENLESS_HTML_EXTRACTION_ENABLED`、`TOKENLESS_DIFF_COMPRESSION_ENABLED`、
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED` 和
+`TOKENLESS_MIXED_CONTENT_ENABLED`。显式 SDK 参数优先于环境默认值。Diff 与浏览器快照压缩
+默认开启，混合区域压缩默认关闭；压缩总开关控制 dry-run，不会关闭 RTK 改写。
+
+| 宿主或集成 | 剩余边界 |
+|------------|----------|
+| Codex、Qwen Code | 当前 PostTool Hook 不能替换原始结果，JSON/TOON、日志、表格、搜索、HTML、Diff 和浏览器快照无法由此减少模型输入；仍可使用 RTK 命令改写。两个集成都没有可用的模型工具 Schema 替换事件。 |
+| Claude Code | 响应替换要求 2.1.121 及以上版本。结构化输出保留原类型，只有文本槽才能使用 TOON、表格／搜索视图、HTML 页面、Diff 或浏览器快照视图。JSON 字符串值中的 HTML 在两种槽位中都可转写，因为结果仍是 JSON。未注册模型工具 Schema 替换 Hook。 |
+| OpenClaw | 工具工厂收到会话 UUID 时，静态 `tokenless_retrieve` 支持可恢复的 PostTool 压缩。宿主工具策略须允许该工具。缺少工具注册 API 或 UUID 时只接受无损候选。Prompt Hook 能读取消息，但不能替换工具 Schema。多块和多模态结果透传。 |
+| Cosh-NG／旧版 Copilot Shell | Cosh-NG 能替换受支持的结果，但 Common BeforeModel Hook 无法发布可执行的静态恢复工具。旧版 Copilot Shell 不能替换 PostTool 结果。 |
+| OpenCode V1 插件 | `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义，因此 Schema 保持原样。OpenCode V2 插件 API 需要单独迁移，当前 V1 Adapter 不支持；这不表示 V2 协议无法支持 Schema 压缩。 |
+| Qoder、千问办公、Hermes、DSH | 当前集成接口没有同时提供可修改的模型工具 Schema 列表和静态恢复授权。Hermes、DSH 的 RTK 使用阻止后建议重试；DSH 在 pre-execute 前已冻结并审计参数，禁止直接修改。 |
+| 千问办公 Shell 恢复 | macOS 恢复 Hook 使用随插件提供的 CLI 和同一份 Stash。此路径不可用时，工作区 Shell 和使用插件私有 CLI 的环境仅接受无损候选。 |
+| QwenPaw／AgentScope | 已接入全部现有 Core 领域，包括 Schema 和静态恢复。中间流式 Chunk 与非文本块保持不变；AgentScope 自定义工具需要明确的内容来源契约。 |
+
+OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果，按会话 UUID 隔离。
+历史刷新会移除已被压缩出上下文的 Marker；`/new`、`/reset` 和会话结束不会把旧授权传给
+其他会话。取回原文不会再次压缩，Stash 过期规则仍然适用。
 
 这些 Adapter 仍会注册 Tool Ready，但会在检查、修复或阻断之前无条件硬退出，任何运行时设置都无法重新启用。工具执行后的失败归因不受影响。
 
@@ -37,9 +63,10 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 ## Adapter 处理规则
 
-共享 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
+Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode 各自的 PostTool 适配器会向 `tokenless compress`
 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
-解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；否则 Core 只接受无损候选。
+解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容。
+没有恢复路径时，Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
@@ -48,17 +75,28 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 | 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
 | 来自命令输出的构建/测试/包管理日志 | 终端输出清理与常规进度缩减；每段省略都带有就地取回标记 |
 | 宿主支持文本替换时的 CSV/TSV 表格 | 仅在字符数和估算 Token 数同时减少时做保留全部单元格的整表压紧，否则透传；不写 Stash，无需恢复能力 |
-| 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
-| 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录、已识别的原生 Shell 搜索，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
+| 宿主支持文本替换时，来自命令输出的 Git Diff（默认开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭） | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的 Playwright MCP／chrome-devtools-mcp 无障碍快照；默认开启，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 | PW 快照无损重编码为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀；包装、尾注与全部 ref 原样保留，无法解析的输入整体透传，完整原文经 Stash 可取回，收益过小的候选会被拒绝。chrome-devtools-mcp uid 快照仅识别、原文直通（裸引号序列化无显式记录边界） |
+| Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的 JSON 字符串值中的 HTML 片段或文档；与 HTML 页面共用开关 | 每个值就地完整转写为 Markdown，类型、数字和其他字段不变；视图可能丢失可见文字、目标地址、表单状态以及样式、属性、换行、列表编号或表头所承载含义，或暴露屏幕上被隐藏文字的值原样保留，每个原始值经 Stash 可取回。详见 [JSON 值中的 HTML](configuration-and-privacy.md#json-值中的-html) |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启（默认关闭）且宿主支持文本替换时，任何整内容领域都无法处理的混合工具输出 | fenced `json`/`csv`/`tsv` 块与括号平衡的裸 JSON 文档按区域用与独立路由相同的策略压缩；周围文本逐字节保留，被拒绝的区域逐字节保留 |
 | 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
 Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
 无意义地启动子进程。
 
+原生 Shell 包装中的主要 `stdout` 或 `stderr` 字段从 200 字符起进入文本路由，让短日志
+与纯文本使用相同的领域压缩器；Qoder 原生 Bash 只选择字符串 `stdout`，包括较短或为空的值。
+`stdout` 缺失或不是字符串时，不替换原始结果。`stderr` 和其他字段保持不变；错误诊断仍可
+读取 `stderr`。Qoder 原生 Bash 的 stdout 和 Claude Code 继续返回对象；千问办公将单流原生 Shell
+的 `stdout` 替换为文本字符串，对包含额外流、失败或未知字段的 Shell 包装保持透传（保留错误诊断），
+并为非 Shell 的结构化 MCP 结果保留对象和数组类型。Cosh-NG 解包 `llmContent` 内的 Shell JSON 后，会把更新后的包装
+序列化为其要求的字符串替换值；OpenCode 继续保留字符串输出契约。
+
 Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
-原样返回 Tools。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
+原样返回 Tools，OpenCode V1 的逐工具定义路径也如此。直接 `compress-schema` 命令仍可使用。
 
 OpenClaw、Hermes 与 DeepSeek Harness 已把 PostTool 决策委托给 Core。独立
 `compress-response` 命令继续作为显式 JSON 清理入口。
@@ -93,7 +131,7 @@ Windows 支持范围为 x64 上的千问办公 1.3.2 本地会话，需要安装
 Python 3.10+。不支持 Windows ARM64 和安全工作区／VM 会话，其他 Windows Agent
 尚未验证。
 
-Windows 安装包尚未发布，目前需按
+使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。源码构建请按
 [Windows 构建说明](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并安装本地 npm 包。
 
 安装 npm 包后，退出千问办公，在 PowerShell 中执行：
@@ -106,6 +144,8 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 
 重启千问办公，在应用内按需启用 Tokenless 插件，再开启新的本地会话。
 之后照常使用千问办公，受支持的输出会自动精简。
+
+适配器注册 `PostToolUse` 来压缩工具输出。Shell 命令按原始参数执行。
 
 如果找不到 Python，可在上述命令后添加 `-Python 'C:/path/to/python.exe'`。
 千问办公安装在自定义位置时，先将 `TOKENLESS_QWENWORK_APP` 设置为包含
@@ -120,27 +160,43 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 ### 千问办公（macOS）
 
 `qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。
-已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 改写、完整 MCP 响应替换、
+已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 输出压缩、完整 MCP 响应替换、
 JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
 macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
-`mcp__qw-builtin__mcp_workspace_bash`，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
-符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
+适配器仅对独立的 `tokenless retrieve <hash>` 命令使用 `PreToolUse`。普通 Shell 命令按原始参数执行。
+`PostToolUse` 将符合条件的完整 Bash 及非 Bash 结果交给公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
-被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
-文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
-不注册 Tool Ready 或 Schema Hook。
+被接受的结果通过 `updatedToolOutput` 替换原文：单流原生 Shell 的 `stdout` 与纯文本槽返回字符串
+（文本槽可使用 TOON，不把 Shell 包装序列化进输出），非 Shell 的结构化 MCP 对象和数组在最终交付文本同时减少字符数与估算 Token 数时保留类型。
+文件内容受保护，不支持的内容原样返回。统计使用独立 Agent ID `qwenwork`。
 
 工作区 Shell 的结果恰好包含一个普通 MCP 文本块时，内容进入文本槽，支持 JSON 转 TOON。
 多个块、混合媒体或带注解的块数组保持透传，其他 MCP 工具保留已有结构化结果处理。
-工作区 Shell 的统计及 Pre/Post 去重状态保存在 `<cwd>/.tokenless`；原生 Bash 保留原有数据位置。
-独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。模型 Shell 不会继承 Hook 的环境，
-因此工作区 Shell 或插件私有二进制不声明裸 `tokenless retrieve` 恢复能力，PostTool 只应用无损压缩。
+千问办公工作区 Shell Hook 的 Tokenless 数据库使用默认的
+`~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的绝对路径。
+默认家目录按操作系统用户身份解析。
+Adapter 保留该环境变量，
+不再自动选择工作区内的数据目录。已有的 `<cwd>/.tokenless` 数据库不会自动迁移；
+查询历史记录时，需要显式指定原目录。
+
+`TOKENLESS_DATA_DIR` 未设置或为空时使用默认目录；路径无效时（相对路径、文件系统
+根目录、父目录遍历、非目录目标或无法解析的链接），工作区 Shell Hook 原样放行，
+不创建数据目录。系统家目录不可用且未设置覆盖路径时，也按此处理。
+
+Hook 进程在权限允许时写入压缩统计。安装和检测会显示各自进程解析出的数据目录。
+
+插件自带 `bin/tokenless` 时，恢复 Hook 将独立恢复命令转发给该程序，读取 PostTool 写入的同一份 Stash。
+此路径不可用时，工作区 Shell 和使用插件私有 CLI 的环境仅做无损压缩。原生 Shell 的 `PATH`
+可以使用独立安装的 CLI 恢复，前提是适配器使用同一个 CLI 和同一份 Stash。恢复命令以只读模式
+打开已有的 Stash。精确匹配的恢复结果会跳过压缩。
+
+升级后，如果 Stash 最后由旧版写入端关闭，SQLite 的 WAL 辅助文件可能已被清理。
+若工具 Shell 无法写入该目录，先让更新后的插件完成一次向同一份 Stash 写入原文的压缩，
+再使用升级前的恢复提示。更新后的写入端关闭时会保留两个辅助文件。
 
 先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
-和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。
-确保桌面会话能够找到这些二进制，而不只是交互式终端能够找到。
+和 Tokenless 二进制。请在实际使用插件的桌面会话中确认这些二进制可用。
 
 安装或升级前退出千问办公，然后执行：
 
@@ -154,8 +210,7 @@ anolisa adapter status tokenless
 CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
 完成后重启千问办公、开启新会话，并在应用内检查插件激活状态。
 `status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
-旁加载不修改 settings、权限、数据库或禁用／阻止列表。兼容性基线为 1.2.5 原生 Bash 和 1.3.2 工作区 Shell；
-其他版本会显示兼容性未验证的警告。
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。
 
 `TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。
 默认在 `/Applications` 和 `~/Applications` 查找应用，数据目录为 `~/.qwenworkcn`。
@@ -205,6 +260,11 @@ dsh --profile web
 和解析后的 DSH home 写入 adapter receipt。后续 status、disable 和 re-enable 会
 继续操作同一棵 profile 目录树。
 
+Plugin 通过 `tools/pre-execute` 阻止受支持的 Shell 命令并给出 RTK 重试建议，保留 DSH
+已经记录的参数。只有原本获准执行的根调用才会进入这一流程；已有拒绝、取消和审批决定
+保持不变。再次提交完全相同的建议命令会获准执行，结果保留 RTK 归属以避免重复压缩。
+这一方式需要额外一次工具往返；设置 `rtkEnabled: false` 可关闭建议。
+
 Plugin 在 DSH 的 `tools/post-execute` Waterfall 上运行，并把包含一个文本块、可替换的
 根调用结果发送给 `tokenless compress`。内容检测、JSON 与 Build Log 压缩、TOON 选择、
 大小门禁、基于工具来源的阈值和最终接受均由 Core 负责。不受支持的内容域与文件内容结果会
@@ -228,6 +288,7 @@ DSH 会从模型 Shell 命令中移除继承的 `TOKENLESS_*` 环境变量。Ada
 ```yaml
 - id: anolisa-tokenless
   config:
+    rtkEnabled: true
     responseCompressionEnabled: true
     timeoutMs: 5000
     maxBuffer: 4194304
@@ -376,7 +437,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 脚本会调用框架自身的 Plugin/Extension 机制；按照脚本输出完成重启。安装脚本缺失、失败或框架版本不兼容时，优先改用 anolisa 管理的安装方式。
 
-在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 和 `rtk` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
+在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
 
 ### npm + Cosh-NG
 
@@ -404,6 +465,11 @@ Extension 在启动时发现。启用后重启 Cosh-NG，并运行一个 Shell �
 middleware，在同轮模型请求之前替换支持的文本结果；不另外压缩持久化副本。
 
 安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写；Core 会选择符合条件的无损 TOON 候选。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+
+插件在 manifest 中声明 `tokenless_retrieve`；宿主工具策略必须允许该工具，恢复功能才能使用。
+提交 prompt 时会根据当前历史重建授权。自动 compaction 事件只提供计数，不提供保留的
+消息，因此会撤销此前全部 Marker 授权。保留下来的 Marker 在下一次提交 prompt 时恢复
+可用；此后新产生的压缩结果仍可立即取回。
 
 Tokenless 只处理 OpenClaw 交付的结果。2026.8.2 等旧版宿主只要注册了适用的结果
 middleware，就会在回调前将每个文本块裁剪到 100,000 个 UTF-16 Code Unit，即使
@@ -437,6 +503,19 @@ middleware 不返回替换内容也是如此。过大的 `details` 也可能被�
 `~/` 会展开为当前用户的主目录。未设置 `dbPath` 时，归档为 `OPENCLAW_STATE_DIR` 下的
 `selective-claw.db`；该环境变量未设置时使用 `~/.openclaw`。将插件的 `enabled` 选项设为
 `false` 时，不打开数据库，也不注册上下文引擎或召回工具。
+
+#### Selective-Claw 归档写入失败
+
+Selective-Claw 将每次首次导入或历史对齐批次的消息写入放在同一个 SQLite 保存点中。
+批次失败时回滚其中的写入并传递原始错误，因此空归档仍可执行首次导入。
+解决存储故障（例如容量耗尽）后，再重试失败的操作。旧代码已经留下的部分导入不会自动修复。
+
+若导入位于调用者已有的 SQLite 事务内，仍须由调用者提交。遇到 `SQLITE_FULL` 等错误时，
+SQLite 自身可能中止整个外层事务，调用者必须处理该失败；连接不可用时，清理也无法保证回滚。
+若保存点清理也失败，Plugin 会记录该二次错误，仍传递原始导入错误。仅凭这条警告无法判断
+SQLite 是否已经结束事务；若无法完成清理，须先重新打开 Plugin 的数据库连接再使用。
+该批次边界不覆盖后续摘要生成或上下文装配失败、其他生命周期调用，以及此前已提交的消息。
+无需迁移数据库结构。
 
 ### Hermes
 

@@ -10,6 +10,65 @@ use common::McpAgent;
 use serde_json::json;
 use std::time::Duration;
 
+#[tokio::test]
+async fn index_refresh_keeps_long_title_and_path_links() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut agent = McpAgent::spawn(
+        temporary.path(),
+        &[
+            ("MEMORY_INDEX_ENABLED", "false"),
+            ("MEMORY_CONSOLIDATION_ENABLED", "false"),
+            ("MEMORY_CGROUP_ENABLED", "false"),
+        ],
+    )
+    .await;
+    let memories = [
+        ("notes/ascii.md".to_string(), "A".repeat(200)),
+        ("notes/chinese.md".to_string(), "记".repeat(80)),
+        ("notes/short.md".to_string(), "Short title".to_string()),
+        (
+            format!("notes/{}.md", "p".repeat(170)),
+            "Long path".to_string(),
+        ),
+    ];
+    let mut writes = Vec::new();
+    let mut contents = Vec::new();
+    for (path, title) in &memories {
+        let content = format!("---\ntitle: {title}\n---\n\nBody for {path}.\n");
+        writes.push(
+            agent
+                .call("mem_write", json!({"path": path, "content": &content}))
+                .await,
+        );
+        contents.push(content);
+    }
+    let refreshed = agent.call("mem_index_refresh", json!({})).await;
+    let index = agent.call("mem_read", json!({"path": "MEMORY.md"})).await;
+    let parsed = agent_memory::tools::memory_index::parse_index(&index);
+    let mut read_back = Vec::new();
+    for (path, _) in &memories {
+        let entry = parsed.iter().find(|entry| entry.path == *path);
+        let content = if let Some(entry) = entry {
+            Some(agent.call("mem_read", json!({"path": &entry.path})).await)
+        } else {
+            None
+        };
+        read_back.push(content);
+    }
+    agent.cleanup().await;
+
+    assert!(writes.iter().all(|response| response.contains("wrote")));
+    assert!(refreshed.contains("refreshed MEMORY.md"), "{refreshed}");
+    assert!(index.contains("[Short title](notes/short.md)"), "{index}");
+    for ((path, _), (actual, expected)) in memories.iter().zip(read_back.iter().zip(&contents)) {
+        assert_eq!(
+            actual.as_ref(),
+            Some(expected),
+            "index target lost for {path}: {index}"
+        );
+    }
+}
+
 // ---- Test 1: Tier A/B + snapshots + sandbox ----
 
 #[tokio::test]
@@ -387,7 +446,14 @@ async fn promote_e2e_workflow() {
 #[tokio::test]
 async fn mem_consolidate_triggers_and_reports() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut agent = McpAgent::spawn(tmp.path(), &[]).await;
+    let mut agent = McpAgent::spawn(
+        tmp.path(),
+        &[
+            ("MEMORY_CONSOLIDATION_ENABLED", "true"),
+            ("MEMORY_CONSOLIDATION_MIN_CALLS", "3"),
+        ],
+    )
+    .await;
 
     // Write a couple of files so consolidation has something to analyse.
     agent
@@ -410,8 +476,20 @@ async fn mem_consolidate_triggers_and_reports() {
         text.contains("consolidation complete"),
         "consolidate result: {text}"
     );
-
+    let sessions = agent
+        .call_json("memory_sessions", json!({"limit": 10}))
+        .await;
     agent.cleanup().await;
+
+    let sessions = sessions
+        .as_array()
+        .expect("session history is a JSON array");
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["tool_calls"], 3);
+    // Short sessions can accidentally report the right count with the old
+    // parser. This assertion catches the generated-label bug; unit tests cover
+    // the duration-versus-count case using summaries longer than a minute.
+    assert_eq!(sessions[0]["tools_used"], json!(["mem_read", "mem_write"]));
 }
 
 #[tokio::test]

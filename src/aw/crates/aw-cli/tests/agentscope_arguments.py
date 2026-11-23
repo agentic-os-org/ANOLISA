@@ -218,7 +218,7 @@ def main() -> None:
             path.write_text(json.dumps(config))
             env = {**os.environ, "AW_TEST_ROOT": str(root), "AW_TEST_ACTION": action}
             with owned(
-                [aw, "serve", "--config", str(path), "--state-dir", str(state)],
+                [aw, "service", "serve", "--config", str(path), "--state-dir", str(state)],
                 root,
                 output,
                 "serve-" + action,
@@ -296,7 +296,7 @@ def main() -> None:
                         ]
                     status = json.loads(
                         subprocess.check_output(
-                            [aw, "status", "--socket", str(state / "aw.sock")], timeout=3
+                            [aw, "service", "status", "--socket", str(state / "aw.sock")], timeout=3
                         )
                     )["result"]
                     assert status["bindings"] == status["events"] == 0, status
@@ -315,7 +315,7 @@ def main() -> None:
                         json.dumps({p.name: p.read_text() for p in root.glob("*.jsonl")}, indent=2)
                     )
                     subprocess.run(
-                        [aw, "stop", "--socket", str(state / "aw.sock")],
+                        [aw, "service", "stop", "--socket", str(state / "aw.sock")],
                         timeout=5,
                         capture_output=True,
                     )

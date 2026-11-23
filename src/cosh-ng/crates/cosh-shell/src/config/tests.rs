@@ -373,6 +373,87 @@ health.verbose = on
 }
 
 #[test]
+fn pressure_notices_defaults_off_and_parses_in_both_formats() {
+    assert!(!CoshConfig::default().health.pressure_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.pressure_notices = true\n", &mut cfg);
+    assert!(cfg.health.pressure_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\npressure_notices = true\n", &mut cfg);
+    assert!(cfg.health.pressure_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\npressure_notices = false\n", &mut cfg);
+    assert!(!cfg.health.pressure_notices);
+}
+
+#[test]
+fn network_capacity_notices_defaults_off_and_parses_in_both_formats() {
+    assert!(!CoshConfig::default().health.network_capacity_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.network_capacity_notices = true\n", &mut cfg);
+    assert!(cfg.health.network_capacity_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nnetwork_capacity_notices = true\n", &mut cfg);
+    assert!(cfg.health.network_capacity_notices);
+}
+
+library_tests! {
+#[test]
+fn fs_and_host_event_notices_default_off_and_parse_in_both_formats() {
+    assert!(!CoshConfig::default().health.fs_event_notices);
+    assert!(!CoshConfig::default().health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.fs_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.fs_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nfs_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.fs_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.host_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nhost_event_notices = true\n", &mut cfg);
+    assert!(cfg.health.host_event_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        "[health]\nfs_event_notices = false\nhost_event_notices = false\n",
+        &mut cfg,
+    );
+    assert!(!cfg.health.fs_event_notices);
+    assert!(!cfg.health.host_event_notices);
+}
+}
+
+#[test]
+fn maintenance_window_parses_and_gates_by_epoch() {
+    assert!(!CoshConfig::default().health.maintenance_active(1000));
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        "[health.maintenance]\nenabled = true\nreason = \"drill\"\nuntil_epoch_seconds = 2000\n",
+        &mut cfg,
+    );
+    assert!(cfg.health.maintenance.enabled);
+    assert_eq!(cfg.health.maintenance.reason, "drill");
+    assert_eq!(cfg.health.maintenance.until_epoch_seconds, Some(2000));
+    assert!(cfg.health.maintenance_active(1999));
+    assert!(!cfg.health.maintenance_active(2000));
+    assert!(!cfg.health.maintenance_active(2001));
+    let mut open = CoshConfig::default();
+    parse_simple_config(
+        "health.maintenance.enabled = true\nhealth.maintenance.reason = planned\n",
+        &mut open,
+    );
+    assert!(open.health.maintenance_active(u64::MAX));
+    let mut legacy = CoshConfig::default();
+    parse_simple_config(
+        "health.maintenance.enabled = true\nhealth.maintenance.until_epoch_seconds = 50\n",
+        &mut legacy,
+    );
+    assert!(legacy.health.maintenance_active(49));
+    assert!(!legacy.health.maintenance_active(50));
+}
+
+#[test]
 fn parse_toml_health_config() {
     let content = r#"
 [health]
@@ -484,6 +565,165 @@ language = "auto"
     assert_eq!(cfg.language, "en-US");
 
     let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+}
+
+library_tests! {
+#[test]
+fn write_language_config_preserves_open_reader_snapshot() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n\n[ui]\nlanguage = \"auto\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    let mut reader = std::fs::File::open(&path).expect("open current config");
+
+    write_language_config_to_path(&path, "zh-CN").expect("save language");
+
+    let mut snapshot = String::new();
+    reader.read_to_string(&mut snapshot).expect("read snapshot");
+    assert_eq!(snapshot, original);
+    let current = std::fs::read_to_string(&path).expect("read current config");
+    let current: toml::Value = current.parse().expect("valid TOML");
+    assert_eq!(current["ai"]["active_provider"].as_str(), Some("keep"));
+    assert_eq!(current["ui"]["language"].as_str(), Some("zh-CN"));
+}
+
+#[test]
+fn write_language_config_concurrently_keeps_provider_values() {
+    use std::sync::Barrier;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n[ai.providers.keep]\nmodel = \"marker\"\n[ui]\nlanguage = \"en-US\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    let expected: toml::Value = original.parse().expect("valid seed");
+    let start = Barrier::new(3);
+
+    std::thread::scope(|scope| {
+        for language in ["auto", "zh-CN"] {
+            let (path, start) = (&path, &start);
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..32 {
+                    write_language_config_to_path(path, language).expect("save language");
+                }
+            });
+        }
+        start.wait();
+        for _ in 0..128 {
+            let content = std::fs::read_to_string(&path).expect("read current config");
+            let current: toml::Value = content.parse().expect("valid TOML");
+            assert_eq!(current.get("ai"), expected.get("ai"));
+        }
+    });
+
+    let content = std::fs::read_to_string(&path).expect("read final config");
+    let current: toml::Value = content.parse().expect("valid final TOML");
+    assert_eq!(current.get("ai"), expected.get("ai"));
+    assert!(matches!(
+        current["ui"]["language"].as_str(),
+        Some("auto" | "zh-CN")
+    ));
+}
+
+#[test]
+fn write_language_config_refuses_to_save_without_shared_lock() {
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    std::fs::create_dir(dir.path().join(".config.toml.lock")).expect("unavailable lock");
+
+    let error = write_language_config_to_path(&path, "auto").expect_err("require the config lock");
+    assert!(error.contains("config lock"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("read config"),
+        original
+    );
+}
+
+#[test]
+fn write_language_config_initializes_a_missing_symlink_target() {
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let target = dir.path().join("dotfiles.toml");
+    std::os::unix::fs::symlink("dotfiles.toml", &path).expect("link config");
+
+    write_language_config_to_path(&path, "en-US").expect("save via symlink");
+
+    assert!(path.is_symlink());
+    let content = std::fs::read_to_string(target).expect("read target");
+    let config: toml::Value = content.parse().expect("valid TOML");
+    assert_eq!(config["ui"]["language"].as_str(), Some("en-US"));
+}
+
+#[test]
+fn write_language_config_rejects_a_symlink_with_directory_syntax() {
+    for destination in ["settings.toml/", "settings.toml/."] {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("config.toml");
+        let target = dir.path().join("settings.toml");
+        let original = "[ui]\nlanguage = \"auto\"\n";
+        std::fs::write(&target, original).expect("seed config");
+        std::os::unix::fs::symlink(destination, &path).expect("link config");
+
+        assert!(write_language_config_to_path(&path, "en-US").is_err(), "{destination}");
+        assert_eq!(std::fs::read_to_string(&target).expect("read target"), original);
+    }
+}
+
+#[test]
+fn write_language_config_reads_the_latest_snapshot_through_a_symlink() {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let intermediate_dir = tempfile::tempdir().expect("intermediate directory");
+    let alias_dir = tempfile::tempdir().expect("alias directory");
+    let target = dir.path().join("config.toml");
+    let intermediate = intermediate_dir.path().join("config.toml");
+    let alias = alias_dir.path().join("config.toml");
+    std::os::unix::fs::symlink(&target, &intermediate).expect("link config");
+    std::os::unix::fs::symlink(&intermediate, &alias).expect("link alias");
+
+    for (lock_dir, language) in [(dir.path(), "en-US"), (intermediate_dir.path(), "zh-CN")] {
+        std::fs::write(&target, "[ai]\nactive_provider = \"old\"\n").expect("seed config");
+        let lock = std::fs::File::create(lock_dir.join(".config.toml.lock")).expect("open lock");
+        let lock = Flock::lock(lock, FlockArg::LockExclusive).expect("hold config lock");
+        let (started, starting) = channel();
+        let (finished, finishing) = channel();
+
+        std::thread::scope(|scope| {
+            let alias = &alias;
+            scope.spawn(move || {
+                started.send(()).expect("signal start");
+                let result = write_language_config_to_path(alias, language);
+                finished.send(result).expect("signal result");
+            });
+            starting.recv().expect("writer started");
+            let early = finishing.recv_timeout(Duration::from_millis(250));
+            std::fs::write(&target, "[ai]\nactive_provider = \"new\"\n").expect("update provider");
+            drop(lock);
+            assert_eq!(
+                early,
+                Err(RecvTimeoutError::Timeout),
+                "save must wait for {}",
+                lock_dir.display()
+            );
+            finishing
+                .recv()
+                .expect("writer ended")
+                .expect("save language");
+        });
+
+        let content = std::fs::read_to_string(&target).expect("read target");
+        let config: toml::Value = content.parse().expect("valid TOML");
+        assert_eq!(config["ai"]["active_provider"].as_str(), Some("new"));
+        assert_eq!(config["ui"]["language"].as_str(), Some(language));
+    }
+}
 }
 
 #[test]

@@ -34,8 +34,8 @@
       "method": "plugin",
       "pluginId": "@anolisa/dsh-tokenless",
       "capabilities": {
-        "seams": ["tools/post-execute"],
-        "features": ["compress-response", "error-attribution", "stats"]
+        "seams": ["tools/pre-execute", "tools/post-execute"],
+        "features": ["rewrite", "compress-response", "error-attribution", "stats"]
       },
       "bundle": {
         "entry": "package.json",

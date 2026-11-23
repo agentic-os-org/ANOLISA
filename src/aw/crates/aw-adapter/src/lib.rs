@@ -9,15 +9,21 @@ pub mod association;
 pub mod attachment;
 pub mod callback;
 pub mod completion;
+pub mod configuration;
+pub mod deployment;
 pub mod projection;
 mod qoder;
 pub mod reload;
+pub mod startup;
+mod version;
 
 pub use adapter::{
     block_reason, select, Adapter, HookEvent, HookOutput, InstallOptions, LaunchContext,
     LaunchFiles, LaunchInput, LaunchPlan, NativeContext, NativeOptions, PreparedLaunch, Readiness,
     OBSERVE_STEP,
 };
+
+pub use adapters::hermes::prepare_gateway as prepare_hermes_gateway;
 
 /// Native callback status; only the CLI delivers signals or exits its process.
 pub enum NativeExit {
@@ -90,3 +96,6 @@ fn read_file(path: impl AsRef<std::path::Path>, limit: usize) -> Result<Vec<u8>>
 
 #[cfg(test)]
 mod test_support;
+
+/// Native input replacement envelopes and callback snapshots.
+pub mod input;

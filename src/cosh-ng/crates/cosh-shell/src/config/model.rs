@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::tools::readonly_rules::RuntimeReadonlyConfig;
 use crate::types::CoshApprovalMode;
 
@@ -66,14 +68,24 @@ impl Default for RecommendationsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthConfig {
     pub enabled: bool,
     pub role: Option<String>,
     pub memory_sensitive: bool,
+    pub pressure_notices: bool,
+    pub network_capacity_notices: bool,
+    pub fs_event_notices: bool,
+    pub host_event_notices: bool,
     pub critical_mounts: Vec<String>,
+    pub scan_mounts: Option<Vec<String>>,
+    pub expected_writable_mounts: Vec<String>,
+    pub checks: std::collections::BTreeMap<String, bool>,
+    pub policies: std::collections::BTreeMap<String, Vec<String>>,
     pub verbose: bool,
     pub services: Vec<HealthServiceConfig>,
+    #[serde(default)]
+    pub maintenance: HealthMaintenanceConfig,
 }
 
 impl Default for HealthConfig {
@@ -82,20 +94,50 @@ impl Default for HealthConfig {
             enabled: true,
             role: None,
             memory_sensitive: false,
+            pressure_notices: false,
+            network_capacity_notices: false,
+            fs_event_notices: false,
+            host_event_notices: false,
             critical_mounts: vec!["/".to_string()],
+            scan_mounts: None,
+            expected_writable_mounts: Vec::new(),
+            checks: Default::default(),
+            policies: Default::default(),
             verbose: false,
             services: Vec::new(),
+            maintenance: HealthMaintenanceConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Declared maintenance/drill window. Suppression only affects notice
+/// presentation; fact collection and episode state tracking are unaffected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthMaintenanceConfig {
+    pub enabled: bool,
+    pub reason: String,
+    pub until_epoch_seconds: Option<u64>,
+}
+
+impl HealthConfig {
+    /// Active when enabled and either open-ended or before the declared end.
+    pub fn maintenance_active(&self, now_epoch_seconds: u64) -> bool {
+        self.maintenance.enabled
+            && self
+                .maintenance
+                .until_epoch_seconds
+                .is_none_or(|until| now_epoch_seconds < until)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthServiceConfig {
     pub name: String,
     pub expected: HealthServiceExpectedState,
+    pub activation: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthServiceExpectedState {
     Active,
     Inactive,

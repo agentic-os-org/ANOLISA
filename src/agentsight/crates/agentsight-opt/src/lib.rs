@@ -26,3 +26,5 @@ pub use atif::AtifTrajectory;
 pub use llm::{LlmClient, TrajectoryRecorder};
 pub use pipeline::AnalyzePipeline;
 pub use summary::TrajectorySummary;
+
+mod tool_command;

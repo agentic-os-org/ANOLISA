@@ -128,3 +128,34 @@ fn traversal_normalization_does_not_over_block() {
     assert!(allowed("cat /home/../usr/bin/ls"));
     assert!(allowed("cat ~/notes.txt"));
 }
+
+#[test]
+fn git_grep_no_index_is_not_builtin_readonly() {
+    assert!(!allowed("git grep --no-index root cmdline"));
+    for command in [
+        "git grep --no-index . /proc/self/environ",
+        "git grep --no-index . /sys/kernel/uevent_seqnum",
+        "git grep --no-index . /dev/stdin",
+        "git grep --no-index . /tmp/../proc/cmdline",
+        "git\tgrep\t--no-index\troot\tcmdline",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn git_grep_is_not_builtin_readonly() {
+    // grep.fallbackToNoIndex can enable filesystem search without a flag.
+    // Neither the working directory nor Git configuration is available here.
+    assert!(!allowed("git grep root cmdline"));
+    for command in [
+        "git grep -n -e root -- cmdline",
+        "git grep --cached root",
+        "git grep --untracked root",
+        "git grep -- . /proc/self/environ",
+    ] {
+        assert!(!allowed(command), "{command}");
+    }
+    assert!(allowed("df -h"));
+    assert!(allowed("uptime"));
+}

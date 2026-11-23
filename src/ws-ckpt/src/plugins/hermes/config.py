@@ -24,7 +24,12 @@ def _read_yaml_config() -> dict:
         from hermes_cli.config import cfg_get, load_config as hermes_load_config
 
         config = hermes_load_config()
-        return cfg_get(config, "plugins", "ws-ckpt", default={}) or {}
+        section = cfg_get(config, "plugins", "ws-ckpt", default={})
+        # `or {}` only covers falsy values. A hand-edited or script-written
+        # `plugins:\n  ws-ckpt: just-a-scalar` is truthy, reaches `load_config`,
+        # and `yaml_cfg.get(...)` then raises AttributeError during plugin
+        # import, taking down every ws-ckpt tool and hook rather than one field.
+        return section if isinstance(section, dict) else {}
     except Exception:
         # hermes_cli not available (e.g. standalone testing) or config missing
         return {}

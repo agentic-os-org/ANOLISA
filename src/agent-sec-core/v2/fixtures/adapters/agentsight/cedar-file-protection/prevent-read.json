@@ -1,0 +1,7 @@
+{
+  "language": "cedar",
+  "content": {
+    "schema": { "schemaId": "seccore.system", "revision": 1 },
+    "text": "forbid(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/workspace/secret\" };"
+  }
+}

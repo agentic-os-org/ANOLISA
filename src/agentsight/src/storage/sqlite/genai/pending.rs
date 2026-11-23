@@ -431,10 +431,18 @@ impl GenAISqliteStore {
                 // The pending row holds the value captured at request time,
                 // so a missing completion value must not erase it — same rule
                 // as the request evidence COALESCEd below.
+                //
+                // The stale sweep may have flipped the row to interrupted on a
+                // transient offline judgment while the call was still in
+                // flight; promoting it must also drop that interruption type —
+                // a finished call is not an interruption, and the grader's
+                // root-cause counters have no status filter. Same invariant as
+                // the adoption branch in insert_pending.
                 let updated = conn
                     .prepare_cached(
                         "UPDATE genai_events SET
                         status = 'complete',
+                        interruption_type = NULL,
                         trace_id            = ?1,
                         conversation_id     = COALESCE(?2, conversation_id),
                         session_id          = COALESCE(?3, session_id),
@@ -554,6 +562,7 @@ impl GenAISqliteStore {
                         .prepare_cached(
                             "UPDATE genai_events SET
                             status = 'complete',
+                            interruption_type = NULL,
                             trace_id            = ?1,
                             conversation_id     = COALESCE(?2, conversation_id),
                             session_id          = COALESCE(?3, session_id),

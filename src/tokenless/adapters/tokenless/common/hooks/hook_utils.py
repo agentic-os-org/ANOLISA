@@ -6,26 +6,29 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # -- Binary fallback paths ----------------------------------------------------
 #
-# Tokenless has three supported installers whose layouts differ:
+# Tokenless has three supported installers whose binary directories differ:
 #
-# - Makefile:     ~/.local/{bin,libexec} or /usr/{bin,libexec}
-# - Anolisa CLI:  ~/.local/{bin,lib/anolisa/libexec} or /usr/local/{bin,libexec}
-# - RPM:          /usr/{bin,libexec}
+# - Makefile:     ~/.local/bin or /usr/bin
+# - Anolisa CLI:  ~/.local/bin or /usr/local/bin
+# - RPM:          /usr/bin
 #
-# Keep the legacy lib/share paths until installations made by older releases
-# have aged out.
+# Callers keep passing the legacy lib/share paths as explicit fallbacks until
+# installations made by older releases have aged out.
 #
 # KEEP IN SYNC with tool_ready_hook.sh::resolve_binary,
 # env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
 # Codex standalone scripts. Makefile and the Anolisa component manifest define
-# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+# the supported layouts; the canonical order is user, /usr/local, then /usr.
 
 _USER_HOME = os.path.expanduser("~")
 if not _USER_HOME or not os.path.isabs(_USER_HOME):
@@ -39,11 +42,6 @@ def _user_path(*parts: str) -> str:
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
 _TOKENLESS_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "tokenless")
 _TOKENLESS_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "tokenless")
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
-_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
-
-_TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
 
 
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
@@ -55,52 +53,8 @@ def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     paths = []
     if user_home:
         paths.append(os.path.join(user_home, ".local", "bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        if user_home:
-            paths.extend(
-                [
-                    # Anolisa CLI user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "lib",
-                        "anolisa",
-                        "libexec",
-                        "tokenless",
-                        name,
-                    ),
-                    # Makefile user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "libexec",
-                        "anolisa",
-                        "tokenless",
-                        name,
-                    ),
-                ]
-            )
     paths.append(os.path.join("/usr/local/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        # Anolisa CLI system mode.
-        paths.append(os.path.join("/usr/local/libexec/anolisa/tokenless", name))
     paths.append(os.path.join("/usr/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        paths.extend(
-            [
-                # Makefile system mode and RPM.
-                os.path.join("/usr/libexec/anolisa/tokenless", name),
-                # Debian and pre-layout-migration compatibility.
-                os.path.join("/usr/lib/anolisa/tokenless", name),
-            ]
-        )
-        if user_home:
-            paths.extend(
-                [
-                    os.path.join(user_home, ".local", "share", "anolisa", "tokenless", name),
-                    os.path.join(user_home, ".local", "lib", "anolisa", "tokenless", name),
-                ]
-            )
     return tuple(paths)
 
 
@@ -212,7 +166,13 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
+    return shutil.which("tokenless") is not None
+
+
+def _bare_retrieve_hash(command: str) -> str | None:
+    if not _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command):
+        return None
+    return re.search(r"[0-9a-fA-F]{24}", shlex.split(command)[2]).group().lower()
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
@@ -375,73 +335,107 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
     return None, None
 
 
-# -- Context file for rewrite session tracking --
+# -- Hook state directory --
 
-_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
-_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
-_OPTIMIZATION_STATE_DIR = os.path.join(_CONTEXT_DIR, "hook-state")
+_OPTIMIZATION_STATE_DIR = os.path.join(os.path.expanduser("~"), ".tokenless", "hook-state")
 _OPTIMIZATION_STATE_TTL_SECONDS = 24 * 60 * 60
+# This bound is shared by all sessions using the same state directory. Under
+# pressure an in-flight marker can be evicted, losing PostTool deduplication.
 _OPTIMIZATION_STATE_MAX_FILES = 1024
 
 # -- Binary resolution (cached) -----------------------------------------------
 
 _resolved_cache: dict[tuple, str | None] = {}
 
-_QWENWORK_WORKSPACE_SHELLS = frozenset(
-    {
-        "mcp__workspace__bash",
-        "mcp__qw-builtin__mcp_workspace_bash",
-    }
-)
-_QWENWORK_PRIVATE_RUNTIME = False
+
+def _windows_profile_directory() -> str:
+    """Resolve the process token's profile, as tokenless-stats/home.rs does."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    profiles = ctypes.WinDLL("userenv", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    security.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    profiles.GetUserProfileDirectoryW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    profiles.GetUserProfileDirectoryW.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise OSError("cannot query the current process token")
+    try:
+        size = wintypes.DWORD()
+        profiles.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+        if not size.value:
+            raise OSError("no profile directory for the current process token")
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not profiles.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
+            raise OSError("cannot resolve the current process profile directory")
+        return buffer.value
+    finally:
+        kernel.CloseHandle(token)
 
 
-def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
-    """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _CONTEXT_DIR, _CONTEXT_FILE, _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
-    if agent_id != "qwenwork":
-        return input_data
+def resolve_data_directory() -> str:
+    """Resolve runtime state without writes or environment-based home fallbacks.
 
-    plugin_root = os.environ.get("QODER_PLUGIN_ROOT", "")
-    private_bin = os.path.join(plugin_root, "bin")
-    if os.path.isabs(plugin_root) and os.path.isdir(private_bin):
-        os.environ["PATH"] = private_bin + os.pathsep + os.environ.get("PATH", "")
-        _resolved_cache.clear()
-        # The hook's private PATH is not the model's shell PATH.
-        _QWENWORK_PRIVATE_RUNTIME = True
+    Keep the default and validation aligned with tokenless-stats/home.rs and
+    path_policy.rs, which the CLI and patched RTK also share.
+    """
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    if configured:
+        path = Path(configured)
+    else:
+        try:
+            if os.name == "nt":
+                home = _windows_profile_directory()
+            else:
+                import pwd
 
-    tool_name = input_data.get("tool_name")
-    if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
-        return input_data
+                home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as error:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR") from error
+        anchor = Path(home)
+        if not home or not anchor.is_absolute() or anchor == anchor.parent:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR")
+        path = anchor / ".tokenless"
 
-    cwd = input_data.get("cwd")
-    if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
-        warn("workspace shell hook has no valid cwd. Passing through unchanged.")
-        skip()
-    # RTK receives this path in its rewritten command; future conversations
-    # must not depend on grants to a previous conversation's state directory.
-    data_dir = os.path.join(cwd, ".tokenless")
-    os.environ["TOKENLESS_DATA_DIR"] = data_dir
-    _CONTEXT_DIR = data_dir
-    _CONTEXT_FILE = os.path.join(data_dir, ".rewrite-context")
-    _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
-    # Bare retrieval commands do not carry the hook's workspace data setting.
-    _QWENWORK_PRIVATE_RUNTIME = True
-
-    normalized = {**input_data, "tool_name": "Bash"}
-    response = input_data.get("tool_response")
-    if isinstance(response, list):
-        if not (
-            len(response) == 1
-            and isinstance(response[0], dict)
-            and set(response[0]) == {"type", "text"}
-            and response[0]["type"] == "text"
-            and isinstance(response[0]["text"], str)
-        ):
-            # Preserve multimodal blocks and metadata we cannot round-trip.
-            skip()
-        normalized["tool_response"] = response[0]["text"]
-    return normalized
+    if not path.is_absolute():
+        raise ValueError("TOKENLESS_DATA_DIR must be an absolute path")
+    if ".." in path.parts:
+        raise ValueError("TOKENLESS_DATA_DIR must not contain parent traversal")
+    # Resolve existing prefixes strictly: dangling links, loops and inaccessible
+    # ancestors must not silently select a different directory from the CLI.
+    ancestor = path
+    missing = []
+    while True:
+        try:
+            ancestor.lstat()
+            break
+        except FileNotFoundError:
+            # Missing drives and UNC shares have no existing ancestor to find.
+            if ancestor == ancestor.parent:
+                raise
+            missing.append(ancestor.name)
+            ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise ValueError("TOKENLESS_DATA_DIR must resolve to a directory")
+    normalized = ancestor.resolve(strict=True).joinpath(*reversed(missing))
+    if normalized == normalized.parent:
+        raise ValueError("TOKENLESS_DATA_DIR must not be the filesystem root")
+    return str(normalized)
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
@@ -520,26 +514,6 @@ def is_skill_file(text: str) -> bool:
     return False
 
 
-def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
-    """Resolve the tool call identifier to record for a hook invocation.
-
-    Qwen Code's serialized hook input carries two identifiers: the internal
-    ``tool_use_id`` (``toolu_<ts>_<rand>``, always present) and
-    ``tool_call_id`` (the LLM provider's original call ID, e.g. ``call_xxx``,
-    snake_case — Qwen Code's TS uses camelCase ``toolCallId`` internally but
-    normalizes to ``tool_call_id`` on the wire). For the qwencode agent,
-    prefer the provider call ID and fall back to the internal one; for other
-    agents, keep the existing priority (``tool_use_id`` first).
-    """
-    if agent_id == "qwencode":
-        return (
-            input_data.get("tool_call_id")
-            or input_data.get("toolCallId")
-            or input_data.get("tool_use_id", "")
-        )
-    return input_data.get("tool_use_id") or input_data.get("toolCallId", "")
-
-
 def secure_write_text(path: str, content: str) -> None:
     """Write a private hook state file (0o600, symlink-safe).
 
@@ -557,11 +531,6 @@ def secure_write_text(path: str, content: str) -> None:
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(content)
-
-
-def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    """Write context file for rtk rewrite session tracking."""
-    secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
 def _optimization_state_path(agent_id: str, session_id: str, tool_use_id: str) -> str:
@@ -641,16 +610,50 @@ def forward_stderr(proc: subprocess.CompletedProcess) -> None:
         warn(proc.stderr.rstrip())
 
 
-def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.CompletedProcess | None:
+def _run_in_group(
+    args: list[str], input_data: str, timeout: int
+) -> subprocess.CompletedProcess:
+    # The rewrite child requires its own group. Its watchdog survives a killed
+    # Hook; if our outer timeout fires first, we must end that entire group.
+    with subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as child:
+        try:
+            stdout, stderr = child.communicate(input_data, timeout=timeout)
+        except BaseException:
+            # communicate has not reaped a timed-out child, so its PID still
+            # reserves the group. Never signal a group after reaping its leader.
+            if child.returncode is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            # An escaped descendant may retain a pipe; reap without awaiting EOF.
+            child.wait()
+            raise
+        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+
+
+def run(
+    args: list[str], input_data: str, timeout: int = 3, *, isolated: bool = False
+) -> subprocess.CompletedProcess | None:
     """Run a subprocess with input data, returning None on failure."""
     try:
-        proc = subprocess.run(
-            args,
-            input=input_data,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        if isolated:
+            proc = _run_in_group(args, input_data, timeout)
+        else:
+            proc = subprocess.run(
+                args,
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         forward_stderr(proc)
         return proc
     except Exception:
@@ -775,10 +778,18 @@ def run_compress(
     Fail-open: a dead binary, non-zero exit, or malformed stdout all
     return None so the caller passes the original through.
     """
+    # Python already collects the complete response before emitting a Hook
+    # result. On POSIX it can supervise the isolated rewrite directly, avoiding
+    # the CLI's additional relay process. Windows keeps the CLI's job ownership.
+    isolated = os.name == "posix" and expected_operation == "pre_tool"
+    args = [tokenless_bin, "compress"]
+    if isolated:
+        args.append("--rewrite-child")
     proc = run(
-        [tokenless_bin, "compress"],
+        args,
         json.dumps(request, ensure_ascii=False),
         timeout=timeout,
+        isolated=isolated,
     )
     if proc is None or proc.returncode != 0 or not proc.stdout.strip():
         if proc is not None and proc.returncode != 0:
@@ -801,88 +812,6 @@ def run_compress(
         warn("tokenless compress returned a malformed operation result")
         return None
     return result
-
-
-def detect_cosh_ng_runtime() -> tuple | None:
-    """Detect if we are running under Cosh-NG and return its version.
-
-    Returns:
-        A (major, minor, patch) version tuple if Cosh-NG is detected,
-        or (0, 0, 0) if Cosh-NG is detected but version is unknown
-        (unsupported), or None if not running under Cosh-NG.
-
-    Detection checks (in order):
-      1. ``COSH_NG_VERSION`` environment variable — set by Cosh-NG when
-         launching hook processes.
-      2. ``COSH_RUNTIME`` environment variable set to ``cosh-ng``.
-
-    The ``(0, 0, 0)`` sentinel means "Cosh-NG detected but version unknown" —
-    callers should treat this as "unsupported version" and fail open (disable
-    compression) rather than falling back to duplicate injection.
-    """
-    version_str = os.environ.get("COSH_NG_VERSION", "")
-    if version_str:
-        ver = parse_version(version_str)
-        if ver:
-            return ver
-        # Detected Cosh-NG but can't parse version — unsupported
-        return (0, 0, 0)
-
-    runtime = os.environ.get("COSH_RUNTIME", "")
-    if runtime == "cosh-ng":
-        # Cosh-NG detected via runtime env var but no version available
-        return (0, 0, 0)
-
-    return None
-
-
-def _agent_id_from_argv(argv: list[str] | None) -> str | None:
-    """Return an explicit ``--agent-id`` value from hook command arguments.
-
-    Adapters declare the agent id in ``hooks.json``. The host always honours
-    the hook ``command`` string, but does not reliably propagate the declared
-    ``env`` map to every hook execution context — PreToolUse rewrite and
-    sub-agent task runs have been observed dropping it, collapsing attribution
-    to the fallback. An id passed as a command argument is therefore the robust
-    channel. Accepts both ``--agent-id VALUE`` and ``--agent-id=VALUE``;
-    unrelated arguments are ignored so hooks that take no other options are
-    unaffected.
-    """
-    args = sys.argv[1:] if argv is None else argv
-    for index, arg in enumerate(args):
-        if arg == "--agent-id":
-            following = args[index + 1] if index + 1 < len(args) else ""
-            return following or None
-        if arg.startswith("--agent-id="):
-            return arg[len("--agent-id=") :] or None
-    return None
-
-
-def resolve_agent_id(default: str = "unknown", argv: list[str] | None = None) -> str:
-    """Resolve the agent ID used for stats attribution.
-
-    Precedence, highest first:
-
-    1. **Cosh-NG runtime detection.** The shared extension manifest sets
-       ``TOKENLESS_AGENT_ID=copilot-shell``, and since Cosh-NG honours hook
-       ``env`` (#1617) an unconditional read would attribute Cosh-NG sessions
-       to copilot-shell. ``COSH_RUNTIME`` / ``COSH_NG_VERSION`` are injected by
-       the host after the manifest env, so they win.
-    2. **``--agent-id`` command argument** — the robust declared channel, since
-       the host always honours the hook ``command`` string.
-    3. **``TOKENLESS_AGENT_ID`` environment variable** — the legacy declared
-       channel, kept for backward compatibility but not always propagated.
-    4. **``default``** — a visible ``"unknown"`` sentinel rather than the tool's
-       own name, so an attribution gap is observable in stats instead of
-       masquerading as a real ``tokenless`` agent.
-
-    This is attribution only. The signal is cooperative — a manifest controls
-    its own ``command`` and env and could reassign these — so it must never
-    gate anything security-relevant.
-    """
-    if detect_cosh_ng_runtime() is not None:
-        return "cosh-ng"
-    return _agent_id_from_argv(argv) or os.environ.get("TOKENLESS_AGENT_ID") or default
 
 
 def parse_version(version_str: str) -> tuple | None:

@@ -28,6 +28,19 @@ Core execution/adoption receipts. Provider-private settings remain in
 `spec.providers.<name>.config`; no security-engine rules are embedded in the
 service.
 
+
+The accept loop polls owner pidfds alongside its socket. Its wait is bounded by
+pending confirmation and bridge-validity deadlines and the existing 5 ms
+external-cancellation interval. Owner checks retain a procfs directory descriptor
+and verify live UID and PID namespace; the pidfd pins process lifetime without
+reopening and parsing `/proc/<pid>/stat` on every check. Opening a watch revalidates
+the original identity. If pidfd setup is unavailable, checks use the existing
+procfs path. Cancelled owners leave the poll set while preparation and cleanup
+drain, preventing repeated wakeups from an already-readable exit descriptor.
+Registration replay records retain only process identity. Active preparation,
+owners and in-flight polls hold watch descriptors; cleanup closes them after
+the last holder finishes, while replay fences remain for the daemon generation.
+
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
@@ -39,11 +52,30 @@ and one response; a frame is limited to 8 MiB. Native stdin and normalized event
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
 
 A request contains `api_version`, `identity`, `deadline_ns` and `operation`.
+`Client::connect_with_status` returns the authenticated discovery status with
+the retained client. Service adoption checks the revision, PID and audit health
+from that response without issuing another Status RPC. It is a snapshot at
+discovery time; subsequent calls still validate the retained identity.
+
 The initial `status` request may omit identity. Every subsequent request must
 match the service's fresh generation and the SHA-256 revision of its original
 configuration bytes. Restarting the service invalidates existing clients and
 handles, even when the file is unchanged. Editing the file does not reload a
 running service.
+
+`Client::connect` discovers an unknown service identity. Callback transports
+with an already-issued binding use `Client::from_identity` to retain that
+identity without an extra Status exchange. Construction performs no I/O;
+every operation still checks the Unix peer, protocol, generation, configuration
+and deadline. A stale binding fails without rediscovery or automatic retry.
+
+The shared JavaScript and Python Scope transports acknowledge the installed
+native routes, enable invocations and obtain the watch revision through one
+`aw scope --action activate` child. The service operations retain their order
+and share the CLI's five-second deadline. The native owner checks its seams
+before and after activation and closes the child scope on failure, including
+a lost response after acknowledgement. The individual scope actions remain
+available to existing callers.
 
 | `operation.method` | Input beyond the envelope | Result |
 | --- | --- | --- |
@@ -54,7 +86,9 @@ running service.
 | `acknowledge_scope` | task `instance_id` | Enable callbacks after the owner receives its handle, within five seconds of preparation |
 | `unbind` | `instance_id` | Release after events close; reloadable instances also require complete native request/tool idle |
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
-| `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
+| `open_event` | `instance_id`, normalized `event`, optional `result_status` for tool.after | Event ID, instance ID and admitted step IDs |
+| `enable_submissions` | `instance_id`, before any input claim | Enable monotonic input turns and reclaim details after closure |
+| `close_input_event` | `instance_id`, `session_id`, `turn_id` | Cancel and drain a submission; retire details for sequenced bindings |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
 | `close_hook_event` | `instance_id`, event name `event`, `session_id`, normalized `call_id` | `{"closed": true}` after cancelling the correlation and draining its active event; later opens are fenced |
 | `invoke_step` | `event_id`, `instance_id`, `step_id`, optional `native_environment` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
@@ -65,6 +99,15 @@ running service.
 | `freeze_context` | `event_id`, `instance_id`, original `candidate_revision` | One immutable bounded evidence context; no step invocation |
 | `audit` | Preparation or event `key` | Verified durable envelopes and a `terminal` flag |
 | `stop` | None | Acknowledge requested shutdown; process exit completes cleanup |
+
+For manual tool completion, `open_event` accepts a typed operation-level
+`result_status` or the existing `event.tool.result_projection.status`. The
+service compares the reported status with any recognized native completion
+callback outcome and persists the ExecutionEvent before acknowledging the open.
+The operation field requires valid public metadata. A projection-only request
+with missing public metadata keeps its Provider path and records an audit gap.
+See the
+[completion input and runnable audit example](../../../../../../docs/developer-guide/en/aw/reference/cli.md#manual-rpc-completion-audit).
 
 Event handles include the original `candidate_revision`. The explicit
 `freeze_context` operation uses only configured sources and corroborated native
@@ -96,6 +139,11 @@ write also releases the created instance. `aw run` observes termination while
 waiting for this reply; the reusable client exposes `call_cancellable` for callers
 with their own cancellation flag. Preparation side effects are not rolled back.
 
+Binding, task-scope and policy preparation wake the connection monitor when the
+worker finishes, including failure. A private socket pair carries completion;
+the same poll observes peer disconnects and retains the bounded shutdown and
+deadline checks. Completed work does not wait for the next cancellation poll.
+
 For raw native commands, `invoke_step.native_environment` can carry the complete
 callback environment using the same byte-preserving encoding. It replaces, rather
 than merges with, the bound environment;
@@ -105,7 +153,7 @@ and never enters event input, correlation digests or audit. An invalid snapshot
 consumes the step claim and produces a visible execution failure without extending
 the event deadline. It is an RPC field, not a new `aw.yaml` option.
 
-The current service admits structured `tool.before` with `observe`/`block`,
+The current service admits structured `input.submit` and `tool.before` with `observe`/`block`,
 `tool.after` with `observe`, and explicit native steps at those tool points. It
 rejects enabled unsupported events, structured `ask`, input replacement,
 final guards and stronger execution guarantees. A successful empty effect list
@@ -123,7 +171,11 @@ configuration and Provider protocols.
 `own_instance` pins the same-user launcher's PID, start ticks and PID namespace.
 `open_scope` inherits the root's admitted target, capabilities and configuration,
 then runs Provider preparation with the task's own cwd and complete environment.
-Nested scopes, reloadable roots and active observation are rejected. The owning
+Nested scopes and restricted reloadable roots are rejected. Existing root observation
+retains run metadata while each acknowledged task owns independent observation.
+Ordinary resident Qoder SDK/QwenPaw roots may enable idle policy updates; their
+whole-task reservations and immutable child snapshots follow
+[the policy update contract](policy-reload.md#ordinary-resident-task-snapshots). The owning
 worker must be the launcher itself or its descendant; forked workers create new
 scopes after fork. Process identity corroborates lifetime within the same-user trust boundary.
 
@@ -146,10 +198,22 @@ durable audit, immediately before Provider invocation. Failed cleanup
 retains the draining state and returns an error; maintenance retries bounded work.
 
 Concurrent budgets live in `spec.daemon.limits`: bindings 64 (including roots),
-live events 128, Provider calls 64, connections 128 and active invocations per
+event slots 128, Provider calls 64, connections 128 and active invocations per
 binding 256 by default. Each field accepts 1..4096; status exposes usage, peaks and
 rejection reasons. Preparing, idle and draining bindings count toward capacity.
-Resident Pi/Claude producers register strictly increasing invocation sequences.
+An event that expires before a step is claimed retains only that step's failure
+reply and original policy action. Its worker and event payload are released;
+no extra Host reference is kept.
+Live events and retained expiry handles share the event-slot limit; status exposes
+`resources.usage.event_slots` and `resources.usage.expired_events`. Each step
+can consume its retained reply once. Explicit `close_event` or unbind reclaims
+the handle; native events also reclaim it after all retained replies are consumed
+or their native correlation is closed. The terminal audit records `expired` and
+the retained steps' failure actions. Expired handles do not count as active work
+for idle policy updates. Closed or unknown handles still return `unknown_event`.
+Resident Pi/Claude and ordinary Qoder SDK producers register strictly increasing
+invocation sequences. Each ordinary Qoder Query owns one acknowledged child scope;
+its native queue and original callbacks drain before invocation retirement and scope release.
 Protocol enable and legacy event admission share one lock. A binding that has
 admitted legacy work cannot switch protocols after that work completes.
 FinishInvocation fences new opens, drains workers and retires both phase claims;
@@ -164,6 +228,36 @@ stop admission. Service generation and owner checks remain mandatory.
 Upgrade CLI and daemon together to `aw-service/v1alpha7` after draining old
 sessions and stopping the old daemon. The configuration and Provider protocols
 retain their versions. Rollback requires the same drain/stop procedure.
+
+### Continuous bridge validity
+
+Shared JS/Python consumers start `watch_scope` after task acknowledgement and
+invocation admission. `check_scope` binds the original worker PID and immutable
+policy revision to the existing task owner; the outer binding pins service and
+task generations. Covered registrations and Hook dispatch recheck validity.
+Qoder verifies installed producer, control-dispatch and transport functions;
+QwenPaw verifies its existing middleware, parser and Toolkit dispatch seams.
+
+Idle checks run two seconds after the previous check completes, with a six-second
+CLI timeout. The service rejects a scope after fifteen seconds without a
+successful check, even if its worker remains alive. Explicit probe failure or a
+revision mismatch permanently fences that scope. Reconnecting cannot revive it.
+These checks preserve the declared coverage boundary: native capabilities outside
+AW coverage retain their original authorization behavior.
+
+Failure cancels active Provider work while retaining the live task's ownership
+until native callbacks, work and credentials finish cleanup. Invocation retirement
+remains available; independent sibling scopes retain their own validity.
+Concurrent closes join one cleanup. A late open response is closed without
+acknowledgement. Recovery requires a fresh scope after cleanup and never replays
+side-effecting calls.
+
+`status.instances[].scope_validity` separates `native_alive` from `covered_bridge`
+(`pending`, `ready`, `failed`, `unavailable`, `unmonitored`).
+`inspect.service.resident_scopes` summarizes task counts; older-service data is
+`null`. Startup `ready` cannot establish continuing validity. New consumers reject
+services without watch operations at task admission; drain existing tasks and
+upgrade CLI, adapters and service together.
 
 ## Shared event lifetime
 
@@ -197,6 +291,39 @@ Adapters continue requiring their original immutable bytes.
 It retains closed and failed-open claims until instance release; they cannot
 create a new budget. Opening an independent event per step is not valid shared
 event scheduling. The current per-instance correlation limit is 1,024 events.
+
+Submission events correlate `(input.submit, session_id, turn_id)` within the
+prepared instance, independently of the tool invocation ledger. They carry
+`input.text` and no `tool` object. Repeated step callbacks retain the first input,
+native bytes and deadline; changed text or identities are rejected. Completed,
+closed and failed-open submission claims remain until instance release, with
+an explicit 1,024-claim bound. Ordinary QwenPaw scopes end with each reply;
+Qoder releases its scope when the Query closes.
+
+Resident Claude SDK and Pi explicitly call `enable_submissions` before the first
+input claim. This selects a separate input high-water mark; tool invocation
+sequences remain independent. `turn_id` is then a canonical decimal sequence
+starting at `1`, increasing by one for each submitted input across all sessions
+in the binding. The producer allocates it only after local projection/encoding
+validation and always acknowledges `close_input_event`, including denial,
+Provider failure and cancellation. Closing cancels and drains the event before
+removing its lease and active identity. Only the high-water mark remains.
+
+Up to 1,024 inputs may be active concurrently; completed inputs do not consume a
+lifetime quota. Different active turns may close out of order. Multiple steps
+reuse the original turn, session, bytes and deadline. A close arriving before
+its open claims the next sequence and fences late callbacks. A retired sequence,
+a changed session, a skipped sequence and switching from legacy input claims
+are rejected. Capacity failures consume their sequence without admitting an
+event. Existing UUID-based consumers, including foreground Claude SDK, keep the
+legacy limit until adopting this explicit protocol. New input Adapters can use
+the same service operations without introducing a tool registration or new scope.
+
+`close_input_event` takes `instance_id`, `session_id` and `turn_id` and uses the
+same cancellation/drain path as tool events. It can cancel before the open wins
+and forbids reopening that turn. Instance release cancels pending submissions
+and waits for their Provider processes to exit. Metadata audit records the
+session/turn and decision, without user text.
 
 `close_hook_event` identifies a correlation by the owning `instance_id`,
 `event` (`tool.before` or `tool.after`), nonempty `session_id` and nonempty
@@ -288,13 +415,19 @@ sandbox or isolation from other processes of that user.
 
 Explicit `spec.daemon.state_dir` and `spec.daemon.endpoint` values must match the
 selected directory and socket. `auto` leaves path selection to the launcher;
-`aw serve` still requires `--state-dir`. `aw run` implements on-demand startup;
+`aw service serve` still requires `--state-dir`. `aw run` implements on-demand startup;
 `external` requires an existing service. With both paths set to `auto`, the
 launcher chooses `$XDG_RUNTIME_DIR/aw/<revision-prefix>` or
 `/tmp/aw-UID/<revision-prefix>` when the runtime variable is unset. An explicitly
 supplied runtime directory must already be private and owned by the current user.
 The path uses a shortened revision to fit a Unix socket; reuse still verifies
 the entire configuration revision.
+
+The service validates its startup document once and passes that immutable
+configuration to resource-limit and evidence-source initialization. Evidence
+validation and public audit projection share the same process-wide compiled
+contract registry. New bindings and policy updates retain their own document
+validation and Provider admission; no readiness or policy result is cached.
 
 Startup holds a private per-state lock and writes an immutable configuration
 snapshot. A new service runs in a separate session with null stdin/stdout and a
@@ -310,7 +443,7 @@ timed-out release leaves the instance draining and rejects new events; a later
 release can finish cleanup without repeating event execution.
 
 `Server` installs no signal handlers; its owner supplies a cancellation flag.
-The `aw serve` CLI handles SIGINT/SIGTERM, cancels active work and joins connection
+The `aw service serve` CLI handles SIGINT/SIGTERM, cancels active work and joins connection
 and event workers. A successful `stop` reply acknowledges the request; wait for
 the foreground process to exit before treating shutdown as complete. Executor
 cleanup and filesystem synchronization are not hard real-time guarantees.
@@ -324,13 +457,13 @@ history and allocates a new generation.
 
 ## Source entry points
 
-- [User commands and local demonstration](../../../../../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
+- [User commands and local demonstration](../../../../../../docs/developer-guide/en/aw/local-service.md)
 - [Public API](../../../../crates/aw-service/src/lib.rs),
   [Client](../../../../crates/aw-service/src/client.rs) and
   [Server](../../../../crates/aw-service/src/server.rs)
 - [Runtime](../../../../crates/aw-service/src/runtime.rs) and
   [audit metadata](../../../../crates/aw-service/src/audit.rs)
-- [Development checks](../../../../CONTRIBUTING.md#runtime-validation)
+- [Development checks](../../../../CONTRIBUTING.md#build-and-check)
 
 ## Boolean command projection
 
@@ -378,15 +511,80 @@ run chain has its own audit key. See [evidence lifecycle](evidence-context.md#au
 
 ## Explicit instance policy updates
 
-Reloadable `aw run` instances use `EnableReload`, `AssociateProcess`,
-`BridgeLifecycle`, `HookPlan` and `UpdatePolicy`. Service identity remains the
+Supported resident and restricted reloadable `aw run` instances share
+`EnableReload`, `AssociateProcess`, `BridgeLifecycle` and `UpdatePolicy`. Resident
+children use immutable `ScopePolicy` snapshots; restricted bridges use `HookPlan`.
+Service identity remains the
 bootstrap digest; `expected_revision` addresses the instance Host's current
 revision. Native request entry and the final update check share the instance
 registry gate. Candidate Host preparation runs outside it. Busy updates never
-queue, drain tools or activate after the response. Completed event leases remain
-claimed across updates; evidence is built from the owning Host snapshot.
+queue, drain tools or activate after the response. Restricted bridges retain
+completed event claims across updates; resident scopes retain their reclamation
+and retired-identity protection. Evidence uses the owning Host snapshot.
 
 The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.
 
-Owned roots may use observation while no scopes exist. Task scopes and roots with preparing or active scopes reject observation; active root observation rejects opening a scope.
+Roots can start observation before opening task scopes. Once scopes exist, the root
+cannot start a new observer. Acknowledgement starts each task's configured observer
+after its ownership and policy checks; closure drains reads and releases source
+claims. Initialization failure cancels the acknowledged scope for maintenance
+cleanup. Source identity and coverage retain the existing Adapter contract.
+
+## Independent registration
+
+`Operation::Registration` adds authenticated registration, query, Ready and release
+without transferring application process ownership. Its types live in
+`wire/registration.rs`; `runtime/registration.rs` coordinates the transaction.
+The stable CLI envelope and integration sequence are defined in the
+[independent instance contract](../../../../../../docs/developer-guide/en/aw/deployment/independent-instances.md).
+
+The request key binds the application PID/start identity and client request ID.
+Service authenticates direct-owner or direct-child Unix peers and retains a digest
+of the complete registration input. A changed target, capability, cwd, environment
+or candidate configuration under that key is a conflict. Each fresh key uses the same `bind_id` preparation
+as `Bind`: Core preflight, Host discovery, Core admission and Host construction
+consume the matching preparation evidence/resources. Configuration digest equality
+does not share prepared resources across instances. The ordinary Adapter route
+projection validates wiring constraints before Provider discovery. Optional
+`config` carries complete configuration text validated against the daemon's
+startup policy-update boundary. It selects the new instance's Host revision;
+the binding retains the original service identity. Omitting it uses the daemon's
+startup configuration.
+
+An owned reservation is visible during preparation. Cancellation, owner loss and
+connection loss reach its preparation flag. Successful preparation starts a
+30-second native confirmation window; reply delivery does not confer Ready or
+release the reservation. A failed response write leaves the registration queryable.
+Ready commits under the instance/owner locks after a durable lifecycle record and
+checks the exact immutable policy revision. Repeating the same registration or
+Ready cannot renew its original deadline. Audit failure keeps admission closed
+and the daemon retains its existing fail-stop behavior.
+
+`Register` creates an ordinary factory root. After Ready, it admits task Scopes
+and requires child Scopes for Hook execution. Workers must belong to the owner
+process tree; Service authenticates each exact worker or direct CLI child on
+existing instance operations, including legacy RPC paths. Each task retains an
+immutable ordinary resident route snapshot through native cleanup.
+
+`RegisterNative` is restricted to admitted Qoder/OpenClaw/Hermes command bridges. Ready
+and process association remain owner-authenticated. Root callbacks require a peer
+in that owner's process tree, and the stable bridge reserves complete native
+requests and tools. Pending roots and unrelated callers cannot dispatch events;
+ordinary SDK roots retain their Scope requirement.
+
+Native preparation explicitly enables supported idle policy updates. Actual
+native readiness confirms the bridge before update or work admission, and active
+tasks or unfinished root requests keep updates busy. Registration alone does not
+confirm native wiring or enable execution. Existing `aw run` and attachment
+contracts retain their admission paths. See [native startup ownership](../architecture.md#application-owned-native-startup)
+for the CLI/Adapter/Service preparation flow.
+
+Release fences admission and reuses `release_instance`: cancel sibling scopes,
+wait for Provider workers and descendants, then drop Host resources. Maintenance
+uses the same path for owner death and unconfirmed expiry. Clients retain original
+native task ownership until their native work drains; Service never signals the
+application process. Retained terminal records prevent duplicate preparation for
+the entire daemon generation. The bounded 4,096-key registry rejects new keys at
+capacity and does not evict replay fences. A new daemon generation requires an
+explicit new registration.

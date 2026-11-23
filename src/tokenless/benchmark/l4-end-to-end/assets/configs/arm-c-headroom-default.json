@@ -1,0 +1,48 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "bench-qwen/qwen3.8-max-0902"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "bench-qwen": {
+        "baseUrl": "http://127.0.0.1:8801/v1",
+        "apiKey": "${DASHSCOPE_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "request": {
+          "allowPrivateNetwork": true
+        },
+        "models": [
+          {
+            "id": "qwen3.8-max-0902",
+            "name": "Qwen3.8 Max 0902 snapshot",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 1000000,
+            "maxTokens": 65536
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "headroom": {
+        "enabled": true,
+        "config": {
+          "proxyUrl": "http://127.0.0.1:8801",
+          "autoStart": false,
+          "routeCodexViaProxy": false,
+          "gatewayProviderIds": ["bench-qwen"]
+        }
+      }
+    },
+    "slots": {
+      "memory": "none"
+    }
+  }
+}

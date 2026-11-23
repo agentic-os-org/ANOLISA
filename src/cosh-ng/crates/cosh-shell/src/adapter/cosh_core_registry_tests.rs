@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::cosh_core::CoshCoreAdapter;
 use super::cosh_core_registry::{
-    extension_mutation_requires_reload, registry_timeout, RegistryQueryError,
+    extension_mutation_requires_reload, guard_auth_params, registry_timeout, RegistryQueryError,
     AUTH_CONFIGURE_TIMEOUT, REGISTRY_MUTATION_TIMEOUT, REGISTRY_READ_TIMEOUT,
 };
 
@@ -86,6 +86,56 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":tru
 }
 
 #[test]
+fn startup_auth_state_keeps_environment_probing_off_and_honors_disabled_auto_access() {
+    let script = write_mock_script(
+        "startup-auth",
+        r#"read REQUEST
+case "$REQUEST" in
+    *'"params":null'*) ;;
+    *) exit 2 ;;
+esac
+printf '%s\n' '{"type":"registry_response","request_id":"startup-auth","success":true,"data":{"effective_auth_required":true,"trial_preferences":{"auto_use":false}}}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.startup_auth_state();
+    let _ = std::fs::remove_file(&script);
+    assert_eq!(result, Ok((false, super::StartupAuthHint::Configure)));
+}
+
+#[test]
+fn startup_ecs_hint_uses_read_only_prepare_and_preserves_probe_errors() {
+    use super::StartupAuthHint;
+    for (response, expected) in [
+        (
+            r#"{"mode":"ecs_ram_role","instance_id":"i-test","console_url":"https://example.test"}"#,
+            StartupAuthHint::Ecs,
+        ),
+        (r#"{"mode":"manual"}"#, StartupAuthHint::Unknown),
+        (
+            r#"{"error_code":"MetadataAccessDenied"}"#,
+            StartupAuthHint::Unknown,
+        ),
+    ] {
+        let success = expected == StartupAuthHint::Ecs || response.contains("manual");
+        let body = format!(
+            r#"read REQUEST
+case "$REQUEST" in
+    *'"action":"prepare"'*'"provider_type":"aliyun"'*) ;;
+    *) exit 2 ;;
+esac
+printf '%s\n' '{{"type":"registry_response","request_id":"startup-ecs","success":{success},"data":{response},"error":null}}'
+"#
+        );
+        let script = write_mock_script("startup-ecs", &body);
+        let adapter = test_adapter_with_program(&script.to_string_lossy());
+        let result = adapter.startup_ecs_hint();
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(result, expected);
+    }
+}
+
+#[test]
 fn registry_query_returns_error_on_failure() {
     let script = write_mock_script(
         "failure",
@@ -129,6 +179,7 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     assert_eq!(
         result,
         Err(RegistryQueryError::Response {
+            provider_updated: false,
             message: "candidate validation failed".to_string(),
             code: None,
         })
@@ -155,6 +206,7 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     assert_eq!(
         result,
         Err(RegistryQueryError::Response {
+            provider_updated: false,
             message: "The API key was rejected.".to_string(),
             code: Some("invalid_credentials".to_string()),
         })
@@ -226,4 +278,50 @@ printf '%s\n' 'this is not valid json'
 
     let err = result.expect_err("should fail on invalid json");
     assert!(err.contains("parse error"), "unexpected error: {err}");
+}
+
+#[test]
+fn access_copy_short_registry_preserves_partial_save_result() {
+    let script = write_mock_script(
+        "partial-save",
+        r#"read REQUEST
+printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":false,"data":{"provider_updated":true,"error_code":"io_error"},"error":"session persistence failed"}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.registry_query_classified("auth", "configure", Value::Null);
+    let _ = std::fs::remove_file(&script);
+    let error = format!("{:?}", result.unwrap_err());
+    assert!(error.contains("provider_updated: true"), "{error}");
+}
+
+#[test]
+fn guarded_trial_activation_carries_the_write_guard_for_null_params() {
+    assert_eq!(
+        guard_auth_params(Value::Null, true).unwrap(),
+        serde_json::json!({"guarded_writes": true})
+    );
+    assert_eq!(
+        guard_auth_params(serde_json::json!({"auto_use": false}), true).unwrap(),
+        serde_json::json!({"auto_use": false, "guarded_writes": true})
+    );
+}
+
+#[test]
+fn guarded_auth_writes_refuse_params_that_cannot_carry_the_guard() {
+    let error = guard_auth_params(serde_json::json!(["x"]), true)
+        .expect_err("unshaped params must not carry the guard");
+    assert!(
+        matches!(
+            error,
+            RegistryQueryError::Response { ref code, .. }
+                if code.as_deref() == Some("guarded_writes_unsupported")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn unguarded_trial_activation_keeps_null_params() {
+    assert_eq!(guard_auth_params(Value::Null, false).unwrap(), Value::Null);
 }

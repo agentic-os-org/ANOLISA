@@ -658,6 +658,9 @@ trace-ID 或第二套审计输出。worker 意外退出时关闭队列准入，`
   Repository 原子检查 ACTIVE、去重并创建真实 Binding 意图，随后只通知 Binding ID。
 - 完整扫描确认退出或观察到失配时，系统请求旧 Binding 删除。局部读取失败保留已有实例；
   清理责任保存在统一 Repository，不靠 discovery 缓存维护。PID selector 不跟随 PID reuse。
+- 恢复 worker 时先读取当前 boot ID，将其它 boot 的已知实例移出恢复集合，并在首次扫描前
+  经 PAP 持久化其 Binding 删除意图；PID metadata 不可读不阻止此步骤。相同 boot 的实例
+  仍按原有读失败规则保留，PID pin 不清空。后端清理由既有 Reconciler 异步执行。
 - 删除 Scope 先关闭新子项准入，再取消/join worker，随后通知全部 Binding 清理。
   即使 Apply 已执行也保留其副作用记账；全部子项清理完成才回收 Scope。重复删除不重置
   预算；终态失败由 `scope retry` 显式重试，不由周期扫描刷新。
@@ -679,3 +682,6 @@ Reconciler 继续拥有调度、CAS、串行目标调用、UNKNOWN 记账及有�
 验收包括 name/path/exec/PID reuse/局部读失败单元测试、registry 容量/停止测试，以及
 `sqlite_procfs_discovery_cleans_exited_instances_and_scope` 的真实 procfs、
 PAP/runtime/Adapter/scripted Client 组合。mock 结果不证明真实 kernel enforcement。
+`scope_discovery.rs::recovery_retires_previous_boot_bindings_and_preserves_same_boot_instances_and_pid_pins`
+使用临时 SQLite 和模拟 procfs 验证跨 boot 删除意图落盘、数据库重开后新实例生成新
+Binding；相同 boot 保留实例及 PID pin 不跟随替代实例分别作针对性检查。

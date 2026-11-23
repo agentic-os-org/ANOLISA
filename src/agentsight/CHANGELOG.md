@@ -1,5 +1,222 @@
 # Changelog
 
+## 0.17.0
+
+### Breaking changes
+- The Rust library removes `AnalysisResult::Http(HttpRecord)`. Match `AnalysisResult::HttpContext` and read `.http` instead. `HttpContext::new` remains available and fields stay public; C FFI signatures and event layouts are unchanged.
+
+### Features
+- Add prompt-cache diagnosis through `agentsight cache`, `GET /api/metrics/cache`, and the Dashboard: report token-weighted hit rates, field coverage, low-hit causes and baseline comparisons. Cost estimates require all four caller-supplied prices; one window covers at most the newest 20,000 calls.
+- Add directory-tree read protection through `POST /api/enforcement/file-read-bindings` with `kind: directory_tree`, covering regular files created, replaced or moved into the tree after Apply.
+- Show workspace snapshots at ATIF Steps and round boundaries, compare file changes, and offer explicitly confirmed guarded restore through authenticated workspace snapshot APIs. AgentSight invokes the local ws-ckpt CLI; restore is disabled by default and trajectories remain available when snapshot support is unavailable.
+
+### Fixes
+- Self-verify scanned static SSL offsets before caching them and rotate response-only write candidates. Retain early request evidence across delayed process discovery without replaying it onto reused PIDs or new candidates, and reject changed or missing binaries before rotation.
+- Pre-attach Claude Code and Codex binaries found on `PATH` at startup to capture short-lived agents' first request. Preserve the shipped table's handshake probes, clear verification state when probes detach, and allow a late request to verify the final candidate after its warning.
+- Restore the RFC 7541 HPACK static table ordering, including `cookie`, so HTTP/2 captures that start mid-connection retain the encoded header names instead of shifting names such as `host` and `user-agent`.
+- Preserve command and file identities in cost-ledger action signatures for Codex `exec_command`, argv-form `local_shell_call`, `script` tools and `filePath` edits, avoiding false repeated-action reports for distinct operations.
+- Keep audit processes and their descendants visible when historical PID reuse creates parent cycles in the displayed process tree; raw audit evidence remains unchanged.
+- Treat copied request history as input rather than new agent executions in recorded analyses, so JSON-repair requests do not inflate call counts and independent requests do not accumulate each other's context.
+- Adopt existing host-visible descendants when installing enforcement bindings, retain surviving reparented children, and report `Degraded` when coverage is partial or cannot be confirmed.
+- Resolve child PID namespace targets, accept nsfs mount roots, and pin guarded ancestors through the target root for file guards such as systemd PrivateTmp.
+- Recover incomplete terminal Responses output and drained custom tool calls; preserve late tool results across conversation changes, declared batch outcomes, Gemini tool input and reasoning tokens, and null Anthropic SSE usage.
+- Deduplicate repeated Gemini function calls on live and drain paths, stop JSON at its document boundary, and honor chunked request framing even when a Content-Length is also present.
+- Restore token-burn and similarity loop detection without treating whitespace-only output as meaningful activity.
+- Keep preference turn cutoffs, complete system snapshots, nested optimization dimensions, cached usage and tool dispatch timing accurate; do not treat label decisions as fresh trajectory evidence.
+- Resolve trace IDs in the served database, return 413 for oversized JSON bodies, bound detail savings windows, and number turns past records without a call ID.
+- Accept BOM-marked ATIF input, validate embedded step IDs, follow changed ATIF URL targets, preserve settings changed during concurrent saves, and keep resolved interruptions hidden.
+- Tolerate unavailable causal history and report step-scan truncation only when another matching step exists.
+- Reduce repeated enforcer-absent diagnostics and stream calibration database rows instead of collecting them all in memory.
+
+### Performance
+- Reserve 1 KiB ring records for small TLS events without truncating larger records, and pace WAL checkpoints and capture scheduling while retaining capacity for deferred delivery and retries.
+
+### Upgrade notes
+- Directory-tree reads require `agent-file-guard`, BPF LSM and `directory_tree_read_protection: true`. Apply rejects existing file mappings, multiply-linked files and trees exceeding 100,000 entries. Directory listings, unbound processes' later hard links, and io_uring/AIO are outside the coverage guarantee.
+- Enforcer activation layout and pinned profile markers changed; upgrade the client and enforcer together and allow incompatible pinned engines to be reinstalled.
+- Workspace snapshots require a compatible local ws-ckpt CLI and daemon. Enable restore explicitly only when wanted; queries and restore require Dashboard authentication even over loopback.
+
+## 0.16.2
+
+### Fixes
+- Capture the first TLS call of warm agents such as Claude Code: ship static SSL offsets for Claude Code 2.1.301, 2.1.319 and 2.1.322, reuse offsets learned from earlier scans across restarts (stored as `ssl_offsets_learned.json` in the storage directory), and drain every finished scan result per tick.
+- Keep active SSE responses under memory pressure: reject new HTTP/1 flows and HTTP/2 streams at the byte budget instead of evicting the oldest retained flow. This fix reached `main` just before the 0.16.1 version commit, but the `sight/v0.16.1` tag and its packages do not contain it, so it first ships in 0.16.2.
+- Record Gemini prompts blocked by `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT` or `IMAGE_SAFETY` as `safety_filter` interruptions, count Gemini tool prompt tokens as input, and preserve Gemini wire tool IDs.
+- Export tool results that Anthropic server tools return inline in the same response, and retain Codex tool completion times at the end of a rollout.
+- Replay changed system prompts in order in cost analysis instead of summing every snapshot, and count backtracks from argv-form Codex shell calls.
+- Invalidate cached causal analyses when a session gains a new round.
+
+### Docs
+- Correct the 0.16.1 note on ActPlane: policies still apply in a container's default PID namespace; only block policies without an active BPF LSM are rejected.
+
+## 0.16.1
+
+### Security
+- Stop trusting every loopback request: the dashboard skips authentication only for same-origin requests to a loopback host, and both `serve` and the macOS local viewer restrict CORS to their own origin, so a visited web page can no longer read sessions, trajectories or security events through `127.0.0.1`.
+
+### Features
+- Resolve the init-namespace identity of targets inside PID namespaces: enforcer map operations, tracepoint holders and events use kernel PIDs, and inode-only paths resolve through the target root.
+- Discover Cline sessions in the trajectory collector, pair Cline usage with its response, and refresh usage that Cline saves after a task finishes.
+
+### Changed
+- The `agentsight` compatibility RPM recommends the matching `agentsight-plugins`, so a default `dnf install agentsight` also delivers the DSH plugin resources.
+- ActPlane rejects block policies when the BPF LSM is not active, before mutating BPF state.
+
+### Fixes
+- Capture Claude Code builds again after Bun's 2026 BoringSSL rebuild reordered the SSL functions; reattach SSL probes on each new PID and retry SSL libraries that load late.
+- Raise the memlock limit before loading probes, so 5.10 vendor kernels no longer fail every probe with `EPERM` in containers.
+- Persist file-delete audit evidence, label denied file operations as blocked, scope the evidence link to the filtered agent, and warn on exec patterns that can never match.
+- Discover Qoder CLI launched through Node with one V8 flag, decode overlay mount paths, read non-UTF-8 process names, and probe the IPv6 loopback for health ports.
+- Read streamed Anthropic tool results; preserve Gemini text parts and project metadata, canonicalize and normalize Gemini request contents, and fold Gemini thinking tokens into partial usage.
+- Match Codex command outcomes, scope reasoning replay suppression, count tools in raw fallback token estimates, discount prompt edits for cache hits, and bound decoded HPACK block bytes.
+- Keep collected results without an owner, collected and local completion times, local tool outcomes and shell output, recorded dispatch timing, and complete command evidence for accuracy checks.
+- Show and analyze replayed user observations, strip injected tags in local sessions, keep useful single-step sessions, isolate optimization session roots, and report local label-store errors.
+- Order and distinguish repeated preference turns, fold evaluator outcome variants, validate citations against the prompt, reject stale model judgements, and accept semantic ranking envelopes.
+- Harden claim extraction for embedded JSON, bracketed lists, paths, URLs, Markdown references and semicolon-delimited values; skip verified rows in the triage window.
+- Stop the causal probe from loading whole response bodies into memory, sanitize causal attribution errors, keep concurrent analysis artifacts, order the savings strategy breakdown, and reject negative batch limits.
+- Clear stale interruptions on completion, exclude tool work from user idle time, and deduplicate crash backups by conversation.
+- Retry a busy WAL conversion, prune legacy evaluation tables, preserve config symlinks and modes, replace optimize configs atomically, read BOM-marked optimize configs, keep a rejected config from applying, and degrade `serve` instead of aborting on malformed JSON.
+- Guard dashboard settings saves until the configuration loads, validate trajectory labels before querying the store, and build Linux-only targets only on Linux.
+
+### Performance
+- Run static SSL signature scans on one paced background worker instead of the capture event consumer.
+- Cache, index and borrow claim extraction fast paths.
+
+### Docs
+- Document container target identity, the EPERM denial invariant, and the Chinese build-all note.
+
+### Upgrade notes
+- The default configuration adds a `QoderCLI` rule `["*node*", "*", "*qodercli*"]` for Node launches with one V8 flag. Existing `cmdline` sections are kept as they are on upgrade; add the rule manually to discover such launches.
+- With weak dependencies enabled (the dnf default), upgrading or installing `agentsight` also pulls `agentsight-plugins`, which requires `nodejs >= 22`; exclude it with `--setopt=install_weak_deps=False` when the DSH integration is not wanted.
+
+## 0.16.0
+
+### Breaking changes
+- Model aliases that resolve to the same tokenizer share one cache slot; automatic aliases no longer appear as separate low-level registrations.
+
+### Features
+- Add secret-file read protection: an enforce-only template stops a selected agent process tree from reading explicitly configured secret files, exposed through a dedicated HTTP route.
+- Observe Qoder CLI gateway calls and record prompts, tools, session IDs and token usage; the schema 6 default configuration adds Qoder discovery and gateway rules for new installations (upgrades need a manual step, see Upgrade notes).
+- Add a Cline session parser to the trajectory collector.
+- Sort token savings sessions by the displayed metrics; CSV export follows the visible order.
+
+### Fixes
+- Keep Codex shell calls in requests, answers and streams, retain Codex result ownership, and include last-only Codex usage tails.
+- Open listed Gemini sessions, isolate Gemini tool responses, count Gemini reasoning tokens, read the generation config, classify the remaining stop reasons, and clear rewound Gemini snapshots.
+- Read null Anthropic usage, SysOM response envelopes and tool_use snapshots, DeepSeek resource stops, and skip Responses sub-endpoint usage while labelling Responses and native operations.
+- Flatten null tool outputs and results to empty, decode block arrays encoded as strings, and preserve string assistant replies, native stop strings and unknown risk reason text.
+- Retain unmatched batch results, batch tool completion times, recorded identity in batch exports, and local session usage.
+- Isolate concurrent storage writes and write agent configuration atomically.
+- Bound LLM HTTP request attempts with per-attempt timeouts, gate the LLM preferences query, guard optimize endpoint retargeting, and serve non-object trajectories intact.
+- Merge overlapping inference windows, measure structured triage messages, require complete RSS evidence, correct signed RSS trend claims, reject nonfinite capture timings, and guard the token-limit ratio against a zero cap.
+- Report process termination status, replay interrupted recovery phases, canonicalize exported result IDs, and share tool-failure precedence.
+- Keep a tool result the provider declared successful instead of re-judging it from the result text.
+- Keep the parsed file path in the post-edit format hook when the payload carries non-list `edits`, so formatting is no longer silently skipped.
+- Reduce the `recvfrom` SCM_RIGHTS eBPF stack usage below the verifier's 512-byte limit in the x86_64 and aarch64 enforcer objects.
+- Make the endpoint match-nothing sentinel unreachable in the policy compiler.
+- Reset the causal panel when the identity changes.
+- Harden benchmark campaigns: tolerate partial artifacts, count only usable checks, skip recovery records that cannot be grouped, treat a null evaluation block as a failed gate, stop tracer and server process groups, and make `test.sh` exit non-zero on failures.
+
+### Docs
+- Document LLM query authentication in the dashboard guide.
+
+### Upgrade notes
+- Configuration moves from schema 5 to 6. The upgrade merges top-level sections only: sections already present, such as `cmdline` and `https`, are kept as they are and do not receive new default entries. A configuration carried over from 0.15.3 therefore lacks the Qoder CLI rules; to observe Qoder CLI, add `cmdline.allow` entries with `agent_name` `QoderCLI` for `["qodercli*"]`, `["*/qodercli*"]`, `["*node*", "*qodercli*"]` and `["*node*", "*", "*qodercli*"]`, and add `*.qoder.sh` to the `https` rules, as in the shipped default `src/agentsight/agentsight.json`.
+- The pre-upgrade file is saved beside the active configuration as `<file>.bak.<timestamp>`, for example `/etc/agentsight/config.json.bak.<timestamp>` for RPM installations.
+- The enforcer map layout changed, so stale pinned engines are reinstalled on upgrade rather than reusing incompatible pins.
+
+## 0.15.3
+
+### Fixes
+- Preserve final token usage in cost analysis and scope final answers to the latest turn.
+- Preserve ATIF developer instructions and recorded tool completion times.
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown.
+- Preserve Hermes fallback call identity and clear empty Hermes histories.
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries.
+- Validate resource capture quality before accepting benchmark results.
+
+### Changed
+- Keep ANOLISA discovery contract ownership in the distribution.
+
+## 0.15.2
+
+### Features
+- Enforce structured file-protection policies: classify policy paths, lower them into map entries, apply them, and enforce structured kernel deletion, rename/exchange, and ordinary file writes.
+- Advertise structured file protection as a capability.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs: `agentsight-core` owns programs, configuration and services; `agentsight-plugins` holds the DSH integration; `agentsight` remains as a compatibility package that depends on the exact-version core.
+- Programs install to the system binary directory, and `make install` consumes prebuilt files without activating services. (BREAKING)
+
+### Tests
+- Cover structured policies end to end and assert matched file guard audit rules.
+
+## 0.15.1
+
+### Breaking changes
+- Unify file installation: `make install` now installs prebuilt files without activation, `make install-core` and `make install-plugins` select programs, configuration and services or native host integration resources, local installation defaults to `PREFIX=/usr/local` with an empty `AWPRJ`, and `DESTDIR` only prepends the packaging root. `make build` still compiles components through the root Makefile.
+
+### Features
+- Enforce structured file protection: activated policies deny `unlink`, `rmdir`, boundary-crossing rename and exchange, and ordinary `write`/`pwrite` on protected regular files, with denial events naming the operation. Truncate, `O_TRUNC`, shared writable mmap and dynamic mounts stay out of scope, and no content-immutability guarantee is claimed.
+- Accept structured policies through ActPlane in enforce mode and report four supported structured capabilities in the health response; the integration guide now documents ordinary-write and Apply stability limits instead of blanket rejection.
+- Add the structured file-protection policy contract behind the above: normalized protections, static and re-resolved protected topology, race-safe path resolution, legacy `path_rename` hook support, self-owned policy activation and detach, transactional policy map staging, policy generations in pinned maps, and a structured policy map ABI.
+- Add resource limit checks.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs.
+- Split RPM file ownership into `agentsight-core` and `agentsight-plugins`; core owns service resources and installs independently.
+
+### Performance
+- Cache GenAI identifier hashes, vectorize SSL executable scans, and stream capture database queries.
+
+### Fixes
+- Explain file guard activation, report file guard capability, and validate file protection boundaries.
+- Ship per-architecture BPF objects so the enforcer payload follows the build target.
+- Attach SSL uprobes earlier to catch the first TLS connections, add verified Codex TLS offsets, and bound unknown process registration.
+- Preserve partial Qoder batch usage, usage-only batch records, bare JSON SSE usage, and the last usable batch usage.
+- Honor successful Gemini tool calls, retain Gemini function responses, and replay Gemini session previews.
+- Retain local session identity, attach local replies to their calls, disambiguate echoed tool call IDs, and compare complete repeated turns.
+- Preserve user config on schema migration and make session controls accessible.
+- Report cleanup errors from a failed activation without losing the original compile or kernel failure classification.
+- Keep partial campaign reports and worker results, lock resource build publication, reject impossible benchmark metrics, preserve missing drop counters, bound recovery evidence by phase, and verify executed regression commands.
+
+### Upgrade notes
+- The enforcer control protocol moves from v4 to v5 and is not backward compatible: a 0.15.0 client paired with a 0.15.1 enforcer has every request rejected as `UnsupportedVersion`, including health checks. Upgrade the client and the enforcer together.
+- Full and agent-file-guard upgrades replace stale v4 hook layouts instead of silently accepting unenforced ordinary-write policies.
+- Review the installation targets above before rollout: `make install` no longer activates what it installs, and deployments relying on the previous single-target behavior must call `make install-core` and `make install-plugins` explicitly.
+
+## 0.15.0
+
+### Features
+- Discover Gemini CLI JSONL chats under `~/.gemini/tmp/<project>/chats/` in the trajectory collector and local viewer, including sub-agent transcripts and project names; the viewer also opens legacy whole-file chats. Sub-agent composite IDs do not link back to the parent row.
+- Add `--stats-only` to the standalone `analyze` CLI and batch-analysis wrapper for local `perf`/`cost` statistics without API credentials or LLM requests; `accuracy --stats-only` is rejected, and omitting the option retains model-backed analysis.
+- Expose the probe-independent `PipelineCore` Rust library API for parsing, correlating and analyzing events without attaching probes, and re-export `HttpContext` as `agentsight::analyzer::HttpContext` so library callers can name the HTTP data carried by `AnalysisResult::HttpContext`; existing command syntax and capture behavior are preserved.
+
+### Fixes
+- Bound the Tokenless savings numerator by the request window when timestamps are available, excluding older optimizations when the Dashboard range narrows. Legacy local `stats.db` tables without `timestamp` retain all matching records, so their savings can still include out-of-window optimizations.
+- Count Tokenless records with a missing, null or upper-case mode as applied savings; only dry-run records are excluded.
+- Keep Anthropic server-tool and MCP tool calls, including their arguments, when a stream is reconstructed after the connection drains.
+- Treat a tool result that opens with a JVM or SQL exception as a tool failure in conversation grading and interruption detection, matching the grounding classifier.
+- Preserve non-streaming Anthropic, Responses, Gemini and legacy-completion answers and tool calls in token breakdowns instead of reporting zero output.
+- Preserve Gemini prompts, answers, tools and finish reasons when building calls from parsed messages without raw HTTP bodies.
+- Render the DeepSeek Harness `agentsight_status` tool result through text content blocks so the host and model receive the validated status.
+- Detect SSL symbols in Python executables and shared libpython images for the existing TLS capture path; retain retryable image reads and startup error causes.
+- Reject fault attempts that were not fully delivered instead of reporting a passing benchmark campaign. (#8890)
+- Recover interrupted benchmark campaigns by validating resume checkpoints, archiving unusable results and atomically replacing checkpoints. (#8857)
+- Reject invalid benchmark time controls before network/file operations and prevent PID reuse from corrupting process-survival and resource evidence. (#8889, #8856)
+- Preserve literal capture-database paths containing URI punctuation and valid JSONL records around damaged lines, with warnings for discarded records.
+- Treat missing or invalid recovery observations as gaps, reject invalid final drop counters, and report unproven recovery gates instead of claiming an improvement.
+- Read modern h2load request-latency summaries correctly, preserving mean, median, p95 and p99 without borrowing fields from adjacent rows.
+- Restore the macOS release builds so the published 0.15.0 artifacts include the macOS package.
+- Publish benchmark campaign artifacts atomically so an interrupted run cannot leave a partially written manifest.
+
+### Performance
+- Compute benchmark latency percentiles from one sorted snapshot and release unused fallback samples to reduce long-run work and memory use. (#8888)
+
+### Docs
+- Flatten the user manual layout.
+- Move the integrated ANOLISA container image sources from `docker/` to `distribution/docker/` and update the AgentSight deployment guide's entrypoint path; CLI syntax, image tags and container behavior are unchanged.
+
 ## 0.14.3
 
 Combined release notes for the 0.14.2 and 0.14.3 release work. Previously shipped fixes recorded in 0.14.2 are identified separately below.

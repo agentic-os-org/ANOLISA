@@ -15,8 +15,9 @@
  * Platform packages follow the naming convention:
  *   @anolisa/cli-{os}-{arch}
  *
- * Each platform package ships a single native binary at:
- *   bin/anolisa
+ * Each platform package ships bin/anolisa and its sibling
+ * share/anolisa/components/ integration registry. The native executable resolves
+ * its packaged data from its real location, through the launcher symlink.
  */
 
 import {

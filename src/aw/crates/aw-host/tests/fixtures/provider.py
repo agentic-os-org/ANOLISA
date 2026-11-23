@@ -40,18 +40,65 @@ if preparation_mode.startswith(f"{method}-"):
 if preparation_mode == "slow-preparation":
     time.sleep(0.5 if method == "describe" else 3.0)
 
-if method == "describe":
+if method == "describe" and preparation_mode == "arbiter":
+    reply["operations"] = [
+        {"name": "evaluate", "events": ["tool.before"], "effects": ["observe", "block"],
+         "decision": True, "binding": True}
+    ]
+elif method == "describe" and preparation_mode == "executor":
+    reply["operations"] = [
+        {"name": "checkpoint", "events": ["tool.before"], "effects": ["observe"],
+         "obligation_kinds": ["snapshot", "audit"]}
+    ]
+elif method == "execute_obligation":
+    assert preparation_mode == "executor"
+    assert "event" not in request
+    scenario = request["obligation"].get("parameters", {}).get("scenario", "completed")
+    if scenario == "crash-window":
+        (directory / "confirmed-snapshot").touch()
+        time.sleep(4)
+    if scenario == "timeout":
+        time.sleep(4)
+    reply["input_digest"] = request["input_digest"]
+    reply["obligation_status"] = "skipped" if scenario == "skipped" else "completed"
+    if scenario in ("completed", "wrong-digest"):
+        (directory / f"confirmed-{request['obligation']['kind']}").touch()
+elif method == "describe":
+    names = os.environ.get("AW_HOST_OPERATIONS", "check,second,record").split(",")
     reply["operations"] = [
         {
             "name": name,
             "events": ["tool.before", "tool.after"],
             "effects": ["observe", "block"],
         }
-        for name in ["check", "second", "record"]
+        for name in names
+        if name
     ]
+    reply["operations"].append({"name":"submit", "events":["input.submit"], "effects":["observe", "block"]})
+    reply["operations"].append({
+        "name": "lifecycle",
+        "events": ["session.start", "session.end"],
+        "effects": ["observe"],
+    })
+    reply["operations"].append({
+        "name": "stop",
+        "events": ["turn.stop"],
+        "effects": ["observe", "block"],
+    })
+    reply["operations"].append({
+        "name": "stop_second",
+        "events": ["turn.stop"],
+        "effects": ["observe", "block"],
+    })
+    reply["operations"].append({
+        "name": "replace", "events": ["tool.after"], "effects": ["replace_result"]
+    })
+    if preparation_mode == "binding":
+        for operation in reply["operations"]:
+            operation["binding"] = True
 elif method == "invoke":
     native = request["event"]["native"]
-    scenario = native["scenario"]
+    scenario = native.get("scenario", request["config"].get("scenario"))
     delay = request["config"].get("delays_ms", {}).get(request["operation"], 0)
     time.sleep(min(delay, 5000) / 1000)
     if scenario == "wait":
@@ -66,6 +113,26 @@ elif method == "invoke":
     if scenario in ["block", "observe", "wait"]:
         effect = "observe" if scenario == "wait" else scenario
         reply["effects"] = [{"type": effect, "reason_code": "fixture_policy"}]
+    if scenario == "replace" and request["operation"] == "replace":
+        reply["effects"] = [{"type": "replace_result", "text": "short result"}]
+    if preparation_mode == "arbiter":
+        assert request["decision"] is True
+        if scenario == "arbiter-timeout":
+            time.sleep(4)
+        reply["decision"] = scenario if scenario in ("allow", "block", "ask", "abstain") else "allow"
+        reply["effects"] = []
+        if scenario == "direct-block":
+            reply["effects"] = [{"type": "block"}]
+        if scenario == "route-unknown":
+            reply["obligations"] = [{"kind": "snapshot"}, {"kind": "private-unmapped-kind"}]
+        if scenario.startswith("snapshot-"):
+            reply["obligations"] = [
+                {"kind": "snapshot", "parameters": {"scenario": scenario.removeprefix("snapshot-").removesuffix("-reversed")}},
+            ]
+            if scenario in ("snapshot-completed", "snapshot-completed-reversed", "snapshot-skipped-reversed"):
+                reply["obligations"].append({"kind": "audit"})
+            if scenario.endswith("-reversed"):
+                reply["obligations"].reverse()
 
 if scenario == "wrong-id":
     reply["request_id"] = "uncorrelated-response"

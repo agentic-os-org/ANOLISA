@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::Instant;
 
 /// Removes the wrapped path when dropped, so a mid-run write/sync failure
@@ -274,10 +274,10 @@ fn bench_io_latency() -> Result<BenchResult> {
 
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .custom_flags(libc::O_SYNC)
-        .open(path)?;
+        .open(path)
+        .with_context(|| format!("create benchmark scratch file {path}"))?;
 
     let data = [0u8; 4096];
 
@@ -317,9 +317,9 @@ fn bench_io_throughput() -> Result<BenchResult> {
 
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create benchmark scratch file {path}"))?;
 
     let _cleanup = RemoveOnDrop(path);
 
@@ -392,6 +392,9 @@ fn bench_net_latency() -> Result<BenchResult> {
         unit: "μs/RTT".to_string(),
     })
 }
+
+#[cfg(test)]
+mod collision_tests;
 
 #[cfg(test)]
 mod tests {

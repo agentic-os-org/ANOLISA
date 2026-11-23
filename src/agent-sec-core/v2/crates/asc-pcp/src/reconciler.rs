@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use asc_foundation_types::ResourceId;
-use asc_policy_types::binding::BindingStatus;
-use asc_policy_types::target::TranslationOutcome;
+use asc_policy_types::binding::{BindingStatus, PreparedBinding};
+use asc_policy_types::target::{TargetBindingPlan, TranslationOutcome};
 
 use crate::{
     AttemptOutcome, BindingStateRepository, Clock, DeploymentReport, Disposition, ExecutionSlot,
@@ -13,6 +13,11 @@ use crate::{
     TargetDeploymentClientFactory, TargetRef,
 };
 
+type RouteSelector = dyn Fn(&PreparedBinding) -> String + Send + Sync;
+type PlanBuilder =
+    dyn Fn(&PreparedBinding) -> Result<Vec<(String, TargetBindingPlan)>, Failure> + Send + Sync;
+type PreparedTarget = (PreparedAttempt, Arc<dyn TargetDeploymentClient>);
+
 /// Pure orchestration over repository, Adapter and Client ports. The caller
 /// serializes attempts for each Binding, including across core instances.
 pub struct BindingReconciler {
@@ -20,6 +25,8 @@ pub struct BindingReconciler {
     adapter: Arc<dyn TargetBindingAdapter>,
     client_factories: BTreeMap<String, Arc<dyn TargetDeploymentClientFactory>>,
     apply_route: String,
+    route_selector: Option<Arc<RouteSelector>>,
+    plan_builder: Option<Arc<PlanBuilder>>,
     clock: Arc<dyn Clock>,
     retry: RetryPolicy,
 }
@@ -47,9 +54,36 @@ impl BindingReconciler {
             adapter,
             client_factories,
             apply_route,
+            route_selector: None,
+            plan_builder: None,
             clock,
             retry,
         })
+    }
+
+    /// Selects a fixed execution route from each immutable Binding snapshot.
+    #[must_use]
+    pub fn with_route_selector(
+        mut self,
+        selector: impl Fn(&PreparedBinding) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.route_selector = Some(Arc::new(selector));
+        self
+    }
+
+    /// Builds ordered target plans together so translation can share parsed input.
+    /// Replaces single-route Adapter dispatch; every plan must prepare before mutation.
+    /// The builder must perform no target I/O.
+    #[must_use]
+    pub fn with_plan_builder(
+        mut self,
+        builder: impl Fn(&PreparedBinding) -> Result<Vec<(String, TargetBindingPlan)>, Failure>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.plan_builder = Some(Arc::new(builder));
+        self
     }
 
     /// Shares the exact clock used to compute retry deadlines with the scheduler.
@@ -231,7 +265,7 @@ impl BindingReconciler {
         if record.binding.status.phase == BindingStatus::Deleting {
             return self.delete(record, slot);
         }
-        let (saved, client) = match self.prepare(record) {
+        let prepared = match self.prepare(record) {
             Ok(saved) => saved,
             Err(error) => {
                 return Ok(Some(DeploymentReport {
@@ -240,16 +274,13 @@ impl BindingReconciler {
                 }));
             }
         };
-        let target = &saved.prepared.target;
-        let previous: Vec<_> = record
-            .deployments
-            .iter()
-            .filter(|d| !d.target.same_identity(target))
-            .map(|d| d.target.clone())
-            .collect();
-        // Cross-route migration needs an explicit multi-PEP contract. Never
-        // reinterpret old cleanup bytes with the newly configured Client.
-        if previous.iter().any(|old| old.route != target.route) {
+        // A route omitted from this revision requires an explicit retirement plan.
+        // Never pass its cleanup bytes to a different Client or forget its ownership.
+        if record.deployments.iter().any(|old| {
+            !prepared
+                .iter()
+                .any(|(saved, _)| saved.prepared.target.route == old.target.route)
+        }) {
             return Ok(Some(DeploymentReport {
                 observations: vec![],
                 error: Some(Failure::new(
@@ -258,58 +289,107 @@ impl BindingReconciler {
                 )),
             }));
         }
-        let mut touched = previous.clone();
-        touched.push(target.clone());
-        if !self.state.register(
-            &ExpectedBinding::from_snapshot(record),
-            Some(&saved),
-            &touched,
-            &mut slot.unconfirmed,
-        )? {
-            return Ok(None);
+        // Record every potentially present target before the first remote call.
+        // A crash or a later route failure must retain all cleanup responsibilities.
+        for (saved, _) in &prepared {
+            let mut touched = previous_targets(record, &saved.prepared.target);
+            touched.push(saved.prepared.target.clone());
+            if !self.state.register(
+                &ExpectedBinding::from_snapshot(record),
+                Some(saved),
+                &touched,
+                &mut slot.unconfirmed,
+            )? {
+                return Ok(None);
+            }
         }
-        self.state.repository.check_writable()?;
-        slot.remote_started = true;
-        let report = if saved.is_update {
-            client.update(&previous, &saved.prepared)
-        } else {
-            client.create(&saved.prepared)
+        let mut aggregate = DeploymentReport {
+            observations: vec![],
+            error: None,
         };
-        let required: Vec<_> = touched
-            .iter()
-            .map(|t| Observation {
-                target: t.clone(),
-                presence: if t.same_identity(target) {
-                    Presence::Present
-                } else {
-                    Presence::Absent
-                },
-            })
-            .collect();
-        Ok(Some(validate_report(report, &required)))
+        for (saved, client) in prepared {
+            let target = &saved.prepared.target;
+            let previous = previous_targets(record, target);
+            let mut required: Vec<_> = previous
+                .iter()
+                .map(|target| Observation {
+                    target: target.clone(),
+                    presence: Presence::Absent,
+                })
+                .collect();
+            required.push(Observation {
+                target: target.clone(),
+                presence: Presence::Present,
+            });
+            self.state.repository.check_writable()?;
+            slot.remote_started = true;
+            let report = if saved.is_update {
+                client.update(&previous, &saved.prepared)
+            } else {
+                client.create(&saved.prepared)
+            };
+            let report = validate_report(report, &required);
+            aggregate.observations.extend(report.observations);
+            if report.error.is_some() {
+                aggregate.error = report.error;
+                break;
+            }
+        }
+        Ok(Some(aggregate))
     }
 
-    fn prepare(
+    fn prepare(&self, record: &ReconcileRecord) -> Result<Vec<PreparedTarget>, Failure> {
+        let plans = if let Some(build) = &self.plan_builder {
+            build(&record.binding.spec)?
+        } else {
+            let plan = match self.adapter.translate(&record.binding.spec) {
+                Ok(TranslationOutcome::Translated(plan)) => plan,
+                Ok(TranslationOutcome::Rejected(rejection)) => {
+                    return Err(Failure::new(FailureKind::Rejected, &rejection.code));
+                }
+                Err(fault) => return Err(retryable(&fault.code)),
+            };
+            let route = self.route_selector.as_ref().map_or_else(
+                || self.apply_route.clone(),
+                |select| select(&record.binding.spec),
+            );
+            vec![(route, plan)]
+        };
+        if plans.is_empty()
+            || plans
+                .iter()
+                .map(|(route, _)| route)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != plans.len()
+        {
+            return Err(Failure::new(
+                FailureKind::Rejected,
+                "RECONCILE_INVALID_ROUTES",
+            ));
+        }
+        plans
+            .iter()
+            .map(|(route, plan)| self.prepare_target(record, route, plan))
+            .collect()
+    }
+
+    fn prepare_target(
         &self,
         record: &ReconcileRecord,
-    ) -> Result<(PreparedAttempt, Arc<dyn TargetDeploymentClient>), Failure> {
-        let plan = match self.adapter.translate(&record.binding.spec) {
-            Ok(TranslationOutcome::Translated(plan)) => plan,
-            Ok(TranslationOutcome::Rejected(rejection)) => {
-                return Err(Failure::new(FailureKind::Rejected, &rejection.code));
-            }
-            Err(fault) => return Err(retryable(&fault.code)),
-        };
+        route: &str,
+        plan: &TargetBindingPlan,
+    ) -> Result<PreparedTarget, Failure> {
         let client = self
             .client_factories
-            .get(&self.apply_route)
+            .get(route)
             .ok_or_else(|| retryable("RECONCILE_TARGET_UNAVAILABLE"))?
             .open()
             .map_err(|error| Failure::new(error.kind, &error.code))?;
         let prepared = client
-            .prepare_apply(&plan)
+            .prepare_apply(plan)
             .map_err(|error| Failure::new(error.kind, &error.code))?;
-        if prepared.target.route != self.apply_route
+        if prepared.target.route != route
             || prepared.target.id.is_empty()
             || prepared.format.is_empty()
         {
@@ -331,7 +411,7 @@ impl BindingReconciler {
         Ok((
             PreparedAttempt {
                 revision: record.binding.spec.binding_revision,
-                is_update: !record.deployments.is_empty(),
+                is_update: record.deployments.iter().any(|d| d.target.route == route),
                 prepared,
             },
             client,
@@ -455,6 +535,15 @@ impl BindingReconciler {
             Ok(Disposition::Completed)
         }
     }
+}
+
+fn previous_targets(record: &ReconcileRecord, target: &TargetRef) -> Vec<TargetRef> {
+    record
+        .deployments
+        .iter()
+        .filter(|d| d.target.route == target.route && !d.target.same_identity(target))
+        .map(|d| d.target.clone())
+        .collect()
 }
 
 fn retryable(code: &str) -> Failure {

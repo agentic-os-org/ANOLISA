@@ -4,6 +4,8 @@ use super::{adapter::HookBinding, Arguments, Exit, Result};
 use aw_service::{Client, LifecyclePhase, Operation};
 use std::time::{Duration, Instant};
 
+mod gateway;
+
 pub(super) fn binding(path: &str) -> Result<HookBinding> {
     let binding = HookBinding::read(path)?;
     if !binding.reloadable {
@@ -28,10 +30,16 @@ pub(super) fn lifecycle(args: &Arguments) -> Result<Exit> {
 }
 
 fn invoke(args: &Arguments) -> Result<Exit> {
-    args.check(&["--adapter", "--binding", "--confirm"], false)?;
+    args.check(
+        &["--adapter", "--binding", "--confirm", "--gateway-scope"],
+        false,
+    )?;
     let binding = binding(args.required("--binding")?)?;
     if binding.adapter != args.required("--adapter")? {
         return Err("lifecycle adapter mismatch".into());
+    }
+    if let Some(action) = args.flags.get("--gateway-scope") {
+        return gateway::scope(binding, action);
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     let bytes = super::hook::read_input(deadline)?;
@@ -40,6 +48,12 @@ fn invoke(args: &Arguments) -> Result<Exit> {
         super::attachment::confirm::confirm(&binding, path, &native, deadline)?;
         return Ok(Exit::Code(0));
     }
+    invoke_bound(binding, bytes)
+}
+
+pub(super) fn invoke_bound(binding: HookBinding, bytes: Vec<u8>) -> Result<Exit> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let native: serde_json::Value = serde_json::from_slice(&bytes)?;
     let (phase, key, pid) = if binding.adapter == "qoder" {
         let (phase, key) = aw_adapter::reload::qoder_lifecycle(&binding.native_context(), &native)?;
         // SAFETY: getppid reads the native exec-form callback's parent process.
@@ -48,7 +62,10 @@ fn invoke(args: &Arguments) -> Result<Exit> {
             key,
             unsafe { libc::getppid() } as u32,
         )
-    } else if matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk") {
+    } else if matches!(
+        binding.adapter.as_str(),
+        "qwenpaw" | "qoder-sdk" | "openclaw" | "hermes"
+    ) {
         (
             serde_json::from_value::<LifecyclePhase>(native["phase"].clone())?,
             native["key"]
@@ -63,18 +80,65 @@ fn invoke(args: &Arguments) -> Result<Exit> {
     } else {
         return Err("unsupported lifecycle adapter".into());
     };
-    let client = Client::connect(&binding.socket, deadline)?;
-    if client.identity() != &binding.binding.identity {
-        return Err("stale lifecycle binding".into());
+    let client = Client::from_identity(&binding.socket, binding.binding.identity.clone());
+    if matches!(phase, LifecyclePhase::Ready) {
+        super::native::ready(&binding, &client, pid, deadline)?;
+    }
+    if binding.adapter == "qoder" && native["hook_event_name"] == "PostToolUseFailure" {
+        let id = binding.binding.instance_id.clone();
+        let output = super::dispatch::invoke_bound(
+            aw_adapter::select("qoder")?,
+            binding,
+            "tool.after",
+            bytes,
+            Instant::now() + Duration::from_secs(59),
+        );
+        // Preserve terminal cleanup even when failure payload normalization or
+        // policy dispatch fails before the dispatcher's own cleanup boundary.
+        client.call(
+            Operation::BridgeLifecycle {
+                instance_id: id,
+                pid,
+                phase,
+                key,
+            },
+            Instant::now() + Duration::from_secs(2),
+        )?;
+        return super::hook::emit(output?);
     }
     client.call(
         Operation::BridgeLifecycle {
-            instance_id: binding.binding.instance_id,
+            instance_id: binding.binding.instance_id.clone(),
             pid,
             phase,
-            key,
+            key: key.clone(),
         },
         deadline,
     )?;
+    if binding.adapter == "qoder" && native["hook_event_name"] == "UserPromptSubmit" {
+        let id = binding.binding.instance_id.clone();
+        let output = super::dispatch::invoke_bound(
+            aw_adapter::select("qoder")?,
+            binding,
+            "input.submit",
+            bytes,
+            Instant::now() + Duration::from_secs(59),
+        );
+        if !output
+            .as_ref()
+            .is_ok_and(|output| !aw_adapter::reload::denied(output))
+        {
+            client.call(
+                Operation::BridgeLifecycle {
+                    instance_id: id,
+                    pid,
+                    phase: LifecyclePhase::RequestEnd,
+                    key,
+                },
+                Instant::now() + Duration::from_secs(2),
+            )?;
+        }
+        return super::hook::emit(output?);
+    }
     Ok(Exit::Code(0))
 }

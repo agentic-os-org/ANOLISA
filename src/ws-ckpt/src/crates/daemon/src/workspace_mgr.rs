@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use ws_ckpt_common::{load_workspace_policy_with_failsafe, ErrorCode, Response, SnapshotIndex};
+use ws_ckpt_common::{
+    escape_terminal_text, load_workspace_policy_with_failsafe, ErrorCode, Response, SnapshotIndex,
+};
 
 use crate::index_store;
 use crate::state::{normalize_registration_path, DaemonState};
@@ -605,7 +607,7 @@ pub async fn delete_snapshot(
 
     // 5. Unlink from DAG, then remove from index + save
     ws.index.unlink_node(&resolved_id);
-    ws.index.snapshots.remove(&resolved_id);
+    ws.remove_snapshot(&resolved_id);
     ws.index.governed_evidence.remove(&resolved_id);
     ws.index.recovered_orphans.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
@@ -711,7 +713,7 @@ async fn recover_workspace_inner(
                 return Ok(Response::RecoverWithWarning {
                     workspace: original_str.to_string(),
                     warning: format!(
-                        "Restored the pre-init backup. Potentially partial or newer storage remains at {:?}; \
+                        "\nRestored the pre-init backup. Potentially partial or newer storage remains at {:?}; \
                          snapshots under {:?} are also retained. Inspect these before removing them. You can run init again.",
                         retained, state.backend.snapshots_root()
                     ),
@@ -774,7 +776,7 @@ async fn recover_workspace_inner(
     if !temp_leftovers.is_empty() {
         let listed = temp_leftovers
             .iter()
-            .map(|path| format!("- {path}"))
+            .map(|path| format!("- {}", escape_terminal_text(path)))
             .collect::<Vec<_>>()
             .join("\n");
         warnings.push(format!(
@@ -791,9 +793,10 @@ async fn recover_workspace_inner(
         )),
         Ok(None) => {}
         Err(error) => warnings.push(format!(
-            "Workspace recovered, but pre-init backup {:?} could not be archived: {error:#}. \
+            "Workspace recovered, but pre-init backup {:?} could not be archived: {}. \
              Inspect and move this backup to another location before running init again",
-            backup
+            backup,
+            escape_terminal_text(&format!("{error:#}"))
         )),
     }
     Ok(if warnings.is_empty() {
@@ -803,7 +806,7 @@ async fn recover_workspace_inner(
     } else {
         Response::RecoverWithWarning {
             workspace: original_path,
-            warning: warnings.join("\n\n"),
+            warning: format!("\n{}", warnings.join("\n\n")),
         }
     })
 }
@@ -975,6 +978,7 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
@@ -1510,6 +1514,7 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
@@ -1850,6 +1855,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(index.snapshots.is_empty());
+            assert!(matches!(
+                crate::snapshot_mgr::list_snapshot_page(&state, Some("ws-del-absent"), 10, None, false).await.unwrap(),
+                Response::ListPageOk { snapshots, next_cursor: None } if snapshots.is_empty()
+            ));
         }
     }
 
@@ -2442,7 +2451,7 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let backend = Arc::new(RecorderStubBackend {
             recover_leftovers: vec![
-                "/data/.diff-tmp/ws-warn/a1b2c3".to_string(),
+                "/data/.diff-tmp/ws-warn/a1b2\nc3".to_string(),
                 "/data/.diff-tmp/ws-warn/deadbeef".to_string(),
             ],
             ..RecorderStubBackend::new()
@@ -2474,8 +2483,11 @@ mod tests {
             "warning explains the failure: {warning}"
         );
         assert!(
-            warning.contains("- /data/.diff-tmp/ws-warn/a1b2c3")
-                && warning.contains("- /data/.diff-tmp/ws-warn/deadbeef"),
+            warning.starts_with('\n')
+                && warning.contains(concat!(
+                    "\n- /data/.diff-tmp/ws-warn/a1b2\\nc3\n",
+                    "- /data/.diff-tmp/ws-warn/deadbeef\n\n"
+                )),
             "warning lists every leftover path: {warning}"
         );
         assert!(

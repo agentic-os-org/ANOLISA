@@ -1,7 +1,9 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
+mod rewrite_deadline;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,8 +13,8 @@ use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_protocol::{Disposition, Request, RequestEnvelope, Response};
 use tokenless_runtime::{
     CompressOptions, CompressResult, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
-    compress_response_with_store, compress_toon, dispatch_with_store, record_compression,
-    retrieve_recorded,
+    compress_response_with_store, compress_toon, dispatch_with_store, normalize_hash,
+    record_compression, retrieve_recorded,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -47,6 +49,10 @@ enum Commands {
         /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
+        /// Set by `compress` or a POSIX Hook supervising a PreTool rewrite;
+        /// the caller must start this process in a group of its own.
+        #[arg(long = rewrite_deadline::CHILD_FLAG, hide = true)]
+        rewrite_child: bool,
     },
     /// Compress OpenAI Function Calling tool schemas
     CompressSchema {
@@ -178,6 +184,49 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run the embedded RTK command line (see `tokenless rtk --help`)
+    ///
+    /// Commands rewritten by PreTool run RTK through this subcommand.
+    #[command(disable_help_flag = true)]
+    Rtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+}
+
+/// Subcommand that hands the remaining arguments to the embedded RTK.
+const RTK_SUBCOMMAND: &str = "rtk";
+/// Program name RTK prints in usage and recovery hints.
+const RTK_PROGRAM: &str = "tokenless rtk";
+
+/// Returns the arguments to hand to RTK, without the end-of-options marker
+/// before the command name.
+///
+/// RTK v0.49.0 parses its own command line and rejects a `--` before the
+/// command: clap fails the parse, then RTK's fallback executes `--` as a
+/// program and exits 127. POSIX.1-2017 XCU Guideline 10 makes the first `--`
+/// that is not an option-argument the end-of-options delimiter, and RTK's
+/// pre-command options take no values, so consume it at this hand-off. The RTK
+/// source is upstream code fetched by packaging/build/setup-rtk.sh, so
+/// Tokenless owns this argument normalization instead of patching the vendored
+/// parser; the standalone `rtk` target keeps upstream behavior and is not
+/// shipped. Markers after the command stay untouched, so
+/// `tokenless rtk run -- <command>` still forwards `--` to `run`.
+fn rtk_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut args = args.into_iter();
+    let mut forwarded = Vec::new();
+    for arg in args.by_ref() {
+        if arg == "--" {
+            break;
+        }
+        let is_option = arg.to_string_lossy().starts_with('-');
+        forwarded.push(arg);
+        if !is_option {
+            break;
+        }
+    }
+    forwarded.extend(args);
+    forwarded
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -418,15 +467,19 @@ impl DatabasePathResolver {
 /// is validated against the user's home and selected data directory;
 /// otherwise `TOKENLESS_DATA_DIR` and then the default data directory are
 /// used.
-fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
+fn get_db_path_with(
+    paths: &DatabasePathResolver,
+    warn_on_rejected_override: bool,
+) -> Result<PathBuf, String> {
     let home = paths.home();
     let data_dir = paths.data_dir();
     if let Some(env_path) = state_path_override("TOKENLESS_STATS_DB", "DSH_TOKENLESS_STATS_DB") {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
-            Err(reason) => warn_soft(&format!(
+            Err(reason) if warn_on_rejected_override => warn_soft(&format!(
                 "[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"
             )),
+            Err(_) => {}
         }
     }
     let data_dir = data_dir.map_err(str::to_string)?;
@@ -455,18 +508,21 @@ fn ensure_db_dir(db_path: &Path) -> Result<(), (String, i32)> {
 }
 
 fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
-    open_recorder_with(&DatabasePathResolver::default())
+    open_recorder_with(&DatabasePathResolver::default(), true)
 }
 
-fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
-    let db_path = get_db_path_with(paths)
+fn open_recorder_with(
+    paths: &DatabasePathResolver,
+    warn_on_rejected_override: bool,
+) -> Result<StatsRecorder, (String, i32)> {
+    let db_path = get_db_path_with(paths, warn_on_rejected_override)
         .map_err(|error| (format!("Stats database unavailable: {error}"), 1))?;
     ensure_db_dir(&db_path)?;
     StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
 fn try_open_recorder(paths: &DatabasePathResolver) -> Option<StatsRecorder> {
-    match open_recorder_with(paths) {
+    match open_recorder_with(paths, true) {
         Ok(recorder) => Some(recorder),
         Err((message, _)) => {
             warn_soft(&format!(
@@ -605,9 +661,21 @@ fn get_stash_db_path_with(
     validate_db_path(&path, home, Some(data_dir))
 }
 
-/// Open a stash store, returning the specific failure cause. Used by
-/// user-initiated paths (`retrieve`) where a generic "unavailable" message
-/// would hide the real reason (invalid data dir, path rejected, corrupt DB, …).
+/// Open an existing stash for retrieval without creating state.
+fn open_stash_reader(
+    paths: &DatabasePathResolver,
+    override_path: Option<&str>,
+) -> Result<Arc<dyn StashStore>, String> {
+    let path = get_stash_db_path_with(paths, override_path)?;
+    if matches!(path.try_exists(), Ok(false)) {
+        return Err(format!("stash database not found at {}", path.display()));
+    }
+    SqliteStore::open_read_only(&path)
+        .map(|store| Arc::new(store) as Arc<dyn StashStore>)
+        .map_err(|e| format!("cannot open stash db at {}: {e}", path.display()))
+}
+
+#[cfg(test)]
 fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
     open_stash_store_or_err_with(&DatabasePathResolver::default(), override_path)
 }
@@ -646,11 +714,39 @@ fn run() -> Result<(), (String, i32)> {
 
 fn run_command(command: Commands) -> Result<(), (String, i32)> {
     match command {
-        Commands::Compress { file, stash_db } => {
+        Commands::Compress {
+            file,
+            stash_db,
+            rewrite_child,
+        } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             // Undecodable or version-mismatched requests carry no content to
             // echo, so no fail-open response can be built: exit 2.
             let request = RequestEnvelope::from_json(&input).map_err(|e| (e.to_string(), 2))?;
+            let pre_tool = matches!(request.request, Request::PreTool(_));
+            let start_deadline = || {
+                rewrite_deadline::start()
+                    .map_err(|error| (format!("cannot bound the RTK rewrite: {error}"), 1))
+            };
+            #[cfg(unix)]
+            if !rewrite_child && pre_tool {
+                // The child reports its own errors; its status becomes this one's.
+                match rewrite_deadline::run_in_child(&input).map_err(|error| (error, 1))? {
+                    0 => return Ok(()),
+                    code => process::exit(code),
+                }
+            }
+            // A Windows job holds only this process and what it starts, never
+            // the caller's other processes, so the rewrite stays in this process.
+            #[cfg(not(unix))]
+            let _ = rewrite_child;
+            // Here a Unix PreTool runs in the rewrite child, which leads a group
+            // that the caller's cleanup never reaches. Its deadline therefore
+            // covers all it does: started before the configuration and stores
+            // are opened, and declared first so that it drops after they close.
+            // A response that the timeout cuts short is never relayed, as
+            // `compress` relays only a child that exits 0.
+            let _child_deadline = (cfg!(unix) && pre_tool).then(start_deadline).transpose()?;
 
             // PostTool dry-runs still open the configured store to verify that
             // recovery is available. The pipeline substitutes an in-memory
@@ -680,10 +776,23 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 None
             };
-            let rtk_path = matches!(&request.request, Request::PreTool(_))
-                .then(env_check::resolve_rtk_path)
-                .flatten()
-                .map(PathBuf::from);
+            // The rewritten command runs later from the agent's working directory,
+            // so it names this executable by absolute path.
+            let rtk_launcher = match &request.request {
+                Request::PreTool(_) => Some(
+                    std::env::current_exe()
+                        .and_then(std::path::absolute)
+                        .map_err(|error| {
+                            (
+                                format!(
+                                    "cannot locate the tokenless executable for RTK commands: {error}"
+                                ),
+                                1,
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
             let rtk_data_dir = match &request.request {
                 Request::PreTool(_) => Some(
                     database_paths
@@ -706,6 +815,11 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 }
                 _ => None,
             };
+            // In this process the deadline covers only the rewrite, so a
+            // response being written is never cut short. A caller that ends
+            // this process when anything else stalls also ends what RTK
+            // started, as the job ends with this process.
+            let deadline = (!cfg!(unix) && pre_tool).then(start_deadline).transpose()?;
             let outcome = dispatch_with_store(
                 &request,
                 &EntryOptions {
@@ -714,16 +828,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         "TOKENLESS_SEARCH_PATH_SHARING_ENABLED",
                         true,
                     ),
-                    diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
+                    diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", true),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
+                    browser_snapshot_enabled: env_flag("TOKENLESS_BROWSER_SNAPSHOT_ENABLED", true),
+                    mixed_content_enabled: env_flag("TOKENLESS_MIXED_CONTENT_ENABLED", false),
                     stash_enabled: true,
-                    rtk_path,
+                    rtk_launcher,
                     rtk_data_dir,
                 },
                 stash.as_ref(),
                 recorder.as_ref(),
-            )
-            .map_err(|error| (error.to_string(), 1))?;
+            );
+            drop(deadline);
+            let outcome = outcome.map_err(|error| (error.to_string(), 1))?;
             if let Response::PostTool(response) = &outcome.response.response
                 && response.disposition == Disposition::NoSavings
             {
@@ -948,18 +1065,18 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             );
         }
         Commands::Retrieve { hash, stash_db } => {
-            let store = match open_stash_store_or_err(stash_db.as_deref()) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Err((format!("stash unavailable: {e}"), 1));
-                }
-            };
-            // Retrieve events are attribution, never a gate: a recorder that
-            // fails to open degrades to unrecorded retrieval.
-            let recorder = if TokenlessConfig::load().is_stats_enabled() {
-                try_open_recorder(&DatabasePathResolver::default())
-            } else {
+            let hash = normalize_hash(&hash).map_err(|error| (error.to_string(), 1))?;
+            let paths = DatabasePathResolver::default();
+            let store = open_stash_reader(&paths, stash_db.as_deref())
+                .map_err(|error| (format!("stash unavailable: {error}"), 1))?;
+            // Keep interactive diagnostics without adding stats setup warnings
+            // to the output of a model's recovery tool.
+            let recorder = if !TokenlessConfig::load().is_stats_enabled() {
                 None
+            } else if io::stderr().is_terminal() {
+                try_open_recorder(&paths)
+            } else {
+                open_recorder_with(&paths, false).ok()
             };
             let payload = retrieve_recorded(store.as_ref(), &hash, recorder.as_ref(), "cli")
                 .map_err(|error| (error.to_string(), 1))?;
@@ -1287,6 +1404,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
+        // Defensive: main() hands `rtk` to RTK before the Tokenless parser
+        // sees it, so this arm normally does not run.
+        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, rtk_args(args))),
     }
 
     Ok(())
@@ -1488,6 +1608,14 @@ fn report_fatal(message: &str) {
 }
 
 fn main() {
+    // RTK parses its own arguments, including help flags, so they bypass the
+    // Tokenless parser. The end-of-options marker before the command is
+    // consumed first: RTK would run it as a program instead of treating it as
+    // a delimiter.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == RTK_SUBCOMMAND) {
+        process::exit(rtk::run(RTK_PROGRAM, rtk_args(args)));
+    }
     if let Err((msg, code)) = run() {
         report_fatal(&msg);
         process::exit(code);

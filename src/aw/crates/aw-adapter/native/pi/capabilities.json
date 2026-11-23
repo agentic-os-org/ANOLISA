@@ -1,0 +1,6 @@
+{
+  "strict_output_releases": {
+    "minimum": "0.84.2",
+    "maximum": "1.5.2"
+  }
+}

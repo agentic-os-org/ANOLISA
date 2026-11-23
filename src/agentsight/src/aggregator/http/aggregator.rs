@@ -481,6 +481,12 @@ impl HttpConnectionAggregator {
             response.set_sse_events(sse_events);
         }
         response.sse_continuation_bytes = self.sse_continuation_buffers.pop(&connection_id);
+        if request
+            .as_ref()
+            .is_some_and(|request| crate::parser::llm::is_qoder_path(&request.path))
+        {
+            response.recover_fragmented_gateway_events();
+        }
         self.sse_read_state.pop(&connection_id);
 
         if let Some(req) = request {
@@ -569,6 +575,14 @@ impl HttpConnectionAggregator {
             .headers
             .get("content-length")
             .and_then(|v| v.parse().ok());
+        // RFC 7230 §3.3.2: when a message carries both Transfer-Encoding and
+        // Content-Length, the transfer coding defines the framing and the
+        // length must be ignored. Compare coding tokens case-insensitively;
+        // `contains("chunked")` missed `Chunked`.
+        let is_chunked = request.headers.get("transfer-encoding").is_some_and(|v| {
+            v.split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        });
 
         if request.body().len() > self.max_body_bytes
             || content_length.is_some_and(|len| len > self.max_body_bytes)
@@ -579,29 +593,19 @@ impl HttpConnectionAggregator {
             return;
         }
 
-        let body_complete = match content_length {
-            Some(cl) => request.body_len >= cl,
-            None => {
-                // No Content-Length: check for Transfer-Encoding: chunked
-                // RFC 7230 §3.3.1: the coding names are case-insensitive and
-                // comma-separated, so compare tokens. `contains("chunked")`
-                // missed `Chunked` and declared the body complete on the first
-                // read, dropping every later body read.
-                let is_chunked = request.headers.get("transfer-encoding").is_some_and(|v| {
-                    v.split(',')
-                        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-                });
-                if is_chunked {
-                    // Detect completion by walking the chunk framing, not by
-                    // scanning for the terminator bytes: the 5-byte pattern can
-                    // occur inside chunk *data* (a prompt quoting a chunked
-                    // example), which ended the body mid-stream. Same helper the
-                    // compressed-response path uses (e6c787258).
-                    crate::utils::decompress::chunked_stream_complete(request.body())
-                } else {
-                    true // No Content-Length and not chunked → body is complete
-                }
-            }
+        let body_complete = if is_chunked {
+            // Detect completion by walking the chunk framing, not by scanning
+            // for the terminator bytes: the 5-byte pattern can occur inside
+            // chunk *data* (a prompt quoting a chunked example), which ended
+            // the body mid-stream. Same helper the compressed-response path
+            // uses (e6c787258). This must win over Content-Length so a proxy
+            // that adds a length to an already-chunked body cannot truncate
+            // it.
+            crate::utils::decompress::chunked_stream_complete(request.body())
+        } else if let Some(cl) = content_length {
+            request.body_len >= cl
+        } else {
+            true // No Content-Length and not chunked → body is complete
         };
 
         if body_complete {
@@ -610,7 +614,8 @@ impl HttpConnectionAggregator {
             // Keeping the surplus makes `json_body` reject the whole body as
             // trailing garbage, silently dropping the request view; the
             // split-read path already truncates to the declared length.
-            if let Some(content_length) = content_length.filter(|length| request.body_len > *length)
+            if let Some(content_length) =
+                content_length.filter(|length| !is_chunked && request.body_len > *length)
             {
                 let body = request.body()[..content_length].to_vec();
                 request.set_reassembled_body(body);
@@ -639,7 +644,7 @@ impl HttpConnectionAggregator {
             );
             initial_body.extend_from_slice(request.body());
             let mut framing_error = false;
-            if content_length.is_none() {
+            if is_chunked {
                 let mut chunks = super::chunk_stream::ChunkStream::default();
                 if let Err(error) = chunks.feed(&initial_body, |_| Ok(())) {
                     log::warn!(
@@ -657,7 +662,9 @@ impl HttpConnectionAggregator {
                 connection_id,
                 ConnectionState::RequestBodyPending {
                     request,
-                    expected_body_len: content_length,
+                    // A chunked body is framed by its chunk walk, so the
+                    // conflicting Content-Length must not also bound it.
+                    expected_body_len: content_length.filter(|_| !is_chunked),
                     body_buffer: initial_body,
                 },
             );
@@ -4094,6 +4101,124 @@ mod tests {
         assert!(
             aggregator.has_pending_request(&conn_id),
             "the real terminating chunk completes the body"
+        );
+    }
+
+    /// RFC 7230 §3.3.2: a message with both `Transfer-Encoding: chunked` and
+    /// `Content-Length` is framed by the chunked coding. The request path
+    /// consulted Content-Length first, so a proxy that added `Content-Length:
+    /// 0` to an already-chunked body made the request complete immediately,
+    /// truncated the chunk framing to zero bytes and dropped the body the
+    /// model call was carrying. The response path already checks the transfer
+    /// coding first.
+    #[test]
+    fn test_chunked_request_framing_wins_over_content_length() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let raw = b"POST /chat HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"messages\":[1]}\r\n0\r\n\r\n";
+        let event = create_mock_ssl_event_with_buf(9103, 0xE200, raw.to_vec(), 1);
+        let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let body_len = raw.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "0".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9103,
+            ssl_ptr: 0xE200,
+        };
+        let Some(ConnectionState::RequestPending { request }) =
+            aggregator.connections.peek(&conn_id)
+        else {
+            panic!("the framed chunked body is complete on the first read");
+        };
+        assert_eq!(
+            request.json_body(),
+            Some(serde_json::json!({"messages": [1]})),
+            "the chunked body must survive a conflicting Content-Length"
+        );
+    }
+
+    /// The same conflicting headers on a split body: the first read has no
+    /// zero-size chunk, so the request must stay open and the continuation
+    /// must be framed by chunks rather than counted against Content-Length.
+    #[test]
+    fn test_chunked_request_with_content_length_waits_for_its_terminator() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let raw = b"POST /chat HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"messages\":[1]}\r\n";
+        let event = create_mock_ssl_event_with_buf(9104, 0xE201, raw.to_vec(), 1);
+        let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let body_len = raw.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "0".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9104,
+            ssl_ptr: 0xE201,
+        };
+        assert!(
+            matches!(
+                aggregator.connections.peek(&conn_id),
+                Some(ConnectionState::RequestBodyPending {
+                    expected_body_len: None,
+                    ..
+                })
+            ),
+            "Content-Length must not complete a chunked body without its terminator"
+        );
+
+        let rest = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 9104,
+            tid: 1,
+            uid: 0,
+            len: 5,
+            rw: 1,
+            comm: String::new(),
+            buf: b"0\r\n\r\n".to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0xE201,
+        };
+        aggregator.process_raw_body_data(&rest);
+
+        let Some(ConnectionState::RequestPending { request }) =
+            aggregator.connections.peek(&conn_id)
+        else {
+            panic!("the zero-size chunk completes the body");
+        };
+        assert_eq!(
+            request.json_body(),
+            Some(serde_json::json!({"messages": [1]})),
+            "the continuation must keep the chunked body"
         );
     }
 }

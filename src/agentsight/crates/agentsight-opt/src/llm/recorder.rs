@@ -6,7 +6,9 @@
 //! in ATIF format for debugging, auditing, and replay.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use agentsight_atif::{
@@ -201,6 +203,47 @@ impl TrajectoryRecorder {
             }
         }
 
+        // Calls are recorded on completion, so the first recorded call need
+        // not have the earliest start. Retain each delegation's full lifetime
+        // using the same completion metadata as imported tool calls.
+        for (label, group_calls) in &groups {
+            let start = group_calls
+                .iter()
+                .filter_map(|call| {
+                    chrono::DateTime::parse_from_rfc3339(&call.start_ts)
+                        .ok()
+                        .map(|time| (time, &call.start_ts))
+                })
+                .min_by_key(|(time, _)| *time);
+            let end = group_calls
+                .iter()
+                .filter_map(|call| {
+                    chrono::DateTime::parse_from_rfc3339(&call.end_ts)
+                        .ok()
+                        .map(|time| (time, &call.end_ts))
+                })
+                .max_by_key(|(time, _)| *time);
+            let dispatch_id = format!("dispatch-{label}");
+            if let Some(step) = steps.iter_mut().find(|step| {
+                step.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == dispatch_id))
+            }) {
+                if let Some((_, timestamp)) = start {
+                    step.timestamp = Some(timestamp.clone());
+                }
+                if let (Some((start, _)), Some((end, timestamp))) = (start, end) {
+                    if end >= start {
+                        for call in step.tool_calls.iter_mut().flatten() {
+                            call.extra
+                                .get_or_insert_with(HashMap::new)
+                                .insert("result_timestamp".into(), serde_json::json!(timestamp));
+                        }
+                    }
+                }
+            }
+        }
+
         // Build one embedded subagent trajectory per label group.
         let subagents: Vec<AtifTrajectory> = groups
             .iter()
@@ -285,28 +328,56 @@ impl TrajectoryRecorder {
     /// Append the step group of one recorded call (system / user / agent) to
     /// `steps`, advancing `step_id`.
     fn append_call_steps(steps: &mut Vec<Step>, step_id: &mut usize, call: &RecordedCall) {
-        // System prompt step (first system message, if any).
-        if let Some(sys) = call.messages.iter().find(|m| m.role == "system") {
+        // Each request replaces the previous instruction snapshot. Preserve
+        // separate blocks, and explicitly clear a prompt that was removed.
+        let mut systems: Vec<&str> = call
+            .messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .collect();
+        if systems.is_empty() {
+            systems.push("");
+        }
+        for (index, content) in systems.iter().enumerate() {
             *step_id += 1;
             steps.push(Step {
                 step_id: *step_id,
                 timestamp: Some(call.start_ts.clone()),
                 source: StepSource::System,
-                message: sys.content.clone(),
+                message: (*content).to_string(),
                 model_name: None,
                 reasoning_effort: None,
                 reasoning_content: None,
                 tool_calls: None,
                 observation: None,
                 metrics: None,
-                extra: None,
+                extra: (index == 0).then(|| {
+                    HashMap::from([(
+                        agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
+                        serde_json::Value::Bool(true),
+                    )])
+                }),
                 llm_call_count: None,
                 is_copied_context: None,
             });
         }
 
-        // User messages (non-system) as user steps.
-        for msg in call.messages.iter().filter(|m| m.role != "system") {
+        // Repair requests replay earlier input and assistant answers as context.
+        let input_start = call
+            .messages
+            .iter()
+            .position(|message| message.role != "system");
+        let input_end = call
+            .messages
+            .iter()
+            .rposition(|message| message.role != "system");
+        for (index, msg) in call
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != "system")
+        {
             *step_id += 1;
             let source = if msg.role == "assistant" {
                 StepSource::Agent
@@ -328,15 +399,29 @@ impl TrajectoryRecorder {
                 tool_calls: None,
                 observation: None,
                 metrics: None,
-                extra: None,
+                extra: (Some(index) == input_start).then(|| {
+                    HashMap::from([(
+                        agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT.into(),
+                        serde_json::Value::Bool(true),
+                    )])
+                }),
                 llm_call_count: None,
-                is_copied_context: None,
+                is_copied_context: (msg.role == "assistant" || Some(index) != input_end)
+                    .then_some(true),
             });
         }
 
         // Agent response step.
         *step_id += 1;
         let mut extra = HashMap::new();
+        // A complete request replaces accumulated history even when it has
+        // no non-system input message to carry the snapshot boundary.
+        if input_start.is_none() {
+            extra.insert(
+                agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
         extra.insert(
             "start_timestamp".to_string(),
             serde_json::Value::String(call.start_ts.clone()),
@@ -377,7 +462,8 @@ impl TrajectoryRecorder {
 
     /// Export and save the ATIF trajectory to a directory.
     ///
-    /// File name: `{session_label}_{timestamp}.atif.json`
+    /// File name: `{session_label}_{timestamp}_{process}_{sequence}.atif.json`.
+    /// Existing files are never replaced, including concurrent saves.
     /// Returns the path of the saved file.
     pub fn save_to_dir(&self, dir: &Path) -> std::io::Result<std::path::PathBuf> {
         std::fs::create_dir_all(dir)?;
@@ -395,11 +481,31 @@ impl TrajectoryRecorder {
                 }
             })
             .collect();
-        let file_name = format!("{safe_label}_{ts}.atif.json");
-        let path = dir.join(file_name);
-
         let json = self.to_atif_json()?;
-        std::fs::write(&path, json)?;
+        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+        let (path, mut file) = loop {
+            let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+            let file_name = format!(
+                "{safe_label}_{ts}_{}_{sequence}.atif.json",
+                std::process::id()
+            );
+            let path = dir.join(file_name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => break (path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        if let Err(error) = file.write_all(json.as_bytes()) {
+            // Remove only the artifact allocated by this save, never an older run.
+            drop((file, std::fs::remove_file(&path)));
+            return Err(error);
+        }
+        drop(file);
 
         tracing::info!(
             "Saved opt LLM trajectory ({} calls) to {}",

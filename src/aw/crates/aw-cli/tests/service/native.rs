@@ -202,7 +202,10 @@ fn native(document: &mut Value, code: &str, mixed: bool) {
         r#"import os, pathlib, signal, sys, time
 pid = os.getpid()
 start = pathlib.Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
-pathlib.Path(str(pid) + '.pid').write_text(str(pid) + ' ' + start)
+# A timeout can kill this process during the write; publish only complete records.
+temporary = pathlib.Path(str(pid) + '.pid.tmp')
+temporary.write_text(str(pid) + ' ' + start)
+temporary.replace(pathlib.Path(str(pid) + '.pid'))
 {code}
 "#
     );

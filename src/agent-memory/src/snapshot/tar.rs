@@ -5,8 +5,8 @@
 //!
 //! - Create: walks the mount root EXCLUDING `.anolisa/`, writes a gzipped
 //!   tarball, then atomically renames into place.
-//! - List: scans the snapshots dir for sidecars and returns them oldest →
-//!   newest.
+//! - List: scans for sidecars backed by regular archive files and returns
+//!   them oldest → newest, without a full integrity check.
 //! - Restore: extracts into a sibling staging dir, then atomically swaps
 //!   the user-visible content (everything except `.anolisa/`) so a crash
 //!   mid-restore can never leave a half-extracted tree.
@@ -14,13 +14,15 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsFd;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg, OFlag};
+use nix::sys::stat::Mode;
 use walkdir::WalkDir;
 
 use super::{SNAPSHOTS_DIR, SnapshotInfo, snapshots_dir};
@@ -29,13 +31,187 @@ use crate::ns::MountPoint;
 
 const BACKEND_TAG: &str = "tar.gz";
 
-/// Process-wide write mutex serializing concurrent `restore_tarball`
-/// invocations. Restore is destructive (renames every top-level entry,
-/// moves staging in) — without this lock, two concurrent restores would
-/// race on the rename-aside step and leave the mount in a half-swapped
-/// state. The mutex is held for the full restore so concurrent file
-/// tools see either the pre- or post-restore state, never an interleave.
-static RESTORE_LOCK: Mutex<()> = Mutex::new(());
+/// Exclude other restores and reclaim sweeps on this mount, across processes.
+/// Returns `None` when busy. Each caller opens its own file description so
+/// threads in the same process also contend. Never unlink the lock file:
+/// replacing its inode would let callers hold different locks on one mount.
+pub(crate) fn restore_lock(mount: &MountPoint) -> Result<Option<Flock<File>>> {
+    let rel = Path::new(mount.meta_dir_name()).join(".restore.lock");
+    let file = crate::safe_fs::open_in_root(
+        mount.root_fd.as_fd(),
+        &rel,
+        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_NONBLOCK,
+        Mode::from_bits_truncate(0o600),
+    )?;
+    if !file.metadata()?.is_file() {
+        return Err(MemoryError::InvalidArgument(format!(
+            "snapshot restore lock is not a regular file: {}",
+            mount.root.join(&rel).display()
+        )));
+    }
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(Some(lock)),
+        Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+        Err((_, error)) => Err(MemoryError::Other(format!(
+            "lock snapshot restore for {}: {error}",
+            mount.root.display()
+        ))),
+    }
+}
+
+/// Archive-intrinsic entry gate shared by `restore_tarball` and the
+/// reclaim validator. `restore_tarball` refuses an entry, for reasons
+/// intrinsic to the archive, in exactly these cases:
+///
+/// 1. entry type outside {Regular, Directory} ("forbidden entry type");
+/// 2. the name has a `ParentDir` component — the only shape `unpack_in`
+///    skips (Prefix/RootDir/CurDir are dropped and re-rooted into
+///    staging; containment is then `validate_inside_dst`'s job);
+/// 3. a *regular-file* entry whose name was already extracted — with
+///    `set_overwrite(false)` the second write hits `AlreadyExists`. For a
+///    directory entry only a prior regular file at the same name refuses
+///    (`unpack_dir` lets an existing directory slide), so duplicate
+///    directory entries and a directory over an already-created subtree
+///    both extract successfully;
+/// 4. an ancestor of the name was already extracted as a regular file —
+///    `ensure_dir_created` fails with ENOTDIR for either entry kind;
+/// 5. a name that normalises to nothing (`./`, `/`, `.`) extracts
+///    nothing — `unpack_in` treats it as a no-op success — so it is
+///    admitted but never tracked.
+///
+/// Everything else restore can fail on is runtime (I/O errors, ENOSPC,
+/// permissions), which no pre-extraction check can screen for and is not
+/// claimed. Sharing one gate between restore and the validator means a
+/// future change to restore's refusals cannot silently invalidate the
+/// repair path: the validator's "would restore accept this archive"
+/// claim is true by construction.
+pub(crate) struct EntryGate {
+    files: std::collections::HashSet<PathBuf>,
+    dirs: std::collections::HashSet<PathBuf>,
+    /// Every strict ancestor of an admitted member — the names extraction
+    /// has already materialised as directories. A later *regular file*
+    /// with one of those names collides (`create_new(true)` on an
+    /// existing directory); maintained incrementally so `admit` is
+    /// O(depth) per entry rather than O(admitted members).
+    populated: std::collections::HashSet<PathBuf>,
+}
+
+impl EntryGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            files: std::collections::HashSet::new(),
+            dirs: std::collections::HashSet::new(),
+            populated: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Whether `restore_tarball` would extract this entry rather than
+    /// refuse it. `Err` names the refusal; runtime failures (I/O, ENOSPC)
+    /// are not visible here and are not claimed.
+    pub(crate) fn admit(&mut self, ty: ::tar::EntryType, path: &std::path::Path) -> Result<()> {
+        // 1. entry type — restore's "forbidden entry type" rejection.
+        if !matches!(ty, ::tar::EntryType::Regular | ::tar::EntryType::Directory) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "forbidden entry type: {}",
+                entry_type_name(ty)
+            )));
+        }
+        // 2. `unpack_in` skips exactly one shape — a `..` component.
+        // Prefix/RootDir/CurDir components are dropped and the entry is
+        // re-rooted into staging, so containment is enforced at unpack
+        // time, not here. Refusing them here would delete archives
+        // restore accepts.
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(MemoryError::InvalidArgument(
+                "entry skipped by parent traversal".into(),
+            ));
+        }
+        // Normalise the way `unpack_in` does — drop Prefix/RootDir/CurDir
+        // so the seen-sets match what actually lands on disk.
+        let normalised: PathBuf = path
+            .components()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                        | std::path::Component::CurDir
+                )
+            })
+            .collect();
+        // A name that normalises to nothing (`./`, `/`, `.`) extracts no
+        // file at all: `unpack_in` returns Ok(true) without touching the
+        // filesystem. Track nothing — and never let the empty path reach
+        // the containment checks, since every path starts with it.
+        if normalised.as_os_str().is_empty() {
+            return Ok(());
+        }
+        // 3. the name was already extracted. For a *directory* entry only a
+        //    prior regular file at the same name is a refusal: `unpack_dir`
+        //    lets an existing directory slide, so duplicate directory
+        //    entries and a directory over an already-created subtree both
+        //    extract successfully.
+        let duplicate = match ty {
+            ::tar::EntryType::Regular => {
+                self.files.contains(&normalised) || self.dirs.contains(&normalised)
+            }
+            _ => self.files.contains(&normalised),
+        };
+        if duplicate {
+            return Err(MemoryError::InvalidArgument(format!(
+                "duplicate entry: {}",
+                path.display()
+            )));
+        }
+        // 4. any ancestor already extracted as a file fails for either
+        // entry kind (`ensure_dir_created` through a regular file).
+        let mut ancestors = normalised.ancestors().peekable();
+        ancestors.next(); // the path itself
+        for ancestor in ancestors {
+            if self.files.contains(ancestor) {
+                return Err(MemoryError::InvalidArgument(format!(
+                    "ancestor of {} is a regular file: {}",
+                    path.display(),
+                    normalised.display()
+                )));
+            }
+        }
+        // 4b. reverse prefix containment — a prior member already lives
+        // under this name, so extraction created the name as a directory.
+        // Only a *new regular file* collides with that (`create_new(true)`
+        // on an existing directory); a directory entry over an existing
+        // subtree is precisely what `unpack_dir` tolerates, and refusing
+        // it would break archives that list children before parents — a
+        // shape the deferred-directory pass deliberately supports. The
+        // `populated` set makes the check O(depth) instead of a scan over
+        // all admitted members.
+        let under = matches!(ty, ::tar::EntryType::Regular) && self.populated.contains(&normalised);
+        if under {
+            return Err(MemoryError::InvalidArgument(format!(
+                "path collides with an extracted path: {}",
+                normalised.display()
+            )));
+        }
+        for ancestor in normalised.ancestors().skip(1) {
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
+            self.populated.insert(ancestor.to_path_buf());
+        }
+        match ty {
+            ::tar::EntryType::Regular => {
+                self.files.insert(normalised);
+            }
+            _ => {
+                self.dirs.insert(normalised);
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Reject snapshot ids that could escape `<mount>/.anolisa/snapshots/`.
 /// `id` is interpolated into `<id>.tar.gz` and `.<id>.staging` paths
@@ -85,7 +261,7 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
     let tmp_path = dir.join(format!("{id}.tar.gz.partial"));
 
     // 1. Stream mount tree → tmp tarball, skipping .anolisa/.
-    {
+    let archived = (|| -> Result<()> {
         let f = File::create(&tmp_path)?;
         let gz = GzEncoder::new(f, Compression::default());
         let mut tar = ::tar::Builder::new(gz);
@@ -124,17 +300,42 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
             .map_err(|e| MemoryError::Other(format!("tar finish: {e}")))?;
         // GzEncoder::finish runs in Drop; explicit shutdown via `into_inner`
         // not necessary because Builder::finish already flushed payload.
-    }
+        Ok(())
+    })();
 
-    let size = std::fs::metadata(&tmp_path)?.len();
-    // 2. Crash-safe atomic rename: sync the tmp file first so the
-    //    inode data is on disk before the rename updates the dirent.
-    //    Then sync the parent directory so the dirent is durable.
-    let tmp_file = File::open(&tmp_path)?;
-    tmp_file.sync_all()?;
-    std::fs::rename(&tmp_path, &archive_path)?;
-    let dir_fd = File::open(&dir)?;
-    dir_fd.sync_all()?;
+    // 2. Crash-safe atomic rename: sync the tmp file first so the inode data
+    //    is on disk before the rename updates the dirent, then sync the
+    //    parent directory so the dirent is durable. These steps share the
+    //    cleanup below: a failure here (delayed ENOSPC/EIO from `sync_all`,
+    //    for example) leaves the partial file behind.
+    let mut renamed = false;
+    let staged = archived.and_then(|()| -> Result<u64> {
+        let size = std::fs::metadata(&tmp_path)?.len();
+        File::open(&tmp_path)?.sync_all()?;
+        std::fs::rename(&tmp_path, &archive_path)?;
+        renamed = true;
+        File::open(&dir)?.sync_all()?;
+        Ok(size)
+    });
+
+    let size = match staged {
+        Ok(size) => size,
+        Err(e) => {
+            // Every early return above happens after `File::create`, so an
+            // aborted snapshot leaves a file behind. Repeat failures (a
+            // symlink in the mount aborts every attempt) would otherwise
+            // grow `.anolisa/snapshots/` without bound.
+            //
+            // Before the rename that file is the partial one. After it, the
+            // archive is complete but has no sidecar yet, and `list_tarballs`
+            // never shows it — the same invisible-file leak, one full archive
+            // at a time. Remove whichever of the two this call created, and
+            // leave `archive_path` alone when the rename did not happen: with
+            // a reused id it may hold an earlier good snapshot.
+            remove_quietly(if renamed { &archive_path } else { &tmp_path });
+            return Err(e);
+        }
+    };
 
     // 3. Write sidecar JSON metadata.
     let info = SnapshotInfo {
@@ -144,15 +345,33 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
         size,
         backend: BACKEND_TAG.into(),
     };
-    write_sidecar(&dir.join(format!("{id}.json")), &info)?;
+    if let Err(e) = write_sidecar(&dir.join(format!("{id}.json")), &info) {
+        // Same hazard as above: without its sidecar the archive is invisible
+        // to `list_tarballs`, so it would sit in the meta directory forever.
+        remove_quietly(&archive_path);
+        return Err(e);
+    }
     Ok(info)
 }
 
+/// Remove a file left behind by a failed snapshot, keeping the failure
+/// observable: a silent `let _ =` here would hide exactly the case (read-only
+/// meta dir, EIO) where the leak survives.
+fn remove_quietly(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("snapshot cleanup {}: {e}", path.display()),
+    }
+}
+
+/// List sidecars backed by regular archive files, without checking integrity.
 pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
     let dir = snapshots_dir(mount);
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let snapshots_rel = Path::new(mount.meta_dir_name()).join(SNAPSHOTS_DIR);
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
@@ -161,7 +380,15 @@ pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
             continue;
         }
         if let Ok(info) = read_sidecar(&path) {
-            out.push(info);
+            if validate_snapshot_id(&info.id).is_err() {
+                continue;
+            }
+            let archive_rel = snapshots_rel.join(format!("{}.tar.gz", info.id));
+            if crate::safe_fs::metadata(mount.root_fd.as_fd(), &archive_rel)
+                .is_ok_and(|metadata| metadata.is_file())
+            {
+                out.push(info);
+            }
         }
     }
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -175,9 +402,14 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // `remove_dir_all(&staging)` would destroy arbitrary directories.
     validate_snapshot_id(id)?;
 
-    // Serialize concurrent restores: the rename-aside step is not idempotent
-    // and two callers swapping at once would interleave rollback entries.
-    let _restore_guard = RESTORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Hold through extraction, publication, rollback and cleanup. A rejected
+    // caller must not touch another restore's staging or user-visible files.
+    let _restore_guard = restore_lock(mount)?.ok_or_else(|| {
+        MemoryError::Other(format!(
+            "another snapshot restore or reclaim is in progress for {}; retry after it finishes",
+            mount.root.display()
+        ))
+    })?;
 
     let dir = snapshots_dir(mount);
     let archive_path = dir.join(format!("{id}.tar.gz"));
@@ -191,10 +423,10 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     let staging_rel = Path::new(&staging_rel_str);
     let staging = mount.root.join(staging_rel);
     if staging.exists() {
-        crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging)?;
+        crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)?;
     }
     std::fs::create_dir_all(&staging)?;
-    {
+    let extraction: Result<()> = (|| {
         let f = File::open(&archive_path)?;
         let gz = GzDecoder::new(f);
         let mut tar = ::tar::Archive::new(gz);
@@ -205,31 +437,47 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         // link to an arbitrary destination, or leave a dangling symlink
         // inside staging that gets renamed into the mount (step 2b).
         //
-        // Directories are created via create_dir_all (idempotent, no
-        // overwrite concern). Regular files use unpack_in with
-        // overwrite=false so any collision in the freshly-created
-        // staging dir is caught as an anomaly.
+        // Regular files use overwrite=false. Directory entries are deferred
+        // until children exist, then applied child-first with archived modes.
+        let mut directories = Vec::new();
+        let mut gate = EntryGate::new();
         for entry in tar
             .entries()
             .map_err(|e| MemoryError::Other(format!("tar entries: {e}")))?
         {
             let mut entry =
                 entry.map_err(|e| MemoryError::Other(format!("tar entry read: {e}")))?;
-            match entry.header().entry_type() {
-                ::tar::EntryType::Regular | ::tar::EntryType::Directory => {
-                    // unpack_in validates the entry path stays inside
-                    // staging (validate_inside_dst rejects ".." and
-                    // absolute paths). This is the same guard that the
-                    // old tar.unpack() used; Directory and Regular share
-                    // one branch because both go through the same
-                    // validation before filesystem dispatch.
-                    entry.unpack_in(&staging).map_err(|e| {
+            // Gate every entry before extraction. `admit` mirrors the
+            // archive-intrinsic refusals the unpack steps below produce —
+            // entry type, parent traversal, duplicate names, file/dir
+            // prefix collisions — so a refused entry is a hard restore
+            // failure rather than a silently partial snapshot. The gate
+            // lives in one place so the reclaim validator (which shares
+            // it) cannot drift from what restore actually refuses.
+            let ty = entry.header().entry_type();
+            let entry_path = entry.path()?.to_path_buf();
+            gate.admit(ty, &entry_path)?;
+            match ty {
+                ::tar::EntryType::Directory => directories.push(entry),
+                ::tar::EntryType::Regular => {
+                    // unpack_in re-roots absolute names and refuses parent
+                    // traversal. Treat skipped entries as incomplete restore,
+                    // rather than publishing a silently partial snapshot.
+                    let unpacked = entry.unpack_in(&staging).map_err(|e| {
                         MemoryError::Other(format!(
                             "tar unpack {}: {e}",
                             entry.path().unwrap_or_default().display()
                         ))
                     })?;
+                    if !unpacked {
+                        return Err(MemoryError::InvalidArgument(format!(
+                            "snapshot entry was skipped: {}",
+                            entry.path()?.display()
+                        )));
+                    }
                 }
+                // Unreachable — the gate above refuses every other entry
+                // type with the same message shape.
                 other => {
                     return Err(MemoryError::InvalidArgument(format!(
                         "snapshot contains forbidden entry type '{}' at {}",
@@ -239,13 +487,47 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                 }
             }
         }
+        // Match tar::Archive::unpack's ordering: restrictive directory
+        // permissions must not prevent extracting children. Reverse path
+        // order also handles archives that list children before parents.
+        directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+        for mut directory in directories {
+            let unpacked = directory.unpack_in(&staging).map_err(|e| {
+                MemoryError::Other(format!(
+                    "tar unpack directory {}: {e}",
+                    directory.path().unwrap_or_default().display()
+                ))
+            })?;
+            if !unpacked {
+                return Err(MemoryError::InvalidArgument(format!(
+                    "snapshot directory was skipped: {}",
+                    directory.path()?.display()
+                )));
+            }
+        }
+        // TAR iteration stops at its end marker before gzip necessarily
+        // validates its CRC and length. Reject damaged or truncated archives
+        // while all extracted files are still isolated in staging.
+        std::io::copy(&mut tar.into_inner(), &mut std::io::sink())
+            .map_err(|e| MemoryError::Other(format!("snapshot gzip validation: {e}")))?;
+        Ok(())
+    })();
+    if let Err(error) = extraction {
+        if let Err(cleanup) =
+            crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
+        {
+            return Err(MemoryError::Other(format!(
+                "{error}; restore staging cleanup failed: {cleanup}"
+            )));
+        }
+        return Err(error);
     }
 
     // 2. Two-stage rename swap. The previous implementation deleted the
     //    entire user-visible tree first, then moved staging in — a crash
     //    in that window left the mount empty. Now we rename each
-    //    top-level entry aside with a hidden rollback prefix, move
-    //    staging entries in, then drop the rollbacks. On any error we
+    //    top-level entry into a private rollback directory, move
+    //    staging entries in, then retain the rollbacks in trash. On error we
     //    rename the rollbacks back, leaving the pre-restore state intact.
     //
     //    Renames within the same directory are atomic per POSIX, so each
@@ -253,6 +535,25 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     //    (the swap window is bounded by a single rename(2) call, not by
     //    arbitrary IO duration).
     let rollback_prefix = format!(".{id}.rollback.");
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let rollback_name = format!("{rollback_prefix}{timestamp}");
+    let rollback_dir = match reserve_recovery_dir(&mount.meta_dir, &rollback_name) {
+        Ok(dir) => dir,
+        Err(error) => {
+            let error = format!(
+                "reserve snapshot rollback directory under {}: {error}",
+                mount.meta_dir.display()
+            );
+            if let Err(cleanup) =
+                crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
+            {
+                return Err(MemoryError::Other(format!(
+                    "{error}; restore staging cleanup failed: {cleanup}"
+                )));
+            }
+            return Err(MemoryError::Other(error));
+        }
+    };
     let mut rollbacks: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut applied: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
 
@@ -270,10 +571,8 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                 continue;
             }
             let original = entry.path();
-            let rolled = mount
-                .meta_dir
-                .join(format!("{rollback_prefix}{}", name.to_string_lossy()));
-            std::fs::rename(&original, &rolled)?;
+            let rolled = rollback_dir.join(&name);
+            rename_preserving_directory_mode(&original, &rolled)?;
             rollbacks.push((original, rolled));
         }
 
@@ -282,7 +581,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
             let entry = entry?;
             let from = entry.path();
             let to = mount.root.join(entry.file_name());
-            std::fs::rename(&from, &to)?;
+            rename_preserving_directory_mode(&from, &to)?;
             applied.push((from, to));
         }
         Ok(())
@@ -290,13 +589,47 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
 
     if let Err(e) = restore_result {
         // Rollback: undo any applied staging moves, then move rollbacks back.
+        let mut rollback_errors = Vec::new();
         for (from, to) in applied.into_iter().rev() {
-            let _ = std::fs::rename(&to, &from);
+            if let Err(error) = rename_preserving_directory_mode(&to, &from) {
+                rollback_errors.push(format!(
+                    "undo {} to {}: {error}",
+                    to.display(),
+                    from.display()
+                ));
+            }
         }
         for (original, rolled) in rollbacks.into_iter().rev() {
-            let _ = std::fs::rename(&rolled, &original);
+            if let Err(error) = rename_preserving_directory_mode(&rolled, &original) {
+                rollback_errors.push(format!(
+                    "recover {} to {}: {error}",
+                    rolled.display(),
+                    original.display()
+                ));
+            }
         }
-        let _ = crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging);
+        // Only an empty directory is disposable; failed undo data stays here.
+        if rollback_errors.is_empty() {
+            if let Err(error) = std::fs::remove_dir(&rollback_dir) {
+                rollback_errors.push(format!("remove empty {}: {error}", rollback_dir.display()));
+            }
+        }
+        let e = if rollback_errors.is_empty() {
+            e
+        } else {
+            MemoryError::Other(format!(
+                "{e}; rollback incomplete; retained data at {}: {}",
+                rollback_dir.display(),
+                rollback_errors.join("; ")
+            ))
+        };
+        if let Err(cleanup) =
+            crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
+        {
+            return Err(MemoryError::Other(format!(
+                "{e}; restore staging cleanup failed: {cleanup}"
+            )));
+        }
         return Err(e);
     }
 
@@ -312,37 +645,125 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // as the swap succeeded — an unrecoverable destruction of the prior
     // state. Operators (or a future GC tool) can purge `.anolisa/trash/`
     // explicitly when they decide the restore is good.
-    let trash_dir = mount
-        .meta_dir
-        .join("trash")
-        .join(format!("{}-{id}", Utc::now().format("%Y%m%dT%H%M%SZ")));
-    if let Err(e) = std::fs::create_dir_all(&trash_dir) {
-        // Trash creation failed — fall back to leaving rollback entries in
-        // place so the user still has a recovery path. Log loudly.
-        tracing::warn!(
-            "could not create trash dir {} ({e}); rollback entries left in meta dir",
-            trash_dir.display()
-        );
-    } else {
-        for (original, rolled) in rollbacks {
-            let leaf = original
-                .file_name()
-                .map(|s| s.to_os_string())
-                .unwrap_or_else(|| std::ffi::OsString::from("entry"));
-            let dest = trash_dir.join(&leaf);
-            if let Err(e) = std::fs::rename(&rolled, &dest) {
-                tracing::warn!(
-                    "could not move rollback {} → {}: {e}",
-                    rolled.display(),
-                    dest.display()
-                );
+    let trash_root = mount.meta_dir.join("trash");
+    let trash_name = format!("{timestamp}-{id}");
+    let trash_dir = std::fs::create_dir_all(&trash_root)
+        .and_then(|()| reserve_recovery_dir(&trash_root, &trash_name));
+    match trash_dir {
+        Err(e) => {
+            // Trash creation failed — fall back to leaving rollback entries in
+            // place so the user still has a recovery path. Log loudly.
+            tracing::warn!(
+                "could not reserve trash dir under {} ({e}); rollback entries retained at {}",
+                trash_root.display(),
+                rollback_dir.display()
+            );
+        }
+        Ok(trash_dir) => {
+            let mut all_moved = true;
+            for (original, rolled) in rollbacks {
+                let leaf = original
+                    .file_name()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_else(|| std::ffi::OsString::from("entry"));
+                let dest = trash_dir.join(&leaf);
+                if let Err(e) = rename_preserving_directory_mode(&rolled, &dest) {
+                    all_moved = false;
+                    tracing::warn!(
+                        "could not move rollback {} → {}: {e}",
+                        rolled.display(),
+                        dest.display()
+                    );
+                }
+            }
+            if all_moved {
+                if let Err(e) = std::fs::remove_dir(&rollback_dir) {
+                    tracing::warn!(
+                        "could not remove empty rollback dir {}: {e}",
+                        rollback_dir.display()
+                    );
+                }
             }
         }
     }
     if let Err(e) =
-        crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging)
+        crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
     {
         tracing::warn!("staging cleanup {}: {e}", staging.display());
+    }
+    Ok(())
+}
+
+// Reserve a fresh namespace before moving user data; existing entries belong
+// to earlier restores and must never be reused or removed, even when empty.
+fn reserve_recovery_dir(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let mut path = parent.join(name);
+    let mut suffix = 0u64;
+    loop {
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix += 1;
+                path = parent.join(format!("{name}-{suffix}"));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Linux requires write permission on a directory when changing its parent
+/// (the move updates `..`). Restore its archived mode after every move, also
+/// when parking the old tree in trash or undoing a failed restore.
+// This helper remains path-anchored under the mount's no-symlink invariant;
+// handling concurrent renames requires a separate fd-anchored swap change.
+fn rename_preserving_directory_mode(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let error = match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind() != std::io::ErrorKind::PermissionDenied {
+        return Err(error);
+    }
+    let meta = std::fs::symlink_metadata(from)?;
+    let original = meta.permissions();
+    if !meta.is_dir() || original.mode() & 0o200 != 0 {
+        return Err(error);
+    }
+    std::fs::set_permissions(
+        from,
+        std::fs::Permissions::from_mode((original.mode() & 0o7777) | 0o200),
+    )
+    .map_err(|chmod| {
+        std::io::Error::other(format!(
+            "rename {} to {} failed: {error}; granting directory owner write failed: {chmod}",
+            from.display(),
+            to.display()
+        ))
+    })?;
+    if let Err(error) = std::fs::rename(from, to) {
+        std::fs::set_permissions(from, original).map_err(|restore| {
+            std::io::Error::other(format!(
+                "rename {} to {} failed: {error}; restoring directory mode failed: {restore}",
+                from.display(),
+                to.display()
+            ))
+        })?;
+        return Err(error);
+    }
+    if let Err(error) = std::fs::set_permissions(to, original.clone()) {
+        // Keep the caller's move journal accurate: a failed operation must
+        // return the entry to its source before the caller starts its undo.
+        std::fs::rename(to, from)
+            .and_then(|()| std::fs::set_permissions(from, original))
+            .map_err(|undo| {
+                std::io::Error::other(format!(
+                    "directory moved to {}, mode restoration failed: {error}; undo failed: {undo}",
+                    to.display()
+                ))
+            })?;
+        return Err(error);
     }
     Ok(())
 }
@@ -388,6 +809,67 @@ fn read_sidecar(path: &Path) -> Result<SnapshotInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_directories_skip_existing_entries_without_changing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        let name = "20261113T120000Z-snap_same";
+        std::fs::write(parent.join(name), b"old file\0\xff").unwrap();
+        let empty = parent.join(format!("{name}-1"));
+        std::fs::create_dir(&empty).unwrap();
+        let occupied = parent.join(format!("{name}-2"));
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("doc.md"), "old directory").unwrap();
+
+        let first = reserve_recovery_dir(parent, name).unwrap();
+        std::fs::write(first.join("doc.md"), "first").unwrap();
+        let second = reserve_recovery_dir(parent, name).unwrap();
+        std::fs::write(second.join("doc.md"), "second").unwrap();
+        assert_eq!(first, parent.join(format!("{name}-3")));
+        assert_eq!(second, parent.join(format!("{name}-4")));
+        assert_eq!(std::fs::read(parent.join(name)).unwrap(), b"old file\0\xff");
+        assert_eq!(std::fs::read_dir(empty).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(occupied.join("doc.md")).unwrap(),
+            "old directory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.join("doc.md")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("doc.md")).unwrap(),
+            "second"
+        );
+
+        let error = reserve_recovery_dir(&parent.join("missing"), name).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn failed_directory_move_restores_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let destination_parent = tmp.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination_parent).unwrap();
+        for path in [&source, &destination_parent] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let result = rename_preserving_directory_mode(&source, &destination_parent.join("moved"));
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        for path in [&source, &destination_parent] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(result.is_err());
+        assert_eq!(mode, 0o555);
+        assert!(!destination_parent.join("moved").exists());
+    }
 
     #[test]
     fn validate_snapshot_id_accepts_generated_form() {

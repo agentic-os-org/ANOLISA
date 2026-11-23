@@ -17,10 +17,16 @@
 from __future__ import annotations
 
 import json
+import stat
+import sys
+import textwrap
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from swe_runner.agents import get_agent
+import pytest
+
+from swe_runner.agents import AgentEnvironmentError, AgentTimeoutError, get_agent
 from swe_runner.agents.openclaw.adapter import (
     OpenClawAdapter,
     build_openclaw_agent_id,
@@ -51,6 +57,7 @@ def make_settings(
     tokenless: bool = False,
     use_skill: bool = False,
     per_case_prompt: bool = False,
+    base_config: Path | None = None,
 ) -> Settings:
     return Settings(
         agent=AgentConfig(
@@ -61,6 +68,7 @@ def make_settings(
             tokenless=tokenless,
             use_skill=use_skill,
             per_case_prompt=per_case_prompt,
+            base_config=base_config,
         ),
         output={"output_dir": tmp_path / "run"},
     )
@@ -87,6 +95,37 @@ def test_profile_manager_copies_base_config_and_creates_symlink(tmp_path: Path) 
 
     assert not profile.link_path.exists()
     assert profile.directory.exists()
+
+
+def test_profile_manager_rejects_missing_explicit_base_config(tmp_path: Path) -> None:
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+    manager = OpenClawCaseProfileManager(
+        output_dir=tmp_path / "run",
+        base_config_path=tmp_path / "absent-openclaw.json",
+        profile_link_root=link_root,
+    )
+
+    with pytest.raises(AgentEnvironmentError, match="base config not found"):
+        manager.prepare("django__django-13448")
+
+
+def test_profile_manager_uses_empty_config_when_only_the_default_base_config_is_missing(tmp_path: Path) -> None:
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+    manager = OpenClawCaseProfileManager(
+        output_dir=tmp_path / "run",
+        base_config_path=None,
+        profile_link_root=link_root,
+    )
+
+    with patch(
+        "swe_runner.agents.openclaw.profile.resolve_openclaw_config_path",
+        return_value=tmp_path / "absent-openclaw.json",
+    ):
+        profile = manager.prepare("django__django-13448")
+
+    assert json.loads(profile.config_path.read_text(encoding="utf-8")) == {}
 
 
 def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: Path) -> None:
@@ -170,6 +209,48 @@ def test_prepare_creates_case_profile_and_single_local_sandbox_agent(tmp_path: P
         "label=openclaw.sessionKey=agent:django__django-13448:main",
     ] in commands
     assert ["docker", "rm", "-f", "stale-container"] in commands
+
+
+def test_prepare_prefers_settings_base_config_over_adapter_default(tmp_path: Path) -> None:
+    def write_marked_config(path: Path, marker: str) -> Path:
+        path.write_text(json.dumps({"agents": {"list": [{"id": "main"}]}, "marker": marker}), encoding="utf-8")
+        return path
+
+    adapter_config = write_marked_config(tmp_path / "adapter-openclaw.json", "adapter")
+    settings_config = write_marked_config(tmp_path / "settings-openclaw.json", "settings")
+    workspace_root = tmp_path / "workspace"
+    openclaw_workspace_root = workspace_root / "openclaw-workspace"
+    work_dir = workspace_root / "repo"
+    link_root = tmp_path / "home"
+    link_root.mkdir()
+
+    def fake_prepare_workspace(*args: object, **kwargs: object) -> Path:
+        work_dir.mkdir(parents=True)
+        return work_dir
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:2] == ["docker", "ps"]:
+            return CommandResult(args=tuple(cmd), returncode=0, stdout="", stderr="")
+        return CommandResult(
+            args=tuple(cmd),
+            returncode=0,
+            stdout=json.dumps({"sandbox": {"workspaceRoot": str(openclaw_workspace_root)}}),
+            stderr="",
+        )
+
+    agent = OpenClawAdapter(base_config_path=adapter_config, profile_link_root=link_root)
+    with (
+        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=workspace_root),
+        patch("swe_runner.agents.openclaw.adapter.prepare_workspace_from_image", side_effect=fake_prepare_workspace),
+        patch("swe_runner.agents.openclaw.adapter.get_git_revision", return_value="base-rev"),
+        patch("swe_runner.agents.openclaw.adapter.build_openclaw_prompt", return_value="fix the bug"),
+        patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
+    ):
+        prepared = agent.prepare(make_instance(), make_settings(tmp_path, base_config=settings_config))
+
+    config = json.loads(Path(prepared.metadata["openclaw_config_path"]).read_text(encoding="utf-8"))
+
+    assert config["marker"] == "settings"
 
 
 def test_prepare_writes_skill_agents_when_skill_enabled(tmp_path: Path) -> None:
@@ -351,7 +432,6 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
     workspace_root = tmp_path / "workspace" / "openclaw-workspace"
     tokenless_bin_dir = workspace_root / ".runner" / "tokenless" / "bin"
     tokenless_bin_dir.mkdir(parents=True)
-    (tokenless_bin_dir / "rtk").write_text("#!/bin/sh\n", encoding="utf-8")
     (tokenless_bin_dir / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
     (workspace_root / ".runner" / "tokenless" / "injection.json").write_text(
         json.dumps(
@@ -359,11 +439,11 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
                 "schema_version": 1,
                 "binaries": [
                     {
-                        "name": "rtk",
-                        "source": "/home/user/.local/bin/rtk",
+                        "name": "tokenless",
+                        "source": "/home/user/.local/bin/tokenless",
                         "source_is_symlink": True,
-                        "source_realpath": "/home/user/.local/libexec/anolisa/tokenless/rtk",
-                        "copied": str(tokenless_bin_dir / "rtk"),
+                        "source_realpath": "/home/user/.local/libexec/anolisa/tokenless/tokenless",
+                        "copied": str(tokenless_bin_dir / "tokenless"),
                         "copied_is_symlink": False,
                     }
                 ],
@@ -483,7 +563,10 @@ def test_run_records_tokenless_evidence_for_tokenless_runs(tmp_path: Path) -> No
         "[tokenless:rtk] rewrite: ls /testbed -> rtk ls /testbed"
     ]
     assert evidence["session"]["exec_tool_call_count"] == 1
-    assert evidence["trajectory"]["tokenless_status"] == "loaded"
+    assert evidence["schema_version"] == 2
+    assert evidence["trajectory"]["status"] == "loaded"
+    # A tokenless arm must not inherit a context engine from the copied host config.
+    assert evidence["config"]["context_engine_slot"] is None
 
 
 def test_run_writes_error_log_for_nonzero_openclaw_exit(tmp_path: Path) -> None:
@@ -577,3 +660,104 @@ def test_openclaw_adapter_registered() -> None:
     agent = get_agent("openclaw")
     assert isinstance(agent, OpenClawAdapter)
     assert agent.name == "openclaw"
+
+
+def _write_stub_cli(tmp_path: Path, body: str) -> Path:
+    """Write an executable stub ``openclaw`` CLI script for watchdog tests."""
+    stub = tmp_path / "openclaw-stub"
+    stub.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body), encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return stub
+
+
+_STUB_CLI_OWN_BUDGET = """
+    import sys
+    import time
+
+    timeout = int(sys.argv[sys.argv.index("--timeout") + 1])
+    time.sleep(timeout)
+    print("graceful-timeout-output", flush=True)
+    sys.exit(3)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_watchdog_grace_lets_the_cli_own_timeout_budget_win(tmp_path: Path) -> None:
+    """A CLI that honors its own --timeout budget must not be killed by the watchdog.
+
+    The CLI budget starts counting after process spawn, so a watchdog armed at
+    the same wall-clock value always fires first and discards the CLI's
+    structured timeout output. With a grace margin the CLI finishes its own
+    budget, exits with its own status, and its output is preserved.
+    """
+    stub = _write_stub_cli(tmp_path, _STUB_CLI_OWN_BUDGET)
+
+    outcome = OpenClawClient(profile="profile-1", agent_id="swebench", cli_path=str(stub)).run_prompt(
+        "fix",
+        session_id="session-1",
+        timeout=2,
+        max_steps=0,
+    )
+
+    assert outcome.returncode == 3
+    assert "graceful-timeout-output" in outcome.raw_output
+
+
+_STUB_CLI_HANGS = """
+    import sys
+    import time
+
+    timeout = int(sys.argv[sys.argv.index("--timeout") + 1])
+    print("partial-evidence-before-hang", flush=True)
+    time.sleep(timeout + 600)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_timeout_error_keeps_captured_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged CLI's pre-kill output must survive in the timeout error message."""
+    stub = _write_stub_cli(tmp_path, _STUB_CLI_HANGS)
+    # Shrink the grace so the test does not wait out the production margin.
+    monkeypatch.setattr("swe_runner.agents.openclaw.client._TIMEOUT_GRACE_SECONDS", 2)
+
+    with pytest.raises(AgentTimeoutError) as excinfo:
+        OpenClawClient(profile="profile-1", agent_id="swebench", cli_path=str(stub)).run_prompt(
+            "fix",
+            session_id="session-1",
+            timeout=1,
+            max_steps=0,
+        )
+
+    assert "partial-evidence-before-hang" in str(excinfo.value)
+    assert "timed out after 1s" in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_watchdog_grace_is_strictly_larger_than_the_cli_budget(tmp_path: Path) -> None:
+    """The subprocess watchdog timeout must exceed the CLI's own budget."""
+    from swe_runner.agents.openclaw.client import _TIMEOUT_GRACE_SECONDS
+
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd: Sequence[str], **kwargs: object) -> CommandResult:
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs.get("timeout")
+        return CommandResult(args=tuple(cmd), returncode=0, stdout="ok", stderr="")
+
+    with patch("swe_runner.agents.openclaw.client.run_command", side_effect=fake_run_command):
+        OpenClawClient(profile="profile-1", agent_id="swebench").run_prompt(
+            "fix",
+            session_id="session-1",
+            timeout=1200,
+            max_steps=0,
+        )
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    cli_budget = int(cmd[cmd.index("--timeout") + 1])
+    watchdog = captured["timeout"]
+    assert isinstance(watchdog, (int, float))
+    assert watchdog == cli_budget + _TIMEOUT_GRACE_SECONDS
+    assert watchdog > cli_budget

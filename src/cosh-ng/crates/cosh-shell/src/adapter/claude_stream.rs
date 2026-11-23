@@ -131,7 +131,9 @@ impl ClaudeStreamParser {
                 events.extend(tool_result_events);
             } else if let Some(text) = self.extract_assistant_snapshot_delta(&value) {
                 self.push_text_event(&mut events, text);
-            } else if !self.emitted_text {
+            } else if !self.emitted_text
+                && value.get("is_error").and_then(|value| value.as_bool()) != Some(true)
+            {
                 if let Some(text) = extract_claude_result_text(&value) {
                     self.push_text_event(&mut events, text);
                 }

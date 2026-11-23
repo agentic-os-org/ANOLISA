@@ -4,9 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "0.84.2";
-
-function packages(application) {
+export function packages(application) {
   let require = createRequire(pathToFileURL(application));
   const resolved = {};
   for (const name of ["pi-coding-agent", "pi-agent-core"]) {
@@ -20,13 +18,16 @@ function packages(application) {
     const metadata = JSON.parse(
       readFileSync(join(directory, "package.json"), "utf8"),
     );
-    if (metadata.name !== fullName || metadata.version !== VERSION) {
-      throw new Error(`AW requires ${fullName} ${VERSION}`);
+    if (metadata.name !== fullName || typeof metadata.version !== "string" ||
+        !/^[0-9][0-9A-Za-z.+_!-]{0,127}$/.test(metadata.version)) {
+      throw new Error(`AW requires ${fullName} with valid version metadata`);
     }
     const entry = metadata.exports?.["."]?.import ?? metadata.main;
     if (entry !== "./dist/index.js")
       throw new Error(`Unsupported ${fullName} module layout`);
     resolved[name] = join(directory, entry);
+    if (name === "pi-coding-agent") resolved.version = metadata.version;
+    else resolved.coreVersion = metadata.version;
     if (name === "pi-coding-agent")
       require = createRequire(pathToFileURL(resolved[name]));
   }
@@ -40,14 +41,67 @@ function packages(application) {
   return resolved;
 }
 
-if (process.env.AW_PI_PROBE === "1") {
-  packages(process.argv.at(-1));
-  process.stdout.write(`AW Pi SDK ${VERSION}\n`);
-} else {
-  const [application, ...args] = process.argv.slice(2);
+/** Run an already prepared native host in its existing process. */
+export async function runNativeWorker({ application, args = [] }) {
   const resolved = packages(application);
+  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
+  const startup = configuration();
+  if (resolved.version !== startup.sdk_version || resolved.coreVersion !== startup.core_version)
+    throw new Error("Pi SDK packages changed after AW admission");
+  if (!startup.resident_policy_reload)
+    throw new Error("Native Pi startup requires aw instance prepare");
+  if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
+      startup.strict_output_supported !== true)
+    throw new Error("AW strict Pi output requires a verified SDK pair");
+  const { worker, sdk, core } = await loadWorker(application, args, resolved, startup.strict_output_supported);
+  const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
+  await runWorker(worker, sdk, core, args);
+}
+
+export async function loadWorker(application, args, resolved, strictOutput) {
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
+  if (typeof sdk.AgentSession !== "function" || typeof core.Agent !== "function")
+    throw new Error("AW Pi SDK requires native AgentSession and Agent");
+  if (strictOutput &&
+      typeof core.Agent.prototype.processEvents !== "function")
+    throw new Error("AW strict Pi output requires the native event dispatch seam");
+  const app = await import(pathToFileURL(application).href);
+  if (typeof app.createSession !== "function" ||
+      (typeof app.runWorker !== "function" && typeof app.run !== "function"))
+    throw new Error("Native Pi startup requires createSession and runWorker or run factories");
+  if (typeof app.runWorker === "function" && typeof app.run === "function")
+    throw new Error("Choose runWorker or run, not both");
+  const worker = typeof app.runWorker === "function" ? app : {
+    ...app,
+    async runWorker({ createSession, closeSession }) {
+      const { session } = await createSession();
+      await app.run(session, { args, createSession, closeSession });
+    },
+  };
+  return { worker, sdk, core };
+}
+
+if (process.env.AW_PI_PROBE === "1") {
+  const resolved = packages(process.argv.at(-1));
+  process.stdout.write(`AW Pi SDK ${resolved.version}:${resolved.coreVersion}\n`);
+} else if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const [application, ...args] = process.argv.slice(2);
+  const resolved = packages(application);
+  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
+  const startup = configuration();
+  if (resolved.version !== startup.sdk_version || resolved.coreVersion !== startup.core_version)
+    throw new Error("Pi SDK packages changed after AW admission");
+  if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
+      startup.strict_output_supported !== true)
+    throw new Error("AW strict Pi output requires a verified SDK pair");
+  const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
+  const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
+  for (const [name, value] of [["AgentSession", sdk.AgentSession], ["Agent", core.Agent]])
+    if (typeof value !== "function") throw new Error(`AW Pi SDK requires native ${name}`);
+  if (startup.strict_output_supported === true &&
+      typeof core.Agent.prototype.processEvents !== "function")
+    throw new Error("AW strict Pi output requires the native event dispatch seam");
   const app = await import(pathToFileURL(application).href);
   if (
     typeof app.createSession !== "function" ||
@@ -62,6 +116,8 @@ if (process.env.AW_PI_PROBE === "1") {
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
     await runWorker(app, sdk, core, args);
   } else {
+  if (configuration().hooks.some(hook => hook.event === "input.submit"))
+    throw new Error("AW Pi input.submit requires the runWorker factory");
   const installations = new Map();
   // All new/resume/fork/import replacements must use this common application factory.
   const createSession = async (options = {}) => {
@@ -80,6 +136,7 @@ if (process.env.AW_PI_PROBE === "1") {
     const bridge = await import(new URL("./bridge.mjs", import.meta.url));
     const installed = bridge.installSessionBridge(session);
     installations.set(session, installed);
+    await installed.sessionStart();
     return result;
   };
   try {
@@ -89,7 +146,8 @@ if (process.env.AW_PI_PROBE === "1") {
   } finally {
     for (const [session, installed] of installations) {
       installed.dispose();
-      session.dispose();
+      await session.dispose();
+      await installed.sessionEnd("disposed");
     }
   }
 }

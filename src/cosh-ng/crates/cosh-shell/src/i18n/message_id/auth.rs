@@ -8,6 +8,20 @@ macro_rules! auth_ids {
     };
 }
 
+macro_rules! guide_ai_management_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AuthProviderManagementQuestion,
+            GuideAiManagementKeys,
+            GuideAuthDeleteKeys,
+            GuideAuthFieldKeys,
+            GuideWizardLoginPrivilegeDenied,
+        );
+    };
+}
+
 macro_rules! auth_ecs_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(

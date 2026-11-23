@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from importlib.metadata import version
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def main() -> None:
         path.write_text(json.dumps(config))
         (args.output / "config.json").write_text(json.dumps(config, indent=2))
         logs = (args.output / "serve.log").open("w")
-        cmd = [str(aw), "serve", "--config", str(path), "--state-dir", str(state)]
+        cmd = [str(aw), "service", "serve", "--config", str(path), "--state-dir", str(state)]
         record = {
             "command": cmd,
             "cwd": str(root),
@@ -135,7 +136,7 @@ def main() -> None:
                     record_path.write_text(json.dumps(launch_record))
                     child = subprocess.Popen(
                         command,
-                        env=env,
+                        env={**env, "AW_TEST_WORKER": str(number)},
                         cwd=root,
                         stdout=stdout,
                         stderr=stderr,
@@ -178,8 +179,11 @@ def main() -> None:
             ]
             assert len(native_callbacks) == 320, len(native_callbacks)
             instances = {item["event"]["agent"]["instance_id"] for item in callbacks}
-            assert len(instances) == 2
+            assert len(instances) == 292, len(instances)
             for instance in instances:
+                selected = [row for row in callbacks if row["event"]["agent"]["instance_id"] == instance]
+                assert len({(row["worker"], row["event"]["session_id"]) for row in selected}) == 1
+            for worker in ["0", "1"]:
                 for session in ["session-one", "session-two"]:
                     for mode, outcome in [
                         ("success", "success"),
@@ -190,7 +194,7 @@ def main() -> None:
                         selected = [
                             item
                             for item in callbacks
-                            if item["event"]["agent"]["instance_id"] == instance
+                            if item["worker"] == worker
                             and item["event"]["session_id"] == session
                             and item["event"]["native"]["tool_call"]["id"] == "call-" + mode
                             and item["event"]["tool"]["input"]["mode"] == mode
@@ -211,7 +215,7 @@ def main() -> None:
                     for item in callbacks:
                         event = item["event"]
                         if (
-                            event["agent"]["instance_id"] == instance
+                            item["worker"] == worker
                             and event["session_id"] == session
                         ):
                             by_call.setdefault(event["tool"]["call_id"], []).append(item)
@@ -260,13 +264,13 @@ def main() -> None:
                 assert len(results) == 76, results
             status = json.loads(
                 subprocess.check_output(
-                    [str(aw), "status", "--socket", str(state / "aw.sock")], timeout=5
+                    [str(aw), "service", "status", "--socket", str(state / "aw.sock")], timeout=5
                 )
             )["result"]
             assert status["bindings"] == 0 and status["events"] == 0, status
             assert not list(state.glob("launch-*"))
             journals = list(state.rglob("*.jsonl"))
-            assert len(journals) == 610, "missing durable event journals"
+            kinds = Counter()
             verified = []
             for journal in journals:
                 audit = subprocess.run(
@@ -278,9 +282,22 @@ def main() -> None:
                 )
                 checked = json.loads(audit.stdout)["result"]
                 assert checked["terminal"] is True, checked
-                if checked["records"][0]["record"]["plan"]["kind"] == "event":
+                kind = checked["records"][0]["record"]["plan"]["kind"]
+                kinds[kind] += 1
+                if kind == "event":
                     assert checked["records"][-1]["record"]["status"] in {"closed", "completed"}
                 verified.append(checked)
+            # Each prepared instance emits a start fact; both root workers also emit an end fact.
+            assert kinds == {
+                "event": 608,
+                "preparation": 294,
+                "task_scope": 292,
+                "scope_acknowledged": 292,
+                "instance_owner": 2,
+                "bridge_ready": 2,
+                "process_association": 2,
+                "runtime_fact": len(instances) + 2 * len(launches),
+            }, kinds
             (args.output / "verified-audit.json").write_text(json.dumps(verified, indent=2))
             (args.output / "callbacks.json").write_text(json.dumps(callbacks, indent=2))
             (args.output / "native-callbacks.json").write_text(
@@ -305,7 +322,7 @@ def main() -> None:
         finally:
             try:
                 subprocess.run(
-                    [str(aw), "stop", "--socket", str(state / "aw.sock")],
+                    [str(aw), "service", "stop", "--socket", str(state / "aw.sock")],
                     timeout=5,
                     capture_output=True,
                 )

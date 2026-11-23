@@ -2,7 +2,7 @@
 
 [中文版](../../zh/adapters/agentscope-adapter.md)
 
-The `agentscope` Adapter targets AgentScope **2.0.6** on **Python >=3.11**
+The `agentscope` Adapter has a verified baseline of AgentScope **2.0.6** on **Python >=3.11**
 ([SDK requirement](https://pypi.org/project/agentscope/2.0.6/)) and explicitly composed
 public `Agent` factories. It shares AW's local service, binding, bounded `aw hook`
 client, foreground launcher, readiness and generated-file cleanup. It does not
@@ -13,8 +13,9 @@ identify the SDK as QwenPaw or depend on QwenPaw's plugin loader.
 `aw run --config FILE --agent TARGET` selects the configured `adapter: agentscope`.
 `argv` starts with the application Python interpreter, followed by a `.py` script
 or `-m MODULE` and application arguments. Interpreter override switches such as
-`-I`, `-E` and `-c` are rejected. The same interpreter must report
-`importlib.metadata.version("agentscope") == "2.0.6"` during the bounded preflight.
+`-I`, `-E` and `-c` are rejected. The bounded preflight records
+`importlib.metadata.version("agentscope")` from the same interpreter. Native
+imports and factory registration verify the required middleware interfaces.
 
 AW supplies an owned `aw_agentscope.py` import path and `AW_NATIVE_CONFIG` to the
 foreground worker. The application explicitly changes its public factory:
@@ -45,6 +46,34 @@ Existing trusted argument injection and delegation wrappers must precede the AW
 middleware; the before event then receives the final `tool_call.input`. Middleware
 placed after AW can still rewrite arguments and lies outside this contract.
 No native permission gate is replaced or relaxed.
+
+## Submission and turn ownership
+
+The resident factory constructs `AwSubmissionAgent`, a public `Agent` subclass. Its `reply` and `reply_stream` wrap the native entry in
+one turn lifetime; when `input.submit` is configured,
+`AwSubmissionMiddleware.on_reply` checks the effective user text after existing middleware and before native memory/model work. The Adapter
+normalizes `session_id`, `aw_turn_id` and `input_text` through the shared submission
+contract, without a synthetic tool identity. All input steps use one deadline.
+Denials raise `SubmissionDenied`; ordinary scan failures adopt block/report.
+
+The existing `AwTaskScope` opens and acknowledges a Service child binding before
+checking input and enables its invocation ledger. A context-local scope lets
+native tool tasks share the turn while concurrent Agent instances stay isolated.
+Callers explicitly close partial streams in their consuming task. The factory
+drives native stream iteration in one owned task, advancing once per requested
+event. Early close resumes that task through the SDK cancellation path and
+drains its interruption results, so sequential and concurrent tool teardown
+finishes in the original context. Cleanup is shielded against repeated
+cancellation; the scope and ledger remain live until teardown settles.
+Completed tool results are delivered after invocation retirement, so native
+interruption stops leave no pending AW middleware teardown. Unconfirmed closes
+remain pending and fence new allocation.
+Same-Agent overlap, nested reply dispatch and inherited factory objects after
+fork are rejected. No shared Service contract changes are required.
+
+See the [input contract](../../../../../../docs/developer-guide/en/aw/agents/agentscope.md#check-user-input-before-a-reply)
+for message shapes, native resumes and stream ownership. Without an input route,
+the existing factory and process-wide scope behavior remain in use.
 
 ## Native tool semantics
 
@@ -81,6 +110,22 @@ permission checks and immediately outside `Toolkit.call_tool`.
   then compression changes the final model-visible text. Reported callback failures
   do not skip compression. All steps share one deadline and once-only claims;
   event budgets remain **1..55000 ms**.
+- A strict after step (`on_error: withhold_result`) gates the completed response.
+  Transport failure, nonzero Hook exit and undecodable Hook stdout mark the
+  invocation; the outermost AW wrapper then substitutes the unchecked native
+  result with a `ToolResponse(state=ERROR)` placeholder once every after hook
+  has unwound. The model never receives the original text, while outer after
+  hooks keep observing the correlated original payload they were admitted
+  against, whatever the hook order or `replace_result` composition. Admission
+  grants this failure action only on SDK versions whose bridge supports
+  completed-response replacement. While any strict after route is installed,
+  the invocation wrapper suppresses intermediate `ToolChunk` frames. After all
+  checks and invocation retirement, it emits one final chunk using the adopted
+  response content, followed by the response itself. Native stream consumers and
+  model context therefore receive the same checked text or withheld placeholder.
+  Suppression applies to every tool in that target, including tools outside a
+  strict step's selector, without an accumulating chunk buffer. Targets with no
+  strict after route retain native streaming, including Tokenless compression.
 - Generated hook configuration grants replacement authority only to the final
   admitted structured replacement step. Native and observation Hook stdout cannot
   replace the result, so every callback keeps the same correlated response until
@@ -166,10 +211,18 @@ success is separate from business failure encoded in returned content.
 This first contract supports one foreground Python worker, not a forking
 Gunicorn supervisor, automatic attachment in child workers or remote sandboxes.
 A long-lived business service needs explicit per-worker/session launch and
-binding ownership. The local service retains at most 1024 event correlations per
-instance (roughly 512 before/after pairs) until release; session IDs alone do not
-reset that budget. No remote command cancellation, hot reload or OS isolation
-is implied.
+binding ownership. Each public reply reserves root occupancy, opens a child Scope,
+fetches its immutable policy, validates the native routes and acknowledges them
+before model or tool dispatch. Tool invocation registration and retirement reuse
+the existing Scope ledger. Middleware is constructed from that reply's snapshot,
+so policy updates preserve application ordering and never mutate active calls.
+
+The reply closes its child after native tasks and callbacks drain, then confirms
+reservation release. Missing open responses keep occupancy fenced; release with
+an unknown outcome is retried before another reply. `aw update` reuses the common
+idle admission and atomic policy activation. Changes apply to the next reply of
+the same Agent; SDK/model/launch changes still require restart. Native evidence
+capture remains unsupported in resident scopes. See [policy updates](../../../../../../docs/developer-guide/en/aw/deployment/policy-updates.md).
 
 The existing `native-hook/v1alpha1`, structured Provider and default Boolean Hook
 contracts all remain available. A Boolean Hook `true` emits its configured
@@ -186,10 +239,27 @@ uses the existing sec-core `scan_code`/`observe_tool` and Tokenless
 full retry arguments to the model. A new call must pass native permissions and
 sec-core again. Attributed RTK ownership comes from the new executed arguments,
 not the rejected call ID, and prevents double compression. Keep the exact Toolkit
-tool names and input pointers in the sec-core mapping. RTK must be installed
-separately; `aw config init` continues to target Qoder/OpenClaw.
+tool names and input pointers in the sec-core mapping. `aw config init` continues
+to target Qoder/OpenClaw.
 
 ## Validation
+
+The submission suite runs the pinned SDK factory against a local HTTP model,
+checks both block/report failure policies, and exercises the real sec-core Provider
+with a controlled scanner CLI. It asserts zero model/tool dispatch on denial,
+per-turn scope release, recovery, message mapping, native permissions, strict
+completed-result withholding and early stream closure during an active tool.
+Both sequential and concurrent tools finish asynchronous teardown before a new
+reply is admitted.
+The scanner CLI is a fixture; this suite does not certify a deployed scanner daemon.
+
+```bash
+python -B crates/aw-cli/tests/agentscope_submission.py \
+  --aw target/debug/aw \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/agentscope-submission
+```
+
 
 Standard `aw-service` tests check preflight rejection, callback normalization and
 failure to adopt a version-only process without a factory/readiness receipt.

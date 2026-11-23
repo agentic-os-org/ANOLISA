@@ -9,6 +9,7 @@
 | 命令 | 用途 |
 |---|---|
 | `cosh` | 启动 Enhanced Assisted，提供 Agent 和斜杠命令路由。 |
+| `cosh --ask '你的问题'` | 携带初始问题启动交互式 AI Shell。 |
 | `COSH_SHELL_INTEGRATION=native cosh` | 启动不加载 Cosh Hook、不观察也不提供洞察的 Native。 |
 | `cosh --shell zsh` | 明确选择zsh。 |
 | `cosh --isolated` | 跳过用户rcfile。 |
@@ -20,6 +21,11 @@
 未指定Shell时，`cosh`使用配置或检测到的bash/zsh，无法确定时回退到bash。
 集成状态在启动时确定，Enhanced 是默认值。需要长期使用无 Hook 会话时，在
 用户配置中设置 `shell.integration = "native"`；只使用一次时设置环境变量。
+
+即使配置为 Native，`--ask` 也只为本次会话选择 Enhanced，不修改保存的集成偏好。
+初始问题交给 Agent，不作为 Shell 命令执行；回答后仍可输入普通命令或自然语言。
+启动引导、独立的资源展示开关和默认登录管理见
+[Bash 引导与登录 Shell 控制](bash-guidance.md)。
 
 执行命令或从重定向的 stdin 执行时，将 `--isolated` 放在 Shell 自有选项之前：
 `cosh --isolated -c '<command>'`。Bash 会跳过启动文件，并从环境中移除 `BASH_ENV`

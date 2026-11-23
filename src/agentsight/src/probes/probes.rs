@@ -24,7 +24,7 @@ use super::filewrite::{FileWrite as FileWriteProbe, RawFileWriteEvent};
 use super::procmon::{ProcMon, ProcMonEvent};
 use super::proctrace::{ProcEventHeader, ProcTrace, VariableEvent};
 use super::shared_maps::SharedMaps;
-use super::sslsniff::SslSniff;
+use super::sslsniff::{IdentityStatus, SslAdmission, SslSniff};
 use super::tcpsniff::TcpSniff;
 use super::udpdns::{RawUdpDnsEvent, UdpDns};
 use crate::config::TcpTarget;
@@ -126,6 +126,31 @@ impl Probes {
     /// `add_traced_cgroup`. When false (default), every probe behaves exactly
     /// like before this feature existed.
     pub fn new_with_cgroup_filter(
+        target_pids: &[u32],
+        target_uid: Option<u32>,
+        enable_filewatch: bool,
+        enable_udpdns: bool,
+        tcp_targets: &[TcpTarget],
+        cgroup_filter_enabled: bool,
+        runtime_limits: &RuntimeLimits,
+    ) -> Result<Self> {
+        let memlock = super::raise_memlock_limit();
+        Self::create(
+            target_pids,
+            target_uid,
+            enable_filewatch,
+            enable_udpdns,
+            tcp_targets,
+            cgroup_filter_enabled,
+            runtime_limits,
+        )
+        .map_err(|err| match memlock {
+            Some(limit) => err.context(super::memlock_hint(limit)),
+            None => err,
+        })
+    }
+
+    fn create(
         target_pids: &[u32],
         target_uid: Option<u32>,
         enable_filewatch: bool,
@@ -277,12 +302,90 @@ impl Probes {
         self.add_traced_pid(pid as u32)
     }
 
+    /// 未识别进程仅在确实关联到 uprobe 时注册，避免每个 exec 耗尽有界过滤表。
+    ///
+    /// 已识别 Agent 仍使用 [`Self::attach_process`]，保留全局 uprobe 的兜底覆盖。
+    ///
+    /// # Errors
+    ///
+    /// uprobe 已关联但 PID 无法注册时返回错误；无可用探针属于正常跳过。
+    pub fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        let admission = match self.sslsniff.attach_observed_process(pid, true) {
+            Ok(admission) => admission,
+            Err(error) => {
+                log::debug!(
+                    "[attach_unclassified_process] pid={pid}: no SSL attach ({error:#}); leaving the traced_processes slot free"
+                );
+                return Ok(());
+            }
+        };
+        if let Some(admission) = admission {
+            self.admit_ssl_process(admission)?;
+        } else if self.sslsniff.pid_has_pending_scan(pid as u32) {
+            self.sslsniff.defer_pid_admission(pid as u32);
+        }
+        Ok(())
+    }
+
     /// Attach SSL probes to a specific process
     pub fn attach_ssl_to_process(&mut self, pid: i32) -> Result<()> {
         self.sslsniff
-            .attach_process(pid)
-            .context("failed to attach sslsniff to process")?;
+            .attach_observed_process(pid, false)
+            .context("failed to attach sslsniff to process")
+            .map(|_| ())
+    }
+
+    /// Complete deferred scans and late SSL retries without blocking event consumption.
+    pub fn poll_pending_ssl(&mut self) {
+        // Warm up once (idempotent): pre-attach known agent binaries so the first
+        // process is covered before its opening TLS call (the first-call race).
+        self.sslsniff.warm_up_once();
+        let mut admitted = self.sslsniff.poll_pending_scan_admissions();
+        admitted.extend(self.sslsniff.poll_late_retries());
+        admitted.sort_by_key(|admission| admission.pid());
+        admitted.dedup();
+        for admission in admitted {
+            let _ = self.admit_ssl_process(admission);
+        }
+    }
+
+    fn admit_ssl_process(&mut self, admission: SslAdmission) -> Result<()> {
+        let pid = admission.pid();
+        match admission.status() {
+            IdentityStatus::Stale => {
+                self.sslsniff.detach_stale_admission(admission);
+                return Ok(());
+            }
+            IdentityStatus::Unavailable => {
+                self.sslsniff.retry_admission(admission);
+                return Ok(());
+            }
+            IdentityStatus::Current => {}
+        }
+        if let Err(error) = self.add_traced_pid(pid) {
+            log::error!("failed to register pid {pid} after deferred SSL attach: {error:#}");
+            if !self.sslsniff.retry_admission(admission) {
+                log::debug!("SSL admission retry budget exhausted for pid {pid}");
+            }
+            return Err(error);
+        }
+        match admission.status() {
+            IdentityStatus::Stale => {
+                if let Err(error) = self.remove_traced_pid(pid) {
+                    log::warn!("failed to remove stale SSL registration for pid {pid}: {error:#}");
+                }
+                self.sslsniff.detach_stale_admission(admission);
+            }
+            IdentityStatus::Current | IdentityStatus::Unavailable => {
+                self.sslsniff.complete_admission(admission);
+            }
+        }
         Ok(())
+    }
+
+    /// Share CPU admission with the bounded executable scan worker.
+    pub(crate) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        self.sslsniff.set_cpu_budget(budget);
     }
 
     /// Start polling for events from the shared ring buffer
@@ -300,6 +403,9 @@ impl Probes {
         let event_tx = self.event_tx.clone();
         let event_policy = self.event_channel_policy;
         let budget = self.budget.clone();
+        // Plaintext self-verify signal shared with the SSL decode below; sslsniff
+        // drains it to confirm an inode's offsets before persisting them (#10080).
+        let plaintext_signal = self.sslsniff.plaintext_signal();
         let sample_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
@@ -325,7 +431,21 @@ impl Probes {
                     EVENT_SOURCE_SSL => {
                         // SSL records are variable-length (tiered reservation):
                         // decode by header prefix + buf_size, not a full-struct cast.
-                        crate::probes::sslsniff::SslEvent::from_bytes(data).map(Event::Ssl)
+                        crate::probes::sslsniff::SslEvent::from_bytes(data).map(|event| {
+                            // Direction-aware plaintext self-verify (#10080): a
+                            // request line confirms the SSL_write offset, a response
+                            // line confirms SSL_read. A request OR an HTTP/2 client
+                            // preface (PRI * HTTP/2.0) is write-direction, so
+                            // HTTP/2-only agents verify too (#10203 review).
+                            let is_request = event.is_http_request() || event.is_http2_preface();
+                            let is_response = event.is_http_response();
+                            if is_request || is_response {
+                                if let Ok(mut signals) = plaintext_signal.lock() {
+                                    signals.record(event.pid, is_request, is_response);
+                                }
+                            }
+                            Event::Ssl(event)
+                        })
                     }
                     EVENT_SOURCE_PROCMON => {
                         // Process monitor event

@@ -15,10 +15,15 @@ mod cli;
 #[cfg(target_os = "linux")]
 mod proxy;
 #[cfg(target_os = "linux")]
+pub mod runtime;
+#[cfg(target_os = "linux")]
 mod seccomp;
 
 #[cfg(target_os = "linux")]
 pub fn run_main() -> ! {
+    if let Some(code) = runtime::try_run() {
+        std::process::exit(code);
+    }
     cli::run_main();
 }
 

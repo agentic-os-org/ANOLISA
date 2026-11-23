@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde"] }
 nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
-ratatui = "0.28"
+ratatui = { version = "0.28", features = ["unstable-rendered-line-info"] }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,7 +24,7 @@ sha2.workspace = true
 signal-hook.workspace = true
 # Anonymous temp files for guarded executor output capture; already used
 # by cosh-cli, cosh-core, and cosh-platform on the same major line.
-tempfile = "3"
+tempfile = { workspace = true }
 toml.workspace = true
 uuid.workspace = true
 wait-timeout.workspace = true

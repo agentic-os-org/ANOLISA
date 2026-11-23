@@ -1170,21 +1170,19 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let home_str = home.to_string_lossy().to_string();
     let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "cosh-core",
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
-        vec![
-            (b"printf 'new-session-output\\n'\n".to_vec(), Duration::ZERO),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"printf 'new-session-%s\\n' output\n"),
             (
-                b"?? cosh-core-stale-terminal-output\n".to_vec(),
-                Duration::from_millis(300),
+                "new-session-output",
+                b"?? cosh-core-stale-terminal-output\n",
             ),
-            (
-                b"/details evidence-1\n".to_vec(),
-                Duration::from_millis(5_000),
-            ),
-            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+            ("STALE EVIDENCE REJECTED", b"/details evidence-1\n"),
+            ("Status: failed", b"exit 0\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);

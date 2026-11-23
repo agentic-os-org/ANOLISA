@@ -410,14 +410,20 @@ fn mime_for_path(path: &str) -> &'static str {
 
 pub fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
     let home = dirs::home_dir()?;
-    Some(vec![
+    let mut dirs = vec![
         home.join(".claude/projects"),
         home.join(".qoderwork/projects"),
         home.join(".qoder/projects"),
         home.join(".codex/sessions"),
         home.join(".codex/archived_sessions"),
         home.join(".cursor/projects"),
-    ])
+    ];
+    dirs.extend(
+        agentsight_trajectory_collector::cline::TASKS_ROOTS
+            .iter()
+            .map(|root| home.join(root)),
+    );
+    Some(dirs)
 }
 
 fn local_database_specs(storage_config: &StorageConfig) -> Vec<DatabaseSpec> {
@@ -622,14 +628,22 @@ pub async fn run_server(
     });
 
     let server = HttpServer::new(move || {
+        // Same-origin only: the embedded dashboard is served by this very
+        // server, so no legitimate consumer needs a foreign origin — while
+        // `allow_any_origin` let any visited web page read every response of
+        // this token-less server.
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin_fn(crate::http_origin::cors_allows_origin)
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
             .allowed_headers(vec!["Content-Type"])
             .max_age(3600);
 
         App::new()
             .wrap(cors)
+            // This server has no token layer; reject browser cross-origin
+            // calls before any data endpoint runs. Local non-browser callers
+            // and the dashboard's own same-origin calls are untouched.
+            .wrap(crate::http_origin::CrossOriginGate)
             .app_data(local_state.clone())
             .app_data(optimize_data.clone())
             // Trajectory collection API (static paths before the dynamic segment)
@@ -734,7 +748,7 @@ mod tests {
         let dirs = local_trajectory_scan_dirs();
         assert!(dirs.is_some());
         let dirs = dirs.unwrap();
-        assert_eq!(dirs.len(), 6);
+        assert_eq!(dirs.len(), 8);
     }
 
     #[test]
@@ -743,8 +757,10 @@ mod tests {
             "agentsight-local-maintenance-{}",
             std::process::id()
         ));
-        let mut config = StorageConfig::default();
-        config.base_path = base.clone();
+        let config = StorageConfig {
+            base_path: base.clone(),
+            ..StorageConfig::default()
+        };
         std::fs::create_dir_all(&base).unwrap();
         let manager =
             DatabaseManager::new(DatabaseRole::LocalServer, local_database_specs(&config)).unwrap();
@@ -797,8 +813,10 @@ mod tests {
             "agentsight-local-maintenance-zero-{}",
             std::process::id()
         ));
-        let mut config = StorageConfig::default();
-        config.base_path = base.clone();
+        let mut config = StorageConfig {
+            base_path: base.clone(),
+            ..StorageConfig::default()
+        };
         config.optimization.check_interval_secs = 0;
         config.reuse.check_interval_secs = 0;
         let manager =

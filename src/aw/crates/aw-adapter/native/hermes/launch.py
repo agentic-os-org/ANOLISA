@@ -2,14 +2,17 @@
 
 from argparse import Namespace
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 import json
 import math
 import os
+import subprocess
 from pathlib import Path
 import sys
 from types import ModuleType
 from typing import Any, Callable
+from uuid import uuid4
 
 
 def _json_native(value: Any) -> bool:
@@ -32,6 +35,55 @@ def _json_native(value: Any) -> bool:
     return type(value) in (bool, type(None))
 
 
+
+def check_submission(launch: dict[str, Any], session: str, text: Any) -> str | None:
+    """Check a quiet CLI text turn before the native conversation starts."""
+    hooks = launch.get("submissions", [])
+    if not hooks:
+        return None
+    if (type(text) is not str or not text.strip() or not isinstance(session, str)
+            or not session.strip() or len(session.encode()) > 512):
+        return "AW input.submit requires a text turn and bounded session identity"
+    payload = {"hook_event_name": "AWInputSubmit", "session_id": session,
+               "aw_turn_id": str(uuid4()), "cwd": str(Path.cwd()), "input_text": text}
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
+    except (ValueError, UnicodeError):
+        return "AW input.submit requires UTF-8 text"
+    if len(encoded) > 256 * 1024:
+        return "AW input.submit exceeds 256 KiB of encoded input"
+
+    def invoke(hook: dict[str, Any], close: bool = False) -> subprocess.CompletedProcess:
+        argv = [launch["binary"], "hook", "--binding", launch["binding"],
+                "--adapter", "hermes", "--event", "input.submit", "--step", hook["step"],
+                "--on-error", hook["on_error"]]
+        if close:
+            argv += ["--close-event", "true"]
+        return subprocess.run(argv, input=encoded, capture_output=True,
+                              timeout=4 if close else hook["timeout"], check=False)
+
+    try:
+        for hook in hooks:
+            try:
+                reply = invoke(hook)
+                value = json.loads(reply.stdout)
+                if reply.returncode == 2 and value.get("action") == "block":
+                    return "Input blocked by AW policy"
+                if reply.returncode != 0 or value != {}:
+                    raise ValueError("invalid submission response")
+            except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+                print("AW input.submit callback failed; on_error=" + hook["on_error"],
+                      file=sys.stderr)
+                if hook["on_error"] == "block":
+                    return "AW input check failed; submission blocked"
+    finally:
+        # Close joins scanner cancellation before the native turn can be dispatched.
+        if not launch.get("reloadable"):
+            reply = invoke(hooks[0], close=True)
+            if reply.returncode != 0:
+                raise RuntimeError("AW input event cleanup failed")
+    return None
+
 def main() -> None:
     launch_path = os.environ["AW_HERMES_LAUNCH"]
     # The private launch directory keeps imports off unverified profile caches.
@@ -47,12 +99,33 @@ def main() -> None:
 
     original = native._prepare_agent_startup
     launch = json.loads(Path(launch_path).read_text())
+    skills = None
+    skill_restore = None
+    dispatch_restore = None
+    if launch.get("reloadable") or any(hook.get("skill_check") for hook in launch["hooks"]):
+        import aw_skill as skills
     original_directives = plugins._get_pre_tool_call_directive_details
     original_execution = middleware.run_tool_execution_middleware
     post_restore: tuple[ModuleType, Callable[..., None]] | None = None
+    input_restore: tuple[ModuleType, Callable[..., Any], Callable[..., Any]] | None = None
     manager = get_plugin_manager()
     original_discovery = manager.discover_and_load
     executing = 0
+    reload_restore = None
+    reload_runtime = None
+    gateway_restore = None
+    primed_sessions: set[str] = set()
+
+    def record_session(session_id: str) -> None:
+        primed_sessions.add(session_id)
+        path = Path(launch_path).with_name("hermes-sessions.json")
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w") as record:
+            os.chmod(temporary, 0o600)
+            json.dump(sorted(primed_sessions), record)
+            record.flush()
+            os.fsync(record.fileno())
+        os.replace(temporary, path)
 
     def discovery(force: bool = False) -> None:
         if not force:
@@ -81,10 +154,16 @@ def main() -> None:
 
     def directives(*values: Any, **options: Any) -> plugins._PreToolCallDirective:
         with guarded_hooks():
-            details = original_directives(*values, **options)
-            # Native callbacks inspect the original arguments; their rewrites are
-            # merged only afterward. Reject rewrites rather than execute unchecked input.
-            if before and details.modified_args is not None:
+            cell = {}
+            token = session.rewritten_input.set(cell)
+            try:
+                details = original_directives(*values, **options)
+                checked = cell.get("input")
+            finally:
+                session.rewritten_input.reset(token)
+            # Only an AW response checked by every before policy may change input.
+            if (before and details.modified_args is not None and
+                    (checked is None or json.dumps(details.modified_args, sort_keys=True) != checked)):
                 return plugins._PreToolCallDirective(
                     action="block", message=details.message if details.action == "block" else
                     rewrite_error,
@@ -94,7 +173,7 @@ def main() -> None:
 
     def execution(tool_name: str, arguments: dict[str, Any],
                   next_call: Callable[[dict[str, Any]], Any], **context: Any) -> Any:
-        with guarded_hooks():
+        with guarded_hooks(), (skills.invocation(tool_name, arguments, dynamic=launch.get("reloadable", False)) if skills else nullcontext()):
             # Freeze JSON values before middleware, including nested mutations and
             # type changes that Python equality would treat as unchanged.
             inspected = json.dumps(arguments, sort_keys=True) if before else None
@@ -112,7 +191,8 @@ def main() -> None:
             return original_execution(tool_name, arguments, dispatch, **context)
 
     def prepare(args: Namespace) -> None:
-        nonlocal post_restore
+        nonlocal post_restore, skill_restore, dispatch_restore, input_restore, reload_restore, reload_runtime, gateway_restore
+        admit_reload = None
         if env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("HERMES_SAFE_MODE disables the AW native plugin")
         original(args)
@@ -125,15 +205,89 @@ def main() -> None:
         except (OSError, ValueError):
             raise SystemExit(
                 "Hermes AW callbacks were not registered before chat; "
-                "check plugin selections and rerun aw install"
+                "check plugin selections and rerun aw connect"
             ) from None
         if receipt != expected or env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("Hermes AW registration does not match this launch")
         require_hooks()
+        if launch["hooks"] and gateway_restore is None:
+            try:
+                from hermes_cli.gateway_agent import GatewayAgent
+            except ImportError:
+                pass  # Older in-process Hermes releases have no GatewayAgent.
+            else:
+                original_run = GatewayAgent.run_conversation
+
+                def bound_run(agent: Any, *args: Any, **kwargs: Any) -> Any:
+                    require_hooks()
+                    # A lost prime receipt still leaves a registration to reconcile.
+                    record_session(agent.session_id)
+                    receipt = agent.connection.call(
+                        "plugin.aw-native-hooks.prime", session_id=agent.session_id,
+                        launch_path=launch_path, token=launch["token"])
+                    if (not isinstance(receipt, dict) or receipt.get("adapter") != "hermes"
+                            or receipt.get("token") != launch["token"]
+                            or receipt.get("hooks") != len(launch["hooks"])
+                            or not isinstance(receipt.get("gateway_pid"), int)):
+                        raise RuntimeError("Hermes Gateway did not register the AW callbacks")
+                    print("AW hermes Gateway callbacks active", file=sys.stderr)
+                    return original_run(agent, *args, **kwargs)
+
+                gateway_restore = (GatewayAgent, original_run)
+                GatewayAgent.run_conversation = bound_run
+        if launch.get("reloadable") and reload_restore is None:
+            import cli
+            from aw_reload import Runtime
+            reload_runtime = Runtime(launch, lambda: executing)
+            admit_reload = reload_runtime
+            original_chat = cli.HermesCLI.chat
+            reload_restore = (cli.HermesCLI, original_chat)
+            cli.HermesCLI.chat = lambda client, *args, **kwargs: reload_runtime.chat(
+                original_chat, client, *args, **kwargs)
+        if launch.get("submissions") and input_restore is None:
+            import cli
+            original_main = cli.main
+            original_images = cli._route_single_query_images
+
+            def quiet_main(**options: Any) -> Any:
+                query = options.get("query")
+                if (not options.get("quiet") or type(query) is not str or not query.strip()
+                        or options.get("image")):
+                    raise SystemExit("AW input.submit requires a quiet single-query text turn")
+                return original_main(**options)
+
+            def input_text(client: Any, query: Any, effective: Any,
+                           images: Any, image_urls: Any) -> Any:
+                require_hooks()
+                if images or image_urls:
+                    raise SystemExit("AW input.submit does not support image input")
+                if reload_runtime is not None:
+                    reload_runtime.admit_input()
+                denied = check_submission(launch, client.session_id, effective)
+                if denied is not None:
+                    if reload_runtime is not None:
+                        reload_runtime.cancel_input()
+                    print(denied, file=sys.stderr)
+                    raise SystemExit(2)
+                return original_images(client, query, effective, images, image_urls)
+
+            input_restore = (cli, original_main, original_images)
+            cli.main = quiet_main
+            cli._route_single_query_images = input_text
         if launch["hooks"] and post_restore is None:
             # Importing model_tools discovers plugins; retain native startup order.
             import model_tools
             original_post = model_tools._emit_post_tool_call_hook
+            if skills is not None:
+                skill_restore = skills.install()
+                dispatch_restore = (model_tools, model_tools.handle_function_call)
+                original_dispatch = model_tools.handle_function_call
+
+                def skill_dispatch(function_name, function_args, *values, **options):
+                    with skills.invocation(function_name, function_args, dynamic=launch.get("reloadable", False)):
+                        return original_dispatch(function_name, function_args, *values, **options)
+
+                model_tools.handle_function_call = skill_dispatch
 
             def post(**context: Any) -> None:
                 # Vetoes skip execution middleware and may have no live listeners.
@@ -142,6 +296,8 @@ def main() -> None:
 
             post_restore = (model_tools, original_post)
             model_tools._emit_post_tool_call_hook = post
+        if admit_reload is not None:
+            admit_reload.ready()
 
     def require_hooks() -> None:
         # Join in-flight native discovery before examining its ownership ledger.
@@ -153,7 +309,7 @@ def main() -> None:
         if len(loaded) != 1 or not loaded[0][1].enabled or loaded[0][1].error:
             raise SystemExit(
                 "Hermes AW plugin is not loaded and enabled; "
-                "check plugin selections and rerun aw install"
+                "check plugin selections and rerun aw connect"
             )
         key, plugin = loaded[0]
         events = {"tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
@@ -168,7 +324,9 @@ def main() -> None:
     # Hermes reloads both plugin modules and dotenv during chat. Keep the binding
     # in this launcher's namespace, outside native plugin teardown and environment.
     session = ModuleType("_aw_hermes_session")
+    session.rewritten_input = ContextVar("aw_hermes_rewritten_input", default=None)
     session.launch_path = launch_path
+    session.skills = skills
     sys.modules[session.__name__] = session
     # Keep this guard outside plugin teardown so native rediscovery cannot remove it.
     if launch["hooks"]:
@@ -183,7 +341,19 @@ def main() -> None:
         if post_restore is not None:
             module, callback = post_restore
             module._emit_post_tool_call_hook = callback
+        if dispatch_restore is not None:
+            dispatch_restore[0].handle_function_call = dispatch_restore[1]
+        if skill_restore is not None:
+            skill_restore()
         manager.discover_and_load = original_discovery
+        if reload_restore is not None:
+            reload_restore[0].chat = reload_restore[1]
+        if gateway_restore is not None:
+            gateway_restore[0].run_conversation = gateway_restore[1]
+        if input_restore is not None:
+            cli, original_main, original_images = input_restore
+            cli.main = original_main
+            cli._route_single_query_images = original_images
         sys.modules.pop(session.__name__, None)
 
 

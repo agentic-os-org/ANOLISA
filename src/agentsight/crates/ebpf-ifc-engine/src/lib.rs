@@ -24,9 +24,36 @@ use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 pub mod capability;
+#[cfg(test)]
+mod file_protection_delete_tests;
+mod file_protection_generation;
+mod file_protection_map_writer;
+mod file_protection_pinned_maps;
+#[cfg(test)]
+mod file_protection_rename_tests;
+#[cfg(test)]
+mod file_protection_tree_read_tests;
+#[cfg(test)]
+mod file_protection_write_tests;
+mod process_adoption;
+mod target_identity;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
+};
+pub use file_protection_generation::{
+    ActiveFileProtectionGeneration, FileProtectionDetachError, FileProtectionStaging,
+    InactiveFileProtectionGeneration,
+};
+pub use file_protection_map_writer::{
+    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
+    FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
+    FileProtectionTargetValue, TreeGuard, TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY,
+    FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
+};
+pub use file_protection_pinned_maps::PinnedFileProtectionMaps;
+pub use target_identity::{
+    procfs_start_time_from_boottime, resolve_process_identity, ProcessIdentity,
 };
 
 const BPF_ANY: u64 = 0;
@@ -85,13 +112,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v4_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v8_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v5_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v9_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v9_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v10_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -217,6 +244,10 @@ pub const INODE_GUARD_UNLINK: u32 = 1;
 pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
+/// Reserved ABI flag for directory-tree guards, separate from per-target operation flags.
+pub const INODE_GUARD_TREE: u32 = 8;
+/// Denies reading or mapping the protected regular file.
+pub const INODE_GUARD_READ: u32 = 16;
 
 /// Must match BPF `struct inode_guard_val` layout.
 #[repr(C)]
@@ -227,6 +258,92 @@ pub struct InodeGuardVal {
     pub rule_id: u32,
     pub _pad: u32,
 }
+
+// Mirrors BPF te_path_key; statx mount IDs must fit kernel mount.mnt_id (u32).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TreePathKey {
+    ino: u64,
+    dev: u32,
+    mnt_id: u32,
+    domain_id: u32,
+    generation: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyRootVal {
+    root_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyStableVal {
+    target_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotKey {
+    parent: TreePathKey,
+    name_len: u32,
+    name: [u8; FILE_PROTECTION_NAME_MAX + 1],
+    // Explicit tail storage avoids indeterminate repr(C) padding in map keys.
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicySlotVal {
+    direct_mask: u64,
+    exact_exclude_mask: u64,
+    subtree_exclude_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetKey {
+    domain_id: u32,
+    generation: u32,
+    target_id: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyTargetVal {
+    guard: InodeGuardVal,
+    flags: u32,
+    target_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyDomainVal {
+    generation: u32,
+    target_count: u32,
+    tree_mask: u64,
+    delete_mask: u64,
+    ordinary_write_mask: u64,
+    read_mask: u64,
+    protection_set_id: u64,
+    guard: InodeGuardVal,
+}
+
+// The structured file-protection map ABI is shared with process.bpf.c by layout
+// alone; pin every key and value size/alignment so a C-side edit cannot silently
+// reinterpret staged generations. Sizes are the BTF sizes of the C structs.
+const _: () = assert!(std::mem::size_of::<InodeGuardVal>() == 16);
+const _: () = assert!(std::mem::size_of::<TreePathKey>() == 24);
+const _: () = assert!(std::mem::align_of::<TreePathKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyRootVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicyStableVal>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotKey>() == 288);
+const _: () = assert!(std::mem::align_of::<PolicySlotKey>() == 8);
+const _: () = assert!(std::mem::size_of::<PolicySlotVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyTargetKey>() == 16);
+const _: () = assert!(std::mem::size_of::<PolicyTargetVal>() == 24);
+const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 64);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -246,6 +363,14 @@ unsafe impl aya::Pod for FileDomainId {}
 unsafe impl aya::Pod for InodePathVal {}
 unsafe impl aya::Pod for FileId {}
 unsafe impl aya::Pod for InodeGuardVal {}
+unsafe impl aya::Pod for TreePathKey {}
+unsafe impl aya::Pod for PolicyRootVal {}
+unsafe impl aya::Pod for PolicyStableVal {}
+unsafe impl aya::Pod for PolicySlotKey {}
+unsafe impl aya::Pod for PolicySlotVal {}
+unsafe impl aya::Pod for PolicyTargetKey {}
+unsafe impl aya::Pod for PolicyTargetVal {}
+unsafe impl aya::Pod for PolicyDomainVal {}
 unsafe impl aya::Pod for CUpdate {}
 unsafe impl aya::Pod for CRule {}
 unsafe impl aya::Pod for ProcState {}
@@ -270,6 +395,7 @@ struct Event {
     domain_id: u32,
     session_root: i32,
     timestamp_ns: u64,
+    process_start_boottime: u64,
     comm: [u8; COMM_LEN],
     filename: [u8; FILENAME_LEN],
     taint_rule_id: u32,
@@ -279,6 +405,7 @@ struct Event {
     matched_labels: u64,
     prov_label: u64,
     prov_timestamp_ns: u64,
+    prov_start_boottime: u64,
     prov_pid: i32,
     prov_op: u32,
     prov_ip: u32,
@@ -290,6 +417,8 @@ struct Event {
 pub struct Provenance {
     pub label: u64,
     pub timestamp_ns: u64,
+    /// Kernel start boot time in nanoseconds, captured with the provenance record.
+    pub process_start_boottime: u64,
     pub pid: i32,
     pub op: u32,
     pub target: String,
@@ -314,6 +443,8 @@ pub struct Violation {
     pub matched_labels: u64,
     pub provenance: Option<Provenance>,
     pub timestamp_ns: u64,
+    /// Kernel start boot time in nanoseconds for the violating process.
+    pub process_start_boottime: u64,
 }
 
 /// Parameters for creating a child runtime policy domain and binding a pid to it.
@@ -537,29 +668,22 @@ fn pin_profile_marker(
 ///
 /// Kernels before 5.15 attach tracepoints through the perf_event ioctl, which
 /// bpffs cannot pin, so the installing process keeps them attached for its
-/// lifetime. The `<pid>_<start_time>` suffix names that process; once it is
-/// gone the pinned layout is stale and gets rebuilt.
+/// lifetime. The `<pid>_<start_time>` suffix names that process by kernel TGID
+/// and raw boot-time clock ticks; once it is gone the layout is stale.
 const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
-
-fn proc_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
-}
 
 fn pin_tracepoint_holder(
     bpf: &Ebpf,
     paths: &PinnedEnginePaths,
     created: &mut Vec<PathBuf>,
 ) -> io::Result<PathBuf> {
-    let pid = std::process::id();
-    let start = proc_start_time(pid).ok_or_else(|| {
+    let cap_pending_fd = dup_array_map_fd(bpf, "cap_pending_submitter")?;
+    // A host-wide marker cannot use a namespace-local process ID or clock offset.
+    let pid =
+        capture_current_thread_identity_fd(cap_req_map_fd(bpf)?, cap_pending_fd.as_raw_fd())?.pid;
+    let start = target_identity::kernel_process_start_ticks(pid)?.ok_or_else(|| {
         err(format!(
-            "read /proc/{pid}/stat start time for tracepoint holder"
+            "kernel process {pid} disappeared while pinning the tracepoint holder"
         ))
     })?;
     let marker = paths.map(&format!("{TRACEPOINT_HOLDER_PREFIX}{pid}_{start}"));
@@ -585,8 +709,6 @@ fn tracepoint_holder_owned_by_current_process(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     };
-    let current_pid = std::process::id();
-    let current_start = proc_start_time(current_pid);
     for entry in entries {
         let name = entry?.file_name();
         let Some(owner) = name
@@ -598,14 +720,23 @@ fn tracepoint_holder_owned_by_current_process(
         let Some((pid, start)) = owner.split_once('_') else {
             continue;
         };
-        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else {
+        let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
             continue;
         };
-        if proc_start_time(pid) != Some(start) {
+        if target_identity::kernel_process_start_ticks(pid)? != Some(start) {
             continue;
         }
-        if pid == current_pid && current_start == Some(start) && allow_current {
-            return Ok(true);
+        if allow_current {
+            let cap_req_fd = dup_pinned_map_fd(paths, "cap_req")?;
+            let cap_pending_fd = dup_pinned_map_fd(paths, "cap_pending_submitter")?;
+            let current_pid = capture_current_thread_identity_fd(
+                cap_req_fd.as_raw_fd(),
+                cap_pending_fd.as_raw_fd(),
+            )?
+            .pid;
+            if pid == current_pid {
+                return Ok(true);
+            }
         }
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -645,16 +776,26 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
-/// Declare to the BPF drain gate that this thread is about to submit to
-/// `cap_req`. The gate refuses to drain in any other thread's context.
-fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+const CAP_DRAIN_DECLARE_TID: i32 = -1;
+const CAP_DRAIN_DECLARE_FLAGS: u32 = 0x4143_5052;
+
+/// Drain declaration and kernel-captured identity shared with `capability.bpf.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CapPendingSubmitter {
+    tid: i32,
+    pid: i32,
+    token: u32,
+    _pad: u32,
+}
+
+fn write_drain_intent_fd(fd: RawFd, pending: &CapPendingSubmitter) -> io::Result<()> {
     let slot: u32 = 0;
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
     let rc = unsafe {
         libbpf_sys::bpf_map_update_elem(
             fd,
             &slot as *const u32 as *const std::ffi::c_void,
-            &tid as *const i32 as *const std::ffi::c_void,
+            pending as *const CapPendingSubmitter as *const std::ffi::c_void,
             BPF_ANY,
         )
     };
@@ -664,21 +805,24 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+fn read_drain_intent_fd(fd: RawFd) -> io::Result<CapPendingSubmitter> {
     let slot: u32 = 0;
-    let tid: i32 = 0;
+    let mut pending = CapPendingSubmitter::default();
     let rc = unsafe {
-        libbpf_sys::bpf_map_update_elem(
+        libbpf_sys::bpf_map_lookup_elem(
             fd,
             &slot as *const u32 as *const std::ffi::c_void,
-            &tid as *const i32 as *const std::ffi::c_void,
-            BPF_ANY,
+            &mut pending as *mut CapPendingSubmitter as *mut std::ffi::c_void,
         )
     };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    Ok(pending)
+}
+
+fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+    write_drain_intent_fd(fd, &CapPendingSubmitter::default())
 }
 
 /// Capacity of the `cap_req` mailbox slot; must match `CAP_REQ_MAILBOX_BYTES`
@@ -751,10 +895,8 @@ fn submit_cap_req(cap_req_fd: RawFd, cap_pending_fd: RawFd, data: &[u8]) -> io::
     };
     slot.data[..data.len()].copy_from_slice(data);
 
-    // Check the trigger before publishing. This prevents a known seccomp or
-    // ENOSYS failure from leaving an already-committed record behind.
-    trigger_cap_req_drain()?;
-    declare_drain_intent_fd(cap_pending_fd)?;
+    let identity = capture_current_thread_identity_fd(cap_req_fd, cap_pending_fd)?;
+    write_drain_intent_fd(cap_pending_fd, &identity)?;
     if let Err(e) = write_cap_req_mailbox(cap_req_fd, &slot) {
         let _ = clear_drain_intent_fd(cap_pending_fd);
         return Err(e);
@@ -805,6 +947,100 @@ fn trigger_cap_req_drain() -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+fn drain_declaration_token() -> io::Result<u32> {
+    let mut token = 0u32;
+    loop {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_getrandom,
+                &mut token as *mut u32 as *mut std::ffi::c_void,
+                std::mem::size_of::<u32>(),
+                0,
+            )
+        };
+        if rc == std::mem::size_of::<u32>() as libc::c_long {
+            return Ok(token);
+        }
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err(format!("generate drain declaration token: {error}")));
+        }
+        return Err(err(format!(
+            "generate drain declaration token: short getrandom result {rc}"
+        )));
+    }
+}
+
+fn trigger_cap_identity_capture(token: u32) {
+    // QUERY rejects nonzero flags, but its sys_enter tracepoint still observes
+    // the declaration. The captured map value, not the syscall result, decides
+    // whether the current thread was registered.
+    unsafe {
+        libc::syscall(
+            libc::SYS_membarrier,
+            libc::MEMBARRIER_CMD_QUERY,
+            CAP_DRAIN_DECLARE_FLAGS,
+            token as libc::c_int,
+        )
+    };
+}
+
+/// Capture and confirm the current thread's init-namespace PID/TID.
+///
+/// The caller must hold the mailbox lock. An empty-mailbox drain proves that
+/// the captured TID belongs to this thread before any policy record is exposed
+/// to the drain hook.
+fn capture_current_thread_identity_fd(
+    cap_req_fd: RawFd,
+    cap_pending_fd: RawFd,
+) -> io::Result<CapPendingSubmitter> {
+    clear_cap_req_mailbox(cap_req_fd)?;
+    clear_drain_intent_fd(cap_pending_fd)?;
+    let result = (|| {
+        // Reject a known seccomp or ENOSYS failure before declaring intent.
+        trigger_cap_req_drain()?;
+        let token = drain_declaration_token()?;
+        write_drain_intent_fd(
+            cap_pending_fd,
+            &CapPendingSubmitter {
+                tid: CAP_DRAIN_DECLARE_TID,
+                pid: 0,
+                token,
+                _pad: 0,
+            },
+        )?;
+        trigger_cap_identity_capture(token);
+        let identity = read_drain_intent_fd(cap_pending_fd)
+            .map_err(|error| err(format!("read captured drain identity: {error}")))?;
+        if identity.tid <= 0 || identity.pid <= 0 || identity.token != token {
+            return Err(err(
+                "membarrier did not capture a valid identity for the submitting thread",
+            ));
+        }
+
+        // The tracepoint can run even when the syscall returns an error; the
+        // cleared declaration confirms ownership independently of that result.
+        let confirmation_error = trigger_cap_req_drain().err();
+        let pending = read_drain_intent_fd(cap_pending_fd)
+            .map_err(|error| err(format!("verify captured drain identity: {error}")))?;
+        if pending != CapPendingSubmitter::default() {
+            let detail = confirmation_error.map_or_else(String::new, |error| format!(": {error}"));
+            return Err(err(format!(
+                "another thread captured the drain declaration{detail}"
+            )));
+        }
+        Ok(identity)
+    })();
+    if result.is_err() {
+        let _ = clear_cap_req_mailbox(cap_req_fd);
+        let _ = clear_drain_intent_fd(cap_pending_fd);
+    }
+    result
 }
 
 fn cap_req_map_fd(bpf: &Ebpf) -> io::Result<RawFd> {
@@ -889,6 +1125,14 @@ fn pinned_engine_present_inner(
         "ts_root",
         "te_protected_pids",
         "te_inode_guard",
+        "te_policy_roots",
+        "te_policy_dirs",
+        "te_policy_stable",
+        "te_policy_slots",
+        "te_policy_targets",
+        "te_policy_domains",
+        "te_policy_slot_scratch",
+        "te_policy_permission_scratch",
         "te_inode_path",
     ] {
         if !paths.map(name).try_exists()? {
@@ -1328,6 +1572,7 @@ enum TracepointNeed {
     RecvAddr,
     FileIpcAdvanced,
     MmapAdvanced,
+    RenameCompat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1341,6 +1586,24 @@ struct TracepointSpec {
 /// Tracepoint programs. The loader attaches only the subset required by the
 /// loaded hook set instead of attaching the entire object by default.
 const TRACEPOINTS: &[TracepointSpec] = &[
+    TracepointSpec {
+        name: "guard_rename_enter",
+        category: "raw_syscalls",
+        event: "sys_enter",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_exit",
+        category: "raw_syscalls",
+        event: "sys_exit",
+        need: TracepointNeed::RenameCompat,
+    },
+    TracepointSpec {
+        name: "guard_rename_task_exit",
+        category: "sched",
+        event: "sched_process_exit",
+        need: TracepointNeed::RenameCompat,
+    },
     TracepointSpec {
         name: "handle_fork",
         category: "sched",
@@ -1792,7 +2055,10 @@ const LSM_PROGS: &[(&str, &str)] = &[
     ("enforce_file_mprotect", "file_mprotect"),
     ("enforce_path_truncate", "path_truncate"),
     ("enforce_path_unlink", "path_unlink"),
+    ("enforce_path_rmdir", "path_rmdir"),
     ("enforce_path_rename", "path_rename"),
+    ("enforce_path_rename_legacy", "path_rename"),
+    ("enforce_path_link", "path_link"),
     ("enforce_socket_connect", "socket_connect"),
     ("enforce_socket_recvmsg", "socket_recvmsg"),
     ("enforce_task_kill", "task_kill"),
@@ -1943,7 +2209,18 @@ impl HookBudget {
     }
 }
 
+fn rename_compat_needed_for_arity(budget: HookBudget, arity: u32) -> bool {
+    budget.features & FEAT_BLOCK_FILE != 0 && !budget.file_open_only && arity == 4
+}
+
+fn rename_compat_needed(budget: HookBudget) -> bool {
+    path_rename_arity().is_ok_and(|arity| rename_compat_needed_for_arity(budget, arity))
+}
+
 fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
+    if spec.need == TracepointNeed::RenameCompat {
+        return rename_compat_needed(budget);
+    }
     if budget.suppress_dataflow_tracepoints {
         return (budget.file_open_only && budget.has_connect() && spec.name == "trace_connect")
             || matches!(
@@ -1953,6 +2230,7 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
     }
     match spec.need {
         TracepointNeed::Core => true,
+        TracepointNeed::RenameCompat => rename_compat_needed(budget),
         TracepointNeed::CoreExec => false,
         TracepointNeed::ExecArgs => true,
         TracepointNeed::FileOpen => budget.has_file_flow() || budget.has_open_rules(),
@@ -1983,7 +2261,6 @@ fn lsm_needed(
     block_file: bool,
     block_connect: bool,
     recv_flow: bool,
-    advanced_hooks: bool,
 ) -> bool {
     match name {
         "enforce_task_kill" | "enforce_ptrace_access_check" | "enforce_bpf_syscall" => true,
@@ -1991,12 +2268,19 @@ fn lsm_needed(
         "enforce_socket_connect" => block_connect,
         "enforce_socket_recvmsg" => recv_flow,
         "enforce_file_permission" => block_file,
-        "enforce_mmap_file" | "enforce_file_mprotect" => advanced_hooks && block_file,
+        // Nominal requirement without a hook budget: writable shared mappings
+        // bypass file_permission, so any file-blocking profile would want the
+        // mapping mediation. lsm_needed_for_budget decides whether the hook
+        // set can actually carry it (verifier stack budget on the validated
+        // kernels); do not read this arm as the production gate.
+        "enforce_mmap_file" | "enforce_file_mprotect" | "enforce_path_link" => block_file,
         "enforce_file_open"
         | "enforce_file_truncate"
         | "enforce_path_truncate"
         | "enforce_path_unlink"
-        | "enforce_path_rename" => block_file,
+        | "enforce_path_rmdir"
+        | "enforce_path_rename"
+        | "enforce_path_rename_legacy" => block_file,
         _ => false,
     }
 }
@@ -2019,18 +2303,32 @@ fn lsm_needed_for_budget(
                 ))
             || (block_connect && name == "enforce_socket_connect");
     }
-    lsm_needed(
+    // Mapping mediation ships only with the advanced tracepoint budget: the
+    // inode-only profile denies writable opens instead, which keeps these
+    // hooks out of its verifier stack budget. The link guard only serves
+    // directory-tree reads, which also require the mapping hooks.
+    if matches!(
         name,
-        block_exec,
-        block_file,
-        block_connect,
-        recv_flow,
-        budget.advanced_tracepoints,
-    )
+        "enforce_mmap_file" | "enforce_file_mprotect" | "enforce_path_link"
+    ) {
+        return (budget.advanced_tracepoints
+            || budget.features == HookReserve::agent_file_guard().policy_features)
+            && block_file;
+    }
+    lsm_needed(name, block_exec, block_file, block_connect, recv_flow)
+}
+
+fn rename_program_selected(name: &str) -> bool {
+    match name {
+        "enforce_path_rename" => path_rename_arity().is_ok_and(|arity| arity == 5),
+        "enforce_path_rename_legacy" => path_rename_arity().is_ok_and(|arity| arity == 4),
+        _ => true,
+    }
 }
 
 fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
     lsm_active
+        && rename_program_selected(name)
         && (name != "enforce_file_truncate" || lsm_prog_hook(name).is_none_or(lsm_hook_available))
         && lsm_needed_for_budget(
             name,
@@ -2082,6 +2380,48 @@ fn lsm_hook_available(hook: &str) -> bool {
         missing
     });
     !missing.contains(&hook)
+}
+
+// Vendor kernels backport hook signatures independently of their release number.
+// Refuse unknown BTF shapes instead of reading a guessed context slot.
+fn path_rename_arity() -> io::Result<u32> {
+    static ARITY: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+    ARITY
+        .get_or_init(|| unsafe {
+            let btf = libbpf_sys::btf__load_vmlinux_btf();
+            if btf.is_null() || libbpf_sys::libbpf_get_error(btf.cast()) != 0 {
+                return Err("cannot read kernel BTF for path_rename".into());
+            }
+            let result = (|| {
+                let id = libbpf_sys::btf__find_by_name_kind(
+                    btf,
+                    c"bpf_lsm_path_rename".as_ptr(),
+                    libbpf_sys::BTF_KIND_FUNC,
+                );
+                if id < 0 {
+                    return Err("kernel BTF has no bpf_lsm_path_rename".into());
+                }
+                let func = libbpf_sys::btf__type_by_id(btf, id as u32);
+                if func.is_null() {
+                    return Err("invalid path_rename BTF function".into());
+                }
+                let proto = libbpf_sys::btf__type_by_id(btf, (*func).__bindgen_anon_1.type_);
+                if proto.is_null()
+                    || ((*proto).info >> 24) & 0x1f != libbpf_sys::BTF_KIND_FUNC_PROTO
+                {
+                    return Err("invalid path_rename BTF prototype".into());
+                }
+                match (*proto).info & 0xffff {
+                    arity @ (4 | 5) => Ok(arity),
+                    arity => Err(format!("unsupported path_rename BTF arity {arity}")),
+                }
+            })();
+            libbpf_sys::btf__free(btf);
+            result
+        })
+        .as_ref()
+        .copied()
+        .map_err(|message| err(message.clone()))
 }
 
 fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
@@ -2249,6 +2589,15 @@ fn config_has_file_write(cfg: &CConfig) -> bool {
             .iter()
             .take((cfg.n_rules as usize).min(MAX_RULES))
             .any(|r| r.op == OP_WRITE)
+}
+
+fn supported_policy_features(features: u32, lsm_active: bool) -> u32 {
+    if lsm_active {
+        features
+    } else {
+        // Reserving hooks cannot provide pre-operation blocking without BPF LSM.
+        features & !(FEAT_BLOCK_EXEC | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT)
+    }
 }
 
 fn validate_supported_features(cfg: &CConfig, supported: u32, context: &str) -> io::Result<()> {
@@ -2546,13 +2895,23 @@ impl PinnedEngine {
         let _install_lock = acquire_install_lock()?;
         let paths = PinnedEnginePaths::from_env();
         let reserve = HookReserve::pinned_profile()?;
-        validate_pinned_runtime(reserve, bpf_lsm_active())?;
-        let policy_features = reserve.policy_features;
+        let lsm_active = bpf_lsm_active();
+        validate_pinned_runtime(reserve, lsm_active)?;
+        let policy_features = supported_policy_features(reserve.policy_features, lsm_active);
         let present = match pinned_engine_present(&paths, reserve) {
             Ok(present) => present,
             // Stale layout from an incompatible ActPlane revision: fall
             // through and rebuild instead of failing the process start.
             Err(e) if e.kind() == io::ErrorKind::InvalidData => false,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "{e}; ActPlane left the pin root at {} unchanged because a tracepoint holder may still be alive. Stop the previous enforcer and confirm from its PID namespace or the host that the holder has exited; then manually remove only this pin root and restart the enforcer",
+                        paths.root.display()
+                    ),
+                ));
+            }
             Err(e) => return Err(e),
         };
         if present {
@@ -2612,6 +2971,16 @@ impl PinnedEngine {
     pub fn supports_file_delete_guard(&self) -> bool {
         self.policy_features & (FEAT_BLOCK_FILE | FEAT_WRITE_RULES)
             == (FEAT_BLOCK_FILE | FEAT_WRITE_RULES)
+    }
+
+    /// Whether the active profile has the LSM hook required for ordinary writes.
+    pub fn supports_file_permission_guard(&self) -> bool {
+        self.supports_file_delete_guard()
+            && self
+                .paths
+                .link("enforce_file_permission")
+                .try_exists()
+                .unwrap_or(false)
     }
 
     pub fn try_lock_runtime() -> io::Result<std::fs::File> {
@@ -2686,6 +3055,40 @@ impl PinnedEngine {
             ignore_missing_remove(guard.remove(&key), "clear inode guard")?;
         }
         Ok(())
+    }
+
+    pub fn clear_file_protection_generations(&self) -> io::Result<()> {
+        let domains = self.clear_policy_map::<u32, PolicyDomainVal>("te_policy_domains");
+        if let Err(error) = domains {
+            return Err(err(format!(
+                "deactivate stale structured file-protection domains: {error}"
+            )));
+        }
+        let errors: Vec<_> = [
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_roots"),
+            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_dirs"),
+            self.clear_policy_map::<TreePathKey, PolicyStableVal>("te_policy_stable"),
+            self.clear_policy_map::<PolicySlotKey, PolicySlotVal>("te_policy_slots"),
+            self.clear_policy_map::<PolicyTargetKey, PolicyTargetVal>("te_policy_targets"),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(err(errors.join("; ")))
+        }
+    }
+
+    fn clear_policy_map<K: aya::Pod + Copy, V: aya::Pod + Copy>(
+        &self,
+        name: &str,
+    ) -> io::Result<()> {
+        let data = pinned_map_data(&self.paths, name)?;
+        let fd = dup_cloexec_fd(data.fd().as_fd().as_raw_fd())?;
+        clear_hash_map::<K, V>(&fd, name)
     }
 
     /// Registers a policy path only within its owning domain.
@@ -3080,7 +3483,8 @@ impl Loader {
         let enforce = bpf_lsm_active();
         let enforce_mode: u32 = if enforce { 1 } else { 0 };
         let hook_budget = HookBudget::from_config(&cfg, hook_reserve);
-        let policy_features = hook_budget.features;
+        let policy_features = supported_policy_features(hook_budget.features, enforce);
+        validate_supported_features(&cfg, policy_features, "initial policy")?;
         if let Some(paths) = pin_paths.as_ref() {
             ensure_pinned_engine_dirs(paths)?;
             if pinned_engine_present(paths, hook_reserve)? {
@@ -3126,6 +3530,9 @@ impl Loader {
         let has_block_file = hook_budget.features & FEAT_BLOCK_FILE != 0;
         let has_block_connect = hook_budget.features & FEAT_BLOCK_CONNECT != 0;
 
+        if enforce && has_block_file && !hook_budget.file_open_only {
+            path_rename_arity()?;
+        }
         load_exec_tail_programs(&mut bpf)?;
         let mut pending_links: Vec<(String, FdLink)> = Vec::new();
         let mut tracepoints_held = false;
@@ -3166,6 +3573,9 @@ impl Loader {
         if enforce {
             let btf = Btf::from_sys_fs().map_err(|e| err(format!("btf: {e}")))?;
             for (name, hook) in LSM_PROGS {
+                if !rename_program_selected(name) {
+                    continue;
+                }
                 if !lsm_needed_for_budget(
                     name,
                     has_block_exec,
@@ -3705,6 +4115,7 @@ const _: () = assert!(
         && std::mem::size_of::<AppendRule>() <= CAP_REQ_MAILBOX_BYTES
         && std::mem::size_of::<DeltaRequest>() <= CAP_REQ_MAILBOX_BYTES
         && std::mem::size_of::<CapReqSlot>() == 8 + CAP_REQ_MAILBOX_BYTES
+        && std::mem::size_of::<CapPendingSubmitter>() == 16
 );
 
 /// A handle for appending runtime policy deltas into a running eBPF engine.
@@ -3745,6 +4156,24 @@ impl ReloadHandle {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(FileLockGuard(file.as_raw_fd())))
+    }
+
+    /// Resolve the current process's init-namespace PID through the BPF hook.
+    ///
+    /// This works inside a PID namespace, where procfs does not expose the
+    /// process's outer PID. The result identifies the whole process and can be
+    /// reused by other threads for direct map operations.
+    pub fn current_process_kernel_pid(&self) -> io::Result<i32> {
+        let _guard = self
+            .append_lock
+            .lock()
+            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
+        let _file_guard = self.lock_append_file()?;
+        capture_current_thread_identity_fd(
+            self.cap_req_fd.as_raw_fd(),
+            self.cap_pending_fd.as_raw_fd(),
+        )
+        .map(|identity| identity.pid)
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
@@ -4137,6 +4566,7 @@ fn decode(e: &Event) -> Violation {
         Some(Provenance {
             label: e.prov_label,
             timestamp_ns: e.prov_timestamp_ns,
+            process_start_boottime: e.prov_start_boottime,
             pid: e.prov_pid,
             op: e.prov_op,
             target,
@@ -4161,6 +4591,7 @@ fn decode(e: &Event) -> Violation {
         matched_labels: e.matched_labels,
         provenance,
         timestamp_ns: e.timestamp_ns,
+        process_start_boottime: e.process_start_boottime,
     }
 }
 
@@ -4251,6 +4682,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<FileId>(), 16);
         assert_eq!(std::mem::size_of::<FileDomainId>(), 24);
         assert_eq!(std::mem::size_of::<InodeGuardVal>(), 16);
+        assert_eq!(std::mem::size_of::<TreePathKey>(), 24);
+        assert_eq!(std::mem::align_of::<TreePathKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyRootVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicyStableVal>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotKey>(), 288);
+        assert_eq!(std::mem::align_of::<PolicySlotKey>(), 8);
+        assert_eq!(std::mem::size_of::<PolicySlotVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyTargetKey>(), 16);
+        assert_eq!(std::mem::size_of::<PolicyTargetVal>(), 24);
+        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 64);
         assert_eq!(std::mem::size_of::<InodePathVal>(), 127);
         assert_eq!(std::mem::size_of::<ProcState>(), 16);
         assert_eq!(std::mem::size_of::<CapState>(), 56);
@@ -4262,7 +4703,130 @@ mod tests {
         assert_eq!(std::mem::size_of::<CRule>(), 224);
         assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
         assert_eq!(std::mem::align_of::<Event>(), 8);
-        assert_eq!(std::mem::size_of::<Event>(), 384);
+        assert_eq!(std::mem::size_of::<Event>(), 400);
+    }
+
+    // Structured-policy map keys are hashed by their byte image, so the Rust
+    // mirrors must contain no implicit repr(C) padding the kernel would compare
+    // as uninitialized bytes, and every declared tail byte must be zeroed.
+    #[test]
+    fn policy_map_keys_have_deterministic_byte_images() {
+        assert_eq!(
+            std::mem::size_of::<TreePathKey>(),
+            std::mem::size_of::<u64>() + 4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicyTargetKey>(),
+            4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PolicySlotKey>(),
+            std::mem::size_of::<TreePathKey>()
+                + std::mem::size_of::<u32>()
+                + FILE_PROTECTION_NAME_MAX
+                + 1
+                + std::mem::size_of::<u32>()
+        );
+
+        let slot = FileProtectionSlot::new(
+            TreePathIdentity {
+                ino: 9,
+                dev: 0x0801,
+                mnt_id: 0,
+            },
+            "etc",
+        )
+        .expect("valid basename");
+        let key = PolicySlotKey {
+            parent: TreePathKey {
+                ino: slot.parent.ino,
+                dev: slot.parent.dev,
+                mnt_id: slot.parent.mnt_id,
+                domain_id: 3,
+                generation: 4,
+            },
+            name_len: slot.name_len,
+            name: slot.name,
+            _pad: 0,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&key as *const PolicySlotKey).cast::<u8>(),
+                std::mem::size_of::<PolicySlotKey>(),
+            )
+        };
+        let name_offset = std::mem::size_of::<TreePathKey>() + std::mem::size_of::<u32>();
+        assert_eq!(&bytes[name_offset..name_offset + 3], b"etc");
+        assert!(
+            bytes[name_offset + 3..].iter().all(|byte| *byte == 0),
+            "slot-key name tail and explicit padding must be zero"
+        );
+    }
+
+    // Normalized target ids are 1-based so each one maps to exactly one bit of
+    // the 64-bit masks carried by te_policy_domain_val.
+    #[test]
+    fn target_ids_are_bounded_and_cover_the_domain_masks() {
+        for flag in [
+            INODE_GUARD_UNLINK,
+            INODE_GUARD_RENAME,
+            INODE_GUARD_WRITE,
+            INODE_GUARD_TREE,
+        ] {
+            assert_eq!(flag.count_ones(), 1, "guard flags must be single bits");
+        }
+
+        let mut covered = 0u64;
+        for target_id in 1..=FILE_PROTECTION_MAX_TARGETS as u32 {
+            let value = PolicyTargetVal {
+                guard: InodeGuardVal {
+                    flags: INODE_GUARD_UNLINK | INODE_GUARD_TREE,
+                    domain_id: 5,
+                    rule_id: target_id,
+                    _pad: 0,
+                },
+                flags: 0b11,
+                target_id,
+            };
+            assert_eq!(
+                value.guard.rule_id, value.target_id,
+                "events must report the stable target id"
+            );
+            covered |= 1u64 << (value.target_id - 1);
+        }
+        assert_eq!(covered, u64::MAX, "64 target ids must fill the mask width");
+
+        let domain = PolicyDomainVal {
+            generation: 1,
+            target_count: FILE_PROTECTION_MAX_TARGETS as u32,
+            tree_mask: covered,
+            delete_mask: covered,
+            ordinary_write_mask: 0,
+            read_mask: 0,
+            protection_set_id: 7,
+            guard: InodeGuardVal {
+                flags: INODE_GUARD_UNLINK,
+                domain_id: 5,
+                rule_id: 0,
+                _pad: 0,
+            },
+        };
+        assert_eq!(domain.generation, 1);
+        assert_eq!(domain.target_count, domain.tree_mask.count_ones());
+        assert_eq!(domain.delete_mask & domain.ordinary_write_mask, 0);
+        assert_eq!(domain.protection_set_id, 7);
+        assert_eq!(domain.guard.flags, INODE_GUARD_UNLINK);
+
+        let root = PolicyRootVal { root_mask: 0b1 };
+        let stable = PolicyStableVal { target_mask: 0b1 };
+        let slot = PolicySlotVal {
+            direct_mask: 0b1,
+            exact_exclude_mask: 0b10,
+            subtree_exclude_mask: 0b100,
+        };
+        assert_eq!(root.root_mask, stable.target_mask);
+        assert_eq!(slot.direct_mask & slot.exact_exclude_mask, 0);
+        assert_eq!(slot.subtree_exclude_mask, 0b100);
     }
 
     #[test]
@@ -4411,14 +4975,7 @@ mod tests {
         assert!(budget.features & FEAT_OPEN_RULES != 0);
         assert!(!tracepoint_needed(spec("trace_openat"), budget));
         assert!(!tracepoint_needed(spec("trace_rename"), budget));
-        assert!(lsm_needed(
-            "enforce_file_open",
-            false,
-            true,
-            false,
-            false,
-            false,
-        ));
+        assert!(lsm_needed("enforce_file_open", false, true, false, false,));
         assert!(lsm_needed_for_budget(
             "enforce_file_open",
             false,
@@ -4438,6 +4995,43 @@ mod tests {
     }
 
     #[test]
+    fn legacy_rename_context_is_independent_of_dataflow_profile() {
+        let budget = HookBudget::for_pinned_reserve(HookReserve::agent_file_guard());
+        assert!(budget.suppress_dataflow_tracepoints);
+        assert!(!budget.has_file_flow());
+        assert!(rename_compat_needed_for_arity(budget, 4));
+        assert!(!rename_compat_needed_for_arity(budget, 5));
+        assert!(!rename_compat_needed_for_arity(HookBudget::default(), 4));
+        assert!(!rename_compat_needed_for_arity(
+            HookBudget::for_pinned_reserve(HookReserve::file_enforcement()),
+            4,
+        ));
+        for name in [
+            "guard_rename_enter",
+            "guard_rename_exit",
+            "guard_rename_task_exit",
+        ] {
+            let spec = TRACEPOINTS
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("compatibility tracepoint");
+            assert_eq!(spec.need, TracepointNeed::RenameCompat);
+            assert_eq!(
+                tracepoint_needed(spec, budget),
+                rename_compat_needed(budget)
+            );
+        }
+        assert!(lsm_needed(
+            "enforce_path_rename_legacy",
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(lsm_needed("enforce_path_unlink", false, true, false, false));
+    }
+
+    #[test]
     fn pinned_file_enforcement_requires_bpf_lsm() {
         let error = validate_pinned_runtime(HookReserve::file_enforcement(), false)
             .expect_err("file enforcement must reject tracepoint-only mode");
@@ -4454,7 +5048,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v4"));
+        assert!(marker.contains("file_v8"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4484,13 +5078,16 @@ mod tests {
         let budget = HookBudget::for_pinned_reserve(reserve);
         // The path_unlink LSM gate must be attached so deletions are blocked.
         assert!(lsm_link_expected("enforce_path_unlink", budget, true));
+        assert!(lsm_link_expected("enforce_mmap_file", budget, true));
+        assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
+        assert!(lsm_link_expected("enforce_path_link", budget, true));
         assert!(budget.suppress_dataflow_tracepoints);
     }
 
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v4"));
+        assert!(marker.contains("agent_file_guard_v10"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -4542,7 +5139,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v5"));
+        assert!(marker.contains("credential_exfiltration_v9"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4562,17 +5159,9 @@ mod tests {
 
     #[test]
     fn file_flow_does_not_enable_lsm_file_hooks_without_block_file() {
-        assert!(lsm_needed(
-            "enforce_task_kill",
-            false,
-            false,
-            false,
-            false,
-            false
-        ));
+        assert!(lsm_needed("enforce_task_kill", false, false, false, false));
         assert!(lsm_needed(
             "enforce_ptrace_access_check",
-            false,
             false,
             false,
             false,
@@ -4583,7 +5172,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             false
         ));
         assert!(!lsm_needed(
@@ -4591,32 +5179,33 @@ mod tests {
             false,
             false,
             false,
-            false,
             false
         ));
-        assert!(!lsm_needed(
+        let file_flow_budget = HookBudget::for_pinned_reserve(HookReserve::runtime_file_delta());
+        for hook in [
             "enforce_mmap_file",
-            false,
-            false,
-            false,
-            false,
-            true
-        ));
+            "enforce_file_mprotect",
+            "enforce_path_link",
+        ] {
+            assert!(!lsm_link_expected(hook, file_flow_budget, true));
+        }
         assert!(lsm_needed(
             "enforce_file_permission",
             false,
             true,
             false,
-            false,
             false
         ));
-        assert!(lsm_needed(
+        assert!(lsm_needed_for_budget(
             "enforce_mmap_file",
             false,
             true,
             false,
             false,
-            true
+            HookBudget::for_pinned_reserve(
+                HookReserve::pinned_profile_value(Some("credential-exfiltration"))
+                    .expect("credential profile"),
+            ),
         ));
     }
 
@@ -4720,6 +5309,146 @@ mod tests {
         );
         validate_supported_features(&cfg, FEAT_BLOCK_EXEC, "runtime policy delta")
             .expect("block exec budget admits block exec rule");
+    }
+
+    #[test]
+    fn force_tracepoint_loader_rejects_initial_block_policy() {
+        // Run in a child so forcing the backend cannot race other tests' env reads.
+        if std::env::var_os("ACTPLANE_FORCE_TRACEPOINT").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "tests::force_tracepoint_loader_rejects_initial_block_policy",
+                    "--nocapture",
+                ])
+                .env("ACTPLANE_FORCE_TRACEPOINT", "1")
+                .output()
+                .expect("run forced-tracepoint child");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_CONNECT;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        let blob = unsafe {
+            std::slice::from_raw_parts(
+                &cfg as *const CConfig as *const u8,
+                std::mem::size_of::<CConfig>(),
+            )
+        };
+        let error = match Loader::load_with_hook_reserve(blob, HookReserve::full_profile()) {
+            Err(error) => error,
+            Ok(_) => panic!("tracepoint backend must reject initial block connect policy"),
+        };
+        let text = error.to_string();
+        assert!(text.contains("initial policy"), "{text}");
+        assert!(text.contains("connect block hooks"), "{text}");
+        assert!(text.contains("active bpf LSM"), "{text}");
+    }
+
+    #[test]
+    fn tracepoint_budget_rejects_block_but_preserves_notify_and_kill() {
+        let budget = HookBudget {
+            features: ALL_POLICY_FEATURES,
+            ..HookBudget::default()
+        };
+        let tracepoint_features = supported_policy_features(budget.features, false);
+        for (op, hook) in [
+            (OP_EXEC, "exec block hooks"),
+            (OP_OPEN, "file block hooks"),
+            (OP_WRITE, "file block hooks"),
+            (OP_CONNECT, "connect block hooks"),
+        ] {
+            let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+            cfg.n_rules = 1;
+            cfg.rules[0].op = op;
+            cfg.rules[0].effect = EFFECT_BLOCK;
+            let error =
+                validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+                    .expect_err("tracepoint-only backend cannot block this operation");
+            assert!(error.to_string().contains(hook), "{error}");
+            validate_supported_features(
+                &cfg,
+                supported_policy_features(budget.features, true),
+                "runtime policy delta",
+            )
+            .expect("active LSM with reserved hooks admits block policy");
+
+            for effect in [0, 2] {
+                cfg.rules[0].effect = effect;
+                validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+                    .expect("notify and kill retain tracepoint support");
+            }
+        }
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_updates = 3;
+        for (update, op) in cfg.updates.iter_mut().zip([OP_OPEN, OP_CONNECT, OP_RECV]) {
+            update.op = op;
+            update.add = 1;
+        }
+        validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+            .expect("file and network taint sources retain tracepoint support");
+    }
+
+    #[test]
+    fn tracepoint_reload_rejects_block_before_accessing_maps() {
+        let file = std::fs::File::open("/dev/null").expect("dummy non-BPF fd");
+        let duplicate = || file.try_clone().expect("duplicate dummy fd").into();
+        let handle = ReloadHandle {
+            cap_req_fd: duplicate(),
+            cap_pending_fd: duplicate(),
+            cap_task_fd: duplicate(),
+            cap_state_fd: duplicate(),
+            cap_policy_fd: duplicate(),
+            ts_counts_fd: duplicate(),
+            append_lock: Arc::new(Mutex::new(())),
+            append_lock_file: None,
+            policy_features: supported_policy_features(
+                HookReserve::full_profile().policy_features,
+                false,
+            ),
+        };
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_CONNECT;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        let blob = unsafe {
+            std::slice::from_raw_parts(
+                &cfg as *const CConfig as *const u8,
+                std::mem::size_of::<CConfig>(),
+            )
+        };
+        let error = handle
+            .append_policy_delta(42, 7, blob)
+            .expect_err("reject unsupported block before reading or writing BPF maps");
+        let text = error.to_string();
+        assert!(text.contains("connect block hooks"), "{text}");
+        assert!(text.contains("active bpf LSM"), "{text}");
+    }
+
+    #[test]
+    fn credential_profile_does_not_admit_unloaded_recv_hooks() {
+        let reserve = HookReserve::credential_exfiltration();
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_updates = 1;
+        cfg.updates[0].op = OP_RECV;
+        cfg.updates[0].add = 1;
+        for lsm_active in [false, true] {
+            let features = supported_policy_features(reserve.policy_features, lsm_active);
+            let error = validate_supported_features(&cfg, features, "runtime policy delta")
+                .expect_err("credential profile does not load recv hooks");
+            assert!(
+                error.to_string().contains("recv rules or sources"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -5016,12 +5745,12 @@ mod tests {
         config_blob(&cfg)
     }
 
-    fn block_connect_endpoint_config_blob(ipv4: u32) -> Vec<u8> {
+    fn notify_connect_endpoint_config_blob(ipv4: u32) -> Vec<u8> {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
         cfg.rules[0].op = OP_CONNECT;
         cfg.rules[0].m = 3; // TAINT_MATCH_ANY
-        cfg.rules[0].effect = EFFECT_BLOCK;
+        cfg.rules[0].effect = EFFECT_NOTIFY;
         cfg.rules[0].rule_id = 0;
         cfg.rules[0].ipv4 = ipv4;
         cfg.rules[0].ipv4_mask = u32::MAX;
@@ -5355,7 +6084,8 @@ os.execv({hit:?}, [{hit:?}])
         // which keeps this test loadable even where heavyweight programs such
         // as trace_openat_exit hit verifier limits.
         let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
-        let my_pid = std::process::id() as i32;
+        let handle = loader.reload_handle().expect("reload handle");
+        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
         let domain: u32 = 0x5eed;
         loader
             .bind_state(
@@ -5454,6 +6184,148 @@ os.execv({hit:?}, [{hit:?}])
         );
     }
 
+    /// Run the complete declaration and admission path where procfs cannot
+    /// reveal the enforcer's outer PID.
+    #[test]
+    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN and loads live eBPF programs"]
+    fn kernel_identity_admits_delta_in_nested_pid_namespace() {
+        const CHILD_ENV: &str = "ACTPLANE_TEST_NESTED_PIDNS";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let test_binary = std::env::current_exe().expect("current test binary");
+            let status = std::process::Command::new("unshare")
+                .args(["--pid", "--fork", "--mount-proc"])
+                .arg(test_binary)
+                .args([
+                    "tests::kernel_identity_admits_delta_in_nested_pid_namespace",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn PID-namespaced test");
+            assert!(status.success(), "nested PID namespace probe failed");
+            return;
+        }
+
+        let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
+        let handle = loader.reload_handle().expect("reload handle");
+        let kernel_pid = handle.current_process_kernel_pid().expect("kernel pid");
+        assert_ne!(
+            kernel_pid,
+            std::process::id() as i32,
+            "the probe must distinguish kernel and namespace-local pids"
+        );
+        let domain: u32 = 0x5eed;
+        loader
+            .bind_state(
+                kernel_pid,
+                domain,
+                CapState {
+                    parent: 0,
+                    scope_id: 0,
+                    labels: 0,
+                    authority_mask: u64::MAX,
+                    target_mask: u64::MAX,
+                    restrict_mask: 0,
+                    gate_mask: u64::MAX,
+                    label_mask: u64::MAX,
+                },
+            )
+            .expect("bind_state");
+        let cap_stat = |slot: u32| -> u64 {
+            let m: Array<_, u64> =
+                Array::try_from(loader.bpf.map("cap_stats").expect("cap_stats map"))
+                    .expect("open cap_stats");
+            m.get(&slot, 0).expect("read cap_stats slot")
+        };
+        let accept0 = cap_stat(0);
+        let drop0 = cap_stat(3);
+        loader
+            .submit_delta(DeltaRequest {
+                caller_pid: kernel_pid,
+                target_id: domain,
+                new_scope_id: 0,
+                required_mask: 0,
+                add_restrict_mask: 1,
+                add_label_mask: 0,
+                add_gate_mask: 0,
+            })
+            .expect("submit_delta in nested PID namespace");
+        assert_eq!(cap_stat(3) - drop0, 0);
+        assert_eq!(cap_stat(0) - accept0, 1);
+    }
+
+    /// Keep host procfs mounted so the pre-5.15 holder path must use kernel identity.
+    #[test]
+    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN, BPF LSM and --test-threads=1; private pins only"]
+    fn pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace() {
+        const CHILD_ENV: &str = "ACTPLANE_TEST_NESTED_HOST_PROCFS";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let pins = std::path::PathBuf::from("/sys/fs/bpf").join(format!(
+                "pidns-host-procfs-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            struct PinCleanup(std::path::PathBuf);
+            impl Drop for PinCleanup {
+                fn drop(&mut self) {
+                    if self.0.exists() {
+                        std::fs::remove_dir_all(&self.0).expect("remove private pins");
+                    }
+                }
+            }
+            let _cleanup = PinCleanup(pins.clone());
+            // SAFETY: ignored live suites are explicitly run serially in their own test process.
+            unsafe {
+                std::env::set_var("ACTPLANE_BPF_PIN_ROOT", &pins);
+                std::env::set_var("ACTPLANE_PINNED_PROFILE", "agent-file-guard");
+            }
+            let test_binary = std::env::current_exe().expect("current test binary");
+            let status = std::process::Command::new("unshare")
+                .args(["--pid", "--fork"])
+                .arg(test_binary)
+                .args([
+                    "tests::pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn PID-namespaced test with host procfs");
+            assert!(status.success(), "nested PID namespace holder probe failed");
+            return;
+        }
+
+        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
+        let reload = engine.reload_handle().expect("reload handle");
+        let kernel_pid = reload.current_process_kernel_pid().expect("kernel pid");
+        assert_ne!(kernel_pid, std::process::id() as i32);
+        let kernel_start = target_identity::kernel_process_start_ticks(kernel_pid)
+            .expect("resolve current kernel start time")
+            .expect("current process must be visible");
+        if let Some(holder) = &engine._tracepoint_holder {
+            let marker = holder
+                ._marker
+                .0
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("holder marker name");
+            let (pid, start) = marker
+                .strip_prefix(TRACEPOINT_HOLDER_PREFIX)
+                .and_then(|owner| owner.split_once('_'))
+                .expect("holder marker owner");
+            assert_eq!(pid.parse::<i32>(), Ok(kernel_pid));
+            assert_eq!(start.parse::<u64>(), Ok(kernel_start));
+        }
+    }
+
     /// The drain gate itself (#3021 follow-up 3): while this thread is the declared
     /// pending submitter, foreign processes and sibling threads must not enter
     /// the drain body (DRAIN stat frozen), and our own trigger must still drain
@@ -5463,7 +6335,8 @@ os.execv({hit:?}, [{hit:?}])
     #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
     fn drain_gate_ignores_foreign_triggers() {
         let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
-        let my_pid = std::process::id() as i32;
+        let handle = loader.reload_handle().expect("reload handle");
+        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
         loader
             .bind_state(
                 my_pid,
@@ -5488,8 +6361,8 @@ os.execv({hit:?}, [{hit:?}])
             m.get(&slot, 0).expect("read cap_stats slot")
         };
 
-        // Declare ourselves as the pending submitter (production submits do
-        // this right before publishing to cap_req).
+        // Recreate the confirmed declaration that production writes right
+        // before publishing to cap_req.
         let pending = loader
             .bpf
             .map("cap_pending_submitter")
@@ -5499,7 +6372,13 @@ os.execv({hit:?}, [{hit:?}])
             Map::Unsupported(data) => data,
             _ => panic!("cap_pending_submitter is not an array map"),
         };
-        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd()).expect("declare intent");
+        let pending_fd = pending_data.fd().as_fd().as_raw_fd();
+        let identity = capture_current_thread_identity_fd(
+            cap_req_map_fd(&loader.bpf).expect("cap_req fd"),
+            pending_fd,
+        )
+        .expect("capture identity");
+        write_drain_intent_fd(pending_fd, &identity).expect("declare intent");
 
         struct Spinners(Vec<std::process::Child>);
         impl Drop for Spinners {
@@ -5594,6 +6473,14 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5621,6 +6508,134 @@ os.execv({hit:?}, [{hit:?}])
         assert!(!pinned_engine_present(&paths, HookReserve::default()).expect("present"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pinned_engine_present_rejects_stale_layout_markers() {
+        let root = std::env::temp_dir().join(format!(
+            "actplane-pin-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        for (reserve, old) in [
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::file_enforcement(),
+                "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::credential_exfiltration(),
+                "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            // Pre-tree-read layouts carry a 56-byte te_policy_domains value.
+            (
+                HookReserve::file_enforcement(),
+                "agentsight_profile_file_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::credential_exfiltration(),
+                "agentsight_profile_credential_exfiltration_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+        ] {
+            let paths = PinnedEnginePaths::new(root.join(old));
+            std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
+            std::fs::create_dir_all(paths.links_dir()).expect("links dir");
+            for name in [
+                "rb",
+                "cap_req",
+                "cap_pending_submitter",
+                "cap_task",
+                "cap_state",
+                "cap_policy",
+                "ts_counts",
+                "ts_proc",
+                "ts_proc_domains",
+                "ts_root",
+                "te_protected_pids",
+                "te_inode_guard",
+                "te_policy_roots",
+                "te_policy_dirs",
+                "te_policy_stable",
+                "te_policy_slots",
+                "te_policy_targets",
+                "te_policy_domains",
+                "te_policy_slot_scratch",
+                "te_policy_permission_scratch",
+                "te_inode_path",
+            ] {
+                std::fs::write(paths.map(name), b"").expect("map pin");
+            }
+            let budget = HookBudget::for_pinned_reserve(reserve);
+            for spec in TRACEPOINTS {
+                if tracepoint_needed(spec, budget) {
+                    std::fs::write(paths.link(spec.name), b"").expect("tracepoint pin");
+                }
+            }
+            for (name, _) in LSM_PROGS {
+                if lsm_link_expected(name, budget, bpf_lsm_active()) {
+                    std::fs::write(paths.link(name), b"").expect("LSM pin");
+                }
+            }
+            std::fs::write(paths.map(old), b"").expect("old marker pin");
+            let error = pinned_engine_present(&paths, reserve).expect_err("old marker must be stale");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("pinned metadata mismatch"));
+
+            let current = reserve.profile_marker();
+            std::fs::rename(paths.map(old), paths.map(current)).expect("current marker pin");
+            assert!(pinned_engine_present(&paths, reserve).expect("complete current layout"));
+            std::fs::remove_file(paths.map("te_policy_permission_scratch"))
+                .expect("remove permission scratch");
+            assert!(
+                !pinned_engine_present(&paths, reserve).expect("incomplete layout"),
+                "missing permission scratch must prevent reuse even with all links"
+            );
+        }
+        std::fs::remove_dir_all(&root).expect("remove private fixture");
+    }
+
+    #[test]
+    #[ignore = "requires root, BPF LSM, unlimited memlock and --test-threads=1; private pins only"]
+    fn pinned_engine_reinstalls_pre_ordinary_write_marker_on_live_kernel() {
+        let _fixture = file_protection_delete_tests::Fixture::new("fp-write-upgrade");
+        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
+        let paths = engine.paths.clone();
+        let current = HookReserve::agent_file_guard().profile_marker();
+        let old = "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
+        std::fs::rename(paths.map(current), paths.map(old)).expect("simulate v4 marker");
+        // Release any process-owned tracepoints before replacing this private layout.
+        drop(engine);
+        let reopened = PinnedEngine::open_or_install_singleton().expect("reinstall private engine");
+        assert_eq!(reopened.paths, paths);
+        assert!(paths.map(current).exists());
+        assert!(paths.map("te_policy_permission_scratch").exists());
+        assert!(!paths.map(old).exists());
     }
 
     /// Upgrade residue (an older or aborted install) leaves maps pinned under
@@ -5706,6 +6721,14 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -5749,6 +6772,14 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_policy_roots",
+            "te_policy_dirs",
+            "te_policy_stable",
+            "te_policy_slots",
+            "te_policy_targets",
+            "te_policy_domains",
+            "te_policy_slot_scratch",
+            "te_policy_permission_scratch",
             "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
@@ -9225,13 +10256,13 @@ finally:
 
     #[test]
     #[ignore = "requires root/CAP_BPF and loads live eBPF tracepoints"]
-    fn tracepoint_block_connect_degrades_to_unblocked_violation_smoke() {
+    fn tracepoint_notify_connect_reports_violation_smoke() {
         let _guard = live_bpf_test_guard();
         let caller_pid = std::process::id() as i32;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
         let port = listener.local_addr().expect("listener addr").port();
         let loopback = 127u32 | (1u32 << 24);
-        let policy = block_connect_endpoint_config_blob(loopback);
+        let policy = notify_connect_endpoint_config_blob(loopback);
         let old_force = std::env::var_os("ACTPLANE_FORCE_TRACEPOINT");
         std::env::set_var("ACTPLANE_FORCE_TRACEPOINT", "1");
         let loaded = Loader::load(&policy);
@@ -9278,15 +10309,15 @@ finally:
         );
 
         // The matching connect must succeed (tracepoints cannot deny) but be
-        // reported as a degraded block violation: effect=block, blocked=false.
+        // reported as a notification: blocking requests require BPF LSM.
         let hit = std::net::TcpStream::connect(("127.0.0.1", port))
             .expect("tracepoint backend must not deny the connect");
         drop(hit);
         let v = rx
             .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("degraded connect block violation");
+            .expect("connect notification");
         assert_eq!(v.op, OP_CONNECT as u32, "unexpected op: {v:?}");
-        assert_eq!(v.effect, EFFECT_BLOCK as u32, "unexpected effect: {v:?}");
+        assert_eq!(v.effect, EFFECT_NOTIFY as u32, "unexpected effect: {v:?}");
         assert!(
             !v.blocked,
             "tracepoint backend cannot block; expected degraded report: {v:?}"

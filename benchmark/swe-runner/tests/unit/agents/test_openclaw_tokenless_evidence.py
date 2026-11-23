@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from swe_runner.agents.openclaw.tokenless_evidence import write_tokenless_evidence
 
 
@@ -55,3 +57,32 @@ def test_write_tokenless_evidence_records_weak_evidence_when_files_are_missing(t
         "hook_seen": False,
         "exec_tool_calls": 0,
     }
+
+
+@pytest.mark.parametrize(
+    "hook_line",
+    [
+        "[tokenless:rtk] rewrote exec",
+        "[tokenless:post-tool] optimized exec",
+        "tokenless: compression did not reduce size, outputting original",
+    ],
+)
+def test_write_tokenless_evidence_reads_the_current_plugin_markers(tmp_path: Path, hook_line: str) -> None:
+    # The markers the plugin prints with verbose on, in its current wording, and
+    # the binary's report of a PostTool call that saved nothing.
+    raw_output = "\n".join(
+        [
+            "[tokenless] OpenClaw plugin registered — active features: pre-tool, post-tool",
+            hook_line,
+        ]
+    )
+
+    updates = write_tokenless_evidence(
+        output_dir=tmp_path / "run",
+        instance_id="case-1",
+        metadata={"agent_id": "case-1", "session_id": "session-1"},
+        raw_output=raw_output,
+    )
+
+    assert updates["openclaw_tokenless_plugin_loaded"] == "true"
+    assert updates["openclaw_tokenless_hook_seen"] == "true"

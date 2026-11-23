@@ -323,6 +323,13 @@ impl GenAIBuilder {
             Some("sysom".to_string())
         } else if crate::parser::llm::is_dashscope_native_path(path) {
             Some("dashscope".to_string())
+        } else if crate::parser::llm::is_qoder_path(path) {
+            // Lockstep with `MessageParser::detect_provider`. The deep parse
+            // reuses the OpenAI types and cannot tell this gateway apart, so a
+            // parsed body falls through to the parsed message's `openai`; only
+            // a body that never parsed (truncated capture, malformed encoding)
+            // reaches this branch, and it must not drift to the token record.
+            Some("qodercli".to_string())
         } else if crate::analyzer::message::MessageParser::gemini_model_from_path(path).is_some() {
             // The model rides in the path for Gemini's inference actions, so a
             // path that names one is a Gemini generation call (`:countTokens`
@@ -905,6 +912,30 @@ mod tests {
                 builder.extract_provider_from_path(path),
                 Some("openai".to_string()),
                 "{path} is detected as openai but the genai row labels it otherwise"
+            );
+        }
+    }
+
+    /// The Qoder CLI gateway path is admitted by the row gate and labelled
+    /// `qodercli` by `MessageParser::detect_provider`, but this map had no
+    /// branch, so a qoder call whose body never parsed (truncated capture,
+    /// malformed encoding) fell to the token record or `unknown`.
+    #[test]
+    fn test_extract_provider_from_path_qoder_lockstep() {
+        let builder = GenAIBuilder::new();
+        for path in [
+            "/algo/api/v2/service/pro/sse/agent_chat_generation",
+            "https://api.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?x=1",
+        ] {
+            assert_eq!(
+                crate::analyzer::message::MessageParser::detect_provider(path),
+                Some("qodercli"),
+                "{path} is a detected provider"
+            );
+            assert_eq!(
+                builder.extract_provider_from_path(path),
+                Some("qodercli".to_string()),
+                "{path} is detected as qodercli but the genai row labels it otherwise"
             );
         }
     }

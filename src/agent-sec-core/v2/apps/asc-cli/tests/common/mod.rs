@@ -45,6 +45,26 @@ impl Drop for Directory {
     }
 }
 
+/// Copies the real CLI into the test directory so dropped-UID processes need not traverse the build path.
+///
+/// The copy runs in a child process because process creation is fork+exec: a
+/// fork in a parallel test thread snapshots this process' descriptors and drops
+/// the inherited ones only at its own exec, so a copy written here can outlive
+/// `fs::copy` as an open write handle and make the copy's first launch fail with
+/// `ETXTBSY` (`ExecutableFileBusy`). A child process owns the write handle for
+/// its whole lifetime, so no other fork can inherit it.
+pub fn executable(directory: &Path) -> PathBuf {
+    let binary = directory.join("agent-sec-cli");
+    let status = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .arg(&binary)
+        .status()
+        .expect("spawn the CLI copy");
+    assert!(status.success(), "copy the CLI: {status}");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    binary
+}
+
 pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsString> {
     let method = request["method"].as_str().unwrap();
     let parts: Vec<_> = method.split('.').collect();
@@ -63,7 +83,12 @@ pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsStrin
             "template" => {
                 let path = directory.join("template with spaces.json");
                 std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
-                args.extend([OsString::from("--file"), path.into_os_string()]);
+                args.extend([
+                    OsString::from("--language"),
+                    "json".into(),
+                    "--file".into(),
+                    path.into_os_string(),
+                ]);
             }
             "policyTemplates" => {
                 assert_eq!(value.as_array().unwrap().len(), 1);
@@ -85,12 +110,8 @@ pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsStrin
                     args.extend([flag.into(), input.as_str().unwrap().into()]);
                     continue;
                 }
-                let (option, number) = if value["kind"] == "pid" {
-                    ("--pid", &value["pid"])
-                } else {
-                    ("--cgroup-id", &value["cgroupId"])
-                };
-                args.extend([option.into(), number.to_string().into()]);
+                assert_eq!(value["kind"], "pid", "unsupported CLI selector: {value}");
+                args.extend(["--pid".into(), value["pid"].to_string().into()]);
             }
             _ => {
                 let option = match field.as_str() {

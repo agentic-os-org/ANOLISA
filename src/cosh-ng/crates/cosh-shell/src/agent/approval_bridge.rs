@@ -16,6 +16,8 @@ use crate::tools::known_provider_tool;
 use crate::tools::readonly_compound::{build_readonly_compound_plan, run_readonly_compound};
 use crate::tools::{ReadonlyPipelineConfig, ReadonlyPipelineError, ReadonlyPipelineOutput};
 
+mod blocked;
+
 pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
@@ -110,10 +112,11 @@ pub(crate) fn render_trusted_tool<W: Write>(
             ));
             continue;
         }
-        let mut request = record_auto_approved_request(state, request);
+        let (mut request, journal_index) = record_auto_approved_request(state, request, true);
         if apply_auto_approved_request_outcome(
             state,
             &mut request,
+            journal_index,
             MessageId::ApprovalResolutionAutoApprovedTitle,
             output,
         )? == AutoApprovalFlow::Handled
@@ -245,10 +248,11 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             continue;
         }
         if request_is_readonly_builtin_tool(&request) {
-            let mut request = record_auto_approved_request(state, request);
+            let (mut request, journal_index) = record_auto_approved_request(state, request, false);
             if apply_auto_approved_request_outcome(
                 state,
                 &mut request,
+                journal_index,
                 MessageId::ApprovalResolutionAutoApprovedTitle,
                 output,
             )? == AutoApprovalFlow::Handled
@@ -301,10 +305,11 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             if defer_fallback_bash_tool(state, request.clone(), output)? {
                 return Ok(true);
             }
-            let mut request = record_auto_approved_request(state, request);
+            let (mut request, journal_index) = record_auto_approved_request(state, request, true);
             if apply_auto_approved_request_outcome(
                 state,
                 &mut request,
+                journal_index,
                 MessageId::ApprovalResolutionTrustedTitle,
                 output,
             )? == AutoApprovalFlow::Handled
@@ -351,10 +356,11 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             continue;
         }
 
-        let mut request = record_auto_approved_request(state, request);
+        let (mut request, journal_index) = record_auto_approved_request(state, request, true);
         if apply_auto_approved_request_outcome(
             state,
             &mut request,
+            journal_index,
             MessageId::ApprovalResolutionAutoApprovedTitle,
             output,
         )? == AutoApprovalFlow::Handled
@@ -463,13 +469,13 @@ fn render_completed_provider_native_shell_request<W: Write>(
     // Resolve the title before recording: recording journals this replay
     // as agent-auto, which would shadow the user's original decision.
     let title = completed_provider_native_shell_title(state, &request);
-    let mut request = record_auto_approved_request(state, request);
+    let (mut request, _journal_index) = record_auto_approved_request(state, request, false);
     mark_provider_native_shell_execution(state, &mut request);
     render_approval_resolution(state, &request, title, output)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutoApprovalFlow {
+pub(crate) enum AutoApprovalFlow {
     Continue,
     Handled,
 }
@@ -578,20 +584,15 @@ fn run_already_approved_shell_tool(state: &InlineState, run_id: &str) -> bool {
     })
 }
 
-fn apply_auto_approved_request_outcome<W: Write>(
+pub(crate) fn apply_auto_approved_request_outcome<W: Write>(
     state: &mut InlineState,
     request: &mut RuntimeApprovalRequest,
+    journal_index: usize,
     title: MessageId,
     output: &mut W,
 ) -> std::io::Result<AutoApprovalFlow> {
     if request.status != ApprovalRequestStatus::Approved {
-        render_approval_resolution(
-            state,
-            request,
-            MessageId::ApprovalResolutionBlockedTitle,
-            output,
-        )?;
-        return Ok(AutoApprovalFlow::Handled);
+        return blocked::finish_blocked_auto_request(state, request, output);
     }
     render_hook_warning_notices(state, request, output)?;
     let outcome = approval_outcome_for_auto_request(request);
@@ -609,13 +610,21 @@ fn apply_auto_approved_request_outcome<W: Write>(
         if authorized.is_err() {
             request.status = ApprovalRequestStatus::Blocked;
             request.execution_path = Some("blocked_audit_required");
-            render_approval_resolution(
-                state,
-                request,
-                MessageId::ApprovalResolutionBlockedTitle,
-                output,
-            )?;
-            return Ok(AutoApprovalFlow::Handled);
+            for stored in &mut state.approvals.requests {
+                if stored.id == request.id {
+                    stored.status = request.status;
+                    stored.execution_path = request.execution_path;
+                }
+            }
+            // Correct exactly the journal entry this recording appended or
+            // settled, by index: journal ids are display numbers reused across
+            // staged/hook entries, so an id-keyed write-back could overwrite an
+            // unrelated same-numbered entry (#10316 review P1-1).
+            if let Some(entry) = state.approvals.journal.get_mut(journal_index) {
+                entry.decision = request.status;
+                entry.execution_path = request.execution_path;
+            }
+            return blocked::finish_blocked_auto_request(state, request, output);
         }
     }
     if outcome == ApprovalOutcome::ProviderNativeShellFallback {
@@ -704,7 +713,7 @@ fn run_auto_approved_readonly_compound<W: Write>(
         return Ok(AutoApprovalFlow::Continue);
     };
 
-    let mut request = record_auto_approved_request(state, request);
+    let (mut request, _journal_index) = record_auto_approved_request(state, request, false);
     // Mirror the handoff path's status gate: when the audit recorder
     // failed closed (blocked_audit_required) the approval is not
     // durable, and a blocked request must never reach the executor.

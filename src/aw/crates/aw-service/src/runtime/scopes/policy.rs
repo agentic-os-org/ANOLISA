@@ -1,0 +1,120 @@
+//! Task snapshots and reload admission share the instance gate with scope reservation.
+
+use super::*;
+
+impl Instance {
+    pub(in crate::runtime) fn hermes_gateway(&self) -> bool {
+        let capabilities = self.host.capabilities();
+        capabilities.adapter == "hermes" && capabilities.entrypoint == "gateway"
+    }
+}
+
+impl Runtime {
+    pub(in crate::runtime) fn gateway_scope(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        Ok(owners
+            .get(id)
+            .and_then(|child| child.parent.as_ref())
+            .and_then(|parent| owners.get(parent))
+            .is_some_and(|parent| parent.native))
+    }
+
+    pub(in crate::runtime) fn native_root(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        Ok(owners.get(id).is_some_and(|owner| owner.native))
+    }
+
+    pub(in crate::runtime) fn resident_root(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        match owners.get(id) {
+            Some(owner) if owner.parent.is_some() => Err(rejected("scope_not_root")),
+            Some(owner) => {
+                if owner.cancelled.load(Ordering::Acquire) {
+                    return Err(rejected("scope_closing"));
+                }
+                owner.process.check()?;
+                Ok(!owner.native)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(in crate::runtime) fn corroborate_scope_root(&self, id: &str, pid: u32) -> Result<()> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        owners
+            .get(id)
+            .filter(|owner| owner.parent.is_none())
+            .ok_or_else(|| rejected("scope_parent_unowned"))?
+            .process
+            .corroborate(pid)
+    }
+
+    pub(in crate::runtime) fn no_scope_children(&self, id: &str) -> Result<()> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        if owners
+            .values()
+            .any(|owner| owner.parent.as_deref() == Some(id))
+        {
+            return Err(rejected("busy"));
+        }
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn scope_policy(&self, id: &str) -> Result<Value> {
+        let instances = self
+            .instances
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?;
+        let instance = instances
+            .get(id)
+            .and_then(Option::as_ref)
+            .filter(|instance| !instance.closing)
+            .ok_or_else(|| rejected("scope_unavailable"))?;
+        let mut owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        let owner = owners
+            .get(id)
+            .ok_or_else(|| rejected("scope_unavailable"))?;
+        let parent = owner
+            .parent
+            .as_ref()
+            .ok_or_else(|| rejected("scope_not_task"))?;
+        let root = owners
+            .get(parent)
+            .ok_or_else(|| rejected("scope_parent_unavailable"))?;
+        if owner.cancelled.load(Ordering::Acquire)
+            || root.cancelled.load(Ordering::Acquire)
+            || owner
+                .acknowledge_by
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            || (owner.acknowledge_by.is_none() && !owner.policy_confirmed)
+        {
+            return Err(rejected("scope_acknowledgement_expired"));
+        }
+        owner.process.check()?;
+        root.process.check()?;
+        if !instances
+            .get(parent)
+            .and_then(Option::as_ref)
+            .is_some_and(|root| {
+                !root.closing
+                    && (root.reload.as_ref().is_some_and(|reload| reload.resident)
+                        || owners.get(parent).is_some_and(|owner| {
+                            owner.independent && owner.acknowledge_by.is_none()
+                        }))
+            })
+        {
+            return Err(rejected("scope_reload_unsupported"));
+        }
+        let mut snapshot = instance
+            .routes
+            .as_ref()
+            .ok_or_else(|| rejected("native_policy_unsupported"))?
+            .to_policy_value();
+        snapshot["policy_revision"] = json!(instance.host.revision());
+        owners
+            .get_mut(id)
+            .ok_or_else(|| rejected("scope_unavailable"))?
+            .policy_confirmed = true;
+        Ok(snapshot)
+    }
+}

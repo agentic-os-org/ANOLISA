@@ -47,11 +47,28 @@ impl ShellIntegration {
 pub(crate) struct ShellEventView<'a> {
     base: usize,
     events: &'a [ShellEvent],
+    prompt_snapshot: Option<&'a crate::raw_input::PromptSnapshot>,
 }
 
 impl<'a> ShellEventView<'a> {
     pub(crate) fn new(base: usize, events: &'a [ShellEvent]) -> Self {
-        Self { base, events }
+        Self {
+            base,
+            events,
+            prompt_snapshot: None,
+        }
+    }
+
+    pub(crate) fn with_prompt_snapshot(
+        mut self,
+        prompt: Option<&'a crate::raw_input::PromptSnapshot>,
+    ) -> Self {
+        self.prompt_snapshot = prompt;
+        self
+    }
+
+    pub(crate) fn prompt_snapshot(self) -> Option<&'a crate::raw_input::PromptSnapshot> {
+        self.prompt_snapshot
     }
 
     pub(crate) fn base(self) -> usize {
@@ -84,6 +101,29 @@ pub(super) struct ShellHistoryFileObserver(Arc<dyn Fn(PathBuf) + Send + Sync + '
 impl std::fmt::Debug for ShellHistoryFileObserver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ShellHistoryFileObserver")
+    }
+}
+
+/// Receives the managed shell's PATH once, after its startup files ran.
+#[derive(Clone)]
+pub(super) struct ShellStartupPathObserver(Arc<dyn Fn(Option<String>) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for ShellStartupPathObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellStartupPathObserver")
+    }
+}
+
+impl ShellStartupPathObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, path: Option<String>) {
+        (self.0)(path);
     }
 }
 
@@ -180,6 +220,7 @@ pub struct ShellHostConfig {
     /// the Rust intercept path. Zsh never enables this Bash-only route.
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
+    pub(crate) initial_output_newline: bool,
     pub raw_action_watchdog: Duration,
     /// #2161: shared input-wait episode clock. The relay's interactive
     /// sentinel marks/clears it; the runtime controller reads it to drive
@@ -197,6 +238,7 @@ pub struct ShellHostConfig {
     pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
+    pub(super) shell_startup_path_observer: Option<ShellStartupPathObserver>,
     pub(super) transcript_retention: TranscriptRetention,
     login_effect_guard: LoginEffectGuard,
 }
@@ -220,6 +262,7 @@ impl ShellHostConfig {
             bash_login_env_posix: true,
             slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
+            initial_output_newline: false,
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
             hint_language: crate::config::Language::default(),
@@ -228,6 +271,7 @@ impl ShellHostConfig {
             assistance_control: None,
             shell_environment_observer: None,
             shell_history_file_observer: None,
+            shell_startup_path_observer: None,
             transcript_retention: TranscriptRetention::Full,
             login_effect_guard: LoginEffectGuard::new(),
         }
@@ -296,6 +340,13 @@ impl ShellHostConfig {
 
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
+    }
+
+    pub(crate) fn set_shell_startup_path_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        self.shell_startup_path_observer = Some(ShellStartupPathObserver::new(observer));
     }
 
     /// Bounds byte-transcript memory for the real interactive runtime. Public

@@ -1,7 +1,8 @@
 //! Real service/Provider calls retire details while retaining a producer high-water mark.
 
 use super::*;
-use aw_service::{Binding, EventHandle};
+use aw_service::{Binding, EventHandle, ResultStatus};
+use std::collections::BTreeMap;
 
 fn register(binding: &Binding, sequence: u64, value: &Value) -> Operation {
     Operation::RegisterInvocation {
@@ -118,6 +119,7 @@ fn invocation_overload_is_observable_and_recovers_without_replaying_old_calls() 
     .unwrap();
     let first = event(&binding, "tool.before", "allow");
     assert!(call(Operation::OpenEvent {
+        result_status: None,
         instance_id: binding.instance_id.clone(),
         event: first.clone()
     })
@@ -158,6 +160,51 @@ fn invocation_overload_is_observable_and_recovers_without_replaying_old_calls() 
 }
 
 #[test]
+fn full_event_capacity_does_not_commit_legacy_protocol() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["daemon"]["limits"] = json!({"events":1});
+    let service = Running::start(&fixture, &document);
+    let occupied = fixture.bind(&service.client);
+    let fresh = fixture.bind(&service.client);
+    let call = |operation| service.client.call(operation, Instant::now() + TIMEOUT);
+    let slots = || call(Operation::Status).unwrap()["resources"]["usage"]["event_slots"].clone();
+    let held = open(
+        &service.client,
+        &occupied,
+        event(&occupied, "tool.before", "allow"),
+    );
+    assert_eq!(slots(), 1);
+
+    let completion = event(&fresh, "tool.after", "observe");
+    let rejected = call(Operation::OpenEvent {
+        instance_id: fresh.instance_id.clone(),
+        event: completion.clone(),
+        result_status: Some(ResultStatus::Success),
+    });
+    assert!(
+        matches!(rejected, Err(aw_service::Error::Rejected(ref code)) if code == "event_limit"),
+        "{rejected:?}"
+    );
+    assert_eq!(slots(), 1);
+    assert_eq!(close(&service.client, &held)["closed"], true);
+    assert_eq!(slots(), 0);
+
+    call(Operation::EnableInvocations {
+        instance_id: fresh.instance_id.clone(),
+    })
+    .unwrap();
+    call(register(&fresh, 1, &completion)).unwrap();
+    let already_used = call(Operation::EnableInvocations {
+        instance_id: occupied.instance_id,
+    });
+    assert!(
+        matches!(already_used, Err(aw_service::Error::Rejected(ref code)) if code == "invocation_protocol_requires_unused_binding"),
+        "{already_used:?}"
+    );
+}
+
+#[test]
 fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
@@ -166,6 +213,26 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
     let binding = fixture.bind(&service.client);
     let call = |operation| service.client.call(operation, Instant::now() + TIMEOUT);
     call(Operation::OwnInstance {
+        instance_id: binding.instance_id.clone(),
+        pid: std::process::id(),
+    })
+    .unwrap();
+    let root = binding;
+    let binding: Binding = serde_json::from_value(
+        call(Operation::OpenScope {
+            parent_id: root.instance_id.clone(),
+            pid: std::process::id(),
+            cwd: fixture.0.to_str().unwrap().into(),
+            environment: BTreeMap::new(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    call(Operation::AcknowledgeScope {
+        instance_id: binding.instance_id.clone(),
+    })
+    .unwrap();
+    let watch = call(Operation::WatchScope {
         instance_id: binding.instance_id.clone(),
         pid: std::process::id(),
     })
@@ -190,12 +257,26 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
     }
+    assert_eq!(
+        call(Operation::SdkControl {
+            command: aw_service::SdkControl::List
+        })
+        .unwrap()["applications"],
+        json!([])
+    );
     let mut second = first.clone();
     second["tool"]["call_id"] = json!("second");
     assert!(call(register(&binding, 2, &second))
         .unwrap_err()
         .to_string()
         .contains("connection_limit"));
+    call(Operation::CheckScope {
+        instance_id: binding.instance_id.clone(),
+        pid: std::process::id(),
+        policy_revision: watch["policy_revision"].as_str().unwrap().into(),
+        valid: true,
+    })
+    .unwrap();
     call(finish(&binding, 1, "native-call")).unwrap();
     let status = call(Operation::Status).unwrap();
     assert_eq!(status["resources"]["usage"]["invocations"], 0);
@@ -216,6 +297,10 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
     }
     call(register(&binding, 2, &second)).unwrap();
     call(finish(&binding, 2, "second")).unwrap();
+    call(Operation::ReleaseInstance {
+        instance_id: root.instance_id,
+    })
+    .unwrap();
     assert!(fixture.calls("invoke").is_empty());
     fixture.assert_reaped();
 }

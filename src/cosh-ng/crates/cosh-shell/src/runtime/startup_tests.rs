@@ -8,14 +8,13 @@ use nix::pty::Winsize;
 
 use super::probe_outcome::{record_probe_outcome, ProbeStartOutcome};
 use super::{
-    append_startup_auth_hint, bootstrap_path_command, bootstrap_path_probe_plan,
-    bootstrap_process_path_from_shell, extract_bootstrap_path, merge_bootstrap_paths,
-    merge_path_additions_at_anchors, merge_path_lists, plan_startup_for_render,
+    bootstrap_path_command, bootstrap_path_probe_plan, bootstrap_process_path_from_shell,
+    extract_bootstrap_path, merge_bootstrap_paths, merge_path_additions_at_anchors,
+    merge_path_lists, plan_startup_for_render, prepare_startup_suggestions,
     record_visible_personal_impressions, render_pending_recommendation_notice,
     render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
-    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
-    BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
-    BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    startup_suggestion_mode, write_startup_suggestions, BootstrapPathProbeError,
+    BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -338,8 +337,11 @@ fn startup_render_plan_is_health_first_and_caps_actual_visible_at_three() {
         Some("health-a")
     );
     assert_eq!(
-        visible_personal_candidates(&rendered)
+        rendered
+            .visible_candidates
             .iter()
+            .filter(|candidate| candidate.source
+                != crate::recommendation::personal_model::CandidateSource::Health)
             .map(|candidate| candidate.candidate_id.as_str())
             .collect::<Vec<_>>(),
         vec!["recent-a"]
@@ -347,7 +349,7 @@ fn startup_render_plan_is_health_first_and_caps_actual_visible_at_three() {
 }
 
 #[test]
-fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
+fn unified_suggestion_list_orders_health_before_personal_and_explains_all_keys() {
     let mut report = HealthScanReport::new("health", 0);
     report.try_items = vec![health_try("health-a", 100)];
     let rendered = plan_startup_for_render(
@@ -356,23 +358,21 @@ fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
         &planner_context(),
         &[personal("recent-a"), personal("recent-b")],
     );
-    let state = InlineState {
-        language: Language::ZhCn,
-        ..InlineState::default()
-    };
     let mut output = Vec::new();
 
-    write_startup_suggestion_card(
-        &state,
+    write_startup_suggestions(
         &RatatuiInlineRenderer::with_width(120).with_language(Language::ZhCn),
-        StartupSuggestionMode::Interactive,
         &rendered.visible_candidates,
+        true,
         &mut output,
     )
     .unwrap();
 
     let text = String::from_utf8(output).unwrap();
-    assert!(text.find("[异常排查]").unwrap() < text.find("[个性化]").unwrap());
+    assert!(text.find("1. ").unwrap() < text.find("2. ").unwrap());
+    assert!(text.find("2. ").unwrap() < text.find("3. ").unwrap());
+    assert!(!text.contains("[异常排查]"));
+    assert!(!text.contains("[个性化]"));
     assert!(text.contains("Shift+Tab 切换"));
     assert!(text.contains("Tab 填入"));
     assert!(text.contains("Enter 直接提问"));
@@ -381,13 +381,11 @@ fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
 
 #[test]
 fn single_suggestion_hides_cycle_instruction() {
-    let state = InlineState::default();
     let mut output = Vec::new();
-    write_startup_suggestion_card(
-        &state,
+    write_startup_suggestions(
         &RatatuiInlineRenderer::with_width(120),
-        StartupSuggestionMode::Interactive,
         &[personal("recent-a")],
+        true,
         &mut output,
     )
     .unwrap();
@@ -502,7 +500,299 @@ fn startup_render_plan_keeps_three_health_prompts_at_narrow_width() {
             .collect::<Vec<_>>(),
         vec!["health-a", "health-b", "health-c"]
     );
-    assert!(visible_personal_candidates(&rendered).is_empty());
+    assert!(rendered
+        .visible_candidates
+        .iter()
+        .all(|candidate| candidate.source
+            == crate::recommendation::personal_model::CandidateSource::Health));
+}
+
+#[test]
+fn startup_snapshot_keeps_display_route_bindings_and_ghost_in_one_order() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var("HOME", home.path().canonicalize().unwrap());
+    std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let old_isolated = std::env::var_os("COSH_SHELL_ISOLATED");
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    std::env::remove_var("COSH_SHELL_ISOLATED");
+    let mut report = HealthScanReport::new("snapshot", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score) in [("health-a", 100), ("health-b", 90)] {
+        let item = health_try(id, score);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report);
+    let prepared = prepare_startup_suggestions(&mut state, "/fixture");
+    let ids: Vec<String> = prepared
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect();
+    assert!(!ids.is_empty());
+    match &state.pending_input_ghost_route {
+        crate::raw_input::PromptGhostRoute::AgentSelection {
+            candidates,
+            active,
+            generation,
+        } => {
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|c| c.suggestion_id.clone())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            assert_eq!(*active, 0);
+            assert_eq!(*generation, state.suggestion_snapshot_generation);
+        }
+        other => panic!("expected selection route, got {other:?}"),
+    }
+    let mut binding_ids: Vec<String> = state
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    binding_ids.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(binding_ids, expected);
+    assert_eq!(
+        state.pending_input_ghost.as_deref(),
+        Some(prepared.candidates[0].prompt_text.as_str())
+    );
+    let mut output = Vec::new();
+    write_startup_suggestions(
+        &RatatuiInlineRenderer::with_width(100).with_language(Language::EnUs),
+        &prepared.candidates,
+        true,
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for candidate in &prepared.candidates {
+        assert_eq!(text.matches(candidate.prompt_text.as_str()).count(), 1);
+    }
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+    match old_term {
+        Some(value) => std::env::set_var("TERM", value),
+        None => std::env::remove_var("TERM"),
+    }
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+        None => std::env::remove_var("XDG_RUNTIME_DIR"),
+    }
+    match old_isolated {
+        Some(value) => std::env::set_var("COSH_SHELL_ISOLATED", value),
+        None => std::env::remove_var("COSH_SHELL_ISOLATED"),
+    }
+}
+
+#[test]
+fn suppressed_first_health_candidate_does_not_consume_a_display_slot() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var("HOME", &root);
+    let store_path = root.join("suppression");
+    std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", &store_path);
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let old_isolated = std::env::var_os("COSH_SHELL_ISOLATED");
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    std::env::remove_var("COSH_SHELL_ISOLATED");
+    let mut report = HealthScanReport::new("suppressed", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score) in [("health-a", 100), ("health-b", 90)] {
+        let item = health_try(id, score);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut suppression =
+        crate::diagnostics::health::suppression::HealthSuppressionStore::default();
+    let host = crate::diagnostics::health::suppression::host_id_for_report(
+        &report,
+        crate::diagnostics::health::suppression::health_machine_id().as_deref(),
+    );
+    suppression.record_shown(
+        &host,
+        &report.findings[0],
+        crate::diagnostics::health::suppression::metrics_for_report(&report),
+        crate::diagnostics::health::suppression::current_time_ms(),
+    );
+    suppression.write_to_path(&store_path).unwrap();
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report);
+    let prepared = prepare_startup_suggestions(&mut state, "/fixture");
+    let ids: Vec<&str> = prepared
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    assert!(!ids.contains(&"health-a"), "{ids:?}");
+    assert!(ids.contains(&"health-b"), "{ids:?}");
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+    match old_term {
+        Some(value) => std::env::set_var("TERM", value),
+        None => std::env::remove_var("TERM"),
+    }
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+        None => std::env::remove_var("XDG_RUNTIME_DIR"),
+    }
+    match old_isolated {
+        Some(value) => std::env::set_var("COSH_SHELL_ISOLATED", value),
+        None => std::env::remove_var("COSH_SHELL_ISOLATED"),
+    }
+}
+
+#[test]
+fn displayed_claim_charges_exactly_the_displayed_findings() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    std::env::set_var("HOME", &root);
+    std::env::set_var(
+        "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+        root.join("suppression"),
+    );
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    let mut report = HealthScanReport::new("omitted", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score, prompt) in [
+        (
+            "health-a",
+            100,
+            crate::diagnostics::health::HealthMessageId::HealthPromptAnalyzeMemoryPressure,
+        ),
+        (
+            "health-b",
+            90,
+            crate::diagnostics::health::HealthMessageId::HealthPromptInspectDiskUsage,
+        ),
+        (
+            "health-c",
+            80,
+            crate::diagnostics::health::HealthMessageId::HealthPromptCheckSwapPressure,
+        ),
+    ] {
+        let mut item = health_try(id, score);
+        item.prompt_id = Some(prompt);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report.clone());
+    let first = prepare_startup_suggestions(&mut state, "/fixture");
+    assert_eq!(first.candidates.len(), 3);
+    let store = std::fs::read_to_string(root.join("suppression")).unwrap();
+    assert_eq!(
+        store
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        3
+    );
+    let mut second_state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    second_state.startup_health.report = Some(report);
+    let second = prepare_startup_suggestions(&mut second_state, "/fixture");
+    let second_ids: Vec<&str> = second
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    assert!(second_ids.is_empty(), "{second_ids:?}");
+    for (key, value) in [
+        ("HOME", old_home),
+        ("COSH_SHELL_HEALTH_SUPPRESSION_STORE", old_store),
+        ("TERM", old_term),
+        ("XDG_RUNTIME_DIR", old_xdg),
+    ] {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
 }
 
 #[test]
@@ -830,8 +1120,10 @@ fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Unsupported("fish".into()),
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(!effects.may_have_started());
@@ -839,15 +1131,15 @@ fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
 
 #[test]
 fn disabled_bootstrap_path_keeps_login_effects_armed() {
-    let _env = crate::diagnostics::test_env::env_guard();
-    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", Some(OsStr::new("0")));
     let effects = LoginEffectGuard::new();
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
-        true,
+        false,
+        false,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(!effects.may_have_started());
@@ -872,10 +1164,52 @@ fn missing_selected_shell_reports_spawn_and_keeps_login_effects_armed() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Zsh,
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
     assert!(!effects.may_have_started());
+}
+
+#[test]
+fn bash_login_bootstrap_path_never_runs_a_side_probe() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create PATH wrapper directory");
+    let hits = dir.path().join("hits");
+    let wrapper = dir.path().join("bash");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf hit >> '{}'\nprintf '\\n__COSH_PATH_BEGIN__/side-probe__COSH_PATH_END__\\n'\n",
+            hits.display()
+        ),
+    )
+    .expect("write side-probe PATH wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH wrapper executable");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+        None,
+    );
+
+    assert!(!effects.may_have_started());
+    assert!(
+        !hits.exists(),
+        "the login profile must run only in the managed shell"
+    );
+    assert_eq!(
+        std::env::var_os("PATH").as_deref(),
+        Some(dir.path().as_os_str())
+    );
 }
 
 #[test]
@@ -896,9 +1230,11 @@ fn selected_bootstrap_path_plan_marks_successful_probe() {
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
+        false,
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -918,9 +1254,11 @@ fn selected_bootstrap_path_plan_marks_failed_probe() {
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
+        false,
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -945,8 +1283,10 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Zsh,
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -954,10 +1294,7 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
 
 #[test]
 fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
-    let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
-    assert_eq!(bash_login.len(), 1);
-    assert_eq!(bash_login[0].flags, "-lic");
-    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert!(bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).is_none());
 
     let (_, zsh_non_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, false, true).unwrap();
     assert_eq!(zsh_non_login.len(), 1);
@@ -1022,34 +1359,109 @@ fn bash_login_probe_timeout_preserves_non_login_path() {
 }
 
 #[test]
-fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
+fn startup_auth_hint_uses_the_probe_without_overriding_disabled_ai() {
     let mut state = InlineState::default();
-    let mut body = vec!["/help".to_string()];
-
-    // Unresolved probe stays quiet.
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 1);
-
-    // Configured credentials stay quiet.
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    assert!(!model.capability.contains("/auth"));
     state.startup_auth.resolved = Some(true);
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 1);
-
-    // Explicitly unconfigured credentials add the /auth hint line.
+    assert!(
+        !super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+            .capability
+            .contains("/auth")
+    );
     state.startup_auth.resolved = Some(false);
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 3);
-    assert_eq!(body[1], "");
-    assert!(body[2].contains("/auth"), "{:?}", body[2]);
-    assert!(body[2].contains("AI not configured"), "{:?}", body[2]);
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    let hint = model.extra.join(" ");
+    assert!(hint.contains("/auth"));
+    assert!(hint.contains("AI"));
+    assert!(!hint.contains("AI not configured"));
+    state.personalization.ai_disabled = true;
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    assert!(!model.capability.contains("/auth"));
+    assert!(model.capability.contains("AI is disabled"));
+}
 
-    // AI disabled by config suppresses the hint even when unconfigured.
-    let mut disabled = InlineState::default();
-    disabled.personalization.ai_disabled = true;
-    disabled.startup_auth.resolved = Some(false);
-    let mut quiet = Vec::new();
-    append_startup_auth_hint(&mut disabled, &mut quiet);
-    assert!(quiet.is_empty());
+#[test]
+fn startup_auth_hint_presents_direct_questions_and_optional_model_setup_in_both_languages() {
+    for (language, direct_question, model_choice, misleading_claims) in [
+        (
+            Language::EnUs,
+            "Ask a question",
+            "a model",
+            ["AI not configured", "unlock", "must run /auth"],
+        ),
+        (
+            Language::ZhCn,
+            "可先提问",
+            "配置模型",
+            ["尚未配置 AI", "解锁", "必须先"],
+        ),
+    ] {
+        let mut state = InlineState {
+            language,
+            ..InlineState::default()
+        };
+        state.startup_auth.resolved = Some(false);
+        let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+        let hint = model.extra.join(" ");
+        for expected in [direct_question, "/auth", model_choice] {
+            assert!(hint.contains(expected), "missing {expected:?}: {hint}");
+        }
+        for claim in misleading_claims {
+            assert!(!hint.contains(claim), "misleading claim {claim:?}: {hint}");
+        }
+    }
+}
+
+#[test]
+fn startup_auth_hint_matches_each_environment_in_both_languages() {
+    use crate::adapter::StartupAuthHint;
+    for (hint, chinese, english) in [
+        (
+            StartupAuthHint::Ecs,
+            "直接提问，开始 AI 问答",
+            "Ask directly to start an AI conversation",
+        ),
+        (
+            StartupAuthHint::Configure,
+            "使用 /auth 配置模型后，即可开始 AI 问答",
+            "Configure a model with /auth to start an AI conversation",
+        ),
+        (
+            StartupAuthHint::Unknown,
+            "可先提问，按提示接入 AI · /auth 配置模型",
+            "Ask a question and follow the AI setup prompts · /auth to configure a model",
+        ),
+    ] {
+        for (language, expected) in [(Language::ZhCn, chinese), (Language::EnUs, english)] {
+            let mut state = InlineState {
+                language,
+                ..InlineState::default()
+            };
+            state.startup_auth.resolved = Some(false);
+            state.startup_auth.hint = hint;
+            assert_eq!(
+                super::welcome::welcome_model(&state, Some(("bash", "/tmp"))).extra,
+                vec![expected]
+            );
+            assert!(super::welcome::welcome_model(&state, None).extra.is_empty());
+            for resolved in [None, Some(true)] {
+                state.startup_auth.resolved = resolved;
+                assert!(
+                    super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+                        .extra
+                        .is_empty()
+                );
+            }
+            state.startup_auth.resolved = Some(false);
+            state.personalization.ai_disabled = true;
+            assert!(
+                super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+                    .extra
+                    .is_empty()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1122,9 +1534,13 @@ fn startup_auth_state_resolves_bounded_and_fails_quiet() {
     let mut ready = StartupAuthState::default();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     ready.pending = Some(receiver);
-    sender.send(Some(false)).unwrap();
+    sender
+        .send(Some((false, crate::adapter::StartupAuthHint::Ecs)))
+        .unwrap();
+    drop(sender);
     ready.wait_ready(Duration::from_millis(150));
     assert!(ready.ai_unconfigured());
+    assert_eq!(ready.hint, crate::adapter::StartupAuthHint::Ecs);
     assert!(ready.pending.is_none());
 
     // Timeout leaves the probe unresolved without consuming it.
@@ -1135,18 +1551,43 @@ fn startup_auth_state_resolves_bounded_and_fails_quiet() {
     assert!(!slow.ai_unconfigured());
     assert!(slow.pending.is_some());
     // A late result is still picked up by a later non-blocking poll.
-    slow_sender.send(Some(false)).unwrap();
+    slow_sender
+        .send(Some((false, crate::adapter::StartupAuthHint::Configure)))
+        .unwrap();
     slow.poll_ready();
     assert!(slow.ai_unconfigured());
+    assert_eq!(slow.hint, crate::adapter::StartupAuthHint::Configure);
 
     // A dropped probe (failed thread) resolves to quiet, not to a hint.
     let mut dropped = StartupAuthState::default();
-    let (broken_sender, receiver) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
+    let (broken_sender, receiver) =
+        std::sync::mpsc::sync_channel::<Option<(bool, crate::adapter::StartupAuthHint)>>(1);
     dropped.pending = Some(receiver);
     drop(broken_sender);
     dropped.wait_ready(Duration::from_millis(150));
     assert!(!dropped.ai_unconfigured());
     assert!(dropped.pending.is_none());
+}
+
+#[test]
+fn startup_auth_keeps_known_credentials_while_metadata_is_pending() {
+    use crate::adapter::StartupAuthHint;
+    let mut state = StartupAuthState::default();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+    state.pending = Some(receiver);
+    sender
+        .send(Some((false, StartupAuthHint::Unknown)))
+        .unwrap();
+    state.wait_ready(Duration::from_millis(10));
+    assert!(state.ai_unconfigured());
+    assert_eq!(state.hint, StartupAuthHint::Unknown);
+    assert!(state.pending.is_some());
+    sender.send(Some((false, StartupAuthHint::Ecs))).unwrap();
+    drop(sender);
+    state.poll_ready();
+    assert!(state.ai_unconfigured());
+    assert_eq!(state.hint, StartupAuthHint::Ecs);
+    assert!(state.pending.is_none());
 }
 
 #[test]
@@ -1190,4 +1631,175 @@ fn recommendation_notice_is_suppressed_while_auth_is_unconfigured() {
     let mut writer = state.personalization.writer.take().unwrap();
     writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn startup_health_handle_is_taken_once_without_filtering_the_report() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let mut report = HealthScanReport::new("startup-owned", 0);
+    report
+        .try_items
+        .push(health_try("stale-worker-preview", 100));
+    let mut state = InlineState::default();
+    state.startup_health.config = crate::config::HealthConfig {
+        role: Some("launch-config-snapshot".into()),
+        ..crate::config::HealthConfig::default()
+    };
+    state.startup_health.pending = Some(HealthScanHandle::ready(report));
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert!(state.startup_health.pending.is_none());
+    let report = state.startup_health.report.as_ref().unwrap();
+    assert_eq!(report.scan_id, "startup-owned");
+    assert_eq!(report.try_items.len(), 1);
+    assert_eq!(report.try_items[0].id, "stale-worker-preview");
+    state.startup_health.poll_ready();
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert_eq!(
+        state.startup_health.report.as_ref().unwrap().scan_id,
+        "startup-owned"
+    );
+    assert_eq!(
+        state.startup_health.config.role.as_deref(),
+        Some("launch-config-snapshot")
+    );
+}
+
+#[test]
+fn cancelled_startup_health_handle_never_publishes_a_late_report() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let mut handle = HealthScanHandle::ready(HealthScanReport::new("cancelled", 0));
+    handle.cancel();
+    let mut state = InlineState::default();
+    state.startup_health.pending = Some(handle);
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert!(state.startup_health.pending.is_none());
+    assert!(state.startup_health.report.is_none());
+    assert!(state.startup_health.rendered);
+    state.startup_health.poll_ready();
+    assert!(state.startup_health.report.is_none());
+}
+
+#[test]
+fn shell_ready_finishes_startup_health_even_when_the_startup_banner_is_hidden() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("0")));
+    let mut state = InlineState::default();
+    state.startup_health.pending =
+        Some(HealthScanHandle::ready(HealthScanReport::new("hidden", 0)));
+    let mut ready = crate::types::ShellEvent::user_input_intercepted("session", "");
+    ready.kind = crate::types::ShellEventKind::ShellReady;
+    let mut output = Vec::new();
+    render_startup_banner(
+        &[ready],
+        &crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter),
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .unwrap();
+    assert!(state.startup_health.pending.is_none());
+    assert_eq!(
+        state.startup_health.report.as_ref().unwrap().scan_id,
+        "hidden"
+    );
+    assert!(state.startup_health.rendered);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn path_bootstrap_probe_marks_only_its_child_as_an_internal_cosh_shell() {
+    let before = std::env::var_os("COSH_INTERNAL_SHELL");
+    let command = bootstrap_path_command("bash", "-lc");
+    assert!(command
+        .get_envs()
+        .any(|(name, value)| name == "COSH_INTERNAL_SHELL" && value == Some(OsStr::new("1"))));
+    assert_eq!(std::env::var_os("COSH_INTERNAL_SHELL"), before);
+}
+
+#[test]
+fn trusted_login_path_bootstrap_does_not_execute_shadowed_bash() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let selected = directory.path().join("verified-bash");
+    let log = directory.path().join("executed-programs");
+    std::fs::write(&selected, "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$COSH_TEST_PATH_PROGRAMS\"\nprintf '\\n__COSH_PATH_BEGIN__/usr/bin:/bin__COSH_PATH_END__\\n'\n").unwrap();
+    std::fs::write(directory.path().join("bash"), "#!/bin/sh\nexit 23\n").unwrap();
+    for path in [&selected, &directory.path().join("bash")] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _path = ScopedEnvVar::set("PATH", Some(directory.path().as_os_str()));
+    let _log = ScopedEnvVar::set("COSH_TEST_PATH_PROGRAMS", Some(log.as_os_str()));
+    let _enabled = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &LoginEffectGuard::new(),
+        Some(selected.to_str().unwrap()),
+    );
+    assert!(!log.exists(), "managed login owns its PATH discovery");
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        false,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &LoginEffectGuard::new(),
+        Some(selected.to_str().unwrap()),
+    );
+    let executed = std::fs::read_to_string(log).unwrap();
+    assert!(!executed.is_empty());
+    assert!(executed
+        .lines()
+        .all(|line| line == selected.to_str().unwrap()));
+}
+
+#[test]
+fn user_facing_startup_explains_the_shell_without_internal_migration_details() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.startup_auth.resolved = Some(false);
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    event.cwd = Some("/tmp".into());
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("AI Shell"), "{text}");
+    assert!(
+        text.contains("Run commands")
+            && text.contains("/help")
+            && !text.contains("natural language"),
+        "{text}"
+    );
+    assert!(text.contains("/auth"), "{text}");
+    assert!(
+        !text.contains("cosh-switch") && !text.contains("Adapter:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn user_facing_startup_does_not_advertise_questions_when_ai_is_disabled() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.personalization.ai_disabled = true;
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("AI is disabled"), "{text}");
+    assert!(text.contains("/help"), "{text}");
+    assert!(
+        !text.contains("ask questions in natural language"),
+        "{text}"
+    );
 }

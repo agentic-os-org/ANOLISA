@@ -1,33 +1,21 @@
-//! Typed local-package and offline-edit options, independent of runtime state.
+//! Typed Provider-extension and offline-edit options, independent of runtime state.
 
 use clap::Args;
 
 #[derive(Args, Debug, PartialEq)]
-#[group(multiple = true)]
 pub(super) struct Install {
     /// Absolute installation directory for a local bundle
-    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
-    pub prefix: Option<String>,
+    #[arg(long, value_name = "ABS_DIR")]
+    pub prefix: String,
     /// Absolute unpacked bundle directory; no URL or RPM/DEB backend
-    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
-    pub bundle: Option<String>,
+    #[arg(long, value_name = "ABS_DIR")]
+    pub bundle: String,
     /// Show packages, files and conflicts without creating or changing anything
-    #[arg(long, requires = "prefix", conflicts_with = "config")]
+    #[arg(long)]
     pub dry_run: bool,
     /// Package database scope (default: user); system writes require root
-    #[arg(long, value_enum, requires = "prefix", conflicts_with = "config")]
+    #[arg(long, value_enum)]
     pub scope: Option<super::scope::Scope>,
-    /// Legacy native Hook connection; prefer aw agent connect
-    #[arg(long, value_name = "FILE", requires = "agent", conflicts_with_all = ["json", "quiet", "verbose", "color"])]
-    pub config: Option<String>,
-    /// Legacy native target; does not install Agent software
-    #[arg(long, value_name = "TARGET", requires = "config")]
-    pub agent: Option<String>,
-    /// Native framework profile for legacy Hook connection
-    #[arg(long, value_name = "NAME", requires_all = ["config", "agent"])]
-    pub native_profile: Option<String>,
-    #[command(flatten)]
-    pub attachment: super::Attachment,
     #[command(flatten)]
     pub output: crate::output::Options,
 }
@@ -46,6 +34,9 @@ pub(super) struct Uninstall {
     /// Package IDs to remove; omit to remove the entire installation
     #[arg(value_name = "PACKAGE")]
     pub packages: Vec<String>,
+    /// Retain changed or missing selected files while removing their package records
+    #[arg(long)]
+    pub keep_changed: bool,
     #[command(flatten)]
     pub prefix: Prefix,
     /// Show removal and blockers without changing files or asking for confirmation
@@ -84,11 +75,14 @@ pub(super) struct Configure {
     )]
     pub openclaw: Option<String>,
     /// Provider template; none is the default
-    #[arg(long, value_parser = ["none", "tokenless", "sec-core", "sec-core+tokenless", "command"])]
+    #[arg(long, value_parser = ["none", "command"], conflicts_with = "template")]
     pub provider: Option<String>,
-    /// Absolute backend socket, only for the sec-core templates
+    /// Explicit distributor or Provider configuration template
     #[arg(long, value_name = "ABS_FILE")]
-    pub socket: Option<String>,
+    pub template: Option<String>,
+    /// Literal template variable NAME=VALUE; PREFIX and STATE are supplied by AW
+    #[arg(long, value_name = "NAME=VALUE", requires = "template")]
+    pub template_var: Vec<String>,
     /// Absolute program for the command template; generation never executes it
     #[arg(long, value_name = "ABS_PROGRAM")]
     pub check: Option<String>,
@@ -114,6 +108,9 @@ pub(super) struct Configuration {
 pub(super) struct Show {
     #[command(flatten)]
     pub configuration: Configuration,
+    /// Show SDK settings for the Adapter's unique or named target
+    #[arg(long, value_name = "ADAPTER[/TARGET]", conflicts_with_all = ["event", "provider", "id"])]
+    pub sdk_target: Option<String>,
     /// Select one Provider, including private parameters
     #[arg(
         long,
@@ -178,4 +175,62 @@ pub(super) struct RemoveHook {
     pub id: String,
     #[command(flatten)]
     pub output: crate::output::Options,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct NativeSources {
+    #[command(flatten)]
+    pub configuration: Configuration,
+    /// Existing AW Agent target
+    #[arg(long, value_name = "TARGET")]
+    pub agent: String,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct AddNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// AW source descriptor; never the native configuration contents
+    #[arg(long, value_name = "FILE")]
+    pub definition: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct RemoveNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// Exact AW source descriptor ID
+    #[arg(long, value_name = "ID", allow_hyphen_values = true)]
+    pub id: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<crate::cli::Exit> {
+    let (adapter, target) = selection
+        .split_once('/')
+        .map_or((selection, None), |(adapter, target)| {
+            (adapter, Some(target))
+        });
+    let config = aw_package::config_edit::read_configuration(std::path::Path::new(path))?;
+    let spec = &config.as_value()["spec"];
+    let agents = spec["agents"]
+        .as_object()
+        .ok_or(aw_config::Error::InvalidSchema)?;
+    let mut matches = agents.iter().filter(|(name, agent)| {
+        agent["adapter"] == adapter && target.is_none_or(|target| target == name.as_str())
+    });
+    let view = match (matches.next(), matches.next()) {
+        (Some((name, _)), None) => serde_json::json!({
+            "target": name,
+            "daemon": {"endpoint": spec["daemon"]["endpoint"], "state_dir": spec["daemon"]["state_dir"]},
+            "input_enabled": spec["events"]["input.submit"]["enabled"] == true,
+            "target_requires_service": aw_config::requirements::requires_service(&config, name)?,
+        }),
+        _ => serde_json::json!({"target": null}),
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &view)?;
+    Ok(crate::cli::Exit::Code(0))
 }

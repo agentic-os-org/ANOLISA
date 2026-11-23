@@ -2,8 +2,8 @@
 
 [English](../en/architecture-boundaries.md)
 
-AW 内部接入库随 AW 编译，具体 Provider 通过进程协议接入。
-本次迁移统一源码归属和回归入口，保留现有命令、协议与 Preview 安装行为。
+AW 内部接入库随 AW 编译，具体 Provider 通过进程协议接入。AW 负责运行接入与
+Provider 配置；组件 owner 构建自己的后端，distribution 选择并封装这些交付件。
 
 ## 目录与责任
 
@@ -15,15 +15,15 @@ ANOLISA/
 │   │   ├── aw-adapter/
 │   │   │   ├── src/                # 方言、能力目录、原生校验与回复转换
 │   │   │   └── native/             # Python / JavaScript 桥接资产
-│   │   ├── aw-contracts/           # src/、schemas/、tests/
+│   │   ├── aw-contracts/           # src/（含 source.rs、hook_plan.rs）、schemas/、tests/
 │   │   ├── aw-config/              # 配置解析与静态校验
-│   │   ├── aw-provider/            # 通用 Provider 协议与能力准入
+│   │   ├── aw-provider/            # 通用 Provider 协议与视图契约
 │   │   ├── aw-exec/                # 有界进程执行
 │   │   ├── aw-host/                # Provider 准备与调用
-│   │   ├── aw-core/                # 计划执行 API 与 Journal
+│   │   ├── aw-core/                # Hook 策略准入、Source 求解器、PreparedRoutes 路由编译、计划执行 API 与 Journal
 │   │   ├── aw-cli/                 # 统一 aw 命令入口
 │   │   ├── aw-service/             # 客户端、服务与运行状态
-│   │   └── aw-package/             # 当前 Preview 构建、安装和配置编辑
+│   │   └── aw-package/             # AW 扩展管理与配置编辑
 │   ├── tests/                     # 回归矩阵、原生验收清单与共享检查
 │   └── scripts/                   # 统一检查入口
 ├── providers/                     # 具体 Provider 的独立协作目录
@@ -32,6 +32,7 @@ ANOLISA/
 ├── src/agent-sec-core/            # 安全引擎及公开产品接口
 ├── src/tokenless/                 # 压缩引擎及公开产品接口
 └── distribution/                  # OS 组合发行
+    └── packaging/aw/              # 构建/打包脚本与具体 Provider 模板
 ```
 
 `providers/` 接受第一方和社区实现，也允许 Provider 在外部仓库维护、使用其他语言。
@@ -41,15 +42,18 @@ AW workspace 的普通依赖和测试依赖均不引用它们。
 ## Adapter 与服务之间传什么
 
 `aw-cli` 提供统一 `aw` 命令；独立 `aw-package` 可执行文件已删除，Rust crate 保留。
-CLI 直接调用 `aw-package`
-库完成安装与离线编辑；`aw-build` 仍是 `aw-package` 中的维护者工具。
+CLI 通过 `aw-package` 完成本地 Provider 管理与离线编辑；文件校验与事务保留在其
+私有 `store` 模块，运行时读锁归 `aw-exec`。产品安装仍归发行方或原生管理器负责。`make -C src/aw build` 构建 AW CLI，
+`make -C distribution aw-packages VERSION=0.2.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
+中的普通构建/打包脚本；具体后端打包和配置默认值由 distribution 管理。
 `aw-service` 以库形式提供客户端与服务；底层库不依赖 `aw-cli`。
 启动器和服务共同使用 `aw-adapter`；Adapter 不依赖 service、Host 或 CLI 内部类型。
 
-软件安装使用 `aw install --prefix ... --bundle ...`，原生 Hook 注册使用
-`aw agent connect --config ... --agent ...`，旧的 `aw install --config ... --agent ...`
-仍兼容。混用安装和原生注册选项会在写入前失败。Preview 仍仅接受现有本地包；
-此次拆分不增加 URL 安装器、系统包后端、自动激活或安装记录迁移。
+本地 AW 扩展安装使用 `aw install --prefix ... --bundle ...`，原生 Hook 注册使用
+`aw connect --config ... --agent ...`。混用安装和原生注册选项会在写入前失败。新的本地包须声明 Provider 协议，
+拒绝 `manifest.json` 与 core/后端 bundle。此入口不下载 URL、不调用原生包
+管理器，也不激活 Provider。已安装的 Provider 也可直接通过 `transport.argv`
+接入，无需 AW 包记录；RPM 所有的文件保留 RPM 管理权。
 
 | 接口或状态 | 归属 |
 | --- | --- |
@@ -59,10 +63,14 @@ CLI 直接调用 `aw-package`
 | `LaunchFiles`、取消标志 | 启动器提供文件访问与取消信号，保留目录和进程所有权 |
 | `Client`、完整 `Binding`、wire 类型、`HookBinding` | 保留在服务与 CLI；Adapter 不持有连接或 RPC 状态 |
 | 原生关联、完成阶段与回复 | Adapter 解释原生字段，返回比较数据或回复；CLI 输出并处理退出 |
+| `RouteOptions`、`PreparedRoutes` | Adapter 方言向 `aw-core::routes::compile` 提供声明式 `RouteOptions`；服务在每个 `Instance` 与任务 `Scope` 上缓存不可变 `PreparedRoutes` 快照 |
 | 实例、事件、claim、预算、取消、审计 | 服务持有并执行约束 |
 
 Qoder 的步骤排序要求、Hermes 的观察/转换阶段、OpenClaw 的替换后观察，以及
-观测来源的 framework 别名归 Adapter。服务继续固定初始快照、检查关联摘要和
+观测来源的 framework 别名归 Adapter。`reload::resident_supported` 的标准常驻 Source
+Profile 兜底校验要求 `aw_adapter::select` 已注册对应 Adapter，使未知 Adapter 在注册期即早失败
+（`registration_adapter_unsupported`），待后续 Source SPI 接管回调归一化后再开放非 catalog 来源。
+服务继续固定初始快照、检查关联摘要和
 单次调用。原始 native bytes 使用服务传入的严格 JSON 解码器核对，不接受回调
 自报的 `verified: true`。
 
@@ -72,15 +80,8 @@ Qoder 的步骤排序要求、Hermes 的观察/转换阶段、OpenClaw 的替换
 
 ## Schema 与演进
 
-能力、计划和证据合同归 `aw-contracts`，配置归 `aw-config`，Provider 公共消息和
-View 归 `aw-provider`。原生桥接数据归 Adapter，Provider 私有数据归各实现。
-
-`aw-contracts` 保留 23 份已注册合同；此前八份未注册、无仓库内调用方的能力 v1
-草案已删除，历史可从 Git 查阅，不另设 `references/`。计划和证据等活跃 v1 合同仍保留。
-迁移未改变活跃 Schema 的字节、`$id`、Registry 名称或摘要向量。
-
-新版本使用独立名称和 `$id`，与受支持的旧版并存，并增加语义校验和正反样例。
-目录清单测试要求每份合同都在 Registry 中，防止新增文件未接入运行时。
+架构总览的[Schema 归属](architecture.md#schema-归属)统一定义合同归属、
+受支持版本演进和迁移要求。活跃 Schema 清单以该章节引用的 Registry 和目录清单测试为准。
 
 ## 组件 owner 与 OS 发行方
 
@@ -100,14 +101,15 @@ OS 发行方消费组件产物，不接管各组件的内部实现。随产品�
 外部安装的 Provider 则按其公开契约接入。公共 SDK 是源码接口；运行时边界是
 JSON/stdio 协议，不承诺 Rust 二进制 ABI 稳定。
 
-### 本次迁移与后续发布
+### 独立交付
 
-本次已拆出独立 workspace、锁文件和测试入口。两个 Provider 仍通过仓库内路径使用
-AW 库，Tokenless 组合测试仍引用 sec-core Provider，尚未达到仓库外独立发布的目标。
+Provider 拥有独立 workspace、锁文件和测试入口。收录的实现仍通过仓库内路径
+使用 AW SDK，Tokenless 组合测试引用 sec-core Provider。这些实现要在仓库外
+构建，仍需已发布且固定版本的 SDK 包。
 
-当前 Preview 将 core 和 Provider 作为同一批构建产物交付，因此安装校验要求版本和
-源码提交一致，以确认组合来源。后续以已发布 SDK 和 Provider 产物建立兼容矩阵，
-再调整安装规则，并补齐旧安装回执迁移测试。本次不要求用户迁移配置或回执。
+集成构建共同选择并验证框架、Provider 与后端版本。Provider bundle 声明自己的
+ID 与版本；AW 扩展 API 要求进程协议，不要求匹配 AW core 包记录。
+core 与后端安装不属于 AW 的 Provider 管理 API。
 
 ## 回归边界
 

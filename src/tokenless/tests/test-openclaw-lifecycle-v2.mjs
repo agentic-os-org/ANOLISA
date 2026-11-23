@@ -35,6 +35,7 @@ writeFileSync(
     'const request = JSON.parse(fs.readFileSync(0, "utf8"));',
     'fs.appendFileSync(requestLog, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");',
     'const behavior = fs.existsSync(behaviorFile) ? fs.readFileSync(behaviorFile, "utf8") : "normal";',
+    'if (request.protocol_version !== 2) process.exit(2);',
     'if (behavior === "exit") process.exit(1);',
     'if (behavior === "malformed") { process.stdout.write("{bad"); process.exit(0); }',
     'if (behavior === "timeout") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);',
@@ -50,14 +51,22 @@ writeFileSync(
     '      output_optimization: "rtk",',
     "    };",
     "  }",
+    '} else if (request.operation === "before_model") {',
+    '  const text = JSON.stringify(request.input.visible_context);',
+    '  result = { tools: [], visible_markers: [...text.matchAll(/(?:If needed, call tool tokenless_retrieve with hash_or_marker=|If needed, run in shell: tokenless retrieve |<<tokenless:)([a-f0-9]{24})/g)].map(match => match[1]) };',
+    '} else if (request.operation === "retrieve") {',
+    '  if (!request.input.visible_markers.includes(request.input.hash_or_marker)) process.exit(1);',
+    '  result = { hash: request.input.hash_or_marker, payload: "verbatim original" };',
     '} else if (request.operation === "post_tool") {',
     "  const input = request.input;",
     '  if (behavior === "no-savings") {',
     '    result = { output: input.content, disposition: "no_savings" };',
     '  } else if (input.status === "error") {',
     '    result = { output: input.content, disposition: "tool_error", additional_context: "install the missing dependency" };',
-    '  } else if (input.output_optimization === "rtk" || input.content_origin === "file_content") {',
+    '  } else if (input.result_kind === "retrieve" || input.output_optimization === "rtk" || input.content_origin === "file_content") {',
     '    result = { output: input.content, disposition: "passthrough" };',
+    '  } else if (input.capabilities.recovery.kind === "tool") {',
+    '    result = { output: "If needed, call tool tokenless_retrieve with hash_or_marker=" + "a".repeat(24), stash_keys: ["a".repeat(24)], disposition: "applied" };',
     '  } else if (input.content.includes("lossy")) {',
     '    result = { output: input.content, disposition: "recoverability_unavailable" };',
     "  } else if (input.capabilities.replace_with_text) {",
@@ -72,7 +81,7 @@ writeFileSync(
     "}",
     'if (behavior === "invalid-output") result.output = 17;',
     "process.stdout.write(JSON.stringify({",
-    '  protocol_version: behavior === "wrong-version" ? 1 : 2,',
+    '  protocol_version: behavior === "wrong-version" ? 1 : behavior === "future-version" ? 3 : 2,',
     "  operation: request.operation,",
     "  attribution: request.attribution,",
     "  result,",
@@ -185,6 +194,7 @@ test("plugin manifest exposes only lifecycle policy switches", () => {
     "verbose",
   ]);
   assert.deepEqual(manifest.contracts.agentToolResultMiddleware, ["openclaw"]);
+  assert.deepEqual(manifest.contracts.tools, ["tokenless_retrieve"]);
   const metadata = JSON.parse(
     readFileSync(
       resolve(testDir, "../adapters/tokenless/openclaw/package.json"),
@@ -192,6 +202,90 @@ test("plugin manifest exposes only lifecycle policy switches", () => {
     ),
   );
   assert.equal(metadata.openclaw.compat.pluginApi, ">=2026.6.6");
+});
+
+test("recovery follows conversation UUIDs, current history and emitted Stash keys", async () => {
+  const hooks = new Map();
+  let factory;
+  let middleware;
+  const manifest = JSON.parse(readFileSync(
+    resolve(testDir, "../adapters/tokenless/openclaw/openclaw.plugin.json"), "utf8",
+  ));
+  plugin.register({
+    pluginConfig: { rtk_enabled: false, tool_ready_enabled: false },
+    registerTool(value, options) {
+      // OpenClaw rejects tools omitted from this manifest contract.
+      assert.ok(manifest.contracts.tools?.includes(options.name));
+      factory = value;
+      assert.equal(options.name, "tokenless_retrieve");
+    },
+    registerAgentToolResultMiddleware(value) { middleware = value; },
+    on(name, value) { hooks.set(name, value); },
+  });
+  assert.equal(factory({ sessionKey: "key-only" }), null);
+  const hash = "a".repeat(24);
+  const contextA = { sessionId: "recovery-a", sessionKey: "shared-key" };
+  const contextB = { sessionId: "recovery-b", sessionKey: "other-key" };
+  assert.equal(hooks.has("before_prompt_build"), false);
+  // Marker-free prompts skip Core, including after a plugin restart.
+  hooks.get("llm_input")({ historyMessages: [], prompt: "Start" }, contextA);
+  assert.equal(requests().length, 0);
+  hooks.get("llm_input")({ historyMessages: [
+    { role: "tool", content: `If needed, call tool tokenless_retrieve with hash_or_marker=${hash}` },
+  ], prompt: "Continue" }, contextA);
+  const toolA = factory(contextA);
+  const toolB = factory(contextB);
+  assert.equal((await toolA.execute("get-a", { hash_or_marker: hash })).content[0].text, "verbatim original");
+  await assert.rejects(toolB.execute("get-b", { hash_or_marker: hash }), /recovery failed/);
+  for (const reference of [
+    `<<tokenless:${hash}>>`,
+    `If needed, run in shell: tokenless retrieve ${hash}`,
+    `If needed, call tool tokenless_retrieve with hash_or_marker=${hash}`,
+  ]) {
+    // A resumed conversation may contain only a historical recovery reference.
+    hooks.get("llm_input")({ historyMessages: [reference], prompt: "Continue" }, contextA);
+    assert.equal((await toolA.execute("from-history", { hash_or_marker: hash })).content[0].text, "verbatim original");
+  }
+  // In-run compaction emits counts and only the routing key, with no llm_input.
+  hooks.get("after_compaction")({ messageCount: 1, compactedCount: 1 }, { sessionKey: contextA.sessionKey });
+  await assert.rejects(toolA.execute("after-compaction", { hash_or_marker: hash }), /recovery failed/);
+  hooks.get("llm_input")({ historyMessages: [
+    { role: "tool", content: `If needed, call tool tokenless_retrieve with hash_or_marker=${hash}` },
+  ], prompt: "Continue" }, contextA);
+  assert.equal((await toolA.execute("retained-marker", { hash_or_marker: hash })).content[0].text, "verbatim original");
+  const requestCount = requests().length;
+  hooks.get("llm_input")({ historyMessages: [], prompt: "Continue" }, contextA);
+  assert.equal(requests().length, requestCount);
+  await assert.rejects(toolA.execute("removed-marker", { hash_or_marker: hash }), /recovery failed/);
+
+  const event = {
+    toolName: "web_fetch", toolCallId: "fetch-a", args: {},
+    result: { content: [{ type: "text", text: "lossy page" }], details: { preserved: true } },
+  };
+  const optimized = middleware(event, { sessionKey: "shared-key" });
+  assert.equal(optimized.result.details.preserved, true);
+  assert.match(optimized.result.content[0].text, /tokenless_retrieve/);
+  assert.equal((await toolA.execute("get-a2", { hash_or_marker: hash })).content[0].text, "verbatim original");
+  await assert.rejects(toolB.execute("get-b2", { hash_or_marker: hash }), /recovery failed/);
+  assert.equal(middleware({ ...event, toolName: "tokenless_retrieve", toolCallId: "get-a2" }, contextA), undefined);
+  assert.equal(requests().at(-1).request.input.result_kind, "retrieve");
+
+  const cyclic = {};
+  cyclic.self = cyclic;
+  for (const malformed of [cyclic, 1n]) {
+    middleware(event, contextA);
+    assert.equal((await toolA.execute("before-malformed", { hash_or_marker: hash })).content[0].text, "verbatim original");
+    const count = requests().length;
+    assert.doesNotThrow(() => hooks.get("llm_input")({ historyMessages: [malformed], prompt: "Continue" }, contextA));
+    assert.equal(requests().length, count, "unserializable history must not reach Core");
+    await assert.rejects(toolA.execute("after-malformed", { hash_or_marker: hash }), /recovery failed/);
+  }
+
+  // /new keeps the routing key but receives a fresh conversation UUID.
+  const toolNew = factory({ sessionId: "recovery-new", sessionKey: "shared-key" });
+  await assert.rejects(toolNew.execute("get-new", { hash_or_marker: hash }), /recovery failed/);
+  hooks.get("session_end")({ sessionId: "recovery-a" });
+  await assert.rejects(toolA.execute("ended", { hash_or_marker: hash }), /recovery failed/);
 });
 
 test("missing or rejected middleware disables PostTool while retaining PreTool", () => {
@@ -445,12 +539,15 @@ test("PreTool requires a stable tool call ID and fails open", () => {
   assert.equal(rewrite("git status", { sessionId: "session-2" }), undefined);
   assert.equal(requests().length, 0);
 
-  writeFileSync(behaviorFile, "malformed");
-  assert.equal(
-    rewrite("git status", { sessionId: "session-2", toolCallId: "call-bad" }),
-    undefined,
-  );
-  assert.equal(requests().length, 1);
+  for (const behavior of ["malformed", "wrong-version", "future-version"]) {
+    writeFileSync(behaviorFile, behavior);
+    assert.equal(
+      rewrite("git status", { sessionId: "session-2", toolCallId: `call-${behavior}` }),
+      undefined,
+    );
+  }
+  assert.equal(requests().length, 3);
+  for (const { request } of requests()) assert.equal(request.protocol_version, 2);
 });
 
 test("RTK output optimization is isolated and consumed once", () => {
@@ -628,14 +725,16 @@ for (const length of [100000, 150000]) {
       "exit",
       "malformed",
       "wrong-version",
+      "future-version",
       "no-savings",
     ]) {
       writeFileSync(behaviorFile, behavior);
       assert.equal(postTool("exec", `failure-${length}`, received), undefined);
       assert.deepEqual(received, snapshot);
     }
-    assert.equal(requests().length, 4);
+    assert.equal(requests().length, 5);
     for (const { request } of requests()) {
+      assert.equal(request.protocol_version, 2);
       assert.equal(request.input.content, received.content[0].text);
     }
     rmSync(behaviorFile);

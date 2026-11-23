@@ -23,14 +23,18 @@ impl Fixture {
 
     fn prefix(&self, name: &str) -> PathBuf {
         let prefix = self.0.join(name);
-        fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+        fs::create_dir_all(prefix.join(".local-packages")).unwrap();
         fs::create_dir(prefix.join("bin")).unwrap();
-        for directory in [&prefix, &prefix.join(".aw-packages"), &prefix.join("bin")] {
+        for directory in [
+            &prefix,
+            &prefix.join(".local-packages"),
+            &prefix.join("bin"),
+        ] {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        fs::write(prefix.join(".aw-install.lock"), []).unwrap();
+        fs::write(prefix.join(".local-install.lock"), []).unwrap();
         fs::set_permissions(
-            prefix.join(".aw-install.lock"),
+            prefix.join(".local-install.lock"),
             fs::Permissions::from_mode(0o644),
         )
         .unwrap();
@@ -44,7 +48,7 @@ impl Fixture {
     }
 
     fn lock(prefix: &Path) -> File {
-        File::open(prefix.join(".aw-install.lock")).unwrap()
+        File::open(prefix.join(".local-install.lock")).unwrap()
     }
 }
 
@@ -131,7 +135,7 @@ fn absolute_argument_paths_protect_backends_even_when_the_executable_is_unmanage
 fn missing_symbolic_hardlinked_and_writable_locks_are_never_treated_as_unmanaged() {
     let fixture = Fixture::new();
     let prefix = fixture.prefix("installation");
-    let lock = prefix.join(".aw-install.lock");
+    let lock = prefix.join(".local-install.lock");
     fs::remove_file(&lock).unwrap();
     assert!(PackageLeases::for_paths([prefix.join("bin/runtime")]).is_err());
     let outside = fixture.0.join("outside");

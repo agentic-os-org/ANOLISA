@@ -2,6 +2,7 @@
 
 mod http;
 mod oauth;
+pub(crate) mod trust;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -97,19 +98,27 @@ pub(crate) async fn run_command(
     workspace_root: &std::path::Path,
 ) -> Result<(), String> {
     match args.command {
-        McpCommand::List => print_server_list(config),
+        McpCommand::List => print_server_list(config, workspace_root),
         McpCommand::Connect { server } => {
+            // Connect re-enables a trusted server; it must not grant startup trust
+            // itself, or it would bypass the interactive consent gate (issue #9518).
+            let server_config = configured_server(config, &server)?;
+            require_trusted_stdio(&server, server_config, workspace_root)?;
             let inspection =
                 inspect_server(&server, config, "connected", true, workspace_root).await?;
             state::remove_disabled(MCP_SERVERS_STATE, &server)?;
             print_json(&inspection)
         }
         McpCommand::Inspect { server } => {
+            let server_config = configured_server(config, &server)?;
+            require_trusted_stdio(&server, server_config, workspace_root)?;
             let inspection =
                 inspect_server(&server, config, "inspected", false, workspace_root).await?;
             print_json(&inspection)
         }
         McpCommand::Refresh { server } => {
+            let server_config = configured_server(config, &server)?;
+            require_trusted_stdio(&server, server_config, workspace_root)?;
             let inspection =
                 inspect_server(&server, config, "refreshed", false, workspace_root).await?;
             print_json(&inspection)
@@ -122,6 +131,51 @@ pub(crate) async fn run_command(
                 server,
                 disabled: true,
                 credentials_removed,
+            })
+        }
+        McpCommand::Show { server } => {
+            let server_config = configured_server(config, &server)?;
+            print_json(&show_server(&server, server_config, workspace_root))
+        }
+        McpCommand::Trust {
+            server,
+            yes,
+            expect_fingerprint,
+        } => {
+            let server_config = configured_server(config, &server)?;
+            require_stdio(&server, server_config)?;
+            if let Some(expected) = &expect_fingerprint {
+                let current = trust::fingerprint(server_config, workspace_root);
+                if &current != expected {
+                    return Err(format!(
+                        "MCP server '{server}' changed since preview; re-run 'cosh-core mcp show {server}' and trust again"
+                    ));
+                }
+            }
+            if !yes && !confirm_trust_interactive(&server, server_config)? {
+                return Err(format!("trust declined for MCP server '{server}'"));
+            }
+            let fingerprint = trust::trust(&server, server_config, workspace_root)?;
+            print_json(&McpTrustResult {
+                server,
+                action: "trust",
+                trusted: true,
+                fingerprint: Some(fingerprint),
+                command: Some(server_config.command.clone()),
+                args: Some(server_config.args.clone()),
+            })
+        }
+        McpCommand::Untrust { server } => {
+            // Revoke by name only: a pin must remain revocable even after the
+            // server leaves config or changes transport, so it cannot revive.
+            let previous = trust::untrust(&server)?;
+            print_json(&McpTrustResult {
+                server,
+                action: "untrust",
+                trusted: false,
+                fingerprint: previous,
+                command: None,
+                args: None,
             })
         }
         McpCommand::Login { server, manual } => {
@@ -138,6 +192,7 @@ struct McpServerStatus {
     transport: &'static str,
     enabled: bool,
     has_credentials: bool,
+    trusted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +217,28 @@ struct McpDisconnectResult {
     credentials_removed: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct McpServerShowResult {
+    server: String,
+    action: &'static str,
+    transport: &'static str,
+    command: String,
+    args: Vec<String>,
+    env_keys: Vec<String>,
+    fingerprint: String,
+    trusted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct McpTrustResult {
+    server: String,
+    action: &'static str,
+    trusted: bool,
+    fingerprint: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+}
+
 fn configured_server<'a>(
     config: &'a CoreConfig,
     server: &str,
@@ -181,6 +258,82 @@ fn transport(config: &McpServerConfig) -> &'static str {
     }
 }
 
+fn is_stdio_server(config: &McpServerConfig) -> bool {
+    config.url.is_none() && !config.command.trim().is_empty()
+}
+
+fn require_stdio(server: &str, config: &McpServerConfig) -> Result<(), String> {
+    if is_stdio_server(config) {
+        Ok(())
+    } else {
+        Err(format!(
+            "MCP server '{server}' is not command-based; startup trust applies to stdio servers"
+        ))
+    }
+}
+
+fn require_trusted_stdio(
+    server: &str,
+    config: &McpServerConfig,
+    workspace_root: &std::path::Path,
+) -> Result<(), String> {
+    if is_stdio_server(config) && !trust::is_trusted(server, config, workspace_root) {
+        Err(format!(
+            "MCP server '{server}' is not trusted for startup; run 'cosh-core mcp trust {server}'"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Shows the resolved command and asks for an explicit terminal confirmation.
+/// Non-interactive callers fail closed unless they pass `--yes`, so an agent
+/// cannot silently self-authorize startup through a piped stdin.
+fn confirm_trust_interactive(server: &str, config: &McpServerConfig) -> Result<bool, String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "trusting '{server}' needs interactive confirmation; run in a terminal or pass --yes"
+        ));
+    }
+    // Preview the literal config (keeping ${VAR} references) so a refused or
+    // piped call never echoes env-resolved credentials to stderr.
+    eprintln!("MCP server '{server}' would start at session startup:");
+    eprintln!("  command: {}", config.command);
+    eprintln!("  args: {}", config.args.join(" "));
+    eprint!("Trust this server to start automatically? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| format!("failed to read confirmation: {error}"))?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn show_server(
+    server: &str,
+    config: &McpServerConfig,
+    workspace_root: &std::path::Path,
+) -> McpServerShowResult {
+    let mut env_keys: Vec<String> = config.env.keys().cloned().collect();
+    env_keys.sort();
+    McpServerShowResult {
+        server: server.to_string(),
+        action: "show",
+        transport: transport(config),
+        // Show the literal config bytes, not env-expanded values: an arg such as
+        // "${API_TOKEN}" must not leak the resolved secret into JSON the agent
+        // can read. The fingerprint still binds the expanded identity.
+        command: config.command.clone(),
+        args: config.args.clone(),
+        env_keys,
+        fingerprint: trust::fingerprint(config, workspace_root),
+        trusted: !is_stdio_server(config) || trust::is_trusted(server, config, workspace_root),
+    }
+}
+
 fn print_json(value: &impl Serialize) -> Result<(), String> {
     let output = serde_json::to_string_pretty(value)
         .map_err(|error| format!("failed to serialize MCP status: {error}"))?;
@@ -188,7 +341,7 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
     Ok(())
 }
 
-fn print_server_list(config: &CoreConfig) -> Result<(), String> {
+fn print_server_list(config: &CoreConfig, workspace_root: &std::path::Path) -> Result<(), String> {
     let disabled = state::load_disabled(MCP_SERVERS_STATE);
     let mut servers = Vec::new();
     for (server, server_config) in &config.mcp.servers {
@@ -198,6 +351,8 @@ fn print_server_list(config: &CoreConfig) -> Result<(), String> {
             enabled: !disabled.contains(server),
             has_credentials: server_config.bearer_token.is_some()
                 || oauth::has_credentials(server)?,
+            trusted: !is_stdio_server(server_config)
+                || trust::is_trusted(server, server_config, workspace_root),
         });
     }
     servers.sort_by(|left, right| left.server.cmp(&right.server));
@@ -295,6 +450,43 @@ pub async fn register_configured_tools(
             }
         }
     }
+}
+
+/// Partitions configured servers into the set allowed to auto-start and the names
+/// of stdio servers still awaiting an explicit trust decision (issue #9518).
+///
+/// Startup is code execution driven by a writable config, so a stdio server runs
+/// automatically only once its command/args/env fingerprint is pinned. HTTP servers
+/// contact a remote endpoint without local execution and are not gated. Explicit
+/// `mcp connect`/`inspect` remain immediate user consent and bypass this partition.
+pub fn partition_startup_servers(
+    servers: &HashMap<String, McpServerConfig>,
+    workspace_root: &std::path::Path,
+) -> (HashMap<String, McpServerConfig>, Vec<String>) {
+    let trusted = trust::load_trusted();
+    let disabled = state::load_disabled(MCP_SERVERS_STATE);
+    let mut allowed = HashMap::new();
+    let mut untrusted = Vec::new();
+    for (name, config) in servers {
+        if is_stdio_server(config) && !trust::is_trusted_in(&trusted, name, config, workspace_root)
+        {
+            // Untrusted stdio never enters the connect set, even when disconnected:
+            // a later disabled-state change must not slip it past the trust gate.
+            // A disconnected server is already opted out; do not nag about trust.
+            if !disabled.contains(name) {
+                tracing::info!(
+                    server = name.as_str(),
+                    fingerprint = %trust::fingerprint(config, workspace_root),
+                    "MCP stdio server untrusted; skipping startup spawn until 'cosh-core mcp trust'"
+                );
+                untrusted.push(name.clone());
+            }
+            continue;
+        }
+        allowed.insert(name.clone(), config.clone());
+    }
+    untrusted.sort();
+    (allowed, untrusted)
 }
 
 fn tool_is_allowed(tool_name: &str, allowed_tools: Option<&[String]>) -> bool {
@@ -867,7 +1059,7 @@ impl StdioConnection {
         config: &McpServerConfig,
         workspace_root: std::path::PathBuf,
     ) -> Result<Self, String> {
-        let executable = expand_env_vars(&config.command);
+        let executable = resolve_executable(&config.command, &workspace_root);
         let args: Vec<_> = config.args.iter().map(|arg| expand_env_vars(arg)).collect();
         let mut command = Command::new(&executable);
         command
@@ -876,6 +1068,13 @@ impl StdioConnection {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true);
+        // Anchor the child cwd to the workspace root so relative script arguments
+        // resolve against the same directory the trust pin binds. The pin binds the
+        // workspace-root path; when the directory is absent the spawn falls back to
+        // the inherited cwd (a vanished-workspace residual noted for follow-up).
+        if workspace_root.is_dir() {
+            command.current_dir(&workspace_root);
+        }
         configure_child_environment(&mut command, &config.env)?;
 
         let mut child = command
@@ -1048,9 +1247,15 @@ fn configure_child_environment(
     Ok(())
 }
 
-fn expand_env_vars(value: &str) -> String {
+pub(crate) fn expand_env_vars(value: &str) -> String {
+    // Bounded so a self-referential or cyclic variable (A="${A}") cannot hang
+    // startup or the MCP CLI; legitimate nested expansion settles well within it.
+    const MAX_EXPANSION_PASSES: usize = 64;
     let mut expanded = value.to_string();
-    while let Some(start) = expanded.find("${") {
+    for _ in 0..MAX_EXPANSION_PASSES {
+        let Some(start) = expanded.find("${") else {
+            break;
+        };
         let Some(end_offset) = expanded[start..].find('}') else {
             break;
         };
@@ -1060,6 +1265,23 @@ fn expand_env_vars(value: &str) -> String {
         expanded.replace_range(start..=end, &replacement);
     }
     expanded
+}
+
+/// Resolves a stdio command to a deterministic startup target. A relative path
+/// (containing a separator) is anchored to the workspace root so the same trust
+/// pin matches across sessions regardless of the process cwd; absolute paths and
+/// bare PATH names are kept as expanded. Trust and spawn must use this same
+/// resolution so a pin binds the file that actually starts (issue #9518).
+pub(crate) fn resolve_executable(command: &str, workspace_root: &std::path::Path) -> String {
+    let expanded = expand_env_vars(command);
+    let path = std::path::Path::new(&expanded);
+    if path.is_absolute() || !expanded.contains('/') {
+        return expanded;
+    }
+    workspace_root
+        .join(&expanded)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn format_tool_result(result: &Value) -> ToolResult {
@@ -1323,6 +1545,7 @@ mod tests {
             transport: "streamable_http",
             enabled: true,
             has_credentials: true,
+            trusted: true,
         };
         let output = serde_json::to_string(&status).unwrap();
         assert!(output.contains("has_credentials"));
@@ -1355,6 +1578,7 @@ done
         config.mcp.servers.insert("fake".to_string(), server);
         let workspace = std::path::PathBuf::from("/tmp/test-workspace");
 
+        trust::trust("fake", config.mcp.servers.get("fake").unwrap(), &workspace).unwrap();
         let inspection = inspect_server("fake", &config, "inspected", false, &workspace)
             .await
             .unwrap();
@@ -1748,6 +1972,77 @@ done
 
         register_configured_tools(&mut registry, &servers, &workspace).await;
         assert!(registry.get("mcp__fake__echo").is_none());
+    }
+
+    #[test]
+    fn partition_separates_trusted_untrusted_and_http() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let _guard = EnvVarGuard::set("COSH_STATES_DIR", states.path());
+        let ws = std::path::Path::new("/tmp/test-workspace");
+        let trusted_stdio = fake_server("#!/bin/sh\n").1;
+        let untrusted_stdio = fake_server("#!/bin/sh\n").1;
+        let mut http = fake_server("#!/bin/sh\n").1;
+        http.url = Some("https://example.invalid/mcp".to_string());
+        http.command = String::new();
+        trust::trust("trusted", &trusted_stdio, ws).unwrap();
+        let mut servers = HashMap::new();
+        servers.insert("trusted".to_string(), trusted_stdio);
+        servers.insert("untrusted".to_string(), untrusted_stdio);
+        servers.insert("http".to_string(), http);
+        let (allowed, untrusted) = partition_startup_servers(&servers, ws);
+        assert!(allowed.contains_key("trusted"));
+        assert!(allowed.contains_key("http"));
+        assert!(!allowed.contains_key("untrusted"));
+        assert_eq!(untrusted, vec!["untrusted".to_string()]);
+    }
+
+    #[test]
+    fn partition_empty_servers() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let _guard = EnvVarGuard::set("COSH_STATES_DIR", states.path());
+        let ws = std::path::Path::new("/tmp/test-workspace");
+        let (allowed, untrusted) = partition_startup_servers(&HashMap::new(), ws);
+        assert!(allowed.is_empty());
+        assert!(untrusted.is_empty());
+    }
+
+    #[test]
+    fn partition_skips_trust_nag_for_disabled_servers() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let _guard = EnvVarGuard::set("COSH_STATES_DIR", states.path());
+        let ws = std::path::Path::new("/tmp/test-workspace");
+        state::add_disabled(MCP_SERVERS_STATE, "off").unwrap();
+        let mut servers = HashMap::new();
+        servers.insert("off".to_string(), fake_server("#!/bin/sh\n").1);
+        let (allowed, untrusted) = partition_startup_servers(&servers, ws);
+        // Disconnected suppresses the nag, but an untrusted stdio server must never
+        // enter the connect set: a later disabled change cannot bypass the gate.
+        assert!(untrusted.is_empty());
+        assert!(!allowed.contains_key("off"));
+    }
+
+    #[test]
+    fn partition_untrusted_names_sorted() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let _guard = EnvVarGuard::set("COSH_STATES_DIR", states.path());
+        let ws = std::path::Path::new("/tmp/test-workspace");
+        let mut servers = HashMap::new();
+        servers.insert("zeta".to_string(), fake_server("#!/bin/sh\n").1);
+        servers.insert("alpha".to_string(), fake_server("#!/bin/sh\n").1);
+        let (_, untrusted) = partition_startup_servers(&servers, ws);
+        assert_eq!(untrusted, vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    #[test]
+    fn expand_env_vars_terminates_on_self_reference() {
+        std::env::set_var("COSH_MCP_TEST_CYCLE", "${COSH_MCP_TEST_CYCLE}");
+        let result = expand_env_vars("${COSH_MCP_TEST_CYCLE}");
+        std::env::remove_var("COSH_MCP_TEST_CYCLE");
+        assert_eq!(result, "${COSH_MCP_TEST_CYCLE}");
     }
 
     #[tokio::test]

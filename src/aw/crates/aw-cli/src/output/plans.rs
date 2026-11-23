@@ -10,7 +10,7 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
     let color = terminal::use_color(options.color, stdout.is_terminal());
     match outcome {
         Outcome::PackagePlanned { plan } => {
-            if !options.quiet {
+            if !options.quiet && plan.ready() {
                 let action = match plan.action {
                     Action::Install => "Install",
                     Action::Uninstall => "Removal",
@@ -18,7 +18,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                 let scope = match plan.scope {
                     Scope::User => "user",
                     Scope::System => "system",
-                    Scope::Unknown => "not recorded",
                 };
                 let title = format!(
                     "{action} plan for {} ({scope})",
@@ -47,6 +46,14 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                         terminal::escape(&file.path)
                     )?;
                 }
+                for file in &plan.preserved {
+                    writeln!(
+                        stdout,
+                        "KEEP PATH {}: {}",
+                        terminal::escape(&file.path),
+                        terminal::escape(&file.reason)
+                    )?;
+                }
                 for dependency in &plan.dependencies {
                     writeln!(
                         stdout,
@@ -55,9 +62,6 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                         terminal::escape(&dependency.required_package_id),
                         terminal::escape(&dependency.version)
                     )?;
-                }
-                if plan.register_legacy {
-                    writeln!(stdout, "Older installation records will be archived and registered when this plan is executed.")?;
                 }
                 writeln!(stdout, "Plan only; no files were created or changed.")?;
             }

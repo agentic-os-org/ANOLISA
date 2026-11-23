@@ -53,7 +53,7 @@ mounted filesystem while ordinary skill files remain backed by the source tree.
 
 ## Scope
 
-- Public CLI commands are `mount`, `stop`, `classify`, `validate`, and `list`.
+- Public CLI commands are `mount`, `stop`, `explain`, `classify`, `validate`, and `list`.
 - Skill visibility is controlled by `skillfs-views.toml`.
 - FUSE write passthrough is supported while mounted, but only `SKILL.md`
   changes trigger store synchronization.
@@ -123,7 +123,7 @@ existing release environment approval.
 ### Build
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### Common Commands
@@ -137,6 +137,9 @@ cargo run -p skillfs -- list /path/to/skills
 
 # Generate or inspect skillfs-views.toml.
 cargo run -p skillfs -- classify /path/to/skills
+
+# Explain source precedence and views without mounting.
+cargo run -p skillfs -- explain --config /path/to/skillfs-mount.toml
 
 # Mount the FUSE filesystem.
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
@@ -168,6 +171,10 @@ To apply configuration changes, run `skillfs stop <MOUNTPOINT>` successfully,
 then start again with `--config ... --managed`.
 See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
+
+`explain` inspects current configuration without mounting; it does not query a
+running managed worker. See the [diagnostic reference](../../docs/user-guide/en/skillfs/index.md#explain)
+for options, JSON fields, exit codes, and incomplete-result semantics.
 
 ### Managed Mount Mode
 
@@ -273,12 +280,23 @@ When FUSE reads `SKILL.md`, SkillFS runs `compiler::compile` and supports:
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+On Linux, command availability is checked directly against executable files on
+`PATH`; the optional `which` utility is not required. The fixed command allowlist
+and mount-startup environment snapshot are unchanged. Remount after changing
+`PATH` or installing a command to refresh that snapshot.
+
 When there are no conditional blocks, SkillFS also applies a small set of
 heuristic command normalizations, for example:
 
 - Bare `pip install` / `pip3 install` -> `uv pip install`; interpreter-specific
-  `python -m pip` calls stay unchanged. Bare invocations use a conservative
-  command-position heuristic rather than a complete shell parser.
+  `python -m pip` calls and installs with `--user` stay unchanged because uv
+  does not support user-site installs. `PIP_USER` in the mount environment or
+  preceding text on the same line also keeps pip, as do known pip-only options
+  such as `--root` (see the [user guide](../../docs/user-guide/en/skillfs/index.md#read-time-transforms)).
+  Bare invocations use a conservative command-position heuristic; unfinished
+  arguments, including line continuations and command substitutions, stay unchanged.
+  Descriptor redirections do not end the argument scan. Inline code spans in lists
+  or prose are independent; trailing parenthetical notes do not prevent rewriting.
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
@@ -440,7 +458,7 @@ silently disabled adapter.
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
   skillfs-fuse/   FUSE filesystem and POSIX passthrough layer
-  skillfs-cli/    mount / stop / classify / validate / list
+  skillfs-cli/    mount / stop / explain / classify / validate / list
 container/        sidecar image: Dockerfile, entrypoint, preflight, mount probe
 deploy/kubernetes/  Kubernetes sidecar manifests and example skill source
 docs/specs/       implementation specifications

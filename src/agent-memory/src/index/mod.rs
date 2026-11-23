@@ -11,12 +11,13 @@ pub mod store;
 pub mod worker;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
 use crate::embedding::EmbeddingProvider;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::ns::MountPoint;
 
 pub use store::BM25Store;
@@ -53,6 +54,7 @@ pub struct IndexHandle {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     /// Whether normal search excludes cold files.
     exclude_cold: bool,
+    incomplete: Arc<AtomicBool>,
 }
 
 impl IndexHandle {
@@ -73,6 +75,7 @@ impl IndexHandle {
         // Initial full scan + watcher in one worker.
         let emb_clone = embedding.clone();
         let worker = IndexWorker::spawn(mount.clone_lite(), Arc::clone(&store), emb_clone)?;
+        let incomplete = Arc::clone(&worker.incomplete);
 
         Ok(Self {
             store,
@@ -80,7 +83,18 @@ impl IndexHandle {
             db_path,
             embedding,
             exclude_cold,
+            incomplete,
         })
+    }
+
+    /// Refuse tool search results while known indexing failures await recovery.
+    pub(crate) fn check_search_health(&self) -> Result<()> {
+        if self.incomplete.load(Ordering::Acquire) {
+            return Err(MemoryError::Other(
+                "search index is incomplete; automatic retry is pending. Retry shortly or use mem_grep; inspect index worker warnings if the failure persists".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
@@ -142,9 +156,8 @@ impl IndexHandle {
     /// searchable, closing the race window between the file write and the
     /// notify watcher's next debounce flush (~200 ms).
     ///
-    /// The notify watcher will later process the same inotify event and
-    /// issue a redundant upsert — this is harmless because `upsert` is
-    /// idempotent (DELETE + INSERT on the same rowid).
+    /// The notify watcher skips the BM25 upsert when the stored mtime and
+    /// size match, so attribution must be correct on this synchronous path.
     ///
     /// Cold-file strategy: `upsert` inserts with `is_cold = 0` (warm) by
     /// default, which is correct — a freshly observed file should be warm.
@@ -152,9 +165,20 @@ impl IndexHandle {
     /// behavioural divergence. The `compact()` method only marks files
     /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
     /// indexed file is unaffected regardless of which path inserts it.
-    pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
+    ///
+    /// `agent_id` is the observing agent's `MCP_CLIENT_NAME`, matching the
+    /// watcher's attribution. An untagged row is invisible to
+    /// `isolated:<agent>` and shared with other agents under `filter:<agent>`.
+    pub fn reindex_file(
+        &self,
+        rel_path: &str,
+        body: &str,
+        mtime_ms: i64,
+        size: u64,
+        agent_id: Option<&str>,
+    ) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.upsert(rel_path, mtime_ms, size, body, None)
+        store.upsert(rel_path, mtime_ms, size, body, agent_id)
     }
 
     /// Compact the index: mark old, never-accessed files as cold.

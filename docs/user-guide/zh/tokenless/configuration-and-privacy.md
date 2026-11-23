@@ -64,15 +64,16 @@ tokenless stats disable
 
 ## 可选 Git Diff 上下文裁剪
 
-Git Diff 裁剪默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
-`TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 启用；取消变量或设为 `0` 关闭。
-`1`、`true`、`yes`（不区分大小写）表示启用。此开关独立于总压缩开关，
+Git Diff 裁剪默认开启。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。未设置或空值保留默认开启；
+`1`、`true`、`yes`（不区分大小写）表示启用，其他非空值表示关闭。此开关独立于总压缩开关，
 不是 `config.json` 字段。启用裁剪后，设置 `TOKENLESS_COMPRESSION_ENABLED=0`
 会测量候选，但仍返回原文。
 
 Rust 使用 `RuntimeConfig.diff_compression_enabled`；Python 使用
-`TokenlessConfig(diff_compression_enabled=True)` 或原生 `TokenlessRuntime`
-的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
+`TokenlessConfig(diff_compression_enabled=False)` 或原生 `TokenlessRuntime`
+的同名参数关闭。两者默认 true。`TokenlessConfig` 继承环境默认值，QwenPaw 和 AgentScope
+也适用；显式参数优先。直接调用原生 Runtime 时采用其显式构造配置。
 
 压缩器处理成功命令输出中收到的完整普通 Git Diff，需要文本替换能力、可用的
 Stash 和支持的恢复方式。保留全部增删行、元信息，以及修改附近两行可用上下文。
@@ -110,8 +111,9 @@ SDK 与原生绑定不读取该环境变量。要在那里关闭转写，Rust �
 命令的输出）保留在视图之后。页面转写为 Markdown 子集：标题、段落、列表、表格、
 带语言的围栏代码、带目标的链接、图片 alt、引用和提示框。MathML 公式输出其 TeX 注解
 或 `alttext`，两侧加 `$`；跨行或跨列的单元格在其覆盖的位置留空单元格，各行不补齐
-到最宽行；段落行首形似 Markdown 标题、列表项、引用、分隔线或代码围栏时加
-转义。正文根为 `<main>`、`role=main` 元素或唯一的最外层 `<article>`（其内部嵌套的
+到最宽行，表格的第一个表头组和表脚组按浏览器的绘制位置分别放在最前和最后；有序列表按
+`start`、`reversed` 和列表项的 `value` 保留浏览器显示的编号；段落行首形似
+Markdown 标题、列表项、引用、分隔线或代码围栏时加转义。正文根为 `<main>`、`role=main` 元素或唯一的最外层 `<article>`（其内部嵌套的
 article，如评论，不计入），否则为整个 body。移除脚本、样式、`noscript`、模板、SVG、iframe、注释、
 `nav`、`aside`、页面级 `header`/`footer`、role 为 navigation、banner、contentinfo、
 complementary 的元素、表单控件（`button`、`input`、`select`、`textarea`、`datalist`、
@@ -134,6 +136,140 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 
 有限样本已验证局部转写及原文恢复。
 
+### JSON 值中的 HTML
+
+同一开关也作用于 JSON 结果中携带的 HTML，例如 API 记录的 `content` 或 `body` 字段中的
+富文本或 UI 卡片。判断不依赖字段名：字符串值至少 256 个字符、以受支持的 HTML5 或 SVG
+标签、注释或 `<!doctype html` 开头并以 `>` 结尾时才会考虑。打印本地文件（`file_read`）的
+结果中的 HTML 与上文一样保持原样。结果仍是 JSON，因此不要求文本替换槽位；但要求 Stash
+与受支持的恢复方式可用。
+
+只替换该值。字段名、其他值、JSON 类型、精确数字字面量以及该值在记录中的位置都保持不变。
+新值以类似 `[HTML rendered as Markdown; removed 1 style. If needed, run in shell: tokenless
+retrieve <hash>]` 的一行开头，其后是混合 Markdown 视图。按该指令可取回这一个值，内容与收
+到时完全一致。字符串中序列化的 JSON 不会被解析，也不会变成对象。
+
+与页面不同，值会被完整转写，不移除任何可见内容。只移除纯外观样式表和注释并在首行计数，
+纯外观行内样式（含不改变阅读顺序的 flex/grid 布局、间距、阴影、轮廓及表现属性）会被去
+除。`br` 与块级元素带来的换行会保留，代码中也一样。普通按钮文字及相邻的 flex 或
+`inline-block` 子项保留为彼此分开的文本，没有替代文字的图片和没有文字的链接保留其目标地
+址，链接或图片的提示文字（`title`）作为 Markdown 标题输出，片段内部被引用的 `id` 或
+`name` 锚点（例如 `#section` 链接或 `for`、`headers`、`aria-*` 引用）予以保留，未被引用
+的锚点去除。
+
+Markdown 无法表达其含义的元素或属性会作为紧凑 HTML 原地保留在已压缩的富文本子树周围，
+而不再让整段字符串回退为原始 HTML：
+
+- 行内 `<svg>` 图标与矢量图形（保留 `xlink:href` 等带命名空间前缀的属性，仅去除最外层纯
+  外观 `style`/`class`），以及不带 `src` 且内容为合法 JSON 的 `<script type="application/json">`
+  或 `<script type="application/ld+json">` 数据块。
+- 语义容器（`nav`、`header`、`footer`、`aside`、`hgroup`、`search`，或携带 `data-*`、
+  `aria-*`、非表现性 `role`、`cite`、被引用 `id` 的容器），保留外层 HTML 起止标签与语义
+  属性，同时递归压缩内部的富文本子树。
+- 无法用 GFM 表达的表格（多行表头、表体中途出现的表头行、单元格嵌套表格或多行单元格）以
+  及 Markdown 会改变编号或任务状态的列表（`reversed`、`type`、`li[value]`、非常规
+  `start`、空编号项或带 `data-*`/`aria-*` 的任务项）：保留成套的 HTML 表格或列表标签，当
+  单元格或列表项内含可压缩富文本时继续将其转写为 Markdown。
+- 表单控件及状态（`input`、`select`、`textarea`、`form`、`label`，以及携带 `name`、
+  `value`、`disabled` 或 `data-*`/`aria-*` 的 `button`）、媒体（`audio`、`video`、
+  `picture`、`canvas`）、局部短语语义标签（`del`、`ins`、`s`、`sub`、`sup`、`q`、`time`、
+  `data`、带 `title` 的 `abbr`、`bdi`、`bdo`、`ruby`）、含文字的 `aria-hidden` 图标连字、
+  行内删除线（`line-through`）、上下标或有界 `vertical-align`、保留空白的 `white-space`，
+  以及 `javascript:`、`data:` 或方括号不平衡的链接与图片。
+
+`text-indent` 的零值（例如 `0`、`0px` 和 `0%`）作为纯外观样式移除。其余未分类的行内
+声明连同所在元素、原始 `style` 属性和完整子树保留为 HTML，独立的兄弟子树仍可转换为
+Markdown。已知会影响可见性或其他元素的样式（包括非零缩进、逻辑尺寸、定位、网格位置、计数器和动画）
+仍使整个值原样保留。`<style>` 样式表中的未知声明同样整值回退，因为选择器不匹配到具体元素。
+
+无法验证全局安全性、视图可能暴露屏幕上隐藏的文字或掩盖可见文字，或没有任何子树可转换为
+Markdown 时，整个值仍原样保留：
+
+- 可执行或外部 `<script>`、行内事件属性（`on*`）、`javascript:` 或 `data:` 表单提交地址、
+  `<template>`、框架与嵌入对象（`iframe`、`frame`、`object`、`embed`、`portal`、
+  `fencedframe`）、MathML、HTML/SVG 之外的自定义元素或 XML 标签、`<base>` 与 `<link>`。
+- 视图会丢弃的元数据：字符集、内容类型、兼容模式、视口和邮件排版提示以外的 `meta`
+  （因此描述或自动跳转会原样保留），以及 head 之外或第一个之后的 `title`。
+- 读者操作后浏览器才显示的内容：折叠的 `details` 中的正文，或没有 `summary`、用 `name`
+  分组的 `details`。
+- `<style>` 样式表中超出纯外观颜色、字体、对齐、边框、尺寸或间距的规则（选择器不做匹
+  配，因此样式表规则无法局部化到单个元素）、`hidden` 属性、隐藏或生成内容、非零 flex/grid
+  `order`、`flex-basis: 0` 裁切、Wingdings 等符号字体、为负或过宽的字间距或词间距，以及
+  检查无法识别的 CSS 转义、厂商前缀、自定义属性或 `var()` 等函数。
+- 样式让文字难以看清或完全看不见。颜色、字号和行高会沿值中的行内样式、`bgcolor` 或
+  `font` 元素的 `color` 等表现属性、`<style>` 样式表和表格列背景，以及浏览器对链接、
+  `mark`、按钮和表单控件的默认样式逐层推算（跳过不绘制文字的 `<script>`、`<style>` 及
+  SVG 元数据/定义节点）。任何文字与其可能所处的颜色对比度低于 1.5（白底白字，或与页面同
+  色的文字），或位于背景图片、渐变之上，或字号小于 6 像素，或行距小于字号的一半，该值都
+  原样保留。固定宽高可能让文字溢出到其他内容上，行内元素超过 8 像素的上下内边距或边框、
+  设置了粗细的文字装饰线可能盖住相邻行，这些情况同样原样保留。值背后的页面按浏览器默认处
+  理：白底、16 像素黑字。值之外的样式表（例如显示该值的应用自身的样式表、深色模式或它加
+  载的字体）无法得知，不在考虑范围内。外边距或内边距可能把文字向右或向下移到页面需要滚动
+  才能看到的位置，显示该值的应用是否会把那里的文字裁掉同样无法得知。
+- 任何可见文字、保留的 HTML 标签或链接/图片目标地址未按浏览器源码顺序出现在视图中，或浏
+  览器中分开显示而视图会连在一起的文字。
+
+每个改写值按 JSON 转义后的形式计算（含首行），须至少节省 16 个估算 token；改写后的整个
+文档还须小于不改写时的 Compact JSON 或 TOON 结果。该比较发生在 15% 无损节省阈值结束搜索
+之前，因此紧凑格式化不再掩盖字段内部的标记。结果同时被缩减（省略记录或限制字符串）时，
+视图超过字符串上限的值改为截断。每个结果的工作量有界：值不超过 256 KiB、嵌套不超过
+32 层、最多解析 128 个值和 2 MiB HTML。可读性检查对每一对文字颜色与背景颜色只比较一次，
+需要超过 65,536 次不同比较的值原样保留。多条记录中重复的值只转写和写入 Stash 一次。
+
+响应报告的操作为 `html_extraction`，内容类型为 `json`，恢复等级为 `retrievable`，因此
+统计数据可区分嵌入片段（`json`）与转写页面（`html`）。上述规则已用合成片段和文档验证；
+它们是防护手段，不能证明每个片段对模型都保持原意。
+
+## 浏览器快照重编码
+
+浏览器快照重编码默认开启。在 Tokenless 或其宿主 Agent 继承的环境中设置
+`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭。未设置或为空时保持开启，`1`、`true`、`yes`
+（不区分大小写）同样开启，其他非空值关闭。该开关独立于压缩总开关，不是 `config.json`
+字段。
+
+生命周期 `TokenlessConfig` 继承该环境默认值；显式
+`TokenlessConfig(browser_snapshot_enabled=False)` 参数优先。直接 `TokenlessRuntime` API
+保持显式构造配置：Rust 调用方设置 `RuntimeConfig.browser_snapshot_enabled` 为 `false`，
+Python 调用方传入同名原生关键字参数。
+
+压缩器处理作为成功命令输出或 API 响应收到的 Playwright MCP（`### Page` 包装加围栏
+YAML aria 树）无障碍快照，例如 MCP 浏览器工具返回的快照。需要文本替换槽、可用 Stash 和受支持的恢复方式。
+文件读取保存的快照文件原样透传。chrome-devtools-mcp uid 快照（`## Latest page snapshot` 列表）
+仅识别、原文直通：上游对 name 与属性值用裸双引号包裹且不转义内嵌引号与换行，记录边界字节歧义，
+无损不可分解。
+
+视图是 TSV 记录表，保留每个 ref、名称与 URL；包装与尾注逐字保留，
+仅对交互角色去除冗余 `cursor=pointer` 标注，重复 URL 前缀仅在字符与估算 Token 双降时
+经 legend 共享。无法解析的输入整体透传，节省不足 16 个估算 Token 的候选被拒绝。
+完整原文经 Stash 可取回，故管线整体无损。开关关闭时，快照内容标注为 `plain_text` 并透传，
+响应不携带新协议值。
+
+## 可选混合内容区域压缩
+
+混合内容区域压缩默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_MIXED_CONTENT_ENABLED=1` 开启；取消该变量或设为 `0` 关闭。`1`、`true`、
+`yes`（不区分大小写）表示开启。此开关独立于总压缩开关，不是 `config.json` 字段。
+开启时，设置 `TOKENLESS_COMPRESSION_ENABLED=0` 会测量候选，但仍返回原文。
+
+Python `TokenlessConfig` 默认读取该环境变量，显式传入的 `mixed_content_enabled` 参数
+优先。Rust 与直接使用原生绑定的调用方将 `RuntimeConfig.mixed_content_enabled` 设为
+`true`，或传入原生 `TokenlessRuntime(mixed_content_enabled=True)` 参数。
+
+该路由处理既不是完整结构化文档、也不归其他领域处理的工具输出。它识别边界显式可验证
+的类型化区域——info string 标注 `json`、`csv` 或 `tsv` 的围栏代码块（缩进不超过
+3 个空格，由同标记且长度不小于开 fence 的闭合 fence 终结），以及在首 3 列内以 `{` 或
+`[` 开始且括号平衡的裸 JSON 文档——并让每个区域走与独立路由完全相同的压缩器和策略。
+区域周围的散文、日志和分隔符逐字节保留；压缩器拒绝的区域保持原样；选择 TOON 的
+fenced JSON 区域其 fence label 改写为 `toon`（仅改写 info word，其余属性保留原文与顺序）；未闭合的 fence 或不平衡的文档保护其余输出。区域只在与其他领域相同的
+64 KiB / 200 行检测窗口内识别；开在窗口之外的区域逐字节保留。仅当输出既不来自 Grep
+工具、也不来自已识别的 Shell `grep`/`rg` 命令，且宿主可以用文本替换输出时，区域才会
+运行。关闭搜索路径共享也不会让搜索输出进入该路由。整个候选仍需通过 Pipeline 的字符与
+token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 Stash 错误时直接透传；
+携带暂存写入的未变化候选按 `no_savings` 处置并回滚写入。任一区域写入 Stash 失败时，
+会回滚本次请求的全部暂存写入，包括其他区域成功的写入，再由 Runtime 报告存储错误。
+
+有限样本已验证区域压缩及原文恢复。
+
 ## 环境变量
 
 ### 用户常用变量
@@ -147,8 +283,10 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
-| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
-| `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关，包括 JSON 值中的 HTML | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | 浏览器快照重编码开关（Playwright MCP 快照；chrome-devtools-mcp 快照仅识别并直通） | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 
@@ -193,7 +331,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |
 |------|----------|----------|----------|--------------|
 | 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 无自动 TTL，直到清理 | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容，以及被转写 HTML 页面的完整原文 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
+| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被转写的 HTML 值 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
 | 配置 | `~/.tokenless/config.json` | 三个布尔开关 | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 

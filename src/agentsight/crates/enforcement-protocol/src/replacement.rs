@@ -5,8 +5,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, PolicyMode, PolicyValidationError,
+    ApplyCredentialPolicy, ApplyPolicy, ApplyPolicyValidationError, Binding, BindingState,
+    CredentialExfiltrationPolicy, DestinationScope, PolicyMode, PolicyValidationError,
 };
 
 const CREDENTIAL_POLICY_SNAPSHOT_VERSION: u32 = 1;
@@ -204,6 +204,9 @@ impl ReplacePolicy {
         if self.expected.domain_id.is_none() {
             return Err(ReplaceValidationError::SourceDomainMissing);
         }
+        if let ReplacementPolicy::Generic(request) = &self.replacement {
+            request.validate_payload()?;
+        }
         let source = &self.expected.request;
         if self.replacement.agent_id() != source.agent_id {
             return Err(ReplaceValidationError::AgentMismatch);
@@ -314,6 +317,9 @@ pub enum ReplaceValidationError {
     /// Persisted source policy snapshot is unknown or invalid.
     #[error("source credential policy snapshot is invalid: {0}")]
     SourcePolicySnapshot(#[from] CredentialPolicySnapshotError),
+    /// The generic target selected an invalid policy payload envelope.
+    #[error("replacement policy payload is invalid: {0}")]
+    PolicyPayload(#[from] ApplyPolicyValidationError),
     /// The product-level credential target is invalid.
     #[error("replacement credential policy is invalid: {0}")]
     CredentialPolicy(#[from] PolicyValidationError),

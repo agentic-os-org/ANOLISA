@@ -57,6 +57,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentCancelledReasonLabel => "Reason:",
         MessageId::AgentCancelledUserRequestedReason => "user requested cancellation",
         MessageId::AgentResponseTitle => "Agent",
+        MessageId::AgentResponseTruncated => {
+            "Response truncated for display. Full answer is in the session record."
+        }
         MessageId::AgentGovernanceTitle => "Governance",
         MessageId::AgentGovernanceStatusLine => "Status: {phase}",
         MessageId::AgentGovernanceReasonLine => "Reason: {reason}",

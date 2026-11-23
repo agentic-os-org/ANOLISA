@@ -1,10 +1,10 @@
 //! Adapt admitted typed options to existing handlers without reparsing argv.
 
-use super::{Agent, Command, Config, Endpoint, Native, Service, Validate};
+use super::{Command, Config, Endpoint, Native, Service};
 use crate::cli::{Arguments, Exit, Result};
 use std::collections::BTreeMap;
 
-fn options<const N: usize>(entries: [(&str, Option<String>); N]) -> Arguments {
+pub(super) fn options<const N: usize>(entries: [(&str, Option<String>); N]) -> Arguments {
     Arguments {
         flags: entries
             .into_iter()
@@ -22,26 +22,8 @@ fn native(value: Native) -> Arguments {
     ])
 }
 
-fn attachment(mut args: Arguments, value: super::Attachment) -> Arguments {
-    args.flags.extend(
-        options([
-            ("pid", value.pid.map(|pid| pid.to_string())),
-            ("remove", value.remove.then(|| "true".into())),
-        ])
-        .flags,
-    );
-    args
-}
-
 fn endpoint(value: Endpoint) -> Arguments {
     options([("config", value.config), ("socket", value.socket)])
-}
-
-fn validate(value: Validate) -> Result<Exit> {
-    crate::runtime(
-        "validate",
-        &options([("config", Some(value.config)), ("against", value.against)]),
-    )
 }
 
 fn service(value: Service) -> Result<Exit> {
@@ -75,23 +57,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
             args.native = value.arguments;
             crate::runtime("run", &args)
         }
-        Command::Install(value) => {
-            if value.config.is_some() {
-                crate::runtime(
-                    "install",
-                    &attachment(
-                        options([
-                            ("config", value.config),
-                            ("agent", value.agent),
-                            ("native-profile", value.native_profile),
-                        ]),
-                        value.attachment,
-                    ),
-                )
-            } else {
-                super::management::install(value)
-            }
-        }
+        Command::Install(value) => super::management::install(value),
         Command::Uninstall(value) => match super::confirmation::check(&value)? {
             Some(reason) => crate::output::unconfirmed(value.prefix.output, reason),
             None => super::management::uninstall(value),
@@ -99,18 +65,21 @@ pub(super) fn run(command: Command) -> Result<Exit> {
         Command::List(value) => super::inventory::run("list", value.query),
         Command::Doctor(value) => super::inventory::run("doctor", value),
         Command::Recover(value) => super::management::recover(value),
-        Command::Agent(Agent::Connect(value)) => crate::runtime(
-            "install",
-            &attachment(native(value.native), value.attachment),
-        ),
+        Command::Connect(value) => {
+            let (command, args) = super::connection::connect(value);
+            crate::runtime(command, &args)
+        }
+        Command::Disconnect(value) => {
+            let (command, args) = super::connection::disconnect(value);
+            crate::runtime(command, &args)
+        }
         Command::Config(value) => config(value),
         Command::Service(value) => service(value),
-        Command::Serve(value) => service(Service::Serve(value)),
-        Command::Status(value) => service(Service::Status(value)),
-        Command::Stop(value) => service(Service::Stop(value)),
-        Command::Validate(value) => validate(value),
         Command::Update(value) => {
-            let mut args = endpoint(value.endpoint);
+            let mut args = options([
+                ("config", value.socket.is_none().then_some(value.config)),
+                ("socket", value.socket),
+            ]);
             args.flags.extend(
                 options([
                     ("agent", value.agent),
@@ -129,6 +98,9 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ("json", value.json.then(|| "true".into())),
             ]),
         ),
+        Command::AuditExport(value) => {
+            crate::audit_export::run(value.state_dir, value.request, value.timeout_ms)
+        }
         Command::Request(value) => crate::runtime(
             "request",
             &options([
@@ -139,6 +111,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ),
             ]),
         ),
+        Command::Instance(value) => super::instance::run(value),
         Command::Policy => crate::runtime("policy", &Arguments::default()),
         Command::Hook(value) => crate::runtime(
             "hook",
@@ -149,6 +122,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ("step", Some(value.step)),
                 ("on-error", Some(value.on_error)),
                 ("close-event", value.close_event),
+                ("event-receipt", value.event_receipt),
             ]),
         ),
         Command::Scope(value) => crate::runtime(
@@ -178,8 +152,10 @@ fn configure(args: Arguments, output: crate::output::Options) -> Result<Exit> {
 
 fn config(command: Config) -> Result<Exit> {
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
+        Config::Descriptor(value) => return super::descriptor::run(value),
         Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
+            let value = *value;
             let mut args = options([
                 ("prefix", Some(value.prefix.prefix)),
                 ("config", Some(value.config)),
@@ -188,13 +164,53 @@ fn config(command: Config) -> Result<Exit> {
                 ("node", value.node),
                 ("openclaw", value.openclaw),
                 ("provider", value.provider),
-                ("socket", value.socket),
+                ("template", value.template),
                 ("check", value.check),
                 ("effect", value.effect),
                 ("reason-code", value.reason_code),
             ]);
+            args.flags.insert(
+                "--template-vars".into(),
+                serde_json::to_string(&value.template_var)?,
+            );
             args.native = value.arguments;
             return configure(args, value.prefix.output);
+        }
+        Config::NativeSources(value) => (
+            "native-sources",
+            options([
+                ("config", Some(value.configuration.config)),
+                ("agent", Some(value.agent)),
+            ])
+            .flags,
+            crate::output::Options::default(),
+        ),
+        Config::AddNativeSource(value) => (
+            "add-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("definition", Some(value.definition)),
+            ])
+            .flags,
+            value.output,
+        ),
+        Config::RemoveNativeSource(value) => (
+            "remove-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("id", Some(value.id)),
+            ])
+            .flags,
+            value.output,
+        ),
+        Config::Show(super::Show {
+            configuration,
+            sdk_target: Some(selection),
+            ..
+        }) => {
+            return super::package::show_target(&configuration.config, &selection);
         }
         Config::Show(value) => (
             "show",
@@ -265,6 +281,9 @@ fn config(command: Config) -> Result<Exit> {
     };
     crate::output::complete(
         match action {
+            "native-sources" => "config native-sources",
+            "add-native-source" => "config add-native-source",
+            "remove-native-source" => "config remove-native-source",
             "show" => "config show",
             "add-provider" => "config add-provider",
             "remove-provider" => "config remove-provider",

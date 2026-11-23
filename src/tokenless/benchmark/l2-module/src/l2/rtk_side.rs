@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! RTK side: paired execution of one command spec — raw argv first, then the
-//! same argv wrapped by the rtk binary — in the same working directory and
+//! same argv run through `tokenless rtk` — in the same working directory and
 //! the same round.
 //!
 //! rtk is an output-filtering command wrapper, not a payload compressor, so
@@ -28,7 +28,7 @@
 //! labels it accordingly.
 
 use crate::l2::L2Error;
-use crate::metrics::find_rtk_binary;
+use crate::metrics::{find_tokenless_binary, rtk_command};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -58,20 +58,22 @@ impl PairedRun {
     }
 }
 
-/// Locates the rtk binary, reusing the L0/L1 discovery order
-/// (`$RTK_BIN` → vendored release build → `PATH`).
+/// Locates `tokenless`, reusing the L1 discovery order
+/// (`$TOKENLESS_BIN` → Tokenless release build → `PATH`).
 ///
 /// # Errors
 ///
 /// Returns [`L2Error::RtkUnavailable`] when nothing runnable is found —
 /// callers degrade the command/grep/diff categories rather than abort.
-pub fn locate_rtk() -> Result<PathBuf, L2Error> {
-    find_rtk_binary().ok_or_else(|| {
-        L2Error::RtkUnavailable("no rtk binary via $RTK_BIN, vendored build, or PATH".to_string())
+pub fn locate_tokenless() -> Result<PathBuf, L2Error> {
+    find_tokenless_binary().ok_or_else(|| {
+        L2Error::RtkUnavailable(
+            "no tokenless via $TOKENLESS_BIN, the Tokenless release build, or PATH".to_string(),
+        )
     })
 }
 
-/// Runs `argv` raw and then `rtk_argv` wrapped by `rtk_bin`, both under `cwd`.
+/// Runs `argv` raw and then `rtk_argv` through `<tokenless> rtk`, both under `cwd`.
 ///
 /// `rtk_argv` is normally the same argv; it differs where rtk's filter is
 /// selected by a subcommand name that is not an executable program, so the
@@ -87,7 +89,7 @@ pub fn locate_rtk() -> Result<PathBuf, L2Error> {
 /// [`L2Error::Command`] when either process cannot be spawned or the raw
 /// command fails.
 pub fn run_paired(
-    rtk_bin: &Path,
+    tokenless: &Path,
     argv: &[String],
     rtk_argv: &[String],
     cwd: &Path,
@@ -121,11 +123,13 @@ pub fn run_paired(
     }
 
     let start = Instant::now();
-    let wrapped = Command::new(rtk_bin)
+    let wrapped = rtk_command(tokenless)
         .args(rtk_argv)
         .current_dir(cwd)
         .output()
-        .map_err(|e| L2Error::Command(format!("spawn rtk {:?} failed: {e}", rtk_bin.display())))?;
+        .map_err(|e| {
+            L2Error::Command(format!("spawn {:?} rtk failed: {e}", tokenless.display()))
+        })?;
     let rtk_wall_s = start.elapsed().as_secs_f64();
 
     Ok(PairedRun {

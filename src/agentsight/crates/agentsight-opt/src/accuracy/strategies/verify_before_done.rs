@@ -174,27 +174,9 @@ impl VerifyBeforeDoneStrategy {
         })
     }
 
-    /// The command a call ran, when its arguments carry one.
-    ///
-    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
-    /// command, so matching the keyword tables against it reads *arguments* as
-    /// actions: a `Read` of `src/tests/foo.rs` or a todo titled "run tests"
-    /// satisfied `VERIFY_KEYWORDS`, and quoting a file path in the final
-    /// answer satisfied the acknowledgement check. Read the command argument
-    /// instead, and treat a call that does not carry one as not a command.
+    /// Read complete execution evidence, never the truncated display preview.
     fn command_of(call: &ToolCallRecord) -> Option<String> {
-        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
-            return COMMAND_KEYS
-                .iter()
-                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
-                .filter(|c| !c.is_empty())
-                .map(str::to_string);
-        }
-        // The summary is truncated, so a long argument string does not parse.
-        // A file-scoped call is never a command; for a command-scoped one the
-        // truncated summary *is* the command text.
-        call.target.is_none().then(|| call.cmd.clone())
+        call.execution_command()
     }
 
     /// Oracle (b): claims success but never ran any verification action.
@@ -274,6 +256,7 @@ mod tests {
             cmd: cmd.into(),
             err,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }

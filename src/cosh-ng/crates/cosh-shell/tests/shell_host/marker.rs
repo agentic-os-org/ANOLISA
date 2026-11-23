@@ -16,14 +16,24 @@ fn marker_json_escape_removes_raw_controls_and_preserves_utf8() {
     );
     let scripts = [
         ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
-        ("zsh", include_str!("../../src/shell_host/marker/zsh.rs")),
+        (
+            "zsh",
+            concat!(
+                include_str!("../../src/shell_host/marker/zsh.rs"),
+                include_str!("../../src/shell_host/marker/zsh_throttle.zsh")
+            ),
+        ),
     ];
 
     for (shell, script) in scripts {
         if Command::new(shell).arg("--version").output().is_err() {
             continue;
         }
-        let function = shell_function(script, "_cosh_json_escape");
+        let function = format!(
+            "{}\n{}",
+            shell_function(script, "_cosh_json_escape_var"),
+            shell_function(script, "_cosh_json_escape")
+        );
         let command = format!("{function}\n_cosh_json_escape \"$1\"");
         let output = Command::new(shell)
             .args(["-c", command.as_str(), "cosh-marker-test", input])
@@ -50,6 +60,538 @@ fn shell_function<'a>(script: &'a str, name: &str) -> &'a str {
         .find("\n}\n")
         .unwrap_or_else(|| panic!("unterminated {name}"));
     &rest[..end + 2]
+}
+
+fn shell_function_span<'a>(script: &'a str, name: &str) -> &'a str {
+    let start_pattern = format!("{name}() {{\n");
+    let start = script
+        .find(&start_pattern)
+        .unwrap_or_else(|| panic!("missing {name}"));
+    let rest = &script[start..];
+    let body = &rest[start_pattern.len()..];
+    let mut end = rest.len();
+    for (offset, _) in body.match_indices("\n_cosh_") {
+        let line_end = body[offset + 1..]
+            .find('\n')
+            .map(|i| offset + 1 + i)
+            .unwrap_or(body.len());
+        if body[offset + 1..line_end].contains("() {") {
+            end = start_pattern.len() + offset;
+            break;
+        }
+    }
+    rest[..end].trim_end()
+}
+
+#[test]
+fn boundary_helpers_run_without_external_binaries() {
+    let empty_path =
+        std::env::temp_dir().join(format!("cosh-10334-empty-path-{}", std::process::id()));
+    std::fs::create_dir_all(&empty_path).unwrap();
+    let bash_script = include_str!("../../src/shell_host/marker/bash.sh");
+    let zsh_script = include_str!("../../src/shell_host/marker/zsh.rs");
+    let resolve_shell = |name: &str| -> Option<String> {
+        let output = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && !path.is_empty() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    let bash_exe = resolve_shell("bash");
+    let zsh_exe = resolve_shell("zsh");
+
+    if let Some(bash_exe) = bash_exe.as_deref() {
+        let bash_version = Command::new(bash_exe).arg("--version").output().unwrap();
+        let version_text = String::from_utf8_lossy(&bash_version.stdout);
+        let major: u32 = version_text
+            .split_whitespace()
+            .find(|word| word.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .and_then(|word| word.split('.').next())
+            .and_then(|part| part.parse().ok())
+            .unwrap_or(0);
+        if major >= 5 {
+            let functions = [
+                shell_function_span(bash_script, "_cosh_now_ms"),
+                shell_function_span(bash_script, "_cosh_capture_history_entry"),
+                shell_function_span(bash_script, "_cosh_history_no_var"),
+                shell_function_span(bash_script, "_cosh_history_no"),
+                shell_function_span(bash_script, "_cosh_history_command_var"),
+                shell_function_span(bash_script, "_cosh_history_command_from_entry"),
+                shell_function_span(bash_script, "_cosh_command_has_secret"),
+            ]
+            .join("\n\n");
+            let command = format!(
+            "{functions}\n\n\
+             ts=\"$(_cosh_now_ms)\"\n\
+             [[ \"$ts\" =~ ^[0-9]{{13}}$ ]] || {{ echo \"bad ts: $ts\" >&2; exit 1; }}\n\
+             no=\"$(_cosh_history_no '  42  echo hi')\"\n\
+             [[ \"$no\" == 42 ]] || {{ echo \"bad no: $no\" >&2; exit 1; }}\n\
+             multiline=\"$(_cosh_history_no $'  42  echo hi\\ncontinued')\"\n\
+             [[ \"$multiline\" == $'42\\ncontinued' ]] || {{ echo \"bad multiline: $multiline\" >&2; exit 1; }}\n\
+             history -s 'echo hi'\n\
+             cmd=\"$(_cosh_history_command_from_entry)\"\n\
+             [[ \"$cmd\" == 'echo hi' ]] || {{ echo \"bad cmd: $cmd\" >&2; exit 1; }}\n\
+             _cosh_command_has_secret 'Bearer abc' || {{ echo 'secret missed' >&2; exit 1; }}\n\
+             if _cosh_command_has_secret 'echo hello'; then echo 'false positive' >&2; exit 1; fi\n"
+        );
+            let output = Command::new(bash_exe)
+                .args(["-c", command.as_str()])
+                .env("PATH", &empty_path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "bash boundary helpers need external binaries: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    if let Some(zsh_exe) = zsh_exe.as_deref() {
+        let zsh_function = shell_function(zsh_script, "_cosh_now_ms");
+        let zsh_command = format!(
+            "{zsh_function}\n\
+             ts=\"$(_cosh_now_ms)\"\n\
+             [[ \"$ts\" =~ ^[0-9]{{13}}$ ]] || {{ echo \"bad ts: $ts\" >&2; exit 1; }}\n"
+        );
+        let output = Command::new(zsh_exe)
+            .args(["-c", zsh_command.as_str()])
+            .env("PATH", &empty_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "zsh _cosh_now_ms needs external binaries: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::remove_dir_all(&empty_path).ok();
+}
+
+#[test]
+fn degraded_path_witness_bash() {
+    let temp_root =
+        std::env::temp_dir().join(format!("cosh-103334-witness-{}", std::process::id()));
+    std::fs::create_dir_all(temp_root.join("home")).unwrap();
+    std::fs::create_dir_all(temp_root.join("cg")).unwrap();
+    std::fs::write(temp_root.join("cg/memory.current"), "200\n").unwrap();
+    std::fs::write(temp_root.join("cg/memory.high"), "100\n").unwrap();
+    let bash_script = include_str!("../../src/shell_host/marker/bash.sh");
+    let prompt_script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    std::fs::write(temp_root.join("bash.sh"), bash_script).unwrap();
+    std::fs::write(temp_root.join("bash_prompt.sh"), prompt_script).unwrap();
+    let resolve_shell = |name: &str| -> Option<String> {
+        let output = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && !path.is_empty() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    let Some(bash_exe) = resolve_shell("bash") else {
+        return;
+    };
+    let root = temp_root.to_string_lossy();
+    let command = format!(
+        r#"set -u
+set -o history
+export HISTFILE="{root}/home/.bash_history"
+_COSH_SESSION_AI_ENABLED=1
+: > "{root}/recovery.history-file"
+source "{root}/bash.sh"
+source "{root}/bash_prompt.sh"
+_COSH_CGROUP_DIR="{root}/cg"
+S="sk-test-""witness"
+_cosh_bounded_preexec_marker > "{root}/pre.out"
+[[ ! -s "{root}/pre.out" ]] || {{ echo 'degraded preexec emitted a marker' >&2; exit 1; }}
+(( _COSH_ATTEMPT_GENERATION >= 1 )) || {{ echo 'generation not incremented' >&2; exit 1; }}
+{{ builtin history -d "$HISTCMD"; history -s "echo installed --api-key $S-12345"; _cosh_precmd_marker 0 > "{root}/precmd.out"; }}
+grep -q '"e":"p"' "{root}/precmd.out" || {{ echo 'no compact boundary' >&2; exit 1; }}
+if builtin history | grep -q "$S"; then echo 'secret survived degraded scrub' >&2; exit 1; fi
+printf '50\n' > "{root}/cg/memory.current"
+_COSH_ATTEMPT_ACTIVE=1
+_COSH_HANDOFF_ACTIVE=1
+_cosh_bounded_preexec_marker > "{root}/pre2.out"
+grep -q '"event":"preexec"' "{root}/pre2.out" || {{ echo 'normal preexec did not resume' >&2; exit 1; }}
+{{ builtin history -d "$HISTCMD"; history -s "echo another --api-key $S-67890"; _cosh_precmd_marker 0 > "{root}/precmd2.out"; }}
+[[ "${{_COSH_ATTEMPT_ACTIVE:-0}}" == 0 ]] || {{ echo 'stale attempt active' >&2; exit 1; }}
+[[ -z "${{_COSH_HANDOFF_ACTIVE:-}}" ]] || {{ echo 'stale handoff active' >&2; exit 1; }}
+if builtin history | grep -q "$S"; then echo 'secret survived recovery scrub' >&2; exit 1; fi
+printf 'max\n' > "{root}/cg/memory.high"
+if _cosh_memory_overage; then echo 'max high reported overage' >&2; exit 1; fi
+exit 0
+"#
+    );
+    let output = Command::new(&bash_exe)
+        .args(["-i", "-c", command.as_str()])
+        .env("HOME", temp_root.join("home"))
+        .env("COSH_MARKER_TOKEN", "witness-token")
+        .env("COSH_SESSION_ID", "witness-session")
+        .env("COSH_RECOVERY_REQUEST_FILE", temp_root.join("recovery"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bash degraded witness failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn degraded_path_witness_zsh() {
+    let temp_root =
+        std::env::temp_dir().join(format!("cosh-10334-zwitness-{}", std::process::id()));
+    std::fs::create_dir_all(temp_root.join("cg")).unwrap();
+    std::fs::write(temp_root.join("cg/memory.current"), "200\n").unwrap();
+    std::fs::write(temp_root.join("cg/memory.high"), "100\n").unwrap();
+    let zsh_script = concat!(
+        include_str!("../../src/shell_host/marker/zsh.rs"),
+        include_str!("../../src/shell_host/marker/zsh_throttle.zsh")
+    );
+    let functions = [
+        shell_function(zsh_script, "_cosh_json_escape_var"),
+        shell_function(zsh_script, "_cosh_json_escape"),
+        shell_function(zsh_script, "_cosh_memory_overage"),
+        shell_function(zsh_script, "_cosh_emit_throttled_precmd"),
+        shell_function(zsh_script, "_cosh_preexec_marker"),
+        shell_function(zsh_script, "_cosh_precmd_marker"),
+    ]
+    .join("\n\n");
+    let root = temp_root.to_string_lossy();
+    let command = format!(
+        r#"{functions}
+function _cosh_is_handoff_wrapper() {{ return 1; }}
+function _cosh_is_pending_handoff_command() {{ return 1; }}
+function _cosh_command_has_secret() {{ return 1; }}
+function _cosh_should_intercept_unknown() {{ return 1; }}
+function _cosh_begin_attempt() {{ :; }}
+function _cosh_unwrap_handoff_command() {{ print -r -- "$1"; }}
+function _cosh_apply_handoff_pager_policy() {{ :; }}
+function _cosh_load_handoff_token() {{ :; }}
+function _cosh_clear_handoff_request() {{ :; }}
+function _cosh_apply_internal_recovery() {{ :; }}
+function _cosh_add_handoff_history() {{ :; }}
+function _cosh_restore_handoff_pager_policy() {{ :; }}
+function _cosh_emit_marker() {{ print -r -- "MARKER:$1"; }}
+preexec_functions=(_cosh_preexec_marker)
+precmd_functions=(_cosh_precmd_marker)
+_COSH_MARKER_TOKEN=tok
+COSH_SESSION_ID=sess
+_COSH_CGROUP_DIR="{root}/cg"
+_COSH_ATTEMPT_GENERATION=0
+_cosh_preexec_marker 'echo hi' 'echo hi' 'echo hi' > "{root}/pre.out"
+[[ ! -s "{root}/pre.out" ]] || {{ print -r -- 'degraded zsh preexec emitted' >&2; exit 1; }}
+(( _COSH_ATTEMPT_GENERATION == 1 )) || {{ print -r -- 'zsh generation not incremented' >&2; exit 1; }}
+true
+_cosh_precmd_marker > "{root}/precmd.out"
+grep -q '"e":"p"' "{root}/precmd.out" || {{ print -r -- 'no zsh compact boundary' >&2; exit 1; }}
+if grep -q MARKER: "{root}/precmd.out"; then print -r -- 'degraded zsh precmd ran normal path' >&2; exit 1; fi
+printf '50\n' > "{root}/cg/memory.current"
+_cosh_preexec_marker 'echo hi' 'echo hi' 'echo hi' > "{root}/pre2.out"
+grep -q MARKER:preexec "{root}/pre2.out" || {{ print -r -- 'zsh normal preexec did not resume' >&2; exit 1; }}
+true
+_cosh_precmd_marker > "{root}/precmd2.out"
+grep -q MARKER:precmd "{root}/precmd2.out" || {{ print -r -- 'zsh normal precmd did not resume' >&2; exit 1; }}
+printf 'max\n' > "{root}/cg/memory.high"
+if _cosh_memory_overage; then print -r -- 'zsh max high reported overage' >&2; exit 1; fi
+exit 0
+"#
+    );
+    let resolve_shell = |name: &str| -> Option<String> {
+        let output = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && !path.is_empty() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    let Some(zsh_exe) = resolve_shell("zsh") else {
+        return;
+    };
+    let output = Command::new(&zsh_exe)
+        .args(["-c", command.as_str()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "zsh degraded witness failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn handoff_request_multiline_matches() {
+    let temp_root =
+        std::env::temp_dir().join(format!("cosh-10334-multiline-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let request_path = temp_root.join("request");
+    std::fs::write(&request_path, "echo one\necho two").unwrap();
+    let bash_script = include_str!("../../src/shell_host/marker/bash.sh");
+    let zsh_script = include_str!("../../src/shell_host/marker/zsh.rs");
+    let resolve_shell = |name: &str| -> Option<String> {
+        let output = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && !path.is_empty() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    for (shell, script) in [("bash", bash_script), ("zsh", zsh_script)] {
+        let Some(exe) = resolve_shell(shell) else {
+            continue;
+        };
+        let function = shell_function_span(script, "_cosh_is_pending_handoff_command");
+        let request = request_path.to_string_lossy();
+        let command = format!(
+            "{function}\n\
+             COSH_HANDOFF_REQUEST_FILE='{request}'\n\
+             _cosh_is_pending_handoff_command $'echo one\\necho two' || exit 1\n\
+             _cosh_is_pending_handoff_command 'echo one' && exit 1\n\
+             COSH_HANDOFF_REQUEST_FILE='{request}.missing'\n\
+             _cosh_is_pending_handoff_command $'echo one\\necho two' && exit 1\n\
+             exit 0\n"
+        );
+        let output = Command::new(&exe)
+            .args(["-c", command.as_str()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} multiline handoff match failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn throttled_boundary_marker_is_fork_free() {
+    let empty_path =
+        std::env::temp_dir().join(format!("cosh-10334-throttle-path-{}", std::process::id()));
+    std::fs::create_dir_all(&empty_path).unwrap();
+    let bash_script = include_str!("../../src/shell_host/marker/bash.sh");
+    let resolve_shell = |name: &str| -> Option<String> {
+        let output = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && !path.is_empty() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    if let Some(bash_exe) = resolve_shell("bash").as_deref() {
+        let functions = [
+            shell_function_span(bash_script, "_cosh_json_escape_var"),
+            shell_function_span(bash_script, "_cosh_memory_overage"),
+            shell_function_span(bash_script, "_cosh_emit_throttled_precmd"),
+        ]
+        .join("\n\n");
+        let command = format!(
+            "{functions}\n\n\
+             _COSH_MARKER_TOKEN='tok'\n\
+             COSH_SESSION_ID='sess'\n\
+             _COSH_CGROUP_DIR=none\n\
+             if _cosh_memory_overage; then echo 'overage without cgroup' >&2; exit 1; fi\n\
+             _cosh_emit_throttled_precmd 7\n"
+        );
+        let output = Command::new(bash_exe)
+            .args(["-c", command.as_str()])
+            .env("PATH", &empty_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "throttled marker path failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"e\":\"p\""),
+            "missing compact boundary: {stdout}"
+        );
+        assert!(stdout.contains("\"s\":7"), "missing status: {stdout}");
+        assert!(stdout.contains("\"t\":\"tok\""), "missing token: {stdout}");
+    }
+    std::fs::remove_dir_all(&empty_path).ok();
+}
+
+#[test]
+fn shell_oversized_history_privacy_and_recovery_contracts() {
+    let temp_root = std::env::temp_dir().join(format!("cosh-10317-contracts-{}", unique_suffix()));
+    std::fs::create_dir_all(temp_root.join("home")).unwrap();
+    std::fs::write(
+        temp_root.join("bash.sh"),
+        include_str!("../../src/shell_host/marker/bash.sh"),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_root.join("bash_prompt.sh"),
+        include_str!("../../src/shell_host/marker/bash_prompt.sh"),
+    )
+    .unwrap();
+    let Some(bash_exe) = Command::new("sh")
+        .args(["-c", "command -v bash"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let root = temp_root.to_string_lossy().to_string();
+    let setup = format!(
+        r#"set -o history
+export HISTFILE="{root}/home/.bash_history"
+HISTIGNORE=''
+COLUMNS=1000000
+_COSH_SESSION_AI_ENABLED=1
+_COSH_CGROUP_DIR=none
+_COSH_BOUNDED_HANDOFF_COMMAND=''
+_COSH_HANDOFF_ACTIVE=0
+source "{root}/bash.sh"
+source "{root}/bash_prompt.sh"
+printf -v PAD '%20000s' ''
+PAD=${{PAD// /P}}
+"#
+    );
+    let run = |body: &str| -> std::process::Output {
+        let command = format!("{setup}\n{body}\nexit 0\n");
+        Command::new(&bash_exe)
+            .args(["-i", "-c", command.as_str()])
+            .env("HOME", temp_root.join("home"))
+            .env("COSH_MARKER_TOKEN", "witness-token")
+            .env("COSH_SESSION_ID", "witness-session")
+            .env("COSH_RECOVERY_REQUEST_FILE", temp_root.join("recovery"))
+            .env(
+                "COSH_HANDOFF_REQUEST_FILE",
+                temp_root.join("handoff-request"),
+            )
+            .env("COSH_TEST_ROOT", &root)
+            .output()
+            .unwrap()
+    };
+    let assert_ok = |label: &str, output: std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // [tri-state] The bounded detector returns match / negative / incomplete by
+    // budget, independent of source. Asserted on the result variable: the
+    // `bash -i -c` harness truncates giant `history` display, so giant content
+    // preservation is witnessed by the real-PTY relay tests reading
+    // .bash_history (routing_c3_oversized_benign_* / imported_secret_*).
+    assert_ok(
+        "bounded detector tri-state by budget",
+        run(r#"
+printf -v SMALL '%100s' ''
+SMALL=${SMALL// /P}
+_cosh_detect_secret_bounded "echo $SMALL"
+[[ "$_COSH_SECRET_RESULT" == negative ]] || { echo "small benign expected negative, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo sk-detector-witness-123456 $SMALL"
+[[ "$_COSH_SECRET_RESULT" == match ]] || { echo "small secret expected match, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo $PAD"
+[[ "$_COSH_SECRET_RESULT" == incomplete ]] || { echo "oversized benign expected incomplete, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+_cosh_detect_secret_bounded "echo ${PAD:0:8000} sk-detector-witness-123456 $PAD"
+[[ "$_COSH_SECRET_RESULT" == match ]] || { echo "oversized head-window secret expected match, got $_COSH_SECRET_RESULT" >&2; exit 1; }
+"#),
+    );
+
+    // [multi-line] A within-budget multi-line secret entry is removable: the
+    // scrub deletes by the leading history number, since the multi-line
+    // identifier (<number>\n<continuation>) is not a valid `history -d`
+    // position. Pre-merge this entry survived the scrub. The entry is captured
+    // into variables (HISTIGNORE is empty so `history -s` lands; the block's own
+    // auto-recorded entry is removed via `history -d "$HISTCMD"`), and asserted
+    // present before the scrub and absent after, so the test fails if the
+    // leading-number strip is reverted.
+    assert_ok(
+        "multiline secret entry scrubbed by leading number",
+        run(r#"
+{ builtin history -d "$HISTCMD" 2>/dev/null || true
+  builtin history -s $'echo sk-multi-witness-123456\ncontinued'
+  hist_before="$(builtin history)"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"
+  hist_after="$(builtin history)"; }
+printf '%s' "$hist_before" | grep -q "sk-multi-witness-123456" || { echo 'multi-line entry did not land before scrub' >&2; exit 1; }
+if printf '%s' "$hist_after" | grep -q "sk-multi-witness-123456"; then echo 'multi-line secret entry retained by scrub' >&2; exit 1; fi
+"#),
+    );
+
+    // [P1-degraded] Under memory overage the scrub still runs bounded tri-state
+    // detection (fork-free): a within-budget credential is removed, while
+    // benign history is preserved (no unconditional length-based deletion).
+    assert_ok(
+        "degraded overage path removes secret, preserves benign",
+        run(r#"
+{ builtin history -d "$HISTCMD" 2>/dev/null || true
+  mkdir -p "$COSH_TEST_ROOT/cg"
+  printf '200\n' > "$COSH_TEST_ROOT/cg/memory.current"
+  printf '100\n' > "$COSH_TEST_ROOT/cg/memory.high"
+  _COSH_CGROUP_DIR="$COSH_TEST_ROOT/cg"
+  builtin history -s "echo installed --api-key sk-degraded-witness-12345"
+  _cosh_precmd_marker 0 > "$COSH_TEST_ROOT/precmd.out"
+  hist_after="$(builtin history)"; }
+grep -q '"e":"p"' "$COSH_TEST_ROOT/precmd.out" || { echo 'degraded path did not emit compact boundary' >&2; exit 1; }
+if printf '%s' "$hist_after" | grep -q "sk-degraded-witness-12345"; then echo 'degraded overage path retained sensitive entry' >&2; exit 1; fi
+"#),
+    );
+
+    // [P1-3] An oversized handoff command whose secret sits outside the bounded
+    // head+tail window must still emit a redacted preexec marker.
+    assert_ok(
+        "P1-3 oversized handoff redaction",
+        run(r#"
+printf -v HEAD9 '%9000s' ''
+HEAD9=${HEAD9// /A}
+printf -v TAIL9 '%9000s' ''
+TAIL9=${TAIL9// /B}
+printf '%s sk-abcdef123456 %s' "$HEAD9" "$TAIL9" > "$COSH_HANDOFF_REQUEST_FILE"
+_cosh_prepare_staged_handoff > "$COSH_TEST_ROOT/handoff.out"
+grep -q 'redacted sensitive command' "$COSH_TEST_ROOT/handoff.out" || { echo 'oversized handoff marker not redacted' >&2; exit 1; }
+if grep -q 'sk-abcdef123456' "$COSH_TEST_ROOT/handoff.out"; then echo 'oversized handoff secret emitted verbatim' >&2; exit 1; fi
+"#),
+    );
+
+    // [P2-3] A staged handoff with an oversized last history entry must not emit
+    // the untracked preexec placeholder (orphan command-start).
+    assert_ok(
+        "P2-3 staged handoff oversized guard",
+        run(r#"
+{ printf 'echo handoff-target' > "$COSH_HANDOFF_REQUEST_FILE"
+  builtin history -d "$HISTCMD" 2>/dev/null || true
+  builtin history -s "echo $PAD"
+  _cosh_bounded_preexec_marker > "$COSH_TEST_ROOT/pre.out"; }
+[[ ! -s "$COSH_TEST_ROOT/pre.out" ]] || { echo 'orphan oversized placeholder emitted beside staged handoff' >&2; exit 1; }
+"#),
+    );
+
+    std::fs::remove_dir_all(&temp_root).ok();
 }
 
 #[test]

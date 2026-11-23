@@ -7,7 +7,7 @@
 The `aw` executable owns daemon discovery, instance binding, foreground process
 lifetime and cleanup. Each native adapter owns version and entrypoint admission,
 registration files, event normalization and the host's response dialect. These
-interfaces are private CLI code. The service adds an optional native-command
+interfaces belong to `aw-adapter`. The service adds an optional native-command
 environment snapshot to `invoke_step`; existing requests may omit it.
 
 Native dialects, callback interpretation and Python/JavaScript assets live in
@@ -22,6 +22,14 @@ launcher admits the configured steps and asks the adapter to validate their nati
 limits before starting or reusing the service. It then generates private launch
 files, binds the instance, writes an adapter-tagged callback binding and starts the
 foreground Agent. Providers receive the adapter's pinned launch environment.
+
+For DeepSeek Harness, the Adapter adds launch-scoped plugin and callback files
+through native `--patch`. When `security.violation` is configured, it also adds a
+Node preload to the Agent's `NODE_OPTIONS` before startup. The preload registers
+a process-wide module loader Hook and checks the published agent-loop source hash
+and final-result anchor. It removes only its own `NODE_OPTIONS` token after
+registration, so tool Node children inherit the caller's original options;
+the pinned Provider environment likewise excludes the AW preload.
 
 On exit or failure the launcher releases its instance, invokes adapter cleanup and
 removes its launch directory. Adapters own rollback for temporary files outside
@@ -67,9 +75,26 @@ a successful process exit alone does not establish hook readiness. The watcher i
 joined before instance and file cleanup. Qoder uses its existing command-hook
 registration path and does not require a plugin startup receipt.
 
+DeepSeek's receipt proves plugin registration. Its final-result guarantee also
+requires the preload to patch the exact agent-loop build before Agent work starts;
+a missing patch or changed build fails startup. For a top-level model tool call,
+the plugin associates the execution token with the native result through a
+`WeakMap`. After native `finalize`/`finish` and before Session commit, the
+patched loop awaits the process-wide final gate. A missing association, Provider
+block or final-check failure yields a withheld error result. The plugin replaces
+the global gate with a rejecting function on disposal; the launcher owns process
+termination and private launch-file cleanup.
+
+This gate covers the verified headless Agent-loop delivery path on DSH
+`0.2.1-rc.5`. Same-process `tools/result` observers receive raw content before
+the gate. Nested/PTC results and direct `ToolRuntime.execute` consumers do not
+pass through this top-level commit point. Web, SDK, ACP and custom-profile
+delivery require their own native adoption tests; see the
+[DeepSeek integration guide](../../../../../../docs/developer-guide/en/aw/agents/deepseek-harness.md).
+
 ## Delivery boundary
 
-Qoder requires a semantic CLI version >=1.1.64 and records the probed value; its
+Qoder records the installed semantic CLI version; its
 command-Hook configuration and callback contracts remain enforced.
 OpenClaw, Hermes and QwenPaw supply separate native implementations and acceptance
 evidence. The daemon still retains at most 1024 correlated events per instance;
@@ -77,6 +102,8 @@ long-lived native hosts must expose that limit and their configured failure
 behavior. OS enforcement, portable approval and additional events remain outside
 this interface extraction.
 
-Resident Pi/Claude factories use the [sequenced invocation lifecycle](resident-sdk.md)
+Resident Pi/Claude factories and ordinary Qoder SDK Queries use the
+[sequenced invocation lifecycle](resident-sdk.md)
 to reclaim completed correlations; their capacity is concurrent rather than cumulative.
-The 1024-correlation boundary above applies to legacy bindings.
+The 1024-correlation boundary above applies to legacy bindings, including the
+separate reloadable Qoder SDK path.

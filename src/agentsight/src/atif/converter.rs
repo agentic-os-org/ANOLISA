@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall, same_call_id,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall, resolve_call_id,
 };
 
 use crate::genai::semantic::{
@@ -22,6 +22,13 @@ use crate::storage::sqlite::genai::TraceEventDetail;
 
 /// Build a plain text step (system prompt or user query) with no agent payload.
 fn text_step(step_id: usize, source: StepSource, timestamp_ns: i64, message: String) -> Step {
+    // Native export concatenates the request's full system instructions.
+    let extra = matches!(source, StepSource::System).then(|| {
+        HashMap::from([(
+            agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
+            serde_json::Value::Bool(true),
+        )])
+    });
     Step {
         step_id,
         source,
@@ -33,7 +40,7 @@ fn text_step(step_id: usize, source: StepSource, timestamp_ns: i64, message: Str
         tool_calls: None,
         observation: None,
         metrics: None,
-        extra: None,
+        extra,
         llm_call_count: None,
         is_copied_context: None,
     }
@@ -122,7 +129,7 @@ pub fn convert_session_to_atif(
     // Group events into conversation turns, preserving order
     let trace_groups = group_by_conversation(&events, &parsed);
 
-    for (trace_events, trace_parsed) in &trace_groups {
+    for (group_idx, (trace_events, trace_parsed)) in trace_groups.iter().enumerate() {
         if trace_events.is_empty() {
             continue;
         }
@@ -168,6 +175,23 @@ pub fn convert_session_to_atif(
                     trace_events[i + 1],
                     trace_parsed.get(i + 1).and_then(|p| p.as_ref()),
                 ))
+            } else if trace_events[i].conversation_id.is_some()
+                && let Some((next_events, next_parsed)) = trace_groups.get(group_idx + 1)
+                && let Some(next_event) = next_events.first()
+                && next_event.conversation_id.is_some()
+                && next_event.start_timestamp_ns
+                    >= trace_events[i]
+                        .end_timestamp_ns
+                        .unwrap_or(trace_events[i].start_timestamp_ns)
+            {
+                // A tool result can be delivered by the first request of the
+                // next turn: a user interjection while the tool runs starts a
+                // new conversation, and that request replays the pending
+                // result. The result still belongs to the step that issued
+                // the call. Both turns need a resolved conversation id; an
+                // unknown turn must not be cross-correlated (it may be an
+                // unrelated replayed request).
+                Some((*next_event, next_parsed.first().and_then(|p| p.as_ref())))
             } else {
                 None
             };
@@ -359,33 +383,51 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
     if defs.is_empty() { None } else { Some(defs) }
 }
 
-/// Extract system prompt text from event data.
+/// Extract instruction text, normalizing OpenAI's replacement role to ATIF system.
 fn extract_system_prompt(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Option<String> {
-    // Strategy 1: from parsed LLMCall request messages
     if let Some(call) = parsed {
-        let text = extract_text_by_role(&call.request.messages, "system");
+        // Read both instruction roles in the order retained by the producer.
+        // Joining each role separately or deduplicating text would lose data.
+        let text = call
+            .request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role.as_str(), "system" | "developer"))
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::Text { content } if !content.is_empty() => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if !text.is_empty() {
             return Some(text);
         }
     }
 
-    // Strategy 2: from system_instructions column (JSON array of InputMessage)
-    if let Some(ref json) = event.system_instructions {
-        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-            let text = extract_text_from_input_messages(&msgs, "system");
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-        // Might be a plain string
-        if let Ok(s) = serde_json::from_str::<String>(json) {
-            if !s.is_empty() {
-                return Some(s);
-            }
+    // Empty parsed instruction text has always fallen back to stored columns.
+    // Those columns split system messages from the remaining input history, so
+    // retain their available order without claiming the original interleaving.
+    let mut instructions = Vec::new();
+    if let Some(json) = event.system_instructions.as_deref() {
+        let text = crate::genai::semantic::input_messages_from_column(json)
+            .map(|messages| extract_text_from_input_messages(&messages, "system"))
+            .or_else(|| serde_json::from_str::<String>(json).ok());
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            instructions.push(text);
         }
     }
-
-    None
+    if let Some(messages) = event
+        .input_messages
+        .as_deref()
+        .and_then(crate::genai::semantic::input_messages_from_column)
+    {
+        let text = extract_text_by_role(&messages, "developer");
+        if !text.is_empty() {
+            instructions.push(text);
+        }
+    }
+    (!instructions.is_empty()).then(|| instructions.join("\n"))
 }
 
 /// Extract user query text from event data.
@@ -519,9 +561,9 @@ fn build_agent_step(
         }
     }
 
-    // Observation: correlate tool_calls with responses from next event
+    // Provider results may be inline; client results arrive in the next request.
     let observation = if !tool_calls.is_empty() {
-        build_observation(&tool_calls, next)
+        build_observation(&tool_calls, event, parsed, next)
     } else {
         None
     };
@@ -628,13 +670,13 @@ fn messages_after_the_last_tool_call(messages: &[InputMessage]) -> &[InputMessag
     }
 }
 
-/// Build observation by looking for ToolCallResponse in the next event's input.
+/// Match inline provider results, then client results in the next request.
 fn build_observation(
     tool_calls: &[ToolCall],
+    event: &TraceEventDetail,
+    parsed: Option<&LLMCall>,
     next: Option<(&TraceEventDetail, Option<&LLMCall>)>,
 ) -> Option<Observation> {
-    let (next_event, next_parsed) = next?;
-
     let tc_ids: HashMap<&str, usize> = tool_calls
         .iter()
         .enumerate()
@@ -644,32 +686,53 @@ fn build_observation(
     let mut results: Vec<ObservationResult> = Vec::new();
     let mut matched_by_id = vec![false; tool_calls.len()];
 
-    // Strategy 1: from parsed LLMCall's full request messages (latest round only)
-    if let Some(call) = next_parsed {
-        let latest = latest_round_messages(&call.request.messages);
-        collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
-    } else {
-        // Strategy 2: from event_json parsed as LLMCall (latest round only)
-        if let Some(call) = parse_event_json(next_event) {
+    // Results in the response are authoritative; a replay must not replace
+    // them or consume an unmatched client call.
+    if let Some(call) = parsed {
+        collect_tool_response_parts(
+            call.response
+                .messages
+                .iter()
+                .map(|message| message.parts.as_slice()),
+            &tc_ids,
+            &mut results,
+            &mut matched_by_id,
+        );
+    } else if let Some(messages) = event
+        .output_messages
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<OutputMessage>>(json).ok())
+    {
+        collect_tool_response_parts(
+            messages.iter().map(|message| message.parts.as_slice()),
+            &tc_ids,
+            &mut results,
+            &mut matched_by_id,
+        );
+    }
+
+    if let Some((next_event, next_parsed)) = next {
+        let inline_count = results.len();
+        // Strategy 1: from parsed LLMCall's full request messages (latest round only)
+        if let Some(call) = next_parsed {
             let latest = latest_round_messages(&call.request.messages);
             collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
         }
-    }
 
-    // Strategy 3: from input_messages column. Narrowed to the round it
-    // carries: a completed row keeps only the current round there, but a row
-    // that never completed keeps the whole replayed history, and a multi-round
-    // turn keeps every round of the turn — an earlier round's id-less response
-    // would otherwise take this step's call through the positional fallback.
-    if results.is_empty() {
-        if let Some(ref json) = next_event.input_messages {
-            if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-                let latest = messages_after_the_last_tool_call(&msgs);
-                collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
+        // Fall back to the input_messages column, narrowed to the round it
+        // carries: a completed row keeps only the current round there, but a row
+        // that never completed keeps the whole replayed history, and a multi-round
+        // turn keeps every round of the turn — an earlier round's id-less response
+        // would otherwise take this step's call through the positional fallback.
+        if results.len() == inline_count {
+            if let Some(ref json) = next_event.input_messages {
+                if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
+                    let latest = messages_after_the_last_tool_call(&msgs);
+                    collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
+                }
             }
         }
     }
-
     if results.is_empty() {
         None
     } else {
@@ -718,6 +781,11 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
     }
     match payload {
         serde_json::Value::String(s) => s.clone(),
+        // An explicit null is "the producer recorded no output", not the
+        // four-character string "null": the shared ATIF message reader maps a
+        // null *message* to empty text, and stringifying the result here would
+        // hand the classifiers a fabricated output.
+        serde_json::Value::Null => String::new(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
@@ -747,7 +815,7 @@ const ERROR_ENVELOPE_KEYS: &[&str] = &[
 /// `tool_call_response` sat on a `user` message and none on a `tool` message, so
 /// gating on role dropped all of them and left every observation empty. The part
 /// type is the reliable discriminator — `ToolCallResponse` is the only variant
-/// carrying a result, and assistant turns only ever carry `ToolCall`.
+/// carrying a result; provider-side results can also appear on assistant turns.
 ///
 /// Matching runs in two passes: every response that names a call through its id
 /// claims that call first, and only the responses the ids could not place are
@@ -761,6 +829,20 @@ fn collect_tool_responses(
     results: &mut Vec<ObservationResult>,
     matched: &mut [bool],
 ) {
+    collect_tool_response_parts(
+        messages.iter().map(|message| message.parts.as_slice()),
+        tc_ids,
+        results,
+        matched,
+    );
+}
+
+fn collect_tool_response_parts<'a>(
+    messages: impl IntoIterator<Item = &'a [MessagePart]>,
+    tc_ids: &HashMap<&str, usize>,
+    results: &mut Vec<ObservationResult>,
+    matched: &mut [bool],
+) {
     // Flatten the responses in message order once; both passes work over the
     // same list.
     let mut pending: Vec<(
@@ -768,8 +850,8 @@ fn collect_tool_responses(
         String,
         Option<HashMap<String, serde_json::Value>>,
     )> = Vec::new();
-    for msg in messages {
-        for part in &msg.parts {
+    for parts in messages {
+        for part in parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
                 // Providers report tool failure out of band: Anthropic wraps a
                 // failed result as `{"content": …, "is_error": true}`, real
@@ -799,38 +881,35 @@ fn collect_tool_responses(
                 // JSON-encoded *string* rather than an object. The detector and
                 // the grader both re-parse that shape before judging it; read
                 // the same envelope here so the same bytes get the same
-                // outcome. Only an object envelope is looked through — a
-                // plain string payload keeps its previous rendering, which is
+                // outcome. An object envelope is looked through for its flags;
+                // a plain string payload keeps its previous rendering, which is
                 // what the flattening below expects.
                 let encoded = match response {
                     serde_json::Value::String(text) => {
-                        serde_json::from_str::<serde_json::Value>(text.trim())
-                            .ok()
-                            .filter(serde_json::Value::is_object)
+                        serde_json::from_str::<serde_json::Value>(text.trim()).ok()
                     }
                     _ => None,
                 };
-                let envelope = encoded.as_ref().unwrap_or(response);
-                let status_is_error = envelope
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
-                let declared = envelope
-                    .get(EXTRA_IS_ERROR)
-                    .or_else(|| envelope.get("isError"))
-                    .and_then(|v| v.as_bool())
-                    .or_else(|| {
-                        envelope
-                            .get("success")
-                            .and_then(|v| v.as_bool())
-                            .map(|success| !success)
-                    });
-                let is_error = declared
-                    .map(|is_error| is_error || status_is_error)
-                    .or_else(|| status_is_error.then_some(true));
-                let extra = is_error.map(|flag| {
-                    HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(flag))])
-                });
+                // An encoded *array* is not an envelope: an MCP tool with
+                // several content items serialises its block array as that
+                // string, and there are no flags to read off it. The typed
+                // path parses such strings into real arrays, and both twins
+                // recurse through the parsed array
+                // (`tool_response_failure_text`, `value_has_error_signal`),
+                // so the parsed array becomes the payload below and the
+                // flattening reads its text blocks instead of exporting the
+                // encoding.
+                let encoded_blocks = encoded.as_ref().filter(|value| value.is_array());
+                let envelope = encoded
+                    .as_ref()
+                    .filter(|value| value.is_object())
+                    .unwrap_or(response);
+                // The precedence itself lives in `agentsight_atif` beside the
+                // schema, because the interruption detector, the grader and the
+                // trajectory collectors all read the same spellings and must
+                // resolve a self-contradicting payload the same way.
+                let is_error = agentsight_atif::declared_tool_failure(envelope);
+                let extra = is_error.map(agentsight_atif::is_error_extra);
 
                 // ATIF allows any JSON for observation content, but downstream
                 // consumers (analyzers, dashboard) render it as text — flatten
@@ -849,7 +928,9 @@ fn collect_tool_responses(
                 // "output"]. `content` stays first (the common spelling), a
                 // null value is skipped, and an envelope with none of the keys
                 // keeps the whole response as before.
-                let payload = if is_error.is_some() {
+                let payload = if let Some(blocks) = encoded_blocks {
+                    blocks
+                } else if is_error.is_some() {
                     ERROR_ENVELOPE_KEYS
                         .iter()
                         .filter_map(|key| envelope.get(*key))
@@ -869,17 +950,20 @@ fn collect_tool_responses(
     // separator differences some agents introduce when echoing a call id back.
     for (id, content_str, extra) in &pending {
         let Some(tc_id) = id else { continue };
-        let found = tc_ids
-            .iter()
-            .find(|(known, _)| same_call_id(known, tc_id))
-            .map(|(_, idx)| *idx);
+        let owner = resolve_call_id(tc_id, tc_ids.keys().copied());
+        let found = owner.and_then(|owner| {
+            tc_ids
+                .iter()
+                .find(|(known, _)| **known == owner)
+                .map(|(_, index)| *index)
+        });
         let Some(idx) = found else { continue };
         if matched[idx] {
             continue;
         }
         matched[idx] = true;
         results.push(ObservationResult {
-            source_call_id: Some(tc_id.to_string()),
+            source_call_id: owner.map(str::to_string),
             content: Some(serde_json::Value::String(content_str.clone())),
             subagent_trajectory_ref: None,
             extra: extra.clone(),
@@ -1506,21 +1590,36 @@ pub(crate) mod tests {
     /// stayed in the evidence pool, where `grep: no such file or directory`
     /// could ground — or refuse to ground — a later claim it never sourced.
     ///
+    /// An encoded *array* is the other shape that string arrives in: an MCP
+    /// tool with several content items serialises its block array as that
+    /// string, and the converter rejected it with the same object filter, so
+    /// the observation exported the raw encoding — the `[{"type":"text"`
+    /// punctuation that defeats a classifier matching lines that start with
+    /// an error token — while both twins recurse through the parsed array.
+    ///
     /// Both spellings must agree on the same bytes; that agreement is what
     /// this pins.
     #[test]
     fn an_encoded_tool_result_envelope_keeps_its_declared_outcome() {
         use crate::grounding::{evidence::build_index, outcome::CallStatus};
 
-        for (encoded, flag, expected) in [
+        for (encoded, flag, expected_content, expected) in [
             (
                 r#"{"content":"grep: no such file or directory","isError":false}"#,
                 Some(false),
+                "grep: no such file or directory",
                 CallStatus::Ok,
             ),
             (
                 r#"{"content":"command failed","isError":true}"#,
                 Some(true),
+                "command failed",
+                CallStatus::Failed,
+            ),
+            (
+                r#"[{"type":"text","text":"command failed"},{"type":"text","text":"exit code 1"}]"#,
+                None,
+                "command failed\nexit code 1",
                 CallStatus::Failed,
             ),
         ] {
@@ -1553,6 +1652,11 @@ pub(crate) mod tests {
             .unwrap();
             let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
             assert_eq!(result.is_error(), flag, "payload {encoded}");
+            assert_eq!(
+                result.content.as_ref().and_then(|content| content.as_str()),
+                Some(expected_content),
+                "the payload must be read through its encoded form, got {encoded}"
+            );
 
             let index = build_index(&doc, 0..doc.steps.len());
             assert_eq!(
@@ -2114,6 +2218,57 @@ pub(crate) mod tests {
         );
     }
 
+    /// An explicit `null` tool-result payload means the producer recorded no
+    /// output, not the four-character string "null".
+    ///
+    /// The observation content is the text every downstream consumer reads:
+    /// `outcome::classify_call` scans it for a line starting with an error
+    /// token and the evidence pool's haystack carries it, so a null flattened
+    /// to `"null"` fabricates an output the tool never produced — and the
+    /// trajectory then serialises that fabricated text back. The shared ATIF
+    /// message reader maps an explicit null *message* to the empty string for
+    /// the same reason.
+    #[test]
+    fn an_explicit_null_tool_result_is_empty_not_the_text_null() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-null".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"file_path": "/tmp/empty"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-null".into()),
+                response: serde_json::Value::Null,
+            }],
+            name: None,
+        }];
+
+        let doc = convert_trace_to_atif(
+            "trace-null",
+            vec![
+                call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read it")),
+                call_event(2, 3_000_000_000, None, Some(replayed), None),
+            ],
+        )
+        .expect("trace converts");
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("the call carries a result")
+            .results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-null"));
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("")
+        );
+    }
+
     #[test]
     fn test_extract_text_from_input_messages() {
         let messages = vec![InputMessage {
@@ -2626,6 +2781,61 @@ pub(crate) mod tests {
             .expect("calls of one conversation must stay in one group")
             .results;
         assert_eq!(results[0].source_call_id.as_deref(), Some("tc-9"));
+    }
+
+    /// A tool result can arrive after a user interjection starts a new
+    /// conversation: the next request carries the pending call's result plus
+    /// the interjection, so the resolver assigns it a different
+    /// `conversation_id`. The result still belongs to the step that issued the
+    /// call. The file-based converter merges exactly this shape
+    /// (`test_convert_late_tool_result_merges_into_its_calling_step`); the
+    /// session exporter only inspected the next event of the same group, so
+    /// the observation vanished from the export.
+    #[test]
+    fn session_export_merges_a_late_result_across_a_new_conversation() {
+        let events = vec![
+            event_with_ids(
+                1,
+                1_000_000_000,
+                Some("conv-a"),
+                Some("resp-1"),
+                Some("read /tmp/a"),
+                Some(tool_call_turn("tc-late")),
+                None,
+            ),
+            event_with_ids(
+                2,
+                3_000_000_000,
+                Some("conv-b"),
+                Some("resp-2"),
+                Some("actually, hold on"),
+                None,
+                Some(replayed_response("tc-late")),
+            ),
+        ];
+
+        let doc = convert_session_to_atif("session-late", events).unwrap();
+
+        let agent_steps: Vec<&Step> = doc
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::Agent)
+            .collect();
+        assert_eq!(agent_steps.len(), 2);
+
+        let observation = agent_steps[0]
+            .observation
+            .as_ref()
+            .expect("the late result must attach to the step that issued the call");
+        assert_eq!(observation.results.len(), 1);
+        assert_eq!(
+            observation.results[0].source_call_id.as_deref(),
+            Some("tc-late")
+        );
+        assert!(
+            agent_steps[1].observation.is_none(),
+            "the interjection's own turn must not claim the result"
+        );
     }
 
     #[test]

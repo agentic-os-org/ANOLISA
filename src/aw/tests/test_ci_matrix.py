@@ -9,7 +9,16 @@ from unittest.mock import patch
 from test_ci_checks import GateFixture, gate
 from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
-from check_matrix import END, START, table, validate
+from check_matrix import (
+    CAPABILITY_DOCS,
+    END,
+    HOOK_EVENTS,
+    START,
+    capability_cells,
+    main,
+    table,
+    validate,
+)
 
 
 class InventoryTests(GateFixture):
@@ -95,12 +104,16 @@ class InventoryTests(GateFixture):
 class MatrixTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
+        self.root = self.root / "src/aw"
+        self.root.mkdir(parents=True)
         self.matrix = json.loads((gate.AW / "tests/regression-matrix.json").read_text())
         self.runnable = {target: {"fixture"} for target in self.matrix["required_targets"]}
         for case in self.matrix["cases"].values():
             self.runnable.setdefault(case["target"], set()).add(case["test"])
-        for name in ("README.md", "README_zh.md"):
-            (self.root / name).write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
 
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
@@ -122,7 +135,7 @@ class MatrixTests(GateFixture):
             workspace({name}, self.root / name) for name in sorted(providers)
         ]
         (self.root / "tests").mkdir()
-        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+        for mode in ("valid", "missing-provider", "missing-framework", "duplicate-target", "unknown-opt-in"):
             matrix = copy.deepcopy(self.matrix)
             if mode == "unknown-opt-in":
                 matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
@@ -131,7 +144,7 @@ class MatrixTests(GateFixture):
             def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
                 owned = set(data["workspace_members"])
                 self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
-                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                if (mode == "missing-provider" and owned == {"aw-provider-tokenless"}) or (mode == "missing-framework" and "aw-cli" in owned):
                     return {}
                 result = {
                     target: tests for target, tests in self.runnable.items()
@@ -185,14 +198,103 @@ class MatrixTests(GateFixture):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 validate(matrix, self.runnable, self.root)
 
-    def test_empty_target_and_stale_readme_fail(self) -> None:
+    def test_empty_target_and_stale_or_missing_guide_grids_fail(self) -> None:
         runnable = copy.deepcopy(self.runnable)
         runnable[self.matrix["required_targets"][0]] = set()
         with self.assertRaisesRegex(ValueError, "target is missing or empty"):
             validate(self.matrix, runnable, self.root)
-        (self.root / "README_zh.md").write_text(f"{START}\nstale\n{END}\n")
-        with self.assertRaisesRegex(ValueError, "update the grid"):
-            validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            original = path.read_text()
+            for text, error in (
+                (f"{START}\nstale\n{END}\n", "update the grid"),
+                ("no generated table", "missing unique matrix markers"),
+                (original + original, "missing unique matrix markers"),
+                (f"<details>\n{original}</details>\n", "keep the Hook grid expanded"),
+            ):
+                with self.subTest(document=name, content=text), self.assertRaisesRegex(
+                    ValueError, error
+                ):
+                    path.write_text(text)
+                    validate(self.matrix, self.runnable, self.root)
+            path.write_text(original)
+
+    def test_regeneration_updates_all_grids_without_changing_surrounding_text(self) -> None:
+        (self.root / "tests").mkdir()
+        (self.root / "tests/regression-matrix.json").write_text(json.dumps(self.matrix))
+        for name in CAPABILITY_DOCS:
+            (self.root / name).write_text(f"intro\n{START}\nstale\n{END}\nfooter\n")
+        with patch("check_matrix.__file__", str(self.root / "scripts/check_matrix.py")), patch(
+            "sys.argv", ["check_matrix.py", "--write-docs"]
+        ):
+            main()
+        validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            self.assertEqual(
+                (self.root / name).read_text(),
+                f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
+            )
+
+    def test_structured_16_hook_capability_cells_match_schemas_and_reject_unknown_hooks(self) -> None:
+        config_schema = json.loads(
+            (gate.AW / "crates/aw-config/schemas/configuration-v1alpha1.schema.json").read_text()
+        )
+        source_schema = json.loads(
+            (
+                gate.AW / "crates/aw-contracts/schemas/source-capability-v1alpha1.schema.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            list(config_schema["properties"]["spec"]["properties"]["events"]["properties"]),
+            list(HOOK_EVENTS),
+        )
+        self.assertEqual(source_schema["$defs"]["hookEvent"]["enum"], list(HOOK_EVENTS))
+        cells = capability_cells(self.matrix)
+        self.assertEqual(set(cells), set(self.matrix["agents"]))
+        for agent, row in cells.items():
+            self.assertEqual(list(row), list(HOOK_EVENTS))
+            for event in HOOK_EVENTS:
+                cell = row[event]
+                self.assertEqual((cell["adapter"], cell["event"]), (agent, event))
+                if event in self.matrix["agents"][agent]["events"]:
+                    self.assertEqual(cell["status"], "supported")
+                    self.assertEqual(cell["sources"], ["native"])
+                    self.assertEqual(cell["mode"], "control")
+                    self.assertEqual(
+                        set(cell["effects"]),
+                        set(self.matrix["agents"][agent]["events"][event]),
+                    )
+                else:
+                    self.assertEqual(cell["status"], "unsupported")
+                    self.assertEqual(cell["sources"], [])
+                    self.assertIsNone(cell["mode"])
+                    self.assertEqual(cell["effects"], [])
+
+        unknown_hook = copy.deepcopy(self.matrix)
+        unknown_hook["agents"]["qoder"]["events"]["unknown.hook"] = {"observe": ["catalog"]}
+        with self.assertRaisesRegex(ValueError, "unknown semantic hook"):
+            capability_cells(unknown_hook)
+
+        missing_observe = copy.deepcopy(self.matrix)
+        del missing_observe["agents"]["qoder"]["events"]["tool.before"]["observe"]
+        with self.assertRaisesRegex(ValueError, "unsupported or incomplete effect set"):
+            capability_cells(missing_observe)
+
+        for event, bad_effect in (("session.end", "replace_input"), ("tool.after", "block")):
+            bad_pair = copy.deepcopy(self.matrix)
+            bad_pair["agents"]["qoder"]["events"][event] = {
+                "observe": ["catalog"],
+                bad_effect: ["catalog"],
+            }
+            with self.subTest(event=event, effect=bad_effect), self.assertRaisesRegex(
+                ValueError, "unsupported or incomplete effect set"
+            ):
+                capability_cells(bad_pair)
+
+        with patch("sys.argv", ["check_matrix.py", "--write-docs", "--cells-json"]), self.assertRaises(
+            SystemExit
+        ):
+            main()
 
 
 class ScriptLayoutTests(GateFixture):

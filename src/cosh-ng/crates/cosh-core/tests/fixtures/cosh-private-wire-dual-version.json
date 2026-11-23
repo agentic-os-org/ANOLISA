@@ -18,6 +18,7 @@
           "subtype": "initialize",
           "protocol_version": 1,
           "capabilities": {
+            "can_handle_ecs_trial_v1": true,
             "can_handle_can_use_tool": true,
             "can_handle_host_executed_shell_tool_result": true,
             "can_handle_shell_evidence_tool": false,

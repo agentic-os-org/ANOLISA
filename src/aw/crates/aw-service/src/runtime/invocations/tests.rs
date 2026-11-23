@@ -87,3 +87,25 @@ fn overload_consumes_sequence_and_changed_identity_remains_rejected() {
     ledger.active.get_mut("new").unwrap().closing = true;
     assert!(ledger.check(&value("new")).is_err());
 }
+
+#[test]
+fn service_rewrite_preserves_before_identity_and_binds_only_checked_after_input() {
+    let mut ledger = Ledger::default();
+    ledger
+        .register(1, "call", "tool", &json!({"n":1}), 2)
+        .unwrap();
+    let mut original = value("call");
+    original["name"] = json!("tool.before");
+    ledger.rewrite(&original, &json!({"n":2})).unwrap();
+    assert!(ledger.rewrite(&original, &json!({"n":3})).is_err());
+    ledger.check(&original).unwrap();
+    let mut executed = original.clone();
+    executed["tool"]["input"] = json!({"n":2});
+    assert!(ledger.check(&executed).is_err());
+    original["name"] = json!("tool.after");
+    assert!(ledger.check(&original).is_err());
+    executed["name"] = json!("tool.after");
+    ledger.check(&executed).unwrap();
+    executed["tool"]["input"] = json!({"n":3});
+    assert!(ledger.check(&executed).is_err());
+}

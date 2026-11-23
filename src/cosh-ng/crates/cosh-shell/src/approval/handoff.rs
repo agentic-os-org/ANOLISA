@@ -1,13 +1,24 @@
 use crate::runtime::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ApprovedBashExecutionPath {
+pub(crate) enum ApprovedBashExecutionPath {
     ForegroundShellPty,
     Blocked,
 }
 
-pub(super) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecutionPath {
-    if build_shell_handoff_request(ShellHandoffBuildInput {
+pub(crate) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecutionPath {
+    if shell_handoff_validation_error(command).is_some() {
+        ApprovedBashExecutionPath::Blocked
+    } else {
+        ApprovedBashExecutionPath::ForegroundShellPty
+    }
+}
+
+/// The handoff validation error for a command, or `None` when it can be handed
+/// to the foreground shell. Single source of truth shared by the execution-path
+/// gate and the model-facing block reason, so the two can never disagree.
+pub(super) fn shell_handoff_validation_error(command: &str) -> Option<String> {
+    build_shell_handoff_request(ShellHandoffBuildInput {
         command,
         exact_preview: format!("$ {command}"),
         source: "validation",
@@ -17,12 +28,7 @@ pub(super) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecuti
         request_id: None,
         tool_use_id: None,
     })
-    .is_err()
-    {
-        ApprovedBashExecutionPath::Blocked
-    } else {
-        ApprovedBashExecutionPath::ForegroundShellPty
-    }
+    .err()
 }
 
 pub(crate) fn raw_bash_command(preview: &str) -> &str {

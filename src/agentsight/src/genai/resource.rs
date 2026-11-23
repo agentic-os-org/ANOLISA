@@ -12,10 +12,11 @@ impl GenAIBuilder {
         agents: &impl PidAgentNameCache,
     ) -> Option<super::semantic::LLMCall> {
         use super::semantic::{LLMCall, LLMRequest};
-        let http = results.iter().find_map(|r| match r {
-            AnalysisResult::Http(http) => Some(http),
+        let context = results.iter().find_map(|r| match r {
+            AnalysisResult::HttpContext(context) => Some(context),
             _ => None,
         })?;
+        let http = &context.http;
         if !crate::parser::llm::is_llm_api_path(&http.path) {
             return None;
         }

@@ -94,6 +94,33 @@ def command(
     )
 
 
+def test_fixture_check_needs_no_third_party_packages(tmp_path: Path) -> None:
+    runtime = tmp_path / "stdlib"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(runtime)], check=True, timeout=10
+    )
+    result = subprocess.run(
+        [
+            str(runtime / "bin/python"), "-I", str(SINGLE_RUN / "load/agents.py"),
+            "--output-dir", str(tmp_path / "unused"), "--check-only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (tmp_path / "unused").exists()
+
+
+def test_changed_synthetic_fixture_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = importlib.util.spec_from_file_location("benchmark_agents", SINGLE_RUN / "load/agents.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "TOKEN_TEXT", "arbitrary output")
+    with pytest.raises(ValueError, match="pinned synthetic delta"):
+        module.run(SimpleNamespace(check_only=True))
+
+
 def test_preflight_carries_its_id_in_semantic_user_content(
     https_server: mock_llm_server.BenchmarkHTTPServer,
 ) -> None:

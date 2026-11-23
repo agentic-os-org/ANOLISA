@@ -5,11 +5,16 @@
 //! discovery, private configuration validation and native effect admission belong
 //! to the service and adapter layers; this crate never starts those components.
 
+pub mod native;
+pub mod requirements;
+pub mod service_paths;
+
 mod parsing;
 mod policy_update;
 mod validation;
 
 use serde_json::Value;
+use std::sync::OnceLock;
 
 /// Authoritative configuration shape, available to offline editor tooling.
 pub const SCHEMA: &str = include_str!("../schemas/configuration-v1alpha1.schema.json");
@@ -83,18 +88,24 @@ impl Configuration {
 }
 
 /// Reusable offline validator compiled from the bundled configuration schema.
-pub struct Validator(jsonschema::Validator);
+pub struct Validator(&'static jsonschema::Validator);
 
 impl Validator {
-    /// Compiles the schema without fetching network resources.
+    /// Reuses the process-wide schema without fetching network resources.
     ///
     /// # Errors
     /// Returns [`Error::InvalidSchema`] if the bundled schema is invalid.
     pub fn new() -> Result<Self, Error> {
-        let schema: Value = serde_json::from_str(SCHEMA).map_err(|_| Error::InvalidSchema)?;
-        jsonschema::draft202012::options()
-            .offline()
-            .build(&schema)
+        static SCHEMA_VALIDATOR: OnceLock<Result<jsonschema::Validator, ()>> = OnceLock::new();
+        SCHEMA_VALIDATOR
+            .get_or_init(|| {
+                let schema: Value = serde_json::from_str(SCHEMA).map_err(|_| ())?;
+                jsonschema::draft202012::options()
+                    .offline()
+                    .build(&schema)
+                    .map_err(|_| ())
+            })
+            .as_ref()
             .map(Self)
             .map_err(|_| Error::InvalidSchema)
     }
@@ -113,6 +124,23 @@ impl Validator {
             constraint: error.schema_path().to_string(),
         })?;
         validation::validate(&document)?;
+        native::validate(&document)?;
         Ok(Configuration(document))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_schema_keeps_document_validation_independent() {
+        let first = Validator::new().unwrap();
+        let second = Validator::new().unwrap();
+        assert!(std::ptr::eq(first.0, second.0));
+        let example = include_bytes!("../examples/aw.minimal.yaml");
+        assert!(first.parse(example).is_ok());
+        assert!(second.parse(b"{}").is_err());
+        assert!(second.parse(example).is_ok());
     }
 }

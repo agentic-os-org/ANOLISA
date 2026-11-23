@@ -10,9 +10,11 @@ Switch with `/mode approval <mode>` or set `shell.approval_mode`.
 
 | Mode | Behavior |
 |------|----------|
-| `recommend` | Explain and suggest only; no tool calls are emitted. |
+| `recommend` | Explains and suggests; no side-effecting tool runs automatically except explicit `allowed_tools` entries; read-only inspection may still run. |
 | `auto` | Default. Eligible read-only or low-risk tools can run automatically; risky, guarded, or external work asks first. |
 | `trust` | Provider tool requests run automatically for this session after explicit confirmation. |
+
+Explicit `agent.allowed_tools` entries take precedence over the mode restrictions.
 
 In `auto` mode, eligible simple read-only commands can suppress stderr with
 `2>/dev/null` or `2>>/dev/null` without an approval card. Spaces after the
@@ -29,8 +31,10 @@ a modifying command eligible. Stdout and the exit status remain available
 in the execution result, including when the command fails.
 
 When tokenless RTK rewriting is enabled, wrapped commands
-(`env TOKENLESS_* … /usr/bin/rtk <command>`, or `/usr/bin/rtk <command>`
-when RTK emits the absolute path itself) keep the same eligibility:
+(`env TOKENLESS_* … /usr/bin/tokenless rtk <command>` when Tokenless links
+RTK; with a standalone RTK, `env TOKENLESS_* … /usr/bin/rtk <command>`, or
+`/usr/bin/rtk <command>` when RTK emits the absolute path itself) keep the
+same eligibility:
 cosh assesses the wrapped read-only command and executes the wrapped
 form, so RTK output compression stays active on the approval-free path.
 A `TOKENLESS_DATA_DIR` that differs from the session's tokenless state
@@ -42,6 +46,36 @@ process; subsequent `export` changes in the interactive shell are not copied,
 and `GIT_*` variables are not passed through. Time-zone, locale, and Git
 results can therefore differ from the same command in that shell. Run commands
 that need the shell's current environment directly in the foreground shell.
+
+`printenv` is not on the built-in read-only allowlist. In the default `auto`
+mode it requires an approval card: the classifier cannot know which variable
+names hold secrets, and bare `printenv` prints the whole environment. This
+gate only removes the built-in read-only auto-approval for `printenv`.
+Explicit trust settings and runtime read-only configuration still apply: a
+request matching an explicit command trust key (`trusted_commands`) can still
+run without a card in `auto` mode, `trust` runs provider tool requests
+automatically after confirmation, and `shell.readonly` overrides and
+`shell.readonly_disabled` continue to control read-only eligibility (see
+[Configuration](../configuration.md)).
+
+### Git commands in auto mode
+
+In the default `auto` mode, every git command requires an approval card;
+there is no built-in git auto-approval exception. Git reads `.git/config`
+and `.gitattributes` from the repository it runs in, and those files can
+name programs that git executes on its own: `core.fsmonitor` on index
+refresh, `diff.<driver>.textconv` when generating patches, `gpg.program`
+when verifying signatures, the remote transport (`core.sshCommand`,
+credential helpers) when a partial clone lazily fetches a missing object,
+and pagers. The foreground shell can also expand a seemingly literal
+argument (bash globbing, zsh `EXTENDED_GLOB`) into options that reach
+those paths. The read-only classifier cannot see repository configuration
+or shell expansion, so git commands ask first instead of running
+automatically.
+
+Non-git read-only commands keep their existing auto-approval behavior.
+To run specific git commands without a card, use trust mode or explicit
+`shell.readonly` overrides; both are deliberate operator choices.
 
 Enable trust mode with a second confirmation:
 

@@ -2,6 +2,87 @@
 
 [English](CHANGELOG.md)
 
+## 0.7.3
+
+### Added
+
+- 新增 `ws-ckpt rollback --json`，以机器可读的 JSON 输出回滚与预览结果；新增 `ws-ckpt rollback --guarded --json`，提供 guarded 回滚协议：兼容性检查、精确预览、确认后执行与持久化结果查询；guarded 结果查询也接受合法的历史快照 ID (#10233)
+- 新增 `ws-ckpt diff --format json`，返回文件级变更与耗时秒数；省略 `--to` 时与当前工作区比较 (#9368)
+
+### Fixed
+
+- `ws-ckpt list` 表格字段、`ws-ckpt status` 工作区行与命令回执中的控制字符和反斜杠现在会被转义，每个条目保持单行显示；JSON 输出保留原始值 (#9987)
+- `ws-ckpt checkpoint` 现在会在任何工作区变更之前拒绝包含控制字符的快照 ID；历史 ID 仍可通过 diff、回滚预览、回滚与删除使用 (#9987)
+
+## 0.7.2
+
+### Changed
+
+- 递归监听不再跟随工作区内部的目录软链接；软链接目标中的写入仅由注册在该目标目录上的工作区检测 (#9988)
+
+### Fixed
+
+- 修复回滚时每个被监听目录都会泄漏一个 inotify 监听的问题；回滚现在会在切换前释放旧目录树的监听，无法解绑时在切换前失败 (#9988, #9986)
+
+## 0.7.1
+
+### Changed
+
+- 文档：补充说明将 `btrfs-base.btrfs_mount` 切回原根不会恢复已清除的快照记录；原根上仍存在的子卷会以 pinned 的 recovered orphan 身份重新纳入，需用 `list --orphans` 查看并显式删除 (#9856, #9784)
+- 文档：更新 RPM 打包指南，说明拆包后的文件归属和 `/usr/bin` 可执行文件路径，并区分 RPM 安装与默认使用 `/usr/local/bin` 的源码安装布局 (#9863)
+
+### Fixed
+
+- 修复 OpenClaw cron 定时快照硬编码 `/usr/local/bin/ws-ckpt` 导致 RPM 安装后执行失败的问题；从插件 PATH 查找实际安装的 `ws-ckpt`（包括 RPM 的 `/usr/bin/ws-ckpt`），并保留跨版本升级稳定的 launcher 符号链接路径 (#9892)
+- 修复非映射 `plugins.ws-ckpt` 段导致 Hermes 插件初始化失败的问题；无效段现在回退到默认配置和环境变量覆盖 (#9770)
+- Hermes 回滚后的自动快照抑制限定到执行回滚的会话；宿主不提供会话身份时不再登记抑制状态 (#9860)
+- 执行回滚前拒绝 Hermes 的空白或 null `preview` 值，以及 OpenClaw 的非布尔 `preview` 值 (#9796)
+- 两个插件均拒绝带小数部分、布尔或字符串类型的回滚深度；仍接受值为正整数的 JSON 数字 (#9792)
+- `make install` 和 `make install-plugins` 不再将 Hermes 的 `tests/` 和 `.coverage` 安装到运行时目录 (#9838)
+- 修复多个写入者重叠时，一个文件关闭便误报静默的问题；观察到活动或重新启用监听后，需重新满足 200 ms 静默间隔 (#9756)
+- 拒绝受到递归监听注册影响的静默窗口，避免将延迟送达的文件事件误判为无活动 (#8494)
+- Hermes 快照消息在原有 80 字符限制内保留截断标记 (#9595)
+
+## 0.7.0
+
+### Added
+
+- Hermes `ws-ckpt-list` 新增 `limit` 和 `cursor` 分页参数 (#8874)
+- 健康提示采用缓存采样；`health-check-interval=0` 关闭周期诊断，但保留提示采样；采样未完成或过期时省略提示 (#8774)
+- Skill 支持无需宿主插件的每回合快照、cron 定时快照与保留策略；由模型编排，不保证生命周期 Hook 必然执行 (#9465)
+
+### Changed
+
+- **BREAKING** `make install` 改为安装预构建文件，不再构建或激活；新增 `install-core`、`install-plugins` 和 `install-skills` 选择性安装目标 (#9222)
+- **BREAKING** `make install` 默认使用 `AWPRJ=anolisa`；传入 `AWPRJ=` 可保留独立布局 (#9462)
+- RPM 可执行文件从 `/usr/local/bin` 迁至 `/usr/bin` (#9222)
+- 独立包不再携带 ANOLISA 组件发现契约；新 raw 包要求 ANOLISA ≥ 0.3.21 (#9222, #9351)
+- 提升长快照历史的游标分页性能 (#8881)
+
+### Fixed
+
+- 多工作区共享单个 inotify 实例；ws-ckpt 和 cosh checkpoint 状态新增监听覆盖缺失与队列溢出信息 (#7592)
+- RPM 回退到拆包前版本时保留服务启用与运行状态 (#9472)
+- legacy IPC 边界拒绝不安全的快照 ID (#7593)
+- 重新挂载前清理空闲 loop 关联，对短暂设备持有执行有界重试 (#9385, #9471)
+- btrfs-loop `img_size` 最低为 5 GiB；配置无效时启动失败，不再回退到默认配置；旧值可通过 `ws-ckpt config -g --img-size <GiB>` 修正 (#9400)
+- 修复超出可表示范围的 `auto_cleanup_keep` 时间导致周期清理停止的问题；此类策略保留所有快照 (#9399)
+- 正确使用 `btrfs-base.btrfs_mount`，并在重启后复用持久化原生存储根目录；挂载变更需重启，不迁移数据 (#8943)
+- 正确解析 Hermes rollback 的字符串 `preview`，避免误执行真实回滚 (#9527)
+- 回滚后的自动快照抑制限定到目标工作区与会话 (#8866)
+- Hermes 插件激活和停用命令增加超时边界；失败或超时不再阻塞本地安装或清理 (#8998)
+- Hermes 工作区及 cron 配置保存成功后才生效 (#3618)
+- OpenClaw cwd 检查解析工作区软链接路径 (#4768)
+- 修正 Skill 的 rollback 父链说明：`-n 1` 选择 HEAD，`-n 2` 选择其父节点；撤销已完成回合应选择该回合快照的父节点 (#9465)
+- 修正 cosh-ng 参考文档中的 ws-ckpt IPC 枚举索引、payload 字段与客户端镜像兼容说明，协议编码不变 (#9466)
+
+## [0.6.1] - 未发布
+
+### Changed
+
+- 可通过独立 RPM 安装运行时、宿主集成与 Skill。
+- Skill 和宿主插件迁至 ANOLISA 的共享资源目录。
+
 ## 0.6.0
 
 ### Added

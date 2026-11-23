@@ -72,7 +72,9 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           async sidebarItemsGenerator({defaultSidebarItemsGenerator, ...args}) {
             const items = await defaultSidebarItemsGenerator(args);
-            if (/^user-guide\/[^/]+$/.test(args.item.dirName)) {
+            // Keep AW's first-use walkthrough visible as its first chapter.
+            if (/^user-guide\/[^/]+$/.test(args.item.dirName)
+              && args.item.dirName !== 'user-guide/aw') {
               // The component category already links to its manual entry.
               return items.filter((item) => item.type !== 'doc' || item.id !== `${args.item.dirName}/index`);
             }

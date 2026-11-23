@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Tokenless patches through the built RTK executable."""
+"""Verify Tokenless patches through the RTK embedded in tokenless (`tokenless rtk`)."""
 
 from __future__ import annotations
 
@@ -17,9 +17,6 @@ from unittest.mock import patch
 from test_hermes_lifecycle import _load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
-RTK = Path(
-    os.environ.get("TOKENLESS_TEST_RTK_BINARY", ROOT / "third_party/rtk/target/release/rtk")
-).resolve()
 TOKENLESS = Path(
     os.environ.get("TOKENLESS_TEST_TOKENLESS_BINARY", ROOT / "target/debug/tokenless")
 ).resolve()
@@ -48,7 +45,7 @@ class RtkIntegrationTest(unittest.TestCase):
 
     def run_rtk(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(RTK), *args],
+            [str(TOKENLESS), "rtk", *args],
             cwd=self.root,
             env=self.env,
             capture_output=True,
@@ -79,9 +76,13 @@ class RtkIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)["result"]
 
+    def install_standalone_rtk(self) -> None:
+        """Puts an `rtk` on PATH for commands that call RTK themselves."""
+        shim = self.bin_dir / "rtk"
+        shim.write_text(f'#!/bin/sh\nexec {shlex.quote(str(TOKENLESS))} rtk "$@"\n')
+        shim.chmod(0o755)
+
     def rewrite_command(self, command: str, tracked: bool = True) -> str:
-        if not (self.bin_dir / "rtk").exists():
-            (self.bin_dir / "rtk").symlink_to(RTK)
         rewritten = self.protocol("pre_tool", {
             "tool_name": "Bash", "arguments": {"command": command}, "command_field": "command",
             "capabilities": {"replace_arguments": True, "block_and_suggest": False},
@@ -110,6 +111,56 @@ class RtkIntegrationTest(unittest.TestCase):
             "capabilities": {"replace_output": True, "replace_with_text": True, "recovery": {"kind": recovery}},
         })
 
+    def test_source_previews_keep_native_line_windows(self) -> None:
+        source = "".join(
+            f"# Function {index}\n@decorator\ndef function_{index}():\n    return {index}\n\n"
+            for index in range(30)
+        )
+        (self.root / "source.py").write_text(source)
+        # Positive control: RTK is available and ordinary commands still rewrite.
+        self.assertIn("git status", self.rewrite_command("git status"))
+        lines = source.splitlines(keepends=True)
+        head = "".join(lines[:40])
+        tail = "".join(lines[-40:])
+        for command, expected in (
+            ("head -40 source.py", head),
+            ("head -n 40 source.py", head),
+            ("tail -40 source.py", tail),
+            ("wc -l source.py; head -40 source.py", f"{len(lines)} source.py\n" + head),
+            ("cat source.py | head -40", head),
+            ("env LANG=C timeout 10 head -40 source.py", head),
+        ):
+            with self.subTest(command=command):
+                result = self.protocol(
+                    "pre_tool",
+                    {
+                        "tool_name": "Bash",
+                        "arguments": {"command": command},
+                        "command_field": "command",
+                        "capabilities": {"replace_arguments": True},
+                    },
+                )
+                self.assertEqual(result["action"], "passthrough")
+                self.assertEqual(result["output_optimization"], "none")
+                self.assertEqual(result["arguments"]["command"], command)
+                self.assertEqual(self.execute(result["arguments"]["command"]), expected)
+
+        # Counterfactual: the pinned RTK rewrites this spelling of head, and
+        # smart_truncate in --max-lines loses bodies inside the requested window.
+        # `rtk rewrite` prints bare `rtk` commands.
+        self.install_standalone_rtk()
+        rewritten = self.run_rtk("rewrite", "head -40 source.py")
+        self.assertEqual(rewritten.returncode, 3, rewritten.stderr)
+        self.assertIn("--max-lines 40", rewritten.stdout)
+        output = self.execute(rewritten.stdout.strip())
+        self.assertNotEqual(output, head)
+        self.assertIn("    return 7\n", head)
+        self.assertNotIn("    return 7\n", output)
+        # tail shares the native-execution policy; it need not share head's bug.
+        rewritten_tail = self.run_rtk("rewrite", "tail -40 source.py")
+        self.assertEqual(rewritten_tail.returncode, 3, rewritten_tail.stderr)
+        self.assertEqual(self.execute(rewritten_tail.stdout.strip()), tail)
+
     def test_unchanged_local_html_keeps_file_origin_after_rewrite(self) -> None:
         content = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
         (self.root / "page.html").write_text(content)
@@ -126,6 +177,7 @@ class RtkIntegrationTest(unittest.TestCase):
         content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
         (self.root / "filtered.js").write_text("// stripped by RTK\n" + content)
         (self.root / "empty.txt").write_text("")
+        self.install_standalone_rtk()
         old_command = self.rewrite_command("cat clean.txt")
         self.execute(old_command)
         command = self.rewrite_command("rtk read -l minimal filtered.js && cat empty.txt", tracked=False)
@@ -142,6 +194,7 @@ class RtkIntegrationTest(unittest.TestCase):
         content = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
         (self.root / "filtered.js").write_text("// stripped by RTK\n" + content)
         (self.root / "empty.txt").write_text("")
+        self.install_standalone_rtk()
         for retry in ["cat filtered.js", "rtk read -l minimal filtered.js && cat empty.txt"]:
             with self.subTest(retry=retry):
                 self.execute_rewrite("cat clean.txt")
@@ -174,7 +227,6 @@ class RtkIntegrationTest(unittest.TestCase):
 
     def test_hermes_recognizes_real_tracked_wrappers(self) -> None:
         plugin = _load_plugin(str(ROOT / "adapters/tokenless/hermes/__init__.py"), "hermes_real_rtk")
-        (self.bin_dir / "rtk").symlink_to(RTK)
         self.env["TOKENLESS_HTML_EXTRACTION_ENABLED"] = "1"
         html = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
         data = json.dumps([{"name": f"item-{index}", "value": index} for index in range(30)], indent=2)
@@ -298,13 +350,21 @@ class RtkIntegrationTest(unittest.TestCase):
         self.assertEqual(result["disposition"], "passthrough")
         self.assertEqual(result["output"], output)
 
+    def test_rewritten_commands_run_without_a_standalone_rtk(self) -> None:
+        stray = self.bin_dir / "rtk"
+        stray.write_text("#!/bin/sh\necho stray rtk >&2\nexit 97\n")
+        stray.chmod(0o755)
+        (self.root / "clean.txt").write_text("embedded output")
+        command = self.rewrite_command("cat clean.txt")
+        self.assertIn(f"{TOKENLESS} rtk ", command)
+        self.assertEqual(self.execute(command), "embedded output")
+
     def test_rewrite_returns_command_without_executing_it(self) -> None:
         result = self.run_rtk("rewrite", "git status")
         self.assertIn(result.returncode, (0, 3), result.stderr)
         self.assertEqual(result.stdout.strip(), "rtk git status")
 
     def test_native_find_hooks_keep_paths_when_pinned_rtk_would_rewrite(self) -> None:
-        (self.bin_dir / "rtk").symlink_to(RTK)
         (self.bin_dir / "tokenless").symlink_to(TOKENLESS)
         self.env["TOKENLESS_AGENT_ID"] = "qwenwork"
         self.env["HOME"] = str(self.root / "home")

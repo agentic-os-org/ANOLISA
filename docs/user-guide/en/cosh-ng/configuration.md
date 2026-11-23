@@ -19,6 +19,24 @@ Agent, Skill, session, `active_model`, and output-language preferences, but
 `agent.approval_mode`, `agent.allowed_tools`, and project audit settings are
 ignored. `cosh-shell` reads the user file, not the system or project file.
 
+For interactive Shell saves such as `/config language`, the configuration file
+or its symlink target must be owned by the account running Cosh as a regular
+user. Group write permission alone is insufficient. Cosh needs access to the
+configuration locks and permission to replace the file in its target directory.
+
+If the user configuration points to a shared or administrator-owned file,
+ask the administrator for the settings intended for your account. Save them in
+a private copy with mode `0600` that your account owns. Place that copy at
+`~/.copilot-shell/config.toml` in a directory writable by your account. If the
+path was a symlink, replace the link itself with your copy and keep the shared
+file in place. Run `/config language` again to save your preference.
+
+ECS automatic access (`aliyun` with `auth_source = "ecs_identity"`) always uses
+the fixed model `auto`. Neither `active_model` nor provider `model` settings can
+change it, and project models are never saved by selecting this access method.
+Use `/auth` to configure another provider when you want to choose a model;
+automatic ECS access does not require `/auth` first.
+
 ## Minimal user configuration
 
 ```toml
@@ -63,6 +81,10 @@ status_symbols = false
 
 Use environment expansion or `/auth` instead of writing a raw secret into
 TOML. See [Providers](core/providers.md) for provider choices.
+
+Use `skills.custom_paths` for preferred shared Skills or `skills.system_paths`
+for additional installed collections at system priority. See
+[Skills](core/skills.md#add-shared-directories) for directory examples.
 
 ## Approval and turn budgets
 
@@ -122,6 +144,11 @@ bash_history = false
 enabled = true
 role = "web-server"
 critical_mounts = ["/", "/var"]
+expected_writable_mounts = ["/data"]
+pressure_notices = false
+network_capacity_notices = false
+fs_event_notices = false
+host_event_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -147,15 +174,66 @@ fall back to `false`.
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
 
+The `[health]` notice switches default to off. They only control whether the
+matching notice appears in the login banner; fact collection in the diagnostic
+detail (`cosh doctor`) is unaffected:
+
+- `expected_writable_mounts` (default `[]`): mounts expected to be writable.
+  Only a read-only deviation on these mounts raises a notice; ordinary
+  read-only mounts stay in the diagnostic detail.
+- `pressure_notices` (default `false`): when enabled, a tight current-cgroup
+  memory quota combined with sustained same-group PSI stall raises a notice
+  (J19), and sustained dual-window memory/IO/CPU PSI pressure on the host or
+  current group raises notices (J20/J21/J22). When disabled, these facts
+  remain visible in the diagnostic detail.
+- `network_capacity_notices` (default `false`): when enabled, conntrack
+  connection-tracking capacity near its limit raises a notice (J23); an
+  ordinary 90% water level stays in the diagnostic detail.
+- `fs_event_notices` (default `false`): gates filesystem-event notices
+  (J24–J29: ext4 error/forced read-only, journal abort/flush, XFS shutdown,
+  block I/O). These notices are part of the progressive rollout and stay off
+  by default; filesystem-event promotion is additionally held pending
+  device-lifecycle evidence, so enabling this switch alone does not authorize
+  default exposure.
+- `host_event_notices` (default `false`): gates kernel host-event notices
+  (J30 hung task, J31 soft lockup). Off by default under the same progressive
+  rollout; enabling it is a per-rule pilot decision, not a default-on change.
+- `[health.checks]`: toggles individual collectors by check ID, for example
+  `"filesystem.mounts" = true` enables volume statistics for all declared
+  mounts (by default only the root mount is checked).
+- `[health.maintenance]`: declares a maintenance/drill window. Set
+  `enabled = true`, describe the `reason`, and optionally set
+  `until_epoch_seconds` (Unix seconds; omitted means open-ended). During the
+  window only the login-banner notice card is suppressed; fact collection
+  and state recovery continue, and notices resume automatically after it.
+
+File-handle water level (R07), pids task quota (R06), and kernel hardware
+events/process segfaults/NIC timeouts (E08-E10) stay diagnostics-only in this
+batch and raise no notice. The ext4/JBD2/XFS/block-I/O fault chains (E02-E05,
+J24-J29) and recent complete hung-task/soft-lockup records (J30/J31) are
+gated by `fs_event_notices` and `host_event_notices` respectively: both default
+off, so they raise no notice until explicitly enabled, and filesystem-event
+promotion is additionally held pending device-lifecycle evidence. All notices
+keep the two-hour cooldown, silent recovery, and ten-minute recurrence gate,
+and the 300ms login health budget is unchanged.
+
 `login_identity` (default `true`) gives an interactive Enhanced login shell a
 real login identity: the inner bash starts as a login shell (`shopt -q
 login_shell` == yes) and reads `/etc/profile` and `~/.bash_profile` like `bash
 -l`. Set `login_identity = false` to fall back to the previous non-login startup
 (`--rcfile`). Bash 4 and newer use the login-identity path when the bounded
 real-launch capability probe succeeds. Bash 3.2 (including the macOS system
-Bash), probe failures, and
-parent environments that export function names POSIX startup cannot import all
-fall back automatically. Zsh is unaffected.
+Bash), probe failures, and parent environments that export function names POSIX
+startup cannot import all fall back automatically. The fallback marker still
+reads the login profile exactly once.
+
+For an Enhanced Bash login, Cosh captures the final startup PATH once after the
+login profile and the first user `PROMPT_COMMAND` hook, but before the first Cosh
+prompt boundary. Only provider child processes inherit this value; Cosh does not
+change its process-wide PATH. A missing, malformed, oversized, forged, or late
+report leaves providers on the inherited PATH. Set `COSH_SHELL_BOOTSTRAP_PATH=0`
+to disable both legacy PATH probes and this Bash startup PATH handoff. Zsh and
+Bash non-login probe behavior is otherwise unchanged.
 
 ## Login upgrade notice
 
@@ -250,6 +328,7 @@ required.
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
 | `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
 | `COSH_SHELL_LOGIN_IDENTITY` | `on`/`off` real login identity for the next Enhanced login shell (default on) |
+| `COSH_SHELL_BOOTSTRAP_PATH` | Set to `0` to disable startup PATH discovery and the Bash login PATH handoff |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_SHELL_UPGRADE_CHECK` | Login upgrade notice check; enabled by default, set `off`, `0`, `false`, or `no` to disable |
 | `COSH_SHELL_UPGRADE_CHECK_CACHE` | Override the login upgrade notice cache path (default `~/.copilot-shell/cosh/upgrade-check.json`) |

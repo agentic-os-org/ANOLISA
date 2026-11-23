@@ -59,7 +59,7 @@ export async function runWorker({ createSession }) {
       await session.prompt("Run fixture sequence");
       assert.equal(stats.remaining,0);
       assert.equal(session.sessionManager.getSessionId(),id);
-      const status = JSON.parse(execFileSync(config.executable,["status","--config",join(root,"aw.json")],{timeout:5000})).result;
+      const status = JSON.parse(execFileSync(config.executable,["service","status","--config",join(root,"aw.json")],{timeout:5000})).result;
       assert.equal(status.resources.usage.invocations,0);
       assert.equal(status.resources.usage.correlations,0);
       samples.push({ calls:stats.calls, seconds:(performance.now()-started)/1000,

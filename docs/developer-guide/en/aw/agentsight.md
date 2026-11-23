@@ -10,13 +10,12 @@ callbacks and collect bounded evidence automatically. No action Provider or eBPF
 is required. AW keeps its local audit when the optional source is unavailable.
 Semantic evaluation is not enabled.
 
-Automatic observation and source identity in this slice cover Qoder, OpenClaw,
-QwenPaw and Hermes. Pi keeps its native policy support; observation-only callbacks
+Automatic observation covers Qoder, OpenClaw and Hermes. QwenPaw requires restricted `--reloadable` mode; ordinary Qoder SDK, QwenPaw and Pi/Claude resident entrypoints require `evidence.mode: off`. Pi keeps its native policy support; observation-only callbacks
 and trusted source association for Pi require a separate Adapter contract.
 
 ## Prerequisites and configuration
 
-Install AW using the [Preview installation guide](../../../user-guide/en/aw/installation.md). Client, callbacks
+Install AW using the [installation guide](../../../user-guide/en/aw/installation.md). Client, callbacks
 and daemon must come from the same build supporting `aw-service/v1alpha7`. Before
 upgrading, exit owned sessions and stop old daemons with the old binary; keep their
 Journal history. Provider stdio remains `aw-provider/v1alpha1`.
@@ -71,7 +70,7 @@ normal [native launch arguments](../../../user-guide/en/aw/index.md).
 
 ```bash
 aw run --config ./aw.yaml --agent qoder
-aw status --config ./aw.yaml
+aw service status --config ./aw.yaml
 ```
 
 Startup reports an observation audit key and source query state. Status exposes

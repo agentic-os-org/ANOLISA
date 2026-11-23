@@ -140,6 +140,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
     if (name === '../utils/text') return loadPageModule('src/utils/text.ts', moduleStubs, driver);
+    if (name === '../utils/clipboard') return loadPageModule('src/utils/clipboard.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
@@ -163,6 +164,86 @@ function deferredFetchStubs(names) {
 }
 
 const componentStub = (name) => ({ [name]: () => null });
+
+async function renderReuseReview(label = '', state = '') {
+  const driver = createHooksDriver();
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchReuseSessions', 'decideReuseLabel', 'runReuseJudgements',
+  ]);
+  const page = loadPageModule('src/pages/ReuseLabelsPage.tsx', {
+    '../i18n': { useI18n: () => ({ t: (key) => key }) },
+    '../utils/apiClient': stubs,
+    '../utils/setSelection': loadPageModule('src/utils/setSelection.ts', {}, driver),
+    '../types/reuse': { ASSIGNABLE_LABELS: ['good', 'bad', 'useless'] },
+  }, driver).ReuseLabelsPage;
+  driver.render(page);
+  assert.deepEqual(driver.slots[0].value, []);
+  driver.slots[1].setter(label);
+  driver.slots[2].setter(state);
+  driver.render(page).effects[0]();
+  const row = (id) => ({ session_id: id, effective_label: label || 'unknown',
+    confirm_state: state || 'unconfirmed', human_backed: false, auto_rules: [] });
+  const original = row('target');
+  calls.fetchReuseSessions[0].resolve({ sessions: [original, row('other')] });
+  await settle();
+  function button(text, id = 'target') {
+    const tree = driver.render(page).element;
+    const item = findElement(tree, (node) => node.type === 'li' && node.props.key === id);
+    const result = findElement(item, (node) => node.type === 'button' && elementText(node).join('') === text);
+    assert.ok(result, `visible action ${text}`);
+    return result;
+  }
+  return { driver, page, calls, original, button };
+}
+
+for (const scenario of [
+  { name: 'confirm-state filter', label: '', state: 'unconfirmed', action: 'reuse.confirm',
+    update: { confirm_state: 'confirmed', human_backed: true } },
+  { name: 'label filter', label: 'unknown', state: '', action: 'good',
+    update: { effective_label: 'good', confirm_state: 'overridden', human_backed: true } },
+]) {
+  test(`reuse decisions remove rows outside the ${scenario.name} and prune their selection`, async () => {
+    const { driver, calls, original, button } = await renderReuseReview(scenario.label, scenario.state);
+    driver.slots[3].setter(new Set(['target', 'other']));
+    const pending = button(scenario.action).props.onClick();
+    calls.decideReuseLabel[0].resolve({ ...original, ...scenario.update });
+    await pending;
+    assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['other']);
+    assert.deepEqual([...driver.slots[3].value], ['other']);
+  });
+}
+
+test('reuse rejudging applies the current label filter to the refreshed row', async () => {
+  const { driver, calls, original, button } = await renderReuseReview('unknown');
+  driver.slots[3].setter(new Set(['target']));
+  const pending = button('reuse.rejudge').props.onClick();
+  calls.runReuseJudgements[0].resolve({ examined: 1, judged: 1 });
+  await settle();
+  calls.fetchReuseSessions[1].resolve({ sessions: [{ ...original, effective_label: 'good' }] });
+  await pending;
+  assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['other']);
+  assert.equal(driver.slots[3].value.size, 0);
+});
+
+test('a reuse decision still matching the filters preserves order and selection', async () => {
+  const { driver, calls, original, button } = await renderReuseReview('unknown');
+  driver.slots[3].setter(new Set(['target']));
+  const pending = button('reuse.confirm').props.onClick();
+  const updated = { ...original, confirm_state: 'confirmed', human_backed: true };
+  calls.decideReuseLabel[0].resolve(updated);
+  await pending;
+  assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['target', 'other']);
+  assert.equal(driver.slots[0].value[0], updated);
+  assert.deepEqual([...driver.slots[3].value], ['target']);
+});
+
+// Mirrors the shared helper's contract: the evidence link may only name a case
+// belonging to a visible (agent-filtered) violation row. The real derivation is
+// covered against the compiled module in apiClient-regression.
+const firstCorrelatedCaseIdStub = (violations, agentIdFilter) => (
+  (agentIdFilter ? violations.filter((v) => v.agent_id === agentIdFilter) : violations)
+    .find((v) => v.case_id)?.case_id
+);
 
 // RichText only sanitizes its text for display, and the sanitizer has its own
 // suite; here it yields the text so the page tree keeps the same content.
@@ -288,7 +369,6 @@ function renderOptimizationPage() {
       },
       recharts: {},
       '../utils/apiClient': { ...stubs, ApiRequestError },
-      '../components/CopyButton': {},
       '../utils/formatDuration': {},
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en' },
       '../utils/accuracyAttribution': {},
@@ -750,7 +830,7 @@ test('security overview: a failed card must not keep the previous range payload'
 //
 // Hook-slot map: 0 complaint · 1 loading · 2 error · 3 caseData · 4 cached
 // 5 history · 6 selectedAltIdx · 7 stageIdx · 8 elapsed · 9 requestVersion ref
-// Effect per render: [history load + request-version bump].
+// 10 runTimer ref. Effect per render: [history load + request-version bump].
 
 function findNode(node, predicate) {
   if (node == null || typeof node !== 'object') return null;
@@ -774,8 +854,18 @@ function findNode(node, predicate) {
 function renderCausalPanel() {
   const { calls, stubs } = deferredFetchStubs(['runCausalAttribution']);
   const driver = createHooksDriver();
+  const navigations = [];
+  const navigate = (path) => navigations.push(path);
+  class ApiRequestError extends Error {
+    constructor(message, status = 400, body = { error: 'llm_not_configured' }) {
+      super(message);
+      this.status = status;
+      this.body = body;
+    }
+  }
   const moduleStubs = {
-    '../utils/apiClient': { ...stubs },
+    'react-router-dom': { useNavigate: () => navigate },
+    '../utils/apiClient': { ...stubs, ApiRequestError },
   };
   const module = loadPageModule('src/components/CausalAttributionPanel.tsx', moduleStubs, driver);
   const panel = module.CausalAttributionPanel;
@@ -788,8 +878,133 @@ function renderCausalPanel() {
   assert.equal(driver.slots[0].value, '', 'slot 0 must be the complaint field');
   assert.equal(driver.slots[3].value, null, 'slot 3 must be caseData');
   rendered.effects[0](); // mount: load this (session, round)'s history
-  return { calls, driver, panel, rendered };
+  return { calls, driver, panel, rendered, ApiRequestError, navigations };
 }
+
+test('causal attribution survives storage being denied before mount or after a run', async () => {
+  const previousWindow = global.window;
+  try {
+    for (const deniedAt of ['mount', 'result']) {
+      let denied = deniedAt === 'mount';
+      const storage = new Map();
+      global.window = {
+        setInterval: () => 1,
+        clearInterval: () => {},
+        get localStorage() {
+          if (denied) throw new DOMException('Storage is disabled', 'SecurityError');
+          return { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) };
+        },
+      };
+      const { driver, panel, calls } = renderCausalPanel();
+      driver.slots[0].setter('Check the result');
+      const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+      const button = findNode(element, (node) => node.type === 'button'
+        && node.children?.includes('发起归因'));
+      const pending = button.props.onClick();
+      denied = true;
+      const result = { id: 'completed-case', nodes: [], edges: [], outcome: 'pass' };
+      calls.runCausalAttribution[0].resolve({ case: result, cached: false });
+      await pending;
+      assert.equal(driver.slots[3].value, result, `${deniedAt}: retain the completed case`);
+      assert.equal(driver.slots[2].value, null, `${deniedAt}: storage is not an attribution failure`);
+      assert.equal(driver.slots[1].value, false);
+      assert.equal(driver.slots[5].value.length, 1, 'the current result remains in memory');
+    }
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('available causal storage still persists the completed result under its round key', async () => {
+  const previousWindow = global.window;
+  const storage = new Map();
+  try {
+    global.window = {
+      setInterval: () => 1, clearInterval() {},
+      localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+    };
+    const { driver, panel, calls } = renderCausalPanel();
+    driver.slots[0].setter('Check this round');
+    const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+    const button = findNode(element, (node) => node.type === 'button' && node.children?.includes('发起归因'));
+    const pending = button.props.onClick();
+    const result = { id: 'completed', nodes: [], edges: [], outcome: 'pass' };
+    calls.runCausalAttribution[0].resolve({ case: result, cached: false });
+    await pending;
+    assert.equal(storage.size, 1);
+    const history = JSON.parse(storage.get('agentsight.causal.history.v2:session:sess-1:r0'));
+    assert.equal(history[0].complaint, 'Check this round');
+    assert.deepEqual(history[0].caseData, result);
+    assert.equal(driver.slots[2].value, null);
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('clearing causal history still clears the panel when persistent deletion is denied', () => {
+  const previousWindow = global.window;
+  try {
+    global.window = {
+      confirm: () => true,
+      localStorage: {
+        getItem: () => null,
+        removeItem: () => { throw new DOMException('Storage is disabled', 'SecurityError'); },
+      },
+    };
+    const { driver, panel } = renderCausalPanel();
+    driver.slots[5].setter([{ complaint: 'previous', ranAt: '2026-01-01T00:00:00Z', caseData: { id: 'previous', nodes: [] } }]);
+    driver.slots[0].setter('previous');
+    const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+    const clear = findNode(element, (node) => node.type === 'button'
+      && node.children?.some(child => typeof child === 'string' && child.includes('清空')));
+    assert.ok(clear, 'history exposes its clear action');
+    clear.props.onClick({ preventDefault() {} });
+    assert.deepEqual(driver.slots[5].value, []);
+    assert.equal(driver.slots[3].value, null);
+    assert.equal(driver.slots[0].value, '');
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('causal attribution: an empty round must clear the previous panel state', () => {
+  const { driver, panel } = renderCausalPanel();
+  driver.slots[0].setter('round 1 complaint');
+  driver.slots[1].setter(true);
+  driver.slots[2].setter('round 1 error');
+  driver.slots[3].setter({
+    id: 'case-round-1',
+    title: 'round 1',
+    verdict: 'round 1 verdict',
+    outcome: 'fail',
+    nodes: [],
+    edges: [],
+  });
+  driver.slots[4].setter(true);
+  driver.slots[6].setter(2);
+  driver.slots[7].setter(1);
+  driver.slots[8].setter(73);
+
+  const rendered = driver.render(panel, {
+    sessionId: 'sess-1',
+    roundIndex: 1,
+    roundLabel: '第 2 轮',
+  });
+  rendered.effects[0]();
+
+  assert.equal(driver.slots[0].value, '', 'the complaint must belong to the selected round');
+  assert.equal(driver.slots[1].value, false, 'the old loading state must not survive');
+  assert.equal(driver.slots[2].value, null, 'the old error must not survive');
+  assert.equal(driver.slots[3].value, null, 'the old verdict must not survive');
+  assert.equal(driver.slots[4].value, false, 'the old cached flag must not survive');
+  assert.deepEqual(driver.slots[5].value, [], 'the empty round must have empty history');
+  assert.equal(driver.slots[6].value, null, 'the old alternative selection must not survive');
+  assert.equal(driver.slots[7].value, 0, 'the progress stage must reset');
+  assert.equal(driver.slots[8].value, 0, 'the elapsed time must reset');
+});
 
 test('causal attribution: a run superseded by a round switch must discard its result', async () => {
   // The attribution call takes seconds. If the user switches rounds while it
@@ -799,8 +1014,21 @@ test('causal attribution: a run superseded by a round switch must discard its re
   // be bound to the request version of the (session, round) it was started
   // for and drop its result once that version is superseded.
   const previousWindow = global.window;
-  global.window = { setInterval: global.setInterval, clearInterval: global.clearInterval };
+  const activeTimers = new Set();
+  let nextTimer = 1;
+  global.window = {
+    setInterval: () => {
+      const timer = nextTimer;
+      nextTimer += 1;
+      activeTimers.add(timer);
+      return timer;
+    },
+    clearInterval: (timer) => {
+      activeTimers.delete(timer);
+    },
+  };
   let calls;
+  let runPromise;
   try {
     const setup = renderCausalPanel();
     const { driver, panel } = setup;
@@ -824,9 +1052,10 @@ test('causal attribution: a run superseded by a round switch must discard its re
     assert.equal(typeof runButton.props.onClick, 'function');
 
     // Round 1's run starts and stays in flight.
-    const runPromise = runButton.props.onClick();
+    runPromise = runButton.props.onClick();
     assert.equal(calls.runCausalAttribution.length, 1, 'the run must issue one request');
     assert.equal(calls.runCausalAttribution[0].args[0].round_index, 0);
+    assert.equal(activeTimers.size, 1, 'the run must start one progress timer');
 
     // The user switches to round 2 while round 1's attribution is pending.
     rendered = driver.render(panel, {
@@ -835,6 +1064,9 @@ test('causal attribution: a run superseded by a round switch must discard its re
       roundLabel: '第 2 轮',
     });
     rendered.effects[0](); // the prop change bumps the request version
+
+    assert.equal(activeTimers.size, 0, 'the round switch must stop the old progress timer');
+    assert.equal(driver.slots[0].value, '', 'the old complaint must not leak into round 2');
 
     // Round 1's slow response lands last with a distinctive case.
     calls.runCausalAttribution[0].resolve({
@@ -864,11 +1096,112 @@ test('causal attribution: a run superseded by a round switch must discard its re
     );
     assert.equal(driver.slots[1].value, false, 'round 2 must not be left loading by round 1');
   } finally {
-    // An assertion before the deferred lands must not leave the run's
-    // interval keeping the test process alive.
     (calls ? calls.runCausalAttribution : []).forEach((call) =>
       call.resolve({ case: null, cached: false }),
     );
+    if (runPromise) await runPromise;
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('causal attribution: missing LLM configuration shows guidance instead of the raw API error', async () => {
+  const previousWindow = global.window;
+  global.window = { setInterval: () => 1, clearInterval: () => {} };
+  let setup;
+  let runPromise;
+  try {
+    setup = renderCausalPanel();
+    const { calls, driver, panel, ApiRequestError, navigations } = setup;
+    const props = { sessionId: 'sess-1', roundIndex: 0, roundLabel: '第 1 轮' };
+    driver.slots[0].setter('这轮不符合预期');
+    let rendered = driver.render(panel, props);
+    const runButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+
+    runPromise = runButton.props.onClick();
+    const rawMessage = 'API http://203.0.113.10:7396/api/causal-attribution -> 400: '
+      + '{"error":"llm_not_configured","message":"LLM API key not configured"}';
+    calls.runCausalAttribution[0].reject(new ApiRequestError(rawMessage));
+    await runPromise;
+
+    rendered = driver.render(panel, props);
+    const pageText = elementText(rendered.element).join('');
+    assert.ok(pageText.includes('当前未配置 LLM，无法发起因果归因'));
+    assert.ok(pageText.includes('请先前往「优化设置」填写 API Key 与模型后再试'));
+    assert.ok(!pageText.includes(rawMessage), 'the raw URL, status, and JSON must not render');
+    assert.ok(!pageText.includes('查看详情'), 'the configuration error needs no debug details');
+
+    const settingsButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('') === '前往优化设置',
+    );
+    assert.ok(settingsButton, 'the guidance must link to optimization settings');
+    settingsButton.props.onClick();
+    assert.deepEqual(navigations, ['/settings']);
+  } finally {
+    (setup ? setup.calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (runPromise) await runPromise;
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('causal attribution: an unrecognized error hides raw API details behind a disclosure', async () => {
+  const previousWindow = global.window;
+  global.window = { setInterval: () => 1, clearInterval: () => {} };
+  let setup;
+  let runPromise;
+  try {
+    setup = renderCausalPanel();
+    const { calls, driver, panel, ApiRequestError } = setup;
+    const props = { sessionId: 'sess-1', roundIndex: 0, roundLabel: '第 1 轮' };
+    driver.slots[0].setter('这轮不符合预期');
+    let rendered = driver.render(panel, props);
+    const runButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+
+    runPromise = runButton.props.onClick();
+    const rawMessage = 'API http://203.0.113.10:7396/api/causal-attribution -> 500: '
+      + '{"error":"internal_error"}';
+    calls.runCausalAttribution[0].reject(
+      new ApiRequestError(rawMessage, 500, { error: 'internal_error' }),
+    );
+    await runPromise;
+
+    rendered = driver.render(panel, props);
+    const summary = findNode(
+      rendered.element,
+      (node) => node.type === 'p' && elementText(node).join('') === '归因失败，请稍后重试。',
+    );
+    assert.ok(summary, 'only a short failure message is shown by default');
+
+    const disclosure = findNode(rendered.element, (node) => node.type === 'details');
+    assert.ok(disclosure, 'debug details must be available on demand');
+    assert.equal(disclosure.props.open, undefined, 'debug details must start collapsed');
+    assert.ok(elementText(disclosure).join('').includes('查看详情'));
+    assert.ok(elementText(disclosure).join('').includes(rawMessage));
+    assert.equal(
+      findNode(
+        rendered.element,
+        (node) => node.type === 'button' && elementText(node).join('') === '前往优化设置',
+      ),
+      null,
+      'an unrelated failure must not direct the user to LLM settings',
+    );
+  } finally {
+    (setup ? setup.calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (runPromise) await runPromise;
     if (previousWindow === undefined) delete global.window;
     else global.window = previousWindow;
   }
@@ -1251,6 +1584,18 @@ function renderAtifPage() {
     '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
     '../utils/apiClient': { ...stubs },
     '../utils/roundModel': roundModel,
+    '../utils/optimizationStrategies': (() => {
+      const out = transpile('src/utils/optimizationStrategies.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
+    '../utils/download': (() => {
+      const out = transpile('src/utils/download.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
     '../utils/savings': (() => {
       const out = transpile('src/utils/savings.ts');
       const mod = { exports: {} };
@@ -1265,8 +1610,10 @@ function renderAtifPage() {
       new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
       return mod.exports;
     })(),
+    '../utils/wsCkpt': { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false },
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': panelStub,
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
     '../utils/trajectoryTree': {
       buildTrajectoryTree: () => null,
       findNodeByPath: () => null,
@@ -1348,6 +1695,7 @@ test('conversation list: the Query button must use the selected end time, not no
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
     '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../components/CopyButton': componentStub('CopyButton'),
     '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
     '../utils/datetime': { formatNsPadded: (ns) => String(ns) },
     '../utils/timeseriesBuckets': {
@@ -1462,6 +1810,117 @@ test('interruption panel: resolved events are neither counted nor offered Resolv
   assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });
 
+// ─── InterruptionPanel: refresh after resolution ───
+
+test('a locale-triggered interruption refresh cannot resurrect a resolved event', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSessionInterruptions']);
+  let t = (key) => key;
+  const driver = createHooksDriver();
+  const Panel = loadPageModule('src/components/InterruptionPanel.tsx', {
+    '../utils/apiClient': stubs,
+    '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US', interruptionTypeKey: () => null },
+    '../utils/datetime': { formatNs: String },
+  }, driver).InterruptionPanel;
+  const props = { sessionId: 'session' };
+  const first = { interruption_id: 'first', resolved: false, severity: 'high' };
+  const second = { interruption_id: 'second', resolved: false, severity: 'low' };
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[0].resolve([first, second]);
+  await settle();
+  // Changing language changes t and starts another read while the existing
+  // rows still expose their Resolve actions.
+  t = (key) => `translated:${key}`;
+  const rendered = driver.render(Panel, props);
+  rendered.effects[0]();
+  const row = collectElements(rendered.element).find((node) => node.props?.event === first);
+  assert.ok(row, 'the loaded row is still actionable while refreshing');
+  row.props.onResolved(first); // called by the row only after resolve succeeds
+  assert.deepEqual(driver.slots[0].value.map((event) => event.interruption_id), ['second']);
+  calls.fetchSessionInterruptions[1].resolve([first, second]);
+  await settle();
+  const visible = collectElements(driver.render(Panel, props).element)
+    .filter((node) => node.props?.event).map((node) => node.props.event.interruption_id);
+  assert.deepEqual(visible, ['second'], 'the earlier read must not restore the resolved row');
+  assert.equal(driver.slots[1].value, false);
+});
+
+test('interruption refresh retains unresolved rows and newly arrived events', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSessionInterruptions']);
+  const driver = createHooksDriver();
+  const Panel = loadPageModule('src/components/InterruptionPanel.tsx', {
+    '../utils/apiClient': stubs,
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US', interruptionTypeKey: () => null },
+    '../utils/datetime': { formatNs: String },
+  }, driver).InterruptionPanel;
+  const props = { sessionId: 'session' };
+  const first = { interruption_id: 'first', resolved: false };
+  const next = { interruption_id: 'new', resolved: false };
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[0].resolve([first]);
+  await settle();
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[1].resolve([first, next, { interruption_id: 'done', resolved: true }]);
+  await settle();
+  assert.deepEqual(driver.slots[0].value.map((event) => event.interruption_id), ['first', 'new']);
+});
+
+// ─── SystemAuditPage: process cycles ───
+
+function auditTreeFunctions() {
+  // Execute the production pure helpers without mounting the rest of the page.
+  const code = transpile('src/pages/SystemAuditPage.tsx');
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', `${code}\nmodule.exports.tree = { buildProcessTree, flattenProcessTree };`)(
+    () => ({}), module, module.exports,
+  );
+  return module.exports.tree;
+}
+
+test('audit process trees retain all evidence when PID reuse produces a parent cycle', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  // PID 40 was a child of the original PID 30. After 30 exits and its PID is
+  // reused by a child of 40, a historical PID-only projection has a cycle.
+  const evidence = [
+    { identity: { pid: 40, ppid: 30 }, event_type: 'taint_transition', event: { label: 'secret' } },
+    { identity: { pid: 30, ppid: 40 }, event_type: 'file_action', event: {} },
+    { identity: { pid: 50, ppid: 30 }, event_type: 'network_action', event: {} },
+    { identity: { pid: 90, ppid: 1 }, event_type: 'file_action', event: {} },
+  ];
+  const original = JSON.stringify(evidence);
+  const tree = buildProcessTree(evidence);
+  const flattened = [];
+  flattenProcessTree(tree.roots, 0, flattened);
+  assert.deepEqual(flattened.map(({ node }) => node.pid).sort((a, b) => a - b), [1, 30, 40, 50, 90]);
+  assert.equal(flattened.length, tree.count, 'each counted process must be visible exactly once');
+  assert.deepEqual(flattened.find(({ node }) => node.pid === 40).node.labels, ['SECRET']);
+  assert.equal(JSON.stringify(evidence), original, 'raw evidence must retain the recorded parents');
+});
+
+test('audit process trees handle inherited parent cycles without losing descendants', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  const evidence = [[30, 40], [40, 50], [50, 30], [50, 60]].map(([parent, child]) => ({
+    identity: { pid: child }, event_type: 'taint_transition',
+    event: { transition: 'inherit', source_pid: parent, target_pid: child, label: 'private' },
+  }));
+  const tree = buildProcessTree(evidence);
+  const flat = [];
+  flattenProcessTree(tree.roots, 0, flat);
+  assert.deepEqual(flat.map(({ node }) => node.pid).sort((a, b) => a - b), [30, 40, 50, 60]);
+  assert.equal(flat.length, tree.count);
+});
+
+test('audit process trees preserve ordinary parent chains and missing-parent roots', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  const tree = buildProcessTree([
+    { identity: { pid: 20, ppid: 10 }, event_type: 'file_action', event: {} },
+    { identity: { pid: 30, ppid: 20 }, event_type: 'file_action', event: {} },
+  ]);
+  const flat = [];
+  flattenProcessTree(tree.roots, 0, flat);
+  assert.deepEqual(flat.map(({ node, depth }) => [node.pid, node.ppid, depth]),
+    [[10, null, 0], [20, 10, 1], [30, 20, 2]]);
+});
+
 // ─── SystemAuditPage: a list that shrinks under the current offset ───────────
 //
 // Every list on this page renders its pager only while `total > pageSize` (the
@@ -1520,6 +1979,7 @@ function auditPageHarness() {
     '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../utils/ruleReason': { translateRuleReason: (summary) => summary },
     '../utils/apiClient': {
@@ -1708,7 +2168,6 @@ test('optimization history: one previous click moves back from the displayed pag
     'react-router-dom': { useParams: () => ({}), useNavigate: () => () => {} },
     recharts: {},
     '../utils/apiClient': { ...stubs, ApiRequestError: class ApiRequestError extends Error {} },
-    '../components/CopyButton': { copyText: () => {} },
     '../utils/formatDuration': { formatDurationSecs: (value) => String(value) },
     '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en' },
     '../utils/accuracyAttribution': {
@@ -1790,6 +2249,7 @@ test('agent health interruptions: one previous click moves back from the display
     },
     '../utils/datetime': { formatNs: (ns) => String(ns) },
     '../constants/policyIds': { CREDENTIAL_POLICY_ID: 'policy' },
+    '../components/CacheDiagnosisPanel': { CacheDiagnosisPanel: () => null },
   }, driver);
 
   // The pagination lives in a section the page renders. Take that component out
@@ -2103,6 +2563,7 @@ test('system audit: a case filter change re-queries the list from the first page
     '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../utils/ruleReason': { translateRuleReason: (summary) => summary },
     '../utils/apiClient': {

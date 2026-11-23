@@ -4,12 +4,12 @@ mod implementation;
 
 pub use implementation::{
     AgentEvent, AgentMode, AgentRequest, AuditRecord, CommandBlock, CommandOrigin, CommandStatus,
-    CoshApprovalMode, Finding, FindingKind, FindingSeverity, GovernanceDecision,
-    GovernancePolicyDecision, GovernedEvent, HookFinding, ImplicitPagerPolicy, Intervention,
-    InterventionDecision, OutputRefs, Policy, QuestionSelectionMode, ShellCaptureLifecycle,
-    ShellCaptureMetadata, ShellCommandAuditIdentity, ShellEvent, ShellEventKind,
-    ShellHandoffRequest, ShellRoutingMetadata, COMMAND_OUTPUT_REF_MAX_BYTES,
-    SESSION_OUTPUT_REF_MAX_BYTES,
+    CoshApprovalMode, EcsTrialAction, EcsTrialContext, EcsTrialProgress, Finding, FindingKind,
+    FindingSeverity, GovernanceDecision, GovernancePolicyDecision, GovernedEvent, HookFinding,
+    ImplicitPagerPolicy, Intervention, InterventionDecision, OutputRefs, Policy,
+    QuestionSelectionMode, ShellCaptureLifecycle, ShellCaptureMetadata, ShellCommandAuditIdentity,
+    ShellEvent, ShellEventKind, ShellHandoffRequest, ShellRoutingMetadata,
+    COMMAND_OUTPUT_REF_MAX_BYTES, SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[allow(unused_imports)]

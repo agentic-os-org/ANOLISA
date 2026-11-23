@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Native Windows lifecycle and registered PowerShell hook smoke tests.
 
-Run after scripts/build-windows.ps1 and npm/scripts/package-npm.js --target win32-x64.
+Run after packaging/build/build-windows.ps1 and packaging/npm/package-npm.js --target win32-x64.
 """
 
+import hashlib
 import importlib.util
-from contextlib import closing
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import sqlite3
@@ -17,6 +16,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import closing
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +39,8 @@ class WindowsHookTests(unittest.TestCase):
         self.lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.lifecycle)
         self.env = {
-            "HOME": str(self.root), "USERPROFILE": str(self.root),
+            "HOME": str(self.root),
+            "USERPROFILE": str(self.root),
             "TOKENLESS_QWENWORK_HOME": str(self.data),
             "TOKENLESS_DATA_DIR": str(self.root / "databases"),
             "RTK_DB_PATH": str(self.root / "rtk.db"),
@@ -57,14 +59,35 @@ class WindowsHookTests(unittest.TestCase):
             self.assertEqual(self.lifecycle.main(["install"]), 0)
 
     def hook(self, event, payload):
-        config = json.loads((self.plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-        hook = config["hooks"][event][0]["hooks"][0]
         if event == "PreToolUse":
-            self.assertIsNotNone(re.fullmatch(config["hooks"][event][0]["matcher"], payload["tool_name"]))
-        self.assertEqual(hook["shell"], "powershell")
+            # Exercise legacy Windows input handling through the shared hook.
+            args = [
+                sys.executable,
+                "-B",
+                str(self.plugin / "hooks/shared/rewrite_hook.py"),
+                "--agent-id",
+                "qwenwork",
+            ]
+        else:
+            config = json.loads(
+                (self.plugin / "hooks/hooks.json").read_text(encoding="utf-8")
+            )
+            hook = config["hooks"][event][0]["hooks"][0]
+            self.assertEqual(hook["shell"], "powershell")
+            args = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                hook["command"],
+            ]
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", hook["command"]],
-            input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", timeout=20,
+            args,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -74,10 +97,11 @@ class WindowsHookTests(unittest.TestCase):
         settings = self.data / "settings.json"
         settings.write_text('{"disabled":true}', encoding="utf-8")
         self.install()
-        shipped = json.loads((SOURCE / "hooks/hooks.json").read_text(encoding="utf-8"))
         installed = json.loads((self.plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-        self.assertEqual(installed["hooks"]["PreToolUse"][0]["matcher"],
-                         shipped["hooks"]["PreToolUse"][0]["matcher"] + "|PowerShell")
+        self.assertEqual(set(installed["hooks"]), {"PostToolUse"})
+        self.assertEqual(
+            installed["hooks"]["PostToolUse"][0]["hooks"][0]["shell"], "powershell"
+        )
         marker = self.plugin / self.lifecycle.MARKER
         before = marker.stat().st_mtime_ns
         self.install()
@@ -86,7 +110,7 @@ class WindowsHookTests(unittest.TestCase):
         self.assertFalse(self.plugin.exists())
         self.assertEqual(settings.read_text(encoding="utf-8"), '{"disabled":true}')
 
-    def test_native_rewrite_execution_and_posttool_passthrough(self):
+    def test_legacy_powershell_rewrite_execution_and_posttool_passthrough(self):
         self.install()
         payload = self.assert_native_call("PowerShell", "native-call")
         payload["tool_use_id"] = "unsupported-command"
@@ -104,7 +128,12 @@ class WindowsHookTests(unittest.TestCase):
             engine_env = manifest["engines"][engine_name]["env"]
             self.assertEqual(engine_env["QWENWORK_PLUGIN_HOOK_COMPATIBILITY"], "managed-tool-hooks-v1")
             with mock.patch.dict(os.environ, engine_env):
-                for tool in ("Bash", "mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+                for tool in (
+                    "Bash",
+                    "mcp__workspace__bash",
+                    "mcp__qw-builtin__mcp_workspace_bash",
+                    "mcp__qw-builtin__mcp__workspace__bash",
+                ):
                     with self.subTest(engine=engine_name, tool=tool):
                         self.assert_native_call(tool, engine_name + "-" + tool)
 
@@ -113,7 +142,6 @@ class WindowsHookTests(unittest.TestCase):
         self.install()
         workspace = self.root / "host workspace"
         workspace.mkdir()
-        subprocess.run(["git", "init", "--quiet"], cwd=workspace, check=True, capture_output=True)
         sdk = Path(os.environ["TOKENLESS_TEST_QWENWORK_APP"]) / "resources/agent-sdk"
         result = subprocess.run(
             ["node", str(ROOT / "tests/qwenwork_host_hooks.mjs"), str(sdk), str(self.plugin), str(workspace)],
@@ -122,9 +150,9 @@ class WindowsHookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with closing(sqlite3.connect(self.root / "databases/stats.db")) as database:
             attribution = database.execute(
-                "SELECT agent_id, session_id, operation FROM stats WHERE tool_use_id = 'host-git-status'"
+                "SELECT agent_id, session_id FROM stats WHERE tool_use_id = 'host-json'"
             ).fetchall()
-        self.assertEqual(attribution, [("qwenwork", "host-runner", "rewrite-command")])
+        self.assertEqual(attribution, [("qwenwork", "host-runner")])
 
     def assert_native_call(self, tool_name, call_id):
         workspace = self.root / "workspace"
@@ -137,7 +165,7 @@ class WindowsHookTests(unittest.TestCase):
         }
         rewritten = self.hook("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
         self.assertEqual(rewritten["timeout"], 30)
-        self.assertIn("Set-Alias -Name rtk", rewritten["command"])
+        self.assertRegex(rewritten["command"], r"& '[^']*tokenless\.exe' rtk git status")
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", rewritten["command"]],
             cwd=workspace, capture_output=True, text=True, encoding="utf-8", timeout=20,
@@ -163,7 +191,8 @@ class WindowsHookTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": ""}):
             rewritten = self.hook("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]["command"]
         self.assertTrue(rewritten.startswith("env TOKENLESS_AGENT_ID=qwenwork "))
-        self.assertNotIn("Set-Alias", rewritten)
+        self.assertTrue(rewritten.endswith(" rtk git status"), rewritten)
+        self.assertNotIn("[CmdletBinding()]", rewritten)
 
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_BASH"), "optional Git Bash compatibility")
     def test_legacy_bash_execution_preserves_stats_path(self):
@@ -209,13 +238,13 @@ class WindowsHookTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("TOKENLESS_TEST_NODE"), "optional installed npm launcher runtime")
     def test_npm_launchers_support_selected_node_and_preserve_exit_code(self):
-        for binary in ("tokenless", "rtk"):
+        for arguments, expected in ((["--version"], "tokenless"), (["rtk", "--version"], "rtk")):
             result = subprocess.run(
-                [os.environ["TOKENLESS_TEST_NODE"], str(BIN / binary), "--version"],
+                [os.environ["TOKENLESS_TEST_NODE"], str(BIN / "tokenless"), *arguments],
                 capture_output=True, text=True, timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(binary, result.stdout)
+            self.assertIn(expected, result.stdout)
         result = subprocess.run(
             [os.environ["TOKENLESS_TEST_NODE"], str(BIN / "tokenless"), "invalid-test-command"],
             capture_output=True, text=True, timeout=20,
@@ -225,6 +254,189 @@ class WindowsHookTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "requires native Windows")
 class WindowsPackagingTests(unittest.TestCase):
+    """Cover artifact staging and packaging in the Windows CI class selector."""
+
+    def setUp(self) -> None:
+        sandbox = tempfile.TemporaryDirectory(prefix="tokenless build \u4e2d\u6587 '")
+        self.addCleanup(sandbox.cleanup)
+        self.root = Path(sandbox.name)
+        self.component = self.root / "tokenless"
+        self.rtk = self.component / "third_party/rtk"
+        scripts = self.component / "packaging/build"
+        scripts.mkdir(parents=True)
+        self.rtk.mkdir(parents=True)
+        for name in ("build-windows.ps1", "setup-rtk.sh"):
+            shutil.copyfile(ROOT / "packaging/build" / name, scripts / name)
+        shutil.copytree(ROOT / "third_party/patches", self.component / "third_party/patches")
+        setup = (scripts / "setup-rtk.sh").read_text(encoding="utf-8")
+        self.revision = re.search(r'^RTK_COMMIT="([0-9a-f]{40})"', setup, re.M).group(1)
+        (self.rtk / ".anolisa-rtk-commit").write_text(self.revision, encoding="utf-8")
+        # The `sha256sum` marker setup-rtk.sh writes; the build must accept it.
+        patches = re.search(r"^PATCHES=\((.*?)^\)", setup, re.M | re.S).group(1).split()
+        self.assertTrue(patches)
+        (self.rtk / ".anolisa-rtk-patches").write_bytes(b"".join(
+            hashlib.sha256((self.component / "third_party/patches" / name).read_bytes())
+            .hexdigest().encode() + b"  " + name.encode() + b"\n"
+            for name in patches
+        ))
+        self.metadata = self.root / "metadata.py"
+        self.metadata.write_text(
+            "import json, sys\n"
+            "sys.stdout.buffer.write(json.dumps({'target_directory': sys.argv[1]}, "
+            "ensure_ascii=False).encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        self.driver = self.root / "driver.ps1"
+        self.driver.write_text(
+            r"""
+$ErrorActionPreference = 'Stop'
+function git {
+    $global:LASTEXITCODE = 0
+    $env:TOKENLESS_TEST_REVISION
+}
+function cargo {
+    $manifestIndex = [array]::IndexOf($args, '--manifest-path')
+    if ($manifestIndex -lt 0) { throw 'Missing manifest path' }
+    $project = Split-Path $args[$manifestIndex + 1] -Parent
+    if ((Split-Path $project -Leaf) -eq 'rtk') { throw 'RTK must build as a tokenless dependency' }
+    $binary = 'tokenless'
+    $target = Join-Path $project 'target'
+    if ($env:CARGO_TARGET_DIR) { $target = $env:CARGO_TARGET_DIR }
+    if ($env:TOKENLESS_TEST_DISTINCT_TARGETS -eq '1') {
+        $target = Join-Path $project 'configured output'
+    }
+    $global:LASTEXITCODE = 0
+    if ($args[0] -eq 'metadata') {
+        if ($args -notcontains '--no-deps' -or $args -notcontains '--locked') {
+            throw 'Metadata must preserve the lockfile and exclude dependencies'
+        }
+        $formatIndex = [array]::IndexOf($args, '--format-version')
+        if ($formatIndex -lt 0 -or $args[$formatIndex + 1] -ne '1') {
+            throw 'Metadata must use format version 1'
+        }
+        if ($env:TOKENLESS_TEST_BAD_METADATA -eq $binary) {
+            $global:LASTEXITCODE = 1
+            return
+        }
+        if ($env:TOKENLESS_TEST_RELATIVE_METADATA -eq $binary) { $target = 'target' }
+        & $env:TOKENLESS_TEST_PYTHON $env:TOKENLESS_TEST_METADATA $target
+    } elseif ($args[0] -eq 'build') {
+        if ($args -notcontains '--locked') { throw 'Build must preserve the lockfile' }
+        $targetIndex = [array]::IndexOf($args, '--target')
+        if ($targetIndex -lt 0 -or $args[$targetIndex + 1] -ne 'x86_64-pc-windows-msvc') {
+            throw 'Build must use the Windows MSVC target'
+        }
+        $profile = if ($args -contains '--release') { 'release' } else { 'debug' }
+        $directory = Join-Path $target "x86_64-pc-windows-msvc/$profile"
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $directory "$binary.exe"), "fresh $binary $profile")
+    } else { throw "Unexpected Cargo command: $($args[0])" }
+}
+$build = Join-Path $env:TOKENLESS_TEST_COMPONENT 'packaging/build/build-windows.ps1'
+[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
+try {
+    & $build -Debug:($env:TOKENLESS_TEST_DEBUG -eq '1')
+} finally {
+    if ([Console]::OutputEncoding.CodePage -ne 437) { throw 'Console encoding was not restored' }
+}
+""",
+            encoding="utf-8",
+        )
+
+    def run_build(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+        environment = {
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key.upper() not in {"CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"}
+            },
+            "TOKENLESS_TEST_COMPONENT": str(self.component),
+            "TOKENLESS_TEST_REVISION": self.revision,
+            "TOKENLESS_TEST_PYTHON": sys.executable,
+            "TOKENLESS_TEST_METADATA": str(self.metadata),
+            "TOKENLESS_TEST_DISTINCT_TARGETS": "",
+            "TOKENLESS_TEST_BAD_METADATA": "",
+            "TOKENLESS_TEST_RELATIVE_METADATA": "",
+            "TOKENLESS_TEST_DEBUG": "",
+            **overrides,
+        }
+        return subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(self.driver),
+            ],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+
+    def assert_staged(self, result: subprocess.CompletedProcess[str], profile: str) -> None:
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = self.component / "target/npm-prebuilt/win32-x64"
+        self.assertEqual(
+            (output / "tokenless.exe").read_text(encoding="utf-8"), f"fresh tokenless {profile}"
+        )
+        self.assertFalse((output / "rtk.exe").exists())
+
+    def test_default_build_directories(self) -> None:
+        self.assert_staged(self.run_build(), "release")
+
+    def test_shared_target_directory_without_default_artifacts(self) -> None:
+        self.assert_staged(
+            self.run_build(CARGO_TARGET_DIR=str(self.root / "shared cache")), "release"
+        )
+
+    def test_shared_target_directory_does_not_publish_stale_binaries(self) -> None:
+        path = self.component / "target/x86_64-pc-windows-msvc/release/tokenless.exe"
+        path.parent.mkdir(parents=True)
+        path.write_text("stale executable", encoding="utf-8")
+        self.assert_staged(
+            self.run_build(CARGO_TARGET_DIR=str(self.root / "shared cache")), "release"
+        )
+
+    def test_distinct_metadata_targets_and_debug_profile(self) -> None:
+        self.assert_staged(
+            self.run_build(TOKENLESS_TEST_DISTINCT_TARGETS="1", TOKENLESS_TEST_DEBUG="1"), "debug"
+        )
+
+    def test_checkout_from_another_patch_set_does_not_publish_binaries(self) -> None:
+        marker = self.rtk / ".anolisa-rtk-patches"
+        marker.write_bytes(
+            marker.read_bytes().replace(b"rtk-pytest-error-report.patch", b"rtk-older.patch")
+        )
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different patch set", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
+    def test_checkout_without_patch_marker_does_not_publish_binaries(self) -> None:
+        (self.rtk / ".anolisa-rtk-patches").unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("patch-set marker is missing", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
+    def test_metadata_failure_does_not_publish_binaries(self) -> None:
+        result = self.run_build(TOKENLESS_TEST_BAD_METADATA="tokenless")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo metadata failed", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
+    def test_relative_metadata_does_not_publish_binaries(self) -> None:
+        result = self.run_build(TOKENLESS_TEST_RELATIVE_METADATA="tokenless")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo metadata has no absolute target directory", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
     def test_text_symlink_materialization_excludes_build_artifacts(self):
         shared = ROOT / "adapters/tokenless/qwenwork/hooks/shared"
         if shared.is_symlink():
@@ -240,7 +452,7 @@ class WindowsPackagingTests(unittest.TestCase):
                 path.write_text("# excluded packaging fixture\n", encoding="utf-8")
             (fixture / "keep.py").write_text("# retained packaging fixture\n", encoding="utf-8")
             result = subprocess.run(
-                ["node", "npm/scripts/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
+                ["node", "packaging/npm/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
                 capture_output=True, text=True, encoding="utf-8", timeout=180,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

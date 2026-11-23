@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   containmentTargetCandidates,
+  createFileReadBinding,
   defaultContainmentTargetPid,
   enforcementSupportsContainment,
   enforcementSupportsMode,
@@ -25,6 +26,7 @@ const {
 } = require(process.env.AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD);
 const {
   effectiveBindingMode,
+  firstCorrelatedCaseId,
   legacyBindingMode,
 } = require(process.env.AGENTSIGHT_ENFORCEMENT_MODE_BUILD);
 const {
@@ -464,6 +466,25 @@ test('audit-only backends report all observed violations instead of blocked-only
   assert.equal(enforcementViolationTotal(violations, health), 3);
 });
 
+test('read-denial bindings use a dedicated route without a selector field', async () => {
+  let submitted;
+  global.fetch = async (url, options) => {
+    submitted = { url, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ binding_id: 'fixture' }), { status: 200 });
+  };
+  await createFileReadBinding({ agent_id: 'fixture', root_pid: 123, path: '/tmp/secret.key' });
+  assert.equal(new URL(submitted.url).pathname, '/api/enforcement/file-read-bindings');
+  assert.equal('deny_read' in submitted.body, false);
+  assert.equal(submitted.body.path, '/tmp/secret.key');
+});
+
+test('read-denial backends count only blocked violations', () => {
+  const health = enforcementHealth(false);
+  health.capabilities.credential_enforce = false;
+  health.capabilities.file_read_protection = true;
+  assert.equal(enforcementViolationTotal([{ blocked: false }, { blocked: true }], health), 1);
+});
+
 test('alternate PID candidates require an explicit backend capability', () => {
   const plan = containmentPlan();
 
@@ -826,4 +847,50 @@ test('both protection views resolve a binding mode through the shared helper', (
   assert.match(auditPage, /effectiveBindingMode\(binding\.request\) === 'enforce'/);
   assert.match(riskPage, /effectiveBindingMode\(binding\.request\)/);
   assert.doesNotMatch(auditPage, /request\.policy_mode === 'enforce'/);
+});
+
+// ── Enforcement evidence link scope (#9240) ──────────────────────────────────
+
+test('the evidence link resolves a case only from the filtered agent rows', () => {
+  // Mixed agents and mixed case/no-case rows: the header used to read the
+  // unfiltered list, so `?agent_id=` could hand over another agent's case or
+  // keep offering a link for an agent whose hits carry no case at all.
+  const violations = [
+    { agent_id: 'agent-a', case_id: 'case-a' },
+    { agent_id: 'agent-b', case_id: null },
+    { agent_id: 'agent-b', case_id: undefined },
+    { agent_id: 'agent-c', case_id: 'case-c' },
+  ];
+
+  // No filter: the first correlated row wins, skipping the uncorrelated ones.
+  assert.equal(firstCorrelatedCaseId(violations, null), 'case-a');
+  assert.equal(firstCorrelatedCaseId(violations, undefined), 'case-a');
+  // A filtered agent with its own case must not inherit agent-a's.
+  assert.equal(firstCorrelatedCaseId(violations, 'agent-c'), 'case-c');
+  // A filtered agent whose rows are all uncorrelated gets no link at all.
+  assert.equal(firstCorrelatedCaseId(violations, 'agent-b'), undefined);
+  // An agent with no rows is not a licence to fall back to another agent.
+  assert.equal(firstCorrelatedCaseId(violations, 'agent-missing'), undefined);
+  assert.equal(firstCorrelatedCaseId([], null), undefined);
+});
+
+test('the evidence link prefers the first correlated row, not the first row', () => {
+  // A file-deletion hit with no case sorts ahead of a correlated one; taking
+  // row 0 unconditionally would hide a link that does have evidence.
+  const violations = [
+    { agent_id: 'agent-a', case_id: null },
+    { agent_id: 'agent-a', case_id: 'case-later' },
+  ];
+
+  assert.equal(firstCorrelatedCaseId(violations, 'agent-a'), 'case-later');
+});
+
+test('the enforcement page derives its evidence link through the shared helper', () => {
+  const { readFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const riskPage = readFileSync(join(process.cwd(), 'src/pages/RiskEnforcementPage.tsx'), 'utf8');
+
+  assert.match(riskPage, /firstCorrelatedCaseId\(violations, agentIdFilter\)/);
+  // The inline derivation is what let the link drift from the visible rows.
+  assert.doesNotMatch(riskPage, /filteredViolations\.find\(\(event\) => event\.case_id\)/);
 });

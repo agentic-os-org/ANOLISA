@@ -12,9 +12,9 @@ it is a real capture.
 |---|---|
 | Privileges | `trace` needs root (or `CAP_BPF` + `CAP_PERFMON`). Query commands need read access to `/var/log/sysak/.agentsight`, which the packaged service owns — use `sudo`. |
 | Config file | Commands that read rules accept `--config`, default `/etc/agentsight/config.json`. `discover` reads the same file `trace` does, so it reflects your custom rules. |
-| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, `interruption`, and `token` accept `--db` to point at a different database file. |
-| Machine output | `--json` is available on `discover`, `token`, `metrics`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
-| Output language | `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
+| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, `interruption`, `token`, and `cache` accept `--db` to point at a different database file. |
+| Machine output | `--json` is available on `discover`, `token`, `cache`, `metrics`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
+| Output language | `summary`, `metrics`, `cache`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
 | Platform | On macOS only `trace` (trajectory collector) and `serve` exist. |
 | Sample IDs | Session, conversation, trace, and interruption IDs in the examples are placeholders — substitute the ones from your own output. |
 
@@ -282,6 +282,111 @@ $ sudo agentsight token --json
 sudo agentsight token --period week --compare
 ```
 
+## agentsight cache
+
+Prompt-cache hit rate per Agent, provider, and model, the causes of low hits, and what they cost.
+Use it when a bill or latency rises and you need to know which part of the requests stopped
+reusing the cache, and to check a fix by comparing the window before it with the window after.
+
+```
+FLAGS:
+        --compare    Compare with the preceding window of the same length
+        --json       Output as JSON
+
+OPTIONS:
+        --agent <agent>                            Only calls of this agent (case-insensitive)
+        --baseline-until <baseline-until>          Compare with the window of the same length ending at this RFC 3339 time
+        --db <db>                                  Override the database path
+        --last <last>                              Window length in hours [default: 24]
+        --low-hit-rate <low-hit-rate>              Conservative hit rate below which a well-sampled group needs review [default: 0.5]
+        --price-cache-read <price-cache-read>      Price per million tokens read from the cache
+        --price-cache-write <price-cache-write>    Price per million tokens written to the cache
+        --price-input <price-input>                Price per million uncached input tokens (all four prices go together)
+        --price-output <price-output>              Price per million output tokens
+        --session <session>                        Only calls of this session
+        --ttl-secs <ttl-secs>                      Gap in seconds after which a cache entry is assumed expired [default: 300]
+        --until <until>                            End of the window as RFC 3339 (default: now)
+```
+
+```bash
+$ sudo agentsight cache --agent profiling --compare
+Prompt cache, 2026-01-01 08:00 → 2026-01-02 08:00
+
+Profiling · openai · qwen3.8-max — needs review
+  Hit rate: 20.0% conservative, 20.0% with complete fields (baseline 90.0%, -70.0 pp, regressed)
+  Calls: 40 (40 with usage, 40 with cache-read counter, 4 explicit zero, 0 duplicates, 0 failed)
+  Tokens: input 2,000,000 · read 400,000 · write 100,000 · uncached 1,500,000 · output 5,000
+  Latency p50, TTFT / end-to-end: hit 1000 ms / 5000 ms (4 calls, median input 20,000) · miss 2000 ms / 10000 ms (36 calls, median input 60,000)
+  [suspected] fixed_prefix_plateau: calls 30, missed 1,000,000 of 1,200,000 unread tokens, latency p50 2000 ms / 10000 ms
+      Cache reads stay at one fixed size while the input grows, so only a static prefix is cached. Move the cache breakpoint forward with the history, for example onto the latest tool result.
+      e.g. trace 00000000-0000-0000-0000-000000000001 (session 00000000-0000-0000-0000-000000000002): input 100,000, read 10,000, previous input 90,000
+  [expected] cold_start: calls 4, missed 0 of 40,000 unread tokens, latency p50 2000 ms / 10000 ms
+      The first call of a session writes the cache. Longer sessions or a shared static prefix amortize it.
+      e.g. trace 00000000-0000-0000-0000-000000000003 (session 00000000-0000-0000-0000-000000000002): input 10,000, read 0, previous input -
+```
+
+How to read it:
+
+- **Hit rate** is token-weighted: cache reads over input, never an average of per-call ratios.
+  The conservative rate counts a call without a cache-read counter as zero; the complete-fields rate
+  leaves such calls out. A missing counter is not a confirmed miss, so a group where no call
+  reports one is shown as `cannot judge` instead of 0%.
+- **Status** only says `needs review` when the group has at least 20 calls with usage and 200,000
+  input Tokens, and either the conservative rate is below `--low-hit-rate`, suspected causes
+  missed 20% or more of the input, or the rate dropped by 15 percentage points or more against the
+  baseline. Smaller groups are `too few samples to judge`.
+- **Latency p50** gives time to first token and end-to-end duration for calls that read at least
+  `--low-hit-rate` of their input from the cache (hit) and for the rest (miss). `n/a` means the
+  calls carried no such timing. Input size also drives latency, so compare the median input next
+  to each figure.
+- **Findings** compare each call with the previous call of the same session. `missed` counts
+  previous-call input that was not read from the cache; `unread` counts all input that was not
+  read, cache writes included. Findings are ordered suspected first, then by missed Tokens.
+
+| Cause | Kind | Meaning |
+|---|---|---|
+| `fixed_prefix_plateau` | suspected | Reads stay at one size while the history grows: only a static prefix is cached |
+| `prefix_not_reused` | suspected | Unchanged previous input was not read and nothing else explains it |
+| `system_prompt_changed` | suspected | The system prompt differs from the previous call |
+| `tools_changed` | suspected | The tool definitions differ from the previous call |
+| `model_switched` | suspected | The model changed within the session; caches are per model and route |
+| `history_rewritten` | expected | The request has fewer messages than before (compaction or truncation) |
+| `cache_expired` | expected | The previous call ended longer ago than `--ttl-secs` |
+| `cold_start` | expected | First call of a session |
+| `new_input_dominant` | expected | The previous input was reused; new content lowers the ratio |
+| `cache_fields_missing` | undeterminable | The response had no cache-read counter |
+| `failed_calls` | undeterminable | HTTP error or recorded interruption |
+| `no_session_context` | undeterminable | No session or conversation ID to compare with |
+
+Prices are per million Tokens and depend on provider, model, region, and contract, so the command
+never assumes them. Pass all four to add a cost line: input cost is
+`(uncached × input + read × cache read + write × cache write) / 1,000,000`, where
+`uncached = input − read − write`, so a cache write is not also charged as normal input. Calls whose
+read plus write exceeds input use incompatible counters and are left out of the cost. `missed`
+estimates the further saving had the missed Tokens been read from the cache.
+
+```bash
+# the day before and the day after a fix deployed at 2026-01-02 12:00
+sudo agentsight cache --last 24 --until 2026-01-03T12:00:00+08:00 \
+  --baseline-until 2026-01-02T12:00:00+08:00 \
+  --price-input 12 --price-cache-read 1 --price-cache-write 15 --price-output 36 --json
+```
+
+Limits:
+
+- Causes are inferred from Token counters and fingerprints of the system prompt, tool definitions,
+  and message count. AgentSight does not record where explicit cache markers such as
+  `cache_control` sit, so a marker on the wrong message shows up as `fixed_prefix_plateau` or
+  `prefix_not_reused`; confirm it in the outgoing request.
+- One window reads at most the newest 20,000 completed calls; the output says so when the window
+  held more.
+- With prices, the JSON output carries `input_cost_per_mtok` for both windows so windows of
+  different load can be compared, but a different workload still changes the hit rate. Compare
+  windows that ran the same work.
+
+The same diagnosis is served as `GET /api/metrics/cache` and shown on the Dashboard's Agent
+Dashboard page.
+
 ## agentsight audit
 
 Queries the audit trail: LLM calls and process actions.
@@ -364,7 +469,7 @@ $ sudo agentsight discover
 总计: 1 个 Agent
 
 $ sudo agentsight discover --list-known | head -12
-已知 AI Agent（共 31 条规则）:
+已知 AI Agent（共 36 条规则）:
 ============================================================
 
   Hermes (custom)
@@ -674,6 +779,9 @@ or making model requests. It is mutually exclusive with `--dim`, and rejects `--
 Selection is shared with analysis: `--file`, repeatable `--dir`, `--limit` (default 10),
 and `--min-steps` (default 3). Directory scans keep the existing 1 KiB minimum file size
 and subagent exclusion; use `--file` to export a small file explicitly.
+
+`--limit` must be non-negative: `0` selects no files, and negative values fail with
+exit code 2 before discovery, analysis, or export.
 
 Each name is the full SHA-256 of the canonical absolute source path followed by
 `.atif.json`. Same-name inputs in different directories remain distinct; exporting the

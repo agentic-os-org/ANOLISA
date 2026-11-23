@@ -2,19 +2,22 @@
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
 from check import AW, git, output, sha
 from native_reports import validate_case
 from native_qoder import validate_pin
+from resident_contract import shards
 
 
 def load(root: Path) -> dict:
     """Reject unaccounted Agents, empty suites and unpinned native runtimes."""
     manifest = json.loads((root / "tests/native-matrix.json").read_text())
     registered = json.loads((root / "tests/regression-matrix.json").read_text())["agents"]
-    if manifest.get("version") != 1 or set(manifest["agents"]) != set(registered):
+    if (manifest.get("version") != 1
+            or set(manifest["agents"]) != set(registered) | {"hermes-0.23.1"}):
         raise ValueError("native acceptance must account for every registered Agent")
     for agent, row in manifest["agents"].items():
         if not row.get("owner"):
@@ -85,13 +88,42 @@ def load(root: Path) -> dict:
                 raise ValueError(f"{agent}: use exact Python dependency versions")
         if "source" in row:
             sha(row["source"]["revision"])
+        if row.get("source_install") and (
+            agent != "hermes-0.23.1"
+            or row["source_install"] != "frozen-no-build-isolation"
+        ):
+            raise ValueError(f"{agent}: unsupported native source install mode")
         if "npm_fixture" in row:
             for name in ("package.json", "package-lock.json"):
                 if not (root / row["npm_fixture"] / name).is_file():
                     raise ValueError(f"{agent}: missing locked npm fixture")
+        for label, fixture in row.get("npm_fixtures", {}).items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", label):
+                raise ValueError(f"{agent}: invalid npm fixture label")
+            for name in ("package.json", "package-lock.json"):
+                if not (root / fixture / name).is_file():
+                    raise ValueError(f"{agent}/{label}: missing locked npm fixture")
+        if agent == "pi":
+            if set(row.get("npm_fixtures", {})) != {"legacy", "latest"}:
+                raise ValueError("pi: retain locked legacy and latest SDK baselines")
+            required = {
+                f"{name}-{label}"
+                for label in ("legacy", "latest")
+                for name in (
+                    "public-factory", "input-submission", "strict-output",
+                    "skill-objects", "skill-input", "native-start",
+                )
+            }
+            if not required.issubset({case["name"] for case in row.get("cases", [])}):
+                raise ValueError("pi: retain release-line native acceptance cases")
         for package in row.get("npm_packages", []):
             if not re.search(r"@\d+\.\d+\.\d+$", package):
                 raise ValueError(f"{agent}: pin the npm package")
+        for key, package in row.get("npm_variants", {}).items():
+            if not re.fullmatch(r"npm_[a-z0-9_]+", key) or not re.search(
+                r"@\d+\.\d+\.\d+$", package
+            ):
+                raise ValueError(f"{agent}: pin and name each npm variant")
         cases = row.get("cases", [])
         if not cases or len({case["name"] for case in cases}) != len(cases):
             raise ValueError(f"{agent}: missing or duplicate native cases")
@@ -105,14 +137,26 @@ def load(root: Path) -> dict:
     return manifest
 
 
-def plan(root: Path, expected: str) -> dict:
+def select(manifest: dict, credential_free: bool = False) -> dict:
+    """Keep hosted-model acceptance explicit when validating an unmerged fork."""
+    return {
+        **manifest,
+        "agents": {
+            agent: row for agent, row in manifest["agents"].items()
+            if not credential_free or agent not in {"qoder", "qoder-sdk"}
+        },
+    }
+
+
+def plan(root: Path, expected: str, credential_free: bool = False) -> dict:
     """Generate the job matrix from the tested checkout, never a second Agent list."""
     if git("rev-parse", "HEAD", repo=root.parents[1]) != sha(expected):
         raise ValueError("native plan checkout does not match candidate SHA")
-    manifest = load(root)
+    manifest = select(load(root), credential_free)
     return {
         "include": [
-            {"agent": agent, "python": row["python"]}
+            {"agent": agent, "python": row["python"],
+             "minutes": math.ceil((sum(c["timeout_seconds"] + 20 for c in row["cases"]) + 1800) / 60)}
             for agent, row in manifest["agents"].items()
             if row["mode"] == "automated"
         ]
@@ -122,8 +166,15 @@ def plan(root: Path, expected: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--credential-free", action="store_true")
     args = parser.parse_args()
-    output(matrix=json.dumps(plan(AW, args.candidate_sha), separators=(",", ":")))
+    matrix = plan(AW, args.candidate_sha, args.credential_free)
+    resident = {"include": [
+        {"shard": name, "minutes": row["job_minutes"]}
+        for name, row in shards(load(AW)).items()
+    ]}
+    output(matrix=json.dumps(matrix, separators=(",", ":")),
+           resident_matrix=json.dumps(resident, separators=(",", ":")))
 
 
 if __name__ == "__main__":

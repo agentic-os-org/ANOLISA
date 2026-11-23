@@ -53,11 +53,15 @@ impl HttpConnectionAggregator {
         Option<String>,
         Option<Rc<RefCell<crate::utils::decompress::ZstdStreamDecoder>>>,
     ) {
-        if !self.compact_sse {
+        let qoder = request.is_some_and(|r| crate::parser::llm::is_qoder_path(&r.path));
+        if !self.compact_sse && !qoder {
             return Self::sse_entry_state(response);
         }
         match SseStream::new(response, self.max_sse_retained_bytes.max(1024)) {
             Ok(mut stream) => {
+                if !self.compact_sse {
+                    stream.retain_raw_events();
+                }
                 if let Some(request) = request
                     .filter(|request| crate::parser::llm::is_dashscope_native_path(&request.path))
                 {

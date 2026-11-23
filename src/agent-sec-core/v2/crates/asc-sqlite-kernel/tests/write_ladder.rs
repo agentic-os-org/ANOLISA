@@ -446,3 +446,22 @@ fn close_runs_the_gated_maintenance_pass() {
         .expect("value");
     assert_eq!(count, 0, "retention must have pruned the stale row");
 }
+
+#[test]
+fn checked_write_rejects_a_fault_even_when_the_policy_swallows_it() {
+    for step in [Step::Skipped, Step::Fail(busy), Step::Fail(io_fault)] {
+        let dir = TempDir::new().expect("temp dir");
+        let sink = sink(&dir.path().join("events.db"), vec![step]);
+        assert!(sink.write_checked(&"receipt".to_owned()).is_err());
+        assert_eq!(seen(&sink).len(), 1, "normal diagnostics still run");
+    }
+}
+
+#[test]
+fn checked_write_acknowledges_an_actual_insert() {
+    let dir = TempDir::new().expect("temp dir");
+    let sink = sink(&dir.path().join("events.db"), vec![]);
+    sink.write_checked(&"receipt".to_owned()).expect("stored");
+    assert!(sink.write_checked(&"receipt".to_owned()).is_err());
+    assert_eq!(sink.repository().attempts(), 2);
+}

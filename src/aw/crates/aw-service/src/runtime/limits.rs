@@ -35,8 +35,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
-        let config = aw_config::Validator::new()?.parse(bytes)?;
+    pub(super) fn from_configuration(config: &aw_config::Configuration) -> Result<Self> {
         let mut value = config.as_value()["spec"]["daemon"]["limits"].clone();
         if value.is_null() {
             return Ok(Self::default());
@@ -94,14 +93,20 @@ impl Runtime {
                 .map_err(|_| rejected("state_poisoned"))?
                 .len();
         }
+        let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+        let expired = self
+            .expired
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?;
         Ok(json!({"limits":self.limits, "usage":{
             "bindings":instances.len(), "invocations":invocations, "correlations":correlations,
+            "event_slots":events.len() + expired.len(), "expired_events":expired.len(),
             "calls":self.calls.load(Ordering::Relaxed),
             "connections":self.resources.connections.load(Ordering::Relaxed)},
             "peak_invocations_per_binding":self.resources.peak_invocations.load(Ordering::Relaxed),
             "admission_rejections":self.resources.rejected.load(Ordering::Relaxed),
             "rejection_reasons":*self.resources.reasons.lock().map_err(|_| rejected("state_poisoned"))?,
-            "reserved_control_connections":16, "maximum_steps_per_binding":64}))
+            "reserved_control_connections":16, "maximum_steps_per_binding":crate::MAX_STEPS_PER_BINDING}))
     }
 }
 
@@ -123,7 +128,11 @@ mod tests {
                 "bindings":number, "events":number, "calls":number,
                 "connections":number, "invocations_per_binding":number
             });
-            let limits = Limits::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+            let config = aw_config::Validator::new()
+                .unwrap()
+                .parse(&serde_json::to_vec(&document).unwrap())
+                .unwrap();
+            let limits = Limits::from_configuration(&config).unwrap();
             assert_eq!(limits.bindings, number as usize);
             assert_eq!(limits.events, number as usize);
             assert_eq!(limits.calls, number as usize);

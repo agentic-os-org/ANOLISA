@@ -71,14 +71,17 @@ pub(super) fn execute_registry(
         if !is_registry_response_for(&response, &command.request_id) {
             continue;
         }
-        if response
+        let success = response
             .get("success")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+            .ok_or_else(|| {
+                RegistryQueryError::Transport("registry response has no boolean success".into())
+            })?;
+        if success {
             return Ok(response.get("data").cloned().unwrap_or(Value::Null));
         }
         return Err(RegistryQueryError::Response {
+            provider_updated: response["data"]["provider_updated"].as_bool() == Some(true),
             message: response
                 .get("error")
                 .and_then(Value::as_str)

@@ -25,11 +25,23 @@ Token authentication is on by default.
 
 | Access path | What is required |
 |---|---|
-| `http://127.0.0.1:7396` from the same host | Read-only page requests normally skip authentication; API exceptions apply |
+| `http://127.0.0.1:7396` (or `localhost`) from the same host | Read-only page requests normally skip authentication; API exceptions apply |
 | `http://<host>:7396` from elsewhere | The Dashboard token, as `?token=<TOKEN>` in the URL, as `Authorization: Bearer <TOKEN>`, or typed into the login form |
 
 Saved Tokenless record lists require the Dashboard credential even on loopback. This changes
 metadata access control; the existing page, login flow and statistics calculation remain unchanged.
+
+`GET /api/preferences?llm=true` also requires the Dashboard credential on loopback because it uses
+the server-saved LLM credential. Rule-only preference queries, `/api/preferences/export`, and
+`/api/preferences/turns` keep their existing access behavior.
+
+Loopback access is only a location shortcut for local, non-browser callers and the dashboard's own
+same-origin calls. A browser page loaded from a *different* origin inherits neither this shortcut
+nor the auth-disabled pass-through: protected Linux API endpoints return `401` without a valid
+credential, while the token-less local viewer returns `403 cross_origin_forbidden`. A page whose
+`Origin` and `Host` merely match each other is not trusted either — the `Host` must name the
+loopback endpoint itself, so a DNS-rebound domain or a reverse-proxy public name in front of a
+loopback server does not inherit the loopback shortcut.
 
 ![Dashboard login screen](../../../images/agentsight/en/dashboard-login.png)
 
@@ -48,7 +60,10 @@ An invalid-token message means the server rejected the token; check it with the 
 A connection-error message can also mean the server or a reverse proxy returned an HTTP error.
 Check that AgentSight is running and reachable, then retry the login.
 
-To turn authentication off — only sensible on a trusted internal network:
+To turn authentication off — only sensible on a trusted internal network, and only for direct
+loopback use; with authentication disabled, browser calls that arrive through a reverse proxy or
+under a non-loopback `Host` are rejected rather than served, so a token-less public binding no
+longer exposes the data to visited web pages:
 
 ```json
 { "server": { "auth": { "enabled": false } } }
@@ -91,6 +106,12 @@ Live Agent health plus the interruption inbox: every unresolved event with its t
 session, and conversation. **Resolve** closes an event, **Details** opens the captured evidence.
 The latency panel switches between the last 24 hours, 7 days, and 30 days.
 
+The **Prompt cache** panel below the Agent cards uses the same range. Each row is one Agent,
+provider, and model with its token-weighted hit rate, the rate of the preceding window of the same
+length, and a status; rows that need review open by default and list the causes of low hits with a
+link to an example session. The figures and causes match
+[`agentsight cache`](cli-reference.md#agentsight-cache).
+
 ![Agent Dashboard with the interruption inbox](../../../images/agentsight/en/dashboard-agent-health.png)
 
 "No agents discovered" only means no Agent process is running right now; historical sessions stay
@@ -131,6 +152,38 @@ and includes its collected subagent trajectories in the ATIF viewer. A captured 
 can resolve children under one matching collected rollout parent; ambiguous rollout parents
 are not combined. If collected children are unavailable, the captured session remains readable.
 
+### Workspace snapshots in execution Steps
+
+When a recorded ws-ckpt operation identifies a registered workspace, the ATIF viewer shows its
+path beside **Interaction trajectory** and attaches workspace snapshots to Agent Steps by
+timestamp. This includes snapshots created by other sessions or CLI users; a Step association
+does not identify the snapshot's creator. The server provides the association, and the viewer
+checks that it describes the displayed trajectory. Local JSON imports and embedded child
+trajectories do not inherit the root's snapshot buttons. Unresolved workspaces or unavailable
+snapshot queries leave the existing trajectory view unchanged.
+If a registered workspace is available and the snapshot API requires a token, the viewer
+opens the Dashboard login form and returns to the same trajectory after sign-in.
+
+Select **View snapshot / Roll back** to open the file change list, comparing the target snapshot
+with the current workspace. Lists longer than 20 files show the total and page controls
+in the dialog footer, alongside the rollback confirmation. M/A/D/R mark modified,
+added, deleted and renamed files; rollback
+reverses these changes. No line-by-line file contents are shown. **Confirm rollback** is enabled
+only when the server allows restoration and you confirm that no other process will write
+to the workspace during rollback. Restore resets the entire managed workspace to the target
+snapshot, overwriting changes from other sessions. If the file list changes before confirmation,
+refresh it and confirm again. When a rollback is rejected before execution, **View failed rollback**
+reopens the original snapshot. **Cancel rollback** clears the failure. To retry that snapshot,
+confirm that there are no other writes and select **Confirm rollback**. The server rechecks the
+preview before executing.
+If the result is uncertain, the dialog automatically checks the submitted operation.
+**View pending rollback** in the page banner reopens the original snapshot and resumes checking.
+**Close** retains it
+on the page. **Cancel rollback** and **Confirm rollback** are unavailable while the
+submitted operation's outcome is unknown. You can still view other snapshots and their
+file changes. Reloading or leaving the viewer clears the pending operation
+from the page. Setup and platform requirements: [ws-ckpt integration](integrations.md#ws-ckpt-workspace-snapshots-linux).
+
 ## Reuse Labels
 
 Reviews collected trajectories for later Agent reuse. Run deterministic triage first, then confirm or override `good`, `bad`, `useless`, or `unknown` labels individually or in batch. The rules never assign `bad`; that verdict requires a human decision or an LLM judgement with a cited trajectory step.
@@ -152,6 +205,13 @@ before computing savings. The existing page and controls stay unchanged. Only un
 `active` records returned by the source query contribute; source failures display an error instead
 of stale totals. The existing AgentSight login is required, including on loopback. Saved metadata
 and explicitly requested content remain available through the [recording API](integrations.md#record-statistics-through-the-api).
+
+Click the input tokens, output tokens, saved tokens or savings rate column heading
+to sort highest first. Click it again for lowest first, then once more to restore
+the query order. Saved tokens and savings rate use the displayed values including
+compounding. Equal values retain the query order; your sort choice also applies
+to the next query result. The arrow marks the current direction, and headings
+work with the keyboard.
 
 **Export CSV** downloads the displayed sessions from the last successful query as
 `token-savings.csv`, in their displayed order. It includes session IDs, Agent names,
@@ -191,6 +251,15 @@ injection, PII, code scanning) per session and run; System Audit aggregates audi
 you can review and, with the enforcer present, contain.
 
 ![System Audit page](../../../images/agentsight/en/dashboard-system-audit.png)
+
+## Secret-file read protection template
+
+With enforcer installed, select **Deny secret file reads** under **Policy template** on the Risk Enforcement
+page, enter the Agent ID, root PID, and absolute regular-file path, then submit. This policy always enforces;
+no trusted network endpoint is needed. Read denials appear as `read` violations. Submission is disabled when
+the backend does not advertise `file_read_protection` or is not ready. The credential exfiltration template
+remains available. See [read-protection boundaries](integrations.md#deny-secret-file-reads) for file identity,
+existing mappings, and secret rotation.
 
 ## Trajectory Viewer
 

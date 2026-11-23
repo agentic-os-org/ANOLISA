@@ -129,7 +129,7 @@ request ID 精确对账仍能提供端到端采集丢失率；缺失计数器不
 
 启动方式、常用参数、产物说明和资源采样方法见 [benchmark 使用说明](BENCHMARK_USAGE_zh.md)。
 
-`single_run/run.sh --agents N --tokens-per-second RATE` 启动 N 个独立 Python 客户端。每个客户端维持一路 HTTPS/SSE 请求，完成后立即开始下一轮。mock 按指定速率发送重复的 ` x`，启动前用 `tiktoken` 的 `cl100k_base` 校验其 Token 数；每个请求的输入 usage 仍是固定 12 Token 的模拟值。
+`single_run/run.sh --agents N --tokens-per-second RATE` 启动 N 个独立 Python 客户端。每个客户端维持一路 HTTPS/SSE 请求，完成后立即开始下一轮。mock 按指定速率发送本地构造的 ` x` 片段，每个 SSE delta 计一个合成测试 Token，并与 mock usage 对账。不下载词表，不验证任意模型分词；每个请求的输入 usage 仍是固定 12 Token 的模拟值。
 
 ```bash
 cd src/agentsight
@@ -137,7 +137,7 @@ bash scripts/benchmark/single_run/run.sh --agents 32 --tokens-per-second 100 \
   --duration 15 --tokens-per-response 200
 ```
 
-先在当前 Python 环境安装 `scripts/benchmark/requirements.txt`。`tiktoken` 首次下载编码数据后会缓存。此模式要求 HTTP/1.1 SSE，无需 k6。
+测试套件和可选 HTTP/2 模式需要在当前 Python 环境安装 `scripts/benchmark/requirements.txt`。Agent 模式仅使用 Python 标准库，要求 HTTP/1.1 SSE，无需 k6 或 tiktoken。
 
 指定 `--agents` 或 `--tokens-per-second` 即启用 Agent 模式，另一项默认分别为 32 和 100。`--tokens-per-response` 默认 1000；`--payload-kb` 控制请求填充大小。`--startup-delay` 默认 5 秒，为探针发现预留时间。测量时长不包含启动阶段；退出前会收完最后一轮在途响应。每次使用新的输出目录。
 

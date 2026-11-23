@@ -148,7 +148,10 @@ pub(super) fn relay_prompt_ghost_input(
 ) -> io::Result<bool> {
     if bytes.starts_with(b"\x1b[Z") {
         if let PromptGhostRoute::AgentSelection {
-            candidates, active, ..
+            candidates,
+            active,
+            generation,
+            ..
         } = route
         {
             if candidates.len() > 1 {
@@ -157,6 +160,7 @@ pub(super) fn relay_prompt_ghost_input(
                 let next_route = PromptGhostRoute::AgentSelection {
                     candidates: candidates.clone(),
                     active: next,
+                    generation: *generation,
                 };
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
@@ -166,6 +170,8 @@ pub(super) fn relay_prompt_ghost_input(
                 }
                 let _ = relay.input_events.send(RawInputEvent::PromptGhostCycle {
                     text: candidate.text.clone(),
+                    suggestion_id: Some(candidate.suggestion_id.clone()),
+                    generation: *generation,
                 });
                 let remainder = &bytes[3..];
                 if !remainder.is_empty() {
@@ -331,18 +337,20 @@ fn relay_native_passthrough(
     emit_activity: bool,
     pending_shell_submits: usize,
 ) -> io::Result<bool> {
+    bash_submission_guard::observe_untracked_readline_binding(bytes, relay);
     let starts_paste = bytes.starts_with(BRACKETED_PASTE_START)
         || (bytes.len() >= 2
             && bytes.len() < BRACKETED_PASTE_START.len()
             && BRACKETED_PASTE_START.starts_with(bytes));
     let complete_paste = bytes.starts_with(BRACKETED_PASTE_START);
     if relay.line_buffer.is_active()
-        || complete_paste
-        || starts_native_intercept_candidate(
-            bytes,
-            relay.native_line_state,
-            relay.zsh_path_prompt_buffering.is_some(),
-        )
+        || ((relay.main_prompt_gate.is_at_prompt() || bytes.starts_with(b"/"))
+            && ((complete_paste && relay.native_line_state.is_empty())
+                || starts_native_intercept_candidate(
+                    bytes,
+                    relay.native_line_state,
+                    relay.zsh_path_prompt_buffering.is_some(),
+                )))
     {
         if let Some(handled) = tab_handoff::relay_coalesced_zsh_tab(
             bytes,
@@ -362,8 +370,17 @@ fn relay_native_passthrough(
             bytes,
         ]
         .concat();
-        relay.line_buffer.soft_newline_enabled = native_candidate_allows_soft_newline(&combined);
+        relay.line_buffer.soft_newline_enabled = relay.main_prompt_gate.is_at_prompt()
+            && native_candidate_allows_soft_newline(&combined);
         relay.line_buffer.push(bytes);
+        if !relay.main_prompt_gate.is_at_prompt()
+            && !relay.line_buffer.visible_line_bytes().starts_with(b"/")
+        {
+            if relay.line_buffer.in_paste() {
+                return Ok(true);
+            }
+            return flush_candidate_line_to_shell(relay, emit_activity, pending_shell_submits);
+        }
         let zsh_path_candidate = relay.zsh_path_prompt_buffering.is_some();
         let hold_zsh_path_candidate = zsh_path_candidate
             && !relay.line_buffer.saw_paste()
@@ -607,6 +624,14 @@ fn redraw_candidate_line(
 ) {
     let original = line_buffer.visible_line_bytes();
     send_shell_input_state(original.is_empty(), input_events);
+    // A streaming paste is fully buffered until the closer; redrawing the
+    // whole draft per chunk amplifies terminal output O(n²/chunk) (#10318).
+    // Coalesce echo into the single redraw the closer chunk already triggers.
+    // Skip before display construction: redaction copies the accumulated
+    // line, so building it per chunk is quadratic CPU as well as output.
+    if line_buffer.in_paste() {
+        return;
+    }
     if line_buffer.soft_newline_enabled
         && !line_buffer.in_paste()
         && contains_soft_newline_sequence(original)

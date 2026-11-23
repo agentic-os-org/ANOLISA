@@ -8,6 +8,9 @@
 //! Retention and capacity are supplied explicitly by the caller. Maintenance
 //! checkpoints WAL data and deletes oldest rows without running `VACUUM`.
 
+mod cache;
+#[cfg(test)]
+mod cache_tests;
 mod events;
 mod maintenance;
 mod pending;
@@ -61,12 +64,14 @@ macro_rules! billed_input_col {
 pub(crate) use billed_input_col;
 
 // Re-export public types from sub-modules
+pub use cache::{CACHE_DIAGNOSIS_MAX_ROWS, CacheCallRow, CacheCallWindow};
 pub use events::TraceEventDetail;
 pub(crate) use maintenance::MaintenanceCursor;
 pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
 pub use resource::ResourceSample;
 pub use resource_timeline::{SessionPhase, SessionResourceTimeline};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
+pub(crate) use stats::percentiles;
 pub use stats::{
     AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
     ModelTimeseriesBucket, TimeseriesBucket,

@@ -18,6 +18,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--provider", type=Path, required=True)
+parser.add_argument("--sec-core-provider", type=Path, required=True)
 parser.add_argument("--hermes", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--source", type=Path, required=True)
@@ -120,6 +121,9 @@ def main() -> None:
             (work / "utils.py").write_text(shadow)
             (work / "hermes_cli").mkdir()
             (work / "hermes_cli/__init__.py").write_text(shadow)
+            scanner = root / "submission-scanner.py"
+            shutil.copyfile(Path(__file__).parent.parent / "pi/submission-scanner.py", scanner)
+            scanner.chmod(0o700)
             trace = root / "trace.jsonl"
             command = work / "existing-hook"
             shutil.copyfile(Path(__file__).with_name("native_command.py"), command)
@@ -176,7 +180,7 @@ unknown_yaml:
             prompt.write_text("Run the requested terminal call once and then finish.")
             env = {key: value for key, value in os.environ.items()
                    if not key.startswith(("HERMES_", "OPENAI_", "AW_HERMES_"))}
-            env.update(HOME=str(home), HERMES_HOME=str(profile), AW_HERMES_TRACE=str(trace),
+            env.update(HOME=str(home), HERMES_HOME=str(profile), AW_HERMES_TRACE=str(trace), FAKE_ROOT=str(root),
                 HERMES_TUI="1",
                 AW_FIXTURE_KEY="local-fixture-not-a-secret", OPENAI_API_KEY="local-fixture-not-a-secret",
                 OPENAI_BASE_URL=f"http://127.0.0.1:{server.server_port}/v1",
@@ -194,7 +198,8 @@ unknown_yaml:
             for label, blocked in (("allow", False), ("block", True), ("empty", False),
                                    ("profile-safe", False), ("parent-safe", False),
                                    ("profile-override", False), ("reload-block", True),
-                                   ("rewrite-block", True)):
+                                   ("rewrite-block", True), ("input-allow", False), ("input-block", False),
+                                   ("input-error-block", False), ("input-error-report", False), ("input-pii", False)):
                 env["PATH"] = byte_path if label == "allow" else short_path
                 safe = label in ("profile-safe", "parent-safe")
                 reloading = label == "reload-block"
@@ -226,6 +231,12 @@ def register(ctx: Any) -> None:
                     native_reload = hermes_yaml.safe_load(installed)
                     native_reload["plugins"]["enabled"].append("reload-fixture")
                     installed = hermes_yaml.safe_dump(native_reload, sort_keys=False).encode()
+                    (profile / "config.yaml").write_bytes(installed)
+                if label == "input-allow":
+                    restored = hermes_yaml.safe_load(installed)
+                    restored["hooks"]["pre_tool_call"][0]["command"] = "./existing-hook hook --step existing-before"
+                    restored["plugins"]["enabled"].remove("reload-fixture")
+                    installed = hermes_yaml.safe_dump(restored, sort_keys=False).encode()
                     (profile / "config.yaml").write_bytes(installed)
                 if label == "rewrite-block":
                     rewritten = hermes_yaml.safe_load(installed)
@@ -273,6 +284,25 @@ def register(ctx: Any) -> None:
                         "effects": ["observe", "block"] if suffix == "before" else ["observe"],
                         "on_error": "block" if suffix == "before" else "report"})
                     document["spec"]["events"][event] = {"enabled": True, "required": True, "steps": steps}
+                input_denied = label in ("input-block", "input-error-block", "input-pii")
+                input_case = label.startswith("input-")
+                if input_case:
+                    prompt.write_text("risk" if label == "input-block" else
+                                      "api_key=synthetic-secret" if label == "input-pii" else
+                                      "error" if "error" in label else "hello")
+                    providers["input"] = {"protocol": "aw-provider/v1alpha1", "transport": {
+                        "type": "stdio", "location": "agent",
+                        "argv": [str(args.sec_core_provider), "--cli", str(scanner),
+                                 "--socket", str(root / "scanner.sock")]},
+                        "timeout_ms": 1500, "max_output_bytes": 65536,
+                        "config": {"version": 1, "mode": "block",
+                                   "prompt": {"mode": "block", "scan_mode": "fast"},
+                                   "pii": {"input_mode": "block", "output_mode": "observe"}}}
+                    document["spec"]["events"]["input.submit"] = {"enabled": True, "required": True,
+                        "steps": [{"id": operation, "provider": "input", "operation": operation,
+                                   "effects": ["observe", "block"],
+                                   "on_error": "report" if label == "input-error-report" else "block"}
+                                  for operation in ("scan_prompt", "scan_user_input")]}
                 if label == "empty":
                     document["spec"]["providers"] = {}
                     document["spec"]["events"] = {}
@@ -291,7 +321,7 @@ def register(ctx: Any) -> None:
                             dotenv = profile_env + (f"{key}={value}\n" if source == "dotenv" else "")
                             (profile / ".env").write_text(dotenv)
                             managed_env = {**env, key: value} if source == "parent" else env
-                            assert run([base[0], "install", *base[1:]], name, work, managed_env) != 0, name
+                            assert run([base[0], "connect", *base[1:]], name, work, managed_env) != 0, name
                             assert not shadowed.exists(), name
                             assert "native config writer failed" in (args.output / (name + ".log")).read_text()
                             assert (profile / ".env").read_text() == dotenv
@@ -324,7 +354,7 @@ def register(ctx: Any) -> None:
                         try:
                             cleanup_base = [*base]
                             cleanup_base[-1] = str(cleanup_profile)
-                            assert run([base[0], "install", *cleanup_base[1:]], "install-cleanup-error",
+                            assert run([base[0], "connect", *cleanup_base[1:]], "install-cleanup-error",
                                        work, {**env, "PYTHONPATH": str(imports)}) != 0
                             cleanup_log = (args.output / "install-cleanup-error.log").read_text()
                             cleanup_report = json.loads(cleanup_log.splitlines()[0])
@@ -351,7 +381,7 @@ def register(ctx: Any) -> None:
                     assert len(original.encode()) < 4 * 1024 * 1024
                     assert len(json.dumps([expanded, expanded]).encode()) > 4 * 1024 * 1024
                     (profile / "config.yaml").write_text(original)
-                    assert run([base[0], "install", *base[1:]], "install", work, env) == 0
+                    assert run([base[0], "connect", *base[1:]], "install", work, env) == 0
                     installed = (profile / "config.yaml").read_bytes()
                     report = json.loads((args.output / "install.log").read_text())
                     backup, displaced = Path(report["backup"]), Path(report["displaced"])
@@ -371,7 +401,7 @@ def register(ctx: Any) -> None:
                     assert b"# Keep this operator comment" in installed
                     assert b'text_yes: "yes"' in installed
                     assert not list(profile.glob(".aw-config-*"))
-                    assert run([base[0], "install", *base[1:]], "install-again", work, env) == 0
+                    assert run([base[0], "connect", *base[1:]], "install-again", work, env) == 0
                     assert (profile / "config.yaml").read_bytes() == installed
                     repeated = json.loads((args.output / "install-again.log").read_text())
                     assert repeated["backup"] is None and repeated["displaced"] is None
@@ -382,7 +412,7 @@ def register(ctx: Any) -> None:
                                                   b"hook_callback_timeout: 1:20\n")
                     assert b"hook_callback_timeout: 1:20\n" in installed
                     (profile / "config.yaml").write_bytes(installed)
-                daemon = start([str(args.aw), "serve", "--config", str(config), "--state-dir", str(state)],
+                daemon = start([str(args.aw), "service", "serve", "--config", str(config), "--state-dir", str(state)],
                                "daemon-" + label, work, env)
                 deadline = time.monotonic() + 10
                 while not (state / "aw.sock").exists() and time.monotonic() < deadline:
@@ -390,12 +420,13 @@ def register(ctx: Any) -> None:
                     time.sleep(0.05)
                 assert (state / "aw.sock").exists()
                 trace.unlink(missing_ok=True)
+                (root / "scanner.jsonl").unlink(missing_ok=True)
                 (work / "marker.txt").unlink(missing_ok=True)
                 request_count = len(server.requests)
                 exit_code = run([base[0], "run", *base[1:], "--", *native_args], label, work, env)
-                assert (exit_code != 0) == safe, (label, exit_code)
+                assert (exit_code != 0) == (safe or input_denied), (label, exit_code)
                 rows = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-                result = {"case": label, "tool_executed": (work / "marker.txt").exists(),
+                result = {"case": label, "model_requests": len(server.requests) - request_count, "tool_executed": (work / "marker.txt").exists(),
                     "chat_from_launcher_arguments": bool(native_args),
                     "installation_preserved_yaml11": True,
                     "steps": [row["step"] for row in rows],
@@ -412,12 +443,18 @@ def register(ctx: Any) -> None:
                 (args.output / (label + "-trace.json")).write_text(json.dumps(rows, indent=2))
                 if reloading:
                     result["native_reload"] = json.loads((work / "native-reloaded.json").read_text())
-                assert result["tool_executed"] == (not blocked and not safe), result
-                if safe:
+                assert result["tool_executed"] == (not blocked and not safe and not input_denied), result
+                if safe or input_denied:
                     assert len(server.requests) == request_count, result
                 expected_steps = ([] if safe else ["existing-before", "existing-after"] if label == "empty"
                                   else ["existing-before", "aw-before-1", "aw-before-2",
                                         "existing-after", "aw-after-1", "aw-after-2"])
+                if input_case:
+                    expected_steps = [] if input_denied else expected_steps
+                    scans = [json.loads(line) for line in (root / "scanner.jsonl").read_text().splitlines()]
+                    assert len(scans) == (1 if label in ("input-block", "input-error-block") else 2), scans
+                    assert all(row["text"] == prompt.read_text() for row in scans), scans
+                    (args.output / (label + "-scanner.json")).write_text(json.dumps(scans, indent=2))
                 if label == "rewrite-block":
                     expected_steps[0] = "modify"
                     assert not (work / "rewritten.txt").exists(), result
@@ -431,7 +468,7 @@ def register(ctx: Any) -> None:
                     assert refreshed["enabled"] and refreshed["error"] is None, refreshed
                 else:
                     assert result["steps"] == expected_steps, result
-                outcomes = [] if safe else ["blocked" if blocked else "ok"] * server.tool_calls
+                outcomes = [] if safe or input_denied else ["blocked" if blocked else "ok"] * server.tool_calls
                 assert result["after_status"] == outcomes, result
                 assert result["profile_retained"] and result["config_unchanged_during_run"], result
                 assert result["native_environment_preserved"], result
@@ -443,13 +480,13 @@ def register(ctx: Any) -> None:
                 assert not (work / "NEVER").exists()
                 assert all(row["literal"] == "literal ; $(touch NEVER) ' spaces" for row in rows
                            if row["step"].startswith("aw-"))
-                assert run([str(args.aw), "status", "--config", str(config)],
+                assert run([str(args.aw), "service", "status", "--config", str(config)],
                            "status-" + label, work, env) == 0
                 status = json.loads((args.output / ("status-" + label + ".log")).read_text())
                 result["instance_released"] = status["result"]["bindings"] == 0
                 assert result["instance_released"], result
                 results.append(result)
-                assert run([str(args.aw), "stop", "--config", str(config)], "stop-" + label, work, env) == 0
+                assert run([str(args.aw), "service", "stop", "--config", str(config)], "stop-" + label, work, env) == 0
                 assert daemon.wait(timeout=10) == 0
                 audit_events = []
                 for journal in state.rglob("*.jsonl"):

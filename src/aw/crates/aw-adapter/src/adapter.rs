@@ -5,8 +5,8 @@ pub(crate) mod catalog;
 #[cfg(test)]
 use crate::Exit;
 use crate::Result;
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use aw_exec::CommandSpec;
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -46,6 +46,8 @@ pub struct HookEvent {
 pub struct NativeOptions {
     /// Preinstall a stable bridge for explicit idle-only policy updates.
     pub reloadable: bool,
+    /// Prepare application-owned factories with immutable task policy updates.
+    pub resident_policy_reload: bool,
     /// Existing native settings file.
     pub settings: Option<String>,
     /// Existing native profile directory.
@@ -176,13 +178,15 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
         return Err("block reason must be nonempty and bounded".into());
     }
     match adapter {
-        "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
+        "sdk" | "qoder" | "qwenpaw" | "agentscope" | "codex" => {
+            reply.stderr = format!("{text}\n").into_bytes()
+        }
         "claude-sdk" | "qoder-sdk" => reply.stdout = serde_json::to_vec(text)?,
-        "openclaw" | "hermes" | "pi" => {
+        "openclaw" | "hermes" | "pi" | "deepseek-harness" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
                 "blockReason"
-            } else if adapter == "pi" {
+            } else if matches!(adapter, "pi" | "deepseek-harness") {
                 "reason"
             } else {
                 "message"
@@ -287,10 +291,14 @@ pub(super) struct NativeStep {
     pub replaces_result: bool,
 }
 
-pub(super) fn native_steps(steps: &[AdmittedStep], event: &str, observe: bool) -> Vec<NativeStep> {
-    let mut selected: Vec<_> = steps
-        .iter()
-        .filter(|step| step.event == event)
+pub(super) fn native_steps(
+    document: &Value,
+    steps: &[AdmittedStep],
+    event: &str,
+    observe: bool,
+) -> Vec<NativeStep> {
+    let mut selected: Vec<_> = aw_core::routes::callback_steps(document, steps, event)
+        .into_iter()
         .map(|step| NativeStep {
             step_id: step.step_id.clone(),
             on_error: step.on_error.clone(),
@@ -322,6 +330,7 @@ mod tests {
             "pi",
             "claude-sdk",
             "agentscope",
+            "deepseek-harness",
         ] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
@@ -345,7 +354,7 @@ mod tests {
                         value,
                         serde_json::json!({"block":true,"blockReason":message})
                     );
-                } else if name == "pi" {
+                } else if matches!(name, "pi" | "deepseek-harness") {
                     assert_eq!(value, serde_json::json!({"block":true,"reason":message}));
                 } else {
                     assert_eq!(

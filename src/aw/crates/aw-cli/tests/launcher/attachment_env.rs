@@ -150,7 +150,7 @@ fn check(scenario: Scenario) {
     if matches!(scenario, Scenario::Removed | Scenario::NoFile) {
         assert!(!env_file.exists());
     }
-    let output = install_entrypoint(&fixture, pid, false, &["agent", "connect"]);
+    let output = install_entrypoint(&fixture, pid, false, &["connect"]);
     let unconfirmed = shared || matches!(scenario, Scenario::NoFile);
     if unconfirmed {
         assert!(!output.status.success(), "{output:?}");
@@ -161,12 +161,7 @@ fn check(scenario: Scenario) {
         assert!(!fixture.root.join("post-seen").exists());
     } else {
         assert_eq!(success(output)["attached"], true);
-        success(install_entrypoint(
-            &fixture,
-            pid,
-            true,
-            &["agent", "connect"],
-        ));
+        success(install_entrypoint(&fixture, pid, true, &["connect"]));
         assert_eq!(service.status()["bindings"], 0);
     }
     assert!(!profile.join(".aw-attachment.json").exists());

@@ -6,6 +6,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-22
+
+### Added
+
+- Login health gains optional checks for memory pressure, disk space and inode usage, resource quotas, unexpected read-only filesystems, service state, and out-of-memory (OOM) events, with filesystem and host event notices. Every new notice is off by default or diagnostics-only, so default login output is unchanged and the 300 ms login budget still applies (#10362)
+
+### Fixed
+
+- Chinese questions whose `?` is followed by more Chinese text or doubled (such as `你还好吗?我想问问` or `什么是mutex??`) reach AI routing again instead of failing with `command not found`; ASCII questions and expansion-sensitive command positions still run as ordinary shell commands (#10298)
+- `cosh audit status` reports gaps in the audit event sequence — deleted, duplicated, or reordered records — and states the integrity boundary, so a discontinuous local audit trail is visible instead of silently accepted (#10309)
+- `web_fetch` blocks loopback, private, link-local, and cloud instance metadata addresses (including the metadata endpoint outside the usual private ranges) and re-checks every redirect hop, so an approved fetch cannot reach internal services. It also refuses targets that route through a system proxy — including public sites — on the first hop and redirects, so proxy-only egress deployments lose this fetch path; exclude a directly reachable target with `NO_PROXY` to keep it (#10313)
+- `cosh guide` keeps setup on a single screen: choosing Default login shell or Manage AI services no longer flashes the terminal or leaves setup output in shell scrollback, the login entry line stays consistent across logins, and pages repaint correctly on terminal resize (#10322)
+- A model connection that goes silent for more than 120 seconds now ends the turn with a readable timeout error instead of waiting indefinitely; steadily streaming responses keep no total-duration deadline, and the question is preserved so the shell stays usable (#10331)
+- A large paste into an interactive session is buffered and shown once when it completes, instead of redrawing the whole draft on every chunk, so input stays responsive (#10340)
+- A Bash tool request that cannot be handed to the shell (such as a bare-newline heredoc) is blocked with a rewrite hint on the automatic approval path too, instead of showing a sent receipt and then waiting forever (#10343)
+- Leaving the terminal during an agent turn cancels the turn and the in-flight model request, instead of continuing in the background and consuming tokens (#10344)
+- Long agent replies are no longer silently clipped: the reply card renders text within its width, and a reply that exceeds the display capacity shows a localized truncation notice instead of dropping the tail without warning (#10345)
+- An authentication failure from a configured provider (such as HTTP 401 or 403) ends the active turn with the provider error and returns shell input, instead of opening an authentication picker that captures input; run `/auth` to update credentials and ask again (#10346)
+- Saving configuration is serialized and published atomically, so concurrent sessions — for example changing the language while another session saves — no longer truncate the config file or lose existing AI service settings; file ownership and permissions are preserved (#10347)
+- Very long single command lines (above 16K characters) no longer freeze input: they run as ordinary shell commands without the costly routing and history scans on every submission path, and oversized history entries are no longer deleted under memory pressure (#10348, #10384)
+- Agent backend processes show a stable name in process listings again, so `ps` and `pgrep` lookups and out-of-memory accounting identify them correctly instead of a changing descriptor number (#10349)
+- Renaming or deleting a managed account no longer strands its login record: `cosh login status` and `cosh login restore` resolve records by user ID, and a new `cosh login reconcile` (with `--yes` to apply) rebinds or removes drifted records, so the package can upgrade and uninstall again (#10354)
+- Foreground commands stay responsive under memory pressure: command-boundary handling avoids spawning helper processes and uses a lightweight path while the session is over its memory limit, so commands no longer stall for tens of seconds (#10356)
+- Stdio MCP servers no longer start automatically at session startup until trusted, whether declared in system or user configuration; HTTP servers keep their existing connection behavior. Trust is pinned to the exact command, arguments, environment, and tool set, and any change re-asks for trust. After upgrading, each preset stdio server needs a one-time `/mcp trust <server>` per user to restore auto-start (#10359)
+- Recommend-mode wording matches actual behavior: the footer and guide state that read-only inspection may still run and explicitly allowed tools run, while side-effecting shell calls are denied before execution (#10361)
+- In the default `auto` approval mode, `printenv` no longer runs automatically: every form goes through an approval prompt instead of printing environment values straight to the terminal. Requests matching `trusted_commands`, explicit read-only overrides, and confirmed `trust` mode still run automatically (#10365)
+- Skill content from project, custom, and extension directories is presented to the model as untrusted data wrapped in a boundary, so instructions embedded in a skill file cannot pose as system or user directives; user and system skills keep their trusted guidance (#10369)
+- Login health filesystem checks are accurate on real hosts: filesystem event notices bind to the correct scanned volumes, and disk capacity alerts evaluate only writable volumes — a read-only or quota-enforced view holds its current state instead of alerting or recovering on headroom alone (#10376, #10381)
+
+## [0.30.0] - 2026-11-19
+
+### Added
+
+- Bash can remain the default login shell while Cosh provides opt-in guidance: a bounded login health banner with resource facts and an AI invitation, persistent `cosh guide` controls, and reversible login-shell switching gated by an explicit capability. Bash owns input and execution until Cosh is started explicitly — no automatic natural-language routing, output capture, or default-shell change; user hooks win, and the RPM does not edit system profile files (#9914)
+- `cosh --help` shows read-only Cosh help instead of forwarding to Bash help, and a bilingual `cosh guide` wizard covers language, AI-service handoff, guidance and recommendation controls, login health, login-shell actions and getting started, with `cosh guide --plain` for non-interactive output; legacy `guide on/off/status` and inline `/help` are retained (#10103)
+- `cosh guide` focuses on setup and learning: the home page leads with the quick guide, then default login shell, AI service, login health, language and more settings; it no longer opens a working shell, explains `cosh --ask`, continued interaction and contextual `exit`, confirms login changes and history import once with Cancel selected, and pages long results (#10266)
+- Startup renders one suggestion area shared by health and personal candidates — up to three, numbered, with a single active marker — instead of a separate health invitation and recommendation card; one snapshot feeds the display, input ghost text and key bindings, and health facts render only once (#10205)
+- Bash login health banners run within a unified 300 ms budget covering preparation, per-source collection, process cleanup and output; `cosh health banner` now defaults to 300 ms (previously 500 ms), `--budget-ms` values above 300 clamp to 300 while smaller budgets still apply, and repeated OOM advice stays suppressed for the same event across log-source changes until a new event or higher severity appears (#10271)
+
+### Changed
+
+- **BREAKING**: The `cosh-switch` package-switch command is removed. Use `cosh login set/restore/status` to change login shells; controlled package replacement, downgrade and erase with account protections remain available (#9968)
+- **BREAKING**: sec-core adds an opt-in mode, enabled with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, that sends every hooked shell invocation — including `sudo` — through the existing approval and sandbox chain using an installed default permission request; explicit block rules still apply and the mode stays off by default. `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` is removed in favor of an administrator-owned `sandbox/permissions.json.template`; the sandbox permits reads and writes under the working directory, `/tmp` and an absolute `$TMPDIR`, disables IP networking, and protects existing `.git` directories (#9954)
+
+### Fixed
+
+- In native Bash mode, command lines edited with Tab completion or arrow keys before submission are recorded in Bash history again — successful and failing commands alike; secret lines and lines with a user-leading space stay hidden (#10189)
+- `cosh login set` works on standard ALinux4 RPM installs: the login lifecycle capability is enabled by default (opt out with `--without login_lifecycle`), supports the current user or an explicitly named local user under existing authorization checks, and accepts the distribution's execute-only sudo; package erase guards all Cosh entry paths, and installing leaves every account's current login shell unchanged (#10001)
+- Chinese sentences containing glob characters, such as `列出所有 *.log 文件`, reach AI routing instead of failing with `command not found`; expansion-sensitive command positions such as `~/run.sh` still run as ordinary shell commands (#9588)
+- `git grep` no longer executes automatically: with `--no-index`, or outside a repository when Git's fallback is enabled, it can read arbitrary filesystem paths, so it now follows the normal approval policy; `git status` and `git ls-files` remain automatic (#10264)
+- Keyboard echo stays responsive under large command output: output without control sequences takes a fast path through the terminal-output parser, cutting loaded echo latency roughly tenfold with output bytes unchanged (#10275)
+- Sanitized UI text no longer carries terminal metadata such as hyperlink targets or window titles; visible hyperlink labels are preserved and display widths stay correct (#9579)
+- When a multi-line Bash command is blocked at shell handoff, the agent receives the specific reason and a rewrite hint — join lines with `;` or `&&`, or pass multi-line code as a single-quoted argument — instead of a fixed denial, so it corrects the command on the first retry (#10177)
+- Welcome and health cards share one width capped at the terminal size; ECS startup says "Ask directly to start an AI conversation" instead of implying model setup is required; disabled automatic access is distinguished from missing configuration with actionable permission-error guidance; approval, trust and privacy wording is corrected, and host-owned command feedback follows the shell language (#9977)
+- Managing the AI service from `cosh guide` runs as a finite task that returns to the guide automatically, instead of opening a full Cosh shell that requires `exit`; Back always returns to the page that opened a setting, simple settings stay on their page after saving, and destructive actions ask for confirmation (#10219)
+- On zero-config ECS hosts, `cosh guide` shows "Zero-config automatic access; ask directly" and defaults to Start asking questions with Manage AI service secondary, instead of directing users to manual configuration; opening the guide performs no identity probe or model request (#10173)
+- Health reports with incomplete collection show a neutral "some checks incomplete" status instead of a green all-clear, while available load, memory and disk values stay visible; the status appears once even on narrow terminals (#9998)
+- Health evidence is more accurate: a single OOM event is counted once across systemd versions, large kernel logs no longer fail the whole check because reads are bounded and confirmed records survive, and small noncritical filesystems turn critical only at 85% usage with less than 2 GiB free (#9999)
+- Failure-context collection yields to user prompt configuration: it stops recording when the guidance-owned prompt entry is replaced, preserves the original exit status, and leaves no active trap behind when it cannot clean up safely (#10000)
+- The guide's default-login-shell page offers only state-valid actions — a restored Bash account no longer sees Restore, conflicts offer Reread, and Other user shows the administrator commands `cosh login status|set|restore --user USER`; a failed re-read reports the failure instead of claiming success, and messages follow the host language (#10178, #10188)
+- Startup and login health banners render exactly one blank line above and below on both interactive and login paths, and the Cosh AI invitation uses the same cyan `┃ Cosh AI` brand line as the Bash invitation; plain and NO_COLOR output is unchanged (#10182, #10194)
+
+## [0.29.1] - 2026-11-12
+
+### Changed
+
+- **BREAKING**: `cosh-cli checkpoint create` no longer accepts `--pin`. The flag used to pin the snapshot, and pinned snapshots are kept by the daemon's automatic count and age cleanup; every snapshot created now is unpinned, so that cleanup can remove it. A script that passes `--pin` must stop doing so, and now fails argument parsing (#9897)
+
+### Fixed
+
+- Automatic ECS model access always requests the `auto` model instead of the model resolved from project, user, environment, CLI, or restored-session settings, refuses a non-`auto` runtime model switch while access is active, and no longer keeps a project's model selection in the saved user configuration after that project is left (#9885)
+- A turn that ends without assistant text now shows completion only instead of replaying a literal `completed` as a fake answer, in both one-shot and interactive headless output (#9118)
+- Suppressing automatic access for the session and cancelling it now have distinct confirmations in English, and model setup errors follow the selected shell language instead of always appearing in English (#9871)
+
+## [0.29.0] - 2026-11-08
+
+### Added
+
+- Alibaba Cloud ECS instances can now answer questions without `/auth`: eligible requests use the OS Console model access automatically, defaulting to `qwen3.7-plus`, while an already configured provider stays selected; `/auth` gains an identity entry to switch back to the saved identity or to another provider, `n` disables automatic access for the current or future sessions, and `Esc` cancels the activation wait without replaying the question (#9449)
+- `skills.system_paths` registers additional skill directories at System priority, so a skill collection installed outside the cosh package is discovered without a custom install prefix (#9460)
+
+### Changed
+
+- **BREAKING**: `make install` installs into the shared `anolisa` namespace by default, placing skills and extensions under `/usr/local/share/anolisa` as RPM and the ANOLISA installer already do; pass `AWPRJ=` to keep the previous independent layout, and `make layout` prints the resolved directories (#9462)
+- Cosh now finds skills and extensions installed under a custom prefix or a custom XDG data directory, and both RPM and the ANOLISA installer record the directories they used so the runtime follows them (#9460)
+- A directory whose root holds `SKILL.md` is loaded as one skill, so its reference documents are no longer mistaken for separate skills (#9460)
+- `COSH_HOME` relocates the user extension and state directories; `COSH_STATES_DIR` still takes precedence for state (#9352)
+- Installation through the ANOLISA installer now requires ANOLISA 0.3.21 or later, which supplies the component discovery data (#9351)
+
+### Fixed
+
+- `cosh-cli checkpoint status` names the workspaces whose change detection is not running and reports how many change events the shared watcher had to drop, so a workspace that silently stopped recording changes is visible (#7592)
+
+## [0.28.1] - 2026-11-03
+
+### Changed
+
+- Install prebuilt binaries and the bundled workflow skill with the component Makefile.
+
 ## [0.28.0] — 2026-10-25
 
 ### Added

@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use super::SecurityStore;
 use super::delivery::{DeliveryOutcome, retry_delivered_event};
-use crate::enforcement::EnforcementClient;
+use crate::enforcement::{EnforcementClient, EnforcementError};
 
 /// Security ingestion and correlation failures.
 #[derive(Debug, Error)]
@@ -143,12 +143,16 @@ fn subscription_loop(
 ) {
     let mut backoff = Duration::from_millis(100);
     let mut disconnected = false;
+    let mut log_state = SubscriptionLogState::default();
     while !stop.load(Ordering::Acquire) {
         match client.subscribe_security_events() {
             Ok(mut subscription) => {
                 if disconnected {
                     record_subscription_state(&audit, last_context, true, "subscription_restored");
-                    disconnected = false;
+                }
+                disconnected = false;
+                if matches!(log_state.on_connected(), SubscriptionLog::Restored) {
+                    log::info!("security event subscription restored");
                 }
                 loop {
                     if stop.load(Ordering::Acquire) {
@@ -201,7 +205,9 @@ fn subscription_loop(
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            log::warn!("security event subscription disconnected: {error}");
+                            if matches!(log_state.on_disconnect(), SubscriptionLog::Failure) {
+                                log::warn!("security event subscription disconnected: {error}");
+                            }
                             if !disconnected {
                                 record_subscription_state(
                                     &audit,
@@ -217,7 +223,17 @@ fn subscription_loop(
                 }
             }
             Err(error) => {
-                log::warn!("security event subscription failed: {error}");
+                match log_state.on_connect_failure(&error) {
+                    // No enforcer deployed: expected idle mode, notice once.
+                    SubscriptionLog::IdleWithoutEnforcer => log::info!(
+                        "enforcer socket not present at {}; running without security-event subscription (deploy agentsight-enforcer to enable enforcement)",
+                        client.socket_path().display()
+                    ),
+                    SubscriptionLog::Failure => {
+                        log::warn!("security event subscription failed: {error}")
+                    }
+                    SubscriptionLog::Silent | SubscriptionLog::Restored => {}
+                }
                 if !disconnected {
                     record_subscription_state(&audit, last_context, false, "subscription_lost");
                     disconnected = true;
@@ -227,6 +243,73 @@ fn subscription_loop(
         sleep_until_retry(stop, backoff);
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
     }
+}
+
+/// Decides which subscription log line (if any) to emit on each loop turn.
+///
+/// Mirrors the enforcement coordinator's `AvailabilityLogTransitions`: logging is
+/// edge-triggered so a deployment without an enforcer records the expected idle
+/// state once instead of warning on every reconnect attempt. The retry backoff
+/// caps at five seconds, which otherwise floods the log in that mode.
+#[derive(Default)]
+struct SubscriptionLogState {
+    /// Whether a live subscription has ever been held.
+    ever_connected: bool,
+    /// Whether the current outage has already produced a log line.
+    failure_logged: bool,
+}
+
+/// The single log line a subscription state transition should emit.
+enum SubscriptionLog {
+    /// Emit nothing.
+    Silent,
+    /// One-time notice that no enforcer is deployed (expected idle mode).
+    IdleWithoutEnforcer,
+    /// A genuine subscription failure or mid-stream loss.
+    Failure,
+    /// The subscription was re-established after an outage.
+    Restored,
+}
+
+impl SubscriptionLogState {
+    /// Classifies a failure to open a subscription.
+    fn on_connect_failure(&mut self, error: &EnforcementError) -> SubscriptionLog {
+        if self.failure_logged {
+            return SubscriptionLog::Silent;
+        }
+        self.failure_logged = true;
+        if !self.ever_connected && enforcer_absent(error) {
+            SubscriptionLog::IdleWithoutEnforcer
+        } else {
+            SubscriptionLog::Failure
+        }
+    }
+
+    /// Classifies a live subscription that dropped mid-stream.
+    fn on_disconnect(&mut self) -> SubscriptionLog {
+        if self.failure_logged {
+            return SubscriptionLog::Silent;
+        }
+        self.failure_logged = true;
+        SubscriptionLog::Failure
+    }
+
+    /// Classifies a newly (re)established subscription.
+    fn on_connected(&mut self) -> SubscriptionLog {
+        self.ever_connected = true;
+        if std::mem::take(&mut self.failure_logged) {
+            SubscriptionLog::Restored
+        } else {
+            SubscriptionLog::Silent
+        }
+    }
+}
+
+/// Whether a subscription failure means "no enforcer is deployed" rather than a
+/// transient fault: the socket path itself is missing (`ENOENT`), so reconnecting
+/// cannot help until an enforcer appears.
+fn enforcer_absent(error: &EnforcementError) -> bool {
+    matches!(error, EnforcementError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn evidence_loss_event(event: &SecurityEvent) -> SecurityEvent {
@@ -325,4 +408,79 @@ fn unix_epoch_ns() -> u64 {
         .unwrap_or_default()
         .as_nanos();
     nanos.min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    fn absent_error() -> EnforcementError {
+        EnforcementError::Io(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    fn refused_error() -> EnforcementError {
+        EnforcementError::Io(io::Error::from(io::ErrorKind::ConnectionRefused))
+    }
+
+    #[test]
+    fn missing_enforcer_logs_idle_notice_once_not_every_retry() {
+        let mut state = SubscriptionLogState::default();
+        assert!(matches!(
+            state.on_connect_failure(&absent_error()),
+            SubscriptionLog::IdleWithoutEnforcer
+        ));
+        // The reconnect loop repeats this every five seconds; all must be silent.
+        for _ in 0..10 {
+            assert!(matches!(
+                state.on_connect_failure(&absent_error()),
+                SubscriptionLog::Silent
+            ));
+        }
+    }
+
+    #[test]
+    fn enforcer_appearing_later_reports_restored_once() {
+        let mut state = SubscriptionLogState::default();
+        assert!(matches!(
+            state.on_connect_failure(&absent_error()),
+            SubscriptionLog::IdleWithoutEnforcer
+        ));
+        assert!(matches!(state.on_connected(), SubscriptionLog::Restored));
+        // Steady healthy state produces no further logs.
+        assert!(matches!(state.on_connected(), SubscriptionLog::Silent));
+    }
+
+    #[test]
+    fn live_disconnect_warns_once_per_outage() {
+        let mut state = SubscriptionLogState::default();
+        // Fresh healthy connect is silent.
+        assert!(matches!(state.on_connected(), SubscriptionLog::Silent));
+        // Stream drops: one failure, then silence across reconnect attempts.
+        assert!(matches!(state.on_disconnect(), SubscriptionLog::Failure));
+        assert!(matches!(
+            state.on_connect_failure(&refused_error()),
+            SubscriptionLog::Silent
+        ));
+        // Recovery logs once.
+        assert!(matches!(state.on_connected(), SubscriptionLog::Restored));
+    }
+
+    #[test]
+    fn failure_after_connection_is_not_idle_even_if_socket_vanishes() {
+        let mut state = SubscriptionLogState::default();
+        assert!(matches!(state.on_connected(), SubscriptionLog::Silent));
+        // A socket that disappears after we once connected is a real fault.
+        assert!(matches!(
+            state.on_connect_failure(&absent_error()),
+            SubscriptionLog::Failure
+        ));
+    }
+
+    #[test]
+    fn enforcer_absent_matches_only_missing_socket() {
+        assert!(enforcer_absent(&absent_error()));
+        assert!(!enforcer_absent(&refused_error()));
+    }
 }

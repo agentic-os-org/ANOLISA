@@ -8,10 +8,9 @@ use std::{
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 const MAX_SCAN_ENTRIES: usize = 65_536;
 
 pub(super) struct OwnedChild {
@@ -100,6 +99,17 @@ impl OwnedChild {
         Ok(())
     }
 
+    pub(super) fn signal_leader(&self, signal: i32) -> io::Result<()> {
+        // SAFETY: exclusive reaping keeps the worker PID reserved until cleanup.
+        if unsafe { libc::kill(self.id() as i32, signal) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn observe_exit(&self) -> io::Result<bool> {
         // SAFETY: zero initializes siginfo_t; waitid fills this live allocation.
         // WNOWAIT observes termination without making the leader PID reusable.
@@ -125,7 +135,7 @@ impl OwnedChild {
 
     pub(super) fn terminate(&self) -> io::Result<()> {
         self.signal(libc::SIGTERM)?;
-        let deadline = Instant::now() + Duration::from_millis(250);
+        let deadline = Instant::now() + crate::CHILD_TERMINATE_GRACE;
         while !self.observe_exit()? && Instant::now() < deadline {
             thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
         }
@@ -133,7 +143,7 @@ impl OwnedChild {
     }
 
     pub(super) fn cleanup(&mut self) -> io::Result<ExitStatus> {
-        let deadline = Instant::now() + CLEANUP_GRACE;
+        let deadline = Instant::now() + crate::CHILD_CLEANUP_GRACE;
         self.signal_group()?;
         loop {
             if Instant::now() >= deadline {

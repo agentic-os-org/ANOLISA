@@ -93,9 +93,21 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             model: String::new(),
             token_ratio_version: String::new(),
             usage_steps: 0,
-            total_real_input_tok: 0,
-            total_real_output_tok: 0,
-            total_real_cached_tok: 0,
+            total_real_input_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_prompt_tokens)
+                .unwrap_or(0),
+            total_real_output_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_completion_tokens)
+                .unwrap_or(0),
+            total_real_cached_tok: trajectory
+                .final_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.total_cached_tokens)
+                .unwrap_or(0),
             headroom: CostHeadroom::default(),
         });
     }
@@ -104,6 +116,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
 
     // Accumulators for content categories.
     let mut tool_result_chars: usize = 0;
+    // Replayed user context is content, but is not a captured call's result.
+    let mut agent_result_chars: usize = 0;
     let mut tool_input_chars: usize = 0;
     let mut thinking_chars: usize = 0;
     let mut text_chars: usize = 0;
@@ -135,14 +149,11 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                     // Summaries are for display: different long paths or
                     // arguments can share the same truncated prefix.
                     let sig = call.command_summary(usize::MAX);
-                    *tool_sig_counts
-                        .entry((call.function_name.clone(), sig))
-                        .or_insert(0) += 1;
-                }
-                for result in step.results() {
-                    let chars = result.content.as_deref().unwrap_or("").chars().count();
-                    tool_result_chars += chars;
-                    total_chars += chars;
+                    if step.is_agent() {
+                        *tool_sig_counts
+                            .entry((call.function_name.clone(), sig))
+                            .or_insert(0) += 1;
+                    }
                 }
             }
             "user" => {
@@ -156,6 +167,14 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                 total_chars += chars;
             }
             _ => {}
+        }
+        for result in step.results() {
+            let chars = result.content.as_deref().unwrap_or("").chars().count();
+            tool_result_chars += chars;
+            if step.is_agent() {
+                agent_result_chars += chars;
+            }
+            total_chars += chars;
         }
     }
 
@@ -188,8 +207,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         .iter()
         .filter(|(_, &count)| count >= REDUNDANT_MIN_COUNT)
         .map(|((name, sig), &count)| {
-            let avg_result_chars = if tool_result_chars > 0 && !tool_sig_counts.is_empty() {
-                tool_result_chars / tool_sig_counts.values().sum::<usize>().max(1)
+            let avg_result_chars = if agent_result_chars > 0 && !tool_sig_counts.is_empty() {
+                agent_result_chars / tool_sig_counts.values().sum::<usize>().max(1)
             } else {
                 0
             };
@@ -229,8 +248,7 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
     let mut findings = Vec::new();
 
     // Per-step replay model: the token flame chart data.
-    let system_tokens = estimate_tokens_from_chars(system_chars);
-    let mut calls = compute_llm_calls(trajectory, system_tokens);
+    let mut calls = compute_llm_calls(trajectory);
     let model = trajectory.model_name();
 
     // Degraded capture: the replay model is built from user/system bytes only,
@@ -278,9 +296,21 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             .iter()
             .filter(|c| c.real_prompt_tokens.is_some())
             .count(),
-        total_real_input_tok: calls.iter().filter_map(|c| c.real_prompt_tokens).sum(),
-        total_real_output_tok: calls.iter().filter_map(|c| c.real_completion_tokens).sum(),
-        total_real_cached_tok: calls.iter().filter_map(|c| c.real_cached_tokens).sum(),
+        total_real_input_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_prompt_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_prompt_tokens).sum()),
+        total_real_output_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_completion_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_completion_tokens).sum()),
+        total_real_cached_tok: trajectory
+            .final_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.total_cached_tokens)
+            .unwrap_or_else(|| calls.iter().filter_map(|c| c.real_cached_tokens).sum()),
         calls,
         model,
         token_ratio_version: TOKEN_RATIO_VERSION.to_string(),
@@ -332,6 +362,9 @@ pub(crate) struct UsageBlock {
 }
 
 fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
+    if step.is_copied_context == Some(true) {
+        return None;
+    }
     let m = step.metrics.as_ref()?;
     let prompt = m.prompt_tokens.map(u64::from);
     let completion = m.completion_tokens.map(u64::from);
@@ -357,7 +390,7 @@ fn empty_agent_stats(traj: &AtifTrajectory) -> (usize, usize) {
     let mut total = 0usize;
     let mut empty = 0usize;
     for step in &traj.steps {
-        if step.source.as_str() != "agent" {
+        if !step.is_agent() {
             continue;
         }
         total += 1;
@@ -383,7 +416,8 @@ pub(crate) fn is_content_degraded(traj: &AtifTrajectory) -> bool {
 
 /// Per-turn metadata kept aside to compute `removable_turn` in a second pass.
 struct TurnMeta {
-    primary_sig: String, // "name|cmd_sig" of the first tool call in the step
+    actions: Vec<(String, serde_json::Value)>,
+    user_turn: usize,
     all_calls_errored: bool,
     has_tool: bool,
 }
@@ -489,15 +523,44 @@ impl CallBuilder {
     }
 }
 
-/// Walk ATIF steps and compute the replay breakdown. Each agent step is one
-/// LLM call; its observation (tool results) becomes replayed tool history for
+/// Walk ATIF steps and compute the replay breakdown. Each non-copied agent
+/// step is one LLM call; its observation becomes replayed tool history for
 /// the following steps.
-fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall> {
+fn compute_llm_calls(traj: &AtifTrajectory) -> Vec<LlmCall> {
     let origin = traj.origin_ts().unwrap_or_default();
-    let mut b = CallBuilder::new(origin, static_region);
+    let mut b = CallBuilder::new(origin, 0);
+    let mut user_turn = 0usize;
+    let mut system_chars = 0usize;
 
     for step in &traj.steps {
+        if step
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get(agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            b.hist_user = 0;
+            b.hist_assistant = 0;
+            b.hist_tool = 0;
+            b.hist_trimmable = 0;
+        }
         match step.source.as_str() {
+            "system" => {
+                // Only producer-declared snapshots replace earlier messages.
+                // Plain ATIF system messages can add instructions mid-session.
+                if step
+                    .extra
+                    .as_ref()
+                    .and_then(|extra| extra.get(agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    system_chars = 0;
+                }
+                system_chars += step.message.as_deref().unwrap_or("").chars().count();
+                b.static_region = estimate_tokens_from_chars(system_chars);
+            }
             "agent" => {
                 let mut turn_output = 0usize;
                 if let Some(r) = step.reasoning_content.as_deref() {
@@ -507,20 +570,14 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     turn_output += estimate_tokens(m);
                 }
                 let mut label: Option<String> = None;
-                let mut primary_sig = String::new();
+                let mut actions = Vec::new();
                 for call in step.calls() {
                     // Tool-call args are model-generated output, replayed as history.
                     turn_output += estimate_tokens(&call.arguments.to_string());
                     if label.is_none() {
                         label = Some(call.function_name.clone());
                     }
-                    if primary_sig.is_empty() {
-                        primary_sig = format!(
-                            "{}|{}",
-                            call.function_name,
-                            call.command_summary(usize::MAX)
-                        );
-                    }
+                    actions.push((call.function_name.clone(), call.arguments.clone()));
                 }
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
@@ -529,7 +586,10 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     && step.calls().iter().enumerate().all(|(index, call)| {
                         step.results().iter().any(|result| {
                             result.source_call_id.as_deref().is_some_and(|id| {
-                                agentsight_atif::same_call_id(id, &call.tool_call_id)
+                                agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                ) == Some(call.tool_call_id.as_str())
                             })
                         }) || (step
                             .results()
@@ -539,40 +599,53 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     });
 
                 let turn_ts = step.end_ts().unwrap_or(origin);
-                b.finalize(
-                    turn_ts,
-                    turn_output,
-                    label,
-                    TurnMeta {
-                        primary_sig,
-                        all_calls_errored,
-                        has_tool,
-                    },
-                    parse_usage(step),
-                );
-
-                // Tool results become replayed history for subsequent steps.
-                for result in step.results() {
-                    let toks = estimate_tokens(result.content.as_deref().unwrap_or(""));
-                    b.hist_tool += toks;
-                    if toks > TOOL_TRIM_MIN {
-                        b.hist_trimmable += (toks as f64 * TOOL_TRIM_FRAC).round() as usize;
-                    }
+                if step.is_copied_context == Some(true) {
+                    b.hist_assistant += turn_output;
+                } else {
+                    b.finalize(
+                        turn_ts,
+                        turn_output,
+                        label,
+                        TurnMeta {
+                            actions,
+                            user_turn,
+                            all_calls_errored,
+                            has_tool,
+                        },
+                        parse_usage(step),
+                    );
                 }
             }
             "user" => {
+                if step.is_user() {
+                    user_turn += 1;
+                }
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
-            _ => {} // system steps feed the static region, already injected
+            _ => {}
+        }
+        // Replayed context can carry observations on a user step when the
+        // issuing call predates the captured conversation.
+        for result in step.results() {
+            let toks = estimate_tokens(result.content.as_deref().unwrap_or(""));
+            b.hist_tool += toks;
+            if toks > TOOL_TRIM_MIN {
+                b.hist_trimmable += (toks as f64 * TOOL_TRIM_FRAC).round() as usize;
+            }
         }
     }
 
     // Second pass: orchestration-layer heuristic for removable_turn.
-    // A turn is flagged when it duplicates the previous turn's primary action
-    // (spinning) or every tool call in it errored (failed retry).
+    // Repeating one action does not make the whole parallel batch redundant.
+    // A new user turn can explicitly request a repeat, so compare complete
+    // action batches only within the same user turn. Failed-call handling is
+    // independent of this duplicate-action heuristic.
     for i in 0..b.calls.len() {
         let m = &b.metas[i];
-        let dup = i > 0 && !m.primary_sig.is_empty() && b.metas[i - 1].primary_sig == m.primary_sig;
+        let dup = i > 0
+            && !m.actions.is_empty()
+            && b.metas[i - 1].user_turn == m.user_turn
+            && b.metas[i - 1].actions == m.actions;
         b.calls[i].removable_turn = dup || (m.has_tool && m.all_calls_errored);
     }
 
@@ -978,12 +1051,19 @@ fn normalize_cmd(cmd: &str) -> String {
 pub(crate) fn normalize_action_sig(call: &crate::atif::AtifToolCall) -> String {
     let tool = call.display_name();
     let args = &call.arguments;
-    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-        return format!("{tool}:{}", normalize_cmd(cmd));
+    if let Some(cmd) = crate::tool_command::from_arguments(args) {
+        return format!("{tool}:{}", normalize_cmd(&cmd));
     }
-    let target = ["file_path", "path", "notebook_path", "pattern", "url"]
-        .iter()
-        .find_map(|k| args.get(k).and_then(|v| v.as_str()));
+    let target = [
+        "file_path",
+        "filePath",
+        "path",
+        "notebook_path",
+        "pattern",
+        "url",
+    ]
+    .iter()
+    .find_map(|k| args.get(k).and_then(|v| v.as_str()));
     match target {
         Some(t) => format!("{tool}:{}", trunc(&mask_digits(t), 60)),
         None => tool,
@@ -1018,6 +1098,9 @@ pub(crate) fn build_turn_ledger(
     let mut turn: usize = 0;
 
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         match step.source.as_str() {
             "agent" => {
                 let tokens = cost
@@ -1032,10 +1115,11 @@ pub(crate) fn build_turn_ledger(
                     .iter()
                     .find(|r| observation_result_is_error(r));
                 let files: Vec<String> = step.calls().iter().filter_map(write_target).collect();
-                let backtrack = step
-                    .calls()
-                    .iter()
-                    .any(|c| c.command().is_some_and(is_backtrack_cmd));
+                let backtrack = step.calls().iter().any(|c| {
+                    crate::tool_command::from_arguments(&c.arguments)
+                        .as_deref()
+                        .is_some_and(is_backtrack_cmd)
+                });
                 let action_sig = step
                     .calls()
                     .first()
@@ -1189,12 +1273,16 @@ pub(crate) fn extract_waste_candidates_from(
     // Second pass over ATIF steps for evidence: tool outputs and large user
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
-    let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-                                                                            // (first replay turn, replays, tokens, snippet)
+    // (step, name, tokens, snippet, replays)
+    let mut tool_outputs: Vec<(usize, String, usize, String, usize)> = Vec::new();
+    // (first replay turn, replays, tokens, snippet)
     let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         match step.source.as_str() {
             "agent" => {
                 turn_idx += 1;
@@ -1207,10 +1295,14 @@ pub(crate) fn extract_waste_candidates_from(
                             .source_call_id
                             .as_deref()
                             .and_then(|id| {
+                                let owner = agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                )?;
                                 step.calls()
                                     .iter()
-                                    .find(|c| agentsight_atif::same_call_id(&c.tool_call_id, id))
-                                    .map(|c| c.function_name.clone())
+                                    .find(|call| call.tool_call_id == owner)
+                                    .map(|call| call.function_name.clone())
                             })
                             .or_else(|| {
                                 // Positional pairing is only for documents whose
@@ -1227,7 +1319,13 @@ pub(crate) fn extract_waste_candidates_from(
                                     .map(|c| c.function_name.clone())
                             })
                             .unwrap_or_else(|| "unknown".to_string());
-                        tool_outputs.push((step_no, name, toks, trunc(text, SNIPPET_CHARS)));
+                        tool_outputs.push((
+                            step_no,
+                            name,
+                            toks,
+                            trunc(text, SNIPPET_CHARS),
+                            total_steps.saturating_sub(step_no + 1),
+                        ));
                     }
                 }
             }
@@ -1252,8 +1350,24 @@ pub(crate) fn extract_waste_candidates_from(
             }
             _ => {}
         }
+        if !step.is_agent() {
+            let first_replay = (turn_idx + 1) as usize;
+            for result in step.results() {
+                let text = result.content.as_deref().unwrap_or("");
+                let tokens = estimate_tokens(text);
+                if tokens >= TOOL_TRIM_MIN && first_replay < total_steps {
+                    tool_outputs.push((
+                        first_replay,
+                        "replayed context".into(),
+                        tokens,
+                        trunc(text, SNIPPET_CHARS),
+                        total_steps - first_replay,
+                    ));
+                }
+            }
+        }
     }
-    tool_outputs.sort_by_key(|out| std::cmp::Reverse(out.2));
+    tool_outputs.sort_by_key(|out| std::cmp::Reverse((out.2 * out.4, out.2)));
 
     // Agent-first: Rust only computes ratio metrics as evidence; every candidate
     // with underlying data goes to the LLM, which checks the admission criteria
@@ -1371,12 +1485,12 @@ pub(crate) fn extract_waste_candidates_from(
         let facts = tool_outputs
             .iter()
             .take(EVIDENCE_TOP_N)
-            .map(|(s, n, tk, _)| format!("step {} {} {} tok", s, n, fmt_k(*tk)))
+            .map(|(s, n, tk, _, _)| format!("step {} {} {} tok", s, n, fmt_k(*tk)))
             .collect::<Vec<_>>()
             .join("；");
         let top_m9 = tool_outputs
             .first()
-            .map(|(step, _, toks, _)| bill_share(toks * total_steps.saturating_sub(*step + 1)))
+            .map(|(_, _, toks, _, replays)| bill_share(toks * replays))
             .unwrap_or(0.0);
         candidates.push(WasteCandidate {
             id: "tool_output".into(),
@@ -1846,6 +1960,7 @@ mod tests {
     fn call(name: &str, args: serde_json::Value) -> crate::atif::AtifToolCall {
         crate::atif::AtifToolCall {
             tool_call_id: "c".into(),
+            extra: None,
             function_name: name.into(),
             arguments: args,
         }
@@ -1916,6 +2031,36 @@ mod tests {
     fn action_sig_uses_file_target_for_write_tools() {
         let sig = normalize_action_sig(&call("Edit", json!({"file_path": "src/p.rs"})));
         assert_eq!(sig, "Edit:src/p.rs");
+        let camel = normalize_action_sig(&call("Edit", json!({"filePath": "src/q.rs"})));
+        assert_eq!(camel, "Edit:src/q.rs");
+    }
+
+    #[test]
+    fn action_sig_reuses_command_extractor_for_aliases_and_argv() {
+        for key in ["command", "cmd", "script"] {
+            assert_eq!(
+                normalize_action_sig(&call(
+                    "exec_command",
+                    json!({key: "cd /repo && cargo test"})
+                )),
+                "exec_command:cargo test"
+            );
+            assert_eq!(
+                normalize_action_sig(&call(
+                    "shell",
+                    json!({key: ["cargo", "test", "--workspace"]})
+                )),
+                "shell:cargo test --workspace"
+            );
+        }
+        // Malformed argv or blank commands fall back to target/tool name without panicking.
+        for bad in [
+            json!({"command": ["cargo", null]}),
+            json!({"command": []}),
+            json!({"command": "   "}),
+        ] {
+            assert_eq!(normalize_action_sig(&call("shell", bad)), "shell");
+        }
     }
 
     /// The ledger must cover every agent turn (no filtering), carry the canonical

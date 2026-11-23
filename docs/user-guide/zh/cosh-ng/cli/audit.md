@@ -47,6 +47,19 @@ cosh-cli audit prune --dry-run
 
 导出目录包含 `events.jsonl`、`summary.json`、`manifest.json` 和 `SHA256SUMS`。导出内容会脱敏并以原子方式发布；`--force` 只能替换带有有效 cosh 审计清单的目录。版本 1 只支持预览保留计划，因此 `audit prune` 必须带 `--dry-run`，不会删除数据。
 
+审计默认在每用户范围内为 active 和 closed v1 segment 合计提供 100 MiB 预算。
+写入准入通过共享锁计入缓冲字节，持续写入与多个 writer 仍受同一个上限约束。
+
+生命周期证据损坏、未知或超过有界扫描限制时，retention 返回 `Blocked`，保留
+证据，不刷新上次成功回收时间，并允许重试。Session start/end 事件只按同一个
+segment 内的实际行序配对。现有事件缺少 invocation identity，因此跨 segment
+未配对的 Session 证据会保守保留；长会话跨越轮转后可能无法自动回收。
+
+Core 会话文件使用独立的每用户 100 MiB 预算，包含 staging。原子替换会在写入前
+同时计算旧文件和新 staging 文件；峰值空间不足时保留旧文件并拒绝提交。
+Core/Shell 诊断日志共享 20 MiB，并保留今天及前两个 UTC 日期。存储所有权检查
+会在写入或清理前拒绝不安全条目。
+
 ## 策略命令
 
 ```bash

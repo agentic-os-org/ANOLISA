@@ -56,6 +56,17 @@ mod application;
 
 /// CLI arguments for the `adapter` sub-surface.
 #[derive(Parser)]
+#[command(
+    after_help = "Install a component first, then use scan to find its integrations.
+
+Examples (with Tokenless and OpenCode already installed):
+  anolisa adapter scan
+  anolisa adapter enable tokenless opencode
+  anolisa adapter status tokenless
+
+Use the component and framework names from scan to choose an integration.
+After enabling, follow any framework-specific instructions and verify the integration in your agent."
+)]
 pub struct AdapterArgs {
     /// Adapter subcommand.
     #[command(subcommand)]
@@ -65,9 +76,9 @@ pub struct AdapterArgs {
 /// Subcommands under `anolisa adapter`.
 #[derive(Subcommand)]
 pub enum AdapterCommands {
-    /// Discover installed adapter declarations and local resource/receipt state.
+    /// Find integrations for installed components and detect local frameworks.
     Scan,
-    /// Enable a component's adapter for a framework.
+    /// Connect a component to a framework.
     Enable {
         /// Component name (e.g. `tokenless`).
         component: String,
@@ -105,7 +116,7 @@ pub enum AdapterCommands {
         /// enabled adapter.
         framework: Option<String>,
     },
-    /// Report adapter receipt status.
+    /// Check the setup of enabled adapters.
     Status {
         /// Limit to one component; omit for all receipts.
         component: Option<String>,
@@ -210,6 +221,9 @@ struct DisablePayload {
 struct StatusRow {
     component: String,
     framework: String,
+    /// Omitted when there is no valid timestamp for an enabled receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_at: Option<String>,
     #[serde(flatten)]
     report: AdapterStatusReport,
 }
@@ -626,6 +640,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             .map(|e| StatusRow {
                 component: e.component,
                 framework: e.framework,
+                enabled_at: e.enabled_at,
                 report: e.report,
             })
             .collect();
@@ -638,7 +653,6 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 
     if report.entries.is_empty() {
         println!("No adapter receipts.");
-        return Ok(());
     }
     for e in &report.entries {
         println!(
@@ -647,6 +661,9 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             e.framework,
             summary_label(&e.report.summary),
         );
+        if let Some(enabled_at) = &e.enabled_at {
+            println!("  Enabled at: {enabled_at}");
+        }
         for cond in &e.report.conditions {
             let reason = cond
                 .reason
@@ -656,6 +673,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             println!("  {:?} = {:?}{}", cond.kind, cond.status, reason);
         }
     }
+    common::print_aw_status_hint(component.as_deref());
     Ok(())
 }
 

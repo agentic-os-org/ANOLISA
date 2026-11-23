@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    update_input_mode, write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
+    write_all_pty, MainPromptGate, RawInputEvent, RawInputMode, RawObserverAction,
     UserPtyInputGeneration,
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
@@ -28,8 +28,9 @@ mod input_events;
 mod input_readiness;
 pub(super) mod interactive_sentinel;
 mod pty_emit;
+pub(super) mod selection_surface;
 mod terminal_recovery;
-mod terminal_size;
+pub(super) mod terminal_size;
 
 use activity::{
     poll_driver_completion, relay_wait_timeout, wait_for_relay_activity, RelayActivity,
@@ -38,18 +39,16 @@ pub(super) use activity::{DriverCompletion, RawActionWatchdog};
 use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
 use input_events::{
     apply_prompt_boundary_evidence, candidate_display_columns, drain_raw_input_events,
-    latest_capture_submission_generation, observe_with_input_mode_lock,
-    publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
+    observe_with_input_mode_lock, publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
 };
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
     emit_interactive_hint_if_waiting, InputWaitStatus, InteractiveHintKind, SentinelThrottle,
 };
-use pty_emit::resolve_pty_emit;
 #[cfg(test)]
 use pty_emit::restore_prompt_display_before_handoff;
+use pty_emit::{resolve_pty_emit, update_input_mode_and_wake};
 use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTerminalRecovery};
-use terminal_size::sync_outer_terminal_winsize;
 
 // DECSC/DECRC are the terminfo `sc`/`rc` sequences for xterm-compatible
 // terminals. Unlike CSI s/u, they also restore the cursor in macOS Terminal.
@@ -72,6 +71,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     resize: &mut UnixStream,
     input_mode: &Arc<Mutex<RawInputMode>>,
     input_generation: &UserPtyInputGeneration,
+    main_prompt_gate: &MainPromptGate,
     last_winsize: &mut Winsize,
     prompt: &str,
     recovery_request_file: &Path,
@@ -107,7 +107,7 @@ where
     // unsupporting terminals ignore it, RawModeGuard withdraws it on exit.
     output.write_all(b"\x1b[>4;1m")?;
     output.flush()?;
-    sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+    prompt_presentation.sync_outer_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
     loop {
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
@@ -175,11 +175,7 @@ where
             bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
-            input_mode,
-            &observer_action,
-            latest_capture_submission_generation(&parser.events),
-        );
+        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
         let mut hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display_position() > display_start {
             write_pending_display_preserving_prompt_ghost(
@@ -311,11 +307,7 @@ where
                             &observer_action,
                             &mut pending_prompt_restore,
                         );
-                        update_input_mode(
-                            input_mode,
-                            &observer_action,
-                            latest_capture_submission_generation(&parser.events),
-                        );
+                        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
                         hold_shell_output = observer_action.hold_shell_output();
                         if !hold_shell_output && parser.display_position() > display_start {
                             write_pending_display_preserving_prompt_ghost(
@@ -464,11 +456,7 @@ where
             bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
-            input_mode,
-            &observer_action,
-            latest_capture_submission_generation(&parser.events),
-        );
+        update_input_mode_and_wake(input_mode, &observer_action, parser, wake)?;
         let runtime_poll_pending = matches!(
             &observer_action,
             RawObserverAction::HoldShellOutput | RawObserverAction::DelayShellOutput
@@ -485,7 +473,7 @@ where
             )?;
             output.flush()?;
         }
-        input_readiness.acknowledge_if_ready(output, input_mode)?;
+        input_readiness.acknowledge_if_ready(output, input_mode, main_prompt_gate)?;
         publish_prompt_snapshot_if_drained(parser, pty_drained);
         // A quiet painted prompt writes off counted submits consumed by a
         // foreground program; occupancy held for unclassified input stays.
@@ -519,7 +507,7 @@ where
             ),
         )?;
         if activity.resize {
-            sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+            prompt_presentation.sync_outer_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         }
     }
 }
@@ -600,8 +588,21 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
 }
 
 fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> io::Result<()> {
+    write_prompt_ghost_labeled(output, text, selection, None)
+}
+
+fn write_prompt_ghost_labeled<W: Write>(
+    output: &mut W,
+    text: &str,
+    selection: bool,
+    label: Option<&str>,
+) -> io::Result<()> {
     let marker = if selection { " ›" } else { "" };
-    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{marker} {text}"))
+    let prefix = match label {
+        Some(label) => format!("{marker} {label} "),
+        None => format!("{marker} "),
+    };
+    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{prefix}{text}"))
 }
 
 fn drain_observer_until_released<W: Write, F>(

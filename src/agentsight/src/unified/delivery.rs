@@ -326,7 +326,7 @@ impl AgentSight {
         aggregated_results: Vec<crate::aggregator::AggregatedResult>,
     ) {
         for agg_result in aggregated_results {
-            let mut analysis_results = self.analyzer.analyze_for_owned_delivery(
+            let mut analysis_results = self.core.analyze_for_owned_delivery(
                 agg_result,
                 self.runtime_limits.retain_raw_sse
                     || (self.ffi_sender.is_none() && self.features.sqlite_storage_enabled)
@@ -389,9 +389,8 @@ impl AgentSight {
                 analysis_results.clear();
             } else if self.ffi_sender.is_some() {
                 analysis_results.retain(|result| {
-                        matches!(result, crate::analyzer::AnalysisResult::Http(_))
-                            || matches!(result, crate::analyzer::AnalysisResult::HttpContext(context) if context.retain_raw)
-                    });
+                    matches!(result, crate::analyzer::AnalysisResult::HttpContext(context) if context.retain_raw)
+                });
             } else {
                 analysis_results.clear();
             }
@@ -480,7 +479,6 @@ impl AgentSight {
                 // raw HTTPS before enqueueing when it is disabled.
                 for ar in analysis_results.drain(..) {
                     let record = match ar {
-                        crate::analyzer::AnalysisResult::Http(record) => record,
                         crate::analyzer::AnalysisResult::HttpContext(context)
                             if context.retain_raw =>
                         {

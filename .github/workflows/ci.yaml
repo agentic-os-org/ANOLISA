@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
   pull_request:
     branches: [main, 'release/**']
+  merge_group:
   workflow_dispatch:
     inputs:
       run_copilot_shell:
@@ -95,19 +96,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Check which components changed
         id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -e
           echo "=== Detect Changes ==="
 
           # Get changed files
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
+            if [[ ! "$MERGE_GROUP_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$MERGE_GROUP_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid merge-group SHA input" >&2
+              exit 1
+            fi
+            if [[ "$MERGE_GROUP_HEAD_SHA" != "$CHECKOUT_SHA" ]]; then
+              echo "Merge-group head SHA does not match the checked out commit" >&2
+              exit 1
+            fi
+            CHANGED=$(git diff --name-only --no-renames "$MERGE_GROUP_BASE_SHA..$MERGE_GROUP_HEAD_SHA")
+          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only --no-renames HEAD~1 HEAD || true)
           else
-            CHANGED=$(git diff --name-only --diff-filter=ACMRT HEAD || true)
+            CHANGED=$(git diff --name-only --no-renames --diff-filter=ACDMRT HEAD || true)
           fi
           echo "Changed files:"
           echo "$CHANGED"
@@ -133,6 +149,10 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/agentsight/"; then
             AGENTSIGHT=true
           fi
+          # 保留组件的独立路径声明；共享源码打包入口作为额外触发条件。
+          if echo "$CHANGED" | grep -Eq '^\.github/actions/package-source/'; then
+            AGENTSIGHT=true
+          fi
           if echo "$CHANGED" | grep -q "^src/tokenless/"; then
             TOKENLESS=true
           fi
@@ -155,8 +175,14 @@ jobs:
             KTUNER=true
           fi
 
+          # Run sec-core checks when their workflow changes.
+          if echo "$CHANGED" | grep -Eq '^\.github/workflows/ci\.yaml$'; then
+            AGENT_SEC=true
+          fi
+
           # Exercise cache consumers when the runner image or cache bootstrap changes.
           if echo "$CHANGED" | grep -Eq '^\.github/actions/setup-sccache/|^\.github/runner-images/ubuntu22-ci/|^\.github/workflows/ci\.yaml$'; then
+            AGENTSIGHT=true
             TOKENLESS=true
             AGENT_MEMORY=true
           fi
@@ -234,13 +260,16 @@ jobs:
         run: bash tests/test-check-component-versions.sh
 
   check-build-runtime-deps:
-    name: Check build runtime dependencies
+    name: Check unified build scripts
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test aggregated runtime dependency preflight
-        run: bash tests/test-build-all-runtime-deps.sh
+      - name: Test build orchestration, prerequisites and runtime preflight
+        run: |
+          bash tests/test-build-all.sh
+          bash tests/test-build-env.sh
+          bash tests/test-build-all-runtime-deps.sh
 
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
@@ -287,7 +316,7 @@ jobs:
           retention-days: 1
 
   # =========================================================================
-  # Step 3: Test copilot-shell (cli + core in parallel)
+  # Step 4: Test copilot-shell (cli + core in parallel)
   # =========================================================================
   test-copilot-shell-cli:
     name: Test copilot-shell/cli
@@ -350,10 +379,10 @@ jobs:
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/core
 
   # =========================================================================
-  # Step 4: Test agent-sec-core (Linux only)
+  # Step 5: Test agent-sec-core (Linux only)
   # =========================================================================
   test-agent-sec-core:
-    name: Test agent-sec-core
+    name: Test sec-core components
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: anolisa-k8s-general-ci-x64
@@ -385,7 +414,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          workspaces: src/agent-sec-core/linux-sandbox
+          workspaces: src/agent-sec-core/agent-sec-cli
 
       - name: Install system dependencies
         run: |
@@ -484,59 +513,16 @@ jobs:
       - name: Rust format & lint check
         run: |
           cd src/agent-sec-core
-          make rust-fmt-check
-          make rust-lint
+          make rust-fmt-check-legacy
+          make rust-lint-legacy
           # cargo-llvm-cov cannot instrument doctests on stable, so the coverage
           # step below skips them; run the crate's public examples here instead.
           cd agent-sec-cli && cargo test --doc -p prompt-scanner
 
-      - name: Run AgentSecCore V2 Rust tests
-        run: |
-          cd src/agent-sec-core
-          make test-rust-v2
-          cd v2
-          skillsec_tests=$(cargo test --locked -p asc-capability-skill-sec --lib --no-run --message-format=json |
-            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
-          test -n "$skillsec_tests"
-          sudo "$skillsec_tests" service::tests::configuration_writeback_ --nocapture
-          cargo doc --workspace --no-deps --locked
-
       - name: Run Rust tests with coverage
         run: |
           cd src/agent-sec-core
-          make test-rust-coverage
-
-      - name: Generate Rust coverage summary
-        if: always()
-        shell: bash
-        run: |
-          cd src/agent-sec-core
-          # One row per Rust workspace: linux-sandbox and the agent-sec-cli
-          # library crates are separate cargo workspaces with separate reports.
-          emit_rust_cov_row() {
-            local cov_file="$1" label="agent-sec-core/$2"
-            if [ ! -f "$cov_file" ]; then
-              echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-              return 0
-            fi
-            local line_rate lines_valid lines_covered line_pct
-            line_rate=$(grep -oP 'line-rate="\K[^"]+' "$cov_file" | head -1)
-            lines_valid=$(grep -oP 'lines-valid="\K[^"]+' "$cov_file" | head -1)
-            lines_covered=$(grep -oP 'lines-covered="\K[^"]+' "$cov_file" | head -1)
-            line_pct=$(echo "$line_rate * 100" | bc -l | xargs printf '%.1f')
-            {
-              echo "### 🧪 ${label} (Rust) Test Coverage"
-              echo ""
-              echo "| Metric | Coverage | Detail |"
-              echo "|--------|----------|--------|"
-              echo "| 🟢 Line Coverage | **${line_pct}%** | ${lines_covered}/${lines_valid} lines |"
-              echo ""
-              echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
-            } >> "$GITHUB_STEP_SUMMARY"
-          }
-
-          emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
-          emit_rust_cov_row rust-coverage.xml linux-sandbox
+          make test-rust-legacy-coverage
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -575,6 +561,177 @@ jobs:
           else
             echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Normalize component coverage
+        run: |
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize \
+            src/agent-sec-core/coverage.xml \
+            src/agent-sec-core/rust-cli-coverage.xml \
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+      - name: Upload component coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-core-component-coverage
+          path: |
+            src/agent-sec-core/coverage.xml
+            src/agent-sec-core/rust-cli-coverage.xml
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+          if-no-files-found: error
+
+  test-agent-sec-v2:
+    name: Test sec-core V2
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_sec_core == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: llvm-tools-preview, rustfmt, clippy
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: sec-core-v2
+          workspaces: src/agent-sec-core/v2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libssl-dev libseccomp-dev
+      - name: Check V2 formatting and Clippy
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run all V2 unit and integration tests with coverage
+        working-directory: src/agent-sec-core
+        run: |
+          test "$(id -u)" -ne 0
+          make test-rust-v2-coverage
+      - name: Verify SkillSec writeback as root
+        working-directory: src/agent-sec-core/v2
+        run: |
+          eval "$(CARGO_TARGET_DIR="$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh)"
+          skillsec_tests=$(cargo test --locked -p asc-capability-skill-sec --lib --no-run \
+            --target-dir "$CARGO_LLVM_COV_TARGET_DIR" --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
+          test -n "$skillsec_tests"
+          sudo env LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" "$skillsec_tests" service::tests::configuration_writeback_ --nocapture
+          sudo chown "$(id -u):$(id -g)" "$CARGO_LLVM_COV_TARGET_DIR"/*.profraw
+      - name: Verify server identity without the test bypass
+        working-directory: src/agent-sec-core/v2
+        run: cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
+      - name: Run V2 doctests and build public API documentation
+        working-directory: src/agent-sec-core/v2
+        run: |
+          AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo test --workspace --locked --doc --features asc-daemon-client/testing
+          cargo doc --workspace --no-deps --locked
+      - name: Generate V2 coverage
+        working-directory: src/agent-sec-core/v2
+        run: cargo llvm-cov report --cobertura --output-path ../rust-v2-coverage.xml
+      - name: Normalize V2 coverage
+        run: python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize src/agent-sec-core/rust-v2-coverage.xml
+      - name: Upload V2 coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-core-v2-coverage
+          path: src/agent-sec-core/rust-v2-coverage.xml
+          if-no-files-found: error
+
+  check-agent-sec-coverage:
+    name: Check sec-core coverage
+    needs: [detect-changes, test-agent-sec-core, test-agent-sec-v2, test-agent-sec-sandbox]
+    if: ${{ !cancelled() && needs.detect-changes.outputs.agent_sec_core == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful test producers
+        env:
+          COMPONENT_RESULT: ${{ needs.test-agent-sec-core.result }}
+          V2_RESULT: ${{ needs.test-agent-sec-v2.result }}
+          SANDBOX_RESULT: ${{ needs.test-agent-sec-sandbox.result }}
+        run: |
+          test "$COMPONENT_RESULT" = success
+          test "$V2_RESULT" = success
+          test "$SANDBOX_RESULT" = success
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          enable-cache: false
+      - name: Install diff-cover
+        run: uv tool install diff-cover
+      - name: Test coverage report handling
+        run: python3 -m unittest discover -s src/agent-sec-core/tests/ci -p test_sec_core_coverage.py
+      - name: Download component coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sec-core-component-coverage
+          path: src/agent-sec-core
+      - name: Download V2 coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sec-core-v2-coverage
+          path: src/agent-sec-core
+      - name: Download sandbox coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sandbox-coverage
+          path: src/agent-sec-core
+      - name: Require complete portable coverage reports
+        run: |
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py validate \
+            src/agent-sec-core/coverage.xml \
+            src/agent-sec-core/rust-cli-coverage.xml \
+            src/agent-sec-core/rust-sandbox-coverage.xml \
+            src/agent-sec-core/rust-v2-coverage.xml \
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml \
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+
+      - name: Generate Rust coverage summary
+        if: always()
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          # One row per Rust workspace: linux-sandbox and the agent-sec-cli
+          # library crates are separate cargo workspaces with separate reports.
+          emit_rust_cov_row() {
+            local cov_file="$1" label="agent-sec-core/$2"
+            if [ ! -f "$cov_file" ]; then
+              echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            local stats lines_valid lines_covered line_pct
+            stats=$(python3 - "$cov_file" <<'PYTHON'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          coverage = ET.parse(sys.argv[1]).getroot().attrib
+          print(f"{float(coverage['line-rate']) * 100:.1f}",
+                coverage['lines-valid'], coverage['lines-covered'])
+          PYTHON
+            )
+            read -r line_pct lines_valid lines_covered <<< "$stats"
+            {
+              echo "### 🧪 ${label} (Rust) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${line_pct}%** | ${lines_covered}/${lines_valid} lines |"
+              echo ""
+              echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
+          emit_rust_cov_row rust-sandbox-coverage.xml linux-sandbox
+          emit_rust_cov_row rust-v2-coverage.xml v2
+          emit_rust_cov_row rust-v2-sandbox-coverage.xml v2-linux-e2e
 
       - name: Incremental coverage gate (PR only)
         if: github.event_name == 'pull_request'
@@ -666,8 +823,120 @@ jobs:
             exit 1
           fi
 
+  # Isolation, cgroups and trusted filesystem ancestors require a VM.
+  test-agent-sec-sandbox:
+    name: Test sec-core Linux E2E
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_sec_core == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      # Keep source locations for coverage without storing full debug types for three workspaces.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: llvm-tools-preview, rustfmt, clippy
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: sec-core-sandbox
+          workspaces: |
+            src/agent-sec-core/v2
+            src/agent-sec-core/linux-sandbox
+            src/cosh-ng
+      - name: Install strict sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev meson ninja-build pkg-config libcap-dev libseccomp-dev
+          git clone --depth 1 --branch v0.10.0 https://github.com/containers/bubblewrap.git /tmp/asc-bubblewrap
+          meson setup /tmp/asc-bubblewrap/build /tmp/asc-bubblewrap -Dman=disabled
+          ninja -C /tmp/asc-bubblewrap/build
+          sudo install -m 0755 /tmp/asc-bubblewrap/build/bwrap /usr/bin/bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+      - name: Check sandbox formatting and Clippy
+        working-directory: src/agent-sec-core/linux-sandbox
+        run: |
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+      - name: Verify non-root server rejection
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent
+          cargo test --locked -p asc-cli --test health_probe nonroot_server_is_rejected_before_health_request_is_sent
+      - name: Verify actual Linux isolation as non-root and root
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core/linux-sandbox
+        env:
+          ASC_SANDBOX_INTEGRATION: '1'
+        run: |
+          test "$(id -u)" -ne 0
+          cargo llvm-cov clean --workspace
+          RUSTFLAGS="-C target-feature=+crt-static" cargo llvm-cov --locked --no-fail-fast --no-report --target x86_64-unknown-linux-gnu -- --skip bwrap_seccomp
+          sudo env ASC_SANDBOX_INTEGRATION=1 LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/root-%p-%m.profraw" "$(find target/llvm-cov-target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" suite::strict_runtime:: --nocapture
+          sudo chown "$(id -u):$(id -g)" target/llvm-cov-target/*.profraw
+          cargo llvm-cov report --target x86_64-unknown-linux-gnu --cobertura --output-path ../rust-sandbox-coverage.xml
+      - name: Build and verify the static sandbox helper
+        if: ${{ !cancelled() }}
+        working-directory: src/agent-sec-core
+        run: |
+          cargo rustc --locked --manifest-path linux-sandbox/Cargo.toml --bin linux-sandbox -- -C target-feature=+crt-static
+          python3 ../../.github/actions/prebuilt-rust-common/verify-glibc.py --arch x86_64 --require-static linux-sandbox/target/debug/linux-sandbox
+      - name: Verify CLI isolation, permissions and root Hook routing
+        working-directory: src/agent-sec-core
+        run: ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-sandbox-cli-coverage
+      - name: Verify Cedar authorization and Cosh sandbox lifecycle
+        working-directory: src/agent-sec-core
+        run: ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-authorized-sandbox-coverage
+      - name: Verify host cgroups and private credential files
+        working-directory: src/agent-sec-core/v2
+        run: |
+          # These fixtures self-skip on a container root cgroup or untrusted workspace.
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          cgroup = next(line[4:] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::/'))
+          assert cgroup and all(re.fullmatch(r'[A-Za-z0-9_.@-]+', part) and part not in ('.', '..') for part in cgroup.split('/')), cgroup
+          base = Path('crates/asc-credential-store').resolve()
+          for path in (base, *base.parents):
+              info = path.stat()
+              assert info.st_uid in (0, os.geteuid()) and info.st_mode & 0o7022 == 0, f'untrusted workspace ancestor: {path}'
+          PY
+          cargo llvm-cov --locked --no-report -p asc-gateway-runtime --lib -- processes::tests::scope_snapshot_survives_members_exiting_mid_enumeration --exact
+          cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::token_
+          cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::fake_file_is_create_new_private_and_validation_or_generation_failure_creates_nothing --exact
+          cargo llvm-cov --locked --no-report -p asc-cli --lib -- commands::inject_credential::boundary_tests::
+      - name: Generate Linux V2 integration coverage
+        working-directory: src/agent-sec-core/v2
+        run: cargo llvm-cov report --cobertura --output-path ../rust-v2-sandbox-coverage.xml
+      - name: Normalize sandbox coverage
+        run: |
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize \
+            src/agent-sec-core/rust-sandbox-coverage.xml \
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml
+      - name: Upload sandbox coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-coverage
+          path: |
+            src/agent-sec-core/rust-sandbox-coverage.xml
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml
+          if-no-files-found: error
+
   # =========================================================================
-  # Step 5: Test agentsight (Linux only)
+  # Step 6: Test agentsight (Linux only)
   # =========================================================================
   test-agentsight:
     name: Test agentsight
@@ -707,6 +976,10 @@ jobs:
         working-directory: src/agentsight/dashboard
         run: npm ci --no-audit --no-fund
 
+      - name: Run dashboard API and ATIF regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:api-client
+
       - name: Run dashboard i18n regression
         working-directory: src/agentsight/dashboard
         run: npm run test:i18n
@@ -718,6 +991,10 @@ jobs:
       - name: Run dashboard stale-load regression
         working-directory: src/agentsight/dashboard
         run: npm run test:stale-load
+
+      - name: Run dashboard controls regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:dashboard-controls
 
       - name: Install eBPF build dependencies
         run: |
@@ -740,6 +1017,15 @@ jobs:
           cd src/agentsight
           python3 scripts/check-sqlite-entrypoints.py --self-test
           python3 scripts/check-sqlite-entrypoints.py
+
+      - name: Check Codex offset extraction
+        run: |
+          cd src/agentsight
+          python3 tests/test_extract_codex_offsets.py
+
+      - name: Run scripts test suites
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --with pytest --no-project -m pytest scripts/tests -q
 
       - name: Lint
         run: |
@@ -852,8 +1138,356 @@ jobs:
             exit 1
           fi
 
+      # 保留快速 benchmark 回归；仅相关 PR 执行有真实等待窗口的负载/资源集成用例。
+      # main/release 和手动执行仍覆盖全部用例，不改资源上限或覆盖率门禁。
+      - name: Decide whether the benchmark Python suite applies
+        id: benchmark
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          RUN=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # diff 不可读时执行完整用例，不能静默跳过。
+            if CHANGED=$(git diff --name-only --no-renames "origin/$BASE_REF...HEAD") \
+              && ! echo "$CHANGED" | grep -Eq '^src/agentsight/(scripts/|src/ffi(\.rs|/)|cbindgen\.toml$|build\.rs$|Cargo\.(toml|lock)$|agentsight\.json$|Makefile$|packaging/|dist/)|^\.github/(workflows/ci\.yaml$|actions/package-source/)'; then
+              RUN=false
+            fi
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "Benchmark Python suite: run=$RUN" >> "$GITHUB_STEP_SUMMARY"
+
+      # 本地合成测试数据不需要模型词表；先构建，保证 native 用例能读取生成的 FFI 头文件。
+      - name: Test benchmark Python suite
+        working-directory: src/agentsight/scripts/benchmark
+        run: |
+          uv venv "$RUNNER_TEMP/benchmark-venv" --python 3.11.6
+          uv pip install --python "$RUNNER_TEMP/benchmark-venv/bin/python" -r requirements.txt
+          PATH="$RUNNER_TEMP/benchmark-venv/bin:$PATH" \
+            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q tests \
+              --ignore=tests/test_agent_load.py \
+              --ignore=tests/test_resource_run.py \
+              --ignore=tests/test_ffi_resource_run.py \
+              --ignore=tests/test_resource_port_reuse.py
+
+      - name: Test benchmark load and resource regressions
+        if: steps.benchmark.outputs.run == 'true'
+        working-directory: src/agentsight/scripts/benchmark
+        run: |
+          PATH="$RUNNER_TEMP/benchmark-venv/bin:$PATH" \
+            "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q \
+              tests/test_agent_load.py tests/test_resource_run.py \
+              tests/test_ffi_resource_run.py tests/test_resource_port_reuse.py
+
   # =========================================================================
-  # Step 6: Test tokenless
+  # Step 7: Test AgentSight resources on a fixed kernel after the functional checks.
+  # =========================================================================
+  test-agentsight-resource:
+    name: Test agentsight resources
+    needs: [detect-changes, test-agentsight]
+    if: needs.detect-changes.outputs.agentsight == 'true'
+    runs-on: anolisa-agentsight-kernel66-x64
+    timeout-minutes: 60
+    # Serialize the whole resource job, not just the measurement step, across
+    # PRs that share this runner. The flock below remains a second layer for
+    # processes started outside this workflow.
+    concurrency:
+      group: ${{ github.repository }}-agentsight-resource-kernel66
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/agentsight
+    env:
+      RUSTUP_TOOLCHAIN: '1.89.0'
+      CARGO_BUILD_JOBS: '2'
+      # Define these at job level so always() steps never see an empty path and
+      # degrade the artifact glob to "/" after an early checkout failure.
+      RESOURCE_OUTPUT: /tmp/agentsight-resource-${{ github.run_id }}-${{ github.run_attempt }}
+      RESOURCE_DIAGNOSTICS: /tmp/agentsight-resource-log-tails-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure resource test paths
+        run: |
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/agentsight-resource-cache" >> "$GITHUB_ENV"
+          echo "PYTHON=$RUNNER_TEMP/agentsight-benchmark-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Verify eBPF runner
+        run: |
+          case "$(uname -r)" in
+            6.6.*) ;;
+            *) echo "Expected Linux 6.6.x for resource measurements" >&2; exit 1 ;;
+          esac
+          sudo -n true
+          sudo test -r /sys/kernel/btf/vmlinux
+
+          tracefs_failure() {
+            local tracefs_status="$1"
+            local tracefs_command="$2"
+            trap - ERR
+            set +e
+            mkdir -p "$RESOURCE_DIAGNOSTICS"
+            {
+              echo "::error::Tracefs preparation failed (exit $tracefs_status): $tracefs_command"
+              uname -a
+              findmnt -t tracefs,debugfs
+              cat /proc/self/mountinfo
+              cat /proc/self/cgroup
+              sudo -n grep -E '^(Cap(Eff|Bnd)|NoNewPrivs|Seccomp):' /proc/self/status
+              for tracefs_root in /sys/kernel/tracing /sys/kernel/debug/tracing; do
+                sudo -n ls -ld "$tracefs_root" "$tracefs_root/events" "$tracefs_root/events/syscalls"
+                sudo -n ls -l "$tracefs_root/events/syscalls/sys_exit_execve"
+                sudo -n grep -E 'syscalls:sys_(enter_execve|exit_execve|enter_write)|sched:sched_process_exit' \
+                  "$tracefs_root/available_events"
+              done
+              for tracefs_config in /proc/config.gz "/boot/config-$(uname -r)"; do
+                if sudo -n test -r "$tracefs_config"; then
+                  echo "Kernel config: $tracefs_config"
+                  if [[ "$tracefs_config" == *.gz ]]; then
+                    sudo -n gzip -dc "$tracefs_config"
+                  else
+                    sudo -n cat "$tracefs_config"
+                  fi | grep -E 'CONFIG_(FTRACE|HAVE_SYSCALL_TRACEPOINTS|BPF_SYSCALL|PERF_EVENTS)'
+                else
+                  echo "Kernel config unavailable: $tracefs_config"
+                fi
+              done
+            } 2>&1 | tee "$RESOURCE_DIAGNOSTICS/tracefs-environment.log"
+            exit "$tracefs_status"
+          }
+          trap 'tracefs_failure "$?" "$BASH_COMMAND"' ERR
+
+          if ! findmnt --mountpoint /sys/kernel/tracing \
+              --types tracefs --noheadings >/dev/null; then
+            sudo -n mkdir -p /sys/kernel/tracing
+            sudo -n mount -t tracefs nodev /sys/kernel/tracing
+          fi
+          for tracefs_event in syscalls/sys_enter_execve syscalls/sys_exit_execve \
+              syscalls/sys_enter_write sched/sched_process_exit; do
+            echo "Checking tracepoint: $tracefs_event"
+            sudo -n cat "/sys/kernel/tracing/events/$tracefs_event/id"
+          done
+          trap - ERR
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: true
+          workspaces: src/agentsight
+          cache-directories: |
+            ${{ env.XDG_CACHE_HOME }}/agentsight-benchmark/target
+
+      - name: Install resource test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config perl openssl curl util-linux
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
+          uv venv --python 3.11.6 "$RUNNER_TEMP/agentsight-benchmark-venv"
+          uv pip install --python "$PYTHON" -r scripts/benchmark/requirements.txt
+
+      - name: Verify non-interactive benchmark privileges
+        run: |
+          sudo -n -- "$PYTHON" -c \
+            'import os; raise SystemExit(os.geteuid() != 0)'
+
+      - name: Record resource test environment
+        run: |
+          {
+            uname -a
+            lscpu
+            free -m
+            df -h "$RUNNER_TEMP"
+            rustc --version
+            clang --version
+            "$PYTHON" --version
+            openssl version
+            sudo grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status
+            cat /proc/self/cgroup
+            for resource_file in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpuset.cpus.effective; do
+              if [[ -r "$resource_file" ]]; then
+                echo "$resource_file"
+                cat "$resource_file"
+              fi
+            done
+          } > "$RUNNER_TEMP/agentsight-resource-environment.txt"
+
+      - name: Test resource report and limit checks
+        run: |
+          "$PYTHON" -B -m pytest -q -p no:cacheprovider \
+            scripts/benchmark/tests/test_resource_limits.py \
+            scripts/benchmark/tests/test_resource_report.py \
+            scripts/benchmark/tests/test_resource_cpu_intervals.py
+
+      - name: Measure resource usage
+        run: |
+          # Serialize measurements on this host without canceling other PR jobs.
+          # The eBPF load (6.6) job in agentsight-runner-test.yml acquires the
+          # same lock around its kernel loading step.
+          exec 9>/tmp/anolisa-agentsight-resource.lock
+          flock --timeout 1800 9
+          resource_status=0
+          bash scripts/benchmark/single_run/resource_run.sh \
+            --candidate HEAD \
+            --agents 32 \
+            --connection-capacity 128 \
+            --payload-kb 1024 \
+            --tokens-per-second 100 \
+            --tokens-per-response 1000 \
+            --duration 300 \
+            --ring-buffer-mb 64 \
+            --cpu-budget-percent 25 \
+            --output-dir "$RESOURCE_OUTPUT" \
+            | tee "$RUNNER_TEMP/agentsight-resource-run.log" || resource_status=$?
+
+          # Keep the host lock while collecting diagnostics so other measurements stay isolated.
+          if (( resource_status != 0 )) && [[ -f "$RESOURCE_OUTPUT/run/worker-result.json" ]]; then
+            if ! sudo -n -- "$PYTHON" - "$RESOURCE_OUTPUT" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1])
+          directory = output / "run"
+          result = json.loads((directory / "worker-result.json").read_text())
+          if not result.get("error", "").startswith((
+              "AgentSight exited during startup (",
+              "AgentSight initialization timed out;",
+          )):
+              print("Skipping startup diagnostics: no AgentSight startup failure reported.")
+              sys.exit(0)
+
+          diagnostics = output / "startup-diagnostics"
+          diagnostics.mkdir()
+          config = json.loads((directory / "config.json").read_text())
+          config["verbose"] = 1
+          config.pop("log_path", None)
+          config.setdefault("storage", {})["base_path"] = str(diagnostics / "db")
+          config_path = diagnostics / "config.json"
+          config_path.write_text(json.dumps(config, indent=2) + "\n")
+          job = json.loads((directory / "job.json").read_text())
+          env = dict(
+              os.environ,
+              **job["env"],
+              RUST_LOG="info",
+              AGENTSIGHT_METRICS_FILE=str(diagnostics / "internal-metrics.prom"),
+          )
+          log_path = directory / "libbpf-startup.log"
+          print("Diagnosing AgentSight startup with verbose libbpf logging (20 s limit).", flush=True)
+          with log_path.open("wb") as log:
+              diagnostic = subprocess.run(
+                  [
+                      "timeout", "--signal=INT", "--kill-after=5s", "20s",
+                      job["binary"], "trace", "--verbose", "--config", str(config_path),
+                  ],
+                  env=env,
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  check=False,
+              )
+          (diagnostics / "result.json").write_text(
+              json.dumps({"returncode": diagnostic.returncode}, indent=2) + "\n"
+          )
+          print(f"Startup diagnostic exit code: {diagnostic.returncode}; log: {log_path}")
+          PY
+            then
+              echo "::warning::AgentSight startup diagnostics could not complete"
+            fi
+            if [[ -f "$RESOURCE_OUTPUT/run/libbpf-startup.log" ]]; then
+              tail -n 80 -- "$RESOURCE_OUTPUT/run/libbpf-startup.log"
+            fi
+          fi
+          exit "$resource_status"
+
+      - name: Warn on missing resource HTML report
+        if: success()
+        run: |
+          if [[ ! -s "$RESOURCE_OUTPUT/run/metrics-report.html" ]]; then
+            echo "::warning::resource HTML report missing; benchmark result remains valid"
+          fi
+
+      - name: Enforce resource limits and publish summary
+        if: always()
+        run: |
+          python3 -B scripts/benchmark/single_run/check_resource_limits.py \
+            --summary "$RESOURCE_OUTPUT/resource-summary.json"
+
+      - name: Collect failure log tails (2 MiB per file)
+        if: failure()
+        run: |
+          mkdir -p "$RESOURCE_DIAGNOSTICS/run"
+          if [[ -n "${RESOURCE_OUTPUT:-}" && -d "$RESOURCE_OUTPUT" ]]; then
+            for resource_log in "$RESOURCE_OUTPUT"/*.log; do
+              if [[ -f "$resource_log" ]]; then
+                tail -c 2097152 -- "$resource_log" > "$RESOURCE_DIAGNOSTICS/${resource_log##*/}"
+              fi
+            done
+            for resource_log in "$RESOURCE_OUTPUT"/run/*.log; do
+              if [[ -f "$resource_log" ]]; then
+                tail -c 2097152 -- "$resource_log" > "$RESOURCE_DIAGNOSTICS/run/${resource_log##*/}"
+              fi
+            done
+          fi
+          if [[ -f "$RUNNER_TEMP/agentsight-resource-run.log" ]]; then
+            tail -c 2097152 -- "$RUNNER_TEMP/agentsight-resource-run.log" \
+              > "$RESOURCE_DIAGNOSTICS/agentsight-resource-run.log"
+          fi
+
+      - name: Upload resource reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsight-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/agentsight-resource-environment.txt
+            ${{ env.RESOURCE_OUTPUT }}/resource-report.txt
+            ${{ env.RESOURCE_OUTPUT }}/resource-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/settings.json
+            ${{ env.RESOURCE_OUTPUT }}/inputs.json
+            ${{ env.RESOURCE_OUTPUT }}/configuration.json
+            ${{ env.RESOURCE_OUTPUT }}/run-error.txt
+            ${{ env.RESOURCE_OUTPUT }}/run/benchmark-report.md
+            ${{ env.RESOURCE_OUTPUT }}/run/run-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/run/report.json
+            ${{ env.RESOURCE_OUTPUT }}/run/agent-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/run/worker-result.json
+            ${{ env.RESOURCE_OUTPUT }}/run/capture-readiness.json
+            ${{ env.RESOURCE_OUTPUT }}/run/safety-stop.json
+            ${{ env.RESOURCE_OUTPUT }}/run/metrics.csv
+            ${{ env.RESOURCE_OUTPUT }}/run/metrics-report.html
+            ${{ env.RESOURCE_OUTPUT }}/run/internal-metrics.prom
+            ${{ env.RESOURCE_OUTPUT }}/startup-diagnostics/config.json
+            ${{ env.RESOURCE_OUTPUT }}/startup-diagnostics/result.json
+            ${{ env.RESOURCE_DIAGNOSTICS }}/
+
+      - name: Clean resource results
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/agentsight-benchmark-venv" \
+            "${RESOURCE_DIAGNOSTICS:-}"
+          rm -f -- "$RUNNER_TEMP/agentsight-resource-environment.txt" \
+            "$RUNNER_TEMP/agentsight-resource-run.log"
+          if [[ "${RESOURCE_OUTPUT:-}" == "/tmp/agentsight-resource-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]; then
+            sudo -n rm -rf -- "$RESOURCE_OUTPUT"
+          fi
+
+  # =========================================================================
+  # Step 8: Test tokenless
   # =========================================================================
   test-tokenless:
     name: Test tokenless
@@ -864,9 +1498,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The workspace MSRV, which RTK also requires.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.89.0'
+          toolchain: '1.91.0'
           components: 'rustfmt, clippy'
 
       - name: Configure trusted compiler cache writes
@@ -882,6 +1517,18 @@ jobs:
             src/tokenless
             src/tokenless/benchmark/l1-compressor
             src/tokenless/benchmark/l2-module
+
+      # RTK is a path dependency of the workspace, so every cargo command below
+      # needs the pinned, patched checkout. The cache keeps its mtimes, which
+      # lets Cargo reuse the cached RTK build.
+      - name: Cache pinned RTK source
+        uses: actions/cache@v4
+        with:
+          path: src/tokenless/third_party/rtk
+          key: tokenless-rtk-source-v1-${{ hashFiles('src/tokenless/packaging/build/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch') }}
+
+      - name: Set up pinned RTK source
+        run: bash src/tokenless/packaging/build/setup-rtk.sh
 
       - name: Check formatting
         run: |
@@ -961,34 +1608,16 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - name: Install RTK Rust toolchain
-        run: rustup toolchain install 1.91.0 --profile minimal
-
-      - name: Identify bundled RTK cache inputs
-        id: rtk-cache-inputs
-        run: |
-          echo "glibc=$(getconf GNU_LIBC_VERSION)" >> "$GITHUB_OUTPUT"
-          echo "rust=$(rustup run 1.91.0 rustc --version)" >> "$GITHUB_OUTPUT"
-
-      # Preserve mtimes for RTK and the shared modules compiled by its stats patch.
-      - name: Cache bundled RTK source and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            src/tokenless/third_party/rtk
-            src/tokenless/crates/tokenless-stats/src/home.rs
-            src/tokenless/crates/tokenless-stats/src/path_policy.rs
-            src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs
-          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs', 'src/tokenless/crates/tokenless-stats/src/rtk_outcome.rs') }}
-
       - name: Test bundled RTK integration
-        env:
-          RUSTUP_TOOLCHAIN: '1.91.0'
         run: make -C src/tokenless test-rtk-integration
 
+      - name: Test L4 benchmark offline regressions
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/l4-benchmark-venv"
+          uv pip install --python "$RUNNER_TEMP/l4-benchmark-venv/bin/python" pytest pydantic tiktoken
+          make -C src/tokenless test-benchmark-l4 L4_TEST_PYTHON="$RUNNER_TEMP/l4-benchmark-venv/bin/python"
+
       - name: Build and test Tokenless Python packages
-        env:
-          RUSTUP_TOOLCHAIN: '1.91.0'
         run: |
           make -C src/tokenless \
             test-python-runtime test-agentscope-integration
@@ -1013,18 +1642,13 @@ jobs:
           make -C src/tokenless test-adapters
 
       - name: npm packaging smoke test (native Linux)
-        # rtk v0.49.0 declares rust-version = "1.91", above the 1.89.0 pin
-        # used by the workspace MSRV checks earlier in this job. Packaging
-        # runs on its own 1.91 toolchain while the MSRV pin stays intact.
-        env:
-          RUSTUP_TOOLCHAIN: '1.91.0'
         run: |
           set -euo pipefail
           make -C src/tokenless npm-package
           # Install root + platform tarballs into a scratch project and verify
-          # both binaries actually run. The root install omits registry
-          # optional deps (unpublished during CI); the platform tarball
-          # installed in step 1 satisfies the platform lookup instead.
+          # the binary and its embedded RTK actually run. The root install
+          # omits registry optional deps (unpublished during CI); the platform
+          # tarball installed in step 1 satisfies the platform lookup instead.
           DIST="$GITHUB_WORKSPACE/src/tokenless/npm/dist"
           SMOKE=$(mktemp -d)
           cd "$SMOKE"
@@ -1033,14 +1657,15 @@ jobs:
           npm install --no-audit --no-fund --omit=optional \
             --install-strategy=nested "$DIST"/tokenless/*.tgz
           ./node_modules/.bin/tokenless --version
-          ./node_modules/.bin/rtk --version
+          ./node_modules/.bin/tokenless rtk --version
+          test ! -e ./node_modules/.bin/rtk
           # Verify the bundled OpenClaw adapter was built and packaged
           test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
           # Verify adapter install scripts are executable
           test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
 
   # =========================================================================
-  # Step 7: Test ws-ckpt
+  # Step 9: Test ws-ckpt
   # =========================================================================
   test-ws-ckpt:
     name: Test ws-ckpt
@@ -1133,7 +1758,7 @@ jobs:
 
 
   # =========================================================================
-  # Step 8: Test agent-memory (Linux-only Rust crate)
+  # Step 10: Test agent-memory (Linux-only Rust crate)
   # =========================================================================
   test-agent-memory:
     name: Test agent-memory
@@ -1207,8 +1832,11 @@ jobs:
           cd src/agent-memory
           make test-openclaw-plugin
 
+      - name: Test automatic capture over MCP
+        run: make -C src/agent-memory test-auto-capture
+
   # =========================================================================
-  # Step 9: Test anolisa (Rust workspace)
+  # Step 11: Test anolisa (Rust workspace)
   # =========================================================================
   test-anolisa:
     name: Test anolisa
@@ -1329,7 +1957,7 @@ jobs:
           retention-days: 14
 
   # =========================================================================
-  # Step 10: Test SkillFS (Rust workspace)
+  # Step 12: Test SkillFS (Rust workspace)
   # =========================================================================
   test-skillfs:
     name: Test SkillFS
@@ -1382,7 +2010,7 @@ jobs:
           scripts/test.sh
 
   # =========================================================================
-  # Step 11: Test cosh-ng (Rust workspace)
+  # Step 13: Test cosh-ng (Rust workspace)
   # =========================================================================
   # Integration uses three complete target shards and the historical
   # "Test cosh-ng" aggregate check. Fast checks and release build remain
@@ -1393,7 +2021,7 @@ jobs:
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -1544,7 +2172,7 @@ jobs:
           cargo build --workspace --release --locked
 
   # =========================================================================
-  # Step 12: Test ktuner (deterministic kernel-tuning engine)
+  # Step 14: Test ktuner (deterministic kernel-tuning engine)
   # =========================================================================
   test-ktuner:
     name: Test ktuner

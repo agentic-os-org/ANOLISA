@@ -1,0 +1,58 @@
+[
+  {
+    "sdk": "0.3.325",
+    "cli": "2.1.325 (Claude Code)",
+    "platform": "aarch64",
+    "sha256": {
+      "_bundled/claude": "7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67",
+      "sdk/bridge.mjs": "c666f20cfcd2f50612fd25d89443cb0c08e8b8b177504ebab1f2a471158f8f65",
+      "sdk/browser-sdk.js": "4c235adfd73f57af57a18d3ef149af97c165f190ffaeba259cac5a10a24a0ed5",
+      "sdk/core-0a66n3e7.mjs": "befa23491920ebd98a026d117c1cd3a4cc9ef5363e45b7014c12c084bedfad3f",
+      "sdk/core-0bmnpbz2.mjs": "e7f2fef88bdbbe44eb59cce468aaa3dbc488e58b1e3fd7eb784d17540012ed81",
+      "sdk/core-9je8ee1j.mjs": "8850fb27d54fef10603c0bf6e76f9de95ab16ad4476120da917bb50d4fb8f616",
+      "sdk/core-ds2jqcef.mjs": "537a401004ca1562adb2a3665eb2d5a76846c7205e4f59f6abfcef8adf5f5c43",
+      "sdk/core-fxa8mwbm.mjs": "f926a53fc632e88a91081f7e863ca632b722aa22f133cdfc5ee15d140a24f534",
+      "sdk/core-gbbw9cgm.mjs": "6a70707bfd16f26d8426ce8835b74e7e2de63956c0ae03d2c1a255c3a139ef15",
+      "sdk/core-msnqqcc2.mjs": "0e30f8111e4a66696c04d15768131369453f987b483bcbe1bc1caa37f7b8483b",
+      "sdk/core-wadgcjfh.mjs": "e6cc844308bbfc948f90b2a7ffbc757795bcf72b914acf86e076e27e836e82c7",
+      "sdk/core-x20yarwf.mjs": "59bb850609905f843391958b02552ddcd538803ba3bad6a89d501de9c83497d2",
+      "sdk/core-x3hc9abc.mjs": "cf3aa46ae21cbce86b5e1b30d322d98330de6ef98cadd3c97f3aea54172a992d",
+      "sdk/core-zg882d22.mjs": "18c13bd750e6b808bf917d8d582c931774df77db64f0b64c71dc1c31fc7c6db1",
+      "sdk/core.mjs": "00c32bcfa990f29a5c54be0237199d78166efbc8c1e552ed627eb5b146b6c100",
+      "sdk/extractFromBunfs.js": "9c590c0ad3f74bf47aad914a84215d2746795b302088ed731c42f6068f0960db",
+      "sdk/manifest.json": "919cc577ed98b12e00154f8bd925df23bbf2eb2b56ec29a09c78ee85f65725f3",
+      "sdk/manifest.zst.json": "e908cbbf3e55b94643e3aafed19e802555a13a0d7bbc6e0e17e05b89dd215920",
+      "sdk/package.json": "4b89371dd97bb1c66e725baf2522df7d425c756d9b035e76dfc9af3374cfa89e",
+      "sdk/sdk.mjs": "030d9a1a7a629c2716d710f88292545951857612b2056b91affc5a0b073f65bf"
+    },
+    "bun": "1.4.4"
+  },
+  {
+    "sdk": "0.3.325",
+    "cli": "2.1.325 (Claude Code)",
+    "platform": "x86_64",
+    "sha256": {
+      "_bundled/claude": "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf",
+      "sdk/bridge.mjs": "c666f20cfcd2f50612fd25d89443cb0c08e8b8b177504ebab1f2a471158f8f65",
+      "sdk/browser-sdk.js": "4c235adfd73f57af57a18d3ef149af97c165f190ffaeba259cac5a10a24a0ed5",
+      "sdk/core-0a66n3e7.mjs": "befa23491920ebd98a026d117c1cd3a4cc9ef5363e45b7014c12c084bedfad3f",
+      "sdk/core-0bmnpbz2.mjs": "e7f2fef88bdbbe44eb59cce468aaa3dbc488e58b1e3fd7eb784d17540012ed81",
+      "sdk/core-9je8ee1j.mjs": "8850fb27d54fef10603c0bf6e76f9de95ab16ad4476120da917bb50d4fb8f616",
+      "sdk/core-ds2jqcef.mjs": "537a401004ca1562adb2a3665eb2d5a76846c7205e4f59f6abfcef8adf5f5c43",
+      "sdk/core-fxa8mwbm.mjs": "f926a53fc632e88a91081f7e863ca632b722aa22f133cdfc5ee15d140a24f534",
+      "sdk/core-gbbw9cgm.mjs": "6a70707bfd16f26d8426ce8835b74e7e2de63956c0ae03d2c1a255c3a139ef15",
+      "sdk/core-msnqqcc2.mjs": "0e30f8111e4a66696c04d15768131369453f987b483bcbe1bc1caa37f7b8483b",
+      "sdk/core-wadgcjfh.mjs": "e6cc844308bbfc948f90b2a7ffbc757795bcf72b914acf86e076e27e836e82c7",
+      "sdk/core-x20yarwf.mjs": "59bb850609905f843391958b02552ddcd538803ba3bad6a89d501de9c83497d2",
+      "sdk/core-x3hc9abc.mjs": "cf3aa46ae21cbce86b5e1b30d322d98330de6ef98cadd3c97f3aea54172a992d",
+      "sdk/core-zg882d22.mjs": "18c13bd750e6b808bf917d8d582c931774df77db64f0b64c71dc1c31fc7c6db1",
+      "sdk/core.mjs": "00c32bcfa990f29a5c54be0237199d78166efbc8c1e552ed627eb5b146b6c100",
+      "sdk/extractFromBunfs.js": "9c590c0ad3f74bf47aad914a84215d2746795b302088ed731c42f6068f0960db",
+      "sdk/manifest.json": "919cc577ed98b12e00154f8bd925df23bbf2eb2b56ec29a09c78ee85f65725f3",
+      "sdk/manifest.zst.json": "e908cbbf3e55b94643e3aafed19e802555a13a0d7bbc6e0e17e05b89dd215920",
+      "sdk/package.json": "4b89371dd97bb1c66e725baf2522df7d425c756d9b035e76dfc9af3374cfa89e",
+      "sdk/sdk.mjs": "030d9a1a7a629c2716d710f88292545951857612b2056b91affc5a0b073f65bf"
+    },
+    "bun": "1.4.4"
+  }
+]

@@ -5,7 +5,6 @@ use crate::{rejected, runtime::Runtime, Result, RunOutcome};
 use aw_contracts::canonical;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -30,7 +29,6 @@ pub(in crate::runtime) struct Observation {
 struct State {
     metadata: Value,
     latest: Option<Value>,
-    claims: BTreeMap<String, String>,
     callbacks: usize,
     closed: bool,
 }
@@ -155,7 +153,7 @@ impl Observation {
             match projected {
                 Ok(value) => {
                     aw_contracts::evidence::validate_context(
-                        &runtime.contexts.registry,
+                        runtime.contexts.registry,
                         &value,
                         &seed.subject,
                         seed.candidate["digest"]
@@ -205,11 +203,16 @@ impl Observation {
             .lock()
             .map_err(|_| rejected("observation_state"))?;
         if !state.closed {
-            runtime.audit.append(&self.key, json!({"phase":"closed", "outcome":state.metadata["run"],
-                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"}))?;
+            let terminal = runtime.audit.append(&self.key, json!({"phase":"closed", "outcome":state.metadata["run"],
+                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"}));
             runtime.audit.release(&self.key);
             state.latest = None;
             state.closed = true;
+            // Release still reports the poisoned audit after dropping the Host;
+            // broken storage must not retain Provider or observation ownership.
+            if runtime.audit.healthy() {
+                terminal?;
+            }
         }
         Ok(true)
     }
@@ -267,7 +270,6 @@ impl Runtime {
                     "coverage":"unknown","ebpf":"unknown","collection":"unknown","callbacks":0,
                     "gaps":["coverage_unknown","source_process_identity_unavailable"],"run":{"state":"launch_prepared"}}),
                     latest: None,
-                    claims: BTreeMap::new(),
                     callbacks: 0,
                     closed: false,
                 }),
@@ -355,22 +357,23 @@ impl Runtime {
         native: Vec<u8>,
         deadline: Instant,
     ) -> Result<Value> {
-        let (observation, host) = {
+        self.check_scope_owner(instance_id)?;
+        let (observation, host, claims, invocations) = {
             let instances = self
                 .instances
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
+            self.check_scope_owner(instance_id)?;
             let instance = instances
                 .get(instance_id)
                 .and_then(Option::as_ref)
                 .filter(|instance| !instance.closing)
                 .ok_or_else(|| rejected("unknown_instance"))?;
             (
-                instance
-                    .observation
-                    .clone()
-                    .ok_or_else(|| rejected("observation_disabled"))?,
+                instance.observation.clone(),
                 Arc::clone(&instance.host),
+                Arc::clone(&instance.native_facts),
+                Arc::clone(&instance.invocations),
             )
         };
         if !matches!(event["name"].as_str(), Some("tool.before" | "tool.after"))
@@ -390,36 +393,75 @@ impl Runtime {
         if association["status"] != "verified" {
             return Err(rejected("native_identity_unverified"));
         }
-        let correlation =
-            canonical::document_digest(&json!([event["name"], association])).map_err(contract)?;
+        let correlation = (
+            association["session_id"]
+                .as_str()
+                .ok_or_else(|| rejected("observation_callback_invalid"))?
+                .to_owned(),
+            association["tool_call_id"]
+                .as_str()
+                .ok_or_else(|| rejected("observation_callback_invalid"))?
+                .to_owned(),
+            event["name"]
+                .as_str()
+                .ok_or_else(|| rejected("observation_callback_invalid"))?
+                .to_owned(),
+        );
         let digest = canonical::digest(&native);
-        {
-            let mut state = observation
-                .state
-                .lock()
-                .map_err(|_| rejected("observation_state"))?;
-            if let Some(previous) = state.claims.get(&correlation) {
-                return if previous == &digest {
-                    Ok(json!({"observed":true,"duplicate":true}))
-                } else {
-                    Err(rejected("native_correlation_mismatch"))
-                };
-            }
-            if state.claims.len() >= MAX_CALLBACKS {
-                drop(state);
-                observation.gap(self, "observation_callback_limit")?;
-                return Err(rejected("observation_callback_limit"));
-            }
-            state.claims.insert(correlation, digest);
+        #[cfg(test)]
+        self.audit
+            .observation_attempts
+            .fetch_add(1, Ordering::Release);
+        let mut invocations = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
+        if let Some(ledger) = &mut invocations.ledger {
+            ledger.check(&event)?;
         }
-        let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":host.revision(),
-            "binding_id":host.target(),"instance_id":instance_id,"event_id":self.identifier()?,"adapter":host.capabilities().adapter}),
-            &event, association, deadline, host.configuration().as_value())?;
-        observation.enqueue(self, &seed)?;
+        let mut claims = claims.lock().map_err(|_| rejected("observation_state"))?;
+        if !self.audit.healthy() {
+            return Err(rejected("audit_unavailable"));
+        }
+        if let Some(previous) = claims.claims.get(&correlation) {
+            let previous = previous
+                .as_ref()
+                .ok_or_else(|| rejected("audit_unavailable"))?;
+            return if previous == &digest {
+                Ok(json!({"observed":true,"duplicate":true}))
+            } else {
+                Err(rejected("native_correlation_mismatch"))
+            };
+        }
+        if claims.claims.len() >= MAX_CALLBACKS {
+            if !claims.overflowed {
+                self.fact_gap(instance_id, "aw.observation_callback_limit")?;
+                claims.overflowed = true;
+            }
+            if let Some(observation) = &observation {
+                observation.gap(self, "observation_callback_limit")?;
+            }
+            return Err(rejected("observation_callback_limit"));
+        }
+        // Reserve before writing; failed durable metadata must never be retried as a new fact.
+        claims.claims.insert(correlation.clone(), None);
+        let key = self.identifier()?;
+        let fact = self.hook_fact(&key, &host, instance_id, &event, &association, None)?;
+        if let Some(fact) = fact {
+            self.standalone_fact(fact)?;
+        } else {
+            self.fact_gap(instance_id, "aw.native_metadata_unavailable")?;
+        }
+        claims.claims.insert(correlation, Some(digest));
+        drop(claims);
+        drop(invocations);
+        if let Some(observation) = observation {
+            let seed = self.contexts.seed(json!({"generation":self.identity.generation,"config_revision":host.revision(),
+                "binding_id":host.target(),"instance_id":instance_id,"event_id":key,"adapter":host.capabilities().adapter}),
+                &event,association,deadline,host.configuration().as_value())?;
+            observation.enqueue(self, &seed)?;
+        }
         Ok(json!({"observed":true,"duplicate":false}))
     }
 
-    pub(in crate::runtime) fn report_run(
+    pub(in crate::runtime) fn report_observed_run(
         &self,
         instance_id: &str,
         outcome: RunOutcome,

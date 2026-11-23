@@ -35,6 +35,9 @@ Intel macOS requires a release that includes `@anolisa/cli-darwin-x64`.
 Older published versions are not retroactively extended by this source change.
 
 The correct platform-specific binary is automatically installed via `optionalDependencies`.
+Each native package also includes ANOLISA's integration registry at
+`share/anolisa/components/`. The launcher points to the native binary, which
+finds that sibling data tree even when the complete npm installation is moved.
 
 ## Build from Source
 

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! CLI agent-contract integration tests.
 //!
 //! `discover` / `token` are the machine-facing surface agents and scripts
@@ -388,6 +390,108 @@ fn now_ns() -> i64 {
         .as_nanos() as i64
 }
 
+#[test]
+fn serve_malformed_json_uses_defaults_and_keeps_health_available() {
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = fixture_dir("serve_malformed_json");
+    let config = dir.join("config.json");
+    let malformed = "{ \"schema_version\": 6, this is not json\n";
+    std::fs::write(&config, malformed).expect("write malformed config");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let log_path = dir.join("serve.log");
+    let log_file = std::fs::File::create(&log_path).expect("create server log");
+    let db = dir.join("genai_events.db");
+    let child = agentsight()
+        .args([
+            "serve",
+            "--config",
+            config.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(log_file))
+        .spawn()
+        .expect("start agentsight serve");
+    let mut child = KillOnDrop(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let url = format!("http://127.0.0.1:{port}/health");
+    let mut health_status = None;
+    let mut early_exit = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.0.try_wait().expect("poll server") {
+            early_exit = Some(status);
+            break;
+        }
+        match ureq::get(&url)
+            .timeout(std::time::Duration::from_millis(200))
+            .call()
+        {
+            Ok(response) => {
+                health_status = Some(response.status());
+                break;
+            }
+            Err(ureq::Error::Status(status, _)) => {
+                health_status = Some(status);
+                break;
+            }
+            Err(ureq::Error::Transport(_)) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+    if early_exit.is_none() {
+        let _ = child.0.kill();
+    }
+    let _ = child.0.wait();
+    let logs = std::fs::read_to_string(&log_path).expect("read server log");
+    let preserved = std::fs::read_to_string(&config).expect("read preserved config");
+    let backups = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("config.json.bak.")
+        })
+        .count();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        health_status,
+        Some(200),
+        "server exited early: {early_exit:?}; logs: {logs}"
+    );
+    assert!(early_exit.is_none(), "logs: {logs}");
+    assert_eq!(preserved, malformed);
+    assert_eq!(backups, 0, "malformed JSON must not trigger schema backup");
+    assert!(logs.contains("invalid JSON"), "logs: {logs}");
+    assert!(logs.contains("key must be a string"), "logs: {logs}");
+    assert!(
+        logs.contains("Tokenless integration disabled"),
+        "logs: {logs}"
+    );
+    assert!(
+        !logs.contains("Server error: invalid Tokenless query configuration or filters"),
+        "logs: {logs}"
+    );
+}
+
 /// Insert one interruption in `dir/interruption_events.db` and return the
 /// path together with the id the store generated.
 fn interruption_fixture(dir: &std::path::Path) -> (PathBuf, String) {
@@ -487,6 +591,7 @@ fn audit_db_reads_the_given_database() {
                 filename: Some("/usr/bin/db_flag_probe".to_string()),
                 args: Some("--probe".to_string()),
                 exit_code: Some(0),
+                signal: None,
             },
             session_id: None,
         })
@@ -1297,4 +1402,101 @@ fn skill_metrics_granularity_is_only_declared_where_it_buckets() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn trace_daemon_resolves_relative_config_and_pid_before_chdir() {
+    let pid_tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("agentsight-cli-daemon-rel-{pid_tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let cfg_name = format!("daemon-cfg-{pid_tag}.json");
+    let pid_name = format!("daemon-pid-{pid_tag}.pid");
+    let storage_dir = dir.join("custom-storage");
+    let cfg_path = dir.join(&cfg_name);
+    let pid_path = dir.join(&pid_name);
+    let leaked_tmp_cfg = std::path::PathBuf::from("/tmp").join(&cfg_name);
+    let leaked_tmp_pid = std::path::PathBuf::from("/tmp").join(&pid_name);
+
+    struct DaemonCleanup {
+        dir: std::path::PathBuf,
+        pid_paths: Vec<std::path::PathBuf>,
+        extra_files: Vec<std::path::PathBuf>,
+    }
+    impl Drop for DaemonCleanup {
+        fn drop(&mut self) {
+            for p in &self.pid_paths {
+                if let Ok(raw) = std::fs::read_to_string(p)
+                    && let Ok(daemon_pid) = raw.trim().parse::<i32>()
+                    && daemon_pid > 1
+                {
+                    unsafe {
+                        libc::kill(daemon_pid, libc::SIGKILL);
+                    }
+                }
+            }
+            for f in &self.extra_files {
+                let _ = std::fs::remove_file(f);
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    let _cleanup = DaemonCleanup {
+        dir: dir.clone(),
+        pid_paths: vec![pid_path.clone(), leaked_tmp_pid.clone()],
+        extra_files: vec![leaked_tmp_cfg.clone(), leaked_tmp_pid.clone()],
+    };
+
+    std::fs::write(
+        &cfg_path,
+        serde_json::json!({
+            "storage": {
+                "base_path": storage_dir.to_str().unwrap()
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = agentsight()
+        .current_dir(&dir)
+        .env("HOME", &dir)
+        .args([
+            "trace",
+            "--daemon",
+            "--no-ebpf",
+            "--config",
+            &format!("./{cfg_name}"),
+            "--pid-file",
+            &format!("./{pid_name}"),
+        ])
+        .output()
+        .expect("run agentsight trace --daemon");
+    assert!(
+        out.status.success(),
+        "daemon start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let expected_db = storage_dir.join("trajectories.db");
+    for _ in 0..40 {
+        if expected_db.exists() && pid_path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(
+        pid_path.exists(),
+        "relative --pid-file must resolve against caller cwd before daemon chdir('/tmp')"
+    );
+    assert!(
+        expected_db.exists(),
+        "relative --config must resolve against caller cwd before daemon chdir('/tmp')"
+    );
+    assert!(
+        !leaked_tmp_cfg.exists(),
+        "daemon must not materialize a default config under /tmp/{cfg_name}"
+    );
 }

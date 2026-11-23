@@ -540,6 +540,64 @@ fn raw_cli_bash_recovered_history_keeps_private_inputs_excluded() {
 }
 
 #[test]
+fn raw_cli_bash_recovered_history_keeps_ordinary_commands() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let home = TempReplayHome::new("recovered-history-ordinary", "");
+    home.enable_bash_history();
+    let missing = "cosh_missing_10185";
+    let present = "echo cosh_present_10185";
+    let clean = "echo cosh_clean_10185";
+    run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_RECOMMENDATIONS_ENABLED", "0"),
+        ],
+        vec![
+            (b"\x1b[H".to_vec(), Duration::from_millis(600)),
+            (
+                format!("{missing}\r").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (b"\x1b[H".to_vec(), Duration::from_millis(600)),
+            (
+                format!("{present}\r").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                format!("{clean}\r").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (b"exit\r".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    let history = fs::read_to_string(home.root.join(".bash_history")).expect("history file");
+    assert_eq!(
+        history.lines().filter(|line| *line == missing).count(),
+        1,
+        "ordinary failing command dropped from history\n{history:?}"
+    );
+    assert_eq!(
+        history.lines().filter(|line| *line == present).count(),
+        1,
+        "ordinary successful command dropped from history\n{history:?}"
+    );
+    assert_eq!(
+        history.lines().filter(|line| *line == clean).count(),
+        1,
+        "clean ordinary command must stay recorded exactly once\n{history:?}"
+    );
+}
+
+#[test]
 fn raw_cli_bash_preserves_user_leading_whitespace_for_provider() {
     if !bash_supports_command_not_found_handler() {
         return;

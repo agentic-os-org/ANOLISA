@@ -3,13 +3,22 @@ use std::path::Path;
 use super::types::{SkillConfig, SkillLevel};
 use super::SKILL_MANIFEST;
 
-/// Load skills from a directory, supporting two layouts:
+/// Load a single skill directory or a collection, supporting these layouts:
+/// - Single skill: `<base>/SKILL.md`
 /// - Directory format (preferred): `<base>/<name>/SKILL.md`
 /// - Flat format (legacy compat): `<base>/<name>.md`
 ///
-/// Mixed layouts are tolerated; directory-format takes precedence over a flat
-/// file with the same skill name.
+/// A root manifest identifies a single skill; its supporting files are not
+/// scanned as separate skills. Collections tolerate mixed layouts, with
+/// directory-format taking precedence over a flat file with the same name.
 pub fn load_skills_from_dir(base_dir: &Path, level: SkillLevel) -> Vec<SkillConfig> {
+    let manifest = base_dir.join(SKILL_MANIFEST);
+    if manifest.exists() {
+        return parse_skill_file(&manifest, level, base_dir)
+            .into_iter()
+            .collect();
+    }
+
     let entries = match std::fs::read_dir(base_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -241,6 +250,56 @@ mod tests {
         assert_eq!(skills.len(), 2);
         assert!(skills.iter().any(|s| s.name == "skill-a"));
         assert!(skills.iter().any(|s| s.name == "skill-b"));
+    }
+
+    #[test]
+    fn single_skill_directory_does_not_expose_supporting_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: ws-ckpt\ndescription: Checkpoints\n---\n\nUse scripts/check.sh.",
+        )
+        .unwrap();
+        let support = "---\nname: support\ndescription: Reference only\n---\n\nDetails.";
+        std::fs::write(dir.path().join("reference.md"), support).unwrap();
+        let nested = dir.path().join("examples");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), support).unwrap();
+
+        let skills = load_skills_from_dir(dir.path(), SkillLevel::System);
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "ws-ckpt");
+        assert_eq!(skills[0].level, SkillLevel::System);
+        assert_eq!(skills[0].base_dir, dir.path());
+        assert_eq!(skills[0].file_path, dir.path().join("SKILL.md"));
+    }
+
+    #[test]
+    fn invalid_single_skill_does_not_fall_back_to_supporting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SKILL.md"), "Missing frontmatter").unwrap();
+        std::fs::write(
+            dir.path().join("reference.md"),
+            "---\nname: reference\ndescription: Reference only\n---\n\nDetails.",
+        )
+        .unwrap();
+
+        assert!(load_skills_from_dir(dir.path(), SkillLevel::System).is_empty());
+    }
+
+    #[test]
+    fn collection_does_not_search_nested_collections() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("category/nested-skill");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: nested\ndescription: Nested skill\n---\n\nDetails.",
+        )
+        .unwrap();
+
+        assert!(load_skills_from_dir(dir.path(), SkillLevel::System).is_empty());
     }
 
     #[test]

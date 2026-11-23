@@ -5,7 +5,12 @@
 AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
 
 Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
-下文正式版本安装和 Agent 集成说明对应 V1；源码构建安装 V2 Rust CLI 和 daemon。
+下文 RPM 选包说明对应 V2 Rust CLI 和 daemon。Agent 接入资源保留既有宿主接口；
+后端命令与服务契约请参阅 V2 指南。
+
+使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
+[Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求，以及应用如何接入策略授权、
+本地审批和执行回执。
 
 ## 概述
 
@@ -15,7 +20,7 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 | Code Scanner | bash/python 静态分析检测危险操作（判定：pass/warn/deny/error） |
 | Skill Ledger | Ed25519 签名完整性追踪，6 状态生命周期（pass/none/drifted/warn/deny/tampered） |
 | PII Checker | 检测文本中的个人信息和凭据（邮箱/手机/身份证/JWT/AccessKey 等） |
-| Sandbox | 基于 seccomp + namespace 的 cosh 命令执行隔离 |
+| Sandbox | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） |
 | Observability | 交互式事件审阅 TUI，4 级下钻 |
 | Security Events | 本地安全事件存储，支持查询与聚合统计 |
 
@@ -44,32 +49,185 @@ sudo anolisa status sec-core
 agent-sec-cli --version
 ```
 
-`sec-core` 是 ANOLISA 中的组件名。RPM 继续使用原有包名
-`agent-sec-core`。
+`sec-core` 是 ANOLISA 中的组件名。V2 RPM 分别交付后端、宿主接入和 skills。
+`agent-sec-core` 通过弱依赖推荐同版本的 `agent-sec-plugins` 和 `agent-sec-skills`，
+默认安装会同时装上这三个包：
 
 ```bash
-sudo yum install anolisa agent-sec-core
+# Backend, host integrations and security skills (weak dependencies enabled).
+sudo yum install agent-sec-core
+
+# Backend, sandbox, configuration and system service only.
+sudo yum install --setopt=install_weak_deps=False agent-sec-core
+
+# Optional: use ANOLISA to manage the installed framework integrations.
+sudo yum install anolisa
 sudo anolisa --install-mode system adopt sec-core
 ```
 
 从 YUM 安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把 RPM
 写入 system 状态，adapter 管理器随后才能读取已安装组件的契约。
 
-从源码构建时，使用仓库级统一入口。
+插件包和 skills 包是弱依赖。关闭 `install_weak_deps`、显式排除，或仓库中没有同版本
+构建时，它们会被静默跳过；此时请用 `sudo yum install agent-sec-plugins agent-sec-skills`
+显式安装，并用 `rpm -q agent-sec-core agent-sec-plugins agent-sec-skills` 确认。
+两个子包都可以单独卸载，不会连带卸载 `agent-sec-core`。`agent-sec-plugins` 包含已有的
+六种宿主接入，安装后再以实际框架用户注册需要的接入。现有 ANOLISA raw 归档仍是整包交付。
+
+仓库级便利脚本继续可用。
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、
-GnuPG 和 `jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
-集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
-要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
-然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
-`--ignore-deps` 跳过检查。
+也可以在仓库根目录使用组件目标：
+
+```bash
+make -C src/agent-sec-core build
+sudo make -C src/agent-sec-core install
+```
+
+仓库脚本会为构建准备 Node.js 22 或更高版本和系统 `python3`，再在安装到宿主前
+检查声明的运行时依赖。agent-sec-core 后端只支持 system 文件安装；使用
+`--no-install` 可以只编译而不安装。已准备好依赖的主机可以用 `--ignore-deps`
+跳过依赖准备与检查。Python hook 使用宿主的 `python3`；Qoder 插件安装器要求
+Python >= 3.11, < 3.12。
+
+两个入口都默认使用 `PREFIX=/usr/local`、`AWPRJ=anolisa`。程序安装到
+`/usr/local/bin`，框架资源安装到
+`/usr/local/share/anolisa/agent-sec-core/adapters`。文件安装不会启动 daemon，也不
+修改框架的用户配置。部署接入前，请先启动 daemon 并检查健康状态。
 
 源码构建不会在 ANOLISA 状态中注册 `sec-core`。这种安装方式不能继续执行
 `anolisa adapter enable`，请使用下文的源码集成脚本。
+
+### 迁移旧源码安装的服务
+
+旧版 `build-all.sh` 会把完整 unit 安装到
+`/etc/systemd/system/agent-sec-core.service`。该文件优先于新布局中
+`PREFIX/lib/systemd/system` 下的 unit；仅重新加载或启动服务不会完成切换。
+全新安装可以跳过本节。
+
+先检查当前加载的 unit、覆盖项和启用状态。自定义过安装路径时，请使用
+`make layout` 输出中的实际 `UNITDIR`：
+
+```bash
+ASC_PREFIX=/usr/local
+ASC_UNIT_FILE="$ASC_PREFIX/lib/systemd/system/agent-sec-core.service"
+make -C src/agent-sec-core layout PREFIX="$ASC_PREFIX" AWPRJ=anolisa
+systemd-analyze unit-paths
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+systemctl is-enabled agent-sec-core.service || true
+sudo systemctl cat agent-sec-core.service
+```
+
+如果状态为 `masked` 或 `masked-runtime`，请停在这里，由管理员决定是否调整该
+策略。如果当前 fragment 已指向 `ASC_UNIT_FILE`，不需要移走 unit。只有确认
+`/etc` 下的文件或链接是已过时的源码安装覆盖项后，才继续以下步骤。
+
+变更前先备份。以下命令同时保留链接及其内容，以及现有管理员 drop-in：
+
+```bash
+ASC_BACKUP_DIR="/var/backups/agent-sec-core/source-unit-$(date +%Y%m%d-%H%M%S)"
+sudo install -d -m 0700 "$ASC_BACKUP_DIR"
+sudo cp -a /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit"
+sudo cp -Lp /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit.contents"
+if sudo test -d /etc/systemd/system/agent-sec-core.service.d; then
+  sudo cp -a /etc/systemd/system/agent-sec-core.service.d "$ASC_BACKUP_DIR/"
+fi
+sudo diff -u /etc/systemd/system/agent-sec-core.service "$ASC_UNIT_FILE" || true
+```
+
+另行备份旧服务实际使用的配置。检查并把需要保留的设置合并到实际
+`CONFIGDIR/skillsec.json`，或在经过审查的覆盖项中有意保留旧配置路径。保留管理员
+drop-in 文件，并检查每个 `DropInPaths` 项：重置 `ExecStart` 的覆盖项仍可能选择
+旧 binary，或遗漏新的 `--skillsec-config` 参数。继续之前，使用
+`sudo systemctl edit agent-sec-core.service` 把完整旧 unit 中需要保留的定制迁入
+经过审查的 drop-in。
+
+完成比较、配置合并和管理员审查后，停止服务，只把过时的 `/etc` 覆盖项移入备份：
+
+```bash
+sudo systemctl stop agent-sec-core.service
+sudo mv /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/retired-override"
+```
+
+如果原来已启用、且仍希望开机启动，请在建立链接**之前**用新 unit 的绝对路径
+刷新现有启动链接。原来未启用时跳过此命令；仅运行时启用的情况使用 `--runtime`：
+
+```bash
+sudo systemctl reenable "$ASC_UNIT_FILE"
+```
+
+只有新的 `UNITDIR` 不在上文输出的 unit 搜索路径中时，才建立链接。否则跳过
+此命令：把同名 unit 链接回自身的搜索路径可能形成 unit alias 循环。
+
+```bash
+sudo systemctl link "$ASC_UNIT_FILE"
+```
+
+重新加载并重启经过审查的 unit：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agent-sec-core.service
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+```
+
+确认 `FragmentPath` 指向预期 unit，`ExecStart` 使用预期 daemon 和配置。保留备份，
+部署接入前继续执行下文的健康等待。安装器不会自动执行这些迁移操作。
+
+### 启动源码安装的 daemon
+
+使用安装时选择的 prefix：
+
+```bash
+ASC_PREFIX=/usr/local
+export PATH="$ASC_PREFIX/bin:$PATH"
+sudo systemctl daemon-reload
+sudo systemctl start agent-sec-core.service
+sudo timeout 60 sh -c '
+  until AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 "$1/bin/agent-sec-daemon-health"; do
+    sleep 1
+  done
+' sh "$ASC_PREFIX"
+```
+
+健康检查最多等待 60 秒，确认 daemon 的 RPC 端点可响应后再继续。如果超时，请查看
+服务诊断：
+
+```bash
+sudo systemctl status agent-sec-core.service --no-pager
+sudo journalctl -u agent-sec-core.service -n 80 --no-pager
+```
+
+自定义 prefix、namespace 或其他路径时，使用与安装一致的 Make 参数检查布局：
+
+```bash
+make -C src/agent-sec-core layout PREFIX=/usr/local AWPRJ=anolisa
+```
+
+下文使用输出中的 `ADAPTERDIR` 和 `EXTENSIONDIR`。若 `UNITDIR` 不在 systemd
+的 unit 搜索路径中，请先执行
+`sudo systemctl link /absolute/path/to/agent-sec-core.service`，再重新加载并启动服务。
+
+### 移除源码安装
+
+执行 `make -C src/agent-sec-core uninstall` 时，传入与安装一致的公共布局参数
+（`PREFIX`、`AWPRJ` 及自定义路径）。移除暂存安装时也应使用相同的 `DESTDIR`。
+与安装一致，卸载会在删除文件前拒绝含空格或 shell 元字符的暂存路径。即使使用
+`make -j`，也必须完成布局验证后才会开始任何删除。
+
+移除真实主机上的安装前，先用 `agent-sec-cli gateway disable` 撤回生效的网关路由，
+再停止并禁用 `agent-sec-core.service`；移除后执行 `systemctl daemon-reload`。
+卸载保留网关撤回检查，但不会自动停止或禁用 core 服务。
+
+`ADAPTERDIR` 应为 sec-core 专用：卸载会删除 `codex`、`qoder`、`openclaw`、
+`hermes` 和 `qwencode` 整个子目录。配置、`DATADIR/LICENSE` 和无关同级资源会
+保留。默认公共布局不会清理旧版 `/etc/systemd/system/agent-sec-core.service` 或
+`PREFIX/lib/anolisa/sec-core/*-plugin` 安装；这些路径需要使用匹配的旧版卸载流程
+或手工迁移。如果旧位置已显式选作公共布局的一部分，则卸载会遵循该布局，删除
+其中归其管理的文件。
 
 ## 快速开始
 
@@ -381,9 +539,11 @@ agent-sec-cli capabilities --agent hermes --capability code-scan
 agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 ```
 
-支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
+支持的 capability 名称为 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger`、`observability` 和 `sandbox`（仅 Cosh）；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 
-当前配置的 L2 后端是唯一有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。而宿主 hook 对失败的扫描一律 fail-open，因此这条 diagnostic 往往是该配置错误在 prompt 开始无防护流转前唯一的可见之处。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
+当前配置的 L2 后端是一项有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。而宿主 hook 对失败的扫描一律 fail-open，因此这条 diagnostic 往往是该配置错误在 prompt 开始无防护流转前唯一的可见之处。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
+
+`sandbox` 在 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 或 `true` 时显示 `MODE=all-shell`，未设置或 `0`/`false` 时为 `dangerous`，非法值为 `blocked`；此开关忽略大小写和前后空白。`ENABLED` 描述 guard，而非此开关。JSON 还原样展示权限来源（默认 `fixed`）与动态 Cedar 运行预设，不验证这些设置、不读取权限文件，也不检查授权是否就绪。`TIMEOUT(s)=55` 涵盖生成与 prepare，finish 为 10 秒。安装和失败行为见 [Cosh sandbox 授权](sandbox.md#在-cosh-ng-中启用授权)。
 
 视图来源和限制：
 
@@ -394,7 +554,7 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 
 ## Agent Hook 环境变量
 
-每个宿主都会读取 `<CAPABILITY>_HOOK_ENABLED`（`true` / `false`，忽略大小写和首尾
+scanner、ledger 和 observability Hook 读取 `<CAPABILITY>_HOOK_ENABLED`（`true` / `false`，忽略大小写和首尾
 空白）。未设置或值无效时保持 hook 开启。对于使用 shared hook policy parser 的
 capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `observe`
 的别名，`deny` 是 `block` 的别名。Prompt Scanner 更窄：`PROMPT_SCANNER_MODE`
@@ -423,6 +583,9 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` | `false` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE` | `fixed` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` | 未设置 | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 `PROMPT_SCANNER_L2_MODEL` 标记为 `✓*`，因为没有任何 adapter 直接读取它：每个宿主都
 是调用 `agent-sec-cli scan-prompt` 子进程，由该命令解析 L2 后端，所以六家都会继承
@@ -466,26 +629,44 @@ anolisa adapter enable sec-core openclaw
 
 ### 源码集成入口
 
-默认源码构建会把 Cosh-NG 扩展直接安装到
-`~/.copilot-shell/extensions/agent-sec-core`，无需再执行启用命令。其他集成请
-运行用户目录中对应的脚本。
+请按需选择接入脚本，以拥有目标框架配置的用户运行，不要加 `sudo`。将下列值设为
+安装时的 prefix 和 namespace；若显式覆盖了 `ADAPTERDIR`，请使用 `make layout`
+输出的路径：
 
 ```bash
+ASC_PREFIX=/usr/local
+ASC_AWPRJ=anolisa
+ASC_ADAPTER_DIR="$ASC_PREFIX/share/$ASC_AWPRJ/agent-sec-core/adapters"
+export PATH="$ASC_PREFIX/bin:$PATH"
+
 # OpenClaw
-bash ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/openclaw/scripts/deploy.sh"
 
 # Hermes
-bash ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/hermes/scripts/deploy.sh"
 
 # Qwen Code
-bash ~/.local/lib/anolisa/sec-core/qwen-code-extension/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/qwencode/scripts/deploy.sh"
 
 # Codex
-bash ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/codex/install.sh"
 
 # Qoder
-bash ~/.local/lib/anolisa/sec-core/qoder-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/qoder/install.sh"
 ```
+
+默认 Cosh-NG 扩展放置在
+`/usr/local/share/anolisa/extensions/agent-sec-core`。文件安装不写入 Cosh 的用户配置。
+请在 Cosh prompt 中检查并启用：
+
+```text
+/extensions list
+/extensions enable agent-sec-core
+/extensions reload
+```
+
+自定义扩展位置或已存在同名用户副本时，请按
+[Cosh 扩展发现与来源选择](../cosh-ng/core/extensions.md)操作。
 
 ### OpenClaw
 
@@ -660,7 +841,7 @@ CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 
 ### Cosh-NG
 
-Cosh-NG 使用的 adapter ID 为 `cosh`，扩展仍从现有的 `.copilot-shell` 目录加载。
+Cosh-NG 使用的 adapter ID 为 `cosh`，会发现用户和系统扩展目录。
 
 通过安装包部署时，在目标用户的配置中启用 adapter。
 
@@ -672,6 +853,7 @@ Cosh-NG 启动时会加载 hook。
 
 扩展路径：
 - 用户安装：`~/.copilot-shell/extensions/agent-sec-core/`
+- 默认源码安装：`/usr/local/share/anolisa/extensions/agent-sec-core/`
 - RPM 安装：`/usr/share/anolisa/extensions/agent-sec-core/`
 
 ## 常见问题

@@ -15,6 +15,11 @@ declarative object shape without introducing Kubernetes APIs or dependencies.
 Provider instances are named objects referenced by ordered event steps; one
 implementation can have multiple instances with different private configuration.
 
+The compiled immutable configuration schema is shared within each process.
+Every document still passes parsing, shape and cross-field validation; no
+configuration or admission result is cached. Independent service processes
+continue to validate their own input.
+
 The schema is the authoritative field shape. A reusable offline validator parses
 bounded YAML or JSON documents into the JSON data model, validates that shape,
 then checks static relationships. JSON travels the same bounded path as a
@@ -38,7 +43,9 @@ projects none; execution and decoding errors retain the step's failure action.
 A structured Provider uses `protocol: aw-provider/v1alpha1`; its step declares
 `operation` and `effects`. Preparation performs `describe` and `validate_config`
 then checks requested effects against trusted Adapter capabilities. The current
-runtime admits before-tool `observe`/`block` and after-tool `observe`.
+runtime admits submission `observe`/`block`, before-tool `observe`/`block`/
+`replace_input`, after-tool `observe`/`replace_result`, and DeepSeek Harness
+final-result `observe`/`block`.
 
 An existing native Hook command uses `protocol: native-hook/v1alpha1`, an empty
 `config` object and steps with `native: {}`. Those steps omit `operation` and
@@ -56,8 +63,9 @@ when another group requests sequential execution.
 Static checks reject unknown public fields, duplicate keys and step IDs,
 unresolved Provider/guard references, invalid tool selectors, mismatched event
 effects/failure actions, mismatched step protocols and active structured `ask`
-steps. `security.violation` remains a reserved active-final-check design; the
-current runtime rejects guards and does not establish global Hook ordering.
+steps. DeepSeek Harness admits an independent `security.violation` final-result
+step at its verified Agent-loop commit boundary. The runtime still rejects
+`tool.before.guard` and does not establish global Hook ordering.
 
 Control effects and their failure actions cannot be discarded via
 `required: false`. Runtime admission and native adoption are separate stages.

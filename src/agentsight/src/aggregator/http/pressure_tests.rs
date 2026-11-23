@@ -492,3 +492,90 @@ fn keep_alive_reservations_do_not_prevent_hard_byte_reclamation() {
     assert_eq!(http.metrics().connection_cache_bytes, 0);
     assert_eq!(http.recently_completed.len(), 1);
 }
+
+#[test]
+fn byte_budget_full_rejects_new_flow_without_evicting_active_sse() {
+    let mut http = HttpConnectionAggregator::with_capacity(2);
+    let body = vec![b'x'; 4096];
+    http.process_request(request(1, &body));
+    http.process_response(ParsedResponse {
+        version: 11,
+        status_code: 200,
+        reason: "OK".into(),
+        headers: HashMap::from([("content-type".into(), "text/event-stream".into())]),
+        body_offset: 0,
+        body_len: 0,
+        source_event: source(1, 0, b""),
+    });
+    let budget = http.metrics().connection_cache_bytes;
+    assert!(budget > 0, "active fixture must retain payload bytes");
+    // Leave room for the current Flow but not for the incoming one: the
+    // overshoot must reject the newcomer, not the active SSE.
+    http.bytes_budget = budget + 1;
+    let before = http.metrics();
+
+    http.process_request(request(2, b"rejected"));
+
+    assert!(matches!(
+        &http.take_ready()[..],
+        [AggregatedResult::Abandoned {
+            reason: RemoveReason::CapacityRejected,
+            ..
+        }]
+    ));
+    assert_eq!(http.active_connections(), 1);
+    assert!(http.is_sse_active(&ConnectionId::from_ssl_event(&source(1, 0, b""))));
+    assert!(matches!(
+        http.retired_sse
+            .peek(&ConnectionId::from_ssl_event(&source(2, 1, b""))),
+        Some((_, RemoveReason::CapacityRejected))
+    ));
+    assert_eq!(http.metrics().eviction_count, before.eviction_count);
+    assert_eq!(
+        http.metrics().connection_cache_bytes,
+        before.connection_cache_bytes
+    );
+}
+
+#[test]
+fn byte_budget_exhausted_rejects_new_flow_before_insert() {
+    let mut http = HttpConnectionAggregator::with_capacity(2);
+    let body = vec![b'x'; 4096];
+    http.process_request(request(1, &body));
+    http.process_response(ParsedResponse {
+        version: 11,
+        status_code: 200,
+        reason: "OK".into(),
+        headers: HashMap::from([("content-type".into(), "text/event-stream".into())]),
+        body_offset: 0,
+        body_len: 0,
+        source_event: source(1, 0, b""),
+    });
+    let budget = http.metrics().connection_cache_bytes;
+    assert!(budget > 0, "active fixture must retain payload bytes");
+    // Exactly exhausted: the next new Flow must be rejected before insertion.
+    http.bytes_budget = budget;
+    let before = http.metrics();
+
+    http.process_request(request(2, b"rejected"));
+
+    assert!(matches!(
+        &http.take_ready()[..],
+        [AggregatedResult::Abandoned {
+            reason: RemoveReason::CapacityRejected,
+            ..
+        }]
+    ));
+    assert_eq!(http.active_connections(), 1);
+    assert!(http.is_sse_active(&ConnectionId::from_ssl_event(&source(1, 0, b""))));
+    assert!(matches!(
+        http.retired_sse
+            .peek(&ConnectionId::from_ssl_event(&source(2, 1, b""))),
+        Some((_, RemoveReason::CapacityRejected))
+    ));
+    assert_eq!(http.metrics().eviction_count, before.eviction_count);
+    assert_eq!(
+        http.metrics().connection_cache_bytes,
+        before.connection_cache_bytes
+    );
+}

@@ -65,7 +65,14 @@ def test_explicit_nonroot_administrator_can_manage_assignments_and_is_revoked_on
         daemon = start_daemon(admin_uids=[1001], name=socket_path)
         daemon.caller_uid = 1001
         policy = daemon.request(
-            "policy", "create", "--name", "ordinary-admin", "--file", str(template)
+            "policy",
+            "create",
+            "--name",
+            "ordinary-admin",
+            "--language",
+            "json",
+            "--file",
+            str(template),
         )
         scope = daemon.request(
             "scope",
@@ -84,6 +91,8 @@ def test_explicit_nonroot_administrator_can_manage_assignments_and_is_revoked_on
             policy["policyId"],
             "--name",
             "updated",
+            "--language",
+            "json",
             "--file",
             str(template),
         )
@@ -109,7 +118,14 @@ def test_explicit_nonroot_administrator_can_manage_assignments_and_is_revoked_on
             == updated
         )
         persisted = daemon.request(
-            "policy", "create", "--name", "persisted", "--file", str(template)
+            "policy",
+            "create",
+            "--name",
+            "persisted",
+            "--language",
+            "json",
+            "--file",
+            str(template),
         )
         daemon.process.terminate()
         assert daemon.process.wait(timeout=5) == 0

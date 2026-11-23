@@ -15,6 +15,19 @@ pub const HEALTH: &[u8] =
 pub const APPLY: &[u8] =
     include_bytes!("../../../../fixtures/clients/agentsight/file-deletion/apply.response.json");
 
+pub fn structured_health() -> Value {
+    let mut health: Value = serde_json::from_slice(HEALTH).unwrap();
+    for capability in [
+        "file_entry_delete_protection",
+        "directory_tree_delete_protection",
+        "ordinary_write_protection",
+        "static_mount_topology",
+    ] {
+        health["capabilities"][capability] = json!(true);
+    }
+    health
+}
+
 pub fn plan(revision: u32) -> TargetBindingPlan {
     let mut value: Value = serde_json::from_str(include_str!(
         "../../../../fixtures/clients/agentsight/file-deletion/deployment-plan.json"

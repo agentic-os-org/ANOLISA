@@ -60,8 +60,9 @@ base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolis
 
 # rpm -- resolution/install delegated to dnf against this repo.
 [backends.rpm]
-base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/agentic-os/$basearch/os/"
-insecure = true
+# TLS name of the same internal mirror; mirrors.cloud.aliyuncs.com serves a
+# certificate that only covers mirrors-ssl.aliyuncs.com / mirrors.aliyun.com.
+base_url = "https://mirrors-ssl.aliyuncs.com/alinux/$releasever/agentic-os/$basearch/os/"
 gpgcheck = true
 
 # npm -- Node-ecosystem components.

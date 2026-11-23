@@ -1,0 +1,67 @@
+Starting a Gradle Daemon, 1 incompatible and 1 stopped Daemons could not be reused, use --status for details
+Parallel Configuration Cache is an incubating feature.
+Configuration on demand is an incubating feature.
+Calculating task graph as configuration cache cannot be reused because the file system entry 'gradle/plugins/.settings/org.eclipse.core.resources.prefs' has been created.
+> Task :plugins:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :plugins:generateExternalPluginSpecBuilders UP-TO-DATE
+> Task :plugins:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+> Task :plugins:compilePluginsBlocks UP-TO-DATE
+> Task :plugins:generatePrecompiledScriptPluginAccessors UP-TO-DATE
+> Task :plugins:generateScriptPluginAdapters UP-TO-DATE
+> Task :plugins:compileKotlin UP-TO-DATE
+> Task :plugins:compileJava NO-SOURCE
+> Task :plugins:pluginDescriptors UP-TO-DATE
+> Task :plugins:processResources UP-TO-DATE
+> Task :plugins:classes UP-TO-DATE
+> Task :plugins:jar UP-TO-DATE
+> Task :caffeine:downloadCaffeine UP-TO-DATE
+> Task :caffeine:processJavaPoetResources UP-TO-DATE
+> Task :caffeine:processResources NO-SOURCE
+> Task :simulator:downloadCaffeine UP-TO-DATE
+> Task :simulator:processResources UP-TO-DATE
+> Task :caffeine:processCodeGenResources NO-SOURCE
+> Task :caffeine:compileJavaPoetJava UP-TO-DATE
+> Task :caffeine:javaPoetClasses UP-TO-DATE
+> Task :caffeine:generateLocalCaches UP-TO-DATE
+> Task :simulator:sourcesJar UP-TO-DATE
+> Task :simulator:processTestResources NO-SOURCE
+> Task :caffeine:generateNodes UP-TO-DATE
+> Task :caffeine:compileJava UP-TO-DATE
+> Task :caffeine:classes UP-TO-DATE
+> Task :caffeine:compileCodeGenJava UP-TO-DATE
+> Task :caffeine:codeGenClasses UP-TO-DATE
+> Task :caffeine:jar UP-TO-DATE
+> Task :caffeine:javadoc UP-TO-DATE
+> Task :simulator:compileJava UP-TO-DATE
+> Task :simulator:classes UP-TO-DATE
+> Task :simulator:jar UP-TO-DATE
+> Task :simulator:startScripts UP-TO-DATE
+> Task :simulator:compileTestJava UP-TO-DATE
+> Task :simulator:distZip UP-TO-DATE
+> Task :simulator:distTar UP-TO-DATE
+> Task :simulator:forbiddenApisMain SKIPPED
+> Task :simulator:testClasses UP-TO-DATE
+> Task :simulator:forbiddenApisTest SKIPPED
+> Task :simulator:forbiddenApis UP-TO-DATE
+> Task :simulator:pmdMain SKIPPED
+> Task :simulator:pmdTest SKIPPED
+> Task :simulator:spotbugsMain SKIPPED
+> Task :simulator:spotbugsTest SKIPPED
+> Task :simulator:javadoc UP-TO-DATE
+> Task :simulator:javadocJar UP-TO-DATE
+> Task :simulator:assemble UP-TO-DATE
+> Task :simulator:test UP-TO-DATE
+> Task :simulator:check UP-TO-DATE
+> Task :simulator:build UP-TO-DATE
+
+[Incubating] Problems report is available at: file:///work/source/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 23s
+30 actionable tasks: 30 up-to-date
+Configuration cache entry stored.

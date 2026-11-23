@@ -42,11 +42,13 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function createHooksDriver() {
   const slots = [];
+  const effectDeps = [];
   const driver = {
     slots,
     render(Component, props = {}) {
       driver._cursor = 0;
       driver._effects = [];
+      driver._effectCursor = 0;
       driver._callbacks = [];
       const element = Component(props);
       return { element, effects: driver._effects, callbacks: driver._callbacks };
@@ -72,8 +74,13 @@ function createHooksDriver() {
       driver._cursor += 1;
       return slot.value;
     },
-    useEffect(fn) {
-      driver._effects.push(fn);
+    useEffect(fn, deps) {
+      const index = driver._effectCursor++;
+      const previous = effectDeps[index];
+      if (!previous || !deps || deps.some((value, i) => !Object.is(value, previous[i]))) {
+        driver._effects.push(fn);
+      }
+      effectDeps[index] = deps;
     },
     useCallback(fn) {
       driver._callbacks.push(fn);
@@ -141,6 +148,7 @@ const atifDoc = (sessionId) => ({
 });
 
 function renderViewerPage() {
+  const snapshotRequests = [];
   const { calls, stubs } = deferredFetchStubs([
     'fetchAtifBySession',
     'fetchAtifByConversation',
@@ -150,7 +158,9 @@ function renderViewerPage() {
   const driver = createHooksDriver();
   const urlParams = new URLSearchParams('');
   const setParams = (next) => {
-    for (const [k, v] of next.entries ? next.entries() : []) urlParams.set(k, v);
+    const replacement = new URLSearchParams(next);
+    for (const key of [...urlParams.keys()]) urlParams.delete(key);
+    for (const [key, value] of replacement) urlParams.set(key, value);
   };
   const moduleStubs = {
     'react-router-dom': { useSearchParams: () => [urlParams, setParams] },
@@ -161,6 +171,11 @@ function renderViewerPage() {
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
     '../utils/apiClient': { ...stubs },
+    '../utils/wsCkpt': {
+      fetchWorkspaceSnapshots: (kind, id, signal) => new Promise((resolve) => snapshotRequests.push({ kind, id, signal, resolve })),
+      snapshotsMatchDocument: (batch, doc) => JSON.stringify(batch.trajectory.steps) === JSON.stringify(doc.steps),
+    },
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': componentStub('CausalAttributionPanel'),
     '../utils/trajectoryTree': {
@@ -182,11 +197,62 @@ function renderViewerPage() {
   assert.equal(typeof driver.slots[14].value.current, 'number',
     'slot 14 must be the load request-id ref');
   return {
-    calls, driver, rendered, urlParams,
+    calls, driver, rendered, urlParams, snapshotRequests,
+    render: () => driver.render(page),
     handleLoad: rendered.callbacks[3],
     handleFileImport: rendered.callbacks[4],
   };
 }
+
+test('mounted viewer follows URL target changes without reloading node navigation', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  viewer.urlParams.set('type', 'conversation');
+  viewer.urlParams.set('id', 'first');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+  viewer.urlParams.set('id', 'second');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 2);
+  viewer.calls.fetchAtifByConversation[1].resolve(atifDoc('second'));
+  await settle();
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('first'));
+  await settle();
+  assert.equal(viewer.driver.slots[4].value.session_id, 'second');
+  viewer.urlParams.set('node', 'child');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 2);
+});
+
+test('explicit loads and successful imports do not trigger duplicate URL requests', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  const pending = viewer.handleLoad('conversation', 'manual');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('manual'));
+  await pending;
+  viewer.handleFileImport({ target: { files: [{ name: 'local.json' }], value: 'local.json' } });
+  FakeFileReader.instances.at(-1).onload({ target: { result: JSON.stringify(atifDoc('local')) } });
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.driver.slots[4].value.session_id, 'local');
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+});
+
+test('clearing a URL target invalidates its pending response', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  viewer.urlParams.set('type', 'conversation');
+  viewer.urlParams.set('id', 'pending');
+  for (const effect of viewer.render().effects) effect();
+  viewer.urlParams.delete('type');
+  viewer.urlParams.delete('id');
+  for (const effect of viewer.render().effects) effect();
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('obsolete'));
+  await settle();
+  assert.equal(viewer.driver.slots[4].value, null);
+  assert.equal(viewer.driver.slots[5].value, false);
+});
 
 
 // TokenSavingsPage and AtifViewerPage render savings rates through the shared
@@ -226,6 +292,8 @@ function loadPageModule(relativePath, moduleStubs, driver) {
     if (moduleStubs[name]) return moduleStubs[name];
     if (name === '../utils/text') return loadPageModule('src/utils/text.ts', moduleStubs, driver);
     if (name === '../utils/trajectoryTextFilter') return loadPageModule('src/utils/trajectoryTextFilter.ts', moduleStubs, driver);
+    if (name === '../utils/optimizationStrategies') return loadPageModule('src/utils/optimizationStrategies.ts', moduleStubs, driver);
+    if (name === '../utils/download') return loadPageModule('src/utils/download.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
@@ -242,8 +310,76 @@ function importFile(handleFileImport, name, payload) {
   return FakeFileReader.instances[0];
 }
 
+const snapshotBatch = (doc, id) => ({
+  trajectory: doc,
+  scope: { ws_id: 'ws-1', path: '/workspace', snapshot_count: 1 },
+  step_snapshots: { '1': [{ id, workspace: 'ws-1', meta: { created_at: '2026-01-01T00:00:00Z' } }] },
+});
+const loadedSnapshotBatch = (driver) => driver.slots.find((slot) => slot?.value?.scope?.ws_id === 'ws-1'
+  && slot.value.step_snapshots)?.value;
+
+test('clearing the URL aborts pending snapshots and discards visible snapshot associations', async () => {
+  const ctx = renderViewerPage();
+  ctx.rendered.effects.forEach(effect => effect());
+  const load = async (id) => {
+    ctx.urlParams.set('type', 'session');
+    ctx.urlParams.set('id', id);
+    ctx.render().effects.forEach(effect => effect());
+    const doc = { ...atifDoc(id), steps: [{ step_id: 1, source: 'agent', message: id }] };
+    ctx.calls.fetchAtifBySession.at(-1).resolve(doc);
+    await settle();
+    return doc;
+  };
+  const clear = () => {
+    ctx.urlParams.delete('type');
+    ctx.urlParams.delete('id');
+    ctx.render().effects.forEach(effect => effect());
+  };
+
+  const pendingDoc = await load('pending-snapshots');
+  const pending = ctx.snapshotRequests.at(-1);
+  assert.equal(pending.signal.aborted, false);
+  clear();
+  assert.equal(pending.signal.aborted, true, 'navigation must cancel snapshot network work');
+  pending.resolve(snapshotBatch(pendingDoc, 'late-snapshot'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value, null);
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined, 'late snapshots must not restore a cleared target');
+
+  const visibleDoc = await load('visible-snapshots');
+  ctx.snapshotRequests.at(-1).resolve(snapshotBatch(visibleDoc, 'visible-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'visible-snapshot');
+  clear();
+  assert.equal(ctx.driver.slots[4].value, null);
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined, 'clearing a target must release existing associations');
+  assert.equal(ctx.calls.fetchAtifBySession.length, 2, 'clearing targets must not issue replacement loads');
+});
+
 const completeRead = (reader, payload) =>
   reader.onload({ target: { result: payload } });
+
+test('atif viewer: changing the URL in the same tab loads the new trajectory and its snapshots', async () => {
+  const ctx = renderViewerPage();
+  const changeUrl = (id) => {
+    ctx.urlParams.set('type', 'session');
+    ctx.urlParams.set('id', id);
+    ctx.render().effects.forEach(effect => effect());
+  };
+
+  changeUrl('old-session');
+  ctx.calls.fetchAtifBySession[0].resolve(atifDoc('old-session'));
+  await settle();
+  changeUrl('new-session');
+  assert.equal(ctx.calls.fetchAtifBySession[1].args[0], 'new-session');
+  ctx.calls.fetchAtifBySession[1].resolve(atifDoc('new-session'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value.session_id, 'new-session');
+  assert.deepEqual(ctx.snapshotRequests.map(({ id }) => id), ['old-session', 'new-session']);
+
+  changeUrl('new-session');
+  assert.equal(ctx.calls.fetchAtifBySession.length, 2);
+});
 
 test('atif viewer: a late network response must not replace an imported document', async () => {
   const ctx = renderViewerPage();
@@ -419,4 +555,59 @@ test("atif viewer: importing a document clears the previous trajectory's savings
   assert.equal(ctx.driver.slots[4].value.session_id, 'imported-doc', 'the import must land');
   assert.equal(ctx.driver.slots[7].value, null,
     "an import must not keep the previous trajectory's savings");
+});
+
+test('atif viewer: snapshot association requires an exact match with the loaded Step document', async () => {
+  const ctx = renderViewerPage();
+  const loaded = { ...atifDoc('loaded'), steps: [{ step_id: 1, source: 'agent', message: 'loaded' }] };
+  const other = { ...atifDoc('other'), steps: [{ step_id: 1, source: 'agent', message: 'other' }] };
+  const request = ctx.handleLoad('session', 'loaded');
+  ctx.calls.fetchAtifBySession[0].resolve(loaded);
+  await request;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 1);
+  ctx.snapshotRequests[0].resolve(snapshotBatch(other, 'wrong-document-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined,
+    'snapshots for a different Step document must not attach to the current trajectory');
+});
+
+test('atif viewer: late snapshot batches cannot replace a newer load or attach after local import', async () => {
+  const ctx = renderViewerPage();
+  const older = { ...atifDoc('older'), steps: [{ step_id: 1, source: 'agent', message: 'older' }] };
+  const newer = { ...atifDoc('newer'), steps: [{ step_id: 1, source: 'agent', message: 'newer' }] };
+  const firstLoad = ctx.handleLoad('session', 'older');
+  ctx.calls.fetchAtifBySession[0].resolve(older);
+  await firstLoad;
+  await settle();
+  const secondLoad = ctx.handleLoad('session', 'newer');
+  assert.equal(ctx.snapshotRequests[0].signal.aborted, true);
+  ctx.calls.fetchAtifBySession[1].resolve(newer);
+  await secondLoad;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 2);
+
+  ctx.snapshotRequests[1].resolve(snapshotBatch(newer, 'newer-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'newer-snapshot');
+  ctx.snapshotRequests[0].resolve(snapshotBatch(older, 'stale-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'newer-snapshot',
+    'the batch from the superseded load must not overwrite current associations');
+
+  const pending = ctx.handleLoad('session', 'superseded-by-import');
+  const remote = { ...atifDoc('superseded-by-import'), steps: [{ step_id: 1, source: 'agent', message: 'remote' }] };
+  ctx.calls.fetchAtifBySession[2].resolve(remote);
+  await pending;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 3);
+  const local = { ...atifDoc('new-local'), steps: [{ step_id: 1, source: 'agent', message: 'new local' }] };
+  const reader = importFile(ctx.handleFileImport, 'new-local.json', JSON.stringify(local));
+  assert.equal(ctx.snapshotRequests[2].signal.aborted, true);
+  completeRead(reader, JSON.stringify(local));
+  ctx.snapshotRequests[2].resolve(snapshotBatch(remote, 'after-import-snapshot'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value.session_id, 'new-local');
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined,
+    'a late matching batch from a network load must not attach to an imported document');
 });

@@ -90,21 +90,15 @@ enum DatadirContractLookup {
     },
 }
 
-#[derive(Clone, Copy)]
-enum ContractSourcePolicy {
-    InstallOrAdopt,
-    RpmReconciliation,
-}
-
-/// Read-only result for comparing an RPM-owned contract with its state snapshot.
+/// Read-only result for comparing a distribution-owned contract with its state snapshot.
 pub(crate) struct ContractDriftInspection {
-    /// Whether the snapshot and provenance differ from the package contract.
+    /// Whether the snapshot and provenance differ from the distribution contract.
     pub(crate) drifted: bool,
     /// Non-fatal lookup or path-resolution failures.
     pub(crate) warnings: Vec<String>,
 }
 
-/// Result of refreshing a package-owned contract snapshot and its provenance.
+/// Result of refreshing a distribution-owned contract snapshot and its provenance.
 pub(crate) struct ContractRefreshOutcome {
     /// Whether publication succeeded, was unnecessary, or failed.
     state: ContractRefreshState,
@@ -125,7 +119,7 @@ impl ContractRefreshOutcome {
         match self.state {
             ContractRefreshState::Refreshed => None,
             ContractRefreshState::NotApplicable => {
-                Some("the package-owned component contract was unavailable during refresh".into())
+                Some("the distribution contract was unavailable during refresh".into())
             }
             ContractRefreshState::Failed => Some(self.warning_detail()),
         }
@@ -138,7 +132,7 @@ impl ContractRefreshOutcome {
 
     fn warning_detail(&self) -> String {
         if self.warnings.is_empty() {
-            "the package-owned component contract could not be refreshed".to_string()
+            "the distribution-owned component contract could not be refreshed".to_string()
         } else {
             self.warnings.join("; ")
         }
@@ -147,17 +141,8 @@ impl ContractRefreshOutcome {
 
 fn datadir_contract_roots(
     layout: &FsLayout,
-    policy: ContractSourcePolicy,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> Vec<PathBuf> {
-    if matches!(policy, ContractSourcePolicy::RpmReconciliation) {
-        return vec![
-            layout
-                .package_datadir()
-                .unwrap_or_else(|| layout.datadir.clone()),
-        ];
-    }
-
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(package_datadir) = layout.package_datadir() {
         roots.push(package_datadir);
@@ -176,11 +161,10 @@ fn datadir_contract_roots(
 fn lookup_datadir_contract(
     layout: &FsLayout,
     component: &str,
-    policy: ContractSourcePolicy,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> DatadirContractLookup {
     let mut searched: Vec<PathBuf> = Vec::new();
-    for datadir_root in datadir_contract_roots(layout, policy, packaged_data_probe) {
+    for datadir_root in datadir_contract_roots(layout, packaged_data_probe) {
         let source_path = FsLayout::component_contract_path(&datadir_root, component);
         match std::fs::read_to_string(&source_path) {
             Ok(content) => {
@@ -204,9 +188,9 @@ fn lookup_datadir_contract(
     DatadirContractLookup::Missing(searched)
 }
 
-/// Compare the package-owned component contract with its state snapshot.
+/// Compare the distribution-owned component contract with its state snapshot.
 ///
-/// A missing package contract is not drift because there is no authoritative
+/// A missing distribution contract is not drift because there is no authoritative
 /// content to copy. An unreadable snapshot is drift so a real reconciliation
 /// can attempt to replace it and surface any write failure.
 pub(crate) fn inspect_datadir_contract_drift(
@@ -215,12 +199,7 @@ pub(crate) fn inspect_datadir_contract_drift(
     command: &str,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ContractDriftInspection {
-    let contract = match lookup_datadir_contract(
-        layout,
-        component,
-        ContractSourcePolicy::RpmReconciliation,
-        packaged_data_probe,
-    ) {
+    let contract = match lookup_datadir_contract(layout, component, packaged_data_probe) {
         DatadirContractLookup::Found(contract) => contract,
         DatadirContractLookup::Missing(_) => {
             return ContractDriftInspection {
@@ -290,12 +269,11 @@ fn snapshot_provenance_matches(snapshot_path: &Path, expected: &ContractProvenan
 
 /// Best-effort snapshot of the datadir component contract for RPM paths.
 ///
-/// After an RPM adopt or delegated install the package-owned contract lives
-/// at `{datadir}/components/<component>/component.toml`. Real RPMs install
-/// to `%{_datadir}` (`/usr/share/anolisa/`), which may differ from the CLI
-/// install prefix (`/usr/local/share/anolisa/`). Install and adopt probe the
-/// FHS package datadir first, then packaged and layout datadirs for explicitly
-/// relocated or locally supplied contracts.
+/// ANOLISA publishes integration contracts at
+/// `{datadir}/components/<component>/component.toml`. Its RPM uses
+/// `/usr/share/anolisa/`; the source installer may use `/usr/local/share/anolisa/`.
+/// Every RPM lifecycle operation probes the FHS package datadir first, then
+/// the running CLI packaged tree and the selected installation datadir.
 ///
 /// The contract is copied verbatim (no TOML parsing) to the state snapshot
 /// at `{state_dir}/component-manifests/<component>/component.toml` so that
@@ -315,16 +293,15 @@ pub(crate) fn snapshot_datadir_contract(
         component,
         command,
         true,
-        ContractSourcePolicy::InstallOrAdopt,
         packaged_data_probe,
     )
     .warnings
 }
 
-/// Refresh an existing state snapshot when the RPM publishes a contract.
+/// Refresh a state snapshot from ANOLISA's distribution registry.
 ///
-/// Reconciliation only trusts the FHS package datadir. Unlike first-time
-/// install/adopt, an RPM without a contract is not a new warning during upgrade
+/// Uses the same scoped datadir roots as install/adopt, including a relocated
+/// CLI packaged tree. A missing contract is not a new warning during upgrade
 /// or repair because there is no authoritative snapshot to refresh.
 pub(crate) fn refresh_datadir_contract_snapshot(
     layout: &FsLayout,
@@ -337,7 +314,6 @@ pub(crate) fn refresh_datadir_contract_snapshot(
         component,
         command,
         false,
-        ContractSourcePolicy::RpmReconciliation,
         packaged_data_probe,
     )
 }
@@ -347,11 +323,10 @@ fn snapshot_datadir_contract_with_missing_policy(
     component: &str,
     command: &str,
     warn_if_missing: bool,
-    policy: ContractSourcePolicy,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ContractRefreshOutcome {
     let mut warnings: Vec<String> = Vec::new();
-    let contract = match lookup_datadir_contract(layout, component, policy, packaged_data_probe) {
+    let contract = match lookup_datadir_contract(layout, component, packaged_data_probe) {
         DatadirContractLookup::Found(contract) => contract,
         DatadirContractLookup::Missing(searched) => {
             if warn_if_missing {
@@ -360,7 +335,7 @@ fn snapshot_datadir_contract_with_missing_policy(
                     .map(|path| path.display().to_string())
                     .collect();
                 warnings.push(format!(
-                    "component '{component}' does not publish an ANOLISA component contract at {}",
+                    "ANOLISA has no integration contract for component '{component}' at {}",
                     paths.join(" or ")
                 ));
             }

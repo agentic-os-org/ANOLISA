@@ -21,11 +21,11 @@ other Provider sources or the full OS checkout. Third parties can use the public
 process protocol and YAML without Rust libraries or repository membership.
 
 The bundled Providers currently use repository-local SDK paths; Tokenless tests
-also use the sec-core bridge. Preview delivers one build set, so installation
-checks matching versions and source commits to establish common origin.
-Independent SDK publication, artifact composition and installation compatibility
-changes need their own implementation and migration tests; directory separation
-does not imply that these release changes have shipped.
+also use the sec-core bridge. Integration builds test selected framework,
+Provider and backend versions together. AW admits only protocol-declared
+Provider `package.json` bundles, with independent IDs and versions; core and
+backend software are delivered outside that API. Native installations retain
+native ownership and use explicit `transport.argv` without AW package records.
 
 Run `python3 src/aw/scripts/check.py` from the repository root. The gate audits
 all three workspaces and their combined runnable regression matrix. Keep Provider

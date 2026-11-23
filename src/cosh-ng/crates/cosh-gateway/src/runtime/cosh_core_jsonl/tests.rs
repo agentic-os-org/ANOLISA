@@ -405,8 +405,8 @@ fn checkpoint_terminal_frames_are_typed_and_hide_gateway_authority() {
         success,
         corpus["gateway_brokered_checkpoint_v4"]["checkpoint_created"]
     );
-    assert!(success.to_string().find("execution_id").is_none());
-    assert!(success.to_string().find(request_id.as_str()).is_none());
+    assert!(!success.to_string().contains("execution_id"));
+    assert!(!success.to_string().contains(request_id.as_str()));
 
     let denied = BrokeredExecutionDelivery {
         request_id: RequestId::new(),
@@ -469,7 +469,7 @@ fn checkpoint_terminal_frames_are_typed_and_hide_gateway_authority() {
         )
         .unwrap();
         assert_eq!(frame["response"]["response"], expected);
-        assert!(frame.to_string().find("execution_id").is_none());
+        assert!(!frame.to_string().contains("execution_id"));
     }
 }
 

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Pure userspace memory micro-benchmarks for SQLite storage paths.
 //!
 //! These tests do not load eBPF probes, so they can run as a normal user and

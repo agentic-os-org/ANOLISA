@@ -16,6 +16,61 @@ const REVIEW_ROUTE: &str = "/api/audit/cases/{case_id}/review";
 const REVIEW: &str = "/api/audit/cases/case-1/review";
 
 #[actix_web::test]
+async fn workspace_snapshot_routes_require_credentials_on_loopback() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/ws-ckpt/{kind}/{id}/snapshots",
+                web::head().to(|| async { HttpResponse::NoContent().finish() }),
+            )
+            .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+    )
+    .await;
+    for uri in [
+        "/api/ws-ckpt/diff",
+        "/api/ws-ckpt/restore/prepare",
+        "/api/ws-ckpt/restore/execute",
+        "/api/ws-ckpt/restore/result",
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::get()
+            .uri("/api/ws-ckpt/session/fixture/snapshots")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for (ip, expected) in [
+        (Ipv4Addr::LOCALHOST, StatusCode::NO_CONTENT),
+        (Ipv4Addr::new(192, 0, 2, 1), StatusCode::UNAUTHORIZED),
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::default()
+                .method(actix_web::http::Method::HEAD)
+                .uri("/api/ws-ckpt/session/fixture/snapshots")
+                .peer_addr(SocketAddr::new(IpAddr::V4(ip), 12345))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[actix_web::test]
 async fn containment_mutation_variants_fail_closed_without_credentials() {
     let fixture = AuthFixture::new();
     let app = awtest::init_service(
@@ -116,6 +171,88 @@ async fn storage_config_mutation_fails_closed_without_credentials() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn llm_preferences_get_fails_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let token = fixture.auth.token().unwrap_or_default().to_string();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/preferences",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/export",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/turns",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+    let llm_uris = [
+        "/api/preferences?llm=true",
+        "/%61pi/preferences?llm=true",
+        "/api/preferences?llm=%74rue",
+        "/api/preferences?%6clm=true",
+        "/api/preferences?l%6cm=true",
+        "/api/preferences?%6C%6Cm=true",
+    ];
+
+    for uri in llm_uris {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+
+    for uri in [
+        "/api/preferences",
+        "/api/preferences?llm=false",
+        "/api/preferences/export?llm=true",
+        "/api/preferences/turns?llm=true",
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+#[test]
+fn duplicate_preferences_llm_values_fail_query_parsing() {
+    for query in ["llm=false&llm=true", "llm=true&llm=false"] {
+        assert!(
+            web::Query::<crate::preferences::api::PreferencesQuery>::from_query(query).is_err(),
+            "{query}"
+        );
+    }
 }
 
 #[actix_web::test]

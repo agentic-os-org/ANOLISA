@@ -223,12 +223,15 @@ def main() -> None:
             (skill / "main.sh").write_text("echo safe\n")
             root = ResolvedSkillRoot(skill, skill, "host")
             backend = Backend()
-            with patch(
-                "agent_sec_cli.skill_ledger.config.get_config_dir",
-                return_value=directory / "config",
-            ), patch(
-                "socket.socket.connect",
-                side_effect=AssertionError("oracle cannot access network"),
+            with (
+                patch(
+                    "agent_sec_cli.skill_ledger.config.get_config_dir",
+                    return_value=directory / "config",
+                ),
+                patch(
+                    "socket.socket.connect",
+                    side_effect=AssertionError("oracle cannot access network"),
+                ),
             ):
                 for index, step in enumerate(case["steps"]):
                     try:

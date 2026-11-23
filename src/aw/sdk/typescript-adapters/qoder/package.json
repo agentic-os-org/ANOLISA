@@ -1,0 +1,32 @@
+{
+  "name": "@anolisa/aw-sdk-qoder",
+  "version": "0.2.0",
+  "description": "Optional Qoder Agent SDK public-Hook bridge for @anolisa/aw-sdk",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "linux"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "peerDependencies": {
+    "@anolisa/aw-sdk": "0.2.0"
+  },
+  "files": [
+    "dist",
+    "examples"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

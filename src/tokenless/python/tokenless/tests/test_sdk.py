@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
+import os
 import re
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from dataclasses import fields
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from anolisa_tokenless import (
     AppliedOperation,
@@ -33,6 +38,28 @@ from anolisa_tokenless import (
     TokenlessSdk,
     ToolResultStatus,
 )
+from anolisa_tokenless.sdk import _kill_process_tree
+
+SDK_LOGGER = "anolisa_tokenless.sdk"
+REQUIRES_POSIX_STUBS = unittest.skipIf(sys.platform == "win32", "uses POSIX shell stubs")
+
+
+def wait_until_gone(pid: int) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        # A killed descendant stays a zombie until PID 1 reaps it.
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            state = ""
+        if state == "Z":
+            return True
+        time.sleep(0.05)
+    return False
 
 
 class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +99,21 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def pre_tool_request(self, command: str = "grep needle file.txt") -> PreToolRequest:
+        return PreToolRequest(
+            tool_name="shell",
+            arguments={"command": command, "other": [1]},
+            command_field="command",
+            capabilities=PreToolCapabilities(replace_arguments=True, block_and_suggest=False),
+            attribution=Attribution("sdk-agent", "sdk-session", "call-7"),
+        )
+
+    def stub_launcher(self, body: str) -> Path:
+        stub = Path(self.temporary_directory.name) / "stub-tokenless"
+        stub.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        stub.chmod(0o755)
+        return stub
+
     def test_record_reduction_operation_uses_the_core_wire_value(self) -> None:
         self.assertEqual(AppliedOperation("tabular_compaction"), AppliedOperation.TABULAR_COMPACTION)
         self.assertEqual(
@@ -89,6 +131,13 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             AppliedOperation("build_log_reduction"),
             AppliedOperation.BUILD_LOG_REDUCTION,
         )
+        self.assertEqual(
+            AppliedOperation("browser_snapshot_reduction"),
+            AppliedOperation.BROWSER_SNAPSHOT_REDUCTION,
+        )
+        self.assertEqual(ContentType("browser_snapshot"), ContentType.BROWSER_SNAPSHOT)
+        with self.assertRaises(ValueError):
+            AppliedOperation("unknown_operation")
 
     async def test_before_model_compresses_schema_and_scopes_retrieve(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
@@ -198,9 +247,67 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "rtk_enabled",
                 "search_path_sharing_enabled",
                 "diff_compression_enabled",
+                "mixed_content_enabled",
                 "html_extraction_enabled",
+                "compression_enabled",
+                "browser_snapshot_enabled",
             },
         )
+
+    def test_legacy_positional_config_preserves_disabled_compression(self) -> None:
+        for mixed_enabled in (False, True):
+            with self.subTest(mixed_enabled=mixed_enabled), patch.dict(
+                os.environ,
+                {
+                    "TOKENLESS_COMPRESSION_ENABLED": "1",
+                    "TOKENLESS_HTML_EXTRACTION_ENABLED": "1",
+                    "TOKENLESS_MIXED_CONTENT_ENABLED": "1" if mixed_enabled else "0",
+                },
+            ):
+                config = TokenlessConfig(
+                    None, "tokenless_retrieve", True, True, True, False, False
+                )
+                self.assertFalse(config.compression_enabled)
+                self.assertFalse(config.html_extraction_enabled)
+                self.assertTrue(config.diff_compression_enabled)
+                self.assertEqual(config.mixed_content_enabled, mixed_enabled)
+
+    async def test_environment_controls_sdk_candidates_and_explicit_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_COMPRESSION_ENABLED": "0",
+                "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "false",
+                "TOKENLESS_DIFF_COMPRESSION_ENABLED": "yes",
+                "TOKENLESS_HTML_EXTRACTION_ENABLED": "0",
+            },
+        ):
+            sdk = self.sdk(rtk_enabled=False)
+            active = self.sdk(rtk_enabled=False, compression_enabled=True)
+        self.assertFalse(sdk.config.search_path_sharing_enabled)
+        self.assertTrue(sdk.config.diff_compression_enabled)
+        self.assertFalse(sdk.config.html_extraction_enabled)
+        content = json.dumps([{"id": i, "name": "record " * 20} for i in range(10)], indent=4)
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api_call",
+            content=content,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(
+                replace_output=True,
+                replace_with_text=True,
+                recovery=RecoveryMethod(),
+            ),
+            attribution=Attribution("test-agent", "env-session", "env-tool-call"),
+        )
+        dry_run = await sdk.post_tool(request)
+        self.assertEqual(dry_run.disposition.value, "dry_run")
+        self.assertEqual(dry_run.output, content)
+        applied = await active.post_tool(request)
+        self.assertEqual(applied.disposition.value, "applied")
+        self.assertLess(len(applied.output), len(content))
 
     def test_config_identifies_invalid_retrieve_tool_names(self) -> None:
         for name in ("", "x" * 65, "tool.name", "tool:name", "tool name", "工具"):
@@ -213,28 +320,72 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             "tenant-retrieve_2",
         )
 
-    def test_packaged_rtk_requires_a_stable_filesystem_resource(self) -> None:
+    async def test_mixed_content_environment_default_and_explicit_override(self) -> None:
+        body = json.dumps([{"id": i, "name": "record " * 20} for i in range(10)], indent=4)
+        content = f"before\n{body}\nafter\n"
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api_call",
+            content=content,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(
+                replace_output=True,
+                replace_with_text=True,
+                recovery=RecoveryMethod(),
+            ),
+            attribution=Attribution("test-agent", "mixed-session", "mixed-tool-call"),
+        )
+        for env_value, override, enabled in [
+            ("", None, False),
+            ("0", None, False),
+            ("TRUE", None, True),
+            ("yes", None, True),
+            ("1", False, False),
+            ("0", True, True),
+        ]:
+            with self.subTest(env_value=env_value, override=override):
+                options = {} if override is None else {"mixed_content_enabled": override}
+                with patch.dict(os.environ, {"TOKENLESS_MIXED_CONTENT_ENABLED": env_value}):
+                    sdk = self.sdk(rtk_enabled=False, compression_enabled=True, **options)
+                self.assertEqual(sdk.config.mixed_content_enabled, enabled)
+                result = await sdk.post_tool(request)
+                if enabled:
+                    self.assertEqual(result.disposition.value, "applied")
+                    self.assertTrue(result.output.startswith("before\n"))
+                    self.assertTrue(result.output.endswith("\nafter\n"))
+                    self.assertLess(len(result.output), len(content))
+                else:
+                    self.assertEqual(result.disposition.value, "passthrough")
+                    self.assertEqual(result.output, content)
+
+    def test_packaged_launcher_requires_a_stable_filesystem_resource(self) -> None:
         with patch("anolisa_tokenless.sdk.files") as package_files:
             package_files.return_value.joinpath.return_value = object()
             with self.assertRaisesRegex(RuntimeError, "unpacked wheel"):
                 self.sdk()
 
-    def test_packaged_rtk_uses_the_platform_executable_name(self) -> None:
+    def test_packaged_launcher_uses_the_platform_executable_name(self) -> None:
         package = Path(self.temporary_directory.name) / "package"
         (package / "_bin").mkdir(parents=True)
-        for platform, name in (("win32", "rtk.exe"), ("linux", "rtk"), ("darwin", "rtk")):
+        for platform, name in (
+            ("win32", "tokenless.exe"),
+            ("linux", "tokenless"),
+            ("darwin", "tokenless"),
+        ):
             with self.subTest(platform=platform):
                 executable = package / "_bin" / name
                 executable.touch(mode=0o755)
                 with patch("sys.platform", platform), patch(
                     "anolisa_tokenless.sdk.files", return_value=package
                 ):
-                    self.assertEqual(self.sdk()._rtk_path, executable)
+                    self.assertEqual(self.sdk()._rtk_launcher, executable)
                 executable.unlink()
 
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
         sdk = self.sdk()
-        original_arguments = {"command": "grep needle file.txt", "other": [1]}
+        original_arguments = {"command": "git status", "other": [1]}
         result = await sdk.pre_tool(
             PreToolRequest(
                 tool_name="shell",
@@ -249,8 +400,10 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.action, PreToolAction.REPLACE_ARGUMENTS)
         self.assertEqual(result.output_optimization, OutputOptimization.RTK)
-        self.assertEqual(original_arguments["command"], "grep needle file.txt")
-        self.assertIn(str(sdk._rtk_path), result.arguments["command"])
+        self.assertEqual(original_arguments["command"], "git status")
+        # The CLI names itself by its resolved path.
+        launcher = os.path.realpath(sdk._rtk_launcher)
+        self.assertIn(f"{launcher} rtk git status", result.arguments["command"])
         self.assertIn("TOKENLESS_AGENT_ID=sdk-agent", result.arguments["command"])
         self.assertIn("TOKENLESS_SESSION_ID=sdk-session", result.arguments["command"])
         self.assertIn("TOKENLESS_TOOL_USE_ID=call-7", result.arguments["command"])
@@ -258,6 +411,17 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             f"TOKENLESS_DATA_DIR={self.temporary_directory.name}",
             result.arguments["command"],
         )
+
+    async def test_pre_tool_leaves_search_commands_for_post_tool(self) -> None:
+        sdk = self.sdk()
+        for command in ("grep needle file.txt", "rg 'foo|bar' src"):
+            with self.subTest(command=command):
+                request = self.pre_tool_request(command)
+                result = await sdk.pre_tool(request)
+                self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+                self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+                self.assertEqual(request.arguments, {"command": command, "other": [1]})
+                self.assertEqual(result.arguments, request.arguments)
 
     async def test_pre_tool_leaves_build_log_commands_for_post_tool(self) -> None:
         sdk = self.sdk()
@@ -277,6 +441,148 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
         self.assertEqual(result.output_optimization, OutputOptimization.NONE)
         self.assertEqual(result.arguments, original_arguments)
+
+    @REQUIRES_POSIX_STUBS
+    async def test_pre_tool_timeout_kills_the_process_tree_and_passes_through(self) -> None:
+        sdk = self.sdk()
+        pids = Path(self.temporary_directory.name) / "pids"
+        # The background sleep keeps stdout open, as a stalled `git` would.
+        sdk._rtk_launcher = self.stub_launcher(f'sleep 60 &\necho "$! $$" > "{pids}"\nwait')
+        request = self.pre_tool_request()
+        started = time.monotonic()
+        with (
+            patch("anolisa_tokenless.sdk._PRE_TOOL_TIMEOUT_SECONDS", 1.0),
+            self.assertLogs(SDK_LOGGER, "WARNING") as logs,
+        ):
+            result = await sdk.pre_tool(request)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("exceeded", logs.output[0])
+        self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+        self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+        self.assertEqual(result.arguments, request.arguments)
+        for pid in pids.read_text(encoding="utf-8").split():
+            self.assertTrue(wait_until_gone(int(pid)), pid)
+
+    @REQUIRES_POSIX_STUBS
+    async def test_pre_tool_failures_pass_through_and_warn_once(self) -> None:
+        missing = Path(self.temporary_directory.name) / "missing"
+        action = 'result":{"arguments":{},"action":"unknown","output_optimization":"none"}'
+        for name, body, detail in (
+            ("missing launcher", None, "cannot start"),
+            ("exit status", "echo boom >&2\nexit 1", "boom"),
+            ("killed", "kill -9 $$", "exited with -9"),
+            ("not JSON", "cat >/dev/null\necho not-json", "malformed"),
+            ("no result", "cat >/dev/null\necho '{}'", "malformed"),
+            ("unknown action", f"cat >/dev/null\necho '{{\"{action}}}'", "malformed"),
+        ):
+            with self.subTest(name):
+                sdk = self.sdk()
+                sdk._rtk_launcher = missing if body is None else self.stub_launcher(body)
+                request = self.pre_tool_request()
+                with self.assertLogs(SDK_LOGGER, "WARNING") as logs:
+                    result = await sdk.pre_tool(request)
+                self.assertIn(detail, logs.output[0])
+                self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+                self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+                self.assertEqual(result.arguments, request.arguments)
+                self.assertIsNot(result.arguments, request.arguments)
+                with self.assertNoLogs(SDK_LOGGER, "WARNING"):
+                    await sdk.pre_tool(request)
+
+    async def test_pre_tool_raises_for_a_request_the_cli_cannot_decode(self) -> None:
+        request = PreToolRequest(
+            tool_name=1,  # type: ignore[arg-type]
+            arguments={"command": "grep needle file.txt"},
+            command_field="command",
+            capabilities=PreToolCapabilities(replace_arguments=True, block_and_suggest=False),
+            attribution=Attribution("sdk-agent", "sdk-session", "call-7"),
+        )
+        with self.assertRaisesRegex(ValueError, "invalid PreTool request"):
+            await self.sdk().pre_tool(request)
+
+    async def test_pre_tool_applies_a_newly_trusted_filter_on_the_next_call(self) -> None:
+        root = Path(self.temporary_directory.name)
+        project = root / "project"
+        (project / ".rtk").mkdir(parents=True)
+        (project / ".rtk" / "filters.toml").write_text(
+            'schema_version = 1\n[filters.review]\nmatch_command = "^reviewtool "\n'
+            "max_lines = 5\n",
+            encoding="utf-8",
+        )
+        sdk = self.sdk()
+        request = self.pre_tool_request("reviewtool list")
+        with (
+            contextlib.chdir(project),
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(root / "home"),
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                    "XDG_DATA_HOME": str(root / "data"),
+                },
+            ),
+        ):
+            untrusted = await sdk.pre_tool(request)
+            subprocess.run(
+                [sdk._rtk_launcher, "rtk", "trust", "--yes"], check=True, capture_output=True
+            )
+            trusted = await sdk.pre_tool(request)
+        self.assertEqual(untrusted.action, PreToolAction.PASSTHROUGH)
+        self.assertEqual(trusted.action, PreToolAction.REPLACE_ARGUMENTS)
+        self.assertIn("rtk reviewtool list", trusted.arguments["command"])
+
+    @REQUIRES_POSIX_STUBS
+    async def test_pre_tool_keeps_child_diagnostics_off_the_host_stderr(self) -> None:
+        response = '{"result":{"arguments":{"command":"x"},"action":"passthrough",'
+        response += '"output_optimization":"none"}}'
+        sdk = self.sdk()
+        sdk._rtk_launcher = self.stub_launcher(
+            f"cat >/dev/null\necho '[rtk] noise' >&2\necho '{response}'"
+        )
+        with tempfile.TemporaryFile() as captured:
+            host_stderr = os.dup(2)
+            os.dup2(captured.fileno(), 2)
+            try:
+                result = await sdk.pre_tool(self.pre_tool_request())
+            finally:
+                os.dup2(host_stderr, 2)
+                os.close(host_stderr)
+            captured.seek(0)
+            self.assertEqual(captured.read(), b"")
+        self.assertEqual(result.arguments, {"command": "x"})
+
+    def test_timeout_kills_the_windows_tree_with_taskkill(self) -> None:
+        process = Mock(pid=42)
+        with (
+            patch("sys.platform", "win32"),
+            patch("subprocess.CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch.dict(os.environ, {"SystemRoot": "C:\\Windows"}),
+            patch("subprocess.run") as run,
+        ):
+            _kill_process_tree(process)
+        command = run.call_args.args[0]
+        self.assertTrue(command[0].endswith("taskkill.exe"), command)
+        self.assertEqual(command[1:], ["/T", "/F", "/PID", "42"])
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
+        # Reader threads may still hold the pipes on Windows.
+        process.stdout.close.assert_not_called()
+
+    def test_timeout_falls_back_to_the_child_when_the_tree_kill_fails(self) -> None:
+        for platform, kill, patched in (
+            ("win32", "subprocess.run", subprocess.TimeoutExpired("taskkill", 1)),
+            ("linux", "os.killpg", PermissionError()),
+        ):
+            with self.subTest(platform):
+                process = Mock(pid=42)
+                process.wait.side_effect = subprocess.TimeoutExpired("tokenless", 1)
+                with (
+                    patch("sys.platform", platform),
+                    patch("subprocess.CREATE_NO_WINDOW", 0x08000000, create=True),
+                    patch(kill, side_effect=patched),
+                ):
+                    _kill_process_tree(process)
+                process.kill.assert_called_once()
 
     def test_post_tool_tool_kind_requires_call_identity_for_wire_strings(self) -> None:
         with self.assertRaisesRegex(ValueError, "tool_use_id"):
@@ -385,6 +691,77 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(json.loads(restored.payload), records)
 
+    async def test_pnpm_layout_compaction_preserves_dependency_rows_without_recovery(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        # Synthetic dependency list: repeated rows and removals must retain their order.
+        rows = [
+            ("+", "@types/node", "25.9.9", "26.6.6"),
+            ("+", "typescript", "5.9.3", "7.0.2"),
+            ("-", "vitest", "3.2.7", "5.1.0"),
+            ("+", "typescript", "5.9.3", "7.0.2"),
+            ("+", "esbuild", "0.28.2", None),
+        ]
+        original = "devDependencies:\n" + "".join(
+            f"{sign} {name} {version}"
+            + (f" ({available} is available)" if available else "")
+            + "\n"
+            for sign, name, version, available in rows
+        ) + "\nDone in 13.8s using pnpm v10.33.4\n"
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="shell",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.COMMAND_OUTPUT,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
+                attribution=Attribution("sdk-agent", "sdk-session", "pnpm-layout"),
+            )
+        )
+        self.assertEqual(result.disposition.value, "applied")
+        self.assertEqual(result.content_type, ContentType.BUILD_LOG)
+        self.assertEqual(result.applied_operations, (AppliedOperation.BUILD_LOG_REDUCTION,))
+        self.assertEqual(result.recoverability.value, "lossless")
+        self.assertEqual(result.stash_keys, ())
+        self.assertLess(len(result.output), len(original))
+        self.assertLess(result.after_tokens, result.before_tokens)
+        self.assertEqual(
+            result.output,
+            "devDependencies (version; available):\n" + "".join(
+                f"{sign} {name} {version}" + (f"; {available}" if available else "") + "\n"
+                for sign, name, version, available in rows
+            ) + "\nDone in 13.8s using pnpm v10.33.4\n",
+        )
+
+    async def test_post_tool_rejects_unknown_applied_operations(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="shell",
+            content="original output",
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.COMMAND_OUTPUT,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
+            attribution=Attribution("sdk-agent", "sdk-session", "unknown-operation"),
+        )
+        with patch.object(sdk, "runtime") as runtime:
+            runtime._post_tool_json.return_value = json.dumps({
+                "output": "compact",
+                "disposition": "applied",
+                "content_type": "build_log",
+                "applied_operations": ["build_log_reduction", "unknown_operation"],
+                "recoverability": "lossless",
+                "before_tokens": 20,
+                "after_tokens": 2,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            })
+            with self.assertRaisesRegex(ValueError, "unknown_operation"):
+                await sdk.post_tool(request)
+            runtime._post_tool_json.assert_called_once()
+
     async def test_search_path_sharing_exposes_the_typed_operation(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
         self.assertTrue(sdk.config.search_path_sharing_enabled)
@@ -432,19 +809,25 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.applied_operations, ())
         self.assertEqual(result.stash_keys, ())
 
-    async def test_diff_opt_in_recovers_original_and_respects_rtk_ownership(self) -> None:
+    async def test_diff_defaults_on_recovers_original_and_respects_rtk_ownership(self) -> None:
         original = (
             "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n"
             "@@ -1,12 +1,12 @@\n"
             + (" " + "context" * 20 + "\n") * 10
             + "-old\n+new\n tail\n"
         )
-        default_sdk = self.sdk(rtk_enabled=False)
-        self.assertFalse(default_sdk.config.diff_compression_enabled)
+        with patch.dict(os.environ, {"TOKENLESS_DIFF_COMPRESSION_ENABLED": ""}):
+            default_sdk = self.sdk(rtk_enabled=False)
+        self.assertTrue(default_sdk.config.diff_compression_enabled)
         self.assertTrue(default_sdk.config.html_extraction_enabled)
-        enabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=True)
+        disabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=False)
+        with patch.dict(os.environ, {"TOKENLESS_DIFF_COMPRESSION_ENABLED": "0"}):
+            env_disabled_sdk = self.sdk(rtk_enabled=False)
+            enabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=True)
         for sdk, optimization, applied in (
-            (default_sdk, OutputOptimization.NONE, False),
+            (default_sdk, OutputOptimization.NONE, True),
+            (disabled_sdk, OutputOptimization.NONE, False),
+            (env_disabled_sdk, OutputOptimization.NONE, False),
             (enabled_sdk, OutputOptimization.NONE, True),
             (enabled_sdk, OutputOptimization.RTK, False),
         ):

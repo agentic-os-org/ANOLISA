@@ -8,22 +8,22 @@ mod management;
 mod metadata;
 #[path = "packages/output.rs"]
 mod output;
-#[path = "packages/registered.rs"]
-mod registered;
 #[path = "packages/scope.rs"]
 mod scope;
 #[path = "packages/support.rs"]
 mod support;
 #[path = "packages/terminal.rs"]
 mod terminal;
+#[path = "packages/upgrade.rs"]
+mod upgrade;
 #[path = "packages/validation.rs"]
 mod validation;
 
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs,
-    os::unix::fs::MetadataExt,
-    path::Path,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     process::{Command, Output},
 };
 use support::{success, Fixture};
@@ -43,7 +43,7 @@ fn failure(output: Output) -> String {
 fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     let f = Fixture::new();
     assert!(success(f.install().output().unwrap()).contains("Installed verified packages"));
-    let receipt = f.prefix.join(".aw-packages/aw-core.json");
+    let receipt = f.prefix.join(".local-packages/installation.json");
     let original_receipt = fs::read(&receipt).unwrap();
     failure(f.install().output().unwrap());
     assert_eq!(fs::read(&receipt).unwrap(), original_receipt);
@@ -55,7 +55,9 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     assert_eq!(value["spec"]["events"], json!({}));
     assert!(!f.state.exists(), "configuration must not start a runtime");
     assert_eq!(
-        fs::read_dir(f.prefix.join(".aw-packages")).unwrap().count(),
+        fs::read_dir(f.prefix.join(".local-packages"))
+            .unwrap()
+            .count(),
         1
     );
     failure(f.init().output().unwrap());
@@ -71,7 +73,7 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
             .output()
             .unwrap(),
     );
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
     let pointer: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     assert_eq!(pointer["schema_version"], 1);
     assert_eq!(fs::read(&f.config).unwrap(), original_config);
@@ -82,116 +84,196 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     );
 }
 
+/// The documented `~/.local` core prefix combined with XDG state
+/// (`~/.local/state/aw`) is a supported layout: state is a writable
+/// sibling of the installed payloads, not one of them, so `config init`
+/// must accept it — with and without a registered Provider in the same
+/// prefix. State that would overwrite an installed payload root or the
+/// installer's registration metadata is still refused.
 #[test]
-fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command() {
-    let f = Fixture::new();
-    let bootstrap = f.bundle.join("aw");
-    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
+fn config_init_accepts_xdg_state_beside_payloads_under_the_prefix() {
+    for installed in [false, true] {
+        let f = Fixture::new();
+        let local = f.root.join("local");
+        if installed {
+            success(
+                f.command()
+                    .args(["install", "--prefix"])
+                    .arg(&local)
+                    .arg("--bundle")
+                    .arg(&f.bundle)
+                    .output()
+                    .unwrap(),
+            );
+            assert!(
+                local.join(".local-packages/installation.json").exists(),
+                "the registered-prefix case requires the installation"
+            );
+        }
+        // The XDG layout from the issue: core installed at ~/.local, config
+        // at ~/.config/aw (outside the prefix), state at ~/.local/state/aw.
+        let config = f.root.join(".config/aw/aw.yaml");
+        let state = local.join("state/aw");
+        // The gate runs under umask 0002 too; create the fixture parents
+        // with explicit safe modes so they never inherit group write.
+        for parent in [config.parent().unwrap(), state.parent().unwrap()] {
+            make_private_dir(parent);
+        }
+        success(
+            f.command()
+                .args(["config", "init", "--prefix"])
+                .arg(&local)
+                .arg("--config")
+                .arg(&config)
+                .arg("--state-dir")
+                .arg(&state)
+                .args(["--qoder", "/bin/true"])
+                .output()
+                .unwrap(),
+        );
+        assert!(config.is_file());
+        assert!(!state.exists(), "configuration must not start a runtime");
 
-    let diagnostic = failure(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--prefix"])
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert!(diagnostic.contains("--bundle"));
-    assert!(diagnostic.contains("required"));
-    assert!(!f.prefix.exists());
-    success(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--bundle"])
-            .arg(&f.bundle)
-            .arg("--prefix")
-            .arg(&f.prefix)
-            .current_dir(&f.root)
-            .output()
-            .unwrap(),
-    );
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
-    assert!(!f.prefix.join("bin/aw-package").exists());
-    assert!(!f.bundle.join("aw-package").exists());
+        // State targeting an immutable payload root, the installer's
+        // reserved registration metadata, or the installation lock is
+        // still refused.
+        for root in [
+            "bin",
+            "libexec",
+            "share",
+            ".local-packages",
+            ".aw-packages",
+            ".local-install.lock",
+        ] {
+            let target = f.root.join(format!(".config/aw/aw2-{root}.yaml"));
+            failure(
+                f.command()
+                    .args(["config", "init", "--prefix"])
+                    .arg(&local)
+                    .arg("--config")
+                    .arg(&target)
+                    .arg("--state-dir")
+                    .arg(local.join(root))
+                    .args(["--qoder", "/bin/true"])
+                    .output()
+                    .unwrap(),
+            );
+            assert!(!target.exists(), "{root}: no configuration is written");
+        }
+    }
+}
+
+/// Create a directory with 0700 so fixture parents pass the owned-parent
+/// gates under any caller umask.
+fn make_private_dir(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]
-fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
-    use aw_package::{Component, Manifest, Payload};
-    use std::collections::BTreeMap;
+fn packaged_templates_route_both_agents_without_losing_security_scans() {
+    use aw_core::admission::{preflight, AdapterCapabilities};
 
-    let f = Fixture::new();
-    success(f.install().output().unwrap());
-    let bundle = f.root.join("provider bundle");
-    let mut files = BTreeMap::new();
-    for binary in ["aw-provider-tokenless", "tokenless", "rtk"] {
-        let relative = format!("libexec/aw/providers/tokenless/{binary}");
-        let path = bundle.join("payload").join(&relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy("/bin/true", &path).unwrap();
-        files.insert(
-            relative,
-            Payload {
-                sha256: aw_package::digest(&path).unwrap(),
-                mode: 0o755,
-            },
+    for (template, qoder_steps, openclaw_steps, has_scan) in [
+        (
+            "tokenless",
+            vec!["rewrite-command"],
+            vec!["retry-command-openclaw"],
+            false,
+        ),
+        (
+            "sec-core-tokenless",
+            vec!["rewrite-command", "scan-code"],
+            vec!["scan-code", "retry-command-openclaw"],
+            true,
+        ),
+        (
+            "sec-core-tokenless-openclaw",
+            vec!["scan-code", "rewrite-command"],
+            vec!["scan-code", "rewrite-command"],
+            true,
+        ),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = root.join("aw.yaml");
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../distribution/packaging/aw/templates")
+            .join(format!("{template}.json"));
+        success(
+            Command::new(env!("CARGO_BIN_EXE_aw"))
+                .args(["config", "init", "--prefix"])
+                .arg(root.join("prefix"))
+                .arg("--config")
+                .arg(&config_path)
+                .arg("--state-dir")
+                .arg(root.join("state"))
+                .arg("--template")
+                .arg(&template_path)
+                .args([
+                    "--template-var",
+                    "PROVIDERS_DIR=/tmp/aw-providers",
+                    "--template-var",
+                    "SEC_CORE_CLI=/bin/true",
+                    "--template-var",
+                    "TOKENLESS_CLI=/bin/true",
+                    "--template-var",
+                    "SOCKET=/tmp/aw-review.sock",
+                    "--qoder",
+                    "/bin/true",
+                    "--node",
+                    "/bin/true",
+                    "--openclaw",
+                    "/bin/true",
+                ])
+                .output()
+                .unwrap(),
         );
+        let bytes = fs::read(&config_path).unwrap();
+        let config = aw_config::Validator::new().unwrap().parse(&bytes).unwrap();
+        for (target, adapter, native_name, expected) in [
+            ("qoder", "qoder", "Bash", &qoder_steps),
+            ("openclaw", "openclaw", "exec", &openclaw_steps),
+        ] {
+            let mut before_effects = vec!["observe".into(), "block".into()];
+            if adapter == "qoder" {
+                before_effects.push("replace_input".into());
+            }
+            let capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: "fixture".into(),
+                entrypoint: "fixture".into(),
+                events: BTreeMap::from([
+                    ("tool.before".into(), before_effects),
+                    (
+                        "tool.after".into(),
+                        vec!["observe".into(), "replace_result".into()],
+                    ),
+                ]),
+                failure_actions: BTreeMap::new(),
+            };
+            let steps = preflight(&config, target, &capabilities).unwrap();
+            let before: Vec<_> = steps
+                .iter()
+                .filter(|step| step.event == "tool.before")
+                .collect();
+            assert_eq!(
+                before
+                    .iter()
+                    .map(|step| step.step_id.as_str())
+                    .collect::<Vec<_>>(),
+                expected.clone(),
+                "{template}: {target}"
+            );
+            if has_scan {
+                assert!(before.iter().any(|step| step.step_id == "scan-code"
+                    && step.matches_tool(
+                        &json!({"agent":{"adapter":adapter},"tool":{"native_name":native_name}})
+                    )));
+            }
+        }
     }
-    let component = Component {
-        format: 1,
-        component: "aw-provider-tokenless".into(),
-        version: "0.1.0-preview.1".into(),
-        source_commit: "a".repeat(40),
-        os: "linux".into(),
-        arch: std::env::consts::ARCH.into(),
-        provider_protocol: "aw-provider/v1alpha1".into(),
-        requires: BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())]),
-        files,
-    };
-    fs::write(
-        bundle.join("manifest.json"),
-        serde_json::to_vec(&Manifest {
-            format: 1,
-            components: vec![component],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let bootstrap = bundle.join("aw");
-    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
-    assert!(!bundle.join("payload/bin/aw").exists());
-    success(
-        Command::new(&bootstrap)
-            .env("XDG_STATE_HOME", f.root.join("package-state"))
-            .args(["install", "--bundle"])
-            .arg(&bundle)
-            .arg("--prefix")
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(
-        fs::read_dir(f.prefix.join(".aw-packages")).unwrap().count(),
-        1
-    );
-    let installed = aw_package::database::Inventory::read(
-        &aw_package::database::DatabasePaths::user(Some(&f.root.join("package-state")), None)
-            .unwrap(),
-        Some(&f.prefix),
-    )
-    .unwrap();
-    assert_eq!(installed.installations[0].packages.len(), 2);
-    drop(installed);
-    assert!(!f.prefix.join("bin/aw-package").exists());
-    success(
-        f.command()
-            .args(["uninstall", "--yes", "--prefix"])
-            .arg(&f.prefix)
-            .output()
-            .unwrap(),
-    );
-    assert!(!f.prefix.join("bin/aw").exists());
-    assert!(!f.prefix.join("libexec/aw/providers/tokenless/rtk").exists());
 }
 
 #[test]
@@ -366,22 +448,57 @@ fn package_help_uses_the_unified_frontend_name() {
             .output()
             .unwrap(),
     );
-    assert!(output.contains("Install a local software bundle"));
-    assert!(output.contains("manifest.json or package.json"));
+    assert!(output.contains("Install a local Provider extension"));
+    assert!(output.contains("Provider bundles with package.json"));
 }
 
-/// Keep writable executable descriptors out of unrelated concurrent test forks.
-fn copy_executable(source: impl AsRef<Path>, destination: &Path) {
-    let output = support::invoke(
-        Command::new("/bin/cp")
-            .arg("--")
-            .arg(source.as_ref())
-            .arg(destination)
-            .current_dir(destination.parent().unwrap()),
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+#[test]
+fn config_init_reports_prefix_overlap_before_parent_io() {
+    for exists in [false, true] {
+        for destination in ["config-inside", "state-reserved", "outside"] {
+            let f = Fixture::new();
+            if exists {
+                fs::create_dir(&f.prefix).unwrap();
+            }
+            let config = if destination == "config-inside" {
+                f.prefix.join("aw.yaml")
+            } else {
+                f.config.clone()
+            };
+            let state = if destination == "state-reserved" {
+                f.prefix.join("bin/state")
+            } else {
+                f.state.clone()
+            };
+            let mut command = f.command();
+            command
+                .args(["config", "init", "--prefix"])
+                .arg(&f.prefix)
+                .arg("--config")
+                .arg(&config)
+                .arg("--state-dir")
+                .arg(&state)
+                .args(["--qoder", "/bin/true"]);
+            let output = support::invoke(&command);
+            if destination != "outside" {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(output.stdout.is_empty());
+                let diagnostic = String::from_utf8(output.stderr).unwrap();
+                assert!(
+                    diagnostic.contains("configuration must be outside the prefix"),
+                    "{diagnostic}"
+                );
+                assert!(!config.exists());
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(config.is_file());
+            }
+            assert_eq!(f.prefix.exists(), exists);
+            assert!(!state.exists());
+        }
+    }
 }

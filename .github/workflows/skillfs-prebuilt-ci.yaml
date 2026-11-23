@@ -55,6 +55,9 @@ jobs:
       - name: Run prebuilt action regression tests
         run: .github/actions/build-skillfs-prebuilt/test.sh
 
+      - name: Run bundled skill regression tests
+        run: python3 -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py'
+
       - name: Run component raw package tests
         run: python3 src/skillfs/tests/test_raw_packaging.py
 

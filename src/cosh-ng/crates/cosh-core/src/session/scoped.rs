@@ -113,7 +113,7 @@ impl ScopedStorage {
                         io_error("set private directory permissions", &self.path, error)
                     })?;
                 if sweep {
-                    self.sweep_stale_temporary_files(directory);
+                    self.sweep_stale_temporary_files(directory, false);
                 }
             }
             if sweep {
@@ -129,7 +129,7 @@ impl ScopedStorage {
     }
 
     /// Best-effort removal of temporary files left behind by crashed writers.
-    fn sweep_stale_temporary_files(&self, directory: &File) {
+    pub(super) fn sweep_stale_temporary_files(&self, directory: &File, managed_only: bool) {
         #[cfg(test)]
         TEMPORARY_SWEEPS.with(|count| count.set(count.get().saturating_add(1)));
         let Ok(entries) = Dir::read_from(directory) else {
@@ -142,6 +142,20 @@ impl ScopedStorage {
             if !filename.starts_with('.') || !filename.ends_with(".tmp") {
                 continue;
             }
+            if managed_only {
+                let Some((session, staging)) = filename
+                    .strip_prefix('.')
+                    .and_then(|name| name.strip_suffix(".tmp"))
+                    .and_then(|name| name.split_once('.'))
+                else {
+                    continue;
+                };
+                if ProviderSessionId::parse(session).is_err()
+                    || ProviderSessionId::parse(staging).is_err()
+                {
+                    continue;
+                }
+            }
             let Ok(descriptor) = openat(
                 directory,
                 filename,
@@ -151,6 +165,15 @@ impl ScopedStorage {
                 continue;
             };
             let file = File::from(descriptor);
+            if managed_only
+                && !file.metadata().is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && metadata.uid() == nix::unistd::geteuid().as_raw()
+                        && metadata.nlink() == 1
+                })
+            {
+                continue;
+            }
             let modified_at_ms = open_file_time_ms(&file);
             if now_ms().saturating_sub(modified_at_ms) >= STALE_TEMPORARY_FILE_MS {
                 let _ = unlinkat(directory, filename, AtFlags::empty());

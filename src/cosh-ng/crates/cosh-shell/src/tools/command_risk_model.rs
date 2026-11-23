@@ -180,6 +180,7 @@ pub const HIGH_RISK_EXPLANATION_REASONS: &[&str] = &[
     "command-substitution",
     "redirection-write",
     "awk-shell-execution",
+    "git-repo-config-execution",
 ];
 
 pub fn is_high_risk_explanation(code: &str) -> bool {

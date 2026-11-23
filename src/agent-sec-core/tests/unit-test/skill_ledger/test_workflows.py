@@ -1077,12 +1077,15 @@ class TestCertifyWorkflow(SkillDirTestCase):
             Path(self.skill_dir, "run.sh").write_text("changed after scan\n")
             return result
 
-        with patch(
-            "agent_sec_cli.skill_ledger.core.certifier._auto_invoke_scanners",
-            return_value=[fresh_scan],
-        ), patch(
-            "agent_sec_cli.skill_ledger.core.decision.scan_skill",
-            side_effect=scan_then_change_root,
+        with (
+            patch(
+                "agent_sec_cli.skill_ledger.core.certifier._auto_invoke_scanners",
+                return_value=[fresh_scan],
+            ),
+            patch(
+                "agent_sec_cli.skill_ledger.core.decision.scan_skill",
+                side_effect=scan_then_change_root,
+            ),
         ):
             with self.assertRaisesRegex(
                 SkillLedgerError,

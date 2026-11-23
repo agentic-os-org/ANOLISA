@@ -37,7 +37,7 @@ def read_sidecar(path: Path, filename: str) -> str:
     """Read a strict sha256sum sidecar for one adjacent file."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         die(f"cannot read checksum sidecar {path}: {error}")
     if len(lines) != 1:
         die(f"checksum sidecar must contain exactly one line: {path}")
@@ -134,17 +134,26 @@ def validate_directory(
     try:
         if target_os == "windows":
             with zipfile.ZipFile(archive) as package:
-                if not package.namelist() or package.testzip() is not None:
+                if (
+                    not any(not member.is_dir() for member in package.infolist())
+                    or package.testzip() is not None
+                ):
                     die(f"archive is empty or corrupt: {archive}")
         else:
             with gzip.open(archive, "rb") as compressed:
                 with tarfile.open(fileobj=compressed, mode="r:") as package:
-                    if not package.getmembers():
+                    if not any(not member.isdir() for member in package.getmembers()):
                         die(f"archive is empty: {archive}")
                 # Tar end markers can precede gzip's CRC/size trailer and later members.
                 while compressed.read(1024 * 1024):
                     pass
-    except (OSError, EOFError, zlib.error, tarfile.TarError, zipfile.BadZipFile) as error:
+    except (
+        OSError,
+        EOFError,
+        zlib.error,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+    ) as error:
         die(f"cannot read archive {archive}: {error}")
 
     sbom = Path(f"{archive}.cdx.json")
@@ -153,7 +162,7 @@ def validate_directory(
         die(f"SBOM checksum mismatch: {sbom}")
     try:
         data = json.loads(sbom.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         die(f"cannot read SBOM {sbom}: {error}")
     if not isinstance(data, dict):
         die(f"SBOM must contain a JSON object: {sbom}")
@@ -162,7 +171,9 @@ def validate_directory(
     metadata = data.get("metadata")
     component = metadata.get("component") if isinstance(metadata, dict) else None
     archive_format = "zip" if target_os == "windows" else "tar"
-    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-{archive_format}"
+    artifact_id = (
+        f"{component_name}-{version}-{target_os}-{target_arch}-{archive_format}"
+    )
     if not isinstance(metadata, dict) or not isinstance(component, dict):
         die(f"SBOM is missing metadata.component: {sbom}")
     if (
@@ -218,7 +229,9 @@ def validate_directory(
     ):
         die(f"SBOM contains invalid or duplicate dependency refs: {sbom}")
     known_refs = set(references)
-    root_dependency = next((item for item in dependencies if item["ref"] == artifact_id), None)
+    root_dependency = next(
+        (item for item in dependencies if item["ref"] == artifact_id), None
+    )
     root_targets = root_dependency.get("dependsOn") if root_dependency else None
     root_children = {
         item["bom-ref"]
@@ -284,20 +297,24 @@ def main() -> int:
     except OSError as error:
         die(f"cannot list Actions Artifact root {root}: {error}")
     actual_directories = {entry.name for entry in entries}
-    if any(not entry.is_dir() for entry in entries) or actual_directories != expected_directories:
+    if (
+        any(not entry.is_dir() for entry in entries)
+        or actual_directories != expected_directories
+    ):
         missing = sorted(expected_directories - actual_directories)
         extra = sorted(actual_directories - expected_directories)
         die(
             "unexpected Actions Artifacts; "
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
-    artifact_component = "sec-core" if args.component == "agent-sec-core" else args.component
+    artifact_component = (
+        "sec-core" if args.component == "agent-sec-core" else args.component
+    )
     for target in selected_targets:
         target_os = target["target-os"]
         target_arch = target["target-arch"]
         directory = (
-            root
-            / f"{args.component}-prebuilt-{args.version}-{target_os}-{target_arch}"
+            root / f"{args.component}-prebuilt-{args.version}-{target_os}-{target_arch}"
         )
         validate_directory(
             directory, artifact_component, args.version, target_os, target_arch

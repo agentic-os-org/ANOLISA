@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ if event["name"] == "tool.before":
 else:
     time.sleep(0.025)
 with (root / "callbacks.jsonl").open("a") as output:
-    output.write(json.dumps({"label": label, "event": event}) + "\n")
+    output.write(json.dumps({"label": label, "event": event, "worker": os.environ.get("AW_TEST_WORKER")}) + "\n")
 if label == "before-first" and mode == "hook-error":
     sys.exit(1)
 print(json.dumps(label != "before-last" and (label != "before-first" or mode == "deny")))

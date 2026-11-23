@@ -1,14 +1,19 @@
 #![forbid(unsafe_code)]
-//! AW capability schemas and side-effect-free boundary validation.
+//! AW capability/public-object schemas and side-effect-free validation.
 //!
 //! Callers authenticate authorities, capture native boundaries and persist
 //! records. Validation establishes consistency of supplied evidence, never OS
 //! ownership, scanner correctness, durable storage or remote model consumption.
 
 pub mod canonical;
+pub mod deployment;
 pub mod evidence;
+pub mod hook_plan;
+pub mod objects;
 pub mod orchestration;
 pub mod registry;
+mod session_scope;
+pub mod source;
 pub mod validation;
 
 pub use registry::Registry;

@@ -842,6 +842,11 @@ fn assert_hermes_result_identity(separate_steps: bool) {
     let outcome = hermes::collect_database(&store, &base.join("state.db"), 0).unwrap();
     assert_eq!(outcome.ingested, 1);
     let record = store.get(&stored_id(&base, SESSION_ID)).unwrap().unwrap();
+    assert_eq!(
+        record.end_time.as_deref(),
+        Some("2026-06-15T10:00:02.000Z"),
+        "terminal Hermes tool results must advance the collected end_time"
+    );
     let document: serde_json::Value = serde_json::from_str(&record.atif_json).unwrap();
     let steps = document["steps"].as_array().unwrap();
     let mut observed = std::collections::HashSet::new();

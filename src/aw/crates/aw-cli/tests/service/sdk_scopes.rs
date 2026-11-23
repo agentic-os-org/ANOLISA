@@ -1,21 +1,29 @@
-//! Private SDK CLI transport preserves task ownership and never converts failures to allow.
+//! Private SDK CLI transport preserves task ownership and classified report recovery.
 
 use super::*;
 use aw_service::Binding;
 use std::os::unix::fs::PermissionsExt;
 
 fn callback(adapter: &str, after: bool, scenario: &str, cwd: &str) -> Value {
-    let mut value = if adapter == "pi" {
-        json!({"event":if after {"tool.after"} else {"tool.before"},
+    let mut value = match adapter {
+        "pi" => json!({"event":if after {"tool.after"} else {"tool.before"},
             "invocation_id":"8a3b4e83-aaba-40d1-af1a-cf062df04113", "session_id":"session",
             "tool_call":{"id":"call","name":"bash","input":{"command":"true"}},
             "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false},
-            "scenario":scenario})
-    } else {
-        json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
+            "scenario":scenario}),
+        "claude-sdk" => json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
             "cwd":cwd,"session_id":"session","tool_use_id":"call","tool_name":"Bash",
             "tool_input":{"command":"true"},"tool_response":{"stdout":"original","stderr":"","interrupted":false,"isImage":false},
-            "scenario":scenario})
+            "scenario":scenario}),
+        "qoder-sdk" => json!({"hook_event_name":if after {"PostToolUse"} else {"PreToolUse"},
+            "cwd":cwd,"session_id":"session","tool_use_id":"call","tool_name":"Bash",
+            "tool_input":{"command":"true"},"tool_response":"original","scenario":scenario}),
+        "qwenpaw" => json!({"event":if after {"tool.after"} else {"tool.before"},
+            "session_id":"session","tool_call":{"id":"call","name":"exec",
+            "input":json!({"command":"true"}).to_string()},
+            "tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"},
+            "scenario":scenario}),
+        _ => panic!("missing SDK scope native fixture for {adapter}"),
     };
     if !after {
         value.as_object_mut().unwrap().remove("tool_response");
@@ -118,7 +126,7 @@ impl Drop for OwnedChild {
 
 #[test]
 fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         for unrelated in [false, true] {
             let fixture = Fixture::new();
             let other =
@@ -162,8 +170,11 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
                     .contains("bridge_process_mismatch"));
                 assert!(fixture.calls("invoke").is_empty());
             } else {
-                for action in ["open", "acknowledge", "invoke", "close"] {
+                for action in ["open", "acknowledge", "watch", "check", "invoke", "close"] {
                     assert_eq!(result[action], 0, "{action}: {result}");
+                }
+                for action in ["invalid", "renew", "blocked"] {
+                    assert_eq!(result[action], 1, "{action}: {result}");
                 }
                 let calls = fixture.calls("invoke");
                 assert_eq!(calls.len(), 1);
@@ -192,11 +203,49 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
 
 #[test]
 fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let task = fixture.0.join("task");
         fs::create_dir(&task).unwrap();
+        let opened = cli(
+            &binding,
+            adapter,
+            "open",
+            &json!({"pid":std::process::id(), "cwd":task, "environment":{}}),
+            false,
+        );
+        assert!(opened.status.success());
+        let activation_scope: Value = serde_json::from_slice(&opened.stdout).unwrap();
+        let mut forwarded = activation_scope.clone();
+        forwarded["pid"] = json!(std::process::id() + 1);
+        assert!(!cli(&binding, adapter, "activate", &forwarded, false)
+            .status
+            .success());
+        let activated = cli(&binding, adapter, "activate", &activation_scope, false);
+        assert!(
+            activated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&activated.stderr)
+        );
+        let activation: Value = serde_json::from_slice(&activated.stdout).unwrap();
+        assert!(
+            activation["invocations"]["invocations_per_binding"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(activation["watch"]["interval_ms"], 2000);
+        assert_eq!(
+            activation["watch"]["policy_revision"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert!(cli(&binding, adapter, "close", &activation_scope, false)
+            .status
+            .success());
         for (scenario, after) in [
             ("allow", false),
             ("block", false),
@@ -229,11 +278,27 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
                 after,
             );
             if scenario == "malformed" {
-                assert_eq!(
-                    response.status.code(),
-                    Some(1),
-                    "resident callbacks must surface report-mode failures"
-                );
+                // Audited after-report faults recover for Pi and Claude;
+                // before-tool faults stay fail-closed for every adapter.
+                if after && matches!(adapter, "pi" | "claude-sdk") {
+                    assert!(
+                        response.status.success(),
+                        "{}: {}",
+                        adapter,
+                        String::from_utf8_lossy(&response.stderr)
+                    );
+                } else {
+                    assert_eq!(
+                        response.status.code(),
+                        Some(1),
+                        "resident callbacks must surface {} failures",
+                        if after {
+                            "report-mode after-tool"
+                        } else {
+                            "before-tool"
+                        }
+                    );
+                }
             } else if scenario == "block" {
                 if adapter == "pi" {
                     assert_eq!(
@@ -306,7 +371,7 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
 
 #[test]
 fn expired_sdk_handoff_can_close_without_reviving_callbacks() {
-    for adapter in ["pi", "claude-sdk"] {
+    for adapter in ["pi", "claude-sdk", "qoder-sdk", "qwenpaw"] {
         let fixture = Fixture::new();
         let (service, parent, binding) = host(&fixture, adapter);
         let input = json!({"pid":std::process::id(), "cwd":fixture.0,
@@ -323,6 +388,9 @@ fn expired_sdk_handoff_can_close_without_reviving_callbacks() {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(!cli(&binding, adapter, "acknowledge", &scope, false)
+            .status
+            .success());
+        assert!(!cli(&binding, adapter, "activate", &scope, false)
             .status
             .success());
         for _ in 0..2 {

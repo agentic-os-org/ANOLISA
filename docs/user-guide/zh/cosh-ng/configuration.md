@@ -14,6 +14,20 @@
 
 Core 按系统 → 用户 → 项目的顺序合并配置。项目配置可以设置 Agent、Skill、会话、`active_model` 和回答语言偏好，但会忽略 `active_provider`、Provider 定义、MCP server、Hook 定义、`agent.approval_mode`、`agent.allowed_tools` 和项目审计设置。`cosh-shell` 只读取用户文件，不读取系统或项目文件。
 
+普通用户运行 Cosh 时，使用 `/config language` 等交互式 Shell 命令保存设置，
+需要由当前账号拥有配置文件或符号链接指向的目标文件。仅有组写权限无法完成保存。
+Cosh 还需要能够打开配置锁，并在目标目录中替换配置文件。
+
+如果用户配置指向共享文件或管理员所有的文件，请向管理员获取适用于当前账号的设置。
+把这些设置另存为当前账号所有的私有副本，权限设为 `0600`，再将副本放到账号可写的
+`~/.copilot-shell/` 目录中，文件名为 `config.toml`。如果原路径是符号链接，
+用副本替换链接本身，并保留共享文件。然后重新运行 `/config language` 保存偏好。
+
+ECS 免配接入（`aliyun` 且 `auth_source = "ecs_identity"`）始终使用固定模型
+`auto`，`active_model` 和 Provider 的 `model` 均不能修改；选择该接入方式不会把
+项目模型保存为用户配置。需要自选模型时，可用 `/auth` 配置其它 Provider；
+默认 ECS 免配接入不需要先运行 `/auth`。
+
 ## 最小用户配置
 
 ```toml
@@ -57,6 +71,9 @@ status_symbols = false
 ```
 
 优先使用环境变量或 `/auth`，不要把原始 secret 写入 TOML。Provider 选择见 [Providers](core/providers.md)。
+
+使用 `skills.custom_paths` 添加优先采用的共享 Skill，或使用 `skills.system_paths`
+以系统优先级添加已安装的技能集合。目录示例见 [Skills](core/skills.md#添加共享目录)。
 
 ## 审批与轮次预算
 
@@ -109,6 +126,11 @@ bash_history = false
 enabled = true
 role = "web-server"
 critical_mounts = ["/", "/var"]
+expected_writable_mounts = ["/data"]
+pressure_notices = false
+network_capacity_notices = false
+fs_event_notices = false
+host_event_notices = false
 
 [[health.services]]
 name = "nginx"
@@ -130,12 +152,47 @@ expected = "active"
 `analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
 `auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
 
+`[health]` 的提示开关默认关闭，只控制是否在登录横幅弹出对应提示，不影响
+诊断详情（`cosh doctor`）里的事实采集：
+
+- `expected_writable_mounts`（默认 `[]`）：声明期望可写的挂载点。只有这些
+  挂载点出现只读偏离时才弹提示；普通只读挂载仅进诊断详情。
+- `pressure_notices`（默认 `false`）：开启后，当前 cgroup 内存额度吃紧且同组
+  PSI 持续停顿时弹提示（J19），主机或当前组的内存/IO/CPU PSI 双窗持续偏高时
+  弹提示（J20/J21/J22）。关闭时这些事实仍可在诊断详情查看。
+- `network_capacity_notices`（默认 `false`）：开启后，conntrack 连接跟踪容量
+  接近上限时弹提示（J23）；普通 90% 水位仅进诊断详情。
+- `fs_event_notices`（默认 `false`）：控制文件系统事件提示（J24–J29：ext4
+  错误/强制只读、journal abort/flush、XFS shutdown、块 I/O）。属渐进放量，
+  默认关闭；文件系统事件的放量另需设备生命期证据，仅打开此开关并不授权
+  默认曝光。
+- `host_event_notices`（默认 `false`）：控制内核主机事件提示（J30 hung task、
+  J31 soft lockup）。同属渐进放量默认关闭；开启是逐规则试点决定，不是默认开启。
+- `[health.checks]`：按检查 ID 开关单项采集，例如 `"filesystem.mounts" = true`
+  启用全部声明挂载的卷级统计（默认只查根挂载）。
+- `[health.maintenance]`：声明维护/演练窗口，`enabled = true` 开启，
+  `reason` 写明原因，`until_epoch_seconds` 可选（Unix 秒，省略则长期有效）。
+  窗口内只抑制登录横幅的提示卡，事实采集与状态恢复照常进行；到期自动恢复。
+
+文件句柄水位（R07）、pids 任务额度（R06）、内核硬件事件/进程 segfault/网卡
+超时（E08–E10）首批仅进诊断详情，不弹提示。ext4/JBD2/XFS/块 I/O 故障链
+（E02–E05，J24–J29）与 hung task/soft lockup 的近期完整记录（J30/J31）分别
+由 `fs_event_notices` 和 `host_event_notices` 控制：两者默认关闭，未显式开启
+前不弹提示，且文件系统事件的放量另需设备生命期证据。所有提示沿用 2 小时冷却、
+恢复静默与 10 分钟复发门，登录健康路径总预算 300ms 不变。
+
 `login_identity`（默认 `true`）让交互式 Enhanced 登录 shell 拥有真实的 login
 身份：内层 bash 以登录 shell 启动（`shopt -q login_shell` == yes），像 `bash
 -l` 一样读取 `/etc/profile` 和 `~/.bash_profile`。设 `login_identity = false`
 可回退到旧的非 login 启动（`--rcfile`）。Bash 4 及以上版本在有界的真实启动能力
 探测通过时走真实 login 身份路径；Bash 3.2（包括 macOS 系统 Bash）、探测失败，或父环境导出了
-POSIX 启动无法导入的函数名时都会自动回退。zsh 不受影响。
+POSIX 启动无法导入的函数名时都会自动回退。fallback marker 仍只读取一次 login profile。
+
+Enhanced Bash login 会在 login profile 和首轮用户 `PROMPT_COMMAND` hook 执行后、
+第一个 Cosh prompt 边界前，一次性记录最终 PATH。该值只传给 Provider 子进程，不会
+修改 Cosh 进程的全局 PATH。报告缺失、格式错误、超长、身份伪造或到达过晚时，Provider
+继续使用继承 PATH。设置 `COSH_SHELL_BOOTSTRAP_PATH=0` 会同时关闭旧 PATH 探针和
+这条 Bash 启动 PATH 交接；zsh 与 Bash non-login 的其他探针行为不变。
 
 ## 登录升级提示
 
@@ -210,6 +267,7 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `COSH_SHELL_DEFAULT_SHELL`、`COSH_SHELL_ADAPTER`、`COSH_SHELL_ANALYSIS_MODE`、`COSH_SHELL_APPROVAL_MODE` | 交互式 Shell 选择 |
 | `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
 | `COSH_SHELL_LOGIN_IDENTITY` | 下一次 Enhanced 登录 shell 是否启用真实 login 身份，`on`/`off`（默认 on） |
+| `COSH_SHELL_BOOTSTRAP_PATH` | 设为 `0` 可关闭启动 PATH 探测和 Bash login PATH 交接 |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
 | `COSH_SHELL_UPGRADE_CHECK` | 登录升级提示检查；默认开启，设为 `off`、`0`、`false` 或 `no` 可禁用 |
 | `COSH_SHELL_UPGRADE_CHECK_CACHE` | 覆盖登录升级提示缓存路径（默认 `~/.copilot-shell/cosh/upgrade-check.json`） |

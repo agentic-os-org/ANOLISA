@@ -118,7 +118,8 @@ pub struct MessageTokenCount {
 pub enum AnalysisResult {
     /// Incomplete correlation reason, retained through semantic delivery.
     Abandoned(crate::aggregator::RemoveReason),
-    /// Parsed payloads and HTTP metadata without serialized body copies.
+    /// Parsed payloads and HTTP metadata; bodies are serialized only when raw
+    /// retention requires them.
     HttpContext(HttpContext),
     /// Audit record from AuditAnalyzer
     Audit(AuditRecord),
@@ -128,8 +129,6 @@ pub enum AnalysisResult {
     Message(ParsedApiMessage),
     /// Computed prompt token count (from tokenizer)
     PromptTokens(PromptTokenCount),
-    /// HTTP request/response record
-    Http(HttpRecord),
     /// Token consumption breakdown by message role
     TokenConsumption(TokenConsumptionBreakdown),
 }
@@ -145,4 +144,67 @@ pub struct HttpContext {
     pub request: Option<serde_json::Value>,
     /// Response JSON or reduced SSE event array.
     pub response: Option<serde_json::Value>,
+}
+
+impl HttpContext {
+    /// Builds an [`HttpContext`] from an HTTP record and optional parsed JSON payloads.
+    pub fn new(
+        retain_raw: bool,
+        http: HttpRecord,
+        request: Option<serde_json::Value>,
+        response: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            retain_raw,
+            http,
+            request,
+            response,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpContext, HttpRecord};
+    use serde_json::json;
+
+    fn sample_http_record() -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1_000,
+            pid: 42,
+            comm: "agent".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: Some("{\"model\":\"claude\"}".to_string()),
+            response_headers: "{}".to_string(),
+            response_body: Some("{\"id\":\"msg_1\"}".to_string()),
+            duration_ns: 500,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    #[test]
+    fn http_context_new_matches_public_field_construction() {
+        let via_new = HttpContext::new(
+            true,
+            sample_http_record(),
+            Some(json!({"model": "claude"})),
+            Some(json!({"id": "msg_1"})),
+        );
+        let via_literal = HttpContext {
+            retain_raw: true,
+            http: sample_http_record(),
+            request: Some(json!({"model": "claude"})),
+            response: Some(json!({"id": "msg_1"})),
+        };
+
+        assert_eq!(via_new.retain_raw, via_literal.retain_raw);
+        assert_eq!(via_new.http.path, via_literal.http.path);
+        assert_eq!(via_new.request, via_literal.request);
+        assert_eq!(via_new.response, via_literal.response);
+    }
 }

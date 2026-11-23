@@ -42,6 +42,37 @@ substate of Enhanced, not a conversion to hook-free Native integration: OSC
 markers remain installed so Cosh can prove prompt ownership and switch back
 safely.
 
+## Bash Login Startup PATH Handoff
+
+An Enhanced Bash login sources its login profile in the managed shell, without a
+separate login PATH probe. After the first user `PROMPT_COMMAND` hook and before
+the first Cosh prompt boundary, the marker emits one internal OSC event:
+
+```json
+{"event":"startup_environment","token":"...","session_id":"...","path":"..."}
+```
+
+The host accepts only the first valid report whose marker token and session ID
+match. PATH is limited to 8 KiB, rejects control characters, and is normalized
+to unique absolute entries. A valid value is stored once and applied only to
+provider/Core child processes; it never changes the shell process's global
+PATH. Startup auth waits for this decision so it uses the same child PATH.
+
+The gate closes at the first prompt. Missing, malformed, oversized, forged, or
+late reports leave provider processes on their inherited PATH and never replay
+the profile. `shell.login_identity = false` keeps the marker-based login-profile
+fallback and reports its resulting PATH under the same contract. Setting
+`COSH_SHELL_BOOTSTRAP_PATH=0` disables both legacy PATH probes and this handoff.
+Native integration is unchanged; Bash non-login and zsh retain their existing
+probe behavior.
+
+For the default Linux installation's admitted absolute ELF Core and Gateway
+CLI paths, the Shell holds an open file descriptor for its session lifetime.
+Delayed launches still use the admitted ELF after an atomic package-path
+replacement, preserving the original `argv[0]`. Relative PATH lookup and
+explicitly configured non-ELF external scripts keep their existing behavior.
+This guarantee does not pin the Gateway daemon's later workers across upgrades.
+
 ## Input Ownership and Visible State
 
 Symbols primarily describe who owns editable input before Enter, not output
@@ -80,6 +111,11 @@ Bash's existing private-history submission guard still inserts one leading
 blank when accepting a cursor-edited draft whose mirror cannot prove it is
 non-secret. This is an accept-line display change, separate from editable
 geometry; argument bytes and the privacy guard remain intact.
+
+A Ctrl-X binding outside pasted text can accept a line without an observable
+Enter. Enhanced Bash therefore hands input back to Bash until the next real
+primary-prompt marker; the same conservative boundary applies to Ctrl-X Ctrl-R
+configuration reloads. No private guard is injected into an unproven PS2 reader.
 
 At an empty Enhanced main prompt, `Shift+Tab` switches to Shell-only and
 disables Cosh input interception (publishing a `◌` status line when status

@@ -1,10 +1,11 @@
 //! Correlate per-step native callbacks without extending or replaying an event.
 
-use super::{event_metadata, Job, Runtime};
+use super::{facts::event_metadata, Job, Runtime};
 use crate::{rejected, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, MutexGuard, TryLockError,
@@ -16,10 +17,20 @@ use std::{
 const MAX_HOOK_EVENTS: usize = 1024;
 
 pub(super) struct Lease {
+    lifecycle_key: Option<String>,
     digest: [u8; 32],
     handle: Option<Value>,
     completion_digest: Option<[u8; 32]>,
     cancelled: Arc<AtomicBool>,
+    closed: bool,
+}
+
+fn at_claim_limit(leases: &BTreeMap<String, Lease>, lifecycle: bool) -> bool {
+    leases
+        .values()
+        .filter(|lease| lease.lifecycle_key.is_some() == lifecycle)
+        .count()
+        >= MAX_HOOK_EVENTS
 }
 
 pub(super) fn correlation(event: &str, session: &str, call: &str) -> Result<String> {
@@ -53,7 +64,93 @@ pub(super) fn lock_until<'a, T>(
     }
 }
 
+pub(super) fn callback_id(event: &Value) -> Result<String> {
+    let identity = match event["name"].as_str() {
+        Some("session.start" | "session.end") => &event["session_id"],
+        Some("input.submit" | "turn.stop") => &event["turn_id"],
+        _ => &event["tool"]["call_id"],
+    }
+    .as_str()
+    .filter(|id| !id.is_empty() && id.len() <= 512)
+    .ok_or_else(|| rejected("native_correlation_missing"))?;
+    match event["name"].as_str() {
+        Some("session.start" | "session.end") => {
+            return correlation(
+                "session.epoch",
+                identity,
+                event["native"]["session_epoch"].as_str().unwrap_or(""),
+            )
+        }
+        Some("turn.stop") => {
+            if let Some(delivery) = event["native"]["delivery_id"].as_str() {
+                // A native delivery identifier stays stable across SDK turn boundaries.
+                return correlation("turn.stop.delivery", "", delivery);
+            }
+            return correlation(
+                "turn.stop.attempt",
+                identity,
+                event["native"]["attempt_id"].as_str().unwrap_or(""),
+            );
+        }
+        _ => {}
+    }
+    Ok(identity.to_owned())
+}
+
+pub(super) fn event_correlation(event: &Value) -> Result<String> {
+    correlation(
+        event["name"]
+            .as_str()
+            .ok_or_else(|| rejected("event_invalid"))?,
+        event["session_id"]
+            .as_str()
+            .ok_or_else(|| rejected("native_correlation_missing"))?,
+        &callback_id(event)?,
+    )
+}
+
 impl Runtime {
+    pub(super) fn event_sender(
+        &self,
+        key: &str,
+        instance: &str,
+    ) -> Result<(mpsc::SyncSender<Job>, Arc<AtomicBool>)> {
+        let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+        let entry = events
+            .get(key)
+            .filter(|entry| entry.instance_id == instance)
+            .ok_or_else(|| rejected("unknown_event"))?;
+        Ok((entry.sender.clone(), Arc::clone(&entry.cancelled)))
+    }
+
+    pub(super) fn remove_live_event(&self, key: &str, cancelled: &Arc<AtomicBool>) {
+        if let Ok(mut events) = self.events.lock() {
+            if events
+                .get(key)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.cancelled, cancelled))
+            {
+                events.remove(key);
+            }
+        }
+    }
+
+    fn retire_lifecycle_leases(&self, leases: &mut BTreeMap<String, Lease>) -> Result<()> {
+        // Only live workers and undelivered deadline replies need their in-memory
+        // lease. The generation-scoped journal reservation fences terminal replay.
+        let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+        let expired = self
+            .expired
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?;
+        leases.retain(|_, lease| {
+            lease
+                .lifecycle_key
+                .as_ref()
+                .is_none_or(|key| events.contains_key(key) || expired.contains_key(key))
+        });
+        Ok(())
+    }
+
     pub(super) fn close_hook(
         &self,
         instance_id: &str,
@@ -62,7 +159,15 @@ impl Runtime {
         call: &str,
         deadline: Instant,
     ) -> Result<Value> {
-        if !matches!(event, "tool.before" | "tool.after") || session.is_empty() || call.is_empty() {
+        let lifecycle = aw_adapter::callback::lifecycle(event);
+        if !(lifecycle
+            || matches!(
+                event,
+                "input.submit" | "tool.before" | "tool.after" | "security.violation"
+            ))
+            || session.is_empty()
+            || call.is_empty()
+        {
             return Err(rejected("native_correlation_missing"));
         }
         let (hooks, invocations) = {
@@ -82,47 +187,109 @@ impl Runtime {
         // Keep the ledger guard until the cancellation claim is installed. A
         // concurrent retirement must not allow a late close to recreate state.
         let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
-        if let Some(ledger) = state.ledger.as_ref() {
-            ledger.check_close(session, call)?;
+        let managed = if lifecycle {
+            false
+        } else if event == "input.submit" {
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.claim(session, call, true, MAX_HOOK_EVENTS)?;
+                true
+            } else {
+                state.legacy_submissions = true;
+                false
+            }
         } else {
-            state.legacy_used = true;
+            state.ledger.is_some()
+        };
+        if !lifecycle && event != "input.submit" {
+            if let Some(ledger) = state.ledger.as_ref() {
+                ledger.check_close(session, call)?;
+            } else {
+                state.legacy_used = true;
+            }
         }
         let key = correlation(event, session, call)?;
-        let cancelled = {
+        let lifecycle_key = lifecycle
+            .then(|| self.lifecycle_key(instance_id, &key))
+            .transpose()?;
+        let (cancelled, deferred_only) = {
             // The worker shares this flag even before its handle is ready.
             let mut hooks = lock_until(&hooks, deadline, "event_open_timeout")?;
-            if state.ledger.is_none() && !hooks.contains_key(&key) && hooks.len() >= MAX_HOOK_EVENTS
+            if !lifecycle && !managed && !hooks.contains_key(&key) && at_claim_limit(&hooks, false)
             {
                 return Err(rejected("native_event_limit"));
             }
-            let lease = hooks.entry(key).or_insert(Lease {
-                digest: [0; 32],
-                handle: None,
-                completion_digest: None,
-                cancelled: Arc::new(AtomicBool::new(true)),
-            });
-            lease.cancelled.store(true, Ordering::Release);
-            Arc::clone(&lease.cancelled)
+            // A durable lifecycle receipt also fences close-before-open.
+            let lease = if let Some(receipt) = &lifecycle_key {
+                let Some(lease) = hooks.get_mut(&key) else {
+                    self.close_lifecycle_receipt(instance_id, receipt)?;
+                    return Ok(json!({"closed": true}));
+                };
+                lease
+            } else {
+                hooks.entry(key).or_insert(Lease {
+                    lifecycle_key: None,
+                    digest: [0; 32],
+                    handle: None,
+                    completion_digest: None,
+                    cancelled: Arc::new(AtomicBool::new(true)),
+                    closed: true,
+                })
+            };
+            let deferred_only = {
+                // A settled callback may have an independent shadow reservation.
+                let _events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                let shadow = self.shadow.lock().map_err(|_| rejected("state_poisoned"))?;
+                let reserved = shadow.as_ref().is_some_and(|event| {
+                    lease
+                        .handle
+                        .as_ref()
+                        .is_some_and(|handle| handle["event_id"] == event.key)
+                });
+                if !reserved {
+                    lease.cancelled.store(true, Ordering::Release);
+                }
+                reserved
+            };
+            lease.closed = true;
+            if let Some(receipt) = &lifecycle_key {
+                self.close_lifecycle_receipt(instance_id, receipt)?;
+            }
+            (Arc::clone(&lease.cancelled), deferred_only)
         };
         drop(state);
-        loop {
-            {
-                let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
-                if !events
-                    .values()
-                    .any(|entry| Arc::ptr_eq(&entry.cancelled, &cancelled))
+        // Lifecycle close also acknowledges the durable terminal receipt.
+        if lifecycle || !deferred_only {
+            loop {
                 {
-                    break;
+                    let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                    if !events
+                        .values()
+                        .any(|entry| Arc::ptr_eq(&entry.cancelled, &cancelled))
+                    {
+                        break;
+                    }
                 }
+                if Instant::now() >= deadline {
+                    return Err(rejected("event_close_timeout"));
+                }
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(5)),
+                );
             }
-            if Instant::now() >= deadline {
-                return Err(rejected("event_close_timeout"));
+        }
+        self.expired
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .retain(|_, entry| !Arc::ptr_eq(&entry.cancelled, &cancelled));
+        if event == "input.submit" && managed {
+            let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
+            let mut hooks = hooks.lock().map_err(|_| rejected("state_poisoned"))?;
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.retire(call);
             }
-            thread::sleep(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(5)),
-            );
+            hooks.remove(&correlation(event, session, call)?);
         }
         Ok(json!({"closed": true}))
     }
@@ -170,7 +337,7 @@ impl Runtime {
                     entry.cancelled.store(true, Ordering::Release);
                     active = true;
                 }
-                active
+                self.cancel_shadow(|owner| owner == instance_id)? || active
             };
             let preparing = match update.try_lock() {
                 Ok(_) => false,
@@ -180,6 +347,10 @@ impl Runtime {
             if !active && !preparing && self.finish_observation(instance_id)? {
                 self.release_source_sessions(instance_id)?;
                 let observation = self.observation_metadata(instance_id)?;
+                self.expired
+                    .lock()
+                    .map_err(|_| rejected("state_poisoned"))?
+                    .retain(|_, entry| entry.instance_id != instance_id);
                 self.instances
                     .lock()
                     .map_err(|_| rejected("state_poisoned"))?
@@ -211,17 +382,19 @@ impl Runtime {
         native_input: Vec<u8>,
         deadline: Instant,
     ) -> Result<Value> {
-        event_metadata(&value)?;
+        let lifecycle = value["name"]
+            .as_str()
+            .is_some_and(aw_adapter::callback::lifecycle);
+        if !lifecycle {
+            event_metadata(&value)?;
+        }
         let session = value["session_id"]
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| rejected("native_correlation_missing"))?
             .to_owned();
-        let call = value["tool"]["call_id"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| rejected("native_correlation_missing"))?
-            .to_owned();
+        let submit = value["name"] == "input.submit";
+        let call = callback_id(&value)?;
         let (hooks, hook_open, invocations, replacement_after) = {
             let instances = self
                 .instances
@@ -232,6 +405,10 @@ impl Runtime {
                 .and_then(Option::as_ref)
                 .filter(|instance| !instance.closing)
                 .ok_or_else(|| rejected("unknown_instance"))?;
+            self.event_execution(instance, &instance_id, &value)?;
+            if lifecycle {
+                super::lifecycle::verify(instance, &instance_id, &value, &native_input)?;
+            }
             (
                 Arc::clone(&instance.hooks),
                 Arc::clone(&instance.hook_open),
@@ -267,6 +444,9 @@ impl Runtime {
             &session,
             &call,
         )?;
+        let lifecycle_key = lifecycle
+            .then(|| self.lifecycle_key(&instance_id, &correlation))
+            .transpose()?;
         let mut digest = Sha256::new();
         digest.update((encoded.len() as u64).to_be_bytes());
         digest.update(encoded);
@@ -276,17 +456,40 @@ impl Runtime {
         let _opening = lock_until(&hook_open, deadline, "event_open_timeout")?;
         // Select a protocol under the same guard as EnableInvocations.
         let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
-        let managed = if let Some(ledger) = state.ledger.as_mut() {
+        let managed = if lifecycle {
+            false
+        } else if submit {
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.claim(&session, &call, false, MAX_HOOK_EVENTS)?;
+                true
+            } else {
+                state.legacy_submissions = true;
+                false
+            }
+        } else if let Some(ledger) = state.ledger.as_mut() {
             ledger.check(&value)?;
             true
         } else {
             state.legacy_used = true;
             false
         };
-        drop(state);
+        let state = if submit && managed {
+            Some(state)
+        } else {
+            drop(state);
+            None
+        };
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
+        if lifecycle {
+            self.retire_lifecycle_leases(&mut leases)?;
+        }
         if let Some(lease) = leases.get_mut(&correlation) {
-            if lease.cancelled.load(Ordering::Acquire) {
+            if lease.closed || lease.cancelled.load(Ordering::Acquire) {
+                if let Some(key) = lease.lifecycle_key.as_deref() {
+                    if super::lifecycle::replays_stop(&value) {
+                        return self.reopen_stop(key, &value);
+                    }
+                }
                 return Err(rejected("native_event_closed"));
             }
             if lease.digest != digest {
@@ -331,7 +534,7 @@ impl Runtime {
         if observed {
             return Err(rejected("native_completion_without_replacement"));
         }
-        if !managed && leases.len() >= MAX_HOOK_EVENTS {
+        if !managed && at_claim_limit(&leases, lifecycle) {
             return Err(rejected("native_event_limit"));
         }
         // Retain failed opens too: retrying must not create a fresh event budget.
@@ -339,20 +542,30 @@ impl Runtime {
         leases.insert(
             correlation.clone(),
             Lease {
+                lifecycle_key,
                 digest,
                 handle: None,
                 completion_digest: None,
                 cancelled: Arc::clone(&cancelled),
+                closed: false,
             },
         );
         // Initialization may wait on durable storage. Keep cancellation writable.
         drop(leases);
-        let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
+        drop(state);
+        let handle = self.open(
+            instance_id,
+            value,
+            Some(native_input),
+            None,
+            deadline,
+            cancelled,
+        )?;
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         let lease = leases
             .get_mut(&correlation)
             .ok_or_else(|| rejected("native_event_closed"))?;
-        if lease.cancelled.load(Ordering::Acquire) {
+        if lease.closed || lease.cancelled.load(Ordering::Acquire) {
             return Err(rejected("native_event_closed"));
         }
         lease.handle = Some(handle.clone());
@@ -362,3 +575,6 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod submission_tests;

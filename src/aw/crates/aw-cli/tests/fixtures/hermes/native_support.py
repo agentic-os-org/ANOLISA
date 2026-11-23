@@ -1,6 +1,7 @@
 """Owned Hermes profile, dispatcher and callback fixtures."""
 
 from __future__ import annotations
+from contextvars import ContextVar
 import importlib.util
 import json
 import os
@@ -56,11 +57,14 @@ class NativeFixture(unittest.TestCase):
         spec.loader.exec_module(self.plugin)
 
     def launch(self, steps: list[tuple[str, str]]) -> Path:
+        from hermes_cli.version_info import get_version_info
+
         launch = self.root / "launch.json"
         launch.write_text(
             json.dumps(
                 {
                     "schema": "aw-hermes/v1alpha1",
+                    "revision": get_version_info().commit,
                     "profile": str(self.home),
                     "cwd": str(Path.cwd()),
                     "binary": str(self.command),
@@ -78,6 +82,7 @@ class NativeFixture(unittest.TestCase):
         os.environ["AW_HERMES_LAUNCH"] = str(launch)
         session = ModuleType("_aw_hermes_session")
         session.launch_path = str(launch)
+        session.rewritten_input = ContextVar("aw_test_rewritten_input", default=None)
         sys.modules[session.__name__] = session
         return launch
 

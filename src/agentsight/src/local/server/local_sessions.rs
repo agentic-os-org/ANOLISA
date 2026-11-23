@@ -148,14 +148,22 @@ fn is_safe_session_path(path: &str) -> bool {
 }
 
 /// Session roots whose files the local viewer may open, relative to `home`.
-const KNOWN_SESSION_ROOTS: [&str; 6] = [
+const KNOWN_SESSION_ROOTS: [&str; 7] = [
     ".claude/projects",
     ".qoder/projects",
     ".qoderwork/projects",
     ".codex/sessions",
     ".codex/archived_sessions",
     ".cursor/projects",
+    ".gemini/tmp",
 ];
+
+#[cfg(test)]
+#[path = "local_sessions/cline_tests.rs"]
+mod cline_tests;
+#[cfg(test)]
+#[path = "local_sessions/gemini_tests.rs"]
+mod gemini_tests;
 
 /// Whether a canonicalized path belongs to one of the known session roots.
 ///
@@ -164,11 +172,19 @@ const KNOWN_SESSION_ROOTS: [&str; 6] = [
 /// session in it was answered with 400. Canonicalize the root too, falling back
 /// to the literal path when it does not exist yet.
 fn is_under_known_session_root(canonical: &std::path::Path, home: &std::path::Path) -> bool {
-    KNOWN_SESSION_ROOTS.iter().any(|root| {
-        let base = home.join(root);
-        let base = base.canonicalize().unwrap_or(base);
-        canonical.starts_with(&base)
-    })
+    KNOWN_SESSION_ROOTS
+        .iter()
+        .copied()
+        .chain(
+            agentsight_trajectory_collector::cline::TASKS_ROOTS
+                .iter()
+                .copied(),
+        )
+        .any(|root| {
+            let base = home.join(root);
+            let base = base.canonicalize().unwrap_or(base);
+            canonical.starts_with(&base)
+        })
 }
 
 #[cfg(test)]

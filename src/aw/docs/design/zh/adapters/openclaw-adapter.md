@@ -2,9 +2,10 @@
 
 [English](../../en/adapters/openclaw-adapter.md)
 
-适配器以新的前台 Gateway 启动 OpenClaw 2026.9.6，将 AW 步骤注册到
+适配器以新的前台 Gateway 启动 OpenClaw，将 AW 步骤注册到
 `before_tool_call` 和 `after_tool_call`。同一份 `aw.yaml` 选择 Provider 和工具事件策略；
-模型配置、凭据、原生插件及会话状态仍由 OpenClaw 管理。
+模型配置、凭据、原生插件及会话状态仍由 OpenClaw 管理。已验证基线为 2026.9.6，
+其他版本需保留原生插件与 Gateway 生命周期接口。
 
 ## 启动与进程归属
 
@@ -15,7 +16,7 @@ aw run --config aw.yaml --agent openclaw \
 ```
 
 Agent 的 `argv` 必须选择 `openclaw gateway run`，也支持 Node 可执行文件后接官方
-`openclaw.mjs` 入口。适配器先核实 OpenClaw 版本，再把此次启动接入服务。
+`openclaw.mjs` 入口。适配器先记录 OpenClaw 版本，再把此次启动接入服务。
 `--force`、重置和切换 profile 的选项会被拒绝。AW 不接管已有 Gateway，也不会为了
 获取端口而停止已有进程。
 
@@ -47,6 +48,10 @@ JSON，不含 `$include`，并设置 `gateway.mode: local`；适配器不解析 
 OpenClaw 向每个 before 回调提供原始参数的副本。已有插件返回的参数修改由 OpenClaw
 合并，不会作为新事件快照逐步传给后续 AW 步骤。AW 保留这一原生行为，不声称检查
 已经覆盖所有插件最后修改的参数。
+
+先前的 `requireApproval` 结果可能冻结参数并丢弃 AW 后续的替换。因此当前版本的
+before 效果只准入 `observe` 和 `block`；Tokenless PreTool 使用阻断并建议重试。
+PostTool 结果替换仍可使用。
 
 回调携带原始 `{hook, event, context}` JSON。结构化 Provider 收到归一化事件及原生
 载荷。`sessionId`、`runId` 和 `toolCallId` 为必需字段。AW 使用 run 与 tool-call 标识

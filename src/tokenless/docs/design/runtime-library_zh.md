@@ -4,9 +4,9 @@
 
 ## 目标
 
-`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
-出现在 `PATH` 中。
+`anolisa-tokenless` 是框架无关的 Tokenless SDK。BeforeModel、PostTool 和 Retrieve 通过
+PyO3 Runtime 在进程内运行；PreTool 在子进程中运行，详见下文。平台 Wheel 同时包含 PyO3 Runtime
+和匹配的 `tokenless` 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk` 出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 
@@ -21,18 +21,62 @@ Tool Ready 在产品范围内硬关闭，不属于该 API。
 
 ## 协议与状态
 
+Python Hook 的宿主协议规则放在各自的
+`adapters/tokenless/<host>/hook_adapter.py`：输入解析、能力检查和返回信封由该宿主负责。
+例如 Cosh-NG 将 Shell 替换结果序列化为文本，Claude Code 保留结构化字段，千问办公将单流
+Shell 的 `stdout` 替换为文本并保留非 Shell 的结构化 MCP 字段，
+Qoder 保留原生 Bash 的 stdout 对象。`common/hooks` 负责 Protocol v2 通信、归一化结果的
+通用转换和生命周期状态。原有命令文件保留为启动入口，宿主选择位于
+`adapters/tokenless/hook_dispatch.py`。Cosh 扩展随包携带自己的适配器，独立复制的千问办公
+插件加载自身目录中的适配器和公共运行库。OpenClaw、DSH、Hermes 及 Python SDK 集成
+继续使用各自现有的宿主入口。压缩器选择和压缩结果的接受策略仍由 Core 负责。
+
 Adapter 把框架对象转换为四组不可变 Request/Response：`BeforeModelRequest`、
 `PreToolRequest`、`PostToolRequest` 和 `RetrieveRequest`。`Attribution` 要求 Agent 和
 Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。工具 Schema 统一为
 OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
+CLI Envelope 保持 Protocol v2。BuildLog 布局压紧与进度缩减共用现有
+`AppliedOperation::BuildLogReduction` / `build_log_reduction`，无需 Wire 升版或新增 SDK 枚举。
+PyO3 调用不经过 Envelope，沿用 `AppliedOperation.BUILD_LOG_REDUCTION`。
+恢复等级仍由独立结果字段表示：仅布局为语义 `lossless`，包含进度省略时为 `retrievable`。
+
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
-候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
-提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
-携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
+候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。RTK 链接在 `tokenless`
+可执行文件中；Adapter 提供 `command_field` 时，`TokenlessSdk.pre_tool` 每次调用都启动
+`tokenless compress`，因为 RTK 假定一条命令对应一个进程：它在进程生命周期内缓存已信任的过滤规则和
+项目文件，并可能无时限地等待 `git rev-parse`。因此每次调用都能看到最新的 RTK 状态。SDK 给子进程
+5 秒时限，超时后杀掉其进程组（Windows 上用 `taskkill /T`），任何失败都记录警告并放行原命令。每个
+改写后的 wrapper 都以 `tokenless rtk` 形式调用 Wheel 内置的 `tokenless`，并携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
 Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
 执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
 HTML 页面因此保持原样，输出中的数据仍照常压缩。
+
+PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，保留已识别的原生
+`head`、`tail` 调用，支持嵌套和 Shell 换行续行。所有参数形式均保持原生执行，包括字节
+窗口和持续跟踪模式。一旦识别到此类调用，其所在的整条 Pipeline 或复合命令都跳过 RTK
+改写。这避免了 RTK `read --max-lines` 路径的结构截断；显式 RTK 调用保持既有行为。
+不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
+该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
+
+同一原生命令识别覆盖 `grep`、`rg` 的所有模式；`git grep`、`xargs grep` 和自定义 Wrapper
+前缀不在此识别范围。PostTool 复用该解析器识别 `command_output` 来源的搜索，
+与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。统一入口识别带路径和行号的
+匹配记录及纯路径列表，格式识别和收益判断都保留在压缩器内部。关闭搜索压缩或没有候选时
+原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只替换
+字符串 `stdout`，即使它较短、为空或 `stderr` 更长。`stdout` 缺失或不是字符串时禁用替换；
+错误诊断仍可读取 `stderr`。回填结果时保留其他所有字段。
+
+此保护覆盖包含已识别搜索的复合命令的完整输出。例如，`grep -q needle Cargo.toml && cargo build`
+也会保留完整构建日志，因为 Hook 不提供各子命令的输出边界。在能保证搜索匹配完整的混合输出
+分块处理实现之前，这会有意降低既有构建/测试日志及其他领域的压缩覆盖率。
+`rg -l TODO src | xargs cat` 等 Pipeline 也保留输出，尽管最终内容是文件正文而非路径列表。
+Tokenless 不增加截断回退，宿主自身的输出限制仍然有效。`max_input_bytes` 限制压缩工作量，
+超限时原样返回，不限制返回文本体积。
+
+搜索压缩器开启但没有候选时，使用公共仲裁的 `no_savings`；连接持久化 Store 时，Stash
+计数为零。关闭搜索压缩或命中生命周期门槛时仍为透传。API 和文件读取结果上的 `command`
+元数据不会开启 Shell 搜索保护；精确工具名 `Grep` 保留其原生搜索契约。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -40,19 +84,30 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-千问办公的 Hook Adapter 在两个生命周期请求之前，将两个工作区 Shell MCP 名称统一为
-`Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
-确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
-及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
-模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
+macOS 千问办公注册 PostToolUse 和仅用于恢复的 PreToolUse。PostTool 将识别到的工作区
+Shell MCP 名称统一为 `Bash`。
+仅解包恰好一个普通文本块，未知块数组直接透传。原生 Bash 仅将单流 `stdout` 替换进宿主
+文本槽，对多流、失败或未知 Shell 包装保持透传，并按最终交付文本核验净节省。
 
-非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
+PostTool 使用配置的 Tokenless 数据目录，可以调用插件自带的二进制。macOS 上，PreTool 为独立的
+恢复命令提供插件自带的可执行文件和相同的数据目录，其他命令保持透传。此路径不可用时，
+工作区 Shell 和使用插件私有 CLI 的环境不声明恢复能力。使用独立安装 CLI 的原生 Shell 可以
+通过 `PATH` 恢复。恢复命令以只读方式打开已有的 Stash。写入端保留 SQLite WAL 辅助文件供
+只读恢复使用，并清理过期记录。
+
+非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
 OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 middleware，在模型消费前
-调用 PostTool。Adapter 保留结果信封，只处理单文本结果，声明 `recovery.kind = none`，
-并保留逐调用 RTK 归属信息。不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
+调用 PostTool。Adapter 保留结果信封，只处理单文本结果，并保留逐调用 RTK 归属信息。
+静态 `tokenless_retrieve` 工具的工厂收到会话 UUID 后才声明工具恢复能力。Adapter 从
+提交 prompt 时的 `llm_input` 重建可见 Marker 集合；历史没有恢复指令时跳过 Core，并加入
+刚交付的 Stash Key。`after_compaction` 不提供消息内容，因此撤销此前授权，直到下次提交
+prompt 时取得保留的历史。会话结束时清空状态。工具执行时向 Core Retrieve 提供该会话的
+Marker 集合，取回内容绕过 PostTool。
+缺少工具 API 或 UUID 时仅接受无损压缩；RTK 输出在回执查询前仍声明 `recovery.kind = none`。
+不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
 失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
 旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
 额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
@@ -71,11 +126,40 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 原生输入进入 middleware，并无损交付 JSON 候选。此测试验证传输行为，不验证模型
 回答质量或计费节省。
 
+Python 生命周期配置在构造时读取总开关、搜索、HTML 和 Diff 环境开关。显式
+`TokenlessConfig` 参数优先于环境默认值，解析后的开关传入进程内 Runtime，因此也覆盖
+QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默认开启，关闭压缩
+总开关只选择 dry-run，不会关闭 PreTool RTK。
+
+## BuildLog 布局与进度
+
+BuildLog 在既有 PostTool 内容路由内处理 pnpm，不解析命令，也不新增 PreTool 归属规则。
+`pnpm install` 不加入原生命令豁免列表；RTK-owned 结果沿用既有旁路/回执规则。
+SGR 清理后，pnpm 在原始行坐标上规划互不重叠的布局替换和进度角色，再一次渲染。
+已识别的更新通知、依赖清单和与数量精确匹配的装饰条可压紧并报告为 `build_log_reduction`，
+恢复等级为语义 `lossless`，即使恢复为 `none` 也不写 Stash。边框和填充无需逐字节重建，
+但通知正文、全部依赖事实和完成信息必须完整保留。
+
+只处理完整 LF 记录。非 SGR 控制字符、CRLF、裸 CR、TAB 会停用 pnpm 新转换。
+警告、脚本头和未知正文保护 SGR 清理后的整个剩余后缀，不因后续空行/进度恢复解析。
+进度至少连续九条才考虑省略，首尾各保留两条；任一计数下降即分段。
+`done`、包总数、通知/类别边界及最终耗时/版本保持可见，布局变换不能合并原先分离的进度段。
+
+进度省略可与布局压紧同时生效，共用 `build_log_reduction` 标签，恢复等级为 `retrievable`，
+要求 Stash 和宿主实际恢复路径。每个省略区间计入 Marker 后须独立减少字符与估算 Token，
+不能用布局收益补贴省略。恢复不可用、省略无收益、超预算或写入失败时，压缩器返回布局候选及
+全部 tentative writes 和 Stash 错误。入口仍将 Stash 错误提升为 Runtime 错误，宿主因此可能
+保留原文而不是采用布局。唯一 Pipeline 仲裁与 `StashLedger` 保留 dry-run、时限、回滚和 generation
+归属保护。两种转换内部共用 `BuildLogOperation::Reduction`，映射到 `AppliedOperation::BuildLogReduction`。
+操作按 `terminal_cleanup`、`build_log_reduction` 排序，每项最多报告一次，只记录最终结果实际采用的操作。
+详见 [pnpm 输出边界](../../../../docs/user-guide/zh/tokenless/index.md#pnpm-安装输出)。
+
 ## 搜索路径共享
 
 PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
-`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
-带行号的搜索记录仍要求来源为 `api_response`。
+`SearchResultsCompressor`。原生 `Grep` 和识别出的 Shell `grep`、`rg` 直接调用此压缩器，
+不要求内容检测先判为搜索结果。其他工具保留按内容派发：带行号记录要求 `api_response`
+来源，纯路径列表也接受命令输出。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
@@ -89,8 +173,9 @@ PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `
 不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
 可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
 `file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
-既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
-不会把路径中间或 CRLF 中间的字节截断片段视为记录。完整输入的路径列表候选只生成一次，随后复用到仲裁。
+对于搜索专用通路之外的工具，既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
+不会把路径中间或 CRLF 中间的字节截断片段视为记录。搜索专用通路之外，资格检查先解析完整路径列表，
+压缩器再解析并生成候选，随后进入公共仲裁。
 
 路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
 开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。
@@ -182,10 +267,10 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 
 ## 打包与验证
 
-`make python-wheel` 会构建固定版本 RTK，把它暂存为
-`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
-可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
-`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
+`make python-wheel` 会构建 `tokenless`，把它暂存为
+`anolisa_tokenless/_bin/tokenless`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_TOKENLESS_BINARY` 指定为同一 Wheel 目标构建的 `tokenless` 文件。
+`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 `tokenless` 或 RTK 的条件下验证
 四个生命周期和 Stats 查询。
 
 `anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter

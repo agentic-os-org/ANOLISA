@@ -74,9 +74,9 @@ class TestDatasetMapping:
 
 class TestGetDatasetName:
     def test_known_subsets(self):
-        assert get_dataset_name("lite") == "princeton-nlp/SWE-bench_Lite"
-        assert get_dataset_name("verified") == "princeton-nlp/SWE-bench_Verified"
-        assert get_dataset_name("full") == "princeton-nlp/SWE-bench"
+        assert get_dataset_name("lite") == "SWE-bench/SWE-bench_Lite"
+        assert get_dataset_name("verified") == "SWE-bench/SWE-bench_Verified"
+        assert get_dataset_name("full") == "SWE-bench/SWE-bench"
         assert get_dataset_name("multilingual") == "SWE-bench/SWE-bench_Multilingual"
 
     def test_unknown_subset_raises(self):
@@ -92,7 +92,7 @@ class TestLoadDataset:
         mock_load.return_value = MOCK_DATASET_ROWS
         config = DatasetConfig(subset="lite", split="dev")
         load_dataset(config)
-        mock_load.assert_called_once_with("princeton-nlp/SWE-bench_Lite", split="dev")
+        mock_load.assert_called_once_with("SWE-bench/SWE-bench_Lite", split="dev")
 
     @patch("swe_runner.run.dataset.hf_datasets.load_dataset")
     def test_load_dataset_uses_multilingual_path(self, mock_load):

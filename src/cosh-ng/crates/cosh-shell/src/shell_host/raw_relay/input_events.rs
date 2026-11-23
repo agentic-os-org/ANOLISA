@@ -133,14 +133,17 @@ pub(super) fn drain_raw_input_events<W: Write>(
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
-    prompt_presentation: &PromptPresentation,
+    prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<bool> {
     let native_mode = prompt.is_empty();
     let mut eof_shutdown_requested = false;
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::ShellInputActivity { empty } => {
-                parser.push_shell_input_activity_event(empty)
+                parser.push_shell_input_activity_event(empty);
+                if !empty {
+                    prompt_presentation.selection_surface_mut().defer();
+                }
             }
             RawInputEvent::PtyUserWrite {
                 generation,
@@ -163,6 +166,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::EofShutdownRequested => eof_shutdown_requested = true,
             RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
             RawInputEvent::PromptDraftOpen { text } => {
+                prompt_presentation.selection_surface_mut().note_draft();
                 let payload = serde_json::json!({ "text": text }).to_string();
                 parser.push_prompt_draft_event("open", Some(&payload));
             }
@@ -248,7 +252,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                 }
-                writeln!(output)?;
+                output.write_all(b"\r\n")?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {
@@ -263,16 +267,37 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::PromptGhostAccepted { suggestion_id } => {
                 parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
             }
-            RawInputEvent::PromptGhostCycle { text } => {
-                clear_prompt_ghost_line(
-                    parser,
-                    output,
+            RawInputEvent::PromptGhostCycle {
+                text,
+                suggestion_id,
+                generation,
+            } => {
+                let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((0, 0));
+                let plan = prompt_presentation.selection_surface_mut().plan_cycle(
+                    suggestion_id.as_deref(),
+                    generation,
                     prompt,
-                    native_candidate_echoed_len,
-                    prompt_presentation,
-                )?;
-                super::write_prompt_ghost(output, &text, true)?;
-                output.flush()?;
+                    parser.display_position(),
+                    width,
+                    height,
+                );
+                match plan {
+                    super::selection_surface::CyclePlan::RedrawList { lines } => {
+                        redraw_suggestion_list(output, &lines, prompt, &text, prompt_presentation)?;
+                    }
+                    super::selection_surface::CyclePlan::PromptLocal { label } => {
+                        clear_prompt_ghost_line(
+                            parser,
+                            output,
+                            prompt,
+                            native_candidate_echoed_len,
+                            prompt_presentation,
+                        )?;
+                        super::write_prompt_ghost_labeled(output, &text, true, Some(&label))?;
+                        output.flush()?;
+                    }
+                    super::selection_surface::CyclePlan::Ignore => {}
+                }
             }
             RawInputEvent::PromptGhostDismissed => {
                 parser.push_prompt_ghost_event("dismissed", None)
@@ -396,6 +421,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
+            RawInputEvent::TrialControl { id, action } => {
+                parser.push_card_event("trial_control", &format!("{id}:{action}"))
+            }
             RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
             RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
             RawInputEvent::QuestionSubmitAttempt(id) => {
@@ -483,6 +511,25 @@ where
     let acknowledged = latest_capture_submission_generation(&parser.events);
     update_locked_input_mode(&mut mode, &action, acknowledged);
     Ok(action)
+}
+
+pub(super) fn redraw_suggestion_list<W: Write>(
+    output: &mut W,
+    lines: &[String],
+    prompt: &str,
+    ghost_text: &str,
+    prompt_presentation: &PromptPresentation,
+) -> io::Result<()> {
+    let rows = lines.len() + 1;
+    write!(output, "\x1b[?7l\x1b[{rows}A")?;
+    for line in lines {
+        write!(output, "\r\x1b[2K{line}\n")?;
+    }
+    write!(output, "\n\r\x1b[2K")?;
+    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+    super::write_prompt_ghost(output, ghost_text, true)?;
+    write!(output, "\x1b[?7h")?;
+    output.flush()
 }
 
 fn clear_prompt_ghost_line<W: Write>(

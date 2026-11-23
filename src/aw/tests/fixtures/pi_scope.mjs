@@ -30,6 +30,20 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+test("failed activation closes its handle without retrying admission", async () => {
+  for (const failure of ["transport", "watch"]) {
+    const scope = create(), calls = [];
+    scope.command = async action => {
+      calls.push(action);
+      return { code: action === "activate" && failure === "transport" ? 1 : 0,
+        stdout: JSON.stringify({ invocations: { invocations_per_binding: 4 }, watch: {} }) };
+    };
+    await assert.rejects(scope.acknowledge());
+    assert(scope.closed);
+    assert.deepEqual(calls, ["activate", "close"]);
+  }
+});
+
 test("retirement transport failure latches even outside prompt cleanup", async () => {
   const scope = create();
   scope.invocations.set("call", 1);
@@ -101,4 +115,79 @@ test("successful drain rejects late calls and permits a new execution", async ()
   await scope.register("fresh", "tool", {});
   await scope.drain();
   assert.equal(scope.invocations.size, 0);
+});
+
+test("bridge checks latch transport loss and keep independent scopes usable", async () => {
+  const scope = create(), other = create();
+  scope.policyRevision = "a".repeat(64);
+  scope.monitorAbort = new AbortController();
+  let calls = 0;
+  scope.command = async () => {
+    if (++calls === 1) return { code: 0 };
+    throw new Error("service restarted");
+  };
+  await scope.validate();
+  await assert.rejects(scope.validate(), /service restarted/);
+  assert.throws(() => scope.begin());
+  other.begin();
+  await other.register("independent", "tool", {});
+  await other.drain();
+  scope.command = async () => ({ code: 0 });
+  await assert.rejects(scope.validate());
+  await scope.close();
+});
+
+test("idle bridge probe reports failure and stops its timer", { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const scope = create(), reported = deferred();
+  let installed = true, reports = 0;
+  scope.probe = () => { if (!installed) throw new Error("removed native seam"); };
+  scope.command = async (action, value) => {
+    if (action === "check") { reports++; reported.resolve(value); return { code: 1 }; }
+    return { code: 0 };
+  };
+  await scope.watch({ policy_revision: "b".repeat(64), interval_ms: 2000 });
+  installed = false;
+  t.mock.timers.tick(2000);
+  const report = await reported.promise;
+  assert.equal(report.valid, false);
+  assert.equal(report.policy_revision, "b".repeat(64));
+  await scope.close();
+  const count = reports;
+  t.mock.timers.tick(10000);
+  assert.equal(reports, count);
+  assert(scope.failed);
+});
+
+test("concurrent close joins one original cleanup and retains its failure", async () => {
+  const scope = create(), entered = deferred(), gate = deferred();
+  let closed = 0;
+  scope.command = async () => { closed++; entered.resolve(); await gate.promise; return { code: 1 }; };
+  const first = scope.close();
+  await entered.promise;
+  const second = scope.close();
+  assert.equal(first, second);
+  gate.resolve();
+  await assert.rejects(first, /release failed/);
+  await assert.rejects(second, /release failed/);
+  await assert.rejects(scope.close(), /release failed/);
+  assert.equal(closed, 1);
+});
+
+test("close joins late admission without acknowledging or reopening it", async () => {
+  const scope = new Scope({}), gate = deferred(), entered = deferred();
+  const actions = [];
+  scope.command = async action => {
+    actions.push(action);
+    if (action === "open") { entered.resolve(); await gate.promise; }
+    return { code: 0, stdout: "{}" };
+  };
+  const opening = scope.open(process.cwd(), {});
+  await entered.promise;
+  const rejected = assert.rejects(opening, /closed/);
+  const closing = scope.close();
+  gate.resolve();
+  await Promise.all([rejected, closing]);
+  assert.deepEqual(actions, ["open", "close"]);
+  await assert.rejects(scope.open(process.cwd(), {}), /reopened/);
 });

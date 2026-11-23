@@ -75,7 +75,13 @@ class RunMetadataSnapshot:
 
 def ns_to_iso(ns: int) -> str:
     """Convert a nanosecond timestamp to UTC ISO-8601."""
-    return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.UTC).isoformat()
+    seconds, remainder = divmod(ns, 1_000_000_000)
+    # Integer arithmetic only; see trace_extraction.helpers.ns_to_iso for why
+    # the float conversion is not safe near the supported timestamp bounds.
+    micros = (remainder + 500) // 1_000
+    instant = dt.datetime(1970, 1, 1, tzinfo=dt.UTC) + dt.timedelta(
+        seconds=seconds, microseconds=micros)
+    return instant.isoformat()
 
 
 def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
@@ -83,8 +89,12 @@ def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any])
     if existing is None:
         return current
 
-    started_at_ns = min(_safe_int(existing.get("started_at_ns")), _safe_int(current.get("started_at_ns")))
-    ended_at_ns = max(_safe_int(existing.get("ended_at_ns")), _safe_int(current.get("ended_at_ns")))
+    # ``_safe_int`` maps an absent timestamp to 0, so a plain min/max would
+    # drag the whole window to the Unix epoch whenever one side predates this
+    # key (an older runner's file, or a hand-edited one) and widen the trace
+    # window to every file on disk.
+    started_at_ns = _earliest_timestamp(existing.get("started_at_ns"), current.get("started_at_ns"))
+    ended_at_ns = _latest_timestamp(existing.get("ended_at_ns"), current.get("ended_at_ns"))
     instance_ids = _ordered_unique_strings(
         [
             item
@@ -130,6 +140,18 @@ def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any])
         if metadata_mapping:
             merged[key] = metadata_mapping
     return merged
+
+
+def _earliest_timestamp(*values: object) -> int:
+    """Return the smallest *known* timestamp, ignoring absent ones."""
+    known = [candidate for candidate in map(_safe_int, values) if candidate]
+    return min(known) if known else 0
+
+
+def _latest_timestamp(*values: object) -> int:
+    """Return the largest *known* timestamp, ignoring absent ones."""
+    known = [candidate for candidate in map(_safe_int, values) if candidate]
+    return max(known) if known else 0
 
 
 def _ordered_unique_strings(values: list[str]) -> list[str]:

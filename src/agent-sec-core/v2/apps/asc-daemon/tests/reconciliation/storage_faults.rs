@@ -161,7 +161,7 @@ where
     let core = BindingReconciler::new(
         repository.clone(),
         Arc::new(|binding: &PreparedBinding| {
-            asc_policy_adapter_agentsight::AgentSightAdapter.translate(binding)
+            asc_policy_translator_agentsight::AgentSightTranslator.translate(binding)
         }),
         BTreeMap::from([(
             "agentsight".into(),
@@ -230,6 +230,7 @@ fn scenario(
                     policy_id: fixture.policy.policy_id.clone(),
                     policy_revision: fixture.policy.revision,
                 }],
+                None,
             )
             .unwrap();
         let accepted = repo

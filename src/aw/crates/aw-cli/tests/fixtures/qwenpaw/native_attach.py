@@ -12,11 +12,13 @@ import socket
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sec_core"))
 from agents import configure_qwenpaw
 from runtime import Processes, await_condition, checked, save
+from native_app_config import request as native_request, stage_user_configuration
 
 
 class NativeAttachTests(unittest.TestCase):
@@ -41,6 +43,7 @@ class NativeAttachTests(unittest.TestCase):
                     environment["XDG_RUNTIME_DIR"] = str(case / "runtime")
                     processes = Processes(case, output, environment)
                     argv, native_ports = configure_qwenpaw(case, self.qwenpaw, environment, processes)
+                    stage_user_configuration(case)
                     marker = case / "work/marker"
                     (case / "tool-command.txt").write_text("printf attached > " + shlex.quote(str(marker)))
                     child = processes.start("native-app", argv, native_ports[:1])
@@ -51,8 +54,16 @@ class NativeAttachTests(unittest.TestCase):
                         with socket.socket() as connection:
                             return connection.connect_ex(("127.0.0.1", native_ports[0])) == 0
                     await_condition(listening, 45, "native App startup")
-                    with urllib.request.urlopen(f"http://127.0.0.1:{native_ports[0]}/api/plugins", timeout=5) as response:
-                        response.read()
+                    def plugins_ready():
+                        self.assertFalse(processes.exited(child))
+                        try:
+                            # Plugin listing can scan disk before the loader exists.
+                            return json.loads(native_request(native_ports[0], "plugins/native-observer/status"))["loaded"] is True
+                        except urllib.error.HTTPError as error:
+                            if error.code not in (404, 503):
+                                raise
+                            return False
+                    await_condition(plugins_ready, 45, "native plugin loader readiness")
                 case, processes, environment, child, native_ports, argv = cases[0]
                 other = cases[1][0]
                 unchanged = (other / "home/config.json").read_bytes()
@@ -71,14 +82,12 @@ class NativeAttachTests(unittest.TestCase):
                 }}
                 save(config, document)
                 aw = self.binary
-                daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", case / "state"])
+                daemon = processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", case / "state"])
                 await_condition(lambda: (case / "state/aw.sock").exists() or processes.exited(daemon), 5, "AW startup")
                 def status():
-                    return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
+                    return json.loads(checked([aw, "service", "status", "--config", config], env=environment).stdout)["result"]
                 def install(remove=False, success=True):
-                    command = [aw, "install", "--config", config, "--agent", "native", "--pid", str(child.pid)]
-                    if remove:
-                        command.append("--remove")
+                    command = [aw, "disconnect" if remove else "connect", "--config", config, "--agent", "native", "--pid", str(child.pid)]
                     result = __import__("subprocess").run(list(map(str, command)), env=environment, capture_output=True, timeout=45)
                     self.assertEqual(result.returncode == 0, success, result.stderr.decode())
                     return result
@@ -118,10 +127,10 @@ class NativeAttachTests(unittest.TestCase):
                     await_condition(lambda: status()["instances"][0]["tools"] > 0, 10, "active native tool")
                     rejected = install(remove=True, success=False)
                     self.assertIn(b"busy", rejected.stderr)
-                    self.assertTrue((case / "home/plugins/aw-native").is_dir())
+                    self.assertEqual(len(list((case / "home/plugins").glob("aw-native-*"))), 1)
                     self.assertEqual(future.result(timeout=45), "success")
                 await_condition(lambda: status()["instances"][0]["requests"] == 0, 5, "request cleanup")
-                plugin_tree = case / "home/plugins/aw-native"
+                plugin_tree, = (case / "home/plugins").glob("aw-native-*")
                 moved_tree = case / "home/plugins/moved-aw-native"
                 plugin_tree.rename(moved_tree)
                 missing = install(remove=True, success=False)
@@ -132,7 +141,7 @@ class NativeAttachTests(unittest.TestCase):
                 moved_tree.rename(plugin_tree)
                 self.assertTrue(json.loads(install(remove=True).stdout)["detached"])
                 self.assertEqual(status()["bindings"], 0)
-                self.assertFalse((case / "home/plugins/aw-native").exists())
+                self.assertFalse(plugin_tree.exists())
                 self.assertFalse((case / "home/.aw-attachment.json").exists())
                 self.assertFalse(list((case / "state").glob("attach-*")))
                 self.assertEqual(turn(0, "existing-session"), "success")

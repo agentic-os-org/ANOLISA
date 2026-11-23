@@ -20,6 +20,9 @@ pub const CLI_AFTER_HELP: &str = r#"Common workflows:
   skillfs classify ./skills --primary-count 6
       Generate skillfs-views.toml so agents see a smaller default skill set.
 
+  skillfs explain --config mount.toml --skill demo
+      Inspect current source precedence and view membership without mounting.
+
   skillfs mount ./skills /mnt/skillfs --foreground
       Mount the default /skills view for local testing.
 
@@ -72,6 +75,42 @@ Security notes:
   hidden from the ordinary view.
   Same-skill relative symlinks and same-skill hardlinks are allowed; cross-skill
   and absolute symlink targets are rejected by policy."#;
+
+pub const EXPLAIN_LONG_ABOUT: &str = r#"Explain the current ordered-source mount configuration without mounting.
+
+Reads the configuration, validates all sources, loads skills in source order,
+then reads only the first source's skillfs-views.toml. Earlier sources win whole
+skills. --skill matches the directory name exactly and cannot hide a blocking
+error elsewhere.
+
+This is configuration diagnosis, not runtime inspection: it does not prove a
+mount exists or an agent has loaded a skill. A running managed instance may use
+an older frozen configuration. Concurrent source edits are not an atomic
+snapshot. Runtime --mountpoint diagnosis is not supported.
+
+The command does not create a mountpoint, modify source or managed state, or
+start a supervisor, watcher, or FUSE session. Existing logging options apply."#;
+
+pub const EXPLAIN_AFTER_HELP: &str = r#"Examples:
+  skillfs explain --config mount.toml
+      Report all discovered skills in text.
+
+  skillfs explain --config mount.toml --skill demo
+      Explain the selected copy, shadowed copies, and default/secondary views.
+
+  skillfs explain --config mount.toml --skill demo --format json
+      Emit one schema-versioned configuration report on stdout; logs use stderr.
+
+Exit status:
+  0  Complete diagnosis, including an exact name that was not discovered.
+  1  Incomplete diagnosis; the report identifies the first blocking phase and
+     leaves unconfirmed conclusions unknown. Invalid or unreadable views are
+     not treated as absent.
+  2  Invalid command-line usage.
+
+View membership is not exclusive: a skill can belong to the effective default
+and multiple secondary views. Enabled metadata is reported, not an extra
+visibility gate."#;
 
 pub const STOP_AFTER_HELP: &str = r#"Example:
   skillfs stop /mnt/skillfs

@@ -1,7 +1,7 @@
 
-# Owner: shell_host. bash.rs emits this asset verbatim into interactive Bash.
-# Preserve the leading empty line and marker golden tests when editing it;
-# split future growth by protocol responsibility before adding more hooks.
+# Owner: shell_host. bash.rs joins this startup/transport prefix with
+# bash_prompt.sh before emitting it into interactive Bash. Preserve the leading
+# empty line and marker golden tests when editing either fragment.
 if [[ -n "${COSH_OSC_MARKER_LOADED:-}" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -13,6 +13,9 @@ readonly _COSH_MARKER_TOKEN="$COSH_MARKER_TOKEN"
 unset COSH_MARKER_TOKEN 2>/dev/null || true
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
+# Oversized lines bypass marker routing/scrub scans (#10317): bash-level
+# classification and secret regexes grow superlinearly and freeze input.
+_COSH_MAX_ROUTE_LINE_CHARS=16384
 # Login replay order: the system profile runs before the baseline handler
 # capture, the user's own login files after it. A real-login-identity session
 # starts Bash in posix mode, where the shell itself reads no startup files, so
@@ -109,7 +112,7 @@ _cosh_apply_internal_recovery() {
   stty echo icanon isig iexten opost 2>/dev/null || true
 }
 # Shell variables cannot represent NUL; escape every representable C0 byte and DEL.
-_cosh_json_escape() {
+_cosh_json_escape_var() {
   local value="$1"
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
@@ -144,7 +147,40 @@ _cosh_json_escape() {
   value=${value//$'\037'/\\u001f}
   value=${value//$'\t'/\\t}
   value=${value//$'\177'/\\u007f}
-  printf '%s' "$value"
+  _COSH_JSON_ESCAPE_RESULT="$value"
+}
+_cosh_json_escape() {
+  _cosh_json_escape_var "$1"
+  printf '%s' "$_COSH_JSON_ESCAPE_RESULT"
+}
+_cosh_memory_overage() {
+  local dir="${_COSH_CGROUP_DIR-}"
+  if [[ -z "$dir" ]]; then
+    local line=""
+    IFS= read -r line < /proc/self/cgroup 2>/dev/null || true
+    local rel="${line#0::}"
+    if [[ "$rel" == /* && "$rel" != "/" && -r "/sys/fs/cgroup${rel}/memory.high" ]]; then
+      dir="/sys/fs/cgroup${rel}"
+    else
+      dir="none"
+    fi
+    _COSH_CGROUP_DIR="$dir"
+  fi
+  [[ "$dir" != none ]] || return 1
+  local current="" high=""
+  IFS= read -r current < "$dir/memory.current" 2>/dev/null || return 1
+  IFS= read -r high < "$dir/memory.high" 2>/dev/null || return 1
+  [[ "$high" != max ]] || return 1
+  (( current > high ))
+}
+_cosh_emit_throttled_precmd() {
+  local exit_status="${1:-0}"
+  _cosh_json_escape_var "${_COSH_MARKER_TOKEN}"
+  local token="$_COSH_JSON_ESCAPE_RESULT"
+  _cosh_json_escape_var "$PWD"
+  local cwd="$_COSH_JSON_ESCAPE_RESULT"
+  printf '\033]1337;COSH;{"e":"p","t":"%s","c":"%s","pc":"%s","s":%s}\a' \
+    "$token" "$cwd" "$cwd" "$exit_status"
 }
 _cosh_native_history_file_path() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" || -z "${HISTFILE:-}" ]]; then
@@ -160,7 +196,8 @@ _cosh_native_history_file_path() {
   if [[ "$history_file" != /* ]]; then
     return 1
   fi
-  if printf '%s' "$history_file" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+  local LC_ALL=C
+  if [[ "$history_file" =~ [[:cntrl:]] ]]; then
     return 1
   fi
   printf '%s' "$history_file"
@@ -205,26 +242,63 @@ _cosh_native_history_file_fragment() {
   printf ',\"h\":\"%s\"' "$(_cosh_json_escape "$history_file")"
 }
 _cosh_now_ms() {
-  date +%s000
+  if [[ -n "${EPOCHREALTIME-}" ]]; then
+    local digits=${EPOCHREALTIME/./}
+    printf '%s' "${digits:0:13}"
+  else
+    date +%s000
+  fi
 }
 _cosh_history_entry() {
+  _cosh_capture_history_entry
+  printf '%s' "$_COSH_HISTORY_ENTRY_RESULT"
+}
+_cosh_capture_history_entry() {
   local saved_fmt="${HISTTIMEFORMAT-}"
   HISTTIMEFORMAT=
-  local entry
-  entry="$(builtin history 1 2>/dev/null)"
+  local scratch="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.scrub"
+  local line entry=""
+  if builtin history 1 > "$scratch" 2>/dev/null; then
+    while IFS= read -r line; do
+      entry+="$line"$'\n'
+    done < "$scratch"
+    entry="${entry%$'\n'}"
+  fi
   HISTTIMEFORMAT="$saved_fmt"
-  printf '%s' "$entry"
+  _COSH_HISTORY_ENTRY_RESULT="$entry"
 }
 _cosh_history_no() {
-  printf '%s' "$1" | sed -E 's/^[[:space:]]*([0-9]+).*/\1/'
+  _cosh_history_no_var "$1"
+  printf '%s' "$_COSH_HISTORY_NO_RESULT"
+}
+_cosh_history_no_var() {
+  # The history number is the leading integer of the entry; read it from a
+  # bounded metadata prefix. Preserve a multi-line continuation, but avoid the
+  # superlinear quoted-literal prefix removal (${1#"$first_line"}) that froze
+  # giant single-line entries (#10317): an unquoted glob to the first newline
+  # is linear, and a single-line entry skips the continuation entirely.
+  local prefix="${1:0:64}"
+  if [[ "$prefix" =~ ^[[:space:]]*([0-9]+) ]]; then
+    if [[ "$1" == *$'\n'* ]]; then
+      _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}"$'\n'"${1#*$'\n'}"
+    else
+      _COSH_HISTORY_NO_RESULT="${BASH_REMATCH[1]}"
+    fi
+  else
+    _COSH_HISTORY_NO_RESULT=""
+  fi
 }
 _cosh_history_command_from_entry() {
-  local saved_fmt="${HISTTIMEFORMAT-}"
-  HISTTIMEFORMAT=
-  local entry
-  entry="$(builtin history 1 2>/dev/null)"
-  HISTTIMEFORMAT="$saved_fmt"
-  printf '%s' "$entry" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//'
+  _cosh_capture_history_entry
+  _cosh_history_command_var "$_COSH_HISTORY_ENTRY_RESULT"
+  printf '%s' "$_COSH_HISTORY_COMMAND_RESULT"
+}
+_cosh_history_command_var() {
+  local entry="$1"
+  if [[ "$entry" =~ ^[[:space:]]*[0-9]+[[:space:]]* ]]; then
+    entry="${entry:${#BASH_REMATCH[0]}}"
+  fi
+  _COSH_HISTORY_COMMAND_RESULT="$entry"
 }
 _cosh_last_preexec_history_no() {
   local history_no="${_COSH_LAST_PREEXEC_HISTORY_NO:-}"
@@ -246,12 +320,27 @@ _cosh_remember_preexec_history_no() {
   printf '%s\n' "$history_no" > "$state_file" 2>/dev/null || true
 }
 _cosh_command_has_secret() {
+  local input="$1"
+  # `complete` scans the whole line (used by the history scrub on non-current
+  # oversized entries, where a mid-gap credential must still be caught); the
+  # default bounded head+tail window keeps the interactive input path cheap.
+  if [[ "${2:-bounded}" != complete ]]; then
+    local secret_scan_limit=${_COSH_MAX_ROUTE_LINE_CHARS:-16384}
+    if (( ${#input} > secret_scan_limit )); then
+      local secret_tail_offset=$(( ${#input} - 8192 ))
+      input="${input:0:8192}${input:$secret_tail_offset:8192}"
+    fi
+  fi
   local jwt_pattern='(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}([^A-Za-z0-9_]|$)'
-  if [[ "$1" =~ $jwt_pattern ]]; then
+  if [[ "$input" =~ $jwt_pattern ]]; then
     return 0
   fi
   local lower
-  lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  if (( BASH_VERSINFO[0] >= 4 )); then
+    lower="${input,,}"
+  else
+    lower="$(printf '%s' "$input" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  fi
   case "$lower" in
     *"-----begin "*"private key-----"*)
       return 0
@@ -269,11 +358,17 @@ _cosh_command_has_secret() {
   local alibaba_pattern='(^|[^a-z0-9_])ltai[a-z0-9]{12,32}([^a-z0-9_]|$)'
   local aws_pattern='(^|[^a-z0-9_])(akia|asia)[a-z0-9]{16}([^a-z0-9_]|$)'
   if [[ "$lower" =~ $bearer_pattern
-     || "$lower" =~ $url_password_pattern
      || "$lower" =~ $github_pattern
      || "$lower" =~ $opaque_pattern
      || "$lower" =~ $alibaba_pattern
      || "$lower" =~ $aws_pattern ]]; then
+    return 0
+  fi
+  # The URL-credential regex is near-quadratic on long letter runs: every
+  # letter is a candidate scheme start and the matcher walks the rest before
+  # finding no "://" (#10317). Gate it on a linear glob precheck so benign
+  # giant pastes without a scheme separator never enter it.
+  if [[ "$lower" == *"://"* && "$lower" =~ $url_password_pattern ]]; then
     return 0
   fi
 
@@ -320,15 +415,55 @@ _cosh_command_has_secret() {
   fi
   return 1
 }
+_cosh_detect_secret_bounded() {
+  # Uniform bounded tri-state secret detection (#10317). The rule set and byte
+  # budget are identical for every record; size and source never select a
+  # different rule set or trigger an unbounded scan. Sets _COSH_SECRET_RESULT:
+  #   match      - a credential was found (definitive).
+  #   negative   - the whole record fit the budget and no credential matched.
+  #   incomplete - the record exceeded the budget; the bounded window matched
+  #                nothing, but the unexamined remainder may still hold a
+  #                credential. Such a negative must NOT authorize exposing the
+  #                original text.
+  local input="$1"
+  local budget=${_COSH_MAX_ROUTE_LINE_CHARS:-16384}
+  if (( ${#input} <= budget )); then
+    if _cosh_command_has_secret "$input" complete; then
+      _COSH_SECRET_RESULT=match
+    else
+      _COSH_SECRET_RESULT=negative
+    fi
+  else
+    if _cosh_command_has_secret "$input" bounded; then
+      _COSH_SECRET_RESULT=match
+    else
+      _COSH_SECRET_RESULT=incomplete
+    fi
+  fi
+}
 _cosh_scrub_sensitive_native_history() {
   [[ -o history ]] || return 0
-  local history_entry history_no command
-  history_entry="$(_cosh_history_entry)"
-  history_no="$(_cosh_history_no "$history_entry")"
-  command="$(_cosh_history_command_from_entry "$history_entry")"
+  _cosh_capture_history_entry
+  local history_entry="$_COSH_HISTORY_ENTRY_RESULT"
+  _cosh_history_no_var "$history_entry"
+  local history_no="$_COSH_HISTORY_NO_RESULT"
+  _cosh_history_command_var "$history_entry"
+  local command="$_COSH_HISTORY_COMMAND_RESULT"
   [[ -n "$history_no" && -n "$command" ]] || return 0
-  if _cosh_command_has_secret "$command"; then
-    builtin history -d "$history_no" 2>/dev/null || true
+  # Uniform bounded tri-state detection (#10317): every entry gets the same
+  # rules and byte budget; neither size nor source selects a slower scan or a
+  # length-based deletion. A detected credential is removed. A complete
+  # negative or an over-budget (incomplete) record is preserved — Cosh does not
+  # delete benign history it cannot fully verify, including under memory
+  # overage. Prompt-level cleanup is best-effort: a credential beyond the
+  # budget in an arbitrary-long record is not guaranteed to be caught here
+  # (Rust evidence redaction still covers marker/journal publication).
+  _cosh_detect_secret_bounded "$command"
+  if [[ "$_COSH_SECRET_RESULT" == match ]]; then
+    # `history -d` takes a position, not the multi-line identifier the number
+    # helper preserves for callers; use the leading number only so a
+    # within-budget multi-line secret entry is removable too.
+    builtin history -d "${history_no%%$'\n'*}" 2>/dev/null || true
   fi
 }
 _cosh_emit_marker() {
@@ -479,6 +614,18 @@ _cosh_guard_slash_submission() {
     set +x
   fi
   local input="$READLINE_LINE"
+  # Remember the accepted line so PS0 can prove which history entry belongs
+  # to this submission (Bash may exclude the real command via HISTIGNORE).
+  _COSH_SUBMITTED_LINE="$input"
+  # Oversized lines bypass the superlinear first-word/secret scans (#10317).
+  # The guard itself neither scans nor re-adds them. The prompt scrub applies
+  # the uniform bounded tri-state contract: it preserves an over-budget record
+  # unless the bounded window matches a credential (no length-based deletion),
+  # and Cosh only re-adds a recovered record on a complete negative.
+  if (( ${#input} > _COSH_MAX_ROUTE_LINE_CHARS )); then
+    (( restore_xtrace == 1 )) && set -x
+    return 0
+  fi
   if [[ "${1:-false}" == true && "$input" == ' '* ]]; then
     input="${input# }"
   fi
@@ -506,6 +653,12 @@ _cosh_guard_slash_submission() {
   if ! _cosh_is_slash_control_candidate "$first_word" ||
      { ! _cosh_assistance_enabled &&
        [[ ! "$classification_input" =~ ^/mode[[:space:]]+routing($|[[:space:]]) ]]; }; then
+    # A non-slash recoverable line executes as an ordinary command. The widget
+    # already proved it non-secret, so confirm re-add for every outcome (success
+    # or ordinary failure), not only the natural-language intercept branch.
+    if [[ "${2:-false}" == true ]]; then
+      _cosh_confirm_pending_recovery_history "$input"
+    fi
     (( restore_xtrace == 1 )) && set -x
     return 0
   fi
@@ -569,7 +722,12 @@ _cosh_commit_pending_recovery_history() {
   case "$input" in
     ' '*|$'\t'*) return 0 ;;
   esac
-  _cosh_command_has_secret "$input" && return 0
+  # Cosh only writes a recovered record into native history on a COMPLETE
+  # negative (#10317). A match is a credential; an incomplete (over-budget)
+  # result cannot establish the record is safe to keep, so fail closed and let
+  # Bash's own acceptance stand without a Cosh re-add.
+  _cosh_detect_secret_bounded "$input"
+  [[ "$_COSH_SECRET_RESULT" == negative ]] || return 0
 
   local history_entry history_no history_command
   history_entry="$(_cosh_history_entry)"
@@ -618,7 +776,9 @@ _cosh_is_pending_handoff_command() {
   if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 1
   fi
-  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+  local handoff_request
+  handoff_request="$(<"$COSH_HANDOFF_REQUEST_FILE")"
+  [[ "$handoff_request" == "$command" ]]
 }
 _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
@@ -642,7 +802,7 @@ _cosh_load_handoff_token() {
   _COSH_HANDOFF_TOKEN=""
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
      && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
-    _COSH_HANDOFF_TOKEN="$(cat -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null)" || _COSH_HANDOFF_TOKEN=""
+    _COSH_HANDOFF_TOKEN="$(<"${COSH_HANDOFF_REQUEST_FILE}.token")" || _COSH_HANDOFF_TOKEN=""
   fi
 }
 # Implicit-pager policy for one approved handoff. The sidecar file is written by
@@ -781,7 +941,12 @@ _cosh_prepare_staged_handoff() {
     builtin history -d "$history_no" 2>/dev/null || true
   fi
   display_command="$command"
-  if _cosh_command_has_secret "$command"; then
+  # Cosh publishes a handoff command's original text only on a COMPLETE
+  # negative (#10317). A match or an incomplete (over-budget) result fails
+  # closed to the redacted placeholder — the emitted preexec marker cannot be
+  # retracted by the later history scrub. The handoff token is loaded above.
+  _cosh_detect_secret_bounded "$command"
+  if [[ "$_COSH_SECRET_RESULT" != negative ]]; then
     display_command="<redacted sensitive command>"
   elif [[ -o history ]]; then
     builtin history -s "$command" 2>/dev/null || true
@@ -791,425 +956,4 @@ _cosh_prepare_staged_handoff() {
   _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
   _cosh_emit_marker "preexec" "$display_command" 0 false
   return 0
-}
-_cosh_begin_attempt() {
-  local input="$1"
-  local top_token="$2"
-  local expansion_drift="${3:-0}"
-  local generation="${4:-}"
-  local utf8_status
-  if [[ "$generation" =~ ^[0-9]+$ ]]; then
-    _COSH_ATTEMPT_GENERATION="$generation"
-  else
-    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
-  fi
-  _COSH_ATTEMPT_ACTIVE=1
-  _COSH_ATTEMPT_WRAPPER_ID="$_COSH_WRAPPER_ID"
-  _COSH_ATTEMPT_SENSITIVE=0
-  _COSH_ATTEMPT_UNSAFE=0
-  _COSH_ATTEMPT_EXPANSION_DRIFT="$expansion_drift"
-  _COSH_ATTEMPT_SUBSHELL="${BASH_SUBSHELL:-0}"
-  _COSH_ATTEMPT_INPUT=
-  _COSH_ATTEMPT_TOKEN=
-  _COSH_ATTEMPT_TOKEN_FINGERPRINT=
-  if _cosh_command_has_secret "$input"; then
-    _COSH_ATTEMPT_SENSITIVE=1
-  fi
-  _cosh_utf8_han_status "$input"
-  utf8_status=$?
-  if (( utf8_status == 2 )); then
-    _COSH_ATTEMPT_UNSAFE=1
-    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
-    return 0
-  fi
-  _COSH_ATTEMPT_INPUT="$input"
-  _COSH_ATTEMPT_TOKEN="$top_token"
-}
-_cosh_token_fingerprint() {
-  local result
-  result="$(printf '%s\n' "$1" | command cksum 2>/dev/null)" || return 1
-  printf '%s' "${result%% *}"
-}
-_cosh_delegate_bash_command_not_found() {
-  if [[ "${_COSH_IN_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-    printf 'bash: %s: command not found\n' "$1" >&2
-    return 127
-  fi
-  if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-    _COSH_IN_USER_COMMAND_NOT_FOUND=1
-    _cosh_user_command_not_found_handle "$@"
-    local status=$?
-    local final_xtrace=0
-    if [[ $- == *x* ]]; then
-      final_xtrace=1
-      set +x
-    fi
-    _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE="$final_xtrace"
-    _COSH_IN_USER_COMMAND_NOT_FOUND=0
-    return "$status"
-  fi
-  printf 'bash: %s: command not found\n' "$1" >&2
-  return 127
-}
-_cosh_user_handler_definition="$(declare -f command_not_found_handle 2>/dev/null || true)"
-if [[ -n "$_cosh_user_handler_definition"
-   && "$_cosh_user_handler_definition" != "$_COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE" ]]; then
-  _cosh_user_handler_definition="${_cosh_user_handler_definition/command_not_found_handle/_cosh_user_command_not_found_handle}"
-  # Resume at the start of user code so the private wrapper invocation cannot
-  # expose dynamic handler arguments before the user's own trace begins.
-  _cosh_user_handler_xtrace_prefix=$'{ \n  if [[ "${_COSH_COMMAND_NOT_FOUND_XTRACE:-0}" == 1 ]]; then set -x; fi\n'
-  _cosh_user_handler_definition="${_cosh_user_handler_definition/\{ /$_cosh_user_handler_xtrace_prefix}"
-  eval "$_cosh_user_handler_definition"
-  _COSH_HAS_USER_COMMAND_NOT_FOUND=1
-else
-  _COSH_HAS_USER_COMMAND_NOT_FOUND=0
-fi
-unset _cosh_user_handler_definition _cosh_user_handler_xtrace_prefix \
-  _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE
-_cosh_command_not_found_handle() {
-  local command="$1"
-  shift || true
-  if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
-    local history_entry history_no history_command classification_command first_word
-    if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
-      history_command="$_COSH_PENDING_RECOVERY_INPUT"
-      classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$history_command}"
-      unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
-        2>/dev/null || true
-    else
-      history_entry="$(_cosh_history_entry)"
-      history_no="$(_cosh_history_no "$history_entry")"
-      history_command="$(_cosh_history_command_from_entry "$history_entry")"
-      classification_command="$history_command"
-    fi
-    first_word="${classification_command%%[[:space:]]*}"
-    if [[ -n "$history_command" ]] \
-       && ! _cosh_has_leading_alias "$classification_command" \
-       && _cosh_literal_first_word_matches "$classification_command" "$first_word" "$command"; then
-      _cosh_begin_attempt "$history_command" "$first_word" 0 "$history_no"
-    fi
-  fi
-  local original="${_COSH_ATTEMPT_INPUT:-}"
-  local classification_original="$original"
-  while [[ "$classification_original" == ' '* || "$classification_original" == $'\t'* ]]; do
-    classification_original="${classification_original#?}"
-  done
-  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1
-     || "${_COSH_ATTEMPT_WRAPPER_ID:-}" != "$_COSH_WRAPPER_ID" ]]; then
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  if [[ "${_COSH_ATTEMPT_SUBSHELL:-}" != "${BASH_SUBSHELL:-0}"
-     || "${#FUNCNAME[@]}" != 2
-     || "${_COSH_ATTEMPT_EXPANSION_DRIFT:-0}" == 1 ]]; then
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  if [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
-    local command_fingerprint
-    command_fingerprint="$(_cosh_token_fingerprint "$command")"
-    if [[ -z "$command_fingerprint"
-       || "$command_fingerprint" != "${_COSH_ATTEMPT_TOKEN_FINGERPRINT:-}" ]]; then
-      _cosh_delegate_bash_command_not_found "$command" "$@"
-      return $?
-    fi
-    _COSH_ATTEMPT_ACTIVE=0
-    local sensitive=false
-    [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
-    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" true
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  if [[ -z "$original" ]] \
-     || ! _cosh_literal_first_word_matches "$classification_original" "${_COSH_ATTEMPT_TOKEN:-}" "$command" \
-     || ! _cosh_arguments_have_no_unquoted_expansion "$classification_original"; then
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  if _cosh_is_pending_handoff_command "$original"; then
-    _cosh_delegate_bash_command_not_found "$command" "$@"
-    return $?
-  fi
-  _COSH_ATTEMPT_ACTIVE=0
-  local sensitive=false
-  [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
-  local reason
-  if reason="$(_cosh_should_intercept_unknown "$command" "$classification_original" "$(($# + 1))")"; then
-    _cosh_emit_intercept_marker "$original" "$reason" false "$sensitive"
-    return 0
-  fi
-  local intent
-  intent="$(_cosh_classify_missing "$classification_original" "$command")"
-  if [[ "$intent" == "natural_language" ]] && _cosh_ai_enabled; then
-    _cosh_confirm_pending_recovery_history "$original"
-    if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-      _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
-      _cosh_delegate_bash_command_not_found "$command" "$@"
-      return $?
-    fi
-    _cosh_emit_intercept_marker "$original" "natural_language" false "$sensitive"
-    return 0
-  fi
-  _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
-  _cosh_delegate_bash_command_not_found "$command" "$@"
-  return $?
-}
-command_not_found_handle() {
-  local _COSH_COMMAND_NOT_FOUND_XTRACE=0
-  local _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=0
-  if [[ $- == *x* ]]; then
-    _COSH_COMMAND_NOT_FOUND_XTRACE=1
-    _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=1
-    set +x
-  fi
-  _cosh_command_not_found_handle "$@"
-  local status=$?
-  (( _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE == 1 )) && set -x
-  return "$status"
-}
-
-# Expands the leading command word of a history line following bash alias
-# rules and stores the whitespace-compacted result in _COSH_EXPANDED_COMPACT
-# (out-parameter form: $(...) would fork a subshell inside the DEBUG trap).
-# Leaves _COSH_EXPANDED_COMPACT empty when no alias applies. Builtin-only:
-# no subprocess, no fork.
-#
-# BASH_ALIASES requires bash 4+. On bash 3.x the associative array does not
-# exist and ${BASH_ALIASES[$word]} would evaluate the subscript as an
-# arithmetic expression (breaking on words like "/help"), so the capability
-# is probed once at load time and the helper degrades to the pre-fix guard.
-_COSH_HAS_BASH_ALIASES=0
-if (( ${BASH_VERSINFO[0]:-0} >= 4 )); then
-  _COSH_HAS_BASH_ALIASES=1
-fi
-
-_cosh_has_leading_alias() {
-  local command="$1"
-  local rest="$command"
-  local word
-  [[ "${_COSH_HAS_BASH_ALIASES:-0}" == 1 ]] || return 1
-  while [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
-    rest="${rest:${#BASH_REMATCH[0]}}"
-  done
-  word="${rest%%[[:space:]]*}"
-  [[ -n "$word" && -n "${BASH_ALIASES[$word]:-}" ]]
-}
-
-_cosh_compact_alias_expanded() {
-  local command="$1" expanded=0 guard=0 prefix rest word expansion done_prefix=""
-  _COSH_EXPANDED_COMPACT=""
-  if [[ "${_COSH_HAS_BASH_ALIASES:-0}" != 1 ]]; then
-    return 0
-  fi
-  # Depth cap: deeper alias chains are vanishingly rare in practice; on
-  # overflow the compact expansion stays incomplete, the stale-history guard
-  # reports a mismatch, and the untracked fallback closes the handoff with
-  # degraded evidence instead of deadlocking.
-  while (( guard++ < 10 )); do
-    prefix=""
-    rest="$command"
-    # Skip leading NAME=VALUE assignments (covers handoff wrapper prefixes);
-    # bash still alias-expands the command word after assignments.
-    while [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
-      prefix+="${BASH_REMATCH[0]}"
-      rest="${rest:${#BASH_REMATCH[0]}}"
-    done
-    word="${rest%%[[:space:]]*}"
-    expansion="${BASH_ALIASES[$word]:-}"
-    if [[ -z "$expansion" ]]; then
-      break
-    fi
-    expanded=1
-    command="${prefix}${expansion}${rest:${#word}}"
-    # bash stops recursive expansion when the expansion starts with the
-    # word being expanded (e.g. ls='ls --color=auto'); the single-round
-    # expansion must still be reported. A trailing blank in the alias
-    # value makes bash alias-expand the next word as well, so freeze the
-    # settled part into done_prefix and keep expanding after it.
-    if [[ "${expansion%%[[:space:]]*}" == "$word" ]]; then
-      if [[ "$expansion" =~ [[:space:]]$ ]]; then
-        done_prefix+="${prefix}${expansion}"
-        command="${rest:${#word}}"
-        command="${command#"${command%%[![:space:]]*}"}"
-        if [[ -z "$command" ]]; then
-          break
-        fi
-        continue
-      fi
-      break
-    fi
-    # The same trailing-blank rule applies when the expansion changed the
-    # command word: settle the expansion and continue with the next word.
-    if [[ "$expansion" =~ [[:space:]]$ ]]; then
-      done_prefix+="${prefix}${expansion}"
-      command="${rest:${#word}}"
-      command="${command#"${command%%[![:space:]]*}"}"
-      if [[ -z "$command" ]]; then
-        break
-      fi
-    fi
-  done
-  if (( expanded )); then
-    command="${done_prefix}${command}"
-    _COSH_EXPANDED_COMPACT="${command//[[:space:]]/}"
-  fi
-}
-
-_cosh_bounded_preexec_marker() {
-  local history_entry history_no command first_word argc=1 display_command sensitive=false
-  local classification_command pending_recovery=false
-  if [[ -n "${_COSH_PENDING_SLASH_INPUT+x}" ]]; then
-    printf '\r\033[K' > /dev/tty
-    return 0
-  fi
-  history_entry="$(_cosh_history_entry)"
-  history_no="$(_cosh_history_no "$history_entry")"
-  command="$(_cosh_history_command_from_entry "$history_entry")"
-  classification_command="$command"
-  if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
-    command="$_COSH_PENDING_RECOVERY_INPUT"
-    classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$command}"
-    pending_recovery=true
-  fi
-  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
-    return 0
-  fi
-  if [[ "$pending_recovery" != true
-     && ( -z "$history_no" || -z "$command"
-     || "$history_no" == "$(_cosh_last_preexec_history_no)" ) ]]; then
-    # PS0 still proves a top-level execution boundary when Bash deliberately
-    # omitted the accepted line from history. Keep the ledger complete but do
-    # not guess command text from a stale entry or route it to Agent.
-    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
-    _cosh_emit_marker "preexec" "<redacted untracked command>" 0 false
-    return 0
-  fi
-  if [[ "$pending_recovery" != true ]]; then
-    _cosh_remember_preexec_history_no "$history_no"
-  fi
-  first_word="${classification_command%%[[:space:]]*}"
-  [[ "$classification_command" == *[[:space:]]* ]] && argc=2
-
-  # PS0 is observation-only and cannot suppress execution. Missing commands
-  # route through command_not_found_handle; ordinary slash controls stay in
-  # the Rust input relay. A slash line that reaches PS0 came from Readline
-  # history or editing and is deliberately Shell-owned, so it still needs an
-  # observed command boundary.
-  local reason
-  if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" != 1 ]] \
-     && reason="$(_cosh_should_intercept_unknown "$first_word" "$classification_command" "$argc")"; then
-    if [[ "$reason" != slash ]]; then
-      return 0
-    fi
-  fi
-  if ! builtin type -t -- "$first_word" >/dev/null 2>&1; then
-    local intent
-    intent="$(_cosh_classify_missing "$classification_command" "$first_word")"
-    if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" != 1 \
-       && "$intent" == natural_language ]] && _cosh_ai_enabled; then
-      return 0
-    fi
-  fi
-
-  display_command="$command"
-  if _cosh_is_handoff_wrapper "$command"; then
-    display_command="$(_cosh_unwrap_handoff_command "$command")"
-  fi
-  _cosh_command_has_secret "$display_command" && sensitive=true
-  if [[ "$sensitive" == true ]]; then
-    display_command="<redacted sensitive command>"
-  fi
-  if [[ "$pending_recovery" == true ]]; then
-    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
-  else
-    _COSH_ATTEMPT_GENERATION="$history_no"
-  fi
-  _cosh_emit_marker "preexec" "$display_command" 0 false
-}
-_cosh_bounded_prompt_marker() {
-  _cosh_precmd_marker "${1:-$?}"
-  return 0
-}
-_cosh_precmd_marker() {
-  local status="${1:-$?}"
-  _cosh_apply_internal_recovery
-  _cosh_commit_pending_recovery_history
-  _cosh_commit_pending_slash
-  _cosh_scrub_sensitive_native_history
-  _cosh_replace_handoff_history
-  # Only the handoff's own prompt boundary may clear the staged files: an
-  # unrelated command finishing while a handoff is still pending must not
-  # destroy the request/token sidecars it is about to consume (#2142 review).
-  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
-    _cosh_clear_handoff_request
-  fi
-  _cosh_restore_handoff_pager_policy
-  unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
-  unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
-    _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
-  _COSH_ATTEMPT_ACTIVE=0
-  # The precmd marker still carries the handoff token (#2142): it closes the
-  # same command the preexec claimed. Cleared right after so the following
-  # prompt_ready and ordinary markers stay token-free.
-  _cosh_emit_boundary_marker "$status"
-  unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
-  _COSH_AT_PROMPT=1
-}
-{
-  if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
-    unset PROMPT_COMMAND
-    builtin history -c 2>/dev/null || true
-  fi
-  _COSH_USER_PS0="${PS0-}"
-  _cosh_initial_history_entry="$(_cosh_history_entry)"
-  _cosh_remember_preexec_history_no "$(_cosh_history_no "$_cosh_initial_history_entry")"
-  unset _cosh_initial_history_entry
-  PS0='$(set +x; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_preexec_marker > /dev/tty)'"$_COSH_USER_PS0"
-  _COSH_USER_PROMPT_COMMAND=()
-  if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
-    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-      _COSH_USER_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
-    elif [[ -n "${PROMPT_COMMAND+x}" ]]; then
-      _COSH_USER_PROMPT_COMMAND=("$PROMPT_COMMAND")
-    fi
-  fi
-  # Keep user prompt hooks at top level so their shell-state changes persist.
-  # Scratch state uses Cosh's reserved namespace and is cleared before traps
-  # resume. Bash before 5.1 executes only element zero of an array
-  # PROMPT_COMMAND, so those versions receive the same sequence as one scalar
-  # command.
-  PROMPT_COMMAND=('_COSH_PROMPT_STATUS="$?"; _COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; eval "unset _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
-  PROMPT_COMMAND+=("${_COSH_USER_PROMPT_COMMAND[@]}")
-  PROMPT_COMMAND+=('_COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
-  if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
-    _COSH_PROMPT_COMMAND_SCALAR="${PROMPT_COMMAND[0]}"
-    if [[ -n "${_COSH_USER_PROMPT_COMMAND[0]-}" ]]; then
-      _COSH_PROMPT_COMMAND_SCALAR+=$'\n'"${_COSH_USER_PROMPT_COMMAND[0]}"
-    fi
-    _COSH_PROMPT_COMMAND_SCALAR+=$'\n'"${PROMPT_COMMAND[${#PROMPT_COMMAND[@]}-1]}"
-    unset PROMPT_COMMAND
-    PROMPT_COMMAND="$_COSH_PROMPT_COMMAND_SCALAR"
-    unset _COSH_PROMPT_COMMAND_SCALAR
-  fi
-  if [[ "${_COSH_USER_HISTORY_ENABLED:-0}" == 1 ]]; then
-    set -o history
-  fi
-  # The relay inserts this private sequence at a recognized main-prompt
-  # accept boundary. The widget inspects and clears Readline's unexpanded
-  # buffer so guarded slash controls never reach Bash parsing.
-  for _cosh_keymap in emacs-standard emacs-meta vi-insert vi-command; do
-    bind -m "$_cosh_keymap" -x '"\e[99~":_cosh_guard_slash_submission' 2>/dev/null || true
-    bind -m "$_cosh_keymap" -x '"\e[100~":_cosh_guard_private_slash_submission' 2>/dev/null || true
-    bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
-  done
-  unset _cosh_keymap
-  IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true
-  rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
-  if [[ -n "${_COSH_USER_DEBUG_TRAP:-}" ]]; then
-    eval "$_COSH_USER_DEBUG_TRAP"
-  fi
 }

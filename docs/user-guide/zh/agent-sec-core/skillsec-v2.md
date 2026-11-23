@@ -3,8 +3,10 @@
 [English](../../en/agent-sec-core/skillsec-v2.md)
 
 SkillSec 扫描 Skill 内容、签名扫描结果、保留可恢复的版本，并向 SkillFS 发布选定版本。
-内置扫描全部在本地执行，不调用模型。Rust CLI 保留 `agent-sec-cli skill-ledger` 入口，
-由一个 root daemon 执行业务操作。
+内置扫描全部在本地执行，不调用模型。Rust CLI 使用 `agent-sec-cli skillsec` 入口，
+由一个 root daemon 执行业务操作。`skill-ledger` 保留为兼容别名，子命令、参数、输出和退出码一致。
+现有 Hook 适配器和脚本可继续使用旧名，新命令建议使用 `skillsec`。能力 ID、
+`SKILL_LEDGER_*` 环境变量、RPC 方法及数据存储路径保持不变。
 
 本文说明 V2 核心及 Hook 适配器。[Skill Ledger 指南](skill-ledger.md)保留 V1 参考和
 各宿主的匹配、策略控制规则。适配器沿用现有语言、默认策略和启用状态，通过 CLI 调用 Rust daemon。
@@ -49,7 +51,7 @@ V1 使用同名单元作为用户服务，V2 将其作为系统服务运行。
 
 ```sh
 sudo systemctl status agent-sec-core.service
-agent-sec-cli skill-ledger status
+agent-sec-cli skillsec status
 ```
 
 如果 RPM 安装在没有 systemd manager 的镜像或容器中，或者服务后来被停止或禁用，请显式启动：
@@ -90,7 +92,7 @@ bash src/agent-sec-core/tests/packaging/test-skillsec-install.sh
 
 安装配套插件或修改可信启动环境后，重启 Agent。使用自定义 socket 时，确保
 `AGENT_SEC_DAEMON_SOCKET` 与 daemon 一致。加载 Skill 前先运行
-`agent-sec-cli skill-ledger status`，若启动尚未建立 V2 信任，再显式扫描该 Skill；V1 密钥或 manifest
+`agent-sec-cli skillsec status`，若启动尚未建立 V2 信任，再显式扫描该 Skill；V1 密钥或 manifest
 不能建立 V2 信任。
 
 | 宿主 | 查询 | 命中 Skill 时的初始化 | 默认策略 |
@@ -208,14 +210,14 @@ root 仍可写的 `0555` 目录正常扫描。显式扫描、用户目录写入�
 `scan` 也会初始化缺失的密钥；两者均不会静默替换损坏的密钥。
 
 ```sh
-agent-sec-cli skill-ledger init --no-baseline
-agent-sec-cli skill-ledger list-scanners
-agent-sec-cli skill-ledger analyze /path/to/skill
-agent-sec-cli skill-ledger scan /path/to/skill
-agent-sec-cli skill-ledger check /path/to/skill
-agent-sec-cli skill-ledger show /path/to/skill
-agent-sec-cli skill-ledger audit /path/to/skill --verify-snapshots
-agent-sec-cli skill-ledger status --verbose
+agent-sec-cli skillsec init --no-baseline
+agent-sec-cli skillsec list-scanners
+agent-sec-cli skillsec analyze /path/to/skill
+agent-sec-cli skillsec scan /path/to/skill
+agent-sec-cli skillsec check /path/to/skill
+agent-sec-cli skillsec show /path/to/skill
+agent-sec-cli skillsec audit /path/to/skill --verify-snapshots
+agent-sec-cli skillsec status --verbose
 ```
 
 `analyze` 要求路径在授权范围内，但仍只读，不初始化密钥，也不写账本。默认内置扫描器为 `code-scanner` 和 `static-scanner`。
@@ -244,14 +246,14 @@ agent-sec-cli skill-ledger status --verbose
 root daemon 不会执行其配置的命令。
 
 ```sh
-agent-sec-cli skill-ledger certify /path/to/skill --findings /path/to/findings.json --scanner skill-vetter
-agent-sec-cli skill-ledger decide /path/to/skill --action allow --reason 'Reviewed this version'
-agent-sec-cli skill-ledger decide /path/to/skill --action always_allow
-agent-sec-cli skill-ledger decide /path/to/skill --action block
-agent-sec-cli skill-ledger decide /path/to/skill --action rollback --version v000001
-agent-sec-cli skill-ledger decide /path/to/skill --clear
-agent-sec-cli skill-ledger export /path/to/skill --version v000001 --output /path/to/empty-export
-agent-sec-cli skill-ledger activate /path/to/skill
+agent-sec-cli skillsec certify /path/to/skill --findings /path/to/findings.json --scanner skill-vetter
+agent-sec-cli skillsec decide /path/to/skill --action allow --reason 'Reviewed this version'
+agent-sec-cli skillsec decide /path/to/skill --action always_allow
+agent-sec-cli skillsec decide /path/to/skill --action block
+agent-sec-cli skillsec decide /path/to/skill --action rollback --version v000001
+agent-sec-cli skillsec decide /path/to/skill --clear
+agent-sec-cli skillsec export /path/to/skill --version v000001 --output /path/to/empty-export
+agent-sec-cli skillsec activate /path/to/skill
 ```
 
 `allow` 批准选定版本；`always_allow` 保存持续的人工批准。`block` 隐藏暴露内容。

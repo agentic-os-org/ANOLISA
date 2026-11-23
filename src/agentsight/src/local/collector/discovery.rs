@@ -1,7 +1,8 @@
 //! Cross-platform local agent session file discovery
 //!
-//! Scans well-known directories on the local machine for JSONL session files
-//! produced by AI coding agents (Claude Code, Qoder, QoderWork, Codex, Cursor).
+//! Scans well-known directories on the local machine for agent session files
+//! (Claude Code, Qoder, QoderWork, Codex, Cursor, Gemini CLI and Cline),
+//! including whole-document JSON conversations.
 //! Uses `dirs::home_dir()` for cross-platform `$HOME` resolution.
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,8 @@ enum Layout {
     PerProject,
     /// Sessions stored flat: <root>/<file>.jsonl
     Flat,
+    /// Cline API histories under tasks/<task-id>/.
+    ClineTasks,
 }
 
 /// Describes where a particular agent stores its session files
@@ -78,6 +81,14 @@ static SESSION_SOURCES: &[SessionSource] = &[
         layout: Layout::PerProject,
         scan_subdirs: &["chats"],
     },
+    SessionSource {
+        agent_id: "cline",
+        agent_name: "Cline",
+        icon: "",
+        dirs: agentsight_trajectory_collector::cline::TASKS_ROOTS,
+        layout: Layout::ClineTasks,
+        scan_subdirs: &[],
+    },
 ];
 
 /// A discovered local agent session file
@@ -140,6 +151,35 @@ fn scan_source(dir: &Path, source: &SessionSource, sessions: &mut Vec<LocalSessi
             }
         }
         Layout::Flat => scan_flat_dir(dir, source, "(default)", sessions),
+        Layout::ClineTasks => scan_cline_tasks(dir, source, sessions),
+    }
+}
+
+fn scan_cline_tasks(dir: &Path, source: &SessionSource, sessions: &mut Vec<LocalSession>) {
+    let projects = agentsight_trajectory_collector::cline::task_projects(dir);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .join(agentsight_trajectory_collector::cline::API_HISTORY_FILENAME);
+        if !path.is_file() {
+            continue;
+        }
+        let Some(task_id) = agentsight_trajectory_collector::cline::task_session_id(&path) else {
+            continue;
+        };
+        let project = projects
+            .get(&task_id)
+            .map(String::as_str)
+            .unwrap_or("(default)");
+        if let Some(session) = parse_session_file(&path, source, project) {
+            sessions.push(session);
+        }
     }
 }
 
@@ -164,7 +204,9 @@ fn scan_flat_dir(
         if is_dir {
             scan_flat_dir(&path, source, project, sessions);
         } else if path.is_file()
-            && path.extension().is_some_and(|ext| ext == "jsonl")
+            && path.extension().is_some_and(|ext| {
+                ext == "jsonl" || (source.agent_id == "gemini-cli" && ext == "json")
+            })
             && let Some(session) = parse_session_file(&path, source, project)
         {
             sessions.push(session);
@@ -178,12 +220,14 @@ fn scan_project_dir(
     project: &str,
     sessions: &mut Vec<LocalSession>,
 ) {
-    // Scan top-level .jsonl files
+    // Scan JSONL files and Gemini's legacy JSON conversations.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && path.extension().is_some_and(|ext| ext == "jsonl")
+                && path.extension().is_some_and(|ext| {
+                    ext == "jsonl" || (source.agent_id == "gemini-cli" && ext == "json")
+                })
                 && let Some(session) = parse_session_file(&path, source, project)
             {
                 sessions.push(session);
@@ -214,6 +258,18 @@ const MAX_PARSE_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 /// Skip files larger than this entirely (50 MB) — too large to parse quickly.
 const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 
+fn session_id_for_path(path: &Path, source: &SessionSource) -> String {
+    if source.agent_id == "cline"
+        && let Some(id) = agentsight_trajectory_collector::cline::task_session_id(path)
+    {
+        return id;
+    }
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// Parse a JSONL session file to extract metadata for the session list.
 fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Option<LocalSession> {
     let metadata = fs::metadata(path).ok()?;
@@ -232,11 +288,7 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     // Skip very large files — just return basic metadata
     if metadata.len() > MAX_FILE_SIZE_BYTES {
         return Some(LocalSession {
-            session_id: path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
+            session_id: session_id_for_path(path, source),
             agent_id: source.agent_id.to_string(),
             agent_name: source.agent_name.to_string(),
             agent_icon: source.icon.to_string(),
@@ -259,6 +311,42 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     let content = fs::read(path)
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
+
+    if matches!(source.agent_id, "gemini-cli" | "cline") {
+        // Preview the same replayed state as details. Cline conversion needs
+        // the path to merge its sibling UI stream.
+        let trajectory = if source.agent_id == "cline" {
+            super::converter::convert_jsonl_to_atif(path).ok()?
+        } else {
+            super::converter::convert_jsonl_content_to_atif(&content).ok()?
+        };
+        let first_message = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == agentsight_atif::StepSource::User)
+            .map(|step| strip_system_context(&step.message))
+            .find(|text| !is_injected_user_text(text))?;
+        let session_id = if source.agent_id == "cline" {
+            session_id_for_path(path, source)
+        } else {
+            trajectory
+                .session_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| session_id_for_path(path, source))
+        };
+        return Some(LocalSession {
+            session_id,
+            agent_id: source.agent_id.to_string(),
+            agent_name: source.agent_name.to_string(),
+            agent_icon: source.icon.to_string(),
+            project: project.to_string(),
+            message_count: trajectory.steps.len().try_into().unwrap_or(u32::MAX),
+            first_message: truncate(&first_message, 200),
+            file_path: path.to_string_lossy().to_string(),
+            file_size_kb,
+            modified_ts,
+        });
+    }
 
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
 
@@ -395,11 +483,7 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     }
 
     if session_id.is_empty() {
-        session_id = path
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        session_id = session_id_for_path(path, source);
     }
 
     Some(LocalSession {
@@ -463,7 +547,7 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 }
 
 /// Extract the human-readable text of a user message event, with
-/// `<system-reminder>` blocks stripped.
+/// system-injected context stripped.
 ///
 /// Session schemas reaching the listing: Claude-style `user` events carry
 /// `message.content` (a string, or an array whose `text` blocks hold the
@@ -535,7 +619,7 @@ fn user_event_text(event: &serde_json::Value) -> Option<String> {
 /// Top-level `content` of a Gemini CLI user record, distinguished from
 /// Claude-style events by the record `id` and the missing `message` wrapper.
 fn gemini_user_content(event: &serde_json::Value) -> Option<&serde_json::Value> {
-    (event.get("id").is_some_and(|v| v.is_str()) && event.get("message").is_none())
+    (event.get("id").is_some_and(|v| v.is_string()) && event.get("message").is_none())
         .then(|| event.get("content"))
         .flatten()
 }
@@ -546,39 +630,53 @@ fn is_injected_user_text(text: &str) -> bool {
     text.is_empty() || text.starts_with("<session_context>") || text.starts_with("<hook_context>")
 }
 
-/// Strip `<system-reminder>...</system-reminder>` blocks from text.
-///
-/// A reminder may open and close on the same line, and a line may carry text
-/// outside the tags; only the block itself is removed. Lines that hold
-/// nothing but reminder content are dropped whole, so a multi-line reminder
-/// leaves no blank gap behind.
-fn strip_system_context(text: &str) -> String {
-    const OPEN: &str = "<system-reminder>";
-    const CLOSE: &str = "</system-reminder>";
+// Keep in sync with the trajectory collector's SYSTEM_TAG_PAIRS contract.
+const SYSTEM_TAG_PAIRS: &[(&str, &str)] = &[
+    ("<system-reminder>", "</system-reminder>"),
+    ("<current_notes_content>", "</current_notes_content>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-name>", "</command-name>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-caveat>", "</local-command-caveat>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+];
 
+/// Strip injected context while dropping lines that contain nothing else.
+fn strip_system_context(text: &str) -> String {
+    let mut current = text.to_string();
+    for &(open, close) in SYSTEM_TAG_PAIRS {
+        if current.contains(open) {
+            current = strip_tag_pair(&current, open, close);
+        }
+    }
+    current.trim().to_string()
+}
+
+fn strip_tag_pair(text: &str, open: &str, close: &str) -> String {
     let mut result = String::new();
-    let mut in_reminder = false;
+    let mut in_block = false;
     for line in text.lines() {
         let mut rest = line;
         let mut kept = String::new();
-        let mut saw_reminder = in_reminder;
+        let mut saw_block = in_block;
         while !rest.is_empty() {
-            if in_reminder {
-                saw_reminder = true;
-                match rest.find(CLOSE) {
+            if in_block {
+                saw_block = true;
+                match rest.find(close) {
                     Some(idx) => {
-                        in_reminder = false;
-                        rest = &rest[idx + CLOSE.len()..];
+                        in_block = false;
+                        rest = &rest[idx + close.len()..];
                     }
                     None => break,
                 }
             } else {
-                match rest.find(OPEN) {
+                match rest.find(open) {
                     Some(idx) => {
                         kept.push_str(&rest[..idx]);
-                        saw_reminder = true;
-                        in_reminder = true;
-                        rest = &rest[idx + OPEN.len()..];
+                        saw_block = true;
+                        in_block = true;
+                        rest = &rest[idx + open.len()..];
                     }
                     None => {
                         kept.push_str(rest);
@@ -587,7 +685,7 @@ fn strip_system_context(text: &str) -> String {
                 }
             }
         }
-        if saw_reminder && kept.is_empty() {
+        if saw_block && kept.is_empty() {
             continue;
         }
         if !result.is_empty() {
@@ -595,7 +693,7 @@ fn strip_system_context(text: &str) -> String {
         }
         result.push_str(&kept);
     }
-    result.trim().to_string()
+    result
 }
 
 /// UTF-8 safe string truncation
@@ -605,6 +703,16 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn discover_test_sessions(home: &std::path::Path) -> Vec<super::LocalSession> {
+        let mut sessions = Vec::new();
+        for source in super::SESSION_SOURCES {
+            for relative in source.dirs {
+                super::scan_source(&home.join(relative), source, &mut sessions);
+            }
+        }
+        sessions
+    }
+
     use super::*;
 
     #[test]
@@ -669,6 +777,27 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_system_context_all_injected_tag_pairs() {
+        let transcripts = [
+            "<system-reminder>injected</system-reminder>",
+            "<current_notes_content>injected</current_notes_content>",
+            "<command-message>injected</command-message>",
+            "<command-name>injected</command-name>",
+            "<command-args>injected</command-args>",
+            "<local-command-caveat>injected</local-command-caveat>",
+            "<local-command-stdout>injected</local-command-stdout>",
+            "<local-command-stderr>injected</local-command-stderr>",
+        ];
+        for transcript in transcripts {
+            assert_eq!(
+                strip_system_context(transcript),
+                "",
+                "{transcript} must not count as human text"
+            );
+        }
+    }
+
+    #[test]
     fn test_truncate_short() {
         assert_eq!(truncate("hello", 10), "hello");
     }
@@ -700,9 +829,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         assert!(sessions.iter().any(|s| s.session_id == "abc123"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -719,9 +846,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         assert!(sessions.iter().any(|s| s.agent_id == "codex"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -744,9 +869,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         let session = sessions
             .iter()
             .find(|s| s.agent_id == "gemini-cli")
@@ -776,15 +899,13 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         let session = sessions
             .iter()
             .find(|s| s.agent_id == "gemini-cli")
             .expect("the real user turn must keep the session listed");
         assert_eq!(session.first_message, "real question");
-        assert_eq!(session.message_count, 2);
+        assert_eq!(session.message_count, 1);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -849,6 +970,37 @@ mod tests {
         assert_eq!(session.first_message, "hello there");
         assert_eq!(session.message_count, 1);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn parse_session_file_excludes_command_only_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-only.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"sessionId\":\"sess-cmd\",\"message\":{\"role\":\"user\",\"content\":\"<command-message>clear</command-message><command-args></command-args>\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Cleared.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        assert!(parse_session_file(&path, &SESSION_SOURCES[0], "test").is_none());
+    }
+
+    #[test]
+    fn parse_session_file_strips_command_transcripts_from_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed-command.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"user","sessionId":"sess-mix","message":{"role":"user","content":"<command-message>compact</command-message>please summarize<local-command-stdout>done</local-command-stdout>"}}"#,
+        )
+        .unwrap();
+
+        let session = parse_session_file(&path, &SESSION_SOURCES[0], "test")
+            .expect("genuine text keeps the session listed");
+        assert_eq!(session.first_message, "please summarize");
     }
 
     #[test]
@@ -976,9 +1128,8 @@ mod tests {
 
     #[test]
     fn test_discover_local_sessions_no_home() {
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", "/nonexistent/path/that/does/not/exist") };
-        let sessions = discover_local_sessions();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = discover_test_sessions(&dir.path().join("missing"));
         assert!(sessions.is_empty());
     }
 
@@ -1170,5 +1321,98 @@ mod tests {
         assert!(parse_session_file(&file, codex_source(), "(default)").is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+// R12 regression tests
+#[cfg(test)]
+mod r12_gemini_preview {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn preview(events: &[Value]) -> Option<LocalSession> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let content = events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>();
+        fs::write(&path, content).unwrap();
+        let source = SESSION_SOURCES
+            .iter()
+            .find(|source| source.agent_id == "gemini-cli")
+            .unwrap();
+        parse_session_file(&path, source, "project")
+    }
+    fn metadata() -> Value {
+        json!({"sessionId":"session","projectHash":"project"})
+    }
+    fn user(id: &str, text: &str) -> Value {
+        json!({"id":id,"type":"user","content":text})
+    }
+
+    #[test]
+    fn rewound_user_is_not_the_preview_or_count() {
+        let session = preview(&[
+            metadata(),
+            user("old", "discarded request"),
+            json!({"id":"a","type":"gemini","content":"discarded answer"}),
+            json!({"$rewindTo":"old"}),
+            user("new", "replacement request"),
+        ])
+        .unwrap();
+        assert_eq!(session.first_message, "replacement request");
+        assert_eq!(session.message_count, 1);
+        assert_eq!(session.session_id, "session");
+    }
+
+    #[test]
+    fn patches_sets_and_upserts_match_visible_conversation() {
+        for correction in [
+            json!({"$patch":{"id":"u","content":"updated"}}),
+            json!({"$set":{"messages":[user("u","updated")]}}),
+            user("u", "updated"),
+        ] {
+            let session = preview(&[metadata(), user("u", "stale"), correction]).unwrap();
+            assert_eq!(session.first_message, "updated");
+            assert_eq!(session.message_count, 1);
+        }
+    }
+
+    #[test]
+    fn empty_or_context_only_replay_disappears() {
+        for correction in [
+            json!({"$rewindTo":"u"}),
+            json!({"$set":{"messages":[]}}),
+            json!({"$patch":{"removeIds":["u"]}}),
+            json!({"$patch":{"id":"u","content":"<session_context>private</session_context>"}}),
+        ] {
+            assert!(preview(&[metadata(), user("u", "stale"), correction]).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_json_is_discovered_and_previews_whole_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let document = json!({"sessionId":"legacy","projectHash":"p","messages":[user("u","legacy request")],"custom":["scalar"]});
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+        let source = SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "gemini-cli")
+            .unwrap();
+        let mut sessions = Vec::new();
+        scan_project_dir(dir.path(), source, "project", &mut sessions);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].first_message, "legacy request");
+        assert_eq!(sessions[0].session_id, "legacy");
+        assert_eq!(sessions[0].message_count, 1);
+        let other = SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "claude-code")
+            .unwrap();
+        let mut foreign = Vec::new();
+        scan_project_dir(dir.path(), other, "project", &mut foreign);
+        assert!(foreign.is_empty(), "JSON support is scoped to Gemini");
     }
 }

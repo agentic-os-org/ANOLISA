@@ -326,7 +326,7 @@ mod tests {
         // Fixed-size variants carry no payload beyond the enum itself.
         let exit = Event::Proc(ProcEvent::Exit {
             header: proc_header(),
-            exit_code: 0,
+            raw_exit_status: 0,
         });
         assert_eq!(exit.approx_bytes(), baseline);
         assert_eq!(Event::Proc(ProcEvent::Unknown(7)).approx_bytes(), baseline);

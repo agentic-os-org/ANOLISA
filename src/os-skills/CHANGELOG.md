@@ -9,6 +9,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+### Added
+
+- A release catalog in `packaging/released-skills.txt` now decides which Skill
+  directories are installed from source, packed into the raw archives and the
+  RPM source package, and advertised by the COSH extensions, so a Skill can be
+  added to the source tree for trial without being delivered to installed
+  agents before a maintainer approves it (#10023)
+- The checked-in COSH root and per-category `cosh-extension.json` Skill lists are
+  generated from that catalog by `packaging/cosh_manifests.py --write`, and CI
+  fails when they drift from it (#10023)
+
+### Changed
+
+- `make -C src/os-skills install` installs the released Skill set only and now
+  requires Python 3.6 or newer, checking the interpreter before writing any
+  file; set `PYTHON3=/path/to/python3` to choose it (#10023)
+- Packaged OpenClaw and Hermes adapter registrations are filtered against the
+  catalog instead of being copied verbatim (#10023)
+
+### Fixed
+
+- The `setup-mcp` skill refuses to merge into a configuration file it cannot
+  decode as UTF-8 instead of rewriting it from an empty one, which had dropped
+  every setting outside `mcpServers`; a malformed but decodable file is backed
+  up to `<path>.bak` first, and the existing file mode and symlink target are
+  preserved (#9769)
+- The `install-openclaw` skill reports an undecodable configuration as invalid
+  JSON and ignores an unreadable cached pairing or device-auth file — moving the
+  device auth aside — instead of failing with a traceback (#9769)
+
+## [0.7.0] - 2026-11-12
+
+### Removed
+
+- Retired eight general-purpose skills from the default bundle to focus on OS
+  operations, ending routine maintenance of the bundled copies. Users who need
+  these capabilities can use the upstream skills, tools, or official docs:
+  - `github` — general GitHub CLI workflows; see the GitHub CLI skill
+  - `humanizer` — writing guidance; load the upstream Humanizer skill
+  - `image-gen` — general image generation; product-specific Bailian integration
+    moves to the product that uses it
+  - `pdf-reader` — general PDF reading; host tools / PyMuPDF integrations
+  - `xlsx` — general spreadsheets; covered by the MiniMax XLSX skill
+  - `regex-mastery` — general regex guide; load the upstream guide
+  - `shell-scripting` — general shell scripting; upstream project guidance
+  - `upgrade-alinux-kernel` — ALinux-specific kernel upgrade; handed to
+    distribution maintainers
+- Removed the companion regression tests for `pdf-reader` and `xlsx`, and the
+  now-unused PyMuPDF test dependency.
+- Dropped the retired `shell-scripting` entry from `alinux-admin`'s dependency
+  list; its self-contained shell reference is unchanged.
+
+## [0.6.6] - 2026-11-12
+
+### Changed
+
+- Source installs record the skill directories they own in an install manifest, and
+  `make uninstall` removes only those directories, so skills added by hand or by
+  another installer are no longer deleted; `make install` also refuses to overwrite
+  an unrecorded directory of the same name unless `REPLACE_UNOWNED=1` is passed. A
+  collection installed before this release has no manifest, so its first upgrade
+  needs `REPLACE_UNOWNED=1 make install`; otherwise both commands stop with an
+  explanation (#9886)
+- `make install INSTALL_PROFILE=user` refuses to run when `HOME` is unset, empty,
+  `/` or relative while the install paths still derive from it, instead of silently
+  writing into `/.copilot-shell/skills`; passing `PREFIX`, `DATADIR` and `SKILLS_DIR`
+  explicitly still installs without a home directory (#9886)
+
+### Fixed
+
+- The `install-openclaw` skill writes `openclaw.json` (which holds the API key in
+  cleartext), its backup, `identity/device-auth.json` and `devices/paired.json` with
+  mode `0600`, so operator tokens are no longer readable by every local user and a
+  re-run no longer downgrades a hardened configuration back to `0644` (#7846)
+- The `aliyun-ecs` skill documents `DeleteKeyPairs --KeyPairNames` with the array
+  form the API requires, so the example is no longer rejected by the parameter
+  check (#9547)
+- `check-env.sh` in the `kernel-dev` skill no longer adds the `kernel-build-dir`
+  pseudo-package to its `yum install` hint, which made the whole transaction fail
+  on dnf hosts; missing packages and the absent kernel build directory are now
+  reported on separate lines (#7922)
+
+## [0.6.5] - 2026-11-09
+
+### Changed
+
+- Installing the skills from source picks the profile from the effective user ID:
+  root installs under `/usr/local/share/anolisa/skills`, other users install into
+  the existing `~/.copilot-shell/skills` directory, so `build-all` and upgrades
+  keep managing the same collection; `make uninstall` uses the same layout and
+  `make install AWPRJ=` selects the native cosh resource directories (#9460)
+- The `install-tokenless` skill explains that tokenless releases after 0.9.2 link
+  RTK into the binary: the npm package installs no separate `rtk`, RTK runs as
+  `tokenless rtk`, and a source build also needs `git` and `patch` (#9461)
+
+### Fixed
+
+- `validate_mcp` in the `setup-mcp` skill rejects a server that sets more than one
+  transport field and no longer accepts a configuration whose root is not an
+  `mcpServers` object (#4588)
+- The `xlsx` skill reads sheet names containing escaped apostrophes, so a formula
+  in a quoted sheet is checked against the intended sheet instead of being
+  reported as broken (#4210)
+- The `install-openclaw` skill stops writing the retired `ownerDisplay` key into
+  the generated OpenClaw configuration (#8798)
+
+## [0.6.4] - 2026-11-03
+
+### Fixed
+
+- Correct the ws-ckpt skill and adapter script paths in the local fallback documentation.
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

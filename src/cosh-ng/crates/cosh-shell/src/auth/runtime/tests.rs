@@ -7,15 +7,327 @@ use super::{
     apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
     clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
     clear_observed_model_after_provider_delete, ecs_ram_role_prepare, handle_auth_answer,
-    management_entry, render_auth_card_actions, restore_after_configure_failure,
-    should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
-    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
-    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
-    EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
+    restore_after_configure_failure, should_apply_aliyun_prepare_after_field,
+    should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
+    AuthBackend, AuthFieldInfo, AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare,
+    DeleteConfirmationOutcome, EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState,
+    ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
+use crate::auth::menu::management_entry;
+use crate::auth::render_auth_card_actions;
 use std::collections::HashMap;
+
+fn trial_state_adapter(state: serde_json::Value) -> (tempfile::TempDir, AdapterInstance) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("registry.sh");
+    let reply = serde_json::json!({"success": true, "data": state}).to_string();
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nread -r request\nprintf '%s\\n' \"$request\" >> \"$0.requests\"\nprintf '%s\\n' '{}'\n",
+            reply.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let adapter = AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+        script.to_string_lossy(),
+        false,
+    ));
+    (dir, adapter)
+}
+
+#[test]
+fn ecs_builtin_state_probe_is_explicit_and_non_ecs_has_no_trial_row() {
+    let (dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use": true},
+        "ecs_trial": {"available": false,"active": false,"model":"ecs-model"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let request: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(dir.path().join("registry.sh.requests"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["params"]["probe_ecs_trial"], true);
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![AuthManagementEntry::AddNew]
+    );
+}
+
+#[test]
+fn review5_non_ecs_identity_edit_uses_manual_credentials_without_identity_source() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"aliyun","label":"Aliyun","fields":[
+            {"name":"access_key_id","label":"AK","secret":true,"required":true},
+            {"name":"access_key_secret","label":"SK","secret":true,"required":true}
+        ]}],
+        "saved_providers": [{"provider_id":"saved-identity","provider_type":"aliyun",
+            "auth_source":"ecs_identity","active":true,"model":"qwen3.7-plus"}],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":false,"active":false,"model":"qwen3.7-plus"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    handle_auth_answer(&adapter, &mut state, &id, "", &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(
+        auth.editing_provider_name.as_deref(),
+        Some("saved-identity")
+    );
+    assert!(!auth.collected_values.contains_key("auth_source"));
+    assert_eq!(auth.current_field_info().unwrap().name, "access_key_id");
+}
+
+#[test]
+fn review5_alternate_identity_activation_unblocks_only_explicit_identity_selection() {
+    for source in ["ecs_identity", "ecs_ram_role"] {
+        let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+            "templates": [{"id":"aliyun","label":"Aliyun","fields":[]}],
+            "saved_providers": [
+                {"provider_id":"builtin","provider_type":"aliyun","auth_source":"ecs_identity","active":true,"model":"trial-model"},
+                {"provider_id":"alternate","provider_type":"aliyun","auth_source":source,"active":false,"model":"alternate-model"}
+            ],
+            "trial_preferences": {"auto_use":false},
+            "ecs_trial": {"available":true,"active":true,"model":"trial-model","provider_id":"builtin"}
+        }));
+        let mut state = InlineState::default();
+        state.auth.ecs_trial.auto_use_allowed = false;
+        state.auth.ecs_trial.disable_save_failed = true;
+        state.auth.ecs_trial.cancelled_question = true;
+        super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+        let provider = state.auth.state.as_ref().unwrap().existing_providers[0].clone();
+        assert_eq!(provider.name, "alternate");
+        super::super::activation::activate_provider(
+            &adapter,
+            &mut state,
+            &provider,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.auth.ecs_trial.auto_use_allowed,
+            source == "ecs_identity"
+        );
+        assert_eq!(
+            state.auth.ecs_trial.disable_save_failed,
+            source != "ecs_identity"
+        );
+        assert!(state.auth.ecs_trial.cancelled_question);
+    }
+}
+
+#[test]
+fn ecs_builtin_menu_marks_current_and_uses_core_model() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use": true},
+        "ecs_trial": {"available": true,"active": true,"model":"ecs-model-from-core"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("[active]"), "{options:?}");
+    assert!(options[0].contains("ecs-model-from-core"), "{options:?}");
+}
+
+#[test]
+fn ecs_builtin_folds_only_its_provider_and_preserves_other_identity_configs() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"aliyun","label":"Aliyun","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"builtin-trial","provider_type":"aliyun","auth_source":"ecs_identity","active":true,"model":"builtin-model"},
+            {"provider_id":"custom-identity","provider_type":"aliyun","auth_source":"ecs_identity","active":false,"model":"custom-model"},
+            {"provider_id":"legacy-role","provider_type":"aliyun","auth_source":"ecs_ram_role","active":false,"model":"legacy-model"}
+        ],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":true,"model":"builtin-model","provider_id":"builtin-trial"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let names: Vec<_> = auth
+        .existing_providers
+        .iter()
+        .map(|provider| provider.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["custom-identity", "legacy-role"]);
+}
+
+#[test]
+fn ecs_builtin_keeps_disabled_entry_when_own_provider_is_current() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":false},
+        "ecs_trial": {"available":true,"active":false,"model":"builtin-model","provider_id":null}
+    }));
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("own-observed-model".into());
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("已关闭"), "{options:?}");
+    assert!(options[0].contains("builtin-model"), "{options:?}");
+    assert!(!options[0].contains("[active]"), "{options:?}");
+    assert!(!options[0].contains("own-observed-model"), "{options:?}");
+    assert!(options[1].contains("[active]"), "{options:?}");
+}
+
+#[test]
+fn ecs_builtin_non_ecs_preserves_retry_disable_without_trial_entry() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":false},
+        "ecs_trial": {"available":false,"active":false,"model":"builtin-model"}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.disable_save_failed = true;
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![
+            AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AddNew
+        ]
+    );
+}
+
+#[test]
+fn ecs_builtin_legacy_core_preferences_keep_existing_provider_and_old_prepare() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":true}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    assert_eq!(auth.phase, AuthPhase::PreparingMenu);
+    super::finish_sysom_menu_prepare(
+        auth,
+        crate::auth::host::AuthHost::Shell,
+        Ok(serde_json::json!({"mode":"manual"})),
+    );
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, auth.existing_providers.len()),
+        vec![
+            AuthManagementEntry::Existing(0),
+            AuthManagementEntry::AddNew
+        ]
+    );
+}
+
+#[test]
+fn ecs_builtin_legacy_prepare_preserves_failed_disable_retry() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":true}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.disable_save_failed = true;
+    state.auth.ecs_trial.auto_use_allowed = false;
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    super::finish_sysom_menu_prepare(
+        auth,
+        crate::auth::host::AuthHost::Shell,
+        Ok(serde_json::json!({"mode":"manual"})),
+    );
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![
+            AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AddNew
+        ]
+    );
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+fn delete_own_provider_reloading_trial(auto_use_allowed: bool) -> (InlineState, String) {
+    let (_initial_dir, initial_adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":false,"model":"old-trial-model"}
+    }));
+    let (_reloaded_dir, reloaded_adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":true,"model":"current-trial-model"}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.auto_use_allowed = auto_use_allowed;
+    state.auth.ecs_trial.disable_save_failed = !auto_use_allowed;
+    super::trigger_auth_from_slash(&initial_adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 1;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    assert!(handle_auth_answer(&reloaded_adapter, &mut state, &id, "", &mut output).unwrap());
+    (state, String::from_utf8(output).unwrap())
+}
+
+#[test]
+fn ecs_builtin_delete_refreshes_current_and_model_from_core() {
+    let (state, output) = delete_own_provider_reloading_trial(true);
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("[active]"), "{options:?}");
+    assert!(options[0].contains("current-trial-model"), "{options:?}");
+    assert!(
+        !output.contains("Select a provider to make it active."),
+        "{output}"
+    );
+}
+
+#[test]
+fn ecs_builtin_delete_refresh_preserves_session_block_and_disable_retry() {
+    let (state, _output) = delete_own_provider_reloading_trial(false);
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert_eq!(
+        crate::auth::menu::management_entry(&auth.sysom, 0, 0),
+        AuthManagementEntry::RetryTrialDisable
+    );
+    assert!(options[1].contains("current-trial-model"), "{options:?}");
+    assert!(options[1].contains("已关闭"), "{options:?}");
+    assert!(!options[1].contains("[active]"), "{options:?}");
+    assert!(!state.auth.ecs_trial.auto_use_allowed);
+    assert!(state.auth.ecs_trial.disable_save_failed);
+}
 
 /// Any registry round-trip through this adapter fails, so reaching the ECS metadata
 /// service a second time turns into a visible error instead of a silent probe.
@@ -505,6 +817,7 @@ fn deleting_the_active_provider_with_a_fallback_discards_the_observed_model() {
     let outcome = DeleteConfirmationOutcome::Deleted {
         provider_name: "deleted-provider".to_string(),
         needs_reselection: false,
+        refresh_error: None,
     };
 
     clear_observed_model_after_provider_delete(&mut state, true, &outcome);
@@ -519,6 +832,7 @@ fn deleting_the_active_provider_without_a_fallback_discards_the_observed_model()
     let outcome = DeleteConfirmationOutcome::Deleted {
         provider_name: "deleted-provider".to_string(),
         needs_reselection: true,
+        refresh_error: None,
     };
 
     clear_observed_model_after_provider_delete(&mut state, true, &outcome);
@@ -547,6 +861,7 @@ fn cancelling_or_deleting_an_inactive_provider_keeps_the_observed_model() {
         &DeleteConfirmationOutcome::Deleted {
             provider_name: "inactive-provider".to_string(),
             needs_reselection: false,
+            refresh_error: None,
         },
     );
     assert_eq!(
@@ -899,4 +1214,340 @@ fn empty_enter_on_a_secret_field_still_keeps_the_masked_value() {
         auth.collected_values.get("api_key").map(String::as_str),
         Some("\u{2022}\u{2022}\u{2022}")
     );
+}
+
+#[test]
+fn failed_activation_keeps_provider_panel_and_observed_model() {
+    let mut state = ecs_state_with_saved_dashscope();
+    state.personalization.foreground_model = Some("old-model".into());
+    state.startup_auth.resolved = Some(true);
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.existing_providers[0].is_active = false;
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    let result = handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "1",
+        &mut output,
+    );
+    assert!(
+        result.is_ok(),
+        "recoverable activation failure escaped the auth panel: {result:?}"
+    );
+    let auth = state
+        .auth
+        .state
+        .as_ref()
+        .expect("provider panel remains active");
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+    assert_eq!(auth.selected_provider, 0);
+    assert!(!auth.existing_providers[0].is_active);
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("old-model")
+    );
+    assert_eq!(state.startup_auth.resolved, Some(true));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Provider switch not confirmed"), "{output}");
+    assert!(!output.contains("Provider switched"), "{output}");
+}
+
+#[test]
+fn failed_activation_rearms_capture_and_accepts_fresh_retry() {
+    let mut state = ecs_state_with_saved_dashscope();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.existing_providers[0].is_active = false;
+    auth.selected_provider = 0;
+    let first_id = auth_capture_id(auth);
+    let mut first = empty_submission(&first_id);
+    first.started_at_ms = Some(1);
+    assert!(relay_card_event(&mut state, first).contains("Provider switch not confirmed"));
+    let retry_id = auth_capture_id(state.auth.state.as_ref().unwrap());
+    assert_ne!(
+        retry_id, first_id,
+        "failed submission must rearm raw input capture"
+    );
+    let mut stale = empty_submission(&first_id);
+    stale.started_at_ms = Some(2);
+    assert!(
+        relay_card_event(&mut state, stale).is_empty(),
+        "stale submission must not retry automatically"
+    );
+    assert_eq!(
+        auth_capture_id(state.auth.state.as_ref().unwrap()),
+        retry_id
+    );
+    let mut retry = empty_submission(&retry_id);
+    retry.started_at_ms = Some(2);
+    assert!(relay_card_event(&mut state, retry).contains("Provider switch not confirmed"));
+    assert_ne!(
+        auth_capture_id(state.auth.state.as_ref().unwrap()),
+        retry_id,
+        "fresh retry was swallowed by handled-card deduplication"
+    );
+}
+
+#[test]
+fn cancelling_auth_releases_only_the_run_waiting_for_its_control_request() {
+    use crate::runtime::prelude::{
+        AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+    };
+    for (event_run, control_id, cancelled) in [
+        ("run-1", "auth-init-retry-1", true),
+        ("other-run", "auth-init-retry-1", false),
+        ("run-1", "other-control", false),
+    ] {
+        let mut state = InlineState::default();
+        let (mut active, _responses) =
+            crate::agent::run::test_support::test_active_run_with_id("run-1");
+        active.governed_events.push(GovernedEvent {
+            event: AgentEvent::AuthRequired {
+                run_id: event_run.into(),
+                request_id: control_id.into(),
+                reason: "missing credentials".into(),
+                error_message: None,
+                providers: Vec::new(),
+            },
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::DisplayOnly,
+            reason: "test".into(),
+            display_text: "test".into(),
+            auto_execute: false,
+        });
+        state.agent_run.active = Some(active);
+        let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+        auth.backend = AuthBackend::ActiveRun;
+        auth.request_id = "auth-init-retry-1".into();
+        state.auth.state = Some(auth);
+
+        super::cancel_auth_panel(&mut state, &mut Vec::new()).unwrap();
+
+        assert!(state.auth.state.is_none());
+        assert_eq!(state.agent_run.active.is_none(), cancelled);
+        assert_eq!(state.agent_run.needs_prompt_after_run, cancelled);
+    }
+}
+
+fn guide_management_state(saved: bool) -> InlineState {
+    let mut state = InlineState::default();
+    state.auth.host = crate::auth::host::AuthHost::Guide;
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::default());
+    if saved {
+        auth.existing_providers.push(saved_dashscope());
+    }
+    state.auth.state = Some(auth);
+    state
+}
+
+fn record_unknown_write(state: &mut InlineState, kind: crate::runtime::guide::result::ActionKind) {
+    let error = crate::auth::provider_management::AuthConfigureFailure {
+        message: "owner receipt lost".into(),
+        code: None,
+        provider_updated: false,
+        unconfirmed: true,
+    };
+    crate::auth::standalone::record_write_result(state, kind, &Err(error));
+}
+
+#[test]
+fn guide_delete_is_held_while_an_earlier_delete_result_is_unconfirmed() {
+    let mut state = guide_management_state(true);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 1;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    assert!(handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "",
+        &mut output
+    )
+    .unwrap());
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("unconfirmed"), "{text}");
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(
+        auth.existing_providers.len(),
+        1,
+        "no delete may be submitted"
+    );
+    assert_eq!(auth.phase, AuthPhase::ConfirmDelete { provider_idx: 0 });
+}
+
+#[test]
+fn guide_writes_stay_available_without_an_unconfirmed_result() {
+    let mut state = guide_management_state(false);
+    assert!(!state
+        .auth
+        .write_blocked(crate::runtime::guide::result::ActionKind::Delete));
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    state.auth.host = crate::auth::host::AuthHost::Shell;
+    assert!(
+        !state
+            .auth
+            .write_blocked(crate::runtime::guide::result::ActionKind::Delete),
+        "an ordinary /auth session keeps its own semantics"
+    );
+}
+
+#[test]
+fn guide_management_list_shows_the_held_writes_before_any_action() {
+    let mut state = guide_management_state(false);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Configure,
+    );
+    let mut output = Vec::new();
+    crate::auth::prompt::render_current_auth_panel(&mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("on hold"), "{text}");
+}
+
+#[test]
+fn review_fix_configure_gate_retains_form_for_manual_and_ecs_sources() {
+    use crate::runtime::guide::result::ActionKind;
+    for source in [None, Some("ecs_ram_role")] {
+        let mut state = guide_management_state(false);
+        record_unknown_write(&mut state, ActionKind::Configure);
+        let auth = state.auth.state.as_mut().unwrap();
+        auth.phase = AuthPhase::FillingField;
+        auth.collected_values
+            .insert("model".into(), "draft-model".into());
+        if let Some(source) = source {
+            auth.collected_values
+                .insert("auth_source".into(), source.into());
+        }
+        let mut output = Vec::new();
+        super::send_auth_response(Some(&adapter_without_registry()), &mut state, &mut output)
+            .unwrap();
+        let auth = state
+            .auth
+            .state
+            .as_ref()
+            .expect("refusal must preserve return path");
+        assert_eq!(auth.phase, AuthPhase::FillingField);
+        assert_eq!(
+            auth.collected_values.get("model").map(String::as_str),
+            Some("draft-model")
+        );
+        assert!(state.auth.ecs.is_none(), "no ECS write worker may start");
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("Change unconfirmed"));
+    }
+}
+
+#[test]
+fn review_fix_unknown_fact_immediately_holds_current_management_writes() {
+    use crate::runtime::guide::result::ActionKind;
+    let mut state = guide_management_state(false);
+    record_unknown_write(&mut state, ActionKind::Configure);
+    assert!(state.auth.write_blocked(ActionKind::Configure));
+    crate::auth::standalone::record_write_result(&mut state, ActionKind::Configure, &Ok(()));
+    assert!(
+        state.auth.write_blocked(ActionKind::Configure),
+        "reading/success cannot erase earlier unknown"
+    );
+}
+
+#[test]
+fn review_fix_delete_hold_allows_cancel_without_a_write() {
+    let mut state = guide_management_state(true);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "",
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+    assert_eq!(auth.existing_providers.len(), 1);
+}
+
+#[test]
+fn guide_delete_success_lands_on_finish_and_return() {
+    let mut state = guide_management_state(true);
+    state.personalization.foreground_model = Some("deleted-provider-model".into());
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ManagingProviders;
+    auth.existing_providers[0].name = "other".into();
+    auth.existing_providers[0].is_active = false;
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".into(),
+        needs_reselection: true,
+        refresh_error: None,
+    };
+    crate::auth::delete_confirm::apply_delete_outcome(&mut state, true, &outcome);
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::hosted_entry(
+            crate::auth::host::AuthHost::Guide,
+            &auth.sysom,
+            auth.existing_providers.len(),
+            auth.selected_provider
+        ),
+        AuthManagementEntry::GuideExit,
+        "the row that shifted into place must not receive the next Enter"
+    );
+    assert!(
+        state
+            .auth
+            .outcome
+            .facts(crate::runtime::guide::result::ActionKind::Delete)
+            .committed
+    );
+    assert!(state.personalization.foreground_model.is_none());
+}
+
+#[test]
+fn publish_fix_delete_refresh_failure_keeps_committed_fact_and_summary_reason() {
+    use crate::runtime::guide::result::ActionKind;
+    let mut state = guide_management_state(true);
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".into(),
+        needs_reselection: true,
+        refresh_error: Some("state read failed".into()),
+    };
+    crate::auth::delete_confirm::apply_delete_outcome(&mut state, true, &outcome);
+    let facts = state.auth.outcome.facts(ActionKind::Delete);
+    assert!(facts.committed && !facts.unknown && !facts.partial);
+    assert!(!state.auth.write_blocked(ActionKind::Delete));
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(
+        crate::auth::menu::hosted_entry(
+            crate::auth::host::AuthHost::Guide,
+            &auth.sysom,
+            auth.existing_providers.len(),
+            auth.selected_provider,
+        ),
+        AuthManagementEntry::GuideExit,
+    );
+    let message = state.auth.outcome.message(state.i18n());
+    assert!(message.contains("state read failed"), "{message}");
+    assert!(message.contains("list refresh failed"), "{message}");
 }

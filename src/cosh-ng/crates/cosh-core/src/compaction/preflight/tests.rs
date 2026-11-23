@@ -59,6 +59,83 @@ fn summarizer() -> MockProvider {
     MockProvider::repeat_text("## Objective and constraints\n- keep diagnosing")
 }
 
+struct AccessFailureProvider {
+    failure: crate::provider::ProviderFailure,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ContentGenerator for AccessFailureProvider {
+    async fn generate(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        _config: &crate::provider::GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::pin(futures::stream::iter(vec![
+            crate::provider::GenerateEvent::ProviderFailure(self.failure.clone()),
+        ])))
+    }
+
+    fn cancel(&self) {}
+}
+
+#[tokio::test]
+async fn access_failure_stops_preflight_without_recovery_or_projection_change() {
+    use crate::provider::{DispatchState, ProviderFailure, ProviderFailureKind};
+
+    let mut messages = complete_run("previously summarized", 5_000);
+    messages.extend(complete_run("large completed run", 31_000));
+    messages.extend(active_run("current question", 400));
+    let state = crate::compaction::CompactionState {
+        revision: 3,
+        compacted_through: 2,
+        summary: "prior context".to_string(),
+        model: "mock-model".to_string(),
+        prompt_version: super::super::projection::COMPACTION_PROMPT_VERSION,
+        source_digest: source_digest(&messages[..2]),
+        tokens_before: None,
+        tokens_after: None,
+        created_at_ms: 0,
+    };
+    let transcript = serde_json::to_value(&messages).unwrap();
+    for (code, kind) in [
+        (
+            "Sysom.ServiceNotActivated",
+            ProviderFailureKind::ActivationRequired,
+        ),
+        (
+            "Sysom.CreditsExhausted",
+            ProviderFailureKind::QuotaExhausted,
+        ),
+    ] {
+        let provider = AccessFailureProvider {
+            failure: ProviderFailure {
+                code: code.to_string(),
+                kind,
+                dispatch: DispatchState::NotDispatched,
+                request_id: Some("summary-request".to_string()),
+            },
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let result =
+            preflight_resuming(&messages, &config(2), &provider, Some(state.clone())).await;
+        assert_eq!(result.error(), format!("provider_access:{code}"));
+        assert_eq!(result.runtime.state(), Some(&state));
+        assert_eq!(result.runtime.revision(), state.revision);
+        assert_eq!(serde_json::to_value(&messages).unwrap(), transcript);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            result.status_codes(),
+            vec![
+                "compaction_emergency_started",
+                &format!("compaction_emergency_failed:{code}")
+            ]
+        );
+    }
+}
+
 struct Preflight {
     runtime: CompactionRuntime,
     result: Result<(), String>,

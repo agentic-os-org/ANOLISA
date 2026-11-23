@@ -27,7 +27,7 @@ def model_server(case):
                 output.write(
                     json.dumps(
                         {
-                            "tools": tools,
+                            "tools": tools, "messages": body["messages"],
                             "tool_result_seen": seen,
                             "stream": body.get("stream"),
                             "tool_results": [m for m in body["messages"] if m["role"] == "tool"],
@@ -35,7 +35,13 @@ def model_server(case):
                     )
                     + "\n"
                 )
-            if not seen:
+            delay = case / "model-delay-seconds"
+            if delay.exists() and not seen:
+                time.sleep(float(delay.read_text()))
+            if (case / "plain-reply.txt").exists():
+                delta = {"role": "assistant", "content": (case / "plain-reply.txt").read_text()}
+                finish = "stop"
+            elif not seen:
                 request_path = case / "tool-call.json"
                 tool = json.loads(request_path.read_text()) if request_path.exists() else {
                     "name": "execute_shell_command",

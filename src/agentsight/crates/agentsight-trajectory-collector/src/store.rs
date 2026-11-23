@@ -45,6 +45,8 @@ pub struct TrajectoryRecord {
     pub source: String,
     pub is_subagent: bool,
     pub file_path: String,
+    /// Scan identity: bytes or a fingerprint for Hermes, Cline and Gemini.
+    /// Cline/Gemini use negative values to invalidate legacy byte counts.
     pub file_size: i64,
     pub file_mtime_ns: i64,
 }
@@ -1026,14 +1028,16 @@ fn collect_step_hits(
     let limit = usize::try_from(filter.limit.max(0)).unwrap_or(0);
     let steps = &trajectory.steps;
     for (idx, step) in steps.iter().enumerate() {
-        if hits.len() >= limit {
-            return true;
-        }
         if !filter.categories.is_empty() {
             let categories = step.categories();
             if !filter.categories.iter().any(|c| categories.contains(c)) {
                 continue;
             }
+        }
+        // The limit is only exceeded by another *matching* step: a following
+        // non-matching step must not claim that the match set was cut.
+        if hits.len() >= limit {
+            return true;
         }
         // Neighbours come from the same in-memory slice, so context is free.
         // Saturating/min keeps the ranges valid at the first and last step.
@@ -1942,6 +1946,36 @@ mod tests {
         // Trajectory-level source stays the product name, not the step role.
         assert_eq!(out.hits[0].source, "qoder");
         assert_eq!(out.hits[0].step.source, "agent");
+    }
+
+    #[test]
+    fn test_scan_steps_truncated_only_when_another_match_exists() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("scan-truncated")).unwrap();
+        seed_five_steps(&store);
+
+        // The only tool_call is the first hit. Later steps do not match, so
+        // the full match set was returned even though the limit was reached.
+        let filter = StepScanFilter {
+            categories: vec![StepCategory::ToolCall],
+            limit: 1,
+            ..scan_all()
+        };
+        let out = store.scan_steps(&filter).unwrap();
+        assert_eq!(out.hits.len(), 1);
+        assert!(
+            !out.truncated,
+            "a following non-matching step does not prove another match exists"
+        );
+
+        // With no category filter every later step matches, so this scan did
+        // stop before the full match set.
+        let filter = StepScanFilter {
+            limit: 1,
+            ..scan_all()
+        };
+        let out = store.scan_steps(&filter).unwrap();
+        assert_eq!(out.hits.len(), 1);
+        assert!(out.truncated);
     }
 
     #[test]

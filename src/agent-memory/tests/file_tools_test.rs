@@ -4,6 +4,7 @@
 //! (path-sandbox, missing file, etc.).
 
 use tempfile::tempdir;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use agent_memory::config::{AppConfig, Profile};
 use agent_memory::error::MemoryError;
@@ -222,6 +223,144 @@ fn list_hides_meta_dir() {
     assert!(!entries.iter().any(|e| e.path.starts_with(".anolisa")));
 }
 
+/// A `tracing_subscriber` writer that captures formatted output into a
+/// shared buffer, so the truncation warning is assertable.
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn list_caps_entries_at_max() {
+    // Regression: a listing over the cap must return exactly the cap and
+    // not silently look complete at an arbitrary count, must say so in the
+    // log with the mount root rendered as '.', and an under-cap listing
+    // must stay silent.
+    let (_t, svc) = setup();
+    let mount_root = _t.path().join("user-tester");
+    let bulk = mount_root.join("bulk");
+    std::fs::create_dir_all(&bulk).unwrap();
+    for i in 0..(5000 + 10) {
+        std::fs::File::create(bulk.join(format!("f{i:05}.md"))).unwrap();
+    }
+
+    // Thread-local subscriber: the warning fires on this thread during the
+    // recursive listing, while concurrently running tests keep whatever
+    // default was installed.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let _guard = tracing_subscriber::fmt()
+        .with_writer(move || CaptureWriter(sink.clone()))
+        .with_ansi(false)
+        .set_default();
+    let entries = svc
+        .list(
+            "",
+            ListOptions {
+                recursive: true,
+                glob: None,
+            },
+        )
+        .unwrap();
+    drop(_guard);
+    assert_eq!(entries.len(), 5000, "listing must stop at the cap");
+    let logged = String::from_utf8(std::mem::take(&mut *captured.lock().unwrap())).unwrap();
+    assert!(
+        logged.contains("listing truncated"),
+        "the over-cap cut must be visible in the log: {logged}"
+    );
+    assert!(
+        logged.contains("under '.'"),
+        "the mount root must render as '.', not an empty path: {logged}"
+    );
+
+    // An under-cap listing must not warn.
+    let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = quiet.clone();
+    let _guard = tracing_subscriber::fmt()
+        .with_writer(move || CaptureWriter(sink.clone()))
+        .with_ansi(false)
+        .set_default();
+    let entries = svc
+        .list(
+            "",
+            ListOptions {
+                recursive: false,
+                glob: None,
+            },
+        )
+        .unwrap();
+    drop(_guard);
+    assert!(
+        entries.len() < 5000,
+        "the non-recursive top-level listing is far under the cap"
+    );
+    assert!(
+        quiet.lock().unwrap().is_empty(),
+        "an under-cap listing must not warn"
+    );
+}
+
+#[test]
+fn list_warns_only_when_matching_entries_exceed_cap() {
+    for glob in [None, Some("**/*.md".to_string())] {
+        let (tmp, svc) = setup();
+        let bulk = tmp.path().join("user-tester/bulk");
+        std::fs::create_dir_all(&bulk).unwrap();
+        for i in 0..4999 {
+            std::fs::File::create(bulk.join(format!("f{i:05}.md"))).unwrap();
+        }
+        if glob.is_some() {
+            // Extra filesystem entries do not imply extra matching results.
+            std::fs::File::create(bulk.join("ignored.txt")).unwrap();
+        }
+
+        for count in 4999..=5001 {
+            if count > 4999 {
+                std::fs::File::create(bulk.join(format!("f{:05}.md", count - 1))).unwrap();
+            }
+            for recursive in [false, true] {
+                let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let sink = captured.clone();
+                let guard = tracing_subscriber::fmt()
+                    .with_writer(move || CaptureWriter(sink.clone()))
+                    .with_ansi(false)
+                    .set_default();
+                let entries = svc
+                    .list(
+                        "bulk",
+                        ListOptions {
+                            recursive,
+                            glob: glob.clone(),
+                        },
+                    )
+                    .unwrap();
+                drop(guard);
+
+                assert_eq!(entries.len(), count.min(5000));
+                assert!(entries.iter().all(|entry| entry.path.ends_with(".md")));
+                let logged =
+                    String::from_utf8(std::mem::take(&mut *captured.lock().unwrap())).unwrap();
+                assert_eq!(
+                    logged.contains("listing truncated"),
+                    count > 5000,
+                    "count={count}, recursive={recursive}, glob={glob:?}: {logged}"
+                );
+                if count > 5000 {
+                    assert!(logged.contains("under 'bulk'"), "{logged}");
+                }
+            }
+        }
+    }
+}
+
 // ---------- mem_grep ----------
 
 #[test]
@@ -241,6 +380,53 @@ fn grep_finds_matches_with_line_numbers() {
     assert_eq!(hits[0].path, "notes/a.md");
     assert_eq!(hits[0].line, 2);
     assert!(hits[0].text.contains("hello"));
+}
+
+#[test]
+fn grep_skips_invalid_utf8_lines_and_keeps_physical_line_numbers() {
+    let (_t, svc) = setup();
+    let notes = svc.mount.root.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let cases = [
+        (
+            b"alpha first\n\xff\xfe alpha bad\nomega last\n".as_slice(),
+            vec![(1, "alpha first"), (3, "omega last")],
+        ),
+        (
+            b"\xff alpha bad\r\n\xfe omega bad\r\n\r\nalpha first\r\nomega last".as_slice(),
+            vec![(4, "alpha first"), (5, "omega last")],
+        ),
+        (
+            b"alpha first\n\xe4\xb8".as_slice(),
+            vec![(1, "alpha first")],
+        ),
+        (b"\xff alpha bad\n\xfe omega bad".as_slice(), vec![]),
+        (
+            "alpha 中文\n\nomega 最后".as_bytes(),
+            vec![(1, "alpha 中文"), (3, "omega 最后")],
+        ),
+    ];
+
+    for (content, expected) in cases {
+        std::fs::write(notes.join("mixed.md"), content).unwrap();
+        let hits = svc
+            .grep(
+                "alpha|omega",
+                GrepOptions {
+                    dir: "notes".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for hit in &hits {
+            assert_eq!(hit.path, "notes/mixed.md");
+        }
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|hit| (hit.line, hit.text.as_str()))
+            .collect();
+        assert_eq!(actual, expected, "input: {content:?}");
+    }
 }
 
 #[test]
@@ -306,6 +492,67 @@ fn diff_missing_file_errors() {
 // mem_promote happy / error paths are exercised in tests/session_test.rs
 // (promote_copies_scratch_to_store, promote_missing_scratch_file_returns_not_found,
 //  session_log_degrades_gracefully_when_session_dir_unavailable).
+
+#[test]
+fn diff_output_round_trips_as_a_unified_patch() {
+    let (_tmp, svc) = setup();
+    let original = "first\noriginal\nlast\n";
+    let modified = "first\nmodified\nlast\n";
+    svc.write("notes/original.md", original, false).unwrap();
+    svc.write("notes/modified.md", modified, false).unwrap();
+    let output = svc.diff("notes/original.md", "notes/modified.md").unwrap();
+    let patch =
+        diffy::Patch::from_str(&output).expect("mem_diff must return a valid unified patch");
+    assert_eq!(patch.original(), Some("notes/original.md"));
+    assert_eq!(patch.modified(), Some("notes/modified.md"));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_preserves_escaped_relative_filenames() {
+    let (_tmp, svc) = setup();
+    let original_path = "笔记/旧 \"名\"\t行\n.md";
+    let modified_path = "笔记/新\\名\r.md";
+    let original = "keep \\\n\t\r\nold\n";
+    let modified = "keep \\\n\t\r\nnew\n";
+    svc.write(original_path, original, false).unwrap();
+    svc.write(modified_path, modified, false).unwrap();
+    let output = svc.diff(original_path, modified_path).unwrap();
+    let patch = diffy::Patch::from_str(&output).expect("escaped filenames must remain parseable");
+    assert_eq!(patch.original(), Some(original_path));
+    assert_eq!(patch.modified(), Some(modified_path));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_preserves_identical_and_unterminated_contents() {
+    let (_tmp, svc) = setup();
+    for (index, (original, modified)) in [
+        ("same\n", "same\n"),
+        ("before", "after"),
+        ("", "first"),
+        ("second", ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let original_path = format!("original-{index}.md");
+        let modified_path = format!("modified-{index}.md");
+        svc.write(&original_path, original, false).unwrap();
+        svc.write(&modified_path, modified, false).unwrap();
+        let output = svc.diff(&original_path, &modified_path).unwrap();
+        let patch = diffy::Patch::from_str(&output)
+            .unwrap_or_else(|error| panic!("case {index}: invalid patch: {error}"));
+        let applied = diffy::apply(original, &patch)
+            .unwrap_or_else(|error| panic!("case {index}: cannot apply patch: {error}"));
+        assert_eq!(applied, modified, "case {index}");
+        assert_eq!(
+            patch.hunks().is_empty(),
+            original == modified,
+            "case {index}"
+        );
+    }
+}
 
 // ---------- audit log smoke ----------
 
@@ -444,5 +691,66 @@ mod symlink_attacks {
         let err = svc.mkdir("out/inside").unwrap_err();
         assert!(matches!(err, MemoryError::PathOutsideMount(_)));
         assert!(!outside.path().join("escape/inside").exists());
+    }
+}
+
+fn setup_edit_overlap() -> (tempfile::TempDir, MemoryService) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.memory.paths.base_dir = tmp.path().join("data").to_string_lossy().into_owned();
+    cfg.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().into_owned();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.index.enabled = false;
+    cfg.memory.git.enabled = false;
+    (tmp, MemoryService::new(cfg).unwrap())
+}
+
+#[test]
+fn overlapping_edits_require_more_context_and_preserve_the_file() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old) in [
+        ("ababa", "aba"),
+        ("哈哈哈", "哈哈"),
+        ("   code", "  "),
+        ("aaa", "aa"),
+        ("prefix ababa", "aba"),
+        ("前缀哈哈哈", "哈哈"),
+        ("前缀ababa", "aba"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        let result = svc.edit("note.md", old, "replacement");
+        assert!(
+            matches!(result, Err(MemoryError::InvalidArgument(ref message))
+            if message.contains("multiple occurrences")),
+            "expected ambiguity for {body:?} / {old:?}, got {result:?}"
+        );
+        assert_eq!(svc.read("note.md").unwrap(), body);
+    }
+}
+
+#[test]
+fn unique_context_and_disjoint_repetition_keep_their_behavior() {
+    let (_tmp, svc) = setup_edit_overlap();
+    svc.write("note.md", "哈哈哈", false).unwrap();
+    svc.edit("note.md", "哈哈哈", "done").unwrap();
+    assert_eq!(svc.read("note.md").unwrap(), "done");
+    svc.write("note.md", "aba aba", true).unwrap();
+    assert!(svc.edit("note.md", "aba", "changed").is_err());
+    assert_eq!(svc.read("note.md").unwrap(), "aba aba");
+    assert!(svc.edit("note.md", "missing", "").is_err());
+}
+
+#[test]
+fn unique_edits_after_multibyte_prefix_and_at_eof() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old, expected) in [
+        ("prefix aba", "aba", "prefix done"),
+        ("前缀哈哈", "哈哈", "前缀done"),
+        ("前缀aba", "aba", "前缀done"),
+        ("前缀aba tail", "aba", "前缀done tail"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        svc.edit("note.md", old, "done").unwrap();
+        assert_eq!(svc.read("note.md").unwrap(), expected);
     }
 }

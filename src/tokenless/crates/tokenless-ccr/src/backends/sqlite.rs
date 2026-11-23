@@ -6,9 +6,9 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, ffi};
 
 use crate::key::compute_key;
 use crate::store::{MAX_GENERATION, StashError, StashStore, StashWrite};
@@ -21,13 +21,36 @@ const DEFAULT_TTL_SECONDS: u64 = 60 * 60;
 /// Default maximum number of live entries before FIFO eviction.
 const DEFAULT_CAPACITY: usize = 10_000;
 
+/// How long one connection waits for locks held by other processes, both
+/// while opening the database and for every later statement.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
     ttl_seconds: u64,
     capacity: usize,
+    read_only: bool,
 }
 
 impl SqliteStore {
+    /// Open an existing stash for lookups without initializing or cleaning it.
+    ///
+    /// SQLite requires readable WAL and shared-memory files when the containing
+    /// directory is not writable. Updated stash writers preserve these files
+    /// on close. If a legacy writer removed them, reopen the stash with an
+    /// updated writer before running a lookup from a read-only directory.
+    /// SQLite can create the files itself when the directory is writable.
+    pub fn open_read_only(path: &Path) -> Result<Self, StashError> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            ttl_seconds: DEFAULT_TTL_SECONDS,
+            capacity: DEFAULT_CAPACITY,
+            read_only: true,
+        })
+    }
+
     /// Open (or create) a stash database at `path` with default TTL and
     /// capacity. The file and its `-wal`/`-shm` sidecars are created on first
     /// write; the parent directory must already exist.
@@ -71,11 +94,22 @@ impl SqliteStore {
                 })?;
         }
         let mut conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;
-             PRAGMA synchronous=NORMAL;",
-        )?;
+        enable_wal(&conn)?;
+        // Read-only retrieval after the last writer closes needs both WAL sidecars.
+        let mut persist_wal = 1;
+        // SAFETY: The live connection and mutable integer are valid for this call.
+        let result = unsafe {
+            ffi::sqlite3_file_control(
+                conn.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_PERSIST_WAL,
+                std::ptr::from_mut(&mut persist_wal).cast(),
+            )
+        };
+        if result != ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(ffi::Error::new(result), None).into());
+        }
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "CREATE TABLE IF NOT EXISTS stash (
@@ -127,6 +161,7 @@ impl SqliteStore {
             conn: Mutex::new(conn),
             ttl_seconds,
             capacity,
+            read_only: false,
         })
     }
 
@@ -253,12 +288,12 @@ impl StashStore for SqliteStore {
         // have uppercased by lowercasing the lookup (case-insensitive retrieve).
         let key = hash.to_ascii_lowercase();
         let conn = self.lock_conn();
-        // Lazy purge sweep: physically drop expired rows on every retrieve so
-        // the DB file does not grow unbounded by stale entries that the
-        // `expires_at >= ?` filter only hides, never deletes. Mirrors headroom's
-        // `SqliteCcrStore::get`. Best-effort — a purge failure must not block
-        // the lookup; it falls through to the SELECT below.
-        if let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
+        // Writable stores reclaim expired rows lazily as well as on writes.
+        // Readers rely on the writer's cleanup and only filter out expired rows.
+        // A purge failure must not block the lookup.
+        if !self.read_only
+            && let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])
+        {
             warn_soft(&format!(
                 "[tokenless-ccr] WARNING: stash lazy-purge failed: {e}"
             ));
@@ -317,6 +352,35 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Switches the connection to WAL within [`BUSY_TIMEOUT`], then leaves that
+/// timeout in place.
+///
+/// Concurrent first openers of a new database can collide while upgrading
+/// journal locks, and SQLite reports that as busy without invoking its busy
+/// handler. Hook processes of concurrent sessions open the stash exactly that
+/// way, and a lost race would leave a process without any stash, so the
+/// switch is retried until the shared deadline.
+fn enable_wal(conn: &Connection) -> Result<(), StashError> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Ok(()) => break,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +414,21 @@ mod tests {
         assert_eq!(
             store2.retrieve(&key).unwrap(),
             Some("payload-A".to_string())
+        );
+    }
+
+    #[test]
+    fn closed_writer_leaves_sidecars_for_read_only_retrieval() {
+        let (writer, dir) = tmp_store(60, 100);
+        let write = writer.stash("read-only shell payload").unwrap();
+        drop(writer);
+        assert!(dir.path().join("stash.db-wal").is_file());
+        assert!(dir.path().join("stash.db-shm").is_file());
+
+        let reader = SqliteStore::open_read_only(&dir.path().join("stash.db")).unwrap();
+        assert_eq!(
+            reader.retrieve(&write.key).unwrap().as_deref(),
+            Some("read-only shell payload")
         );
     }
 
@@ -474,6 +553,30 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_fresh_openers_all_get_a_store() {
+        // Hook processes of concurrent sessions open a new stash database
+        // at the same moment. Every opener must get a store: a lost race
+        // used to fail with "database is locked" and leave that process
+        // without reversible compression.
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stash.db");
+            let barrier = std::sync::Barrier::new(8);
+            thread::scope(|scope| {
+                for index in 0..8 {
+                    let (path, barrier) = (&path, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let store = SqliteStore::new(path).unwrap();
+                        store.stash(&format!("payload-{index}")).unwrap();
+                    });
+                }
+            });
+            assert_eq!(SqliteStore::new(&path).unwrap().len(), 8);
+        }
+    }
+
+    #[test]
     fn expired_rows_physically_deleted_after_retrieve() {
         // Lazy purge: a retrieve must physically DELETE expired rows, not
         // merely filter them via the WHERE clause. Mirrors headroom's
@@ -488,6 +591,41 @@ mod tests {
         // physically deleted, not just hidden.
         assert_eq!(store.retrieve("000000000000000000000000").unwrap(), None);
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn retrieve_succeeds_when_lazy_purge_fails() {
+        let (store, _dir) = tmp_store(60, 100);
+        let live = store.stash("live payload").unwrap();
+        let expired = store.stash("expired payload").unwrap();
+        {
+            let conn = store.lock_conn();
+            conn.execute(
+                "UPDATE stash SET expires_at = 0 WHERE hash = ?",
+                [&expired.key],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER block_lazy_purge BEFORE DELETE ON stash
+                 BEGIN SELECT RAISE(ABORT, 'lazy purge blocked'); END;",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            store.retrieve(&live.key).unwrap().as_deref(),
+            Some("live payload")
+        );
+        assert_eq!(store.retrieve(&expired.key).unwrap(), None);
+        let still_present: bool = store
+            .lock_conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM stash WHERE hash = ?)",
+                [&expired.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(still_present);
     }
 
     #[test]

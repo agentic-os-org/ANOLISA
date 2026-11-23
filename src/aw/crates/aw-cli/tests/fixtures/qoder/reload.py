@@ -57,7 +57,7 @@ def run(argv, cwd, environment, terminal):
 
 
 def status(aw, config, cwd, environment, terminal):
-    return run([aw, 'status', '--config', str(config)], cwd, environment, terminal)['result']
+    return run([aw, 'service', 'status', '--config', str(config)], cwd, environment, terminal)['result']
 
 
 def tui_environment(root: Path) -> dict[str, str]:
@@ -175,7 +175,7 @@ def exercise(binaries, output):
                 if (root/'state/aw.sock').exists():
                     final = status(aw, config, root, controls, master)
                     assert final['bindings'] == final['events'] == 0
-                    run([aw, 'stop', '--config', str(config)], root, controls, master)
+                    run([aw, 'service', 'stop', '--config', str(config)], root, controls, master)
                     limit = time.monotonic()+5
                     while (root/'state/aw.sock').exists() and time.monotonic() < limit:
                         time.sleep(0.01)

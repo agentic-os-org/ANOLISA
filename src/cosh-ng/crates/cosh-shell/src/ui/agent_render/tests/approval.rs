@@ -465,6 +465,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
 #[test]
 fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -508,6 +509,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
 fn approval_panel_styles_selected_actions_by_decision_kind() {
     let mut deny_output = Vec::new();
     RatatuiInlineRenderer {
+        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -540,6 +542,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
 
     let mut details_output = Vec::new();
     RatatuiInlineRenderer {
+        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -685,6 +688,7 @@ fn approval_receipt_panel_uses_zh_fallback_labels() {
 #[test]
 fn approval_receipt_panel_uses_negative_state_not_localized_title_for_style() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -908,11 +912,101 @@ fn approval_details_panel_renders_structured_request_context() {
     assert!(text.contains("Request: Bash command"), "{text}");
     assert!(text.contains("Command:"), "{text}");
     assert!(text.contains("ps aux -m"), "{text}");
-    assert!(text.contains("Policy: user approval is required"), "{text}");
+    assert!(
+        text.contains("This tool request requires your approval."),
+        "{text}"
+    );
     assert!(!text.contains("Subject: tool Bash"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
     assert!(!text.contains("Approval details\nid:"), "{text}");
     assert_rendered_width(&text, 70);
+}
+
+#[test]
+fn approval_details_panel_surfaces_secondary_git_repo_config_warning() {
+    for (language, phrase) in [
+        (crate::Language::EnUs, "may run repo-embedded scripts"),
+        (crate::Language::ZhCn, "可能执行仓库内嵌脚本"),
+    ] {
+        let renderer = RatatuiInlineRenderer::with_width(70).with_language(language);
+        let text = renderer
+            .approval_details_panel_lines(ApprovalDetailsPanelModel {
+                id: "req-9",
+                run_id: "run-19",
+                source: "agent",
+                kind: "tool request",
+                status: "pending",
+                risk: "high",
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "sudo git diff",
+                request_id: None,
+                tool_use_id: None,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: Some(CommandAssessmentSummaryModel {
+                    impact: "high",
+                    execution: "ask-user",
+                    confidence: "high",
+                    primary_reason: "privilege-escalation",
+                    reason_trace: "privilege-escalation,git-repo-config-execution",
+                    auto_allow: None,
+                    output_stability: "stable-snapshot",
+                    output_exposure: "normal",
+                }),
+                audit_ref: None,
+            })
+            .join("\n");
+        assert!(text.contains("privilege-escalation"), "{text}");
+        assert!(text.contains(phrase), "{text}");
+    }
+}
+
+#[test]
+fn plain_approval_details_surface_secondary_git_repo_config_warning() {
+    for (language, phrase) in [
+        (crate::Language::EnUs, "may run repo-embedded scripts"),
+        (crate::Language::ZhCn, "可能执行仓库内嵌脚本"),
+    ] {
+        let renderer = RatatuiInlineRenderer::plain_with_width(80).with_language(language);
+        let text = renderer
+            .approval_details_panel_lines(ApprovalDetailsPanelModel {
+                id: "req-10",
+                run_id: "run-20",
+                source: "agent",
+                kind: "tool request",
+                status: "pending",
+                risk: "high",
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "sudo git diff",
+                request_id: None,
+                tool_use_id: None,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: Some(CommandAssessmentSummaryModel {
+                    impact: "high",
+                    execution: "ask-user",
+                    confidence: "high",
+                    primary_reason: "privilege-escalation",
+                    reason_trace: "privilege-escalation,git-repo-config-execution",
+                    auto_allow: None,
+                    output_stability: "stable-snapshot",
+                    output_exposure: "normal",
+                }),
+                audit_ref: None,
+            })
+            .join("\n");
+        if matches!(language, crate::Language::EnUs) {
+            assert!(
+                text.contains("Assessment: impact high; decision ask-user; confidence high"),
+                "{text}"
+            );
+        }
+        assert!(text.contains(phrase), "{text}");
+    }
 }
 
 #[test]
@@ -966,10 +1060,7 @@ fn approval_details_panel_uses_zh_catalog_labels() {
     assert!(text.contains("默认: 拒绝"), "{text}");
     assert!(text.contains("请求: Bash 命令"), "{text}");
     assert!(text.contains("命令:"), "{text}");
-    assert!(
-        text.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
-        "{text}"
-    );
+    assert!(text.contains("此工具请求需要你的批准。"), "{text}");
     assert!(!text.contains("Approval details"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
 }
@@ -1035,7 +1126,10 @@ fn approval_details_panel_renders_audit_reference_inside_panel() {
     assert!(closing_border.contains('└'), "{text}");
     assert!(!closing_border.contains("audit_ref"), "{text}");
     assert!(text.contains("ls -la"), "{text}");
-    assert!(text.contains("Policy: user approval is required"), "{text}");
+    assert!(
+        text.contains("This tool request requires your approval."),
+        "{text}"
+    );
     assert_rendered_width(&text, 70);
     assert_box_lines_aligned(&text, 70);
 }
@@ -1051,7 +1145,7 @@ fn panel_content_without_layout(text: &str) -> String {
 }
 
 #[test]
-fn approval_details_panel_wraps_audit_reference_at_minimum_width() {
+fn review_regression_approval_details_keeps_audit_and_policy_at_minimum_width() {
     // The 40-column minimum panel is narrower than `audit_ref: <uuid>`; the id
     // must wrap instead of being clipped, or it cannot be traced in the audit log.
     let renderer = RatatuiInlineRenderer::with_width(40);
@@ -1087,7 +1181,16 @@ fn approval_details_panel_wraps_audit_reference_at_minimum_width() {
     assert!(!text.contains(" ..."), "{text}");
     // The wrapped rows must be budgeted, not stolen from the rows below.
     assert_eq!(with_ref.len(), without_ref.len() + 2, "{text}");
-    assert!(text.contains("Policy:"), "{text}");
+    assert!(
+        panel_content_without_layout(&text).contains("Thistoolrequestrequiresyourapproval."),
+        "{text}"
+    );
+    assert!(
+        panel_content_without_layout(&without_ref.join("\n"))
+            .contains("Thistoolrequestrequiresyourapproval."),
+        "{}",
+        without_ref.join("\n")
+    );
     assert_rendered_width(&text, 40);
     assert_box_lines_aligned(&text, 40);
 }
@@ -1155,6 +1258,7 @@ fn approval_details_panel_keeps_borders_aligned_with_uuid_audit_reference() {
 #[test]
 fn styled_approval_details_write_keeps_audit_reference_inside_panel() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 70,
         plain: false,
         styled: true,
@@ -1507,6 +1611,7 @@ fn approval_journal_panel_scopes_audit_reference_to_owning_entry() {
 #[test]
 fn styled_approval_journal_write_scopes_audit_reference_to_owning_entry() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 88,
         plain: false,
         styled: true,

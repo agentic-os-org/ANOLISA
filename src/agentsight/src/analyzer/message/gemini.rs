@@ -132,6 +132,10 @@ pub struct GeminiPart {
 /// A Gemini tool call: the tool name plus its argument object
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeminiFunctionCall {
+    /// Optional provider call ID, shared by a call and its response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Tool name
     #[serde(default)]
     pub name: String,
@@ -147,6 +151,10 @@ pub struct GeminiFunctionCall {
 /// raw because the response is caller-defined.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeminiFunctionResponse {
+    /// Optional provider call ID, shared by a call and its response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Tool name this result belongs to
     #[serde(default)]
     pub name: String,
@@ -291,6 +299,28 @@ pub struct GeminiUsageMetadata {
 // GeminiParser
 // ============================================================================
 
+/// A prompt-level safety block (`promptFeedback.blockReason`), when present
+/// and non-empty. Google's response shape uses this instead of a candidate
+/// when the input itself was refused.
+///
+/// Only the safety-class spellings are surfaced. `OTHER` means the prompt was
+/// refused for an unstated reason and `BLOCK_REASON_UNSPECIFIED` says nothing;
+/// carrying either as a finish reason would make the detector read the call as
+/// a normal stop (`other`) or a truncated stream. They keep the pre-existing
+/// empty-response behaviour instead of being recorded as a success.
+fn safety_prompt_block_reason(body: &serde_json::Value) -> Option<&str> {
+    /// Gemini's `BlockReason` values that name a safety policy.
+    const SAFETY_BLOCK_REASONS: &[&str] =
+        &["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY"];
+    body.pointer("/promptFeedback/blockReason")
+        .and_then(serde_json::Value::as_str)
+        .filter(|reason| {
+            SAFETY_BLOCK_REASONS
+                .iter()
+                .any(|known| reason.eq_ignore_ascii_case(known))
+        })
+}
+
 /// Parser for Google's Gemini `generateContent` API
 pub struct GeminiParser;
 
@@ -346,12 +376,28 @@ impl GeminiParser {
         if let Some(chunks) = body.as_array() {
             return Self::aggregate_sse_chunks(chunks);
         }
-        if body.get("candidates").is_none() && body.get("usageMetadata").is_none() {
+        // A prompt blocked by a safety filter has no candidates and may carry
+        // no usage metadata; its only answer signal is `promptFeedback`.
+        if body.get("candidates").is_none()
+            && body.get("usageMetadata").is_none()
+            && safety_prompt_block_reason(body).is_none()
+        {
             return None;
         }
-        let response: GeminiResponse = serde_json::from_value(body.clone())
+        let mut response: GeminiResponse = serde_json::from_value(body.clone())
             .map_err(|e| log::trace!("Failed to parse Gemini response: {e}"))
             .ok()?;
+        // Surface the block as a candidate finish reason so the call carries a
+        // reason the interruption detector can classify (the provider blocks
+        // the prompt, not a candidate, and sends no candidates at all).
+        if response.candidates.is_empty()
+            && let Some(reason) = safety_prompt_block_reason(body)
+        {
+            response.candidates.push(GeminiCandidate {
+                finish_reason: Some(reason.to_string()),
+                ..Default::default()
+            });
+        }
         log::debug!(
             "Parsed Gemini response: candidates={}, finish_reason={:?}",
             response.candidates.len(),
@@ -372,8 +418,20 @@ impl GeminiParser {
     fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<GeminiResponse> {
         let mut merged = GeminiResponse::default();
         let mut saw_gemini = false;
+        let mut prompt_block: Option<String> = None;
+        // Gemini repeats a candidate's parts, `functionCall` included, as
+        // whole objects in every chunk. A call is identified by its candidate
+        // and its position in the chunk's `parts` array; the last value per
+        // slot folds the repeats. Keying by value instead would merge two
+        // genuinely distinct calls that happen to share name and arguments.
+        let mut call_slots: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
 
         for chunk in chunks {
+            if let Some(reason) = safety_prompt_block_reason(chunk) {
+                saw_gemini = true;
+                prompt_block = Some(reason.to_string());
+            }
             if merged.response_id.is_none() {
                 merged.response_id = chunk
                     .get("responseId")
@@ -416,7 +474,9 @@ impl GeminiParser {
                             None => continue,
                         }
                     }
-                    None => position,
+                    // Earlier skipped out-of-range candidates leave `merged.candidates`
+                    // shorter than `position`; clamp so an unindexed follower appends contiguously.
+                    None => position.min(merged.candidates.len()),
                 };
                 if index == merged.candidates.len() {
                     merged.candidates.push(GeminiCandidate::default());
@@ -450,10 +510,19 @@ impl GeminiParser {
                     continue;
                 };
                 let entry = slot.content.get_or_insert_with(GeminiContent::default);
-                for part in parts {
-                    if let Ok(part) = serde_json::from_value::<GeminiPart>(part.clone()) {
-                        entry.parts.push(part);
+                for (part_pos, part) in parts.iter().enumerate() {
+                    let Ok(part) = serde_json::from_value::<GeminiPart>(part.clone()) else {
+                        continue;
+                    };
+                    if part.function_call.is_some() {
+                        if let Some(&existing) = call_slots.get(&(index, part_pos)) {
+                            // The same whole call repeated by this chunk.
+                            entry.parts[existing] = part;
+                            continue;
+                        }
+                        call_slots.insert((index, part_pos), entry.parts.len());
                     }
+                    entry.parts.push(part);
                 }
             }
         }
@@ -466,6 +535,17 @@ impl GeminiParser {
         merged
             .candidates
             .retain(|candidate| candidate.content.is_some() || candidate.finish_reason.is_some());
+        // A prompt block never names a candidate, so carry it as the answer's
+        // finish reason for the interruption detector, like the single-body
+        // path above.
+        if merged.candidates.is_empty()
+            && let Some(reason) = prompt_block
+        {
+            merged.candidates.push(GeminiCandidate {
+                finish_reason: Some(reason),
+                ..Default::default()
+            });
+        }
         Some(merged)
     }
 }
@@ -623,6 +703,82 @@ mod tests {
         assert_eq!(response.finish_reason(), Some("STOP"));
     }
 
+    /// A prompt blocked by a safety filter answers with `promptFeedback`
+    /// (`blockReason`) and no candidates. The parser read neither field, so
+    /// the call had no finish reason and the detector reported it as an
+    /// `empty_response` instead of `safety_filter`.
+    #[test]
+    fn prompt_feedback_block_surfaces_as_a_safety_finish_reason() {
+        let blocked = serde_json::json!({
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7},
+            "responseId": "resp-blocked"
+        });
+        let response = GeminiParser::parse_response(&blocked).expect("a prompt block must parse");
+        assert_eq!(response.finish_reason(), Some("SAFETY"));
+        assert_eq!(response.candidates.len(), 1);
+        assert!(response.candidates[0].content.is_none());
+
+        // No usage metadata: the body is still a Gemini answer.
+        let bare = serde_json::json!({"promptFeedback": {"blockReason": "BLOCKLIST"}});
+        let response = GeminiParser::parse_response(&bare).expect("a bare prompt block must parse");
+        assert_eq!(response.finish_reason(), Some("BLOCKLIST"));
+
+        let image = serde_json::json!({"promptFeedback": {"blockReason": "IMAGE_SAFETY"}});
+        let response =
+            GeminiParser::parse_response(&image).expect("an image safety block must parse");
+        assert_eq!(response.finish_reason(), Some("IMAGE_SAFETY"));
+
+        let chunks = serde_json::json!([
+            {"promptFeedback": {"blockReason": "SAFETY"}},
+            {"usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}}
+        ]);
+        let response = GeminiParser::parse_response(&chunks).expect("stream block aggregates");
+        assert_eq!(response.finish_reason(), Some("SAFETY"));
+        assert_eq!(response.candidates.len(), 1);
+
+        // An empty promptFeedback carries no block and must not turn an
+        // unrelated body into a Gemini response.
+        assert!(GeminiParser::parse_response(&serde_json::json!({"promptFeedback": {}})).is_none());
+    }
+
+    /// `OTHER` and `BLOCK_REASON_UNSPECIFIED` are prompt blocks too, but they
+    /// do not name a safety policy. Carrying them as a finish reason would
+    /// make the detector read the call as a normal stop (`other`) or a
+    /// truncated stream, turning a withheld answer into a silent success.
+    /// They keep the pre-existing empty-response behaviour.
+    #[test]
+    fn non_safety_prompt_block_keeps_the_empty_response_behaviour() {
+        // With usage metadata the body is still parseable, as before this
+        // fix, but no candidate or finish reason is synthesized.
+        let other = serde_json::json!({
+            "promptFeedback": {"blockReason": "OTHER"},
+            "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}
+        });
+        let response =
+            GeminiParser::parse_response(&other).expect("usage metadata keeps it parseable");
+        assert!(response.candidates.is_empty());
+        assert_eq!(response.finish_reason(), None);
+
+        // Without a Gemini-shaped sibling field the body is not a Gemini
+        // answer, exactly as before the safety fix.
+        assert!(
+            GeminiParser::parse_response(&serde_json::json!({
+                "promptFeedback": {"blockReason": "BLOCK_REASON_UNSPECIFIED"}
+            }))
+            .is_none()
+        );
+
+        // A non-safety block must not mask a later safety block in a stream.
+        let chunks = serde_json::json!([
+            {"promptFeedback": {"blockReason": "OTHER"}},
+            {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}},
+            {"usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}}
+        ]);
+        let response = GeminiParser::parse_response(&chunks).expect("stream block aggregates");
+        assert_eq!(response.finish_reason(), Some("PROHIBITED_CONTENT"));
+    }
+
     #[test]
     fn aggregates_streaming_chunks_into_one_response() {
         let chunks = serde_json::json!([
@@ -663,6 +819,74 @@ mod tests {
         assert_eq!(response.response_id.as_deref(), Some("resp-stream"));
     }
 
+    /// Gemini's `streamGenerateContent` repeats a candidate's parts as whole
+    /// objects, `functionCall` included: a call that arrives in two chunks is
+    /// the same call, not two. The aggregate appended every copy, so a
+    /// streamed call was described once per chunk; `tool_call_ids_json` then
+    /// persisted the same id several times and tool-result pairing saw
+    /// phantom calls. Fold a call by its candidate and part position, the
+    /// rule the token-side merger already applies to the same stream.
+    #[test]
+    fn a_repeated_function_call_in_a_stream_is_kept_once() {
+        let chunks = serde_json::json!([
+            {"candidates": [{"content": {"role": "model", "parts": [
+                {"text": "calling"},
+                {"functionCall": {"id": "call-1", "name": "lookup", "args": {"q": "x"}}}
+            ]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [
+                {"text": " the tool"},
+                {"functionCall": {"id": "call-1", "name": "lookup", "args": {"q": "x"}}}
+            ]}, "finishReason": "STOP", "index": 0}]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+        let parts = &response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts;
+
+        let calls: Vec<&GeminiFunctionCall> = parts
+            .iter()
+            .filter_map(|part| part.function_call.as_ref())
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a call repeated by the stream must be recorded once: {parts:?}"
+        );
+        assert_eq!(calls[0].id.as_deref(), Some("call-1"));
+
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "calling the tool");
+    }
+
+    /// Folding is positional, not by value: two genuinely distinct calls that
+    /// happen to carry the same name and arguments remain two calls.
+    #[test]
+    fn two_identical_calls_at_different_positions_are_kept() {
+        let call = serde_json::json!({"functionCall": {"name": "lookup", "args": {"q": "x"}}});
+        let chunks = serde_json::json!([
+            {"candidates": [{"content": {"parts": [call, call]}, "index": 0}]},
+            {"candidates": [{"content": {"parts": [call, call]}, "finishReason": "STOP", "index": 0}]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+        let parts = &response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts;
+        let calls = parts
+            .iter()
+            .filter(|part| part.function_call.is_some())
+            .count();
+        assert_eq!(calls, 2, "distinct part positions stay distinct: {parts:?}");
+    }
+
     /// A stream candidate's `index` is wire data, not a position this reader
     /// may allocate up to. Gemini numbers candidates contiguously from 0, so
     /// an index that is not the next free slot is not a position of this
@@ -693,6 +917,29 @@ mod tests {
             .filter_map(|part| part.text.as_deref())
             .collect();
         assert_eq!(text, "a");
+    }
+
+    #[test]
+    fn unindexed_candidate_after_skipped_index_does_not_panic() {
+        let chunks = serde_json::json!([
+            {"candidates": [
+                {"content": {"parts": [{"text": "skip"}]}, "index": 5},
+                {"content": {"parts": [{"text": "kept"}]}}
+            ]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+
+        assert_eq!(response.candidates.len(), 1);
+        let text: String = response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "kept");
     }
 
     #[test]

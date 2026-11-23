@@ -534,6 +534,63 @@ fn provider_shell_permission_multiline_command_is_blocked() {
     assert!(!decision.run_approved_tool);
     queue_approved_shell_handoff(&mut state, &decision.request);
     assert!(state.control.shell_handoff().approved_is_empty());
+    let response = provider_approval_response(&decision.request, "ctrl-1");
+    assert!(matches!(
+        response.decision,
+        ApprovalDecision::Deny { ref message }
+            if message.contains("blocked this Bash tool request")
+                && message.contains("single line")
+                && message.contains("single-quoted")
+    ));
+}
+
+#[test]
+fn provider_shell_permission_double_quoted_newline_block_carries_rewrite_hint() {
+    let mut state = InlineState::default();
+    state.approvals.requests.push(provider_tool_request(
+        "Bash",
+        Some(serde_json::json!({ "command": "python3 -c \"\nbuf=[]\nwhile True:\n    buf.append(1)\n\"" })),
+    ));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::Approve)
+        .expect("approval decision");
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Blocked);
+    let response = provider_approval_response(&decision.request, "ctrl-1");
+    assert!(matches!(
+        response.decision,
+        ApprovalDecision::Deny { ref message }
+            if message.contains("line break")
+                && message.contains("single-quoted")
+                && message.contains("was not executed")
+    ));
+}
+
+#[test]
+fn provider_shell_permission_handoff_block_hints_cover_each_validation_arm() {
+    for (command, expected) in [
+        ("echo\u{0}", "NUL byte"),
+        ("echo \u{1b}[31m", "control character"),
+        ("   ", "command is empty"),
+    ] {
+        let mut state = InlineState::default();
+        state.approvals.requests.push(provider_tool_request(
+            "Bash",
+            Some(serde_json::json!({ "command": command })),
+        ));
+        let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::Approve)
+            .expect("approval decision");
+        assert_eq!(decision.request.status, ApprovalRequestStatus::Blocked);
+        let response = provider_approval_response(&decision.request, "ctrl-1");
+        assert!(
+            matches!(
+                response.decision,
+                ApprovalDecision::Deny { ref message }
+                    if message.contains("blocked this Bash tool request")
+                        && message.contains(expected)
+            ),
+            "{command:?} did not carry the {expected:?} hint: {response:?}"
+        );
+    }
 }
 
 #[test]
@@ -1708,7 +1765,8 @@ fn batch_drain_writes_drop_audit_before_responding() {
         .try_iter()
         .filter_map(|message| match message {
             crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-            crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            crate::adapter::ApprovalChannelMessage::Receipt { .. }
+            | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
         })
         .collect();
     assert_eq!(responses.len(), 1, "{responses:?}");

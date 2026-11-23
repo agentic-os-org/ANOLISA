@@ -47,6 +47,7 @@ use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_config
 use tokio::signal;
 use tracing::{debug, error, info, warn};
 
+mod explain;
 mod help_text;
 mod managed;
 mod mount_file;
@@ -413,6 +414,23 @@ enum Commands {
         skill_layout: Option<String>,
     },
 
+    /// Explain source selection and visibility from current configuration
+    #[command(long_about = help_text::EXPLAIN_LONG_ABOUT)]
+    #[command(after_help = help_text::EXPLAIN_AFTER_HELP)]
+    Explain {
+        /// Ordered-source mount configuration to inspect without mounting.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+
+        /// Report only this exact skill directory name, after full diagnosis.
+        #[arg(long, value_name = "EXACT_NAME")]
+        skill: Option<String>,
+
+        /// Output format.
+        #[arg(short, long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+
     /// Generate or update skillfs-views.toml from a skill directory
     #[command(after_help = help_text::CLASSIFY_AFTER_HELP)]
     Classify {
@@ -491,13 +509,13 @@ async fn main() {
 
     // Arm the SLS ops guard before any logging output so a broken stdout /
     // stderr pipe that closes before the first write still yields exactly one
-    // ops record via Drop. Stop / Supervise are internal and left unlogged.
+    // ops record via Drop. Explain is read-only; Stop / Supervise are internal.
     let sls_guard = match &cli.command {
         Commands::Mount { .. } => Some(SlsOpsGuard::new("mount")),
         Commands::Classify { .. } => Some(SlsOpsGuard::new("classify")),
         Commands::Validate { .. } => Some(SlsOpsGuard::new("validate")),
         Commands::List { .. } => Some(SlsOpsGuard::new("list")),
-        Commands::Stop { .. } | Commands::Supervise { .. } => None,
+        Commands::Explain { .. } | Commands::Stop { .. } | Commands::Supervise { .. } => None,
     };
 
     let max_level = if cli.verbose {
@@ -714,6 +732,16 @@ async fn run(
             .await;
             finish_sls(guard, err_reason(&result));
             result
+        }
+        Commands::Explain {
+            config,
+            skill,
+            format,
+        } => {
+            if explain::run(&config, skill.as_deref(), format)? {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Commands::Classify {
             source,
@@ -3380,15 +3408,34 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
         return Ok(());
     }
 
+    // `--enabled-only` filters before the section header is printed. A tree
+    // where every skill is disabled is the filtered view's empty-result
+    // case and must print the explicit `No enabled skills found in ...`
+    // summary — the same contract the empty store follows — instead of the
+    // `Skills in <source>:` header followed by zero entries. The dangling
+    // header promised content the filtered view did not have, and a script
+    // parsing the output could not tell "no enabled skills" apart from a
+    // rendering failure.
+    let names: Vec<&str> = if enabled_only {
+        let enabled: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|&name| store.get(name).is_some_and(|entry| entry.metadata.enabled))
+            .collect();
+        if enabled.is_empty() {
+            println!("No enabled skills found in {}", source.display());
+            return Ok(());
+        }
+        enabled
+    } else {
+        names
+    };
+
     println!("Skills in {}:", source.display());
     println!();
 
     for name in names {
         if let Some(entry) = store.get(name) {
-            if enabled_only && !entry.metadata.enabled {
-                continue;
-            }
-
             let status_icon = match &entry.parse_status {
                 skillfs_core::ParseStatus::Ok => "✓",
                 skillfs_core::ParseStatus::Degraded(_) => "⚠",

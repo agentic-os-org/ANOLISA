@@ -1,0 +1,48 @@
+Internal ctest changing into directory: /work/build-ninja
+Test project /work/build-ninja
+      Start  1: args-test
+ 1/21 Test  #1: args-test ........................   Passed    0.00 sec
+      Start  2: base-test
+ 2/21 Test  #2: base-test ........................   Passed    0.01 sec
+      Start  3: assert-test
+ 3/21 Test  #3: assert-test ......................   Passed    0.00 sec
+      Start  4: chrono-test
+ 4/21 Test  #4: chrono-test ......................   Passed    0.05 sec
+      Start  5: color-test
+ 5/21 Test  #5: color-test .......................   Passed    0.00 sec
+      Start  6: gtest-extra-test
+ 6/21 Test  #6: gtest-extra-test .................   Passed    0.00 sec
+      Start  7: format-test
+ 7/21 Test  #7: format-test ......................   Passed    0.01 sec
+      Start  8: format-impl-test
+ 8/21 Test  #8: format-impl-test .................   Passed    0.04 sec
+      Start  9: ostream-test
+ 9/21 Test  #9: ostream-test .....................   Passed    0.00 sec
+      Start 10: compile-test
+10/21 Test #10: compile-test .....................   Passed    0.00 sec
+      Start 11: printf-test
+11/21 Test #11: printf-test ......................   Passed    0.01 sec
+      Start 12: ranges-test
+12/21 Test #12: ranges-test ......................   Passed    0.01 sec
+      Start 13: no-builtin-types-test
+13/21 Test #13: no-builtin-types-test ............   Passed    0.00 sec
+      Start 14: scan-test
+14/21 Test #14: scan-test ........................   Passed    0.00 sec
+      Start 15: std-test
+15/21 Test #15: std-test .........................   Passed    0.00 sec
+      Start 16: unicode-test
+16/21 Test #16: unicode-test .....................   Passed    0.00 sec
+      Start 17: xchar-test
+17/21 Test #17: xchar-test .......................   Passed    0.00 sec
+      Start 18: enforce-checks-test
+18/21 Test #18: enforce-checks-test ..............   Passed    0.00 sec
+      Start 19: posix-mock-test
+19/21 Test #19: posix-mock-test ..................   Passed    0.01 sec
+      Start 20: os-test
+20/21 Test #20: os-test ..........................   Passed    0.01 sec
+      Start 21: c-test
+21/21 Test #21: c-test ...........................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 21
+
+Total Test time (real) =   0.19 sec

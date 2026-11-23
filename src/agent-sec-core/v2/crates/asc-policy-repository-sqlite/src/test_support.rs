@@ -13,7 +13,27 @@ use asc_policy_types::{
 
 use crate::{RepositoryError, SqlitePolicyRepository, records};
 
+thread_local! {
+    static BEFORE_COMMIT: std::cell::Cell<Option<fn(&rusqlite::Transaction<'_>)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+pub(crate) fn before_commit(transaction: &rusqlite::Transaction<'_>) {
+    if let Some(hook) = BEFORE_COMMIT.take() {
+        hook(transaction);
+    }
+}
+
 impl SqlitePolicyRepository {
+    /// Sets a one-shot hook before the next write transaction commits on this thread.
+    ///
+    /// Isolated crash tests use this to inspect staged writes and wait for SIGKILL.
+    /// The callback runs under the repository mutex and must not re-enter that repository.
+    pub fn before_next_commit_for_test(hook: fn(&rusqlite::Transaction<'_>)) {
+        BEFORE_COMMIT.set(Some(hook));
+    }
+
     /// Opens an isolated temporary on-disk database with production validation.
     /// The repository owns its private directory and removes it on drop.
     /// # Errors
@@ -22,7 +42,7 @@ impl SqlitePolicyRepository {
         let directory = tempfile::Builder::new()
             .prefix("asc-policy-test-")
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").map_err(|_| StoreError::Io)?)
             .map_err(|_| StoreError::Io)?;
         let mut repository = Self::open(&directory.path().join("policy-state.db"))
             .map_err(RepositoryError::store)?;
@@ -49,6 +69,7 @@ impl SqlitePolicyRepository {
                                 scope_id: owner.scope_id.clone(),
                                 selector: owner.selector.clone(),
                                 policy_snapshots: Vec::new(),
+                                owner_uid: None,
                                 status: ScopeStatus::Active,
                             });
                     if scope.selector != owner.selector {

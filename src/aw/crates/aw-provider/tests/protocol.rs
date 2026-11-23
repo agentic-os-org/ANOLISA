@@ -315,7 +315,7 @@ fn responses_cannot_escalate_effects_or_change_request_binding() {
     assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
     for (event, effect) in [
         ("tool.before", "ask"),
-        ("tool.before", "replace_input"),
+        ("input.submit", "replace_input"),
         ("tool.after", "block"),
         ("tool.before", "replace_result"),
     ] {
@@ -382,6 +382,31 @@ fn protocol_event_vocabulary_matches_configuration() {
     assert_eq!(events.len(), 16);
     assert_eq!(declared.len(), events.len());
     assert!(events.keys().all(|event| declared.contains(&json!(event))));
+}
+
+#[test]
+fn malformed_number_tokens_report_json_syntax_errors() {
+    let protocol = Protocol::new().unwrap();
+    let describe = protocol
+        .parse_request(&bytes(&request("describe")))
+        .unwrap();
+    for input in ["not-json", "-", "a-b", "--1", r#"{"n":-}"#] {
+        for error in [
+            protocol.parse_request(input.as_bytes()).err().unwrap(),
+            protocol
+                .check_response(&describe, input.as_bytes())
+                .err()
+                .unwrap(),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    Error::Invalid("expected one bounded, unambiguous JSON value")
+                ),
+                "{input}: {error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -492,4 +517,107 @@ fn replacement_requires_one_text_payload_and_a_projected_after_result() {
     assert!(protocol
         .bind_invocation(invoke("tool.before", json!(["replace_result"])))
         .is_err());
+}
+
+#[test]
+fn submission_binds_text_and_turn_without_tool_fields() {
+    let protocol = Protocol::new().unwrap();
+    let mut value = invoke("input.submit", json!(["observe", "block"]));
+    value["event"].as_object_mut().unwrap().remove("tool");
+    value["event"]["session_id"] = json!("session");
+    value["event"]["turn_id"] = json!("turn");
+    value["event"]["input"] = json!({"text":"untrusted text\nsecond line"});
+    let request = protocol.bind_invocation(value.clone()).unwrap();
+    let mut changed = request.as_value().clone();
+    changed["event"]["input"]["text"] = json!("different");
+    assert!(protocol.parse_request(&bytes(&changed)).is_err());
+    let mut changed = request.as_value().clone();
+    changed["event"]["turn_id"] = json!("other");
+    assert!(protocol.parse_request(&bytes(&changed)).is_err());
+    for (pointer, replacement) in [
+        ("/event/tool", json!({})),
+        ("/event/turn_id", json!(null)),
+        ("/event/turn_id", json!("")),
+        ("/event/session_id", json!(null)),
+        ("/event/input", json!({"text":42})),
+        ("/allowed_effects", json!(["replace_result"])),
+        ("/allowed_effects", json!(["ask"])),
+    ] {
+        let mut invalid = value.clone();
+        if pointer == "/event/tool" {
+            invalid["event"]["tool"] = replacement;
+        } else {
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+        }
+        assert!(protocol.bind_invocation(invalid).is_err(), "{pointer}");
+    }
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"block","reason_code":"input_risk"}]);
+    assert!(matches!(
+        protocol.check_response(&request, &bytes(&reply)),
+        Ok(Reply::Invocation(_))
+    ));
+}
+
+#[test]
+fn operation_adapter_constraints_are_bounded_and_reference_declared_events() {
+    let protocol = Protocol::new().unwrap();
+    let describe = protocol
+        .parse_request(&bytes(&request("describe")))
+        .unwrap();
+    let mut reply = response();
+    reply["operations"] = json!([{
+        "name": "check", "events": ["input.submit", "tool.before"],
+        "effects": ["observe", "block"],
+        "event_adapters": {"input.submit": ["pi", "third-party"]}
+    }]);
+    assert!(matches!(
+        protocol.check_response(&describe, &bytes(&reply)),
+        Ok(Reply::Description(_))
+    ));
+    for constraints in [
+        json!({}),
+        json!({"unknown.event": ["pi"]}),
+        json!({"tool.after": ["pi"]}),
+        json!({"input.submit": []}),
+        json!({"input.submit": ["pi", "pi"]}),
+        json!({"input.submit": [""]}),
+        json!({"input.submit": ["*"]}),
+        json!({"input.submit": ["pi\n"]}),
+        json!({"input.submit": ["x".repeat(129)]}),
+        json!({"input.submit": (0..65).map(|i| format!("adapter-{i}")).collect::<Vec<_>>()}),
+    ] {
+        reply["operations"][0]["event_adapters"] = constraints;
+        assert!(
+            matches!(
+                protocol.check_response(&describe, &bytes(&reply)),
+                Err(Error::Invalid(_))
+            ),
+            "{reply}"
+        );
+    }
+}
+
+#[test]
+fn input_replacement_is_a_single_bound_object_effect_before_execution() {
+    let protocol = Protocol::new().unwrap();
+    let request = protocol
+        .bind_invocation(invoke("tool.before", json!(["replace_input"])))
+        .unwrap();
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] =
+        json!([{"type":"replace_input","input":{"价格":1.25,"command":"new","nested":[1,false]}}]);
+    protocol.check_response(&request, &bytes(&reply)).unwrap();
+    for effects in [
+        json!([{"type":"replace_input"}]),
+        json!([{"type":"replace_input","input":"command"}]),
+        json!([{"type":"replace_input","input":{}},{"type":"replace_input","input":{}}]),
+        json!([{"type":"replace_input","input":{},"text":"approve"}]),
+        json!([{"type":"replace_input","input":{}},{"type":"observe"}]),
+    ] {
+        reply["effects"] = effects;
+        assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
+    }
 }

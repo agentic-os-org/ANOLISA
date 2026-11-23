@@ -11,7 +11,7 @@
       "requirements": [
         "agentscope==2.0.6"
       ],
-      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model.",
+      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model. Strict tool.after withholding replaces an unchecked native result with an error-state placeholder at the end of the middleware chain on timeout, hook error and invalid reply, keeping the original payload correlated for outer after hooks, and requires SDK 2.0.6+. Long histories recycle correlation capacity through the invocation ledger: 600 sequential tool calls in one worker complete past the legacy 512-call limit, and replayed registrations are rejected. Factory input.submit checks native user text before model HTTP requests on reply and reply_stream, with independent per-reply scopes and explicit stream close. Controlled Provider faults and the real sec-core Provider with a controlled scanner CLI exercise prompt/PII routing and failure policies. Early closure cancels active tool tasks before scope release; deployed security backend acceptance remains separate. Ordinary resident policy updates use a snapshot per reply and retain occupancy through model execution, tool drain and confirmed scope release; native acceptance covers policy addition/removal in one Agent and busy rejection. Application-owned private-execution/v1 leases retain root occupancy through acquisition, native drain and revocation. Explicit tool subprocess environments, whole-result redaction before Hooks/model HTTP, cancellation, late lease cleanup, timeouts and failed-revocation fencing are covered. Two OS workers, each launched by aw run on the same daemon/configuration, have independent readiness and policy identity; selected-instance updates and stopping one worker leave the other operational. Native SkillViewer checks reuse QwenPaw source resolution and per-invocation pinning: actual duplicate precedence, denial before instruction delivery, source edits, unavailable/memory-only sources, concurrent calls and cancellation; SDK 2.0.6 BOM assets remain native-unloadable. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "cases": [
         {
           "name": "middleware",
@@ -21,7 +21,7 @@
           ],
           "timeout_seconds": 120,
           "report": "unittest",
-          "tests": 26
+          "tests": 46
         },
         {
           "name": "native",
@@ -133,10 +133,272 @@
                 "sdk": "2.0.6",
                 "executed": 5,
                 "permissions": 8,
-                "scans": 3,
+                "scans": 7,
                 "after": 7,
                 "status/bindings": 0,
                 "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "long-calls",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_long_calls.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/long-calls"
+          ],
+          "timeout_seconds": 400,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/long-calls/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "calls": 600,
+                "states": [
+                  "success"
+                ],
+                "hook_calls": 600,
+                "replay_rejected": true,
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_strict.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/strict"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "withheld": 3,
+                "healthy": 1,
+                "observer_callbacks": 4
+              }
+            }
+          ]
+        },
+        {
+          "name": "submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_submission.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/submission",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/submission/block/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "bindings": 0,
+                "events": 0,
+                "case_count": 33
+              }
+            },
+            {
+              "file": "fixtures/submission/report/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "bindings": 0,
+                "events": 0,
+                "case_count": 33
+              }
+            },
+            {
+              "file": "fixtures/submission/security-block/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "bindings": 0,
+                "events": 0,
+                "case_count": 33
+              }
+            },
+            {
+              "file": "fixtures/submission/security-report/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "bindings": 0,
+                "events": 0,
+                "case_count": 33
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-idle",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/idle.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/resident-idle"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-idle/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "turns": 7,
+                "updates": 4,
+                "busy_rejections": 2,
+                "executed": 5,
+                "same_worker": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "private-lease",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/native_private.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 16
+        },
+        {
+          "name": "private-native",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/private.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/private-native"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/private-native/result.json",
+              "values": {
+                "passed": true,
+                "sdk_version": "2.0.6",
+                "model_requests": 10,
+                "tool_subprocesses": 5,
+                "public_hooks": 10,
+                "busy_rejections": 3,
+                "failed_revoke_fenced": true,
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-workers",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/workers.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/resident-workers"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-workers/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "workers": 2,
+                "independent_ready": true,
+                "selected_updates": 2,
+                "surviving_worker_turns": 7,
+                "surviving_worker_executions": 6,
+                "released_bindings": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/native_skill.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 11
+        },
+        {
+          "name": "skill-provider",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_skill.py",
+            "--aw",
+            "{bin}/aw",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-provider"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-provider/result.json",
+              "values": {
+                "case_count": 7,
+                "sdk_version": "2.0.6",
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/idle.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--native-start"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "turns": 7,
+                "updates": 4,
+                "busy_rejections": 2,
+                "executed": 5,
+                "same_worker": true,
+                "native_start": true
               }
             }
           ]
@@ -157,7 +419,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. An installed Python wheel attaches cooperatively to a worker that starts independently from a compiled claude-resident-hooks descriptor without the offline parser, observes Bash results at the model, and releases all Scopes after allow and deny. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result acceptance captures actual model HTTP after an application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP. Exact SDK/CLI fingerprints admit a private Bun preload; global fetch and FetchSession fetch adopt only checked text or a withheld envelope. Safe controls, late mutation, policy timeout/error and rejection of fail-open policy are required. Scope is a fresh foreground Python client or TypeScript 0.3.325 Query, empty settings sources and Anthropic Messages. The TypeScript suite checks the complete bundled SDK/CLI fingerprint on linux-x64, with Bash/MCP safe, late-mutation, timeout/error and fail-open rejection cases. Scheduled acceptance uses a deterministic endpoint; opt-in hosted Python acceptance captures unchanged request bytes through an authorized gateway.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -218,7 +480,19 @@
                   "bash-compress-tool-failure",
                   "bash-pretool",
                   "bash-pretool-deny",
-                  "mcp-error-compress"
+                  "mcp-error-compress",
+                  "http-mcp",
+                  "http-mcp-compress-failure",
+                  "http-mcp-compress",
+                  "http-mcp-error-compress",
+                  "settings-disabled-hooks",
+                  "settings-native-deny",
+                  "bash-native-rewrite-inline",
+                  "bash-native-rewrite-inline-deny",
+                  "bash-native-rewrite-project",
+                  "bash-native-rewrite-project-deny",
+                  "bash-native-rewrite-plugin",
+                  "bash-native-rewrite-plugin-deny"
                 ]
               }
             }
@@ -248,6 +522,69 @@
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-cooperative-attach",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "cooperative-attach",
+            "--output",
+            "{output}/resident-cooperative-attach"
+          ],
+          "timeout_seconds": 270,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-cooperative-attach/result.json",
+              "values": {
+                "tasks": 2,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": ["allow", "deny"],
+                "values": {"passed": true}
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-model-settings",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-model-settings",
+            "--scenario",
+            "settings"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-model-settings/result.json",
+              "values": {
+                "tasks": 8,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "concurrent_settings_clients": 2
               }
             }
           ]
@@ -443,7 +780,9 @@
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0,
-                "rejected_before_ready": true
+                "task_observation": true,
+                "source_association": "unverified",
+                "coverage": "unknown"
               }
             }
           ]
@@ -577,11 +916,22 @@
             {
               "file": "fixtures/managed-mcp-failure/result.json",
               "values": {
-                "tasks": 1,
+                "tasks": 2,
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0,
                 "scenario": "mcp-failure"
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": [
+                  "compress-error",
+                  "compress-recovery"
+                ],
+                "values": {
+                  "passed": true
+                }
               }
             }
           ]
@@ -828,7 +1178,445 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-report",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "report",
+            "--output",
+            "{output}/resident-report",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-report/result.json",
+              "values": {
+                "passed": true,
+                "tasks": 15,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "http-allow",
+                  "http-tokenless-error",
+                  "http-after-error",
+                  "http-after-timeout",
+                  "http-after-invalid",
+                  "http-structured-allow",
+                  "http-structured-tokenless-error",
+                  "http-structured-after-error",
+                  "http-structured-after-timeout",
+                  "http-structured-after-invalid",
+                  "bash-allow",
+                  "bash-tokenless-error",
+                  "bash-after-error",
+                  "bash-after-timeout",
+                  "bash-after-invalid"
+                ],
+                "values": {
+                  "passed": true,
+                  "turns": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "tests/claude_submission.py",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "foreground-block",
+                  "foreground-report",
+                  "resident-block",
+                  "resident-report"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "backend_removed": true,
+                "processes_stopped": true
+              }
+            },
+            {
+              "file": "fixtures/input-submission/foreground-block/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/foreground-report/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/resident-block/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery",
+                  "connect-denial",
+                  "connect-pass"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/resident-report/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery",
+                  "connect-denial",
+                  "connect-pass"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/claude-sdk/native_update.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "passed": true,
+                "python": "3.12.3",
+                "sdk": "0.2.88",
+                "model_requests": 4,
+                "sdk_processes_stopped": true,
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "allow-side-effect",
+                  "updated-denial",
+                  "sdk-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-rewrite",
+          "argv": [
+            "{python}",
+            "tests/claude_input_rewrite.py",
+            "--aw",
+            "{bin}/aw",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless",
+            "--output",
+            "{output}/input-rewrite"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-rewrite/result.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allowed",
+                  "denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "before": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-boundary",
+          "argv": [
+            "{python}",
+            "tests/claude_final_result.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result"
+          ],
+          "timeout_seconds": 480,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result/result.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "bash-safe",
+                  "bash-late",
+                  "mcp-safe",
+                  "mcp-late",
+                  "required-final",
+                  "bash-gate-safe",
+                  "bash-gate-late",
+                  "mcp-gate-safe",
+                  "mcp-gate-late",
+                  "bash-gate-timeout",
+                  "mcp-gate-error",
+                  "mcp-gate-multi-late"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings_released": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "typescript-final-result",
+          "argv": [
+            "{python}",
+            "tests/claude_final_result.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/typescript-final-result",
+            "--node",
+            "node",
+            "--npm",
+            "{npm}",
+            "--expected-platform",
+            "x86_64",
+            "--cases",
+            "bash-safe",
+            "bash-late",
+            "mcp-safe",
+            "mcp-late",
+            "required-final",
+            "bash-gate-safe",
+            "bash-gate-late",
+            "mcp-gate-safe",
+            "mcp-gate-late",
+            "bash-gate-timeout",
+            "mcp-gate-error",
+            "ts-before-deny",
+            "ts-before-error",
+            "ts-before-matcher-error",
+            "ts-before-matcher-timeout",
+            "bash-history",
+            "bash-gate-history"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/typescript-final-result/result.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "bash-safe",
+                  "bash-late",
+                  "mcp-safe",
+                  "mcp-late",
+                  "required-final",
+                  "bash-gate-safe",
+                  "bash-gate-late",
+                  "mcp-gate-safe",
+                  "mcp-gate-late",
+                  "bash-gate-timeout",
+                  "mcp-gate-error",
+                  "ts-before-deny",
+                  "ts-before-error",
+                  "ts-before-matcher-error",
+                  "ts-before-matcher-timeout",
+                  "bash-history",
+                  "bash-gate-history"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings_released": true
+                }
+              }
+            }
+          ]
         }
+      ],
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "npm_packages": [
+        "@anthropic-ai/claude-agent-sdk@0.3.325"
       ]
     },
     "hermes": {
@@ -840,7 +1628,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "952c941e741e922a9be8fc403c8944c6e96318bb"
       },
-      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model.",
+      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries. Quiet single-query text input includes allow, denial with zero model requests, PII blocking and block/report scanner faults through the real sec-core Provider with a controlled CLI scanner. Explicit venv startup also runs the installed interactive CLI against a local model, verifies same-process idle policy updates, active-turn rejection, actual tool effects and normal exit cleanup. Prepared native chat also supports idle Skill-policy addition/removal with the existing source guard, full 55000 ms budgets, successful quiet input and native veto precedence. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "cases": [
         {
           "name": "dispatcher",
@@ -854,7 +1642,18 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 23
+          "tests": 48
+        },
+        {
+          "name": "native-lifecycle",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/runtime_reload.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 6
         },
         {
           "name": "chat",
@@ -865,6 +1664,8 @@
             "{bin}/aw",
             "--provider",
             "{bin}/policy",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
             "--hermes",
             "{source}/.venv/bin/hermes",
             "--source",
@@ -888,7 +1689,12 @@
                   "parent-safe",
                   "profile-override",
                   "reload-block",
-                  "rewrite-block"
+                  "rewrite-block",
+                  "input-allow",
+                  "input-block",
+                  "input-error-block",
+                  "input-error-report",
+                  "input-pii"
                 ],
                 "values": {
                   "instance_released": true,
@@ -896,6 +1702,237 @@
                   "profile_retained": true,
                   "native_environment_preserved": true
                 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-provider",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/skill_cli.py",
+            "--aw",
+            "{bin}/aw",
+            "--provider",
+            "{bin}/aw-provider-sec-core",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--source",
+            "{source}",
+            "--output",
+            "{output}/skill-provider"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-provider/result.json",
+              "values": {
+                "case_count": 10,
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/native_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--site-packages",
+            "{source}/.venv/lib/python3.14/site-packages",
+            "--output",
+            "{output}/native-start",
+            "--interactive"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "status": "passed",
+                "same_native_process": true,
+                "idle_policy_updates": 2,
+                "allow_marker_present": true,
+                "deny_marker_absent": true,
+                "bindings_after_exit": 0,
+                "events_after_exit": 0,
+                "native_config_preserved": true,
+                "observations_after_exit": 0,
+                "observation_coverage": "unknown"
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-skill-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/native_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--site-packages",
+            "{source}/.venv/lib/python3.14/site-packages",
+            "--output",
+            "{output}/native-skill-update",
+            "--interactive",
+            "--skill-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-skill-update/result.json",
+              "values": {
+                "status": "passed",
+                "same_native_process": true,
+                "idle_policy_updates": 3,
+                "bindings_after_exit": 0,
+                "events_after_exit": 0,
+                "native_config_preserved": true,
+                "observations_after_exit": 0,
+                "observation_coverage": "unknown",
+                "skill_deliveries": [
+                  true,
+                  false,
+                  true
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-skill-provider",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/skill_cli.py",
+            "--aw",
+            "{bin}/aw",
+            "--provider",
+            "{bin}/aw-provider-sec-core",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--source",
+            "{source}",
+            "--output",
+            "{output}/native-skill-provider",
+            "--native-site-packages",
+            "{source}/.venv/lib/python3.14/site-packages"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-skill-provider/result.json",
+              "values": {
+                "case_count": 10,
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "hermes-0.23.1": {
+      "owner": "@kongche-jbw",
+      "python": "3.14.0",
+      "mode": "automated",
+      "versions": {},
+      "source_install": "frozen-no-build-isolation",
+      "source": {
+        "url": "https://github.com/NousResearch/hermes-agent.git",
+        "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
+      },
+      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers active Gateway Hook registration, server-owned admission binding, automatic and manually resolved unknown admission settlement, idempotent drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The live CLI/Gateway case checks both model-visible replacement and tool denial. The attach contract covers native argument parsing, fail-closed options, workspace binding, cancellation, and normal release. The older in-process baseline runs in the separate hermes job.",
+      "cases": [
+        {
+          "name": "gateway-contract",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/native_contract.py",
+            "--source",
+            "{source}",
+            "--plugin",
+            "{aw_root}/crates/aw-adapter/native/hermes"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 83
+        },
+        {
+          "name": "gateway-live",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/gateway_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--output",
+            "{output}/gateway-live"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/gateway-live/result.json",
+              "values": {
+                "status": "passed",
+                "model_saw_replacement": true,
+                "model_saw_original": false,
+                "denied_marker_absent": true,
+                "denied_policy_blocks": 1,
+                "gateway_confirmation_logged": true,
+                "pre_events": 2,
+                "after_events": 1,
+                "instance_released": true,
+                "gateway_stopped": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "gateway-attach",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/gateway_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--output",
+            "{output}/gateway-attach",
+            "--attach"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/gateway-attach/result.json",
+              "values": {
+                "status": "passed",
+                "parallel_tools": true,
+                "alternate_workspace": true,
+                "pre_events": 3,
+                "after_events": 3,
+                "model_saw_replacement": true,
+                "updated_workspace_policy": true,
+                "workspace_scopes_released": true,
+                "launch_assets_released": true,
+                "gateway_stopped": true
               }
             }
           ]
@@ -910,7 +1947,7 @@
       "npm_packages": [
         "openclaw@2026.9.6"
       ],
-      "boundary": "Official plugin loader/SDK/manifest, runtime-scoped result middleware, native policy aliases, Hook ordering and effect adoption; no Gateway or model turn.",
+      "boundary": "Official plugin loader, runtime-scoped result middleware, native policy aliases and Hook adoption. Native Gateway startup uses explicit private preload setup, real local-model tool turns, same-process idle policy updates and confirmed shutdown; no hosted model or messaging consumer. OpenClaw retains block-and-retry PreTool because earlier approval hooks can freeze arguments; the other Adapters cover same-call replace_input in the shared service regression.",
       "cases": [
         {
           "name": "hooks",
@@ -923,8 +1960,523 @@
           "timeout_seconds": 120,
           "report": "tap",
           "tests": 8
+        },
+        {
+          "name": "native-reload",
+          "argv": [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/openclaw/reload.mjs"
+          ],
+          "timeout_seconds": 120,
+          "report": "tap",
+          "tests": 9
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--model-turn",
+            "--native-start"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "status": "passed",
+                "native_start": true,
+                "model_calls": 4,
+                "proof/idle_policy_updates": 2,
+                "proof/allow_marker_present": true,
+                "proof/deny_marker_absent": true,
+                "bindings_after_exit": 0,
+                "port_closed": true,
+                "original_config_unchanged": true,
+                "persistent_profile_preserved": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-order-baseline",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.6"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": false,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-error",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-error/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-error/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-sec-core",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-sec-core",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-sec-core/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_sec_core": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-sec-core/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-order-baseline-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-5/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.5"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate-2026-9-5/final-boundaries.json",
+              "values": {
+                "version": "2026.9.5",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-order-baseline-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-7/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.7"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate-2026-9-7/final-boundaries.json",
+              "values": {
+                "version": "2026.9.7",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-5/final-boundaries.json",
+              "values": {
+                "version": "2026.9.5",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-6",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.6",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-6",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-6/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-6/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-7/final-boundaries.json",
+              "values": {
+                "version": "2026.9.7",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
         }
-      ]
+      ],
+      "npm_variants": {
+        "npm_openclaw_2026_9_5": "openclaw@2026.9.5",
+        "npm_openclaw_2026_9_7": "openclaw@2026.9.7"
+      }
     },
     "pi": {
       "owner": "@kongche-jbw",
@@ -932,7 +2484,11 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup.",
+      "npm_fixtures": {
+        "legacy": "crates/aw-cli/tests/fixtures/pi/legacy",
+        "latest": "crates/aw-cli/tests/fixtures/pi/latest"
+      },
+      "boundary": "Published Coding Agent/Core SDK 0.84.2, 1.3.0 and 1.5.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output admits matching stable 0.84.2\u20131.5.2 pairs; the pinned baselines verify the Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup. Application-owned runPiWorker attach starts from a compiled pi-worker-hooks descriptor without the offline parser and repeats the input and strict-output suites on all three pinned releases. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "cases": [
         {
           "name": "public-factory",
@@ -949,6 +2505,132 @@
           "results": [
             {
               "file": "npm/public-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-before-denial",
+                  "late-after-replacement",
+                  "late-before-replacement-session",
+                  "late-after-replacement-session",
+                  "allow",
+                  "deny",
+                  "tool-error",
+                  "native-mutation",
+                  "native-replacement",
+                  "two-sessions-parallel",
+                  "before-error-block",
+                  "after-error-report",
+                  "await-both-hooks",
+                  "factory-new",
+                  "factory-resume",
+                  "factory-fork",
+                  "factory-import",
+                  "block-reason-model",
+                  "aw-replacement-metadata",
+                  "aw-replacement-parallel",
+                  "aw-replacement-error-neutral",
+                  "aw-replacement-multiblock-neutral",
+                  "aw-replacement-image-neutral",
+                  "native-invalid-before",
+                  "native-invalid-after-neutral",
+                  "native-forged-after-neutral",
+                  "native-empty-neutral",
+                  "native-block-reason-model",
+                  "native-after-exception",
+                  "native-error-cleared-replaced",
+                  "native-nullish-success",
+                  "native-nullish-error",
+                  "reused-native-id",
+                  "early-denial-forty",
+                  "early-error-block",
+                  "early-native-invalid-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "public-factory-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/public-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm_legacy/public-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-before-denial",
+                  "late-after-replacement",
+                  "late-before-replacement-session",
+                  "late-after-replacement-session",
+                  "allow",
+                  "deny",
+                  "tool-error",
+                  "native-mutation",
+                  "native-replacement",
+                  "two-sessions-parallel",
+                  "before-error-block",
+                  "after-error-report",
+                  "await-both-hooks",
+                  "factory-new",
+                  "factory-resume",
+                  "factory-fork",
+                  "factory-import",
+                  "block-reason-model",
+                  "aw-replacement-metadata",
+                  "aw-replacement-parallel",
+                  "aw-replacement-error-neutral",
+                  "aw-replacement-multiblock-neutral",
+                  "aw-replacement-image-neutral",
+                  "native-invalid-before",
+                  "native-invalid-after-neutral",
+                  "native-forged-after-neutral",
+                  "native-empty-neutral",
+                  "native-block-reason-model",
+                  "native-after-exception",
+                  "native-error-cleared-replaced",
+                  "native-nullish-success",
+                  "native-nullish-error",
+                  "reused-native-id",
+                  "early-denial-forty",
+                  "early-error-block",
+                  "early-native-invalid-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "public-factory-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/public-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm_latest/public-smoke-results.json",
               "cases": {
                 "at": "",
                 "key": "case",
@@ -1024,7 +2706,10 @@
                 "names": [
                   "json-selected-output",
                   "rtk-retry-rescanned-denied",
-                  "rtk-retry-allowed-post-neutral"
+                  "rtk-retry-allowed-post-neutral",
+                  "rtk-same-call-allow",
+                  "rtk-same-call-deny",
+                  "rtk-same-call-native-deny"
                 ],
                 "values": {
                   "passed": true
@@ -1292,7 +2977,9 @@
                 "passed": true,
                 "status/bindings": 0,
                 "status/events": 0,
-                "rejected_before_ready": true
+                "task_observation": true,
+                "source_association": "unverified",
+                "coverage": "unknown"
               }
             }
           ]
@@ -1339,6 +3026,949 @@
               }
             }
           ]
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission-legacy"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-legacy/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi-legacy",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi-legacy/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission-latest"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-latest/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi-latest",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi-latest/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi-strict",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi-strict",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi-strict/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output-legacy"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output-legacy/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi-strict-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi-strict-legacy",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi-strict-legacy/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output-latest"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output-latest/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-attach-pi-strict-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/sdk-attach-pi-strict-latest",
+            "--sdk-bridge",
+            "sdk/typescript/src/pi.mjs"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-attach-pi-strict-latest/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm}",
+            "{output}/skill-objects/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects-legacy",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm_legacy}",
+            "{output}/skill-objects-legacy/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects-legacy/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects-latest",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm_latest}",
+            "{output}/skill-objects-latest/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects-latest/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-input",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-input-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input-legacy"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input-legacy/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-input-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input-latest"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input-latest/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "1.3.0",
+                "versions/pi-agent-core": "1.3.0",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start-legacy",
+            "--npm",
+            "{npm_legacy}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-legacy/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "0.84.2",
+                "versions/pi-agent-core": "0.84.2",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start-latest",
+            "--npm",
+            "{npm_latest}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-latest/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "1.5.2",
+                "versions/pi-agent-core": "1.5.2",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-run",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start-run",
+            "--npm",
+            "{npm}",
+            "--entrypoint",
+            "run"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-run/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "1.3.0",
+                "versions/pi-agent-core": "1.3.0",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown",
+                  "run-entrypoint",
+                  "initial-session-cleanup"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -1347,14 +3977,17 @@
       "python": "3.12.3",
       "mode": "automated",
       "versions": {
-        "qwenpaw": "2.2.2b4",
-        "agentscope": "2.0.9"
+        "qwenpaw": "2.2.2.post1",
+        "agentscope": "2.0.10"
       },
       "requirements": [
-        "qwenpaw==2.2.2b4",
-        "agentscope==2.0.9"
+        "qwenpaw==2.2.2.post1",
+        "agentscope==2.0.10",
+        "pip==24.0",
+        "setuptools==68.1.2",
+        "wheel==0.42.0"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Ordinary resident App startup confirms readiness before its first reply; the native startup seam and real service tests verify pre-first-task updates. Ordinary resident replies support explicit idle policy updates with immutable task snapshots, same-Agent reuse, strict Post and MCP route changes; private lease cleanup retains busy after child closure. Acknowledged reply scopes retain bounded observation and release source claims on close. The separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once. Resident App acceptance compares native and AW startup in one user profile, preserves existing plugin names and configuration, and exercises native MCP create/update/deny/delete while AW covers shell only. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. Fresh text input is checked before native reply admission; pinned native types distinguish confirmation, interruption and external tool-result resumes. Submission tests cover denial, recovery on the next fresh input, failure policy, turn identity and cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. The installed after-only SDK starts the native App without AW, admits an already-running model reply before its first tool, and retains checked events/model bodies, bounded no-attach refusal and detached text-only replies.",
       "cases": [
         {
           "name": "middleware",
@@ -1364,7 +3997,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 22
+          "tests": 23
         },
         {
           "name": "runtime-reload",
@@ -1390,7 +4023,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 1
+          "tests": 3
         },
         {
           "name": "native-attach",
@@ -1439,6 +4072,668 @@
                   "scan-deny",
                   "backend-error",
                   "timeout-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 78
+        },
+        {
+          "name": "resident-service",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident_service.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 9
+        },
+        {
+          "name": "structured-mcp",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_mcp.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 8
+        },
+        {
+          "name": "structured-mcp-service",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_mcp_service.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 2
+        },
+        {
+          "name": "input-submission-types",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_submission.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 6
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-backend-error",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-timeout-block",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-cancel",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed",
+                  "cancelled": true,
+                  "blocked": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-ledger",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/skill_native.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/skill-ledger",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-ledger/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "unsigned",
+                  "signed",
+                  "drifted",
+                  "tampered",
+                  "shadow",
+                  "ambiguous",
+                  "backend-denied",
+                  "unavailable",
+                  "timeout",
+                  "bom"
+                ],
+                "values": {
+                  "passed": true,
+                  "native_skill_called": true,
+                  "config_preserved": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/skill-ledger/bom-native-cache.json",
+              "values": {
+                "skipped": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_skill.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 11
+        },
+        {
+          "name": "after-only-sdk",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_after_only.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/after-only"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/after-only/results.json",
+              "values": {
+                "passed": true,
+                "prompt_before_aw": true,
+                "safe_events": true,
+                "safe_model": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "name",
+                "names": [
+                  "late-attach",
+                  "ordinary",
+                  "provider-failure",
+                  "plain-detached",
+                  "not-ready"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured-after-sdk",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_after_only.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/configured-after",
+            "--configured",
+            "--boundary",
+            "after",
+            "--long"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/configured-after/results.json",
+              "values": {
+                "passed": true,
+                "prompt_before_aw": true,
+                "safe_events": true,
+                "safe_model": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "name",
+                "names": [
+                  "late-attach",
+                  "ordinary",
+                  "provider-failure",
+                  "plain-detached",
+                  "not-ready",
+                  "long-tool"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured-before-sdk",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_after_only.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/configured-before",
+            "--configured",
+            "--boundary",
+            "before"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/configured-before/results.json",
+              "values": {
+                "passed": true,
+                "boundary": "before",
+                "input_before_model": false,
+                "model_before_aw": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "name",
+                "names": [
+                  "configured-boundary",
+                  "denied-no-side-effect",
+                  "allowed-native-tool"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured-input-sdk",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_after_only.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/configured-input",
+            "--configured",
+            "--boundary",
+            "input",
+            "--long"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/configured-input/results.json",
+              "values": {
+                "passed": true,
+                "boundary": "input",
+                "input_before_model": true,
+                "model_before_aw": false
+              },
+              "cases": {
+                "at": "cases",
+                "key": "name",
+                "names": [
+                  "configured-boundary",
+                  "denied-no-side-effect",
+                  "allowed-native-tool",
+                  "long-model"
                 ],
                 "values": {
                   "passed": true
@@ -1575,6 +4870,82 @@
               }
             }
           ]
+        },
+        {
+          "name": "input-submit",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder/submission.py",
+            "--bin",
+            "{bin}",
+            "--agent-bin",
+            "{qoder}",
+            "--output",
+            "{output}/input-submit"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submit/results.json",
+              "values": {
+                "passed": true,
+                "runtime_removed": true,
+                "native_version": "1.1.64"
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "block",
+                  "fault-block",
+                  "fault-report"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_turns": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder/submission.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/native-start",
+            "--native-start"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/results.json",
+              "values": {
+                "passed": true,
+                "runtime_removed": true,
+                "native_version": "1.1.73",
+                "native_start": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "block",
+                  "fault-block",
+                  "fault-report"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_turns": 0
+                }
+              }
+            }
+          ]
         }
       ],
       "qoder_cli": {
@@ -1590,7 +4961,7 @@
           }
         }
       },
-      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary. Native attach separately starts the 1.1.73 TUI in an isolated Ubuntu container, requires ConfigChange adoption before input, and verifies a hosted first-tool denial, ownership-aware detach and reattachment in the same process. Attachment acceptance also holds a native tool Hook during busy detach rejection and applies a same-file idle update before the next hosted tool executes.",
+      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary. Native attach separately starts the 1.1.73 TUI in an isolated Ubuntu container, requires ConfigChange adoption before input, and verifies a hosted first-tool denial, ownership-aware detach and reattachment in the same process. Attachment acceptance also holds a native tool Hook during busy detach rejection and applies a same-file idle update before the next hosted tool executes. Preinstalled startup Hooks also register native print processes without aw run; pinned 1.1.73 submission denial, callback failure handling and owner/asset cleanup are verified before any model turn. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
       "qoder_reload_cli": {
         "version": "1.1.73",
@@ -1612,9 +4983,10 @@
       "mode": "automated",
       "versions": {},
       "npm_packages": [
-        "@qoder-ai/qoder-agent-sdk@1.0.54"
+        "@qoder-ai/qoder-agent-sdk@1.0.56",
+        "typescript@5.9.3"
       ],
-      "boundary": "Real SDK 1.0.54 / bundled Worker 1.1.74 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement.",
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: eight hosted Worker cases verify successful/error results, required failure, timeout, report, native text replacement, and post-AW mutation adoption through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Acknowledged ordinary resident Queries own bounded observation and release source claims on close; Qoder SDK callback facts retain unverified source identity and unknown coverage. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery. Qoder SDK Read text results project /file/content; real PII replacement is verified for plain/newline/Tab credentials, with safe file metadata and subsequent assistant continuation. Normal Read and missing-file errors retain native behavior. Application-owned native-start acceptance initializes pinned direct and prewarmed Queries without startDaemon or aw run, rejects updates while reserved, accepts updates after close, reuses the same application PID, and verifies Worker exit and zero final bindings/events/assets. This lane submits no model prompt and requires a Qoder test PAT for native initialization. Two callback deadline cases use the real Worker Hook timer and CLI with a framed service fault fixture: a late specific veto or invocation expiry followed by a stalled correlated close must retain the denial, retry reason and cleanup diagnostic before native timeout. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. SDK 1.0.55/1.0.57 parser, Worker byte inspection and hosted late Post mutation adoption are release evidence; the verified 1.0.57 / Worker 1.1.81 foreground Bash profile now gates final legacy plaintext through security.violation. Four scheduled hosted cases assert safe delivery, post-AW mutation blocking, timeout/error withholding, source fingerprints, linux-x64 and cleanup. Background notifications, context changes, custom transports, managed MCP and resident updates remain unsupported by this final profile. Configuration-driven public Hooks additionally verify model-before-attach, first-tool Scope, original Hook coexistence and allowed/denied Bash side effects.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -1647,7 +5019,8 @@
                   "denial-reason-preserved",
                   "permission-allow-aw-deny",
                   "native-goal-create-and-complete",
-                  "worktree-callback-cwd"
+                  "worktree-callback-cwd",
+                  "native-producer-identity"
                 ]
               }
             }
@@ -1697,7 +5070,1433 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-parser",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 120
+        },
+        {
+          "name": "daemon-auth-drain",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/daemon-auth"
+          ],
+          "timeout_seconds": 90,
+          "report": "tap",
+          "tests": 6
+        },
+        {
+          "name": "strict-post",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/strict-post"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "failure",
+                  "timeout",
+                  "report",
+                  "native-error",
+                  "failure-error",
+                  "replace",
+                  "late-mutation"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-post-1.0.55-late-mutation",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_55}",
+            "--output",
+            "{output}/strict-post-1.0.55-late-mutation",
+            "--case",
+            "late-mutation"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post-1.0.55-late-mutation/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-mutation"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.55",
+                  "worker": "1.1.75",
+                  "late_mutation_adopted": true,
+                  "model_echoed_late_marker": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-post-1.0.57-late-mutation",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/strict-post-1.0.57-late-mutation",
+            "--case",
+            "late-mutation"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post-1.0.57-late-mutation/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-mutation"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "late_mutation_adopted": true,
+                  "model_echoed_late_marker": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-policy-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-resident-policy",
+            "--resident-reload"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-resident-policy/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "open-query-busy-without-hooks",
+                  "new-query-adds-security-hook",
+                  "new-query-removes-security-hook",
+                  "new-query-enables-strict-post",
+                  "new-query-restores-report-post",
+                  "updated-managed-mcp-denial",
+                  "same-worker-and-daemon-across-revisions"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "declarative-profile",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native-profile.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/native-profile",
+            "{bin}/aw"
+          ],
+          "timeout_seconds": 120,
+          "report": "tap",
+          "tests": 2
+        },
+        {
+          "name": "native-command",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native-command.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/native-command",
+            "{bin}/aw"
+          ],
+          "timeout_seconds": 1100,
+          "report": "tap",
+          "tests": 7
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "native-veto"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-backend-error",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-timeout-block",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-cancel",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed",
+                  "cancelled": true,
+                  "blocked": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error",
+                  "read-clean",
+                  "tool-output-pii-read",
+                  "tool-output-pii-read-newline",
+                  "tool-output-pii-read-tab",
+                  "read-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-ledger",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/skill_native.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/skill-ledger",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-ledger/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "unsigned",
+                  "signed",
+                  "drifted",
+                  "tampered",
+                  "shadow",
+                  "ambiguous",
+                  "backend-denied",
+                  "unavailable",
+                  "timeout",
+                  "case-shadow",
+                  "project-only",
+                  "workspace-enabled",
+                  "empty-shadow",
+                  "model-only",
+                  "workflow-case",
+                  "workflow-empty",
+                  "dynamic-read"
+                ],
+                "values": {
+                  "passed": true,
+                  "native_skill_called": true,
+                  "config_preserved": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-direct-prewarm",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native-direct.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/native-start-direct"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-direct/result.json",
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "direct-first",
+                  "prewarm",
+                  "direct-reuse",
+                  "unused-prewarm"
+                ],
+                "values": {
+                  "passed": true
+                }
+              },
+              "values": {
+                "passed": true,
+                "sdk": "1.0.56",
+                "worker": "1.1.78",
+                "daemon": false,
+                "prompt_submissions": 0,
+                "cleanup/bindings": 0,
+                "cleanup/events": 0,
+                "cleanup/observations": 0,
+                "cleanup/native_assets": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "callback-deadlines",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/deadline-native.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/callback-deadlines",
+            "{bin}/aw"
+          ],
+          "timeout_seconds": 270,
+          "report": "tap",
+          "tests": 2
+        },
+        {
+          "name": "resident-parser-1-0-55",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm_qoder_sdk_1_0_55}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 120
+        },
+        {
+          "name": "resident-parser-1-0-57",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm_qoder_sdk_1_0_57}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 120
+        },
+        {
+          "name": "worker-lifecycle-1-0-55",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm_qoder_sdk_1_0_55}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.55",
+            "--worker-version",
+            "1.1.75",
+            "--sdk-sha256",
+            "e344a33c3b6b9512d72d28b32af2d67abca21ecef2826008c809668f69456e4c",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "fc3af4986e8082f1963e8f5fdd363a16f8ae721c3c4125fd12a81f629516a682",
+            "--output",
+            "{output}/worker-lifecycle-1-0-55"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-55/result.json",
+              "values": {
+                "status": "static_probe_only",
+                "sdk_version": "1.0.55",
+                "worker_version": "1.1.75",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "unsupported",
+                "worker_target": "linux-x64",
+                "worker_sha256": "fc3af4986e8082f1963e8f5fdd363a16f8ae721c3c4125fd12a81f629516a682"
+              }
+            }
+          ]
+        },
+        {
+          "name": "worker-lifecycle-1-0-56",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.56",
+            "--worker-version",
+            "1.1.78",
+            "--sdk-sha256",
+            "e76eb037555c5b8e74c0cbe7df9071f343be8d081d4c27738cb73491bdf827c1",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6",
+            "--output",
+            "{output}/worker-lifecycle-1-0-56"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-56/result.json",
+              "values": {
+                "status": "static_probe_only",
+                "sdk_version": "1.0.56",
+                "worker_version": "1.1.78",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "unsupported",
+                "worker_target": "linux-x64",
+                "worker_sha256": "dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6"
+              }
+            }
+          ]
+        },
+        {
+          "name": "worker-lifecycle-1-0-57",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm_qoder_sdk_1_0_57}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.57",
+            "--worker-version",
+            "1.1.81",
+            "--sdk-sha256",
+            "313b5050df8014cba1356965be39e316cd9b3e6c79ca0cd35fa6ac1ce7b59334",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb",
+            "--output",
+            "{output}/worker-lifecycle-1-0-57"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-57/result.json",
+              "values": {
+                "status": "static_probe_only",
+                "sdk_version": "1.0.57",
+                "worker_version": "1.1.81",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "not_exercised",
+                "worker_target": "linux-x64",
+                "worker_sha256": "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-1.0.57-gate-safe",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/final-1.0.57-gate-safe",
+            "--case",
+            "gate-safe",
+            "--expected-target",
+            "linux-x64"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-1.0.57-gate-safe/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "gate-safe"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "target": "linux-x64",
+                  "final_gate": true,
+                  "final_blocked": false,
+                  "package_unchanged": true,
+                  "model_withheld": false
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-1.0.57-gate-late",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/final-1.0.57-gate-late",
+            "--case",
+            "gate-late",
+            "--expected-target",
+            "linux-x64"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-1.0.57-gate-late/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "gate-late"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "target": "linux-x64",
+                  "final_gate": true,
+                  "final_blocked": true,
+                  "package_unchanged": true,
+                  "model_withheld": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-1.0.57-gate-timeout",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/final-1.0.57-gate-timeout",
+            "--case",
+            "gate-timeout",
+            "--expected-target",
+            "linux-x64"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-1.0.57-gate-timeout/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "gate-timeout"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "target": "linux-x64",
+                  "final_gate": true,
+                  "final_blocked": true,
+                  "package_unchanged": true,
+                  "model_withheld": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-1.0.57-gate-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/final-1.0.57-gate-error",
+            "--case",
+            "gate-error",
+            "--expected-target",
+            "linux-x64"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-1.0.57-gate-error/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "gate-error"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "target": "linux-x64",
+                  "final_gate": true,
+                  "final_blocked": true,
+                  "package_unchanged": true,
+                  "model_withheld": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-1.0.57-gate-native-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/final-1.0.57-gate-native-error",
+            "--case",
+            "gate-native-error",
+            "--expected-target",
+            "linux-x64"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-1.0.57-gate-native-error/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "gate-native-error"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "target": "linux-x64",
+                  "final_gate": true,
+                  "final_blocked": false,
+                  "package_unchanged": true,
+                  "model_withheld": false,
+                  "post": "PostToolUseFailure",
+                  "delivered": true,
+                  "delivered_is_error": true,
+                  "model_echoed_checked_result": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-sdk-bridge",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_qoder_bridge.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/native-sdk-bridge"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-sdk-bridge/result.json",
+              "values": {
+                "status": "passed",
+                "model_before_attach": true,
+                "native_hooks_preserved": true,
+                "allowed_once": true,
+                "denied_side_effect_absent": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "sdk-types",
+          "argv": [
+            "{python}",
+            "sdk/tests/native_qoder_types.py",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-types"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-types/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "1.0.56",
+                "typescript": "5.9.3"
+              }
+            }
+          ]
         }
+      ],
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "npm_variants": {
+        "npm_qoder_sdk_1_0_55": "@qoder-ai/qoder-agent-sdk@1.0.55",
+        "npm_qoder_sdk_1_0_57": "@qoder-ai/qoder-agent-sdk@1.0.57"
+      }
+    },
+    "deepseek-harness": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_fixture": "crates/aw-cli/tests/fixtures/deepseek-harness",
+      "boundary": "Published DeepSeek Harness 0.2.1-rc.5 headless CLI, actual plugin loader and model/tool loop with real AW sec-core and Tokenless Providers/CLI. User text is scanned at agent/pre-step; prompt denial and scanner failure prevent model requests. Web, SDK and ACP startup confirm four-Hook readiness; their actual input/tool-call adoption remains unverified. Profile selection and version do not gate admission. Model, tool bodies, scanner and RTK execution are deterministic fixtures; no hosted model acceptance. Tool input PII blocks execution; tool output PII can be replaced for successful single-text root results. An exact-build Node preload awaits security.violation after finalization and before Agent-loop Session commit; finalizer-added PII is withheld from the model and CLI output, and safe finalized text survives. Same-process tools/result observers receive the raw result before this gate; nested programmatic values and native value replacements retain native content. The Skill tool exposes only a name before execution, and direct /skill injection bypasses tool Hooks; resolved Skill checking is not claimed.",
+      "cases": [
+        {
+          "name": "headless",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/deepseek-harness/native.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/headless"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/headless/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "security-deny",
+                  "security-error",
+                  "native-deny",
+                  "native-bypass",
+                  "native-override",
+                  "compress",
+                  "tool-error",
+                  "parallel",
+                  "nested-deny",
+                  "retry-denied",
+                  "retry-allowed",
+                  "post-content",
+                  "post-value",
+                  "post-block",
+                  "finalizer",
+                  "cancel",
+                  "pii-clean",
+                  "pii-input-deny",
+                  "pii-output-replace",
+                  "final-pii-deny",
+                  "final-pii-replace",
+                  "final-pii-error",
+                  "strict-output-rejected",
+                  "submit-allow",
+                  "submit-deny",
+                  "submit-error"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "profiles",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/deepseek-harness/profiles.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/profiles"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/profiles/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "web",
+                  "sdk",
+                  "acp"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "codex": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "@openai/codex@0.166.0",
+        "codex163@npm:@openai/codex@0.163.0"
+      ],
+      "boundary": "Codex 0.163.0 and 0.166.0 native exec and local app-server stdio with UserPromptSubmit/PreToolUse/PostToolUse Hooks and a local Responses fixture. Exec covers ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. App-server covers same-cwd/default-config output replacement and code/prompt denial. Client-controlled thread/turn cwd and config overrides, Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, and sandbox enforcement are not certified as protected output.",
+      "cases": [
+        {
+          "name": "native-cli",
+          "argv": [
+            "{python}",
+            "tests/test_codex_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/.bin/codex",
+            "--expected-version",
+            "0.166.0",
+            "--output",
+            "{output}/codex"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "untrusted",
+                  "disabled",
+                  "prompt-deny",
+                  "allow",
+                  "deny",
+                  "offline",
+                  "retry",
+                  "native-deny",
+                  "native-rewrite",
+                  "native-rewrite-deny",
+                  "native-rewrite-required",
+                  "after-failure",
+                  "long",
+                  "replace",
+                  "replace-failure",
+                  "replace-peer",
+                  "replace-code-mode",
+                  "replace-apply",
+                  "replace-mcp",
+                  "replace-mcp-large",
+                  "replace-media",
+                  "replace-long",
+                  "replace-parallel"
+                ],
+                "values": {
+                  "passed": true,
+                  "cleaned": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-app-server-stdio",
+          "argv": [
+            "{python}",
+            "tests/test_codex_app_server.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/.bin/codex",
+            "--expected-version",
+            "0.166.0",
+            "--output",
+            "{output}/codex-app-server"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-app-server/result.json",
+              "values": {
+                "version": "codex-cli 0.166.0",
+                "entrypoint": "app-server stdio",
+                "output_replaced": true,
+                "code_blocked": true,
+                "prompt_blocked": true,
+                "cleaned": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-cli-0163",
+          "argv": [
+            "{python}",
+            "tests/test_codex_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/codex163/bin/codex.js",
+            "--expected-version",
+            "0.163.0",
+            "--output",
+            "{output}/codex-0163"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-0163/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "untrusted",
+                  "disabled",
+                  "prompt-deny",
+                  "allow",
+                  "deny",
+                  "offline",
+                  "retry",
+                  "native-deny",
+                  "native-rewrite",
+                  "native-rewrite-deny",
+                  "native-rewrite-required",
+                  "after-failure",
+                  "long",
+                  "replace",
+                  "replace-failure",
+                  "replace-peer",
+                  "replace-code-mode",
+                  "replace-apply",
+                  "replace-mcp",
+                  "replace-mcp-large",
+                  "replace-media",
+                  "replace-long",
+                  "replace-parallel"
+                ],
+                "values": {
+                  "passed": true,
+                  "cleaned": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-app-server-stdio-0163",
+          "argv": [
+            "{python}",
+            "tests/test_codex_app_server.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/codex163/bin/codex.js",
+            "--expected-version",
+            "0.163.0",
+            "--output",
+            "{output}/codex-app-server-0163"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-app-server-0163/result.json",
+              "values": {
+                "version": "codex-cli 0.163.0",
+                "entrypoint": "app-server stdio",
+                "output_replaced": true,
+                "code_blocked": true,
+                "prompt_blocked": true,
+                "cleaned": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "sdk": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {
+        "pip": "24.0",
+        "setuptools": "68.1.2",
+        "wheel": "0.42.0"
+      },
+      "boundary": "Application-owned semantic callbacks using installed TypeScript and Python packages. Verifies input and tool denial adoption, result observation, identity rejection, bounded release, unsupported effect rejection, session lifecycle, turn-stop decision adoption and preserved audit reasons without Agent framework packages. Automatic discovery and runtime instrumentation are not included.",
+      "cases": [
+        {
+          "name": "semantic-packages",
+          "argv": [
+            "{python}",
+            "sdk/tests/semantic_contract.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/semantic"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/semantic/result.json",
+              "values": {
+                "status": "passed",
+                "packages": 2,
+                "protocol": "aw-hook-source/v1",
+                "lifecycle": ["session.start", "turn.stop", "session.end"]
+              }
+            }
+          ]
+        }
+      ],
+      "requirements": [
+        "pip==24.0",
+        "setuptools==68.1.2",
+        "wheel==0.42.0"
       ]
     }
   }

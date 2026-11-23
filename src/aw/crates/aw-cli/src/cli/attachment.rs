@@ -1,7 +1,7 @@
 //! Explicit registration of a caller-owned, quiescent native process.
 
 pub(super) mod confirm;
-mod process;
+pub(super) mod process;
 
 use super::{adapter::HookBinding, read_file, readiness, run, Arguments, Exit, Result};
 use aw_adapter::{
@@ -144,7 +144,7 @@ fn attach(
     )?;
     let capabilities = prepared.capabilities();
     aw_adapter::reload::supported(&capabilities)?;
-    let steps = aw_provider::admission::preflight(config, target, &capabilities)?;
+    let steps = aw_core::admission::preflight(config, target, &capabilities)?;
     prepared.validate_steps(&steps)?;
     let executable = std::env::current_exe()?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -164,7 +164,7 @@ fn attach(
         _ => unreachable!("an existing or ensured service is always selected"),
     };
     let state_dir = socket.parent().ok_or("service socket has no parent")?;
-    super::connection::remember(source.1, socket, client)?;
+    super::connection::remember(source.1, socket, client, deadline)?;
     let directory = tempfile::Builder::new()
         .prefix("attach-")
         .tempdir_in(state_dir)?;
@@ -225,8 +225,10 @@ fn attach(
         files.write(
             "binding.json",
             &serde_json::to_vec(&HookBinding {
+                registration: None,
                 adapter: name.into(),
                 reloadable: true,
+                resident_policy_reload: false,
                 binding,
                 socket: socket.clone(),
                 cwd: native.command.cwd.clone(),
@@ -242,19 +244,22 @@ fn attach(
             .get("evidence")
             .is_some()
         {
-            call(
+            let observation = call(
                 client,
                 Operation::StartObservation {
                     instance_id: instance_id.clone(),
                 },
             )?;
-            call(
-                client,
-                Operation::ReportRun {
-                    instance_id: instance_id.clone(),
-                    outcome: RunOutcome::Started { pid: native.pid },
-                },
-            )?;
+            // Disabled evidence has no observation to report against.
+            if observation["audit_key"].is_string() {
+                call(
+                    client,
+                    Operation::ReportRun {
+                        instance_id: instance_id.clone(),
+                        outcome: RunOutcome::Started { pid: native.pid },
+                    },
+                )?;
+            }
         }
         native.identity.check()?;
         native.endpoint(&record.registration)?;
@@ -338,7 +343,7 @@ fn attach(
             let released = call(client, Operation::ReleaseInstance { instance_id });
             if removed.is_err() || released.is_err() {
                 let _ = directory.keep();
-                return Err(format!("{error}; attachment cleanup incomplete; retry aw install --remove with the same config, target and PID; native={removed:?}, binding={released:?}").into());
+                return Err(format!("{error}; attachment cleanup incomplete; retry aw disconnect --config FILE --agent TARGET --pid PID using the original config, target and PID; native={removed:?}, binding={released:?}").into());
             }
             if let Err(cleanup) = confirm::cleanup(directory.path()) {
                 let _ = directory.keep();

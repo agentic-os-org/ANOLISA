@@ -57,7 +57,7 @@ entry point, but it does not treat the current v0 `LogEntry` as a complete runti
 
 - Version 1 does not store or restore full conversations, terminal scrollback, raw tool inputs or
   outputs, or provider response bodies.
-- Local files do not claim authenticity against a malicious administrator. Compliance-grade
+- Local files do not claim authenticity against a same-uid or privileged attacker. Compliance-grade
   immutability belongs to an externally managed sink correlated by local trace IDs.
 - SLS and tracing logs do not become audit sources of truth.
 - The first phase adds no audit daemon, remote upload protocol, or new workspace crate.
@@ -157,6 +157,11 @@ Security and durability requirements:
   batch at most eight records or one second and flush during normal shutdown.
 - Readers may ignore only an incomplete final line and report `trailing_partial_record`. Invalid
   interior lines, unknown schemas, and read errors are diagnostics rather than silent skips.
+- Version 1 segment sequences are contiguous from zero; deleted, duplicated, or reordered records
+  surface a `sequence_gap` diagnostic. Tail truncation of a dense prefix and schema-valid forgery
+  remain undetectable without cryptographic evidence.
+- `audit status` exposes a fixed integrity boundary: no cryptographic tamper evidence, sequence
+  continuity diagnostics only, and no non-repudiation claim.
 
 ## Stable Event Format
 

@@ -1,7 +1,7 @@
-//! Read-only package queries retain older records and report observed damage.
+//! Read-only package queries reject unsupported records and report observed damage.
 #![cfg(target_os = "linux")]
 
-use aw_package::{Component, Payload};
+use aw_package::Payload;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -59,18 +59,11 @@ impl Fixture {
                 },
             );
         }
-        let component = Component {
-            format: 1,
-            component: "aw-core".into(),
-            version: "0.1.0-preview.1".into(),
-            source_commit: "a".repeat(40),
-            os: "linux".into(),
-            arch: std::env::consts::ARCH.into(),
-            provider_protocol: "aw-provider/v1alpha1".into(),
-            requires: BTreeMap::new(),
-            files,
-        };
-        self.record(&self.prefix.join(".aw-install.lock"), b"", 0o600);
+        let component = serde_json::json!({
+            "format":1,"component":"aw-core","version":"0.1.0",
+            "source_commit":"a".repeat(40),"os":"linux","arch":std::env::consts::ARCH,
+            "provider_protocol":"aw-provider/v1alpha1","requires":{},"files":files,
+        });
         self.record(
             &self.prefix.join(".aw-packages/aw-core.json"),
             serde_json::to_vec(&component).unwrap(),
@@ -116,7 +109,7 @@ impl Fixture {
                         "mode": 0o755
                     }},
                     "dependencies": [],
-                    "source": {}
+                    "source": {},"provider":{"protocol":"aw-provider/v1alpha1"}
                 }]
             }]
         });
@@ -130,9 +123,9 @@ impl Fixture {
         let pointer =
             aw_package::database::RegistrationPointer::new(&paths, "standalone-fixture".into())
                 .unwrap();
-        self.record(&self.prefix.join(".aw-install.lock"), b"", 0o600);
+        self.record(&self.prefix.join(".local-install.lock"), b"", 0o600);
         self.record(
-            &self.prefix.join(".aw-packages/aw-core.json"),
+            &self.prefix.join(".local-packages/installation.json"),
             serde_json::to_vec(&pointer).unwrap(),
             0o644,
         );
@@ -164,37 +157,27 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, u32, Vec<u8>)> {
 }
 
 #[test]
-fn legacy_queries_preserve_every_file_and_do_not_create_a_database() {
+fn legacy_queries_are_rejected_without_importing_or_changing_records() {
     let fixture = Fixture::new();
     fixture.legacy();
     let before = snapshot(&fixture.root);
     for arguments in [
         vec!["list", "--installed", "--json"],
-        vec!["list", "--installed", "--scope", "user", "--json"],
         vec!["doctor", "--json"],
-        vec!["doctor", "--scope", "user", "--json"],
     ] {
         let output = fixture.run(&arguments, true);
-        assert!(output.status.success(), "{:?}", output);
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.status.code(), Some(1));
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["format"], 1);
-        assert_eq!(value["status"], "succeeded");
-        assert!(value.get("mutation").is_none());
+        assert_eq!(value["error"]["code"], "package_contract");
         assert_eq!(snapshot(&fixture.root), before);
     }
-    let output = fixture.run(&["list", "--installed", "--json"], true);
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let installation = &value["result"]["inventory"]["installations"][0];
-    assert_eq!(installation["packages"][0]["package_id"], "aw-core");
-    assert_eq!(installation["registration"], "legacy_unregistered");
 }
 
 #[test]
 fn list_keeps_recorded_packages_while_doctor_reports_missing_files() {
     let fixture = Fixture::new();
-    fixture.legacy();
-    fs::remove_file(fixture.prefix.join("bin/aw")).unwrap();
+    fixture.registered();
+    fs::remove_file(fixture.prefix.join("bin/example-mant")).unwrap();
     let before = snapshot(&fixture.root);
     let list = fixture.run(&["list", "--installed", "--json"], true);
     assert!(list.status.success(), "{:?}", list);
@@ -311,12 +294,12 @@ fn unfinished_transactions_explain_the_recovery_location_without_repairing_it() 
 fn human_query_output_escapes_untrusted_directory_names() {
     let mut fixture = Fixture::new();
     fixture.prefix = fixture.root.join("prefix\n\u{1b}[2J\u{202e}");
-    fixture.legacy();
+    fixture.registered();
     let output = fixture.run(&["list", "--installed", "--color", "never"], true);
     assert!(output.status.success(), "{:?}", output);
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'));
-    assert!(text.contains("prefix\\n") && text.contains("older installation records"));
+    assert!(text.contains("prefix\\n") && text.contains("package database"));
 }
 
 #[test]

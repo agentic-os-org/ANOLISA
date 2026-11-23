@@ -11,16 +11,23 @@ mod server;
 mod wire;
 
 pub mod agentsight;
+pub mod audit_export;
 pub mod inspect;
 pub mod launch_service;
+pub mod public_projection;
 
 pub use client::Client;
 pub use runtime::process::Process as ProcessIdentity;
 pub use server::Server;
 pub use wire::{
-    Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation, Request, Response,
-    RunOutcome, VERSION,
+    Availability, Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation,
+    RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
+    RegistrationRequest, Request, Response, ResultStatus, RunOutcome, SdkControl, SdkIntent,
+    REGISTRATION_VERSION, SDK_CONTROL_VERSION, SDK_VERSION, VERSION,
 };
+
+/// Maximum applicable enabled steps across all events in one service binding.
+pub const MAX_STEPS_PER_BINDING: usize = 64;
 
 /// Service boundary failure; remote messages contain only stable error codes.
 #[derive(Debug, thiserror::Error)]

@@ -17,11 +17,14 @@ Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime 
 - **TOML config hot-reload** — single config entry at `/etc/ws-ckpt/config.toml`, `ws-ckpt reload` applies instantly
 - **Capacity alerting** — warns when any workspace exceeds 1000 snapshots or 90% filesystem usage
 
+Setting the health check interval to zero disables periodic diagnostics; the
+daemon still refreshes its advisory cache. See [CLI configuration](../../docs/user-guide/en/ws-ckpt/index.md#cli-based-configuration).
+
 After a successful rollback through the OpenClaw or Hermes plugin, the next
 turn-end checkpoint is skipped only for the restored workspace, whether the
 rollback uses its ID or registered path. Other
 workspaces keep their automatic checkpoints; preview and failed rollbacks do
-not suppress them. OpenClaw keeps this state within the originating session,
+not suppress them. Both plugins keep this state within the originating session,
 so another session finishing first cannot consume it.
 
 ## Project Structure
@@ -35,11 +38,10 @@ ws-ckpt/
 │   │   ├── common/            # Shared types, IPC protocol codec
 │   │   ├── daemon/            # Daemon core logic
 │   │   └── cli/               # CLI client
-│   ├── systemd/               # systemd service files
 │   └── skills/                # OS Skills
 ├── docs/                      # Documentation
-├── ws-ckpt.spec.in            # RPM spec template
-├── build-rpm.sh               # RPM build script
+├── packaging/                 # RPM/raw specs, service resources and delivery rules
+├── build-rpm.sh               # Compatibility wrapper for packaging/rpm/build.sh
 └── .gitignore
 ```
 
@@ -49,7 +51,7 @@ ws-ckpt/
 
 - Linux (Alinux 4 recommended)
 - btrfs filesystem
-- Rust 1.70+
+- Rust 1.91+
 
 The workspace root must not be an active mount point. Initialization moves the
 original directory aside as a backup, and `rename(2)` fails with `EBUSY` on a
@@ -60,8 +62,7 @@ the first `checkpoint`.
 ### Build
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
 [Maintainer guide: Raw packaging and GitHub builds](../../contribute/en/ws-ckpt/packaging.md)
@@ -103,6 +104,10 @@ ws-ckpt delete --workspace ~/my-workspace -s feature
 
 ### Snapshot Management
 
+The Hermes `ws-ckpt-list` tool also accepts `{"limit":20}` for one page and
+`{"limit":20,"cursor":"<next_cursor>"}` to continue. Stop only at `next_cursor:null`;
+`{}` still returns the complete table. See the [user guide](../../docs/user-guide/en/ws-ckpt/index.md#hermes-snapshot-list-pagination).
+
 ```bash
 # List all snapshots
 ws-ckpt list --workspace ~/my-workspace
@@ -121,6 +126,9 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 
 # Diff snapshot vs current working tree (omit --to)
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
+
+# Machine-readable file changes (no line-by-line content diff)
+ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --format json
 
 # Cleanup old snapshots, keep latest 5
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
@@ -158,6 +166,12 @@ Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wid
 - `-g` / `--global`: view or modify the global config file
 - `-w <workspace>` / `--workspace <workspace>`: view or modify a workspace's `policy.toml`
 
+`backend.btrfs-loop.img_size` / `config -g --img-size` accepts integers of at
+least **5 GiB** (default: 30 GiB); changes require a daemon restart. Invalid
+configurations stop daemon startup rather than replacing other settings with
+defaults. CLI updates validate before saving and can repair an existing
+out-of-range value.
+
 ```bash
 # View system status
 ws-ckpt status --workspace ~/my-workspace
@@ -183,6 +197,15 @@ ws-ckpt reload
 ```
 
 `config -g` writes the global file, then verifies the daemon reloaded the same settings — it exits non-zero and lists any field that differs. In a Kubernetes sidecar deployment the CLI and daemon run in separate containers, so `/etc/ws-ckpt` must be on a volume shared by both, or global settings will not reach the daemon.
+
+For BtrfsBase, set `[backend.btrfs-base] btrfs_mount = "/data"` to pin an
+existing writable btrfs mount; data lives at `/data/ws-ckpt-data`. Restart to apply
+backend settings. Without a pin, restarts reuse the persisted mount and fail if
+it is unavailable. Changing the pin deliberately switches roots: previous
+snapshots become invisible and startup can prune unpinned indexes. Switching
+back does not recover them; leftover subvolumes reappear as pinned recovered
+orphans. Back up state and data before changing it. `daemon --mount-path` applies only to BtrfsLoop.
+See [storage selection](../../docs/user-guide/en/ws-ckpt/index.md#storage-backend-selection).
 
 ## Command Reference
 

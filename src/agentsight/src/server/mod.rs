@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod cache;
 mod capabilities;
 mod causal;
 pub(crate) mod causal_store;
@@ -18,6 +19,7 @@ pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
 mod tokenless;
+mod ws_ckpt;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -260,9 +262,16 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
                 .service(handlers::get_latency_metrics)
+                .service(cache::get_cache_diagnosis)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
+                .service(ws_ckpt::get_snapshots)
+                .service(ws_ckpt::snapshot_availability)
+                .service(ws_ckpt::diff)
+                .service(ws_ckpt::prepare)
+                .service(ws_ckpt::execute)
+                .service(ws_ckpt::restore_result)
                 .service(handlers::get_agent_health)
                 .service(handlers::get_agent_process_health)
                 .service(
@@ -309,6 +318,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
                 .service(enforcement::apply_file_binding)
+                .service(enforcement::apply_file_read_binding)
                 .service(enforcement::apply_credential_binding)
                 .service(enforcement::preview_agent_protection)
                 .service(enforcement::list_bindings)
@@ -364,6 +374,36 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// Keep in sync with `configure_routes` above — the doc test in this module
 /// spot-checks a few entries but cannot detect every drift.
 const API_ROUTES: &[(&str, &str, &str)] = &[
+    (
+        "GET",
+        "/api/ws-ckpt/{kind}/{id}/snapshots",
+        "ATIF steps and workspace snapshots",
+    ),
+    (
+        "HEAD",
+        "/api/ws-ckpt/{kind}/{id}/snapshots",
+        "Whether a registered workspace is available for the trajectory",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/diff",
+        "File changes against the current workspace",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/prepare",
+        "Verify file changes and prepare rollback confirmation",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/execute",
+        "Confirm an exact guarded restore",
+    ),
+    (
+        "POST",
+        "/api/ws-ckpt/restore/result",
+        "Query durable restore evidence",
+    ),
     ("GET", "/health", "Liveness probe (localhost only)"),
     ("GET", "/metrics", "Prometheus metrics (localhost only)"),
     (
@@ -403,6 +443,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/agent-names", "Distinct agent names"),
     ("GET", "/api/timeseries", "Token/call time series"),
     ("GET", "/api/metrics/latency", "LLM latency metrics"),
+    (
+        "GET",
+        "/api/metrics/cache",
+        "Prompt-cache hit rate and low-hit diagnosis",
+    ),
     ("POST", "/api/grader/evaluate", "Run grader on a session"),
     ("GET", "/api/grader/latest", "Latest grader result"),
     (
@@ -537,6 +582,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
         "POST",
         "/api/enforcement/file-bindings",
         "Apply file binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/file-read-bindings",
+        "Apply file or directory-tree read-denial binding (token required)",
     ),
     (
         "POST",
@@ -681,8 +731,25 @@ async fn api_not_found() -> impl Responder {
 fn json_extractor_config() -> web::JsonConfig {
     // Generic prefix keeps Rust type names out of the leading text while
     // preserving the serde detail (field/variant names are public API states).
-    web::JsonConfig::default()
-        .error_handler(|error, _req| extractor_error(format!("invalid request body: {error}")))
+    web::JsonConfig::default().error_handler(|error, _req| {
+        // Actix maps an oversized body to 413. Rewriting every failure as 400
+        // told clients a valid-but-large body was malformed and made "body too
+        // big" indistinguishable from a serde error.
+        let oversized = matches!(
+            error,
+            actix_web::error::JsonPayloadError::Overflow { .. }
+                | actix_web::error::JsonPayloadError::OverflowKnownLength { .. }
+        );
+        let (status, code) = if oversized {
+            (
+                actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+            )
+        } else {
+            (actix_web::http::StatusCode::BAD_REQUEST, "bad_request")
+        };
+        extractor_error_with_status(status, code, format!("invalid request body: {error}"))
+    })
 }
 
 /// Builds the typed path extractor config registered on the server `App`.
@@ -708,12 +775,20 @@ fn query_extractor_config() -> web::QueryConfig {
 
 /// Wraps an extractor failure into a 400 response with the shared envelope.
 fn extractor_error(message: String) -> actix_web::Error {
-    let response = system_audit::error_response(
+    extractor_error_with_status(
         actix_web::http::StatusCode::BAD_REQUEST,
         "bad_request",
-        &message,
-        false,
-    );
+        message,
+    )
+}
+
+/// Wraps an extractor failure into the shared error envelope at `status`.
+fn extractor_error_with_status(
+    status: actix_web::http::StatusCode,
+    code: &'static str,
+    message: String,
+) -> actix_web::Error {
+    let response = system_audit::error_response(status, code, &message, false);
     actix_web::error::InternalError::from_response(message, response).into()
 }
 
@@ -1202,8 +1277,13 @@ pub async fn run_server(
     }
 
     let server = match HttpServer::new(move || {
+        // Same-origin only: the dashboard is embedded and served by this very
+        // server, so no legitimate consumer needs a foreign origin — while
+        // `allow_any_origin` let any visited web page read every response
+        // (combined with the loopback bypass, the whole API was
+        // cross-origin-readable without a token).
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin_fn(crate::http_origin::cors_allows_origin)
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
             .allowed_headers(vec!["Content-Type", "Authorization"])
             .max_age(3600);
@@ -1642,6 +1722,26 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let binding = r#"{"agent_id":"qoder","root_pid":1,"path":"/tmp/secret","deny_read":true}"#;
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(binding)
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "file_read_route_required");
+
+        // Without an enforcer the registered read route reports 503, never 404.
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-read-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(binding)
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Asserts the response is a 400 carrying the structured error envelope
@@ -1697,6 +1797,37 @@ mod tests {
             .to_request();
         let response = awtest::call_service(&app, invalid_variant).await;
         assert_bad_request_envelope(response, "unknown variant").await;
+    }
+
+    /// Actix rejects a JSON body above the configured limit with 413, but the
+    /// shared error handler rewrote every JSON failure as 400. A client could
+    /// not tell "body too large" from malformed JSON.
+    #[actix_web::test]
+    async fn oversized_json_bodies_return_payload_too_large() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let uri = "/api/audit/cases/00000000-0000-0000-0000-000000000000/review";
+        let payload = "x".repeat(2 * 1024 * 1024 + 1);
+
+        let request = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload(payload.into_bytes())
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "payload_too_large");
     }
 
     #[actix_web::test]
@@ -1785,7 +1916,7 @@ mod tests {
         assert!(tail.status().is_success() || tail.status() == StatusCode::NOT_FOUND);
     }
 
-    fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
+    pub(super) fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
         let auth_config = ServerAuthConfig { enabled: false };
         let auth = Arc::new(DashboardAuth::init(
             &auth_config,
@@ -1820,6 +1951,121 @@ mod tests {
             )),
             trajectory_store: Arc::new(RwLock::new(None)),
         })
+    }
+
+    #[test]
+    fn concurrent_storage_config_requests_keep_the_config_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({"storage": {}, "fixture": "x".repeat(16 * 1024)}).to_string(),
+        )
+        .unwrap();
+        let mut state = test_app_state(0).into_inner();
+        Arc::get_mut(&mut state).unwrap().config_path = Some(config_path.clone());
+        let data = web::Data::from(state);
+        let barrier = std::sync::Barrier::new(4);
+
+        // Each in-process app models one worker with the same production
+        // application data. No listener, socket or background service starts.
+        let statuses = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|worker_index| {
+                    let data = data.clone();
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        actix_web::rt::System::new().block_on(async move {
+                            let app = awtest::init_service(
+                                App::new()
+                                    .app_data(data)
+                                    .service(super::storage_status::post_storage_config),
+                            )
+                            .await;
+                            barrier.wait();
+                            let mut statuses = Vec::new();
+                            for index in 0..16 {
+                                let request = awtest::TestRequest::post()
+                                    .uri("/storage/config")
+                                    .set_json(serde_json::json!({
+                                        "max_total_size_mb": 900 + worker_index * 100 + index % 4
+                                    }))
+                                    .to_request();
+                                statuses.push(awtest::call_service(&app, request).await.status());
+                            }
+                            statuses
+                        })
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert!(
+            statuses.iter().all(|status| *status == StatusCode::OK),
+            "valid concurrent settings requests must succeed: {statuses:?}"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert!(
+            [903, 1003, 1103, 1203]
+                .contains(&saved["storage"]["max_total_size_mb"].as_u64().unwrap()),
+            "the last complete worker write must win"
+        );
+        assert_eq!(saved["fixture"], "x".repeat(16 * 1024));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn storage_config_request_preserves_symlink_target_and_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target_path = directory.path().join("real.json");
+        let config_path = directory.path().join("config.json");
+        std::fs::write(
+            &target_path,
+            r#"{"storage":{"max_total_size_mb":2200},"keep":1}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target_path, &config_path).unwrap();
+
+        let mut state = test_app_state(0).into_inner();
+        Arc::get_mut(&mut state).unwrap().config_path = Some(config_path.clone());
+        let data = web::Data::from(state);
+        actix_web::rt::System::new().block_on(async move {
+            let app = awtest::init_service(
+                App::new()
+                    .app_data(data)
+                    .service(super::storage_status::post_storage_config),
+            )
+            .await;
+            let request = awtest::TestRequest::post()
+                .uri("/storage/config")
+                .set_json(serde_json::json!({"max_total_size_mb": 2000}))
+                .to_request();
+            let response = awtest::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+
+        assert_eq!(std::fs::read_link(&config_path).unwrap(), target_path);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target_path).unwrap()).unwrap();
+        assert_eq!(saved["storage"]["max_total_size_mb"], 2000);
+        assert_eq!(saved["keep"], 1);
+        assert_eq!(
+            std::fs::metadata(&target_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     fn test_app_state_with_trajectory_store(store: TrajectoryStore) -> web::Data<AppState> {

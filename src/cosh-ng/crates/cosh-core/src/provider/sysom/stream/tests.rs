@@ -27,9 +27,13 @@ fn summarize(events: &[GenerateEvent]) -> Vec<String> {
                 total_tokens,
                 cached_tokens: _,
             } => format!("usage:{prompt_tokens}:{completion_tokens}:{total_tokens}"),
+            GenerateEvent::RequestAccepted => "request_accepted".to_string(),
             GenerateEvent::MessageEnd => "message_end".to_string(),
             GenerateEvent::Cancelled => "cancelled".to_string(),
             GenerateEvent::Error(message) => format!("error:{message}"),
+            GenerateEvent::ProviderFailure(failure) => {
+                format!("failure:{}:{:?}", failure.code, failure.dispatch)
+            }
         })
         .collect()
 }
@@ -1339,4 +1343,36 @@ fn empty_content_or_arguments_snapshot_is_treated_as_no_change() {
         vec![tool_entry(0, "call-1", "ask_user_question", ASK_ARGS)],
     ));
     assert_eq!(parse(&grown, &mut state), vec!["text: Done.".to_string()]);
+}
+
+#[tokio::test]
+async fn structured_failures_never_claim_sse_is_not_dispatched() {
+    for payload in [
+        r#"{"code":"Sysom.ServiceNotActivated","message":"secret-canary"}"#,
+        "None",
+    ] {
+        let bytes = Box::pin(futures::stream::iter(vec![Ok(format!(
+            "event: Failed\ndata: {payload}\n\n"
+        )
+        .into_bytes())]));
+        let events: Vec<_> = sysom_event_stream_structured(bytes, Arc::new(AtomicBool::new(false)))
+            .collect()
+            .await;
+        assert!(
+            matches!(events.as_slice(),[GenerateEvent::ProviderFailure(failure)] if failure.dispatch==crate::provider::DispatchState::Unknown)
+        );
+        assert!(!format!("{events:?}").contains("canary"));
+    }
+}
+
+#[tokio::test]
+async fn structured_transport_failure_is_terminal_and_does_not_echo_upstream_error() {
+    let bytes = Box::pin(futures::stream::iter(vec![Err("secret-canary".into())]));
+    let events: Vec<_> = sysom_event_stream_structured(bytes, Arc::new(AtomicBool::new(false)))
+        .collect()
+        .await;
+    assert!(
+        matches!(events.as_slice(),[GenerateEvent::ProviderFailure(failure)] if failure.kind==crate::provider::ProviderFailureKind::Transport && failure.dispatch==crate::provider::DispatchState::Unknown)
+    );
+    assert!(!format!("{events:?}").contains("canary"));
 }

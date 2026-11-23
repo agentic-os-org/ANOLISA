@@ -107,6 +107,7 @@ fn selection_input_mode() -> Arc<Mutex<RawInputMode>> {
         route: PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
+            generation: 0,
         },
     }))
 }
@@ -1079,6 +1080,7 @@ fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
             route: PromptGhostRoute::AgentSelection {
                 candidates,
                 active: 1,
+                generation: 0,
             },
         };
     }
@@ -1455,6 +1457,7 @@ fn selection_bare_escape_times_out_without_waiting_for_another_key() {
         route: PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
+            generation: 0,
         },
     }));
     let relay = super::super::spawn_raw_input_relay(
@@ -1497,6 +1500,7 @@ fn selection_action_wait_flushes_escape_at_the_deadline() {
                 suggestion_id: "health-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     }));
     let relay = super::super::spawn_raw_action_relay(
@@ -1537,6 +1541,8 @@ fn selection_shift_tab_cycles_when_arriving_in_one_chunk() {
     assert_eq!(output, b"exit\n");
     assert!(events.contains(&RawInputEvent::PromptGhostCycle {
         text: "continue deployment".to_string(),
+        suggestion_id: Some("personal-1".to_string()),
+        generation: 0,
     }));
     assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
     assert!(matches!(mode, RawInputMode::Passthrough));
@@ -1616,7 +1622,7 @@ fn selection_shift_tab_received_before_deadline_survives_a_delayed_relay() {
 
     assert!(rx.try_iter().any(|event| matches!(
         event,
-        RawInputEvent::PromptGhostCycle { text } if text == "continue deployment"
+        RawInputEvent::PromptGhostCycle { text, .. } if text == "continue deployment"
     )));
     assert_eq!(fs::read(&path).expect("read test output"), b"");
     fs::remove_file(path).ok();
@@ -1674,6 +1680,7 @@ fn selection_pending_escape_at_eof_after_route_change_is_cancelled() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1699,6 +1706,7 @@ fn selection_pending_escape_at_eof_after_route_change_is_cancelled() {
                 suggestion_id: "new-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     };
     finish_input_relay(&mut master, &tx, &classifier, &input_mode, &mut state)
@@ -1725,6 +1733,7 @@ fn selection_route_change_before_deadline_dismisses_then_forwards_shift_tab() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1758,6 +1767,7 @@ fn selection_route_change_before_deadline_dismisses_then_forwards_shift_tab() {
                 },
             ],
             active: 0,
+            generation: 0,
         },
     };
 
@@ -1795,6 +1805,7 @@ fn selection_expired_escape_dismisses_instead_of_rebuffering_for_a_new_route() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1823,6 +1834,7 @@ fn selection_expired_escape_dismisses_instead_of_rebuffering_for_a_new_route() {
                 suggestion_id: "new-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     };
     relay_input_bytes(
@@ -2316,6 +2328,7 @@ fn zsh_space_prefix_returns_to_shell_when_ascii_command_resolves() {
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
     let mut zsh_path_prompt_buffering = ZshPathPromptBuffering::new();
     let mut relay = InputRelayContext {
         master: &mut master,
@@ -2492,6 +2505,8 @@ fn selection_shift_tab_cycles_and_tab_inserts_the_active_prompt() {
     let (events, output, mode) = relay.finish();
     assert!(events.contains(&RawInputEvent::PromptGhostCycle {
         text: "continue deployment".to_string(),
+        suggestion_id: Some("personal-1".to_string()),
+        generation: 0,
     }));
     assert!(events.contains(&RawInputEvent::PromptGhostAccepted {
         suggestion_id: Some("personal-1".to_string()),
@@ -2510,6 +2525,7 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
             suggestion_id: "health-disk".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "inspect disk pressure".to_string(),
@@ -3270,8 +3286,245 @@ fn cjk_line_start_stays_passthrough_when_gate_is_down() {
     fs::remove_file(path).ok();
 }
 
-// #1721 D16: submitting a line lowers the gate until the next prompt_ready,
-// so follow-up CJK bytes (e.g. heredoc body after `cat <<EOF`) pass through.
+#[test]
+fn native_continuation_agent_markers_stay_byte_exact_after_submit() {
+    let cases: &[(&str, &[&[u8]])] = &[
+        ("complete", &[b"?? native ps2\r"]),
+        ("fragmented", &[b"?", b"? native ps2", b"\r"]),
+        ("lone", &[b"??", b"\r"]),
+        ("paste", &[b"\x1b[200~?? native ps2\x1b[201~", b"\r"]),
+        (
+            "split-paste",
+            &[b"\x1b[20", b"0~?? native ps2", b"\x1b[201~", b"\r"],
+        ),
+        ("paste-slash", &[b"\x1b[200~/mode\x1b[201~", b"\r"]),
+        (
+            "split-paste-slash",
+            &[b"\x1b[20", b"0~/mode", b"\x1b[201~", b"\r"],
+        ),
+        ("soft-newline", &[b"?? native ps2", b"\x1b\r"]),
+        ("slash-edit", &[b"/", b"\x7f?? native ps2\r"]),
+    ];
+    for (label, chunks) in cases {
+        let (path, mut master) = output_file(label);
+        let (tx, rx) = mpsc::channel();
+        let mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let mut buffer = CandidateLineBuffer::default();
+        let mut native = NativeLineState::default();
+        let mut exit = ExplicitExitTracker::default();
+        let classifier = InputClassifier::default()
+            .with_bash_readline_history_privacy(true)
+            .with_bash_slash_submission_guard(true);
+        let generation = UserPtyInputGeneration::default();
+        let mut submits = LineSubmitCounter::default();
+        let gate = super::super::MainPromptGate::default();
+        gate.set_at_prompt(true);
+        let mut relay = passthrough_relay_fixture(
+            &mut master,
+            &tx,
+            &mode,
+            &mut buffer,
+            &mut native,
+            &mut exit,
+            &classifier,
+            &generation,
+            &mut submits,
+            &gate,
+        );
+        let opener = b"printf '%s\\n' '\n";
+        relay_passthrough_input(opener, &mut relay).unwrap();
+        assert!(!gate.is_at_prompt(), "native submit must lower gate");
+        let _ = rx.try_iter().collect::<Vec<_>>();
+        for chunk in *chunks {
+            relay_passthrough_input(chunk, &mut relay).unwrap();
+        }
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::UserIntercept(..)
+                    | RawInputEvent::UserInterceptAtPrompt { .. }
+                    | RawInputEvent::PromptDraftOpen { .. }
+            )),
+            "{label}: native ownership lost: {events:?}"
+        );
+        if *label != "slash-edit" {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, RawInputEvent::CandidateRedraw { .. })),
+                "{label}: native candidate redraw: {events:?}"
+            );
+        }
+        let mut expected = opener.to_vec();
+        if *label == "slash-edit" {
+            expected.extend_from_slice(b"?? native ps2\r");
+        } else {
+            for chunk in *chunks {
+                expected.extend_from_slice(chunk);
+            }
+        }
+        assert_eq!(fs::read(&path).unwrap(), expected, "{label}: native bytes");
+        relay_passthrough_input(b"\x03\r", &mut relay).unwrap();
+        let _ = rx.try_iter().collect::<Vec<_>>();
+        gate.set_at_prompt(true);
+        relay_passthrough_input(b"?? primary control\r", &mut relay).unwrap();
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::UserIntercept(..) | RawInputEvent::UserInterceptAtPrompt { .. }
+            )),
+            "{label}: prompt_ready must restore Agent upgrade: {events:?}"
+        );
+        fs::remove_file(path).ok();
+    }
+}
+
+#[test]
+fn pasted_ctrl_x_keeps_primary_prompt_evidence() {
+    let cases: &[&[&[u8]]] = &[
+        &[b"\x1b[200~\x18\x1b[201~"],
+        &[b"\x1b[200~", b"\x18", b"\x1b[201~"],
+        &[b"\x1b[20", b"0~", b"\x18", b"\x1b[20", b"1~"],
+    ];
+    for chunks in cases {
+        let (path, mut master) = output_file("pasted-ctrl-x-gate");
+        let (tx, rx) = mpsc::channel();
+        let mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let mut buffer = CandidateLineBuffer::default();
+        let mut native = NativeLineState::default();
+        let mut exit = ExplicitExitTracker::default();
+        let classifier = InputClassifier::default()
+            .with_bash_readline_history_privacy(true)
+            .with_bash_slash_submission_guard(true);
+        let generation = UserPtyInputGeneration::default();
+        let mut submits = LineSubmitCounter::default();
+        let gate = super::super::MainPromptGate::default();
+        gate.set_at_prompt(true);
+        let mut relay = passthrough_relay_fixture(
+            &mut master,
+            &tx,
+            &mode,
+            &mut buffer,
+            &mut native,
+            &mut exit,
+            &classifier,
+            &generation,
+            &mut submits,
+            &gate,
+        );
+        for chunk in *chunks {
+            relay_passthrough_input(chunk, &mut relay).unwrap();
+            assert!(
+                gate.is_at_prompt(),
+                "pasted Ctrl-X is literal data: {chunks:?}"
+            );
+        }
+        relay_passthrough_input(b"\x18", &mut relay).unwrap();
+        assert!(
+            !gate.is_at_prompt(),
+            "Ctrl-X after the closer is a real binding"
+        );
+        assert!(
+            rx.try_iter().all(|event| !matches!(event,
+                RawInputEvent::PtyUserWrite { line_submits, .. } if line_submits > 0
+            )),
+            "untracked binding must not invent a submission"
+        );
+        fs::remove_file(path).ok();
+    }
+}
+
+#[test]
+fn custom_accept_line_continuation_paste_does_not_acquire_agent_capture() {
+    let opener = b"printf '%s\\n' '\x18\x01";
+    let paste = b"\x1b[200~?? native ps2'\x1b[201~\r";
+    let cases = [
+        ("custom-complete", vec![opener.to_vec(), paste.to_vec()]),
+        (
+            "custom-config-reload",
+            vec![b"\x18\x12".to_vec(), b"echo native\r".to_vec()],
+        ),
+        (
+            "custom-split-opener",
+            vec![
+                opener.to_vec(),
+                b"\x1b[20".to_vec(),
+                b"0~?? native ps2'".to_vec(),
+                b"\x1b[201~\r".to_vec(),
+            ],
+        ),
+        (
+            "custom-separate-enter",
+            vec![
+                opener.to_vec(),
+                b"\x1b[200~?? native ps2'\x1b[201~".to_vec(),
+                b"\r".to_vec(),
+            ],
+        ),
+        (
+            "custom-coalesced",
+            vec![[opener.as_slice(), paste.as_slice()].concat()],
+        ),
+        (
+            "custom-split-binding",
+            vec![
+                opener[..opener.len() - 1].to_vec(),
+                vec![0x01],
+                paste.to_vec(),
+            ],
+        ),
+    ];
+    for (label, chunks) in cases {
+        let (path, mut master) = output_file(label);
+        let (tx, rx) = mpsc::channel();
+        let mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let mut buffer = CandidateLineBuffer::default();
+        let mut native = NativeLineState::default();
+        let mut exit = ExplicitExitTracker::default();
+        let classifier = InputClassifier::default()
+            .with_bash_readline_history_privacy(true)
+            .with_bash_slash_submission_guard(true);
+        let generation = UserPtyInputGeneration::default();
+        let mut submits = LineSubmitCounter::default();
+        let gate = super::super::MainPromptGate::default();
+        gate.set_at_prompt(true);
+        let mut relay = passthrough_relay_fixture(
+            &mut master,
+            &tx,
+            &mode,
+            &mut buffer,
+            &mut native,
+            &mut exit,
+            &classifier,
+            &generation,
+            &mut submits,
+            &gate,
+        );
+        for chunk in &chunks {
+            relay_passthrough_input(chunk, &mut relay).unwrap();
+        }
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::CandidateRedraw { .. }
+                    | RawInputEvent::UserIntercept(..)
+                    | RawInputEvent::UserInterceptAtPrompt { .. }
+                    | RawInputEvent::PromptDraftOpen { .. }
+            )),
+            "native continuation must retain ownership: {events:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            chunks.concat(),
+            "{label}: enhanced native PTY bytes"
+        );
+        fs::remove_file(path).ok();
+    }
+}
+
 #[test]
 fn submit_lowers_gate_until_next_prompt_ready() {
     let (path, mut master) = output_file("gate-lowered-by-submit");
@@ -3638,7 +3891,13 @@ fn routing_c3_eof_candidate_prefix_is_cancelled_before_clean_exit() {
         let (tx, rx) = mpsc::channel();
         let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
         let classifier = InputClassifier::default();
-        let mut state = RawInputRelayState::default();
+        let gate = super::super::MainPromptGate::default();
+        gate.set_at_prompt(true);
+        let mut state = RawInputRelayState::with_generation_and_gate(
+            UserPtyInputGeneration::default(),
+            gate,
+            false,
+        );
 
         relay_input_bytes(
             bytes,
@@ -4459,3 +4718,6 @@ fn native_hint_prefix_slash_keeps_rust_intercept_when_routed() {
 
 #[path = "relay_tests/routing_recovery.rs"]
 mod routing_recovery;
+
+#[path = "relay_tests/paste_echo_budget.rs"]
+mod paste_echo_budget;

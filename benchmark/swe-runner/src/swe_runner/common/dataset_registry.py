@@ -16,10 +16,18 @@
 
 from __future__ import annotations
 
+# The `SWE-bench/*` org is the current home of these datasets and the only variant
+# swebench >=5 can evaluate: its harness reads per-instance `image` and
+# `eval_script` columns that the legacy `princeton-nlp/*` copies do not carry, and
+# it fails with KeyError('image') on them. The two are otherwise the same data --
+# verified over this benchmark's 48-instance shard: identical instance ids,
+# base_commit, gold patch and problem_statement, and identical FAIL_TO_PASS /
+# PASS_TO_PASS contents (the legacy copy stores them as JSON strings where the
+# current one stores real lists).
 DATASET_MAPPING: dict[str, str] = {
-    "lite": "princeton-nlp/SWE-bench_Lite",
-    "verified": "princeton-nlp/SWE-bench_Verified",
-    "full": "princeton-nlp/SWE-bench",
+    "lite": "SWE-bench/SWE-bench_Lite",
+    "verified": "SWE-bench/SWE-bench_Verified",
+    "full": "SWE-bench/SWE-bench",
     "multilingual": "SWE-bench/SWE-bench_Multilingual",
 }
 
@@ -31,7 +39,7 @@ def get_dataset_name(subset: str) -> str:
         subset: One of the known subset keys (lite, verified, full, multilingual).
 
     Returns:
-        The full dataset path (e.g. ``princeton-nlp/SWE-bench_Lite``).
+        The full dataset path (e.g. ``SWE-bench/SWE-bench_Lite``).
 
     Raises:
         ValueError: If *subset* is not a known key.

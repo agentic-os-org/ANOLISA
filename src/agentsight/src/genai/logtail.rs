@@ -90,6 +90,77 @@ fn telemetry_disabled_at(sentinel: &std::path::Path) -> bool {
 /// 动态 Logtail 路径（由 config watcher 运行时设置）
 static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
+#[derive(Clone, PartialEq, Eq)]
+struct BatchWriteKey {
+    ptr: usize,
+    len: usize,
+    first_id: Option<String>,
+    first_timestamp_ns: u64,
+}
+
+struct LastBatchWrite {
+    from_default_exporter: bool,
+    batch: BatchWriteKey,
+    path: PathBuf,
+}
+
+thread_local! {
+    /// Tracks the most recent batch written by either the default exporter
+    /// (`require_path_exists == true`) or an explicit/dynamic exporter
+    /// (`require_path_exists == false`) on the current thread so that when both
+    /// are registered and resolve to the same physical file, the second exporter
+    /// in the loop skips the duplicate write without requiring the default
+    /// exporter to guess in advance whether a dynamic exporter will write later.
+    static LAST_BATCH_WRITE: std::cell::RefCell<Option<LastBatchWrite>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn clear_last_batch_write() {
+    LAST_BATCH_WRITE.with(|cell| *cell.borrow_mut() = None);
+}
+
+fn batch_write_key(events: &[GenAISemanticEvent]) -> Option<BatchWriteKey> {
+    let first = events.first()?;
+    let (first_id, first_timestamp_ns) = match first {
+        GenAISemanticEvent::LLMCall(call) => (Some(call.call_id.clone()), call.start_timestamp_ns),
+        GenAISemanticEvent::ToolUse(tool) => (Some(tool.tool_use_id.clone()), tool.timestamp_ns),
+        GenAISemanticEvent::AgentInteraction(agent) => {
+            (Some(agent.interaction_id.clone()), agent.timestamp_ns)
+        }
+        GenAISemanticEvent::StreamChunk(chunk) => {
+            (Some(chunk.stream_id.clone()), chunk.timestamp_ns)
+        }
+    };
+    Some(BatchWriteKey {
+        ptr: events.as_ptr() as usize,
+        len: events.len(),
+        first_id,
+        first_timestamp_ns,
+    })
+}
+
+fn paths_refer_to_same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino();
+        }
+        if a.file_name().is_some()
+            && a.file_name() == b.file_name()
+            && let (Some(pa), Some(pb)) = (a.parent(), b.parent())
+            && let (Ok(meta_pa), Ok(meta_pb)) = (std::fs::metadata(pa), std::fs::metadata(pb))
+        {
+            return meta_pa.dev() == meta_pb.dev() && meta_pa.ino() == meta_pb.ino();
+        }
+    }
+    false
+}
+
 /// 设置动态 Logtail 输出路径（线程安全）。
 ///
 /// 由 config watcher 在检测到 `runtime.sls_logtail_path` 变更时调用：
@@ -158,7 +229,10 @@ pub fn active_logtail_paths() -> Vec<std::path::PathBuf> {
         paths.push(std::path::PathBuf::from(p));
     }
     let default = std::path::PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
-    if !paths.contains(&default) {
+    if !paths
+        .iter()
+        .any(|existing| paths_refer_to_same_file(existing, &default))
+    {
         paths.push(default);
     }
     paths
@@ -348,12 +422,41 @@ impl LogtailExporter {
     }
 
     fn write_batch(&self, events: &[GenAISemanticEvent]) {
+        let batch_key = batch_write_key(events);
         let Some(target_path) = self.output_path() else {
+            if let Some(key) = batch_key {
+                LAST_BATCH_WRITE.with(|cell| {
+                    let mut guard = cell.borrow_mut();
+                    if guard.as_ref().is_some_and(|prev| {
+                        prev.from_default_exporter != self.require_path_exists && prev.batch == key
+                    }) {
+                        *guard = None;
+                    }
+                });
+            }
             return;
         };
         if self.dynamic {
             if let Some(parent) = target_path.parent() {
                 std::fs::create_dir_all(parent).ok();
+            }
+        }
+        if let Some(ref key) = batch_key {
+            let should_skip = LAST_BATCH_WRITE.with(|cell| {
+                let mut guard = cell.borrow_mut();
+                if guard.as_ref().is_some_and(|prev| {
+                    prev.from_default_exporter != self.require_path_exists
+                        && prev.batch == *key
+                        && paths_refer_to_same_file(&prev.path, &target_path)
+                }) {
+                    *guard = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_skip {
+                return;
             }
         }
 
@@ -396,6 +499,16 @@ impl LogtailExporter {
 
         if let Err(e) = writer.flush() {
             log::warn!("Failed to flush logtail file: {e}");
+            return;
+        }
+        if let Some(key) = batch_key {
+            LAST_BATCH_WRITE.with(|cell| {
+                *cell.borrow_mut() = Some(LastBatchWrite {
+                    from_default_exporter: self.require_path_exists,
+                    batch: key,
+                    path: target_path,
+                });
+            });
         }
     }
 }
@@ -1101,6 +1214,7 @@ pub mod tests {
         // so no other test thread can observe a race.
         unsafe { std::env::remove_var(LOGTAIL_ENV_VAR) };
         set_dynamic_logtail_path("");
+        clear_last_batch_write();
     }
 
     /// A panic while the dynamic-path lock was held (the write guard is held
@@ -1649,5 +1763,143 @@ pub mod tests {
         assert!(!telemetry_disabled_at(&sentinel));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_default_and_explicit_exporter_do_not_duplicate_same_target() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_logtail_dedup_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("agentsight.jsonl");
+        std::fs::write(&target, "").unwrap();
+
+        let default_exporter = LogtailExporter {
+            path: target.clone(),
+            encryptor: None,
+            trace_enabled: true,
+            dynamic: false,
+            require_path_exists: true,
+        };
+        set_dynamic_logtail_path(target.to_str().unwrap());
+        let explicit_exporter = LogtailExporter::new(None, true).expect("explicit exporter");
+
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        default_exporter.export(std::slice::from_ref(&event));
+        explicit_exporter.export(std::slice::from_ref(&event));
+
+        let line_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(
+            line_count, 1,
+            "default and explicit exporters pointing at the same file must emit one record, not duplicates"
+        );
+
+        // Once the explicit dynamic path clears, the default exporter resumes writing.
+        set_dynamic_logtail_path("");
+        default_exporter.export(std::slice::from_ref(&event));
+        explicit_exporter.export(std::slice::from_ref(&event));
+        let resumed_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(resumed_count, 2);
+
+        // If the watcher deactivates the dynamic path *between* the default
+        // exporter call and the explicit exporter call for the same batch, the
+        // batch must still be present (default exporter already persisted it).
+        set_dynamic_logtail_path(target.to_str().unwrap());
+        default_exporter.export(std::slice::from_ref(&event));
+        set_dynamic_logtail_path("");
+        explicit_exporter.export(std::slice::from_ref(&event));
+        let mid_deactivate_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(
+            mid_deactivate_count, 3,
+            "deactivation between default and explicit exporter calls must not drop the batch"
+        );
+
+        // `..` aliases over real directories and symlinks to the same file must
+        // also deduplicate.
+        let sub = tmp.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let dotdot_alias = sub.join("..").join("agentsight.jsonl");
+        set_dynamic_logtail_path(dotdot_alias.to_str().unwrap());
+        default_exporter.export(std::slice::from_ref(&event));
+        explicit_exporter.export(std::slice::from_ref(&event));
+        let alias_count = std::fs::read_to_string(&target)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(
+            alias_count, 4,
+            "dotdot path alias to the same file must not be written twice"
+        );
+
+        #[cfg(unix)]
+        {
+            let link_path = tmp.join("symlink-agentsight.jsonl");
+            std::os::unix::fs::symlink(&target, &link_path).unwrap();
+            set_dynamic_logtail_path(link_path.to_str().unwrap());
+            default_exporter.export(std::slice::from_ref(&event));
+            explicit_exporter.export(std::slice::from_ref(&event));
+            let symlink_count = std::fs::read_to_string(&target)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            assert_eq!(
+                symlink_count, 5,
+                "symlink path alias to the same file must not be written twice"
+            );
+
+            // A symlinked directory component followed by `..` (`tmp/dir_link/../agentsight.jsonl`
+            // where `dir_link -> other_dir/nested`) resolves in the kernel to
+            // `other_dir/agentsight.jsonl`, NOT `tmp/agentsight.jsonl`. Both files must receive
+            // the record.
+            let other_nested = tmp.join("other_dir").join("nested");
+            std::fs::create_dir_all(&other_nested).unwrap();
+            let dir_link = tmp.join("dir_link");
+            std::os::unix::fs::symlink(&other_nested, &dir_link).unwrap();
+            let symlink_dotdot = dir_link.join("..").join("agentsight.jsonl");
+            set_dynamic_logtail_path(symlink_dotdot.to_str().unwrap());
+            default_exporter.export(std::slice::from_ref(&event));
+            explicit_exporter.export(std::slice::from_ref(&event));
+            let default_after = std::fs::read_to_string(&target)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            let other_file = tmp.join("other_dir").join("agentsight.jsonl");
+            let other_after = std::fs::read_to_string(&other_file)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            assert_eq!(
+                default_after, 6,
+                "default file must still receive its record when symlink+dotdot resolves elsewhere"
+            );
+            assert_eq!(
+                other_after, 1,
+                "kernel-resolved symlink+dotdot target must also receive its record"
+            );
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
     }
 }

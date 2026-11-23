@@ -1,32 +1,12 @@
 import React, { useState, useRef } from 'react';
 import { useI18n } from '../i18n';
+import { copyText } from '../utils/clipboard';
 
-function fallbackCopy(text: string, done: () => void) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  el.style.position = 'fixed';
-  el.style.opacity = '0';
-  document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch {}
-  document.body.removeChild(el);
-  done();
-}
-
-/** 复制文本到剪贴板，HTTP 非安全上下文自动降级到 execCommand */
-export function copyText(text: string, done: () => void) {
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-  } else {
-    fallbackCopy(text, done);
-  }
-}
-
-/** 复制按钮组件，点击后短暂显示「已复制」反馈 */
-export const CopyButton: React.FC<{ text: string; title?: string }> = ({
+/** Copy button with a brief "Copied" feedback. */
+export const CopyButton: React.FC<{ text: string; title?: string; showIcon?: boolean }> = ({
   text,
   title,
+  showIcon = true,
 }) => {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -38,7 +18,6 @@ export const CopyButton: React.FC<{ text: string; title?: string }> = ({
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     };
-    // HTTP 环境下 clipboard API 可能不可用，使用 execCommand fallback
     copyText(text, done);
   };
   const resolvedTitle = title ?? t('common.copyFullId');
@@ -52,7 +31,7 @@ export const CopyButton: React.FC<{ text: string; title?: string }> = ({
       }`}
       title={resolvedTitle}
     >
-      {copied ? t('common.copied') : `⧉ ${t('common.copy')}`}
+      {copied ? t('common.copied') : `${showIcon ? '⧉ ' : ''}${t('common.copy')}`}
     </button>
   );
 };

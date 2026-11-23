@@ -4,15 +4,16 @@
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
 //! Codex rollouts use a different envelope schema and are delegated to the
-//! collector crate's Codex converter.
+//! collector crate's Codex converter. Cline whole-document tasks and their
+//! sibling UI streams use the corresponding path-aware Cline converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall, declared_tool_failure, is_error_extra,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -27,10 +28,19 @@ pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
-    convert_jsonl_content_to_atif(&content)
+    if let Some(result) = agentsight_trajectory_collector::cline::convert_task_file(path, &content)
+    {
+        return result;
+    }
+    let claude = path.components().any(|part| part.as_os_str() == ".claude");
+    convert_content_with_source(&content, claude)
 }
 
 pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajectory> {
+    convert_content_with_source(content, false)
+}
+
+fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Result<AtifTrajectory> {
     // Codex rollouts use a different envelope schema
     // (`{"timestamp","type","payload"}` records). The collector crate already
     // ships a converter for them, so delegate instead of emitting an empty
@@ -60,14 +70,11 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         || content.contains("$patch")
         || content.contains("$set")
     {
-        let mut events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
-        // Legacy (<= 0.38) files are one pretty-printed document: the JSONL
-        // pass comes back empty and only the whole-file fallback absorbs it.
-        if events.is_empty() {
-            if let Some(doc) = agentsight_trajectory_collector::gemini::legacy_document(content) {
-                events.push(doc);
-            }
-        }
+        // A legacy document may contain individually parseable lines (for
+        // example a scalar in an array). Recognize the whole document first.
+        let events = agentsight_trajectory_collector::gemini::legacy_document(content)
+            .map(|document| vec![document])
+            .unwrap_or_else(|| agentsight_trajectory_collector::qoder::load_jsonl_events(content));
         if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
             return agentsight_trajectory_collector::gemini::convert_gemini_events(
                 &events,
@@ -83,20 +90,52 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
     let mut agent_name = String::new();
+    let mut message_session_id = None;
+    let mut message_version = None;
+    let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
+    let mut unmatched_tool_results = Vec::new();
     let mut step_id: usize = 0;
+    let mut events = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    // Runtime configuration is a header record. Reuse that parsed event in
+    // the conversion loop instead of scanning headerless files twice.
+    let first_event = events.next();
+    let claude_snapshots = first_event
+        .as_ref()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("runtime-config"))
+        .and_then(|event| event.get("entrypoint").and_then(Value::as_str))
+        .map(|entrypoint| entrypoint == "claude-code")
+        .unwrap_or(claude_path);
+    let mut usage_owners: HashMap<String, usize> = HashMap::new();
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let event: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
+    for event in first_event.into_iter().chain(events) {
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if matches!(event_type, "user" | "assistant") {
+            if message_session_id.is_none() {
+                message_session_id = event
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if message_version.is_none() {
+                message_version = event
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if event_type == "assistant" && message_model.is_none() {
+                message_model = event
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+        }
 
         match event_type {
             "runtime-config" => {
@@ -141,12 +180,7 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                     // same time (typing while a tool call is pending). Both
                     // belong to the trajectory: the results as observations on
                     // the agent step, the text as its own user step.
-                    if blocks
-                        .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                    {
-                        append_tool_results(&mut steps, blocks);
-                    }
+                    let unmatched = append_tool_results(&mut steps, blocks, timestamp.as_deref());
 
                     let mut message_text = String::new();
                     for block in blocks {
@@ -160,7 +194,11 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             }
                         }
                     }
-                    if !message_text.is_empty() {
+                    if message_text.is_empty() && !unmatched.is_empty() {
+                        unmatched_tool_results.push(
+                            serde_json::json!({"timestamp": timestamp, "results": unmatched}),
+                        );
+                    } else if !message_text.is_empty() {
                         step_id += 1;
                         steps.push(Step {
                             step_id,
@@ -171,7 +209,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             reasoning_effort: None,
                             reasoning_content: None,
                             tool_calls: None,
-                            observation: None,
+                            observation: (!unmatched.is_empty())
+                                .then_some(Observation { results: unmatched }),
                             metrics: None,
                             extra: None,
                             llm_call_count: None,
@@ -210,7 +249,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                     .map(String::from)
                     .or_else(|| model_name.clone());
 
-                let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
+                let content = event.pointer("/message/content");
+                let content_arr = content.and_then(Value::as_array);
 
                 let mut message_text = String::new();
                 let mut reasoning = String::new();
@@ -261,6 +301,43 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             _ => {}
                         }
                     }
+                } else if let Some(text) = content.and_then(Value::as_str) {
+                    message_text.push_str(text);
+                }
+
+                let usage = event.pointer("/message/usage");
+                let counter = |key: &str| {
+                    usage
+                        .and_then(|value| value.get(key))
+                        .and_then(Value::as_u64)
+                };
+                let prompt = counter("input_tokens").map(|value| {
+                    value
+                        .saturating_add(counter("cache_read_input_tokens").unwrap_or(0))
+                        .saturating_add(counter("cache_creation_input_tokens").unwrap_or(0))
+                });
+                let completion = counter("output_tokens");
+                let metrics = (prompt.is_some() || completion.is_some()).then(|| Metrics {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    cached_tokens: counter("cache_read_input_tokens"),
+                    cost_usd: None,
+                    logprobs: None,
+                    completion_token_ids: None,
+                    prompt_token_ids: None,
+                    extra: None,
+                });
+                // Split assistant blocks repeat cumulative usage for one API
+                // message. Only a valid later snapshot supersedes its owner.
+                if claude_snapshots
+                    && metrics.is_some()
+                    && let Some(id) = event
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    && let Some(previous) = usage_owners.insert(id.to_string(), steps.len())
+                {
+                    steps[previous].metrics = None;
                 }
 
                 step_id += 1;
@@ -282,7 +359,7 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                         Some(tool_calls)
                     },
                     observation: None,
-                    metrics: None,
+                    metrics,
                     extra: None,
                     llm_call_count: None,
                     is_copied_context: None,
@@ -292,6 +369,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Claude Code records identity on messages without a runtime-config.
+    // Explicit runtime metadata retains precedence even when it arrives later.
+    if session_id.is_empty() {
+        session_id = message_session_id.unwrap_or_default();
+    }
+    if agent_version.is_empty() {
+        agent_version = message_version.unwrap_or_default();
+    }
+    if model_name.is_none() {
+        model_name = message_model;
+    }
     let total_steps = steps.len();
 
     let agent = Agent {
@@ -310,10 +398,18 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         extra: None,
     };
 
+    let sum = |select: fn(&Metrics) -> Option<u64>| {
+        steps
+            .iter()
+            .filter_map(|step| step.metrics.as_ref().and_then(select))
+            .fold(None, |sum: Option<u64>, value| {
+                Some(sum.unwrap_or(0).saturating_add(value))
+            })
+    };
     let final_metrics = FinalMetrics {
-        total_prompt_tokens: None,
-        total_completion_tokens: None,
-        total_cached_tokens: None,
+        total_prompt_tokens: sum(|metrics| metrics.prompt_tokens),
+        total_completion_tokens: sum(|metrics| metrics.completion_tokens),
+        total_cached_tokens: sum(|metrics| metrics.cached_tokens),
         total_cost_usd: None,
         total_steps: Some(total_steps),
         extra: None,
@@ -333,7 +429,12 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         final_metrics: Some(final_metrics),
         continued_trajectory_ref: None,
         subagent_trajectories: None,
-        extra: None,
+        extra: (!unmatched_tool_results.is_empty()).then(|| {
+            HashMap::from([(
+                "unmatched_tool_results".into(),
+                serde_json::json!(unmatched_tool_results),
+            )])
+        }),
     })
 }
 
@@ -363,20 +464,12 @@ fn flatten_tool_result_content(content: &Value) -> String {
     }
 }
 
-fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
-    let last_agent_step = steps
-        .iter_mut()
-        .rev()
-        .find(|s| s.source == StepSource::Agent);
-    let step = match last_agent_step {
-        Some(s) => s,
-        None => return,
-    };
-
-    let observation = step.observation.get_or_insert(Observation {
-        results: Vec::new(),
-    });
-
+fn append_tool_results(
+    steps: &mut [Step],
+    blocks: &[Value],
+    timestamp: Option<&str>,
+) -> Vec<ObservationResult> {
+    let mut unmatched = Vec::new();
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -386,31 +479,82 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let content = Some(Value::String(
-            block
-                .get("content")
-                .map(flatten_tool_result_content)
-                .unwrap_or_default(),
-        ));
-        let extra = if block
-            .get("is_error")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            Some(HashMap::from([(
-                EXTRA_IS_ERROR.to_string(),
-                Value::Bool(true),
-            )]))
-        } else {
-            None
-        };
-        observation.results.push(ObservationResult {
+        let content = block
+            .get("content")
+            .map(flatten_tool_result_content)
+            .unwrap_or_default();
+        let extra = declared_tool_failure(block)
+            .or_else(|| {
+                serde_json::from_str::<Value>(content.trim())
+                    .ok()
+                    .filter(Value::is_object)
+                    .and_then(|envelope| declared_tool_failure(&envelope))
+            })
+            .map(is_error_extra);
+        let mut result = ObservationResult {
             source_call_id,
-            content,
+            content: Some(Value::String(content)),
             subagent_trajectory_ref: None,
             extra,
+        };
+        let Some(id) = result.source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            unmatched.push(result);
+            continue;
+        };
+        // Prefer the original ID across the whole history before considering
+        // a unique provider echo; intervening assistant steps do not own it.
+        let exact = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
         });
+        let owner = exact.or_else(|| {
+            let mut matched_id: Option<&str> = None;
+            let mut owner = None;
+            for (index, step) in steps.iter().enumerate() {
+                for call in step.tool_calls.iter().flatten() {
+                    if agentsight_atif::same_call_id(&call.tool_call_id, id) {
+                        if matched_id.is_some_and(|previous| previous != call.tool_call_id) {
+                            return None;
+                        }
+                        matched_id = Some(&call.tool_call_id);
+                        owner = Some(index);
+                    }
+                }
+            }
+            owner
+        });
+        let Some(step) = owner.map(|index| &mut steps[index]) else {
+            unmatched.push(result);
+            continue;
+        };
+        let source_call_id = agentsight_atif::resolve_call_id(
+            id,
+            step.tool_calls
+                .iter()
+                .flatten()
+                .map(|call| call.tool_call_id.as_str()),
+        )
+        .map(str::to_string);
+        if let Some(timestamp) = timestamp {
+            for call in step.tool_calls.iter_mut().flatten() {
+                if Some(&call.tool_call_id) == source_call_id.as_ref() {
+                    call.extra.get_or_insert_with(HashMap::new).insert(
+                        "result_timestamp".into(),
+                        Value::String(timestamp.to_string()),
+                    );
+                }
+            }
+        }
+        let observation = step.observation.get_or_insert_with(|| Observation {
+            results: Vec::new(),
+        });
+        result.source_call_id = source_call_id;
+        observation.results.push(result);
     }
+    unmatched
 }
 
 #[cfg(test)]
@@ -637,10 +781,61 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_result_preserves_declared_outcomes() {
+        let calls: Vec<Value> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "id": format!("tc{index}"),
+                    "name": "tool",
+                    "input": null
+                })
+            })
+            .collect();
+        let results = serde_json::json!([
+            {"type":"tool_result","tool_use_id":"tc0","is_error":false,"content":"No such file or directory"},
+            {"type":"tool_result","tool_use_id":"tc1","isError":true,"content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc2","success":false,"content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc3","success":true,"status":"error","content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc4","content":serde_json::json!({"isError":false,"content":"ok"}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc5","content":serde_json::json!({"success":false,"content":"boom"}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc6","is_error":false,"content":serde_json::json!({"success":false}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc7","content":"error text without a declaration"}
+        ]);
+        let content = format!(
+            "{}\n{}",
+            serde_json::json!({"type":"assistant","message":{"model":"m","content":calls}}),
+            serde_json::json!({"type":"user","message":{"content":results}}),
+        );
+
+        let traj = convert_jsonl_content_to_atif(&content).unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        let outcomes: Vec<Option<bool>> =
+            obs.results.iter().map(|result| result.is_error()).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                None,
+            ]
+        );
+    }
+
+    #[test]
     fn test_tool_result_without_prior_agent_step() {
         let content = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"result"}]}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
-        assert_eq!(traj.steps.len(), 0);
+        assert!(traj.steps.is_empty());
+        assert_eq!(
+            traj.extra.as_ref().unwrap()["unmatched_tool_results"][0]["results"][0]["content"],
+            "result"
+        );
     }
 
     #[test]
@@ -700,12 +895,12 @@ mod tests {
     }
 
     #[test]
-    fn test_assistant_no_content_blocks() {
+    fn test_assistant_string_content() {
         let content =
             r#"{"type":"assistant","message":{"model":"m","content":"plain text reply"}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 1);
-        assert_eq!(traj.steps[0].message, "");
+        assert_eq!(traj.steps[0].message, "plain text reply");
         assert!(traj.steps[0].tool_calls.is_none());
         assert!(traj.steps[0].reasoning_content.is_none());
     }

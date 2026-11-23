@@ -81,6 +81,41 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(snapshot["processes"], 3)
         self.assertEqual(snapshot["rss_kib"], 2048 + 1024 + 512)
 
+    def test_soak_reports_nearest_rank_p95(self) -> None:
+        # Small samples expose rounding drift; 20 and 40 pin exact ranks.
+        for sample_count, expected in ((0, 0), (1, 1), (5, 5), (20, 19), (29, 28), (40, 38)):
+            with self.subTest(samples=sample_count), tempfile.TemporaryDirectory() as directory:
+                args = RUNNER.parse_args(["--profile", "g3", "--artifact-dir", directory])
+                manifest = RUNNER.load_manifest(RUNNER_PATH.parent / "manifest.json")
+                manifest["profiles"]["g3"] = {
+                    "duration_seconds": 0,
+                    "minimum_cycles": sample_count,
+                }
+                runner = RUNNER.Runner(args, manifest)
+                self.addCleanup(runner.home.rmdir)
+                case = next(case for case in manifest["cases"] if case["id"] == "E2E-08")
+                # Descending latencies also require the production path to sort.
+                ticks = [0]
+                now = 0
+                for latency in range(sample_count, 0, -1):
+                    ticks.extend((now, now + latency))
+                    now += latency
+                ticks.append(now)
+                snapshot = {"processes": 0, "rss_kib": 0, "fds": 0}
+                completed = mock.Mock(returncode=0, stdout="COSH_E2E_SOAK\n")
+                with (
+                    mock.patch.object(RUNNER.time, "monotonic", side_effect=ticks),
+                    mock.patch.object(runner, "process_snapshot", return_value=snapshot),
+                    mock.patch.object(runner, "pty", return_value=("PASS", "", [])),
+                    mock.patch.object(runner, "command", return_value=completed),
+                ):
+                    status, reason, evidence = runner.soak(case)
+                self.assertEqual((status, reason), ("PASS", ""))
+                metrics = json.loads((runner.bundle / evidence[0]).read_text(encoding="utf-8"))
+                self.assertEqual(metrics["cycles"], sample_count)
+                self.assertEqual(metrics["p95_latency_seconds"], expected)
+                self.assertEqual(metrics["max_latency_seconds"], sample_count)
+
     def test_cleanup_only_uses_persisted_state(self):
         with tempfile.TemporaryDirectory() as directory:
             bundle = pathlib.Path(directory) / "bundle"

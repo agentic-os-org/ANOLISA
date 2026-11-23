@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+bash tests/test-test-gates.sh
+
 failures=0
 
 fail() {
@@ -59,13 +61,42 @@ check_source_floor cosh-core 699
 check_source_floor cosh-shell 2683
 
 ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"
-echo "ignored tests: $ignored_count (ceiling 3)"
-if [[ "$ignored_count" -gt 3 ]]; then
-  fail "ignored test inventory increased above 3 to $ignored_count"
+# These four regressions require a real writable file owned by another UID.
+# Their separately provisioned execution does not consume the ordinary skip budget.
+uid_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "requires an explicitly provisioned writable foreign-UID fixture"\]\n[ \t]*fn foreign_uid_(expired_log_preserves_content|current_log_refuses_append)\(' \
+    crates/cosh-core/src/logging.rs crates/cosh-shell/src/runtime/logging_tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$uid_ignored_count" -ne 4 ]]; then
+  fail "expected exactly four provisioned foreign-UID regressions, found $uid_ignored_count"
+fi
+helper_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "(same-package worker entry used by the unit launcher|isolated deadline helper subprocess|helper subprocess requiring a controlling terminal)"\]\n([ \t]*#\[[^\n]*\][^\n]*\n)?[ \t]*fn (private_worker_child|deadline_job_child|controlling_terminal_child)\(' \
+    crates/cosh-shell/src/diagnostics/health/runtime/worker/tests.rs \
+    crates/cosh-shell/src/diagnostics/health/runtime/job/tests.rs \
+    crates/cosh-shell/src/diagnostics/health/collectors/command/tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$helper_ignored_count" -ne 3 ]]; then
+  fail "expected exactly three supervised private subprocess entries, found $helper_ignored_count"
+fi
+health_matrix_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "isolated ALinux4 acceptance; requires independently frozen source probes"\]\n[ \t]*fn live_report_matrix\(' \
+    crates/cosh-shell/src/diagnostics/health/runtime/acceptance_tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$health_matrix_ignored_count" -ne 1 ]]; then
+  fail "expected exactly one provisioned health report matrix, found $health_matrix_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix"
+if [[ "$ordinary_ignored_count" -gt 3 ]]; then
+  fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi
 
 check_overlap_ceiling cosh-core cosh-core 4
-check_overlap_ceiling cosh-shell cosh-shell 696
+check_overlap_ceiling cosh-shell cosh-shell 980
 
 if [[ "$failures" -ne 0 ]]; then
   echo "test inventory audit failed with $failures violation(s)" >&2

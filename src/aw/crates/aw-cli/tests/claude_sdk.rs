@@ -9,6 +9,125 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Instant};
 use support::{Fixture, Service, TIMEOUT};
 
+#[path = "claude_sdk/event_receipt.rs"]
+mod event_receipt;
+
+#[path = "claude_sdk/submission.rs"]
+mod submission;
+
+#[path = "claude_sdk/stop_replay.rs"]
+mod stop_replay;
+
+#[path = "claude_sdk/probe.rs"]
+mod probe;
+
+#[test]
+fn final_runtime_gate_checks_owned_bytes_and_native_identity() {
+    let fixture = Fixture::new();
+    let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native");
+    let mut command = std::process::Command::new("node");
+    command
+        .args(["--test", "--test-reporter=tap"])
+        .arg(native.join("shared/js-runtime/fetch-gate.test.mjs"))
+        .arg(native.join("claude-sdk/final-gate.test.mjs"))
+        .arg(native.join("claude-sdk/final-preload.test.mjs"))
+        .arg(native.join("claude-sdk/typescript-bridge.test.mjs"));
+    let output = support::Process::spawn(&fixture, command)
+        .finish_with_timeout(std::time::Duration::from_secs(45));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 16"));
+}
+
+#[test]
+fn final_factory_rejects_uncovered_delivery_paths() {
+    let fixture = Fixture::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/final_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 5 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn native_configuration_preserves_sources_plugins_and_http_mcp() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/options_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn resident_model_settings_preserve_native_precedence_and_require_relay_adoption() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/settings_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 6 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn managed_response_iterators_close_before_native_teardown() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/receive_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 19 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn resident_report_recovery_preserves_failure_fences() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .args(["-B"])
+        .arg(root.join("tests/fixtures/claude-sdk/report_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 7 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn managed_mcp_freezes_registered_tools_and_checked_results() {
     let fixture = Fixture::new();
@@ -24,7 +143,7 @@ fn managed_mcp_freezes_registered_tools_and_checked_results() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 7 tests"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 9 tests"));
 }
 
 #[test]
@@ -42,6 +161,7 @@ fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
                 Operation::Bind {
                     target: "claude".into(),
                     capabilities: Capabilities {
+                        failure_actions: Default::default(),
                         adapter: "claude-sdk".into(),
                         version: "0.2.88".into(),
                         entrypoint: "sdk-worker".into(),
@@ -110,7 +230,14 @@ fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
     }
     let mut found = BTreeMap::new();
     for entry in fs::read_dir(fixture.root.join("state/journal")).unwrap() {
-        let entries: Vec<Value> = fs::read_to_string(entry.unwrap().path())
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+        let entries: Vec<Value> = fs::read_to_string(path)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -169,5 +296,52 @@ fn model_producer_identity_and_callback_drain_contracts() {
             && String::from_utf8_lossy(&output.stderr).contains("\nOK\n"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn sdk_and_cli_releases_reach_readiness_checks_without_a_version_allowlist() {
+    for version in [
+        "0.2.87:2.1.160 (Claude Code)",
+        "0.2.89:2.1.162 (Claude Code)",
+        "1.0.0rc1:3.0.0 (Claude Code)",
+    ] {
+        let fixture = Fixture::new();
+        let host = fixture.root.join("python-probe");
+        fs::write(
+            &host,
+            format!("#!/usr/bin/python3\nimport sys\nif sys.argv[1] == '-c': print({version:?})\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut document = fixture.document();
+        document["spec"]["agents"] =
+            json!({"sdk":{"adapter":"claude-sdk","argv":[host,"worker.py"]}});
+        let service = Service::start(&fixture, &document);
+        let mut command = fixture.command();
+        command
+            .args(["run", "--config"])
+            .arg(fixture.root.join("aw.json"))
+            .args(["--agent", "sdk"]);
+        let output = fixture.run(command);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("before native hooks became ready")
+        );
+        service.released(&fixture);
+    }
+}
+
+#[test]
+fn shared_python_scope_monitors_failure_and_joins_concurrent_cleanup() {
+    let fixture = Fixture::new();
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/scope_contract.py"));
+    let output = fixture.run(command);
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && report.contains("Ran 6 tests"),
+        "{report}"
     );
 }

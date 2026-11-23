@@ -100,8 +100,14 @@ cd anolisa/benchmark/terminal-runner
 `setup.sh` 做了什么：
 1. 检查 Python 版本 — 若 < 3.12，自动检测 conda（Miniconda/Anaconda）并创建 3.12 环境（环境名可通过 `CONDA_ENV_NAME` 配置，默认 `terminal-runner-py312`）
 2. 创建 Python 虚拟环境 `.venv/`
-3. `git clone` harbor 上游 → `harbor/`，**checkout 到锁定的 release tag**（`v0.15.0`），然后在 venv 中 `pip install -e`
-4. 通过 Git LFS 从 HuggingFace 克隆数据集 → `dataset/`
+3. 按需克隆 harbor 上游 → `harbor/`，并选择 `HARBOR_REF`（默认 `v0.15.0`）
+4. 按需通过 Git LFS 从 HuggingFace 克隆数据集 → `dataset/`，并选择 `DATASET_REF`（默认 `main`）
+5. 两个 checkout 均成功后，在 venv 中通过 `pip install -e` 安装 harbor
+
+重新执行 setup 也会为已有仓库选择这两个 ref。已有 clone 会在 origin 可访问时
+fetch tags；fetch 失败时仍可使用本地缓存的 ref。ref 不存在或本地修改阻止 checkout
+时，setup 会在 pip 安装前停止并显示 checkout 错误。处理本地修改或选择可用的 ref
+后重新执行；checkout 不会强制丢弃你的修改。
 
 > **注意：** Harbor 锁定到特定 release（`v0.15.0`）以保证稳定性。如有需要可通过 `HARBOR_REF` 覆盖。
 
@@ -111,6 +117,7 @@ cd anolisa/benchmark/terminal-runner
 HARBOR_URL=git@github.com:your-fork/harbor.git \
 HARBOR_REF=v0.15.0 \
 DATASET_URL=https://huggingface.co/datasets/<org>/<dataset> \
+DATASET_REF=main \
   ./scripts/setup.sh
 ```
 
@@ -157,6 +164,10 @@ harbor run \
 5. 将结果反馈给 OpenClaw 进入下一轮迭代
 6. 当 OpenClaw 输出 `TASK_COMPLETE` 或达到 `OPENCLAW_MAX_ITERATIONS` 时停止
 
+OpenClaw 直接子进程退出后，runner 会继续收集输出，直到 stdout 和 stderr 均到达 EOF，并始终检查原有超时和 stdout 大小守卫。因此，后代进程保持管道打开时，等待仍受限制；限制允许范围内的尾部输出会被保留。总超时守卫为 `max(OPENCLAW_TIMEOUT, 600)` 秒；无输出守卫仅在从未收到 stdout 时生效。
+
+守卫触发时，runner 停止收集输出、关闭自身的管道读端，并在直接子进程仍运行时终止它；它不会终止整个后代进程组。守卫会记录到 runner 日志中；直接子进程若已经退出，即使剩余输出被截断，也保留其原有退出码。
+
 ### 每次试验隔离
 
 每次试验获得独立的 `~/.openclaw-<profile>` 目录（profile 名称源自 harbor session id），并发试验互不冲突。
@@ -169,6 +180,7 @@ Skill 提示按优先级从高到低加载：
 2. **`dataset/<task>/solution/solve.sh`** — 自动解析为分步提示。**默认禁用**，设置 `SKILL_FROM_SOLUTION=1` 启用。
 
 数据集目录通过 `DATASET_DIR` 环境变量解析（默认 `dataset`，相对于 `harbor run` 的工作目录）。
+设置 `SKILL_FROM_SOLUTION=1` 时，自动解析会移除未加引号的行尾 shell 注释，并保留引号内或转义命令文本中的 `#`。
 
 ---
 

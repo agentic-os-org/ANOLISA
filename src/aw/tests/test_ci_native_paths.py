@@ -87,6 +87,8 @@ class NativePathTests(GateFixture):
                     ), patch.object(
                         claude, "check_callback_payloads", new=AsyncMock()
                     ), patch.object(
+                        claude, "check_input_replacement", new=AsyncMock()
+                    ), patch.object(
                         claude, "check_preserved_callbacks", new=AsyncMock()
                     ), patch.object(
                         claude.signal, "signal"
@@ -94,7 +96,7 @@ class NativePathTests(GateFixture):
                         sys, "stdout", new=io.StringIO()
                     ):
                         claude.main()
-                self.assertEqual(sum(len(call.args) == 6 for call in cases.call_args_list), 8)
+                self.assertEqual(sum(len(call.args) == 6 for call in cases.call_args_list), 11)
 
     def test_agentscope_uses_explicit_providers_with_clean_and_stale_layouts(self) -> None:
         paths = self.executables()

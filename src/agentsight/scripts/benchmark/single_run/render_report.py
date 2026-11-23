@@ -11,7 +11,13 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
-from benchmark_stats import linear_slope, numeric, rolling_max_increase, stats
+from benchmark_stats import (
+    counter_increase,
+    linear_slope,
+    numeric,
+    rolling_max_increase,
+    stats,
+)
 from h2load_stats import summarize_h2load
 from validate_results import json_lines
 
@@ -67,6 +73,7 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
     """Summarize counters and latency points from k6 JSON output."""
     result: dict[str, Any] = {
         "available": False,
+        "requests_observed": False,
         "requests": 0,
         "http_success": 0,
         "timeouts": 0,
@@ -88,8 +95,14 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
         if metric == "http_req_duration" and latency["benchmark_latency"]:
             continue
         value = numeric(data.get("value"))
-        if metric == "benchmark_requests" and value is not None:
+        if (
+            metric == "benchmark_requests"
+            and value is not None
+            and value >= 0
+            and value.is_integer()
+        ):
             result["requests"] += int(value)
+            result["requests_observed"] = True
         elif metric == "benchmark_http_success" and value is not None:
             result["http_success"] += int(value)
         elif metric == "benchmark_timeouts" and value is not None:
@@ -188,17 +201,7 @@ def _summarize_qps_resource_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 def counter_delta(values: list[float]) -> int:
     """Return the increase in a cumulative counter, tolerating counter resets."""
-    if len(values) < 2:
-        return 0
-    total = 0.0
-    for previous, current in pairwise(values):
-        if current < previous:
-            # Counter reset: the new epoch's accumulated count already
-            # happened, so its first observed sample counts in full.
-            total += current
-        else:
-            total += current - previous
-    return int(total)
+    return int(counter_increase(values))
 
 
 def summarize_drops(
@@ -212,32 +215,46 @@ def _summarize_drop_rows(
     rows: list[dict[str, str]], load_requests: int
 ) -> dict[str, int | float | None]:
     values = {name: [] for name in DROP_METRICS}
+    invalid: set[str] = set()
     for row in rows:
         for name in DROP_METRICS:
             value = numeric(row.get(name))
-            if value is not None:
+            if value is None or value < 0 or not value.is_integer():
+                invalid.add(name)
+            else:
                 values[name].append(value)
-    ring_dropped = counter_delta(values["ring_buffer_dropped"])
-    channel_dropped = counter_delta(values["channel_dropped"])
-    completed = counter_delta(values["completed"])
-    total_dropped = ring_dropped + channel_dropped
-    available = any(
-        len(values[name]) >= 2 for name in ("ring_buffer_dropped", "channel_dropped")
+    deltas = {
+        name: counter_delta(samples) if len(samples) >= 2 and name not in invalid else None
+        for name, samples in values.items()
+    }
+    # A missing counter can hide drops even when the other source is zero.
+    ring, channel = deltas["ring_buffer_dropped"], deltas["channel_dropped"]
+    total_dropped = ring + channel if ring is not None and channel is not None else None
+    completed = deltas["completed"]
+    denominator = (
+        (completed + total_dropped or load_requests)
+        if completed is not None and total_dropped is not None
+        else load_requests
     )
-    denominator = completed + total_dropped or load_requests
     return {
-        "ring_buffer_dropped": (
-            ring_dropped if len(values["ring_buffer_dropped"]) >= 2 else None
-        ),
-        "channel_dropped": (
-            channel_dropped if len(values["channel_dropped"]) >= 2 else None
-        ),
-        "completed": completed if len(values["completed"]) >= 2 else None,
-        "total_dropped": (total_dropped if available else None),
+        **deltas,
+        "total_dropped": total_dropped,
         "drop_rate": (
-            total_dropped / denominator * 100 if available and denominator else None
+            total_dropped / denominator * 100
+            if total_dropped is not None and denominator > 0
+            else None
         ),
     }
+
+
+def _load_throughput(load: dict[str, Any], duration: str) -> float | None:
+    """Derive rates only from observed counters, preserving directly recorded rates."""
+    if load.get("throughput") is not None:
+        return load["throughput"]
+    if not load.get("requests_observed", load.get("available", True)):
+        return None
+    seconds = numeric(duration)
+    return int(load["requests"]) / seconds if seconds is not None and seconds > 0 else None
 
 
 def build_summary(
@@ -287,11 +304,7 @@ def build_summary(
         "measured_seconds": seconds,
         "sent_requests": requests,
         "successful_http_requests": successes,
-        "effective_qps": (
-            load.get("throughput")
-            if load.get("throughput") is not None
-            else requests / seconds if seconds and seconds > 0 else None
-        ),
+        "effective_qps": _load_throughput(load, duration),
         "tokens_per_second": {
             "generated": (
                 expected_tokens / seconds
@@ -377,11 +390,7 @@ def render_markdown(
     timeouts = int(load.get("timeouts", 0))
     success_rate = success / requests * 100 if requests else None
     seconds = numeric(duration)
-    throughput = (
-        load.get("throughput")
-        if load.get("throughput") is not None
-        else requests / seconds if seconds and seconds > 0 else None
-    )
+    throughput = _load_throughput(load, duration)
     latency = load["latency"]
     if load["available"]:
         lines.append(
@@ -594,7 +603,7 @@ def main() -> int:
             f"average {agent_load['average_active_streams']:.2f}.",
             f"Received output: {agent_load['received_output_tokens_per_second']:.2f} tokens/s; "
             f"target per agent: {agent_load['target_tokens_per_second_per_agent']:.2f} tokens/s.",
-            "Fixture: ` x` verified with `cl100k_base`. Output rates cover the measurement window; "
+            "Fixture: synthetic ` x` (one test token per SSE delta). Output rates cover the measurement window; "
             "token reconciliation above includes synthetic input usage and drained responses.",
             "\n| Agent | PID | Measured output tok/s | Error |",
             "| ---: | ---: | ---: | --- |",

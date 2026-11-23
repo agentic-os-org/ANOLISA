@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini;
@@ -127,6 +128,13 @@ fn process_session(
         .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0);
 
+    let file_size = if session.source == "cline" {
+        cline::scan_fingerprint(&session.path, &session.project, file_size, file_mtime_ns)?
+    } else if session.source == "gemini-cli" {
+        gemini::scan_fingerprint(&session.project, file_size, file_mtime_ns)
+    } else {
+        file_size
+    };
     let file_path = session.path.to_string_lossy().to_string();
     if retention_days > 0 {
         let now_ns = std::time::SystemTime::now()
@@ -157,14 +165,14 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let mut events = qoder::load_jsonl_events(&content);
-    // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
-    // document: no line parses, so the whole content is the only unit.
-    if events.is_empty() {
-        if let Some(doc) = gemini::legacy_document(&content) {
-            events.push(doc);
-        }
-    }
+    // Recognize whole-file formats before JSONL: individual pretty-printed
+    // lines can be valid JSON without representing session events.
+    let mut events = gemini::legacy_document(&content)
+        .map(|document| vec![document])
+        .or_else(|| cline::record_array(&content))
+        .unwrap_or_else(|| qoder::load_jsonl_events(&content));
+    // A compact Cline writer puts the whole array on one JSONL line.
+    cline::normalize_events(&mut events);
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).
@@ -174,19 +182,41 @@ fn process_session(
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
     // that needs a dedicated converter; Gemini CLI chats use an append-only
-    // record stream with `$`-prefixed correction records; everything else
-    // shares the Claude-style converter.
+    // record stream with `$`-prefixed correction records; Cline task files
+    // hold raw Anthropic message params plus a ui record stream; everything
+    // else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
     let is_gemini =
         !is_codex && (session.source == "gemini-cli" || gemini::is_gemini_chat(&events));
+    let is_cline = !is_codex && !is_gemini && cline::is_cline_task(&events);
+    if is_cline {
+        cline::append_ui_records(&session.path, &mut events);
+    }
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
     } else if is_gemini {
         gemini::convert_gemini_events(&events, &session.source)?
+    } else if is_cline {
+        cline::convert_cline_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
-    if trajectory.steps.is_empty() {
+    // A partial transcript can contain retained tool evidence without any
+    // complete conversation steps. Persist that evidence without inventing
+    // user turns; truly empty/unsupported documents still follow the old path.
+    let has_unmatched_results = trajectory
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("unmatched_tool_results"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|results| !results.is_empty());
+    if trajectory.steps.is_empty() && !has_unmatched_results {
+        if is_gemini && gemini::explicitly_cleared(&events) {
+            // A successful rewind can remove every turn. The previous
+            // snapshot must not survive under the new file fingerprint.
+            store.clear_replayed_file(&file_path, file_size, file_mtime_ns)?;
+            return Ok(false);
+        }
         let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!(
             "no ATIF steps extracted for source {}; converter support may be missing",
@@ -202,6 +232,8 @@ fn process_session(
         codex::extract_private_metadata(&events, &session.project)
     } else if is_gemini {
         gemini::extract_private_metadata(&events, &session.project)
+    } else if is_cline {
+        cline::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
@@ -236,11 +268,7 @@ fn process_session(
             .and_then(|m| m.total_completion_tokens)
             .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
         start_time: trajectory.steps.iter().find_map(|s| s.timestamp.clone()),
-        end_time: trajectory
-            .steps
-            .iter()
-            .rev()
-            .find_map(|s| s.timestamp.clone()),
+        end_time: last_activity(&trajectory),
         first_user_message,
         last_user_message,
         atif_json,
@@ -253,6 +281,49 @@ fn process_session(
     };
     store.upsert_trajectory(&record)?;
     Ok(true)
+}
+
+/// Collected last activity includes tool dispatches and completions within a grouped step.
+fn last_activity(trajectory: &agentsight_atif::AtifTrajectory) -> Option<String> {
+    let mut latest = None;
+    for step in &trajectory.steps {
+        let issued = step.timestamp.as_deref().and_then(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|time| (time, raw))
+        });
+        let tool_activity = step.tool_calls.iter().flatten().flat_map(|call| {
+            ["start_timestamp", "result_timestamp"]
+                .into_iter()
+                .filter_map(move |key| {
+                    if step.source != agentsight_atif::StepSource::Agent {
+                        return None;
+                    }
+                    let raw = call.extra.as_ref()?.get(key)?.as_str()?;
+                    let end = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+                    issued
+                        .as_ref()
+                        .is_none_or(|(start, _)| end >= *start)
+                        .then_some((end, raw))
+                })
+        });
+        for (timestamp, raw) in issued.into_iter().chain(tool_activity) {
+            if latest
+                .as_ref()
+                .is_none_or(|(previous, _)| timestamp > *previous)
+            {
+                latest = Some((timestamp, raw));
+            }
+        }
+    }
+    latest.map(|(_, raw)| raw.to_owned()).or_else(|| {
+        // Keep the legacy fallback for documents without any parseable time.
+        trajectory
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| step.timestamp.clone())
+    })
 }
 
 /// Sleep `interval_secs` in 1s slices; returns `false` as soon as `stop` is
@@ -600,6 +671,68 @@ mod tests {
         assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
         assert_eq!(rec.total_prompt_tokens, Some(10));
         assert_eq!(rec.total_completion_tokens, Some(5));
+    }
+
+    #[test]
+    fn test_scan_once_routes_cline_task() {
+        let base = tmp_dir("cline-route");
+        let storage = base.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev");
+        let task = storage.join("tasks/task-123");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::create_dir_all(storage.join("state")).unwrap();
+        std::fs::write(
+            storage.join("state/taskHistory.json"),
+            serde_json::json!([{
+                "id": "task-123",
+                "cwdOnTaskInitialization": "/workspace/demo-app"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("api_conversation_history.json"),
+            serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":"inspect auth"}]},
+                {"role":"assistant","content":[{"type":"text","text":"done"}]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("ui_messages.json"),
+            serde_json::json!([
+                // These UI records precede the first API user message.
+                {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":-1},
+                {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":-1}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![storage]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+        scan_once(&store, &config);
+        assert_eq!(store.count().unwrap(), 1);
+
+        let rec = store.get("task-123").unwrap().unwrap();
+        assert_eq!(rec.source, "cline");
+        assert_eq!(rec.project, "demo-app");
+        assert_eq!(rec.first_user_message.as_deref(), Some("inspect auth"));
+        assert_eq!(rec.total_prompt_tokens, Some(10));
+        assert_eq!(rec.total_completion_tokens, Some(5));
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["session_id"], "task-123");
+        assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+        let response = &doc["steps"][1];
+        assert_eq!(response["source"], "agent");
+        assert_eq!(response["message"], "done");
+        assert_eq!(response["metrics"]["prompt_tokens"], 10);
+        assert_eq!(response["metrics"]["completion_tokens"], 5);
+        assert_eq!(response["timestamp"], "2025-11-13T22:00:01.000Z");
     }
 
     #[test]

@@ -19,6 +19,8 @@ def validate_case(case: dict) -> None:
         raise ValueError(f"{case['name']}: native suite needs a supported report contract")
     files = []
     for result in case["results"]:
+        if not isinstance(result, dict) or not isinstance(result.get("file"), str):
+            raise ValueError(f"{case['name']}: result entries need a string file")
         path = Path(result["file"])
         if path.is_absolute() or ".." in path.parts or path.suffix != ".json":
             raise ValueError(f"{case['name']}: result file must stay within the evidence directory")
