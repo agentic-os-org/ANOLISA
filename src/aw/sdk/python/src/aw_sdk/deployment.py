@@ -170,7 +170,7 @@ def load_descriptor(
     encoded = read_file(descriptor_file)
     try:
         value = json.loads(encoded.decode("utf-8"), object_pairs_hook=object_fields)
-        if not isinstance(value, dict) or set(value) != FIELDS:
+        if not isinstance(value, dict) or set(value) - {"observe_session_start"} != FIELDS:
             raise ValueError()
         actual_profile = value["profile"]
         if not isinstance(actual_profile, dict) or set(actual_profile) != {
@@ -195,6 +195,7 @@ def load_descriptor(
             or not value["endpoint"].startswith("/")
             or "\0" in value["endpoint"]
             or type(value["wait_for_input_submit"]) is not bool
+            or type(value.get("observe_session_start", False)) is not bool
             or value["availability"] not in {"required", "native_fallback"}
             or any(not text.strip(WHITE_SPACE) for text in actual_profile.values())
         ):

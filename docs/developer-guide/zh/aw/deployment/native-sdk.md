@@ -78,12 +78,16 @@ await aw.close();
 aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
 ```
 
-设置 `daemon.startup: on_demand` 时，命令启动或复用 AW。PID 对应已安装接入模块的
-Node 应用。服务准备可与模型推理重叠；未配置 `input.submit` 时，不安装
-`UserPromptSubmit` 回调，也不在首次工具前创建 Scope。首次 `PreToolUse` 固定 Task 策略；required 模式等待 attach，
-可选模式在 AW 尚未 Ready 时立即固定原生回退；仅后策略同样通过内部前观察关联调用。纯文本回复不等待。
-`attachTimeoutMs` 默认为 5000 ms，超时会拒绝 required 工具；可选模式不等待 attach。准入后的每个 Query 持有一个 Scope，沿用既有失联／恢复合同。
-修改文件增加 `input.submit` 后，应先重启接入模块再 attach。
+设置 `daemon.startup: on_demand` 时，命令启动或复用 AW。PID 对应已安装接入模块的 Node
+应用。接入层只为各自启用的事件安装 `SessionStart` 和 `UserPromptSubmit`。两项都关闭时，
+模型推理可与挂接并行，首次 `PreToolUse` 固定 Task 策略。required 准入最多等待
+`attachTimeoutMs`，默认 5000 ms。回退模式可在 AW 不可用时继续原生运行。只配置工具后策略时，
+仍使用内部工具前观察关联调用。准入后的每个 Query 持有一个 Scope。
+
+启用 `session.start` 时，新生成的 `qoder-public-hooks` Descriptor 包含可选的
+`observe_session_start` 字段；其他 Profile 保持原有 Descriptor 字段不变。
+接入层将缺少该字段的旧 Descriptor 按关闭处理。启用 `session.start` 时重新生成
+Descriptor，变更任一启动事件后重启接入模块。
 
 `aw.query` 接受原生 Query 输入，返回保留原方法的代理；消费结束、提前退出迭代或显式
 `close()` 会关闭原生 Query 与 Scope。应用结束时关闭其余 Query。每个 Query 的 cwd

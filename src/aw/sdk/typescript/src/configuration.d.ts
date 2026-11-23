@@ -10,6 +10,7 @@ export interface ConfigurationResult {
   target: string;
   endpoint: string;
   inputEnabled: boolean;
+  sessionStartEnabled?: boolean;
   availability: Availability;
 }
 

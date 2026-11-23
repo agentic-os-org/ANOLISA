@@ -96,15 +96,19 @@ aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 100
 ```
 
 With `daemon.startup: on_demand`, this command starts or reuses AW. The PID must
-belong to the Node application running the installed bridge. Preparation can
-overlap model inference. Without `input.submit`, the bridge installs no
-`UserPromptSubmit` callback and creates no Scope before the first native tool.
-The first `PreToolUse` fixes the Task policy; required mode waits for attachment,
-while optional mode immediately fixes native fallback if AW is not Ready; internal
-before observation also correlates an after-only policy. Text-only replies do not
-wait. `attachTimeoutMs` defaults to 5000 ms: timeout denies a required tool. Optional mode does not wait for attachment. Once admitted, each Query
-retains one Scope and the existing loss/recovery semantics. Changing the file to
-add `input.submit` requires restarting the bridge before attachment.
+belong to the Node application running the installed bridge. The bridge installs
+`SessionStart` and `UserPromptSubmit` only for their respective enabled events.
+With both events disabled, model inference can overlap attachment and the first
+`PreToolUse` fixes the Task policy. Required admission waits up to
+`attachTimeoutMs` (5000 ms by default). Native fallback can proceed when AW is
+unavailable. An internal tool-before observation still correlates an
+after-only policy. Once admitted, each Query uses one Scope.
+
+Current `qoder-public-hooks` deployment descriptors include the optional
+`observe_session_start` hint when `session.start` is enabled; other profiles
+leave their descriptor fields unchanged. The bridge reads older descriptors
+with the hint absent as disabled. Regenerate the descriptor when enabling
+`session.start`, and restart the bridge when changing either startup event.
 
 `aw.query` accepts the original Query input and returns a proxy preserving native
 methods. Consumption completion, early iterator return and explicit `close()`

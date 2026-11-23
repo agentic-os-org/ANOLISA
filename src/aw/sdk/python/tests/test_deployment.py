@@ -70,6 +70,15 @@ class Deployment(unittest.TestCase):
                 self.assertEqual(raised.exception.code, case["error"])
                 self.assertNotIn("secret", str(raised.exception))
 
+    def test_optional_session_start_hint_keeps_the_deployment_shape_strict(self) -> None:
+        self.value["observe_session_start"] = True
+        self.descriptor.write_text(json.dumps(self.value))
+        self.assertEqual(self.load()["target"], "app")
+        self.value["observe_session_start"] = "true"
+        self.descriptor.write_text(json.dumps(self.value))
+        with self.assertRaisesRegex(AwError, "sdk_descriptor_invalid"):
+            self.load()
+
     def test_shared_unicode_profile_fields(self) -> None:
         for case in FIXTURE["unicode_profile"]:
             for field in self.profile:
