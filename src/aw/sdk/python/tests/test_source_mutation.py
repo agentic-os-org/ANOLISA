@@ -572,6 +572,52 @@ class LanguageSourceMutationTests(unittest.IsolatedAsyncioTestCase):
                                 _ = [c async for c in wrapped_op({"command": "ok"})]
                             self.assertEqual(ctx.exception.code, "source_result_isolation_required")
                             self.assertTrue(getattr(ctx.exception, "tool_executed", False))
+
+                    # 8) P2: Sync strict replay stops on session.close() after first chunk
+                    #    for both sync generator functions and dynamic sync iterators.
+                    for label, as_dynamic in (("sync_gen", False), ("dynamic_iter", True)):
+                        cleaned = 0
+
+                        def close_sync_gen(_args: dict[str, str]):
+                            nonlocal cleaned
+                            try:
+                                yield {"part": 1}
+                                yield {"part": 2}
+                            finally:
+                                cleaned += 1
+
+                        def returns_dynamic_iter(args: dict[str, str]):
+                            return close_sync_gen(args)
+
+                        tool_fn = returns_dynamic_iter if as_dynamic else close_sync_gen
+                        close_session = source.session(session_id=f"py-close-{label}")
+                        try:
+                            after_before = len(
+                                [e for e in read_provider_log(log_path) if e["event"] == "tool.after"]
+                            )
+                            wrapped_close = close_session.wrap_tool(
+                                tool_fn, name=f"close_{label}", buffer_stream=True
+                            )
+                            replay = await wrapped_close({"command": "ok"})
+                            self.assertEqual(cleaned, 1)
+                            after_buffered = len(
+                                [e for e in read_provider_log(log_path) if e["event"] == "tool.after"]
+                            )
+                            self.assertEqual(after_buffered, after_before + 1)
+                            self.assertEqual(next(replay), {"part": 1})
+                            await close_session.close()
+                            with self.assertRaises(AwError, msg=label) as ctx:
+                                next(replay)
+                            self.assertEqual(ctx.exception.code, "source_session_closed")
+                            self.assertTrue(getattr(ctx.exception, "tool_executed", False))
+                            self.assertIsNone(next(replay, None))
+                            self.assertEqual(cleaned, 1)
+                            after_closed = len(
+                                [e for e in read_provider_log(log_path) if e["event"] == "tool.after"]
+                            )
+                            self.assertEqual(after_closed, after_before + 1)
+                        finally:
+                            await close_session.close()
             finally:
                 stop_service(proc)
 

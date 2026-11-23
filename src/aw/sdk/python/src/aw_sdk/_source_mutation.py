@@ -233,9 +233,21 @@ def apply_stream_result(
     raise AwError("source_result_replace_unsupported")
 
 
+def _replay_buffered_sync(
+    deliver: list[Any], session: Any
+) -> IteratorABC[Any]:
+    """Yield buffered sync chunks while enforcing session open state per chunk."""
+    with tool_executed():
+        for out in deliver:
+            if session is not None:
+                session._require_open()
+            yield out
+
+
 async def deliver_strict_result(
     result: Any,
     *,
+    session: Any = None,
     snapshot: dict[str, Any],
     call_id: str,
     observe_result: Callable[..., Any],
@@ -280,7 +292,9 @@ async def deliver_strict_result(
                 )
             else:
                 deliver = [deepcopy(item) for item in checked_items]
-            return iter(deliver)
+            if session is not None:
+                session._require_open()
+            return _replay_buffered_sync(deliver, session)
         isolated = isolate_strict_value(
             result,
             snapshot_result=snapshot_result,
@@ -532,6 +546,7 @@ def build_tool_wrapper(
             if session._strict_after():
                 return await deliver_strict_result(
                     result,
+                    session=session,
                     snapshot=snapshot,
                     call_id=resolved_call,
                     observe_result=observe_result,

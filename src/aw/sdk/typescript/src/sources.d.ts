@@ -137,6 +137,36 @@ type SnapshotItemOf<T> = T extends EagerIterable
 
 type ImplicitSnapshotItem<R> = SnapshotItemOf<Awaited<R>>;
 
+type SyncLazyItem<T> = 0 extends 1 & T
+  ? never
+  : T extends EagerIterable
+    ? never
+    : T extends AsyncIterable<unknown>
+      ? never
+      : T extends { next(): IteratorResult<infer Y, unknown> }
+        ? Y
+        : T extends Iterable<infer Y>
+          ? Y
+          : never;
+
+type HasSyncLazyResult<T> = [SyncLazyItem<T>] extends [never] ? false : true;
+
+type BufferedToolResultOf<T> = 0 extends 1 & T
+  ? T
+  : T extends EagerIterable
+    ? T
+    : T extends AsyncIterable<unknown>
+      ? T
+      : T extends { next(): IteratorResult<infer Y, unknown> }
+        ? Y[]
+        : T extends Iterable<infer Y>
+          ? Y[]
+          : T;
+
+type SyncBufferedToolResult<R> =
+  | BufferedToolResultOf<Awaited<R>>
+  | (R extends AsyncIterable<infer Y> ? Y[] : never);
+
 export type MethodKeys<T extends object> = {
   [K in keyof T]: T[K] extends (...args: never[]) => unknown ? K : never;
 }[keyof T] &
@@ -148,16 +178,40 @@ export type InputMethodMap<T extends object> = {
     : never;
 };
 
+type ToolMethodOptions<A extends unknown[], R> =
+  | string
+  | (HasSyncLazyResult<Awaited<R>> extends true
+      ?
+          | (WrapToolOptions<
+              A,
+              ImplicitToolResult<R>,
+              ImplicitSnapshotItem<R>
+            > & {
+              stream?: false;
+              bufferStream?: false;
+            })
+          | (WrapToolOptions<
+              A,
+              SyncBufferedToolResult<R>,
+              ImplicitSnapshotItem<R>
+            > & {
+              stream?: false;
+              bufferStream: true;
+            })
+      : WrapToolOptions<
+          A,
+          ImplicitToolResult<R>,
+          ImplicitSnapshotItem<R>
+        > & {
+          stream?: false;
+        })
+  | (Awaited<R> extends AsyncIterable<infer Y>
+      ? WrapToolOptions<A, Y[], Y> & { stream: true }
+      : never);
+
 export type ToolMethodMap<T extends object> = {
   [K in MethodKeys<T>]?: T[K] extends (...args: infer A) => infer R
-    ?
-        | string
-        | (WrapToolOptions<A, ImplicitToolResult<R>, ImplicitSnapshotItem<R>> & {
-            stream?: false;
-          })
-        | (Awaited<R> extends AsyncIterable<infer Y>
-            ? WrapToolOptions<A, Y[], Y> & { stream: true }
-            : never)
+    ? ToolMethodOptions<A, R>
     : never;
 };
 
@@ -234,12 +288,24 @@ export class SourceSession {
   ): (...args: Args) => AsyncGenerator<Yield, void, unknown>;
   wrapTool<Args extends unknown[], Result>(
     fn: (...args: Args) => Result,
+    options: WrapToolOptions<
+      Args,
+      SyncBufferedToolResult<Result>,
+      ImplicitSnapshotItem<Result>
+    > & {
+      stream?: false;
+      bufferStream: true;
+    },
+  ): (...args: Args) => ImplicitResult<Result>;
+  wrapTool<Args extends unknown[], Result>(
+    fn: (...args: Args) => Result,
     options?: WrapToolOptions<
       Args,
       ImplicitToolResult<Result>,
       ImplicitSnapshotItem<Result>
     > & {
       stream?: false;
+      bufferStream?: false;
     },
   ): (...args: Args) => ImplicitResult<Result>;
   instrument<T extends object>(
