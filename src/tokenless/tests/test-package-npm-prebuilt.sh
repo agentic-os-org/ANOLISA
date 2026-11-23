@@ -12,6 +12,8 @@ LEGACY_AGENTSCOPE_BACKUP="$TMP/legacy-agentscope.backup"
 CACHE_FIXTURE=""
 QWENWORK_PLUGIN="$ROOT/adapters/tokenless/qwenwork/.qoder-plugin/plugin.json"
 STALE_PLUGIN_SEEDED=0
+OPENCLAW_INDEX="$ROOT/adapters/tokenless/openclaw/dist/index.js"
+OPENCLAW_INDEX_MOVED=0
 
 cleanup() {
     if [[ -n "$CACHE_FIXTURE" ]]; then
@@ -23,6 +25,13 @@ cleanup() {
         else
             rm -f "$QWENWORK_PLUGIN"
         fi
+    fi
+    if [[ "$OPENCLAW_INDEX_MOVED" = 1 && -f "$TMP/openclaw-index.js.backup" ]]; then
+        if [[ -d "$OPENCLAW_INDEX" && ! -L "$OPENCLAW_INDEX" ]]; then
+            rmdir "$OPENCLAW_INDEX"
+        fi
+        mkdir -p "$(dirname "$OPENCLAW_INDEX")"
+        mv "$TMP/openclaw-index.js.backup" "$OPENCLAW_INDEX"
     fi
     rm -rf "$PREBUILT"
     rm -rf "$LEGACY_AGENTSCOPE"
@@ -115,8 +124,14 @@ for target in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     make_binaries "$target"
 done
 
+SKIP_ADAPTER_BUILD="${TOKENLESS_SKIP_ADAPTER_BUILD:-0}"
+INITIAL_BUILD_FLAG=()
+if [[ "$SKIP_ADAPTER_BUILD" = 1 ]]; then
+    INITIAL_BUILD_FLAG=(--skip-adapter-build)
+fi
+
 cp "$PREBUILT/linux-x64/"* "$PREBUILT/linux-arm64/"
-if node "$ROOT/packaging/npm/package-npm.js" --target linux-arm64 \
+if node "$ROOT/packaging/npm/package-npm.js" --target linux-arm64 ${INITIAL_BUILD_FLAG[@]+"${INITIAL_BUILD_FLAG[@]}"} \
     >"$TMP/mismatch.out" 2>&1; then
     echo "ERROR: npm packer accepted mislabeled x86_64 binaries as arm64" >&2
     exit 1
@@ -131,7 +146,7 @@ import sys
 path = pathlib.Path(sys.argv[1])
 path.write_bytes(path.read_bytes().replace(b"GLIBC_2.17", b"GLIBC_2.18"))
 PY
-if ! node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 \
+if ! node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 ${INITIAL_BUILD_FLAG[@]+"${INITIAL_BUILD_FLAG[@]}"} \
     >"$TMP/glibc.out" 2>&1; then
     echo "ERROR: npm packer rejected a binary above the GLIBC 2.17 baseline" >&2
     exit 1
@@ -142,7 +157,7 @@ make_binaries linux-x64
 check_selector() {
     local selector="$1"
     local expected="$2"
-    node "$ROOT/packaging/npm/package-npm.js" --target "$selector" >"$TMP/selector.out"
+    node "$ROOT/packaging/npm/package-npm.js" --target "$selector" --skip-adapter-build >"$TMP/selector.out"
     grep -Fq "Targets: $expected" "$TMP/selector.out"
 }
 
@@ -157,7 +172,7 @@ if [[ -f "$QWENWORK_PLUGIN" ]]; then
 fi
 STALE_PLUGIN_SEEDED=1
 printf '{"name":"tokenless","version":"0.0.0-stale"}\n' > "$QWENWORK_PLUGIN"
-node "$ROOT/packaging/npm/package-npm.js" --all
+node "$ROOT/packaging/npm/package-npm.js" --all --skip-adapter-build
 test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
 # Inspect the published tarball: staging can contain working symlinks that
@@ -278,6 +293,30 @@ if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
   throw new Error('dsh bundle patch contract missing');
 }
 JS
+
+# Verify --skip-adapter-build rejects missing or directory adapter outputs before replacing npm/dist.
+touch "$ROOT/npm/dist/.preserve-sentinel"
+mv "$OPENCLAW_INDEX" "$TMP/openclaw-index.js.backup"
+OPENCLAW_INDEX_MOVED=1
+if node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 --skip-adapter-build \
+    >"$TMP/missing-adapter.out" 2>&1; then
+    echo "ERROR: npm packer accepted missing OpenClaw bundle under --skip-adapter-build" >&2
+    exit 1
+fi
+grep -Fq 'OpenClaw plugin build did not produce' "$TMP/missing-adapter.out"
+test -f "$ROOT/npm/dist/.preserve-sentinel"
+mkdir -p "$OPENCLAW_INDEX"
+if node "$ROOT/packaging/npm/package-npm.js" --target linux-x64 --skip-adapter-build \
+    >"$TMP/dir-adapter.out" 2>&1; then
+    echo "ERROR: npm packer accepted a directory for OpenClaw bundle under --skip-adapter-build" >&2
+    exit 1
+fi
+grep -Fq 'OpenClaw plugin build did not produce' "$TMP/dir-adapter.out"
+test -f "$ROOT/npm/dist/.preserve-sentinel"
+rmdir "$OPENCLAW_INDEX"
+mv "$TMP/openclaw-index.js.backup" "$OPENCLAW_INDEX"
+OPENCLAW_INDEX_MOVED=0
+rm -f "$ROOT/npm/dist/.preserve-sentinel"
 
 if grep -Eq \
     'cargo-zigbuild|cargo zigbuild|cross build|rustup target|SDKROOT|detectBuilder' \

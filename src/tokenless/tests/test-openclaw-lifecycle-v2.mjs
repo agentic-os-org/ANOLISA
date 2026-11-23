@@ -38,7 +38,9 @@ writeFileSync(
     'if (request.protocol_version !== 2) process.exit(2);',
     'if (behavior === "exit") process.exit(1);',
     'if (behavior === "malformed") { process.stdout.write("{bad"); process.exit(0); }',
-    'if (behavior === "timeout") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);',
+    // Sleep past the 500 ms test timeout override but below the 8000 ms default so
+    // an ignored override falls through to a valid replacement and fails the test.
+    'if (behavior === "timeout") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);',
     "let result;",
     'if (request.operation === "pre_tool") {',
     "  const command = request.input.arguments[request.input.command_field];",
@@ -837,17 +839,28 @@ test("PostTool passes through malformed input, unusable responses and no savings
 
 test(
   "PostTool timeout returns unchanged output instead of throwing into the host",
-  { timeout: 25000 },
+  { timeout: 10000 },
   () => {
-    writeFileSync(behaviorFile, "timeout");
-    for (const length of [100000, 150000]) {
-      const received = {
-        content: [{ type: "text", text: "x".repeat(length) }],
-        details: { source: "host" },
-      };
-      const snapshot = structuredClone(received);
-      assert.equal(postTool("web_fetch", "timeout", received), undefined);
-      assert.deepEqual(received, snapshot);
+    const previousTimeout = process.env.TOKENLESS_OPENCLAW_TIMEOUT_MS;
+    process.env.TOKENLESS_OPENCLAW_TIMEOUT_MS = "500";
+    try {
+      writeFileSync(behaviorFile, "timeout");
+      for (const length of [100000, 150000]) {
+        const received = {
+          content: [{ type: "text", text: "x".repeat(length) }],
+          details: { source: "host" },
+        };
+        const snapshot = structuredClone(received);
+        assert.equal(postTool("web_fetch", "timeout", received), undefined);
+        assert.deepEqual(received, snapshot);
+      }
+      assert.equal(requests().length, 2);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.TOKENLESS_OPENCLAW_TIMEOUT_MS;
+      } else {
+        process.env.TOKENLESS_OPENCLAW_TIMEOUT_MS = previousTimeout;
+      }
     }
   },
 );

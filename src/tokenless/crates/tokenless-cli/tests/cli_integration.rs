@@ -2090,7 +2090,8 @@ fn locked_stats_do_not_change_compression_or_retrieval() {
                     .command()
                     .env("TOKENLESS_COMPRESSION_ENABLED", "1")
                     .env("TOKENLESS_STATS_ENABLED", enabled)
-                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                    .env("TOKENLESS_SLS_ENABLED", "0")
+                    .env("TOKENLESS_STATS_BUSY_TIMEOUT_MS", "200"),
                 &args,
                 &input,
             );
@@ -3124,6 +3125,7 @@ fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
     use std::time::{Duration, Instant};
 
     let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    compress.env("TOKENLESS_REWRITE_TIMEOUT_MS", "1500");
     if caller == StalledCaller::ChildBehindFullStderr {
         compress.arg("--rewrite-child");
     }
@@ -3188,7 +3190,7 @@ fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
     // A workspace below a `.claude` directory would pass without RTK running git.
     assert!(pid_file.exists(), "RTK never ran git: {stderr}");
     assert!(
-        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        (Duration::from_millis(1500)..Duration::from_secs(5)).contains(&elapsed),
         "{elapsed:?}: {stderr}"
     );
     if caller == StalledCaller::ChildBehindFullStderr {
@@ -3203,7 +3205,7 @@ fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
         StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
     ) {
         assert!(
-            stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+            stderr.contains("Error: RTK rewrite timed out after 1500 ms"),
             "{stderr}"
         );
     }
@@ -3382,6 +3384,7 @@ fn killing_compress_leaves_no_rewrite_child_waiting_on_a_locked_stats_database()
         .unwrap();
     compress
         .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_REWRITE_TIMEOUT_MS", "1500")
         .process_group(0);
     let started = Instant::now();
     let mut outer = compress.spawn().unwrap();
@@ -3393,12 +3396,12 @@ fn killing_compress_leaves_no_rewrite_child_waiting_on_a_locked_stats_database()
         .unwrap();
     let child = rewrite_child_of(outer.id());
     // Past reading its request, the child waits on the lock.
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(300));
     // As the SDK and AW do at their limits, end only the group of `compress`.
     // SAFETY: `compress` leads its own group, which holds nothing of the test's.
     unsafe { libc::killpg(outer.id() as libc::pid_t, libc::SIGKILL) };
     outer.wait().unwrap();
-    let deadline = started + Duration::from_secs(7);
+    let deadline = started + Duration::from_secs(4);
     while !process_gone(child) {
         if Instant::now() > deadline {
             // SAFETY: the child leads its own group, which the test started.
@@ -3432,6 +3435,7 @@ fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
     let (_stdout_reader, writer) = full_pipe();
     compress
         .arg("--rewrite-child")
+        .env("TOKENLESS_REWRITE_TIMEOUT_MS", "1500")
         .process_group(0)
         .stdout(writer);
     let started = Instant::now();
@@ -3463,11 +3467,11 @@ fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
         .unwrap();
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}: {stderr}");
     assert!(
-        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        (Duration::from_millis(1500)..Duration::from_secs(5)).contains(&elapsed),
         "{elapsed:?}: {stderr}"
     );
     assert!(
-        stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+        stderr.contains("Error: RTK rewrite timed out after 1500 ms"),
         "{stderr}"
     );
 }

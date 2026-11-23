@@ -1489,12 +1489,18 @@ jobs:
   # =========================================================================
   # Step 8: Test tokenless
   # =========================================================================
-  test-tokenless:
-    name: Test tokenless
+  test-tokenless-rust:
+    name: Test tokenless (Rust & benchmarks)
     needs: detect-changes
     if: needs.detect-changes.outputs.tokenless == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    timeout-minutes: 20
+    env:
+      # Disable Fat LTO and codegen-units=1 in PR CI while preserving Cargo.toml
+      # release profiles for release/preview/prebuilt workflows.
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
     steps:
       - uses: actions/checkout@v4
 
@@ -1510,13 +1516,17 @@ jobs:
         with:
           writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry downloads
+        uses: actions/cache@v4
         with:
-          cache-bin: false
-          workspaces: |
-            src/tokenless
-            src/tokenless/benchmark/l1-compressor
-            src/tokenless/benchmark/l2-module
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: tokenless-cargo-registry-rust-v1-${{ hashFiles('src/tokenless/Cargo.lock', 'src/tokenless/benchmark/l1-compressor/Cargo.lock', 'src/tokenless/benchmark/l2-module/Cargo.lock') }}
+          restore-keys: |
+            tokenless-cargo-registry-rust-v1-
+            tokenless-cargo-registry-integration-v1-
 
       # RTK is a path dependency of the workspace, so every cargo command below
       # needs the pinned, patched checkout. The cache keeps its mtimes, which
@@ -1541,9 +1551,7 @@ jobs:
           cargo clippy --workspace -- -D warnings
 
       - name: Run tests
-        run: |
-          cd src/tokenless
-          cargo test --workspace -- --test-threads=1
+        run: make -C src/tokenless test-tokenless
 
       # The benchmark suite is split into two standalone workspaces (each with an
       # empty [workspace] table in its Cargo.toml), so the --workspace commands
@@ -1588,48 +1596,69 @@ jobs:
           cd src/tokenless/benchmark/l2-module
           cargo test --release --locked
 
+  test-tokenless-integration:
+    name: Test tokenless (hooks, adapters & npm)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tokenless == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.91.0'
+
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
+      - name: Cache Cargo registry downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: tokenless-cargo-registry-integration-v1-${{ hashFiles('src/tokenless/Cargo.lock') }}
+          restore-keys: |
+            tokenless-cargo-registry-integration-v1-
+
+      - name: Cache pinned RTK source
+        uses: actions/cache@v4
+        with:
+          path: src/tokenless/third_party/rtk
+          key: tokenless-rtk-source-v1-${{ hashFiles('src/tokenless/packaging/build/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch') }}
+
+      - name: Set up pinned RTK source
+        run: bash src/tokenless/packaging/build/setup-rtk.sh
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Run Python integration tests
-        run: |
-          make -C src/tokenless test-integration
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          prune-cache: false
-          cache-dependency-glob: |
-            src/tokenless/python/tokenless/pyproject.toml
-            src/tokenless/python/agentscope/pyproject.toml.in
-            src/tokenless/tests/test-agentscope-integration.sh
-            src/tokenless/Makefile
-
       - uses: extractions/setup-just@v2
-
-      - name: Test bundled RTK integration
-        run: make -C src/tokenless test-rtk-integration
-
-      - name: Test L4 benchmark offline regressions
-        run: |
-          uv venv --python 3.12 "$RUNNER_TEMP/l4-benchmark-venv"
-          uv pip install --python "$RUNNER_TEMP/l4-benchmark-venv/bin/python" pytest pydantic tiktoken
-          make -C src/tokenless test-benchmark-l4 L4_TEST_PYTHON="$RUNNER_TEMP/l4-benchmark-venv/bin/python"
-
-      - name: Build and test Tokenless Python packages
-        run: |
-          make -C src/tokenless \
-            test-python-runtime test-agentscope-integration
-
-      - name: Remove local wheels from UV dependency cache
-        run: uv cache clean anolisa-tokenless anolisa-tokenless-agentscope
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: src/tokenless/adapters/tokenless/openclaw/package-lock.json
+
+      - name: Build debug CLI for integration tests
+        run: cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
+
+      - name: Run Python integration tests
+        run: make -C src/tokenless -j4 test-integration
+
+      - name: Test bundled RTK integration
+        run: make -C src/tokenless test-rtk-integration
 
       # Adapter lifecycle tests (install / detect / uninstall for openclaw,
       # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
@@ -1638,8 +1667,7 @@ jobs:
       # plus two `node --test` suites) and python3 (installer probes), both
       # already set up above.
       - name: Test adapter installers
-        run: |
-          make -C src/tokenless test-adapters
+        run: make -C src/tokenless test-adapters
 
       - name: npm packaging smoke test (native Linux)
         run: |
@@ -1663,6 +1691,102 @@ jobs:
           test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
           # Verify adapter install scripts are executable
           test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
+
+  test-tokenless-python:
+    name: Test tokenless (Python packages & L4)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tokenless == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_PYTHON_RELEASE_LTO: 'false'
+      CARGO_PROFILE_PYTHON_RELEASE_CODEGEN_UNITS: '16'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.91.0'
+
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
+      - name: Cache Cargo registry downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: tokenless-cargo-registry-python-v1-${{ hashFiles('src/tokenless/Cargo.lock') }}
+          restore-keys: |
+            tokenless-cargo-registry-python-v1-
+            tokenless-cargo-registry-integration-v1-
+
+      - name: Cache pinned RTK source
+        uses: actions/cache@v4
+        with:
+          path: src/tokenless/third_party/rtk
+          key: tokenless-rtk-source-v1-${{ hashFiles('src/tokenless/packaging/build/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch') }}
+
+      - name: Set up pinned RTK source
+        run: bash src/tokenless/packaging/build/setup-rtk.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: |
+            src/tokenless/python/tokenless/pyproject.toml
+            src/tokenless/python/agentscope/pyproject.toml.in
+            src/tokenless/tests/test-agentscope-integration.sh
+
+      - uses: extractions/setup-just@v2
+
+      - name: Test L4 benchmark offline regressions
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/l4-benchmark-venv"
+          uv pip install --python "$RUNNER_TEMP/l4-benchmark-venv/bin/python" pytest pydantic tiktoken
+          make -C src/tokenless test-benchmark-l4 L4_TEST_PYTHON="$RUNNER_TEMP/l4-benchmark-venv/bin/python"
+
+      - name: Build and test Tokenless Python packages
+        run: |
+          make -C src/tokenless \
+            test-python-runtime test-agentscope-integration
+
+      - name: Remove local wheels from UV dependency cache
+        run: uv cache clean anolisa-tokenless anolisa-tokenless-agentscope
+
+  test-tokenless:
+    name: Test tokenless
+    needs:
+      - detect-changes
+      - test-tokenless-rust
+      - test-tokenless-integration
+      - test-tokenless-python
+    if: ${{ always() && needs.detect-changes.outputs.tokenless == 'true' }}
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 15
+    steps:
+      - name: Require all tokenless test jobs
+        env:
+          RUST_RESULT: ${{ needs.test-tokenless-rust.result }}
+          INTEGRATION_RESULT: ${{ needs.test-tokenless-integration.result }}
+          PYTHON_RESULT: ${{ needs.test-tokenless-python.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$INTEGRATION_RESULT" = success
+          test "$PYTHON_RESULT" = success
 
   # =========================================================================
   # Step 9: Test ws-ckpt

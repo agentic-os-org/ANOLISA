@@ -187,7 +187,10 @@ test: test-tokenless test-hooks test-integration test-rtk-integration test-hook-
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
-	cargo test --workspace -- --test-threads=1
+	cargo test --workspace --lib --bins -- --test-threads=1
+	cargo test --workspace --test '*'
+	cargo test --workspace --examples --no-run
+	cargo test --workspace --doc
 
 # Declared separately from the .PHONY list at the top of this file on purpose:
 # that list is extended by other components' targets as well, and a shared line
@@ -259,22 +262,23 @@ test-claude-code-detect:
 test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cleanup test-hook-scripts \
                   test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
-	python3 tests/test_codex_response_diagnostics.py
-	python3 tests/test_codex_rewrite_hook.py
-	python3 tests/test_hermes_lifecycle.py
-	python3 tests/test_compress_schema_hook.py
-	python3 tests/test_hook_payload_shapes.py
-	python3 tests/test_hermes_plugin_import.py
-	python3 tests/test_agentscope_middleware.py
-	python3 tests/test_agentscope_v1.py
-	python3 tests/test_cosh_extension_matcher.py
-	python3 tests/test_release_regression_probe.py
-	python3 tests/test_verify_release_versions.py
-	python3 tests/test_qwenpaw_plugin.py
-	python3 tests/test_cosh_ng_compat.py
-	python3 tests/test_host_adapter_isolation.py
-	python3 tests/test_stats_http.py
-	python3 tests/test_capture_ctest.py
+	python3 tests/run-parallel.py -- \
+		'python3 tests/test_codex_response_diagnostics.py' \
+		'python3 tests/test_codex_rewrite_hook.py' \
+		'python3 tests/test_hermes_lifecycle.py' \
+		'python3 tests/test_compress_schema_hook.py' \
+		'python3 tests/test_hook_payload_shapes.py' \
+		'python3 tests/test_hermes_plugin_import.py' \
+		'python3 tests/test_agentscope_middleware.py' \
+		'python3 tests/test_agentscope_v1.py' \
+		'python3 tests/test_cosh_extension_matcher.py' \
+		'python3 tests/test_release_regression_probe.py' \
+		'python3 tests/test_verify_release_versions.py' \
+		'python3 tests/test_qwenpaw_plugin.py' \
+		'python3 tests/test_cosh_ng_compat.py' \
+		'python3 tests/test_host_adapter_isolation.py' \
+		'python3 tests/test_stats_http.py' \
+		'python3 tests/test_capture_ctest.py'
 
 .PHONY: test-headroom-pipeline-worker
 test-headroom-pipeline-worker:
@@ -285,11 +289,12 @@ test-headroom-pipeline-worker:
 test-qwenwork: test-qwenwork-hooks test-qwenwork-install
 
 test-qwenwork-hooks:
-	python3 tests/test_compress_response_hook.py
-	python3 tests/test_hook_contract.py
-	python3 tests/test_rewrite_hook.py
-	python3 tests/test_rewrite_benchmark.py
-	python3 tests/test_resolve_agent_id.py
+	python3 tests/run-parallel.py -- \
+		'python3 tests/test_compress_response_hook.py' \
+		'python3 tests/test_hook_contract.py' \
+		'python3 tests/test_rewrite_hook.py' \
+		'python3 tests/test_rewrite_benchmark.py' \
+		'python3 tests/test_resolve_agent_id.py'
 
 test-qwenwork-install:
 	@echo "==> Testing QwenWork sideloading..."
@@ -328,7 +333,7 @@ test-rtk-integration: test-benchmark-rtk-probe
 # current hooks and real debug binary, then compare with the v2 goldens.
 test-hook-parity:
 	@echo "==> Testing hook golden parity (real binary)..."
-	cargo build -p tokenless-cli
+	cargo build --locked -p tokenless-cli
 	python3 tests/test_hook_parity.py
 
 # The npm channel's packaging contract suite is a member of the `test`
@@ -368,29 +373,21 @@ test-hook-parity:
 # directories it rewrites through its own recursive make; test-npm-package
 # declares them as prerequisites for exactly that reason.
 test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
-	@echo "==> Testing OpenClaw adapter installer..."
-	bash tests/test-openclaw-adapter-install.sh
-	@echo "==> Testing openclaw Protocol v2 lifecycle..."
-	node --test tests/test-openclaw-lifecycle-v2.mjs
+	@echo "==> Testing adapter installers and lifecycle suites..."
 	cargo build --locked -p tokenless-cli
-	node --test tests/test-adapter-core-integration.mjs
-	@echo "==> Testing native dsh adapter bundle..."
-	bash tests/test-dsh-adapter.sh
-	@echo "==> Testing qoder adapter installer..."
-	bash tests/test-qoder-adapter-install.sh
-	@echo "==> Testing Claude Code adapter installer..."
-	bash tests/test-claude-code-adapter-install.sh
-	@echo "==> Testing Codex adapter installer..."
-	bash tests/test-codex-adapter-install.sh
-	@echo "==> Testing Qwen Code adapter installer..."
-	python3 tests/test_qwencode_install.py
-	@echo "==> Testing OpenCode adapter..."
-	bash tests/test-opencode-adapter-install.sh
-	node tests/test-opencode-plugin.mjs
-	@echo "==> Testing QwenPaw adapter installer..."
-	bash tests/test-qwenpaw-adapter-install.sh
-	# Run after npm packaging has restored its stale-version fixture.
-	$(MAKE) test-qwenwork-install
+	python3 tests/run-parallel.py -- \
+		'bash tests/test-openclaw-adapter-install.sh' \
+		'node --test tests/test-openclaw-lifecycle-v2.mjs' \
+		'node --test tests/test-adapter-core-integration.mjs' \
+		'bash tests/test-dsh-adapter.sh' \
+		'bash tests/test-qoder-adapter-install.sh' \
+		'bash tests/test-claude-code-adapter-install.sh' \
+		'bash tests/test-codex-adapter-install.sh' \
+		'python3 tests/test_qwencode_install.py' \
+		'bash tests/test-opencode-adapter-install.sh' \
+		'node tests/test-opencode-plugin.mjs' \
+		'bash tests/test-qwenpaw-adapter-install.sh' \
+		'python3 tests/test_qwenwork_install.py'
 
 test-openclaw-host-contract: stamp-adapter-templates
 	@test -n "$(OPENCLAW_TEST_DIST)" && test -d "$(OPENCLAW_TEST_DIST)" \
@@ -428,7 +425,7 @@ test-raw-package:
 # also protects the `test` aggregate, where the suite and test-adapters share a
 # single deduplicated instance. Keep it if the suite is attached elsewhere.
 test-npm-package: build-openclaw-plugin build-dsh-plugin
-	@bash tests/test-package-npm-prebuilt.sh
+	@TOKENLESS_SKIP_ADAPTER_BUILD=1 bash tests/test-package-npm-prebuilt.sh
 
 test-stale-helper-cleanup:
 	@bash tests/test-stale-helper-cleanup.sh
