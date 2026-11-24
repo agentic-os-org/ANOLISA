@@ -27,7 +27,8 @@ native acceptance. Preserve exact version evidence, bounded processes, complete
 reports and visible manual boundaries. Missing or skipped suites must fail the
 integration result. Prepare private native tool environments; do not weaken
 admission to accommodate runner loader overrides or writable shared caches.
-Rerun on the exact release SHA before release.
+Release validation must cover the exact tag commit. See the
+[candidate publication procedure](../../../../../../contribute/en/aw/building.md#github-release).
 
 The existing `AW / required` check joins parallel AW and Tokenless jobs after
 scope selection. Keep independent build caches, whole-job results and tested

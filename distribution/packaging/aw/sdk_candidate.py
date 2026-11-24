@@ -208,10 +208,8 @@ def build(
         return receipt
 
 
-def verify_sdk(
-    repo: Path, candidate: str, receipt_path: Path, python: str, cancel: Cancellation
-) -> dict:
-    """Compare shipped payloads against a fresh build, not a supplied SHA alone."""
+def sdk_records(candidate: str, receipt_path: Path) -> list[dict]:
+    """Read the complete, typed SDK receipt for this candidate."""
     receipt = json.loads(receipt_path.read_text())
     if not isinstance(receipt, dict):
         raise ValueError("SDK receipt must be an object")
@@ -242,6 +240,14 @@ def verify_sdk(
         raise ValueError(
             "receipt must contain the complete core and optional SDK artifact set"
         )
+    return records
+
+
+def verify_sdk(
+    repo: Path, candidate: str, receipt_path: Path, python: str, cancel: Cancellation
+) -> dict:
+    """Compare shipped payloads against a fresh build, not a supplied SHA alone."""
+    records = sdk_records(candidate, receipt_path)
     with tempfile.TemporaryDirectory(prefix="aw-sdk-rebuild-") as directory:
         fresh = Path(directory)
         rebuilt = build(repo, candidate, fresh, python, cancel)

@@ -101,9 +101,15 @@ python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-di
 
 ## GitHub Release
 
-Run **Release / AW** manually on main for a candidate build. The workflow runs
-the full contract gate and native integration against that commit, verifies the
-three Linux x86_64 archives and rebuilds the six SDK payloads for comparison.
-Download the verified set from the workflow artifacts. A push of `aw/vX.Y.Z`
-publishes those assets when the tag matches the source package versions and its
-commit belongs to main. The release includes `SHA256SUMS` and `sdk-candidate.json`.
+Run **Release / AW** manually on the official repository's `main` branch for
+the release commit. The workflow checks contracts, runs the full native and
+resident matrix, verifies three Linux x86_64 archives and compares six SDK
+packages with a clean rebuild. Wait for the run to succeed before pushing
+`aw/vX.Y.Z` at that commit. Candidate artifacts are retained for 28 days.
+
+The tag workflow checks main ancestry and package versions. It looks up the
+latest manual candidate run for the same commit. When that run succeeded and
+its artifact is available, the workflow verifies the artifact digest, package
+receipts and checksums before publication. Without an accepted candidate, the
+tag runs the full validation, starting integration after contracts pass.
+The release includes `SHA256SUMS` and `sdk-candidate.json`.

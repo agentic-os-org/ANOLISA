@@ -96,7 +96,6 @@ python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-di
 
 ## GitHub Release
 
-在 main 上手动运行 **Release / AW** 可验证候选版本。工作流对同一提交运行完整合同检查和原生集成，
-核对三个 Linux x86_64 归档，并重新构建六个 SDK 比对包内容。通过后可从工作流下载候选产物。
-推送 `aw/vX.Y.Z` 时，工作流检查提交已进入 main、tag 与各包版本一致，验收通过后将这些产物、
-`SHA256SUMS` 和 `sdk-candidate.json` 一并发布到 GitHub Release。
+在官方仓库的 `main` 分支上为待发布提交手动运行 **Release / AW**。工作流检查合同，执行全部原生框架和常驻容器测试，核验三个 Linux x86_64 归档，并重新构建六个 SDK 包比对内容。等待工作流成功后，在该提交上推送 `aw/vX.Y.Z`。候选产物保留 28 天。
+
+标签工作流检查提交已进入 main、标签与包版本一致，并查找同一提交最近一次手动候选验收。该次验收通过且产物仍可下载时，工作流复核产物摘要、包收据和校验和后发布。没有可用的已验收候选时，标签工作流执行完整验证，合同通过后启动集成测试。发布文件包含 `SHA256SUMS` 和 `sdk-candidate.json`。
