@@ -28,7 +28,7 @@ def load_config_workspaces(config_file: Path) -> dict:
     workspaces = {}
     if config_file.exists():
         try:
-            with open(config_file) as f:
+            with open(config_file, encoding="utf-8") as f:
                 config = json.load(f)
             agents = config.get("agents", {})
             for agent in agents.get("list", []):
@@ -439,7 +439,7 @@ def main():
             "by_date": {k: dict(v) for k, v in results["by_date"].items()},
             "by_session": results["by_session"],
         }
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         print(f"Report saved to: {args.output}")
 

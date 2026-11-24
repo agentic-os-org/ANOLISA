@@ -695,5 +695,58 @@ class TestPrefixedSkillAttribution(SessionLogsTestCase):
         self.assertNotIn("web:", proc.stdout)
 
 
+class TestUtf8JsonBoundaries(SessionLogsTestCase):
+    """JSON config and report files must be UTF-8 regardless of locale."""
+
+    def run_cli_bounded(self, *args, timeout=60):
+        environment = {
+            **os.environ,
+            "PYTHONUTF8": "0",
+            "PYTHONIOENCODING": "utf-8",
+            "LC_ALL": "C",
+            "PYTHONCOERCECLOCALE": "0",
+        }
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--logs-dir", str(self.logs_dir), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=environment,
+            timeout=timeout,
+        )
+
+    def test_utf8_config_workspace_is_preserved(self):
+        workspace = "/fixtures/workspace-\u20ac"
+        config = self.logs_dir / "openclaw.json"
+        config.write_text(
+            json.dumps(
+                {"agents": {"list": [{"id": "agent-1", "workspace": workspace}]}},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.write_log([tool_call("python /skills/web/run.py")])
+        output = self.logs_dir / "report.json"
+
+        proc = self.run_cli_bounded("--mode", "summary", "--output", str(output))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["workspaces"], {"agent-1": workspace})
+        self.assertIn(workspace.encode("utf-8"), output.read_bytes())
+
+    def test_utf8_session_workspace_writes_a_complete_report(self):
+        workspace = "/fixtures/workspace-\U0001f9ea"
+        self.write_log([json.dumps({"cwd": workspace}, ensure_ascii=False)])
+        output = self.logs_dir / "report.json"
+
+        proc = self.run_cli_bounded("--mode", "summary", "--output", str(output))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["workspaces"], {"agent-1": workspace})
+        self.assertIn(workspace.encode("utf-8"), output.read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
