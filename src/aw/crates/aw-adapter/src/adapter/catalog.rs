@@ -1,7 +1,17 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_core::admission::AdapterCapabilities as Capabilities;
+use aw_contracts::source::{project_capability_cells, CapabilityCell, SourceCapability};
+use aw_core::{
+    admission::AdapterCapabilities as Capabilities,
+    resolver::{source_from_adapter, ResolveError},
+};
+use std::collections::BTreeMap;
+
+/// Placeholder contract version used when projecting static default profiles.
+const CATALOG_VERSION: &str = "catalog";
+/// Placeholder entrypoint used when projecting static default profiles.
+const CATALOG_ENTRYPOINT: &str = "default-profile";
 
 pub(crate) struct Profile {
     pub name: &'static str,
@@ -28,6 +38,37 @@ impl Profile {
                 .collect(),
         }
     }
+
+    pub(crate) fn source_capability(
+        &self,
+        version: &str,
+        entrypoint: &str,
+    ) -> Result<SourceCapability, ResolveError> {
+        source_from_adapter(&self.capabilities(version, entrypoint))
+    }
+}
+
+/// Projects every registered default profile onto the 16 semantic Hooks.
+///
+/// The returned cells reflect only the static default profiles declared in the
+/// Adapter catalog, not conditionally prepared deployment profiles or native
+/// adoption evidence. Each profile is converted through
+/// [`aw_core::resolver::source_from_adapter`] using fixed catalog placeholders
+/// (`version = "catalog"`, `entrypoint = "default-profile"`) and projected with
+/// [`aw_contracts::source::project_capability_cells`].
+///
+/// # Errors
+/// Returns [`ResolveError`] if a registered profile fails `SourceCapability`
+/// conversion or 16-Hook capability-cell projection.
+pub fn coverage_cells(
+) -> Result<BTreeMap<&'static str, BTreeMap<String, CapabilityCell>>, ResolveError> {
+    let mut coverage = BTreeMap::new();
+    for profile in PROFILES {
+        let source = profile.source_capability(CATALOG_VERSION, CATALOG_ENTRYPOINT)?;
+        let cells = project_capability_cells(profile.name, std::slice::from_ref(&source))?;
+        coverage.insert(profile.name, cells);
+    }
+    Ok(coverage)
 }
 
 pub(crate) const SDK: Profile = Profile {
@@ -172,14 +213,12 @@ pub(crate) const PROFILES: &[Profile] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aw_contracts::source::{CapabilityStatus, HookAuthority, SourceKind, HOOK_EVENTS};
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet};
 
-    #[test]
-    fn registered_capabilities_match_the_regression_matrix_and_config_schema() {
-        let matrix: Value =
-            serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
-        let declared: BTreeMap<_, BTreeMap<_, BTreeSet<_>>> = matrix["agents"]
+    fn regression_matrix_events(matrix: &Value) -> BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> {
+        matrix["agents"]
             .as_object()
             .unwrap()
             .iter()
@@ -204,7 +243,14 @@ mod tests {
                         .collect(),
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn registered_capabilities_match_the_regression_matrix_and_config_schema() {
+        let matrix: Value =
+            serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
+        let declared = regression_matrix_events(&matrix);
         let actual: BTreeMap<_, BTreeMap<_, BTreeSet<_>>> = PROFILES
             .iter()
             .map(|profile| {
@@ -238,5 +284,51 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(names, actual.keys().copied().collect());
+    }
+
+    #[test]
+    fn catalog_coverage_cells_match_the_regression_matrix_projection() {
+        let matrix: Value =
+            serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
+        let declared = regression_matrix_events(&matrix);
+        let coverage = coverage_cells().unwrap();
+
+        let coverage_agents: BTreeSet<_> = coverage.keys().copied().collect();
+        let matrix_agents: BTreeSet<_> = declared.keys().copied().collect();
+        assert_eq!(coverage_agents, matrix_agents);
+        assert_eq!(coverage.len(), PROFILES.len());
+
+        let expected_events: BTreeSet<_> = HOOK_EVENTS.iter().copied().collect();
+        for profile in PROFILES {
+            let row = coverage
+                .get(profile.name)
+                .expect("every registered profile must be projected");
+            assert_eq!(row.len(), HOOK_EVENTS.len());
+            assert_eq!(
+                row.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+                expected_events
+            );
+            let declared_events = &declared[profile.name];
+            for event in HOOK_EVENTS {
+                let cell = &row[event];
+                assert_eq!(cell.adapter, profile.name);
+                assert_eq!(cell.event, event);
+                if let Some(expected_effects) = declared_events.get(event) {
+                    assert_eq!(cell.status, CapabilityStatus::Supported);
+                    assert_eq!(cell.sources, vec![SourceKind::Native]);
+                    assert_eq!(cell.mode, Some(HookAuthority::Control));
+                    let actual_effects: BTreeSet<_> =
+                        cell.effects.iter().map(|effect| effect.as_str()).collect();
+                    assert_eq!(&actual_effects, expected_effects);
+                    assert!(cell.failure_actions.is_empty());
+                } else {
+                    assert_eq!(cell.status, CapabilityStatus::Unsupported);
+                    assert!(cell.sources.is_empty());
+                    assert!(cell.mode.is_none());
+                    assert!(cell.effects.is_empty());
+                    assert!(cell.failure_actions.is_empty());
+                }
+            }
+        }
     }
 }

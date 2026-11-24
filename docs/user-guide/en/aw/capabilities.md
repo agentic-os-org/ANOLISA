@@ -83,6 +83,29 @@ Qoder SDK foreground `Read` text results support PII replacement of file content
 
 Qoder SDK 1.0.57 / Worker 1.1.81 also supports a required final result gate for one foreground Bash Query on Linux arm64/x64. It checks post-Hook text before native request encoding; unsupported transports, extra context turns and runtime builds fail closed. See [setup and scope](../../../developer-guide/en/aw/agents/qoder-sdk.md#final-tool-result-gate).
 
+### 16-Hook coverage by Agent
+
+Legend: `o` observe, `b` block, `ri` replace_input, `rr` replace_result, `a` ask, `×` unsupported.
+
+Generated from [tests/regression-matrix.json](../../../../src/aw/tests/regression-matrix.json); it shows declared default profiles, not conditional profiles or native-adoption certification.
+`runtime.observed`, `runtime.exited` and `coverage.changed` are produced by AW (Service/AgentSight), not by Agent adapters, and are therefore not listed.
+
+<!-- aw-hook-coverage:start -->
+| Agent | `session.start` | `input.submit` | `tool.before` | `tool.after` | `permission.request` | `compact.before` | `compact.after` | `subagent.start` | `subagent.stop` | `turn.stop` | `session.end` | `model.before_request` | `security.violation` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `claude-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+| `codex` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | × |
+| `deepseek-harness` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | o b |
+| `hermes` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `openclaw` | o | × | o b | o rr | × | × | × | × | × | o | o | × | × |
+| `pi` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `qoder` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qoder-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qwenpaw` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+<!-- aw-hook-coverage:end -->
+
 ## Lifecycle boundaries
 
 Session Hooks observe native boundaries. `turn.stop` can observe a terminal turn

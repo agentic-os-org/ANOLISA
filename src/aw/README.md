@@ -68,6 +68,29 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 | `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
+### 16-Hook coverage by Agent
+
+Legend: `o` observe, `b` block, `ri` replace_input, `rr` replace_result, `a` ask, `×` unsupported.
+
+Generated from [tests/regression-matrix.json](tests/regression-matrix.json); it shows declared default profiles, not conditional profiles or native-adoption certification.
+`runtime.observed`, `runtime.exited` and `coverage.changed` are produced by AW (Service/AgentSight), not by Agent adapters, and are therefore not listed.
+
+<!-- aw-hook-coverage:start -->
+| Agent | `session.start` | `input.submit` | `tool.before` | `tool.after` | `permission.request` | `compact.before` | `compact.after` | `subagent.start` | `subagent.stop` | `turn.stop` | `session.end` | `model.before_request` | `security.violation` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `claude-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+| `codex` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | × |
+| `deepseek-harness` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | o b |
+| `hermes` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `openclaw` | o | × | o b | o rr | × | × | × | × | × | o | o | × | × |
+| `pi` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `qoder` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qoder-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qwenpaw` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+<!-- aw-hook-coverage:end -->
+
 <a id="hook-support"></a>
 <a id="adapter-capability-coverage"></a>
 

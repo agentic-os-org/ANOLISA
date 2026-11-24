@@ -2,6 +2,7 @@
 
 pub(crate) mod catalog;
 mod python;
+pub use catalog::coverage_cells;
 pub(crate) use python::{isolate_python_environment, PYTHON_PROBE_TIMEOUT};
 
 #[cfg(test)]

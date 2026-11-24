@@ -1,9 +1,12 @@
 """Regression obligations and visible Hook grids share one checked manifest."""
 
+import re
 from pathlib import Path
 
 START = "<!-- aw-regression-matrix:start -->"
 END = "<!-- aw-regression-matrix:end -->"
+COVERAGE_START = "<!-- aw-hook-coverage:start -->"
+COVERAGE_END = "<!-- aw-hook-coverage:end -->"
 CAPABILITY_DOCS = (
     "README.md",
     "README_zh.md",
@@ -43,6 +46,15 @@ HOOK_EVENTS = (
     "coverage.changed",
 )
 EFFECT_ORDER = ("observe", "block", "replace_input", "replace_result", "ask")
+AW_PRODUCED_EVENTS = ("runtime.observed", "runtime.exited", "coverage.changed")
+COVERAGE_EVENTS = tuple(event for event in HOOK_EVENTS if event not in AW_PRODUCED_EVENTS)
+EFFECT_ABBREVIATIONS = {
+    "observe": "o",
+    "block": "b",
+    "replace_input": "ri",
+    "replace_result": "rr",
+    "ask": "a",
+}
 BLOCKING_EVENTS = frozenset(
     {
         "input.submit",
@@ -151,6 +163,46 @@ def table(matrix: dict) -> str:
     return "\n".join(rows)
 
 
+def coverage_table(matrix: dict) -> str:
+    """Render declared default-profile coverage across all Agent-semantic Hooks."""
+    cells = capability_cells(matrix)
+    rows = [
+        "| Agent | " + " | ".join(f"`{event}`" for event in COVERAGE_EVENTS) + " |",
+        "| --- | " + " | ".join("---" for _ in COVERAGE_EVENTS) + " |",
+    ]
+    for agent, agent_cells in sorted(cells.items()):
+        rendered = []
+        for event in COVERAGE_EVENTS:
+            cell = agent_cells[event]
+            if cell["status"] == "supported":
+                rendered.append(
+                    " ".join(
+                        EFFECT_ABBREVIATIONS[effect]
+                        for effect in EFFECT_ORDER
+                        if effect in cell["effects"]
+                    )
+                )
+            else:
+                rendered.append("×")
+        rows.append(f"| `{agent}` | " + " | ".join(rendered) + " |")
+    return "\n".join(rows)
+
+
+_DETAILS_TAG_RE = re.compile(r"<details\b[^>]*>|</details\s*>", re.IGNORECASE)
+
+
+def _has_unclosed_details(prefix: str) -> bool:
+    """Return whether an open HTML <details> element surrounds the following marker."""
+    cleaned = re.sub(r"<!--.*?-->", "", prefix, flags=re.DOTALL)
+    depth = 0
+    for match in _DETAILS_TAG_RE.finditer(cleaned):
+        if match.group(0).startswith("</"):
+            depth = max(0, depth - 1)
+        else:
+            depth += 1
+    return depth > 0
+
+
 def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
     """Fail on missing/ignored tests, uncovered cells, schema drift or stale guide grids."""
     if matrix.get("version") != 1 or not matrix.get("agents") or not matrix.get("cases"):
@@ -195,15 +247,38 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
         raise ValueError("sec-core and Tokenless provider contracts are required")
     for provider, cases in matrix["providers"].items():
         covered(cases, provider)
+    expected_grid = table(matrix)
+    expected_coverage = coverage_table(matrix)
     for document in CAPABILITY_DOCS:
         text = (root / document).read_text(encoding="utf-8")
-        if text.count(START) != 1 or text.count(END) != 1:
+        if text.count(START) != 1 or text.count(END) != 1 or text.index(START) > text.index(END):
             raise ValueError(f"{document}: missing unique matrix markers")
-        prefix = text.split(START)[0].lower()
-        if prefix.rfind("<details") > prefix.rfind("</details>"):
+        if _has_unclosed_details(text.split(START, 1)[0]):
             raise ValueError(f"{document}: keep the Hook grid expanded")
-        if text.split(START)[1].split(END)[0].strip() != table(matrix):
+        if text.split(START)[1].split(END)[0].strip() != expected_grid:
             raise ValueError(f"{document}: update the grid from tests/regression-matrix.json")
+        if (
+            text.count(COVERAGE_START) != 1
+            or text.count(COVERAGE_END) != 1
+            or text.index(COVERAGE_START) > text.index(COVERAGE_END)
+        ):
+            raise ValueError(f"{document}: missing unique coverage markers")
+        if _has_unclosed_details(text.split(COVERAGE_START, 1)[0]):
+            raise ValueError(f"{document}: keep the Hook coverage grid expanded")
+        if text.split(COVERAGE_START)[1].split(COVERAGE_END)[0].strip() != expected_coverage:
+            raise ValueError(
+                f"{document}: update the coverage grid from tests/regression-matrix.json"
+            )
+
+
+def _replace_block(
+    document: str, text: str, start: str, end: str, content: str, label: str
+) -> str:
+    if text.count(start) != 1 or text.count(end) != 1 or text.index(start) > text.index(end):
+        raise ValueError(f"{document}: missing unique {label} markers")
+    before, rest = text.split(start, 1)
+    _, after = rest.split(end, 1)
+    return f"{before}{start}\n{content}\n{end}{after}"
 
 
 def main() -> None:
@@ -214,6 +289,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--write-docs", action="store_true")
+    mode.add_argument(
+        "--coverage",
+        action="store_true",
+        help="print the declared default-profile coverage table across Agent-semantic Hooks",
+    )
     mode.add_argument(
         "--cells-json",
         action="store_true",
@@ -228,17 +308,20 @@ def main() -> None:
     if args.cells_json:
         print(json.dumps(capability_cells(matrix), indent=2, sort_keys=True))
         return
+    if args.coverage:
+        print(coverage_table(matrix))
+        return
     grid = table(matrix)
     if not args.write_docs:
         print(grid)
         return
+    coverage = coverage_table(matrix)
     for name in CAPABILITY_DOCS:
         path = root / name
         text = path.read_text(encoding="utf-8")
-        if text.count(START) != 1 or text.count(END) != 1:
-            raise ValueError(f"{name}: missing unique matrix markers")
-        before, after = text.split(START)[0], text.split(END)[1]
-        path.write_text(f"{before}{START}\n{grid}\n{END}{after}", encoding="utf-8")
+        text = _replace_block(name, text, START, END, grid, "matrix")
+        text = _replace_block(name, text, COVERAGE_START, COVERAGE_END, coverage, "coverage")
+        path.write_text(text, encoding="utf-8")
 
 
 if __name__ == "__main__":

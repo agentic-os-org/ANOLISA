@@ -44,7 +44,7 @@ python3 src/aw/scripts/check.py
 
 1. 更新 Adapter catalog、配置 Schema 及实际接线。
 2. 在 [regression-matrix.json](tests/regression-matrix.json) 填入每个 event/effect 的真实用例，以及安全、Tokenless、生命周期组合用例。
-3. 从 `src/aw` 运行以下命令，同步 README 和能力页的可见矩阵。
+3. 从 `src/aw` 运行以下命令，同步 README 和能力页中的两张生成表（Hook 支持矩阵与按 Agent 的 16 Hook 覆盖表）。
 
 ```bash
 python3 scripts/check_matrix.py --write-docs

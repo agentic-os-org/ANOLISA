@@ -70,6 +70,29 @@ Claude SDK 对精确匹配的 Python／TypeScript SDK／bundled CLI 构建开放
 
 Qoder SDK 1.0.57 / Worker 1.1.81 在 Linux arm64/x64 上支持单次前台 Bash Query 的必需最终结果检查，在原生请求编码前检查 Post Hook 后的文本；未覆盖的传输、额外上下文轮次和运行时构建均拒绝放行。参见[配置与范围](../../../developer-guide/zh/aw/agents/qoder-sdk.md#最终工具结果检查)。
 
+### 按 Agent 的 16 Hook 覆盖
+
+图例：`o` observe、`b` block、`ri` replace_input、`rr` replace_result、`a` ask、`×` 不支持。
+
+本表由 [tests/regression-matrix.json](../../../../src/aw/tests/regression-matrix.json) 生成，展示已声明的默认 Profile，不代表条件准备的 Profile 或原生采纳认证。
+`runtime.observed`、`runtime.exited` 与 `coverage.changed` 由 AW（Service/AgentSight）产生而非 Agent Adapter，因此未列入下表。
+
+<!-- aw-hook-coverage:start -->
+| Agent | `session.start` | `input.submit` | `tool.before` | `tool.after` | `permission.request` | `compact.before` | `compact.after` | `subagent.start` | `subagent.stop` | `turn.stop` | `session.end` | `model.before_request` | `security.violation` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `claude-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+| `codex` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | × |
+| `deepseek-harness` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | o b |
+| `hermes` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `openclaw` | o | × | o b | o rr | × | × | × | × | × | o | o | × | × |
+| `pi` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `qoder` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qoder-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qwenpaw` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+<!-- aw-hook-coverage:end -->
+
 ## 生命周期边界
 
 会话 Hook 观察原生的开始和结束。根据 Adapter 的接点，`turn.stop` 可以观察已经结束的轮次，

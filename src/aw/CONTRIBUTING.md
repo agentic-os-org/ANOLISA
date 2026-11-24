@@ -44,7 +44,7 @@ Before opening a PR for a new framework or Provider in this repository, open an 
 
 1. Update the Adapter catalog, configuration schema and actual wiring.
 2. Add real cases for each event/effect, security, Tokenless and lifecycle composition in [regression-matrix.json](tests/regression-matrix.json).
-3. Run these commands from `src/aw` to synchronize the visible README and capability-page matrices.
+3. Run these commands from `src/aw` to synchronize both generated tables (the Hook support matrix and the 16-Hook coverage table) in the READMEs and capability pages.
 
 ```bash
 python3 scripts/check_matrix.py --write-docs
