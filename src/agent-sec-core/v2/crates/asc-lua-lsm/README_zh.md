@@ -45,6 +45,7 @@ Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保
 内部计划不属于内核 ABI：`register` 接收 Lua 源码，`unregister` 接收模块名。
 
 一个模板分别处理读、普通写和删除，支持精确普通文件、目录树、路径模式及各目标的排除项。
+Lua-LSM 只接受 Cedar 策略。SecCore 原生模板在翻译时返回 `LUA_LSM_CEDAR_REQUIRED`。
 不支持的策略整体拒绝。SecCore 的 AgentSight Translator 支持精确文件和目录树禁读。
 模块名为 `asc_{binding_id}_r{binding_revision}`。PAP/Scope/Binding 对外字段及
 reconciler 的四个 Client 方法保持兼容。
@@ -55,23 +56,25 @@ Schema 区分 `create` 与 `write`，本后端不支持单独的 create-only 策
 AgentSight 按其自身契约执行。禁写策略要求内核识别 18 个 hook，包括目录项操作和两种
 truncate hook。缺少必要 hook 的内核无法确认部署成功。
 
-原生文件规则中，`*`、`?` 在单个路径段内匹配，整段 `**` 可跨零层或多层目录。
-例如 `/data/*.txt` 匹配 `/data/a.txt`，`/data/**/*.txt` 还匹配
-`/data/nested/a.txt`。Cedar 表达式 `resource.path like "/data/*.txt"` 对两个文件
-都生效：Cedar 的 `*` 可跨目录，`?` 按字面匹配，`\*` 表示字面星号。
+Cedar 表达式 `resource.path like "/data/*.txt"` 同时匹配 `/data/a.txt` 和
+`/data/nested/a.txt`。Cedar 的 `*` 可跨目录，`?` 按字面匹配，`\*` 表示字面星号。
 对于 `resource.path like "/data/*" && resource.path like "*.txt"`，Lua-LSM Translator
 选取 `/data` 作为扫描目录，Lua 执行两个条件。每个可独立成立的分支都要有正向条件
 限定 SecCore 挂载视图中的范围。可以在文件或目录出现前下发规则。每次操作匹配当时的路径，
 此后新建的目录项、同名替换后的文件都受约束。精确排除只作用于该目录项，子树排除覆盖其后代。
 
-例如，禁止写入 `/work/secrets/**` 后，即使内核回收并重新载入 inode，
+如果目标位于 overlayfs，或保护的目录树包含 overlayfs 子挂载，下发会返回
+`LUA_LSM_OVERLAYFS_UNSUPPORTED`。空目录和所有文件操作都适用。目标尚不存在时，
+按最近已存在的祖先判断挂载类型。即使根文件系统是 overlayfs，单独挂载的 tmpfs 仍可受保护。
+部分 overlayfs 挂载下已有映射的设备号、inode 与目标路径不一致，因此所有内核版本都执行此检查。
+
+例如，用 `resource.path like "/work/secrets/*"` 禁止写入后，即使内核回收并重新载入 inode，
 `/work/secrets/key` 仍受保护。如果同一文件另有硬链接 `/tmp/key`，规则仍可下发。
 通过范围外名称读写文件或删除该名称，暂时不在防护保证内。通过范围内名称访问仍按规则执行。
 受控进程尝试跨保护边界建立新硬链接时，操作也可能被拒绝。
 
 Client 在注册时解析目标或其祖先路径上已有的符号链接。悬空目标链接会被拒绝，改变链接指向后需重新部署。
-树中新建的符号链接不会将外部引用目标纳入范围。原生 `/**` 按目录前缀及路径段边界匹配。
-单层前后缀 glob 直接比较文件名，Cedar `like` 按顺序比较字面片段，其余原生 glob 使用路径段匹配器。
+树中新建的符号链接不会将外部引用目标纳入范围。Cedar `like` 按顺序比较字面片段。
 每个模式最多 4,096 字节、64 个未转义的通配符。
 
 混合 Cedar Binding 共用一份已校验的 PST：选定的文件 Translator 消费文件投影，
@@ -98,8 +101,11 @@ fork 继承成员身份，exec 保留身份。私有命令要求调用者具备�
 
 模板在访问任务属性前将 `current` 绑定到模块环境。文件和目录 inode 均不保存策略状态。
 
-映射预检按设备号/inode 匹配 `/proc/<pid>/maps` 与策略范围内的文件，覆盖首次下发
-的进程树和更新时旧模块保有的成员。禁读时拒绝已有文件映射，包括 private 和
+映射预检按设备号和 inode 匹配 `/proc/<pid>/maps` 与策略范围内的文件。首次下发的最终预检
+覆盖两轮扫描中发现且仍存活的进程，包括首轮发现后被重新托管到树外的后代。
+首轮快照仅保存在本次下发的内存中。如果一个后代尚无成员标签，在被任一轮扫描发现前就被托管到树外，
+即使 Binding 进入 `Ready`，该进程仍可能不受保护。需要覆盖全部后代时，应在首次下发期间保持进程树稳定。
+策略更新时检查旧模块保有的成员。禁读时拒绝已有文件映射，包括 private 和
 PROT_NONE；禁写时拒绝已有共享可写映射。读取映射失败会阻止下发。已有可写 FD
 和只读共享映射可以保留，后续写入及共享映射写权限升级由文件 hook 检查。
 从读取进程的映射快照到相关 hook 开始阻断访问之间，进程仍可能建立新的映射。
@@ -128,6 +134,10 @@ Client 持久化 boot ID、完整部署输入摘要（含源码和进程身份�
 - 首次下发、或缺少已确认旧模块的恢复，仍要求原根进程存在，不能从重用的 PID
   重建已丢失的内核成员身份。并发 fork/退出已有确定性模拟覆盖，持续内核压力
   及 namespace 组合仍未验证。
+- **PID 复用的已知问题。** 部署或迁移成员身份时，Lua 按 PID 给已有后代打标。
+  如果 PID 在 SecCore 核验进程身份后被复用，Lua 可能给无关进程打标。
+  打标后的身份复核即使失败，标签仍然保留，该进程及其后续创建的子进程都可能受到此 Binding 的限制。
+  解决此问题需要 Lua-LSM 提供接口，在接收标签的同一个 task 对象上核验预期的进程实例身份。
 - 跨读写保护范围的移动和新建硬链接、涉及模式或排除项的目录移动，以及在保护路径或其祖先上的
   挂载操作，可能被保守拒绝。
 
@@ -164,7 +174,7 @@ Client 持久化 boot ID、完整部署输入摘要（含源码和进程身份�
 
 上线前仍需补充：user namespace、chroot/pivot_root 及其它挂载操作；跨 Binding 的排除项和
 重叠目录树、文件替换、深目录/非 ASCII 路径；fork/退出/建映射/更新竞争；实机
-审计和运行时异常证据；安装包的 systemd 部署与重启。overlayfs、tmpfs、网络
+审计和运行时异常证据；安装包的 systemd 部署与重启。tmpfs、网络
 文件系统分别验收。模板之外的 Lua 回调/VM 故障仍沿用内核当前的失败行为。
 
 ## 验证与回退
@@ -172,15 +182,16 @@ Client 持久化 boot ID、完整部署输入摘要（含源码和进程身份�
 在 `src/agent-sec-core/v2` 下执行：
 
 ```sh
-cargo test -p asc-lua-lsm -p asc-policy-translator-agentsight
+cargo test -p asc-lua-lsm -p asc-lua-lsm-client -p asc-policy-translator-agentsight
 LUA_BIN=/path/to/lua5.1 cargo test -p asc-lua-lsm lua51_template_behavior -- --ignored
 ```
 
 Rust 测试检查请求字节、错误、更新顺序及重启证据；Lua 5.1 用例使用模拟内核对象。
 本地 procfs 回归还检查后代持有映射、文件/目录树身份、范围外硬链接映射和排除项，
 这些预检测试不修改内核状态。
-Ubuntu CI 执行 Lua 5.1 模拟用例，包括原生 glob 和 Cedar 匹配。Repository/daemon
+Ubuntu CI 执行 Lua 5.1 模拟用例，包括 Cedar 路径匹配。Repository/daemon
 测试覆盖根进程退出后的清理和重启恢复。内核防护用例需要在专用主机上手工执行。
+运行原生 exec 和 mmap 用例时，将 `TMPDIR` 设在可写且允许执行的非 overlay 文件系统上。
 
 ```sh
 cargo test -p asc-lua-lsm live_kernel_ -- --ignored --test-threads=1

@@ -358,8 +358,8 @@ daemon 对源码快照做一次校验，再将解析后的语法树（PST）按�
 | 这台主机现在能否安装计划？ | Deployment Client 检查主机条件并报告部署结果。例如，目标路径缺失时仍可下发 Lua-LSM 策略；已有内存映射与策略冲突时会阻止部署。 |
 
 例如，Cedar 的 `resource.path like "/work/*.txt"` 同时匹配 `/work/a.txt` 和
-`/work/sub/a.txt`，SecCore 原生的 `/work/*.txt` 只匹配前者。Lua-LSM Translator
-保留 Cedar 匹配条件，交由内核模块执行。AgentSight Translator 当前拒绝这一通用模式。
+`/work/sub/a.txt`。Lua-LSM Translator 只接受 Cedar 策略，保留匹配条件并交由
+内核模块执行。AgentSight Translator 当前拒绝这一通用模式。
 混合 Binding 用例用同一份策略验证两种文件后端的翻译结果，同时核对 Gateway 收到的网络规则。[后端选择用例](../../v2/apps/asc-daemon/src/reconciliation/mixed_tests.rs)
 
 共享解析器为两个后端提取同一组文件条件。例如，对 `resource.path like "/work/*" && resource.path like "*.txt"`，

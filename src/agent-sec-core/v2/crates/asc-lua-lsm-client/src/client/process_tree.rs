@@ -33,17 +33,14 @@ impl LuaLsmClient {
         &self,
         root: &ProcessIdentity,
         controls: &Path,
-        family: Vec<ProcessIdentity>,
+        family: &[ProcessIdentity],
     ) -> Result<(), Failure> {
         for process in family {
-            match verify_process(&process) {
-                Ok(()) => {
-                    self.label_process(controls, root, &process)?;
-                    verify_process(&process)?;
-                }
-                Err(_) if &process != root => {}
-                Err(error) => return Err(error),
+            if !available_to_seed(root, process)? {
+                continue;
             }
+            self.label_process(controls, root, process)?;
+            verify_process(process)?;
         }
         Ok(())
     }
@@ -53,12 +50,33 @@ impl LuaLsmClient {
         controls: &Path,
         root: &ProcessIdentity,
         mappings: &MappingPreflight,
+        initial: Vec<ProcessIdentity>,
     ) -> Result<(), Failure> {
+        let mut initial_only: BTreeSet<_> = initial.into_iter().collect();
         for process in process_family(root)? {
-            verify_process(&process)?;
-            mappings.check(process.pid)?;
+            initial_only.remove(&process);
+            if !available_to_seed(root, &process)? {
+                continue;
+            }
+            let result = mappings.check(process.pid);
+            // The descendant can exit or its PID can be reused while reading maps.
+            if !available_to_seed(root, &process)? {
+                continue;
+            }
+            result?;
             self.label_process(controls, root, &process)?;
             verify_process(&process)?;
+        }
+        // A seeded descendant can be reparented before pattern matching is available.
+        // Its mappings remain in scope for as long as this process identity survives.
+        for process in initial_only {
+            if !same_process(&process)? {
+                continue;
+            }
+            let result = mappings.check(process.pid);
+            if same_process(&process)? {
+                result?;
+            }
         }
         Ok(())
     }
@@ -97,11 +115,25 @@ fn identity(pid: u32) -> io::Result<(ProcessIdentity, u32)> {
     ))
 }
 
+pub(super) fn same_process(expected: &ProcessIdentity) -> Result<bool, Failure> {
+    match identity(expected.pid) {
+        Ok((actual, _)) => Ok(actual == *expected),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(local_error(error)),
+    }
+}
+
+fn available_to_seed(root: &ProcessIdentity, process: &ProcessIdentity) -> Result<bool, Failure> {
+    if process == root {
+        verify_process(root)?;
+        Ok(true)
+    } else {
+        same_process(process)
+    }
+}
+
 pub(super) fn verify_process(expected: &ProcessIdentity) -> Result<(), Failure> {
-    if identity(expected.pid)
-        .map(|(actual, _)| actual == *expected)
-        .unwrap_or(false)
-    {
+    if same_process(expected)? {
         Ok(())
     } else {
         Err(rejected("LUA_LSM_PROCESS_IDENTITY_MISMATCH"))

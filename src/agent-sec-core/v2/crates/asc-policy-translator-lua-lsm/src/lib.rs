@@ -3,22 +3,16 @@
 #![forbid(unsafe_code)]
 
 use asc_policy_cedar::file_protection::{self, FileRule, PathScope};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
 
-use asc_file_policy::{
-    FILE_PROTECTION_POLICY_VERSION, FilePathPattern, FilePlan, FileProtectionPolicy,
-    FileProtectionTarget, FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
-    PatternSyntax,
-};
+use asc_file_policy::FileProtectionTarget;
 use asc_lua_lsm_protocol::{
     DEFAULT_STATE_DIRECTORY, LUA_LSM_PLAN_FORMAT, LuaLsmPlan, is_supported_path,
     is_supported_pattern, render_module,
 };
 use asc_policy_types::{
     Validate,
-    authoring::{
-        Action, Category, Comparison, Condition, Effect, PolicySource, Resource, Scalar, Value,
-    },
+    authoring::PolicySource,
     binding::PreparedBinding,
     scope::ScopeSelector,
     target::{AdapterFault, TargetBindingPlan, TranslationOutcome, TranslationRejection},
@@ -44,7 +38,7 @@ impl LuaLsmTranslator {
         }
     }
 
-    /// Translates file rules from a complete Binding without filesystem or kernel I/O.
+    /// Translates Cedar file rules from a complete Binding without filesystem or kernel I/O.
     /// Composition consumes network rules through its separate projection.
     ///
     /// # Errors
@@ -78,18 +72,12 @@ impl LuaLsmTranslator {
         if matches!(binding.scope.selector, ScopeSelector::CgroupId { .. }) {
             return reject("UNSUPPORTED_SCOPE_SELECTOR");
         }
-        let policy = match &binding.policy.template {
-            PolicySource::Cedar(source) => {
-                if let Some(syntax) = syntax {
-                    file_protection::translate_pst(syntax, cedar_target)
-                } else {
-                    file_protection::translate(source, cedar_target)
-                }
-            }
-            PolicySource::SecCore(_) if syntax.is_some() => {
-                return reject("INVALID_CEDAR_POLICY");
-            }
-            PolicySource::SecCore(template) => native(template),
+        let PolicySource::Cedar(source) = &binding.policy.template else {
+            return reject("LUA_LSM_CEDAR_REQUIRED");
+        };
+        let policy = match syntax {
+            Some(syntax) => file_protection::translate_pst(syntax, cedar_target),
+            None => file_protection::translate(source, cedar_target),
         };
         let (policy, patterns) = match policy {
             Ok(policy) => policy,
@@ -142,89 +130,6 @@ fn cedar_target(rule: &FileRule) -> Result<Option<FileProtectionTarget>, &'stati
         }
     }
     rule.target(&scope.ok_or("UNBOUNDED_PATH_SCOPE")?)
-}
-
-fn native(
-    template: &asc_policy_types::authoring::PolicyTemplate,
-) -> Result<FilePlan, TranslationRejection> {
-    let mut patterns = BTreeMap::new();
-    let mut targets = Vec::new();
-    for (index, rule) in template.rules.iter().enumerate() {
-        let reject = |code| rejection(&format!("RULE_{index}_{code}"));
-        if rule.effect != Effect::Block
-            || rule.category != Category::File
-            || rule.previous.is_some()
-        {
-            return Err(reject("UNSUPPORTED_RULE"));
-        }
-        let operation = match &rule.condition {
-            None if rule.action == Action::Read => "read",
-            Some(Condition::Operation(Comparison::Eq(Value::Scalar(Scalar::String(
-                operation,
-            ))))) => operation,
-            _ => return Err(reject("UNSUPPORTED_CONDITION")),
-        };
-        if !matches!(
-            (rule.action, operation),
-            (Action::Read, "read") | (Action::Write, "write" | "delete")
-        ) {
-            return Err(reject("UNSUPPORTED_ACTION"));
-        }
-        let Resource::File { path } = &rule.target else {
-            return Err(reject("UNSUPPORTED_TARGET"));
-        };
-        if path.contains(['[', ']', '{', '}', '\\']) {
-            return Err(reject("UNSUPPORTED_PATH"));
-        }
-        let (path, kind) = if let Some(prefix) = path.strip_suffix("/**")
-            && !prefix.contains(['*', '?'])
-        {
-            (
-                if prefix.is_empty() { "/" } else { prefix }.to_owned(),
-                FileProtectionTargetKind::DirectoryTree,
-            )
-        } else if path.contains(['*', '?']) {
-            let pattern = FilePathPattern {
-                syntax: PatternSyntax::Glob,
-                value: path.clone(),
-                negated: false,
-            };
-            if !is_supported_pattern(&pattern) {
-                return Err(reject("UNSUPPORTED_PATH"));
-            }
-            let root = scan_directory(&pattern.value)
-                .ok_or_else(|| reject("UNSUPPORTED_PATH"))?
-                .to_owned();
-            patterns.insert(targets.len(), vec![pattern]);
-            (root, FileProtectionTargetKind::DirectoryTree)
-        } else {
-            (path.clone(), FileProtectionTargetKind::ExactFile)
-        };
-        if !is_supported_path(&path) {
-            return Err(reject("UNSUPPORTED_PATH"));
-        }
-        targets.push(FileProtectionTarget {
-            path,
-            kind,
-            protections: FileProtections {
-                read: operation == "read",
-                ordinary_write: operation == "write",
-                delete: operation == "delete",
-            },
-            exclusions: vec![],
-        });
-    }
-    if targets.is_empty() || targets.len() > 64 {
-        return Err(rejection("UNSUPPORTED_TARGET_COUNT"));
-    }
-    Ok((
-        FileProtectionPolicy {
-            version: FILE_PROTECTION_POLICY_VERSION,
-            topology_mode: FileProtectionTopologyMode::StaticAtApply,
-            targets,
-        },
-        patterns,
-    ))
 }
 
 fn rejection(code: &str) -> TranslationRejection {

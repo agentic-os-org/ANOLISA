@@ -26,7 +26,7 @@ agent-sec-cli --socket "$SOCKET" policy list
 ## Lua-LSM file backend
 
 An administrator can select `AGENT_SEC_FILE_BACKEND=lua-lsm` for newly deployed
-file Bindings. The default remains `agentsight`; saved deployments keep their
+file Bindings. Lua-LSM accepts only Cedar policies. The default remains `agentsight`; saved deployments keep their
 route. This backend requires a compatible Lua-LSM kernel and effective
 `CAP_MAC_ADMIN` in the initial user
 namespace and writable securityfs. Native Translator/Client enforcement tests for the earlier inode-label template
@@ -38,6 +38,14 @@ module removal before downgrading the daemon. See
 the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README.md).
 
 Lua-LSM matches the path used for each operation. A rule can cover files created after deployment. Existing hard links do not block deployment. Access through a hard-link name outside the protected paths is currently outside the guarantee.
+
+Deployment returns `LUA_LSM_OVERLAYFS_UNSUPPORTED` if the target is on overlayfs or
+a protected directory tree contains an overlayfs mount. Empty directories are checked
+too. For a target that does not yet exist, the nearest existing ancestor determines the mount.
+
+Keep the process tree stable during first deployment when all descendants must be protected.
+If an unmarked descendant is reparented outside the tree before the client discovers it,
+the Binding can reach `Ready` while that descendant remains unprotected.
 
 Lua modules survive daemon stops. When discovery observes a root process exit or
 an administrator deletes its Scope, the daemon schedules Binding cleanup. Any
@@ -513,7 +521,7 @@ File read/write/exec rules, logical conditions, history predicates, and block/al
 require_confirmation decisions can be saved when valid. Network and AgentHook target
 formats are not yet defined and cannot be saved.
 
-For native JSON, the PEP Translator supports only block + file/write + operation=delete
+For native SecCore JSON, the AgentSight Translator supports only block + file/write + operation=delete
 rules without history. Unsupported rules fail the entire Binding with a bounded code
 such as `RULE_1_UNSUPPORTED_EFFECT`; no supported subset is sent. Quotes, backslashes
 and control characters in `because` are rejected during translation because the target

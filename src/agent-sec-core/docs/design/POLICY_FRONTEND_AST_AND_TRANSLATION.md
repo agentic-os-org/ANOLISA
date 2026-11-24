@@ -421,8 +421,8 @@ the following boundaries when adding a file condition or a backend.
 | Can this host install the plan now? | The Deployment Client checks host prerequisites and reports the deployment result. For Lua-LSM, a missing target can be deployed, while a conflicting existing memory mapping blocks deployment. |
 
 For example, Cedar `resource.path like "/work/*.txt"` matches both `/work/a.txt`
-and `/work/sub/a.txt`. Native SecCore `/work/*.txt` matches only the first path.
-The Lua-LSM Translator preserves the Cedar predicate for the kernel module.
+and `/work/sub/a.txt`. The Lua-LSM Translator accepts only Cedar policies and
+preserves the predicate for the kernel module.
 The AgentSight Translator currently rejects this general pattern. The mixed
 Binding test uses the same policy with both file backends and also checks the
 Gateway projection. [Backend selection test](../../v2/apps/asc-daemon/src/reconciliation/mixed_tests.rs)
