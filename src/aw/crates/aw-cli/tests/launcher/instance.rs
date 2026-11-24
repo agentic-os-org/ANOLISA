@@ -1,7 +1,7 @@
 //! Public instance commands retain native adoption and idle-update checks.
 
 use super::super::{
-    attachment::{action, native, success},
+    attachment::{action, native, send_action, success},
     support::{Fixture, Service},
 };
 use serde_json::json;
@@ -69,11 +69,7 @@ fn qoder_input_policy(delayed: bool) {
     detach.args(["disconnect", "--agent", "qoder", "--pid", &pid.to_string()]);
     success(fixture.run(detach));
     assert_eq!(service.status()["bindings"], 0);
-    fs::write(
-        fixture.root.join("attach-command-3.json"),
-        br#"{"action":"stop"}"#,
-    )
-    .unwrap();
+    send_action(&fixture.root, 3, "stop");
 }
 
 #[test]

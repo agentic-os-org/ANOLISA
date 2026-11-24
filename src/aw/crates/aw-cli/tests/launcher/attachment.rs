@@ -93,14 +93,15 @@ pub(super) fn install_entrypoint(
     fixture.run(command)
 }
 
+pub(super) fn send_action(work: &std::path::Path, index: usize, action: &str) {
+    let command = work.join(format!("attach-command-{index}.json"));
+    let temporary = command.with_extension("tmp");
+    fs::write(&temporary, json!({"action": action}).to_string()).unwrap();
+    fs::rename(temporary, command).unwrap();
+}
+
 pub(super) fn action(fixture: &Fixture, index: usize, action: &str) -> Value {
-    let temporary = fixture.root.join("attach-command.tmp");
-    fs::write(&temporary, json!({"action":action}).to_string()).unwrap();
-    fs::rename(
-        temporary,
-        fixture.root.join(format!("attach-command-{index}.json")),
-    )
-    .unwrap();
+    send_action(&fixture.root, index, action);
     wait(&fixture.root.join(format!("attach-result-{index}.json")))
 }
 
