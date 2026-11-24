@@ -12,7 +12,7 @@ use std::{io::Cursor, path::Path, time::Duration};
 fn request(output: bool) -> Value {
     json!({"api_version":VERSION,"method":"invoke","request_id":"pii",
         "operation":if output {"scan_tool_output"} else {"scan_tool_input"},
-        "config_revision":"a".repeat(64),"budget_ms":1000,
+        "config_revision":"a".repeat(64),"budget_ms":5000,
         "allowed_effects":if output {json!(["observe","replace_result"])} else {json!(["observe","block"])},
         "config":{"version":1,"mode":"block","pii":{"input_mode":"block","output_mode":"replace_result"}},
         "event":{"name":if output {"tool.after"} else {"tool.before"},
@@ -63,7 +63,7 @@ fn tool_input_and_output_distinguish_pass_risk_and_backend_error() {
                 req["event"]["tool"]["result_projection"]["text"] = json!("SENSITIVE");
             }
             let response = run(req, &d);
-            assert_eq!(response["status"], "ok");
+            assert_eq!(response["status"], "ok", "{response}");
             assert_eq!(
                 d.argv()[11],
                 if output { "tool_output" } else { "tool_input" }
@@ -150,7 +150,6 @@ fn qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope()
                 "content":"SENSITIVE", "numLines":1, "startLine":1, "totalLines":1},
                 "metadata":if retained_secret {"SENSITIVE other"} else {"retained"}}});
         let mut req = request(true);
-        req["budget_ms"] = json!(5000);
         req["event"]["agent"]["adapter"] = json!("qoder-sdk");
         req["event"]["tool"]["result"] = native["tool_response"].clone();
         req["event"]["tool"]["result_projection"] =
@@ -284,8 +283,6 @@ fn decoded_scans_and_retained_checks_share_one_deadline() {
             req["event"]["tool"]["result"]["content"][0]["text"] = json!("SENSITIVE");
             req["event"]["tool"]["result_projection"]["text"] = json!("SENSITIVE");
         }
-        // Leave startup headroom; budget sharing is checked in the CLI arguments.
-        req["budget_ms"] = json!(5000);
         let response = run(req.clone(), &d);
         assert_eq!(response["status"], "ok", "{response}");
         let scans: Vec<Value> = std::fs::read_to_string(d.0.join("scans.jsonl"))
@@ -311,7 +308,6 @@ const WITHHELD: &str = "Sensitive data detected by AW; content withheld.";
 
 fn mask_request(text: &str) -> Value {
     let mut req = request(true);
-    req["budget_ms"] = json!(5000);
     req["config"]["pii"]["output_mode"] = json!("mask");
     req["event"]["tool"]["result"] = json!(text);
     req["event"]["tool"]["result_projection"]["text"] = json!(text);
