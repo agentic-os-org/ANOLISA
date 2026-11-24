@@ -1,6 +1,7 @@
 //! Project one model-visible text slot and preserve its native envelope on replacement.
 
 use super::{adapter::HookOutput, Exit, Result};
+use crate::completion::codex_result_status;
 use serde_json::{json, Value};
 
 /// Add the bounded evaluation projection to a normalized post-tool callback.
@@ -153,7 +154,10 @@ pub(crate) fn decoded_result(adapter: &str, native: &Value) -> Value {
         && value["content"].as_array().is_some_and(|blocks| {
             blocks.len() == 1 && blocks[0]["type"] == "text" && blocks[0]["text"].is_string()
         })
-        && value["isError"] != true
+        && !matches!(
+            codex_result_status(value, native),
+            Some("error" | "interrupted")
+        )
     {
         return Value::String(value.to_string());
     }
@@ -246,6 +250,8 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
         }
     };
     let status = match adapter {
+        // A replaceable text slot can lack native completion evidence.
+        "codex" => codex_result_status(result(adapter, native), native).unwrap_or("success"),
         "qwenpaw" | "agentscope" => value["state"].as_str()?,
         "openclaw" if openclaw_result_failed(&value) => "error",
         "hermes" => match native["extra"]["status"].as_str()? {

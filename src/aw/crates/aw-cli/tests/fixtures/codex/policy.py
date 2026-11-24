@@ -24,7 +24,7 @@ elif request["method"] == "invoke":
         stream.write(op + "\n")
     if op == "slow":
         time.sleep(5)
-    if mode == "error" and op == "scan":
+    if (mode, op) in (("error", "scan"), ("replace-failure", "record"), ("replace-mcp-failure", "record")):
         sys.exit(1)
     reply["input_digest"] = request["input_digest"]
     reply["effects"] = [{"type": "observe", "reason_code": "seen"}]
@@ -37,6 +37,6 @@ elif request["method"] == "invoke":
         reply["effects"] = [{"type": "block", "reason_code": "security_denied"}]
     elif op == "retry" and mode == "retry":
         reply["effects"] = [{"type": "block", "reason_code": "tokenless_retry", "text": "Retry with rtk candidate"}]
-    elif op == "record" and mode == "replace":
+    elif op == "record" and mode in ("replace", "replace-mcp"):
         reply["effects"] = [{"type": "replace_result", "text": "AW_REDACTED_RESULT"}]
 print(json.dumps(reply))
