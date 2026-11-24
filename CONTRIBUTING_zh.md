@@ -255,6 +255,46 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 
 完整的生命周期矩阵与自动化规则见 [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md)（[中文评审参考](specs/issue-claim-and-pr-lifecycle_zh.md)）。
 
+### 维护者协助处理
+
+有些问题与 PR 的实现无关，却会阻塞合入。为避免作者为此返工，维护者可能直接处理
+以下问题，不改变 PR 的实现。
+
+- 因已知不稳定用例或临时故障失败的 CI，在同一 PR 版本中每个失败的 workflow
+  重跑一次。
+- PR 标题格式错误或模板章节缺失，修正格式或补回章节标题与占位；验证结果、风险判断
+  和关联 Issue 仍由作者填写。
+- 无需在行为、顺序或优先级之间做选择即可保留双方意图的合并冲突（如内容相同、
+  仅格式不同，或在同一位置各自新增互不依赖的内容），rebase PR 分支解决。
+
+修改 PR 分支需要该分支的写权限；个人 fork 的作者可勾选
+**Allow edits from maintainers** 授予。如果 fork 中包含 GitHub Actions
+workflows，GitHub 会把该选项显示为 **Allow edits and access to secrets by
+maintainers**，因为维护者随后可修改 fork 的 workflows。如果不希望他人修改
+分支，可以不勾选，或随时在 PR 页面取消。
+rebase 会改变提交 hash，原有的加密签名也会失效，但不改变提交作者、提交说明和
+`Signed-off-by`。若要求加密签名，改写后的提交须重新签名。维护者会在 PR 中记录
+更新前后的分支 head。继续修改前，请先切换到本地 PR 分支，另行保存未提交的工作
+（包括未跟踪文件），再备份本地分支；备份分支只保留已有提交。以下命令作用于当前
+检出的分支。切换并备份后，请确认旧 head 是本地 `HEAD` 的祖先。若检查失败，说明
+本地历史已分叉：命令链会在 rebase 前停止，请保留备份，并参考
+[Git 的上游 rebase 恢复说明](https://git-scm.com/docs/git-rebase#_recovering_from_upstream_rebase)
+先确认要重放哪些提交。检查通过后，将旧 head 之后的本地提交（如有）重放到
+新 head：
+
+```bash
+git checkout <PR 分支> &&
+git fetch origin &&
+git branch <备份分支名> &&
+git merge-base --is-ancestor <旧 head> HEAD &&
+git -c rebase.updateRefs=false rebase --onto <新 head> <旧 head>
+```
+
+`rebase.updateRefs=false` 保证备份分支仍指向原提交。
+
+维护者会在 PR 中说明处理内容。CI 重跑后仍失败、冲突涉及实现选择，或无法修改 PR
+分支时，由作者处理。
+
 ## 文档同步
 
 按[文档规范 §5 的 PR 文档更新规则](specs/documentation-standard.md#5-pr-documentation-update-rules)
