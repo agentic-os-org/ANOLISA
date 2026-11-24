@@ -78,12 +78,16 @@ def authorized(decision: str = "allow") -> dict[str, Any]:
 
 @pytest.mark.parametrize("decision", ["allow", "ask", "block"])
 @pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("preset", [False, True])
 def test_candidate_uses_same_command_cwd_and_private_cleaned_file(
     dynamic: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
     decision: str,
     configured: bool,
+    preset: bool,
 ) -> None:
+    if not preset:
+        monkeypatch.delenv(bridge.RUNTIME_ENV)
     calls, paths = [], []
     mode_file = Path(dynamic["cwd"]) / "landlock.conf"
     if configured:
@@ -106,7 +110,7 @@ def test_candidate_uses_same_command_cwd_and_private_cleaned_file(
         paths.append(path)
         assert path.read_text() == ""
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert "--runtime-permissions" in args
+        assert ("--runtime-permissions" in args) == preset
         if configured:
             assert args[args.index("--landlock-config") + 1] == str(mode_file)
         else:
@@ -276,7 +280,12 @@ def test_guard_proposes_the_original_command_including_sudo(
 
 @pytest.mark.parametrize(
     "source,preset",
-    [("unknown", "/runtime"), ("command", "relative"), ("", "/runtime")],
+    [
+        ("unknown", "/runtime"),
+        ("command", ""),
+        ("command", "relative"),
+        ("", "/runtime"),
+    ],
 )
 def test_invalid_source_or_preset_blocks_without_fixed_fallback(
     dynamic: dict[str, str], monkeypatch: pytest.MonkeyPatch, source: str, preset: str

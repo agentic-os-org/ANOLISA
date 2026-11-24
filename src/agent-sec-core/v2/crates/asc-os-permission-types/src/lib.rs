@@ -98,6 +98,9 @@ pub enum FileRight {
 pub struct ExecutionPermissions {
     /// Paths whose visible mounts must reject direct execution.
     pub deny_paths: Vec<String>,
+    /// Canonical launch directory to create in the sandbox without binding its host contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_entry: Option<String>,
 }
 
 /// IP network mode for the entire process tree.
@@ -194,6 +197,19 @@ impl Validate for OsPermissionSet {
         for path in &self.execution.deny_paths {
             validate_os_path(path)?;
         }
+        if let Some(path) = &self.execution.cwd_entry {
+            validate_os_path(path)?;
+            if self.filesystem.rules.iter().any(|rule| {
+                rule.effect == RuleEffect::Deny
+                    && rule.rights.contains(&FileRight::Read)
+                    && rule.covers_path(path, true)
+            }) {
+                return Err(ValidationError::new(
+                    "cwd_entry",
+                    format!("read denied at {path}"),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -233,6 +249,21 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cwd_entry_respects_read_denies_and_their_subtree_exclusions() {
+        let mut permissions: OsPermissionSet = serde_json::from_value(serde_json::json!({
+            "version": 1, "filesystem": {"default": "deny", "rules": [
+                {"effect":"deny", "path":"/work", "rights":["read"], "excluded_paths":["/work/public"]},
+                {"effect":"deny", "path":"/work/public", "rights":["write"]}
+            ]}, "execution":{"deny_paths":[], "cwd_entry":"/work/private"}, "network":{"mode":"off"}
+        })).unwrap();
+        let error = permissions.validate().unwrap_err();
+        assert_eq!(error.path, "cwd_entry");
+        assert!(error.message.contains("/work/private"));
+        permissions.execution.cwd_entry = Some("/work/public/project".into());
+        permissions.validate().unwrap();
     }
 
     #[test]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import shlex
 import shutil
@@ -17,7 +16,6 @@ import intent
 import sandbox
 import sight
 from support.common import (
-    FIXTURES,
     banner,
     check_host,
     checking,
@@ -59,25 +57,7 @@ STARTUP_SECONDS = 15
 CASE_TIMEOUT_SECONDS = 300
 # Let the TUI return to idle before typing the next task.
 CASE_GAP_SECONDS = 2
-RUNTIME_PRESET = FIXTURES / "runtime.cedar"
-# 固定已通过真实 Cedar 投影测试的自测预设；不接受未验证的额外授权。
-RUNTIME_PRESET_SHA256 = (
-    "8da33cc9aaec72b68f3c5c18719bba67061c9f92b31d56a7acf8965c16b768ef"
-)
 LOGIN_ENV = {"PATH": os.defpath, "LC_ALL": "C.UTF-8"}
-
-
-def runtime_preset(path: Path) -> bytes:
-    require(
-        path.is_absolute() and path.is_file(),
-        f"Missing absolute runtime preset: {path}",
-    )
-    data = path.read_bytes()
-    require(
-        hashlib.sha256(data).hexdigest() == RUNTIME_PRESET_SHA256,
-        f"Invalid self-test runtime preset: {path}; restore fixtures/runtime.cedar",
-    )
-    return data
 
 
 def account_command(user: str, *args: str) -> list[str]:
@@ -101,12 +81,6 @@ def preflight(user):
     sandbox.preflight()
     sight.preflight()
     section("cosh 运行环境预检")
-    with checking("command 模式的固定 Cedar 运行时预设", progress=False):
-        runtime_preset(RUNTIME_PRESET)
-        print(
-            f"  [INFO] runtime preset={RUNTIME_PRESET}；正式运行复制到普通账号工作区。",
-            flush=True,
-        )
     for cmd in ("runuser", "pgrep"):
         with checking(f"系统工具：{cmd}", progress=False):
             executable = shutil.which(cmd)
@@ -131,10 +105,7 @@ def preflight(user):
     return account
 
 
-def start_cosh(
-    user: str, row: Path, session: ExitStack, socket: str, preset: Path
-) -> int:
-    runtime_preset(preset)
+def start_cosh(user: str, row: Path, session: ExitStack, socket: str) -> int:
     tmux = ["tmux", "-L", socket, "-f", "/dev/null"]
 
     def stop() -> None:
@@ -151,11 +122,12 @@ def start_cosh(
     session.callback(stop)
     env = [
         "env",
+        "-u",
+        "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS",
         "COSH_SHELL_APPROVAL_MODE=trust",
         "CODE_SCANNER_HOOK_ENABLED=false",
         "AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1",
         "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command",
-        f"AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS={preset}",
         "LC_ALL=C.UTF-8",
     ]
     result = subprocess.check_output(
@@ -214,15 +186,7 @@ def exercise(args, account, report: Path, cleanup: ExitStack) -> None:
     """Runs the cosh scenarios that need no manual approval."""
     row = create_workspace(cleanup)
     previous = fixture(row, account)
-    preset = row / "home/runtime.cedar"
-    preset.write_bytes(runtime_preset(RUNTIME_PRESET))
-    preset.chmod(0o444)
     os.chown(row, account.pw_uid, account.pw_gid)
-    require(
-        fixture_reader(row, account)("home/runtime.cedar")
-        == runtime_preset(RUNTIME_PRESET),
-        "Ordinary account cannot read the runtime preset",
-    )
     draft = intent.generate_policy(row, report)
     section("策略发布与文件保护 Scope")
     policy = publish(draft, report.name, cleanup)
@@ -233,7 +197,7 @@ def exercise(args, account, report: Path, cleanup: ExitStack) -> None:
     section("cosh 会话与 Binding")
     with ExitStack() as session:
         with checking("cosh 会话启动"):
-            pid = start_cosh(args.user, row, session, report.name, preset)
+            pid = start_cosh(args.user, row, session, report.name)
         binding = sight.ready(scope, policy, pid)
         print(
             f"  READY cosh PID {pid}, binding {binding}；逐例发送任务并等待执行证据。",

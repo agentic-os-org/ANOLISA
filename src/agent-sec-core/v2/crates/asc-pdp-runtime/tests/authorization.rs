@@ -203,6 +203,57 @@ fn effective_set_matches_agent_type_and_preserves_global_forbid_precedence() {
 }
 
 #[test]
+fn cwd_entry_gates_launch_on_directory_read_without_granting_its_tree() {
+    let mut input = request();
+    input.context.requested_permissions.execution.cwd_entry = Some("/work".into());
+    input
+        .context
+        .requested_permissions
+        .filesystem
+        .rules
+        .retain(|rule| rule.path != "/work");
+
+    let gate = r#"@advice("{\"verdict\":\"escalate\",\"message\":\"Enter workspace\"}")
+permit(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work" };"#;
+    let decision = PdpRuntime::from_policy_set(snapshot(gate))
+        .unwrap()
+        .evaluate(&input, 100)
+        .unwrap();
+    assert_eq!(
+        decision.verdict,
+        DecisionVerdict::StepUp,
+        "{}",
+        decision.reason
+    );
+    assert_eq!(
+        decision.approval_requirements,
+        vec![ApprovalRequirement {
+            target: ApprovalTarget::Filesystem {
+                path: "/work".into(),
+                right: FileRight::Read,
+                excluded_paths: vec![],
+            },
+            message: Some("Enter workspace".into()),
+        }]
+    );
+    assert_eq!(
+        decision.effective_permissions.as_ref(),
+        Some(&input.context.requested_permissions)
+    );
+
+    let forbid = r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work" };"#;
+    let denied = PdpRuntime::from_policy_set(snapshot(forbid))
+        .unwrap()
+        .evaluate(&input, 100)
+        .unwrap();
+    assert_eq!(denied.verdict, DecisionVerdict::Deny);
+    assert!(denied.reason.contains("/work"), "{}", denied.reason);
+    assert!(denied.effective_permissions.is_none());
+}
+
+#[test]
 fn invocation_advice_uses_the_requested_working_directory() {
     let gate = r#"@advice("{\"verdict\":\"escalate\",\"message\":\"Confirm this launch\"}")
 permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource)

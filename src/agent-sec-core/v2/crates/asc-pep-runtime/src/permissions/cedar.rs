@@ -118,7 +118,7 @@ pub(super) fn bind(
                 )?;
                 if rules_allow(&permissions.filesystem.rules, resolved, FileRight::Write) {
                     return Err(unsupported(format!(
-                        "permission alias has a writable ancestor: {path}"
+                        "permission alias has a writable ancestor: {path} (ancestor {resolved})"
                     ))
                     .into());
                 }
@@ -254,10 +254,20 @@ fn project_parsed(
     let mut readable = BTreeSet::new();
     let mut writable = BTreeSet::new();
     for path in ordered {
-        let (access, mut forbidden) = evaluator.project_access(path, &programs, &create_parents)?;
+        let (mut access, mut forbidden) =
+            evaluator.project_access(path, &programs, &create_parents)?;
         let (children, child_forbidden) =
             evaluator.project_access(&probe(path, &paths)?, &programs, &create_parents)?;
-        if access != children && !is_file(path, facts)? {
+        if path == &launch.cwd
+            && access.read
+            && !access.write
+            && !children.read
+            && !rules_allow(&permissions.filesystem.rules, path, FileRight::Read)
+        {
+            // Bind only separately authorized children into a fresh working directory.
+            permissions.execution.cwd_entry = Some(path.clone());
+            access.read = false;
+        } else if access != children && !is_file(path, facts)? {
             return Err(unsupported(format!(
                 "point-only or descendants-only directory permissions at {path}"
             )));
@@ -522,7 +532,9 @@ fn is_missing(path: &str) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(unsupported(format!(
+            "cannot inspect permission path {path}: {error}"
+        ))),
     }
 }
 

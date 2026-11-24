@@ -36,6 +36,8 @@ from all_shell_host import (
 )
 
 CASES = (
+    "baseline-agent",
+    "baseline-tty",
     "allowed",
     "task-deny",
     "preset-forbid",
@@ -51,7 +53,7 @@ CASES = (
     "tty-deny",
 )
 FAULTS = {"intent-malformed", "intent-clarification", "intent-timeout"}
-TTY_CASES = {"tty-allow", "tty-deny", "unknown-script"}
+TTY_CASES = {"tty-allow", "tty-deny", "unknown-script", "baseline-tty"}
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -410,11 +412,11 @@ class Harness:
             "AGENT_SEC_DAEMON_SOCKET": str(self.tap),
             "AGENT_SEC_COSH_SANDBOX_ALL_SHELL": "1",
             "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE": "command",
-            "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS": str(self.runtime),
         }
         if case == "fixed":
             env.pop("AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE")
-            env.pop("AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS")
+        elif case not in {"baseline-agent", "baseline-tty", "empty-candidate"}:
+            env["AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS"] = str(self.runtime)
         if case in FAULTS:
             directory = home / "bin"
             directory.mkdir()
@@ -437,6 +439,12 @@ class Harness:
         return env
 
     def payload(self, case: str) -> str:
+        if case in {"baseline-agent", "baseline-tty"}:
+            # This glob exercises the intent service's deterministic file-operand path.
+            inputs = self.work / "inputs"
+            inputs.mkdir(exist_ok=True)
+            (inputs / "input.txt").write_text("once\n")
+            return "cat inputs/*.txt > marker"
         command = "printf 'once\\n' >> " + shlex.quote(str(self.marker))
         if case == "empty-candidate":
             return "true"
@@ -668,7 +676,11 @@ class Harness:
             "duration_seconds": round(time.monotonic() - start, 3),
             "marker": self.marker.read_text(),
             "pap_sources": json.loads(json.dumps(self.policies)),
-            "runtime_preset": self.runtime.read_text() if case != "fixed" else None,
+            "runtime_preset": (
+                self.runtime.read_text()
+                if "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS" in env
+                else None
+            ),
             "candidate": proposals[0] if proposals else None,
             "authorization": decisions[0] if decisions else None,
             "claim_phases": [

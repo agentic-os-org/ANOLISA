@@ -379,6 +379,14 @@ impl Validate for OsAuthorizationRequest {
         }
         self.context.agent.validate()?;
         self.context.launch.validate()?;
+        if let Some(path) = &self.context.requested_permissions.execution.cwd_entry
+            && path != &self.context.launch.cwd
+        {
+            return Err(ValidationError::new(
+                "cwd_entry",
+                format!("not the launch cwd: {path}"),
+            ));
+        }
         self.context.requested_permissions.validate()
     }
 }

@@ -193,9 +193,9 @@ back to a local model.
   `network.use`. Modification requests carry `WriteOperation` values
   `write/create/delete/rename/setattr`; a delete prohibition is not immutability.
   `file.read` means content reading, not listing names or reading metadata.
-- Task candidates contain only the validated model rules. Configure shell startup and dependency
-  access for a command-mode sandbox hook in its deployment preset using
-  `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`.
+- Task candidates contain the validated model rules. The command-mode sandbox hook
+  derives a read-only shell launch baseline. Set `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`
+  to an absolute Cedar preset path when additional dependencies are required.
 - Paths use `resource.path` and `context.input.program/cwd`, not File UIDs.
   The frontend accepts canonical absolute literals with `==`/`!=`, or `like`
   patterns whose only wildcard is the trailing directory `/*`. Dynamic and

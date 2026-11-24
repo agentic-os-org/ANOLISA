@@ -23,7 +23,7 @@ cd src/agent-sec-core/tests/e2e/intent-policy-enforcement/
 ```text
 intent-policy-enforcement/
 ├── intent.py  sandbox.py  sight.py  gateway.py  full.py
-├── fixtures/            # task.txt、task.cedar、gateway.cedar.in、runtime.cedar
+├── fixtures/            # task.txt、task.cedar、gateway.cedar.in
 ├── support/             # 共享实现
 └── checks/              # 无需服务的断言回归
 ```
@@ -113,11 +113,11 @@ python3 gateway.py --user demo
 
 ## 五、全流程：通过 cosh 验证意图、Policy、Sandbox 与 Sight
 
-**准备。** 以上 daemon、Sandbox、AgentSight 依赖与 `tmux`、util-linux；普通账号已配置 cosh 模型和 agent-sec sandbox 扩展；主机没有其他 cosh 进程。保持随套件提交的 [runtime.cedar](fixtures/runtime.cedar) 原样存在：`--check` 校验其绝对路径及固定摘要，缺失或修改时直接失败。无需额外导出运行时权限变量。
+**准备。** 以上 daemon、Sandbox、AgentSight 依赖与 `tmux`、util-linux；普通账号已配置 cosh 模型和 agent-sec sandbox 扩展；主机没有其他 cosh 进程。全流程使用 command 模式，启动 cosh 时清除可选的 `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`。
 
-正式运行将该预设复制为普通账号可读的 `/run/anolisa-task-policy/home/runtime.cedar`，并在 `runuser` 登录 shell 内显式给 cosh 设置 `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` 和 `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`。预设申请读取系统运行库和工作目录、启动 Bash；工作目录的七个场景子目录从这条读取授权中排除，读脚本和写日志由命令候选单独申请。
+沙箱根据本次 Bash 调用申请系统运行目录的读取和进入工作目录的权限。脚本与输出日志由命令候选单独申请。fixture 中的两份 Cedar 分别用于任务策略与 Gateway 凭据策略。
 
-Linux 上可从 `src/agent-sec-core/v2` 运行以下回归。它读入本套件实际的 `runtime.cedar`，合并仅申请构建脚本和输出日志的候选，再用案例 1 的 PDP 测试策略断言启动判定为 `ALLOW`。该测试覆盖权限投影和 PDP 判定；实际 cosh、daemon 和 Sandbox 的联调由下面的 `full.py` 验证。[回归测试源码](../../../v2/crates/asc-pep-runtime/tests/permission_input.rs)
+下面的 Linux 回归使用真实临时工作目录和 Case 1 的 PDP 测试策略，核对软链、空候选、单文件读写与 cwd 的隔离。设置 `ASC_SANDBOX_INTEGRATION=1` 和 `ASC_SANDBOX_HELPER` 后还会运行静态 helper，验证直接启动 shebang 脚本与越界写入结果。[回归测试源码](../../../v2/crates/asc-pep-runtime/tests/permission_input.rs)
 
 ```bash
 cargo test --locked -p asc-pep-runtime --test permission_input task_policy_runtime_allows_narrow_case_one_launch -- --exact

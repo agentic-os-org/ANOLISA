@@ -577,10 +577,18 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
     }
     let program = open_object(&spec.launch.resolved_program, &spec.path_facts)?;
     let cwd = open_object(&spec.launch.cwd, &spec.path_facts)?;
+    let entry_only = spec.permissions.execution.cwd_entry.as_ref() == Some(&cwd.path)
+        && !access(spec, &objects, &cwd.canonical).0;
+    if entry_only && (reserved(&cwd.canonical) || Path::new(&cwd.path) != cwd.canonical) {
+        return Err(unsupported(format!(
+            "invalid sandbox cwd entry: {}",
+            cwd.path
+        )));
+    }
     if program.directory
         || !cwd.directory
         || !access(spec, &objects, &program.canonical).0
-        || !access(spec, &objects, &cwd.canonical).0
+        || (!entry_only && !access(spec, &objects, &cwd.canonical).0)
     {
         return Err(unsupported(
             "program and cwd must have explicit readable permissions",
@@ -600,7 +608,7 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
                 && access(spec, &objects, &object.canonical).0
         })
         .map(|object| object.path.clone());
-    for object in [program, cwd] {
+    for object in std::iter::once(program).chain((!entry_only).then_some(cwd)) {
         let write = access(spec, &objects, &object.canonical).1;
         mounts.insert(
             object.path.clone(),
@@ -906,6 +914,12 @@ fn bwrap_command(
         mounts: mount_checks(&prepared)?,
     };
     let mut preserved = Vec::new();
+    if let Some(path) = &spec.permissions.execution.cwd_entry
+        && path != "/"
+    {
+        // Create it on the private root before installing any host mounts.
+        command.args(["--dir", path]);
+    }
     append_mounts(
         &mut command,
         prepared.mounts,
@@ -1652,6 +1666,57 @@ mod tests {
             }))
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn private_cwd_is_created_before_binds_without_mounting_the_host_directory() {
+        let (_dir, mut spec) = fixture();
+        spec.permissions.filesystem.rules[0].path = spec.launch.resolved_program.clone();
+        spec.permissions.filesystem.rules[0].rights = vec![FileRight::Read];
+        spec.permissions.execution.cwd_entry = Some(spec.launch.cwd.clone());
+        let plan = prepare(&spec).unwrap();
+        assert!(
+            plan.mounts
+                .iter()
+                .all(|mount| mount.path != spec.launch.cwd)
+        );
+        let (command, _files) = bwrap_command(
+            &spec,
+            &tempfile::tempfile().unwrap(),
+            tempfile::tempfile().unwrap(),
+            plan,
+            "bwrap",
+            false,
+            None,
+        )
+        .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        let cwd = args
+            .windows(2)
+            .position(|pair| pair[0] == "--dir" && pair[1] == spec.launch.cwd.as_str())
+            .unwrap();
+        let bind = args.iter().position(|arg| *arg == "--ro-bind-fd").unwrap();
+        assert!(cwd < bind);
+    }
+
+    #[test]
+    fn private_cwd_rejects_reserved_paths_and_directory_aliases() {
+        let (dir, mut spec) = fixture();
+        spec.permissions.filesystem.rules[0].path = spec.launch.resolved_program.clone();
+        let alias = dir.path().join("alias");
+        symlink(dir.path(), &alias).unwrap();
+        for path in [alias.as_path(), Path::new("/proc")] {
+            let mut record = fact(path);
+            record.path = path.to_str().unwrap().into();
+            spec.launch.cwd.clone_from(&record.path);
+            spec.permissions.execution.cwd_entry = Some(record.path.clone());
+            spec.path_facts.push(record);
+            let error = prepare(&spec).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("invalid sandbox cwd entry: {}", path.display())),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -132,7 +132,8 @@ def fixture(row: Path, account) -> bytes:
         "out/github-user.json": b"{}",
         "out/http-status": b"",
         "scripts/build-with-setup.sh": (
-            f"#!/usr/bin/env bash\nprintf 'build ok\\n'\nprintf 'config-change\\n' >> {row}/home/.zshrc\n"
+            "#!/usr/bin/env bash\nprintf 'build ok\\n'\n"
+            f"mkdir -p {row}/home && printf 'config-change\\n' >> {row}/home/.zshrc\n"
             'echo "zshrc-update rc=$?" >&2\n'
         ).encode(),
     }

@@ -112,7 +112,9 @@ of every Cedar condition:
 - File reads and writes use literal paths, directory-prefix `/*` patterns and
   Boolean combinations. Include both directory equality and its child pattern to
   authorize a complete directory tree. Exact file grants are checked against the
-  local object; point-only or descendants-only directory grants are rejected.
+  local object. A read of the cwd alone can create a private directory at its
+  canonical path with only separately authorized mounts visible. Other directory
+  permissions that differ between the directory and its children are rejected.
 - Any allowed write operation (`write`, `create`, `delete`, `rename`, `setattr`)
   maps to `write`, including reads and deletion. A delete-only forbid therefore
   does not remove a write grant when another mutation remains allowed.
@@ -195,6 +197,7 @@ it does not produce a bound execution plan.
 | `filesystem.rules[].rights` | A nonempty list of distinct `read` and/or `write` rights. Write includes read, creation, deletion and rename; denying read also prevents write. |
 | `filesystem.rules[].excluded_paths` | Optional, deny rules only: existing canonical descendant directories outside this rule's scope. They do not grant access or cancel other denies. |
 | `execution.deny_paths` | Mount-level noexec for named files or directory subtrees, including their visible submounts. |
+| `execution.cwd_entry` | Optional canonical launch cwd. The Linux helper can create this directory on the private root and mount only separately authorized files there. Requires matching CLI, daemon and helper builds. |
 | `network.mode` | `off` blocks IP networking; `full` uses host networking without destination, port or direction filters. |
 
 Paths must be existing, normalized absolute paths, without wildcards, dot
@@ -568,12 +571,11 @@ removed; administrator defaults now belong in the installed template.
 
 Use matching CLI/daemon builds that support `intent.propose_command`, with the
 daemon's intent model configured as described in the [Policy guide](policy-cli.md).
-Before starting Cosh, select the dynamic source and an explicit Cedar runtime preset:
+Before starting Cosh, select the dynamic source:
 
 ```bash
 export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
 export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
-export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
 cosh
 ```
 
@@ -582,16 +584,13 @@ block authorization. These settings only apply when all-shell authorization is e
 they do not enable it themselves. The removed `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`
 variable has no effect in either mode.
 
-Command mode uses the explicit runtime preset **instead of** the installed fixed
-JSON template. The template's cwd/tmp writes and Git protections are not inherited.
-Declare any required restrictions in the Cedar preset or applicable PAP policies.
-The preset must be raw Cedar or its source envelope, use the candidate's schema,
-and provide the known shell/loader/library access and initial `/bin/bash -c`
-invocation permit needed by this workload. Directory grants cover descendants;
-a whole-project grant already requests its contents even with an empty candidate.
-Do not add speculative writes or network access for unknown script behavior.
-An OS permission JSON preset is rejected because combining it would lose Cedar
-invocation and network restrictions.
+For a Cedar candidate, Hook prepare requests the initial Bash invocation, read
+access to the system binary and library directories and loader cache, and the cwd
+entry. The baseline adds zero write or network rights. Workspace files and output
+paths require their own grants. For additional dependencies, set
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` to an absolute path to raw Cedar or
+a Cedar source envelope with the candidate's schema. Explicit directory grants
+cover descendants. Every requested permission is subject to PDP evaluation.
 
 The Hook sends the exact original command, including `sudo`, and canonical cwd
 to `intent propose-command --format json`, before sandbox wrapping. It sends no
@@ -604,11 +603,10 @@ constrain execution.
 
 The Hook checks JSON `outcome`, independently of the exit code:
 
-- `candidate`: show `caveats`, combine Cedar with the runtime preset, then reuse
-  conversion, initial invocation validation and path binding. Forbids from either
-  source remain effective.
-- An empty candidate requests no business permissions. Only the explicit runtime
-  preset contributes grants; PDP can deny or narrow them.
+- `candidate`: show `caveats` and combine Cedar with the launch baseline and
+  any supplied preset before conversion, invocation validation and path binding.
+  Explicit forbids remain effective.
+- An empty candidate requests the baseline plus any explicitly configured preset.
 - `needs_clarification`: display the missing information and stop before authorization.
 - Unavailable interfaces, malformed responses, conversion failures and timeouts
   block execution without a fixed-permission or unsandboxed fallback. Unknown
