@@ -1564,6 +1564,10 @@ fn file_deletion_events(
     }
     let policy_revision = match active.binding.request.policy_revision.parse::<u64>() {
         Ok(revision) => revision,
+        Err(_) if active.binding.request.file_protection_policy.is_some() => {
+            // Structured revisions are protocol tags; the raw violation remains available.
+            return None;
+        }
         Err(_) => {
             let message = format!(
                 "policy revision '{}' is not numeric",
@@ -2507,6 +2511,37 @@ mod tests {
         assert!(
             state.runtime_error().is_some(),
             "the dropped case must leave a visible error"
+        );
+    }
+
+    #[test]
+    fn structured_file_protection_without_numeric_revision_preserves_runtime_health() {
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        raw.op = 6;
+        raw.blocked = true;
+        let mut active = active_binding();
+        active.binding.request = structured_policy_request("/tmp/protected-tree");
+        active.binding.request.policy_revision = "agentsight-tree-deny-read-v1".into();
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active, &state);
+
+        let violation = violations
+            .try_recv()
+            .expect("the raw violation must remain available");
+        assert_eq!(violation.policy_revision, "agentsight-tree-deny-read-v1");
+        assert!(
+            evidence.try_iter().next().is_none(),
+            "a structured revision tag cannot produce a numeric audit case"
+        );
+        assert!(
+            state.runtime_error().is_none(),
+            "an auxiliary case conversion must not disable the enforcement control plane"
         );
     }
 
