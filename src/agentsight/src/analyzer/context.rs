@@ -1,10 +1,21 @@
 //! Semantic delivery shares parsed JSON without a full body serialization round trip.
 
 use super::super::result::{AnalysisResult, HttpContext, HttpRecord};
-use super::super::token::{TokenParser, TokenRecord, merge_usage_from_event};
+use super::super::token::{TokenRecord, merge_usage_from_event};
 use super::Analyzer;
 use crate::aggregator::AggregatedResult;
 use serde_json::Value;
+
+fn sse_continuation_bytes(result: &AggregatedResult) -> Option<&[u8]> {
+    match result {
+        AggregatedResult::Abandoned { partial, .. } => sse_continuation_bytes(partial),
+        AggregatedResult::SseComplete(pair) => pair.response.sse_continuation_bytes.as_deref(),
+        AggregatedResult::ResponseOnly { response, .. } => {
+            response.sse_continuation_bytes.as_deref()
+        }
+        _ => None,
+    }
+}
 
 impl Analyzer {
     pub(crate) fn analyze_for_delivery(
@@ -105,18 +116,19 @@ impl Analyzer {
             context.retain_raw = true;
         }
         let timer = crate::runtime_metrics::StageTimer::start("analyzer");
-        let parser = TokenParser::new();
-        let usage =
-            match context.response.as_ref() {
-                Some(Value::Array(events)) => events.iter().fold(None, |usage, event| match parser
-                    .parse_json(event)
-                {
-                    Some(parsed) => merge_usage_from_event(usage, parsed, event),
-                    None => usage,
-                }),
-                Some(value) => parser.parse_json(value),
-                None => None,
-            };
+        let usage = match context.response.as_ref() {
+            Some(Value::Array(events)) => {
+                events
+                    .iter()
+                    .fold(None, |usage, event| match self.token.parse_json(event) {
+                        Some(parsed) => merge_usage_from_event(usage, parsed, event),
+                        None => usage,
+                    })
+            }
+            Some(value) => self.token.parse_json(value),
+            None => None,
+        };
+        let usage = self.merge_continuation_usage(usage, sse_continuation_bytes(result));
         let mut token = usage
             .map(|usage| {
                 TokenRecord::new(
