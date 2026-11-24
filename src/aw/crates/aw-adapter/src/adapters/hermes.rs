@@ -215,12 +215,14 @@ impl Adapter for Hermes {
                 let mut probe = command.clone();
                 probe.program = python.as_os_str().into();
                 let script = r#"import json, sys
+result = sys.argv[-1]
 selector, plugin, names = sys.argv[1], sys.argv[2], json.load(sys.stdin)
 sys.argv = ['hermes', '--profile', selector, 'config', 'show']
 from hermes_cli import main
 from hermes_cli.config import _expand_env_vars
-print(json.dumps([[index for index, name in enumerate(selection)
-    if _expand_env_vars(name) == plugin] for selection in names]))
+with open(result, 'w', encoding='utf-8') as stream:
+    json.dump([[index for index, name in enumerate(selection)
+        if _expand_env_vars(name) == plugin] for selection in names], stream)
 "#;
                 probe.args = python_args(
                     cache.path(),
@@ -232,8 +234,8 @@ print(json.dumps([[index for index, name in enumerate(selection)
                         install::PLUGIN.into(),
                     ],
                 );
-                let output = aw_exec::run(
-                    &probe,
+                let (output, bytes) = adapter::Probe(cancelled).run_python(
+                    probe,
                     &serde_json::to_vec(names)?,
                     aw_exec::Limits {
                         input_bytes: 4 * 1024 * 1024,
@@ -241,12 +243,12 @@ print(json.dumps([[index for index, name in enumerate(selection)
                         stderr_bytes: 4096,
                     },
                     std::time::Instant::now() + Duration::from_secs(30),
-                    cancelled,
+                    aw_exec::CleanupMode::Immediate,
                 )?;
                 if !output.status.success() {
                     return Err("Hermes native plugin selection expansion failed".into());
                 }
-                Ok(serde_json::from_slice(&output.stdout)?)
+                Ok(serde_json::from_slice(&bytes)?)
             },
             |candidate, field, names| {
                 let mut writer = command.clone();
@@ -660,27 +662,25 @@ fn callback_timeout(
     // Importing the native CLI selects the profile and loads its dotenv before
     // the native resolver applies YAML 1.1, environment expansion and limits.
     let script = r#"import json, sys
+result = sys.argv[-1]
 sys.argv = [sys.argv[1], '--profile', sys.argv[2], 'config', 'get', 'plugins.hook_callback_timeout']
 from hermes_cli import main
 from hermes_cli.plugins import _resolve_hook_callback_timeout
-print(json.dumps(_resolve_hook_callback_timeout(), allow_nan=False))
+with open(result, 'w', encoding='utf-8') as stream:
+    json.dump(_resolve_hook_callback_timeout(), stream, allow_nan=False)
 "#;
-    let value = adapter::Probe(cancelled)
-        .version_output_with_timeout(
-            &probe,
-            &python_args(
-                cache,
-                &[
-                    "-P".into(),
-                    "-c".into(),
-                    script.into(),
-                    command.program.as_os_str().into(),
-                    selector.into(),
-                ],
-            ),
-            Duration::from_secs(30),
-        )
-        .map_err(|error| format!("Hermes callback timeout probe failed: {error}"))?;
+    probe.args = python_args(
+        cache,
+        &[
+            "-P".into(),
+            "-c".into(),
+            script.into(),
+            command.program.as_os_str().into(),
+            selector.into(),
+        ],
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let value = adapter::Probe(cancelled).python_text(probe, deadline)?;
     let timeout: f64 = serde_json::from_str(&value)?;
     if !timeout.is_finite() || timeout < 0.0 {
         return Err("Hermes hook_callback_timeout must be nonnegative and finite".into());

@@ -52,9 +52,13 @@ if probe == selected:
     (root / 'probe.pid.tmp').replace(root / 'probe.pid')
     time.sleep(90)
 elif probe == 'dotenv':
-    print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))] for key, value in os.environ.items()]))
+    assert os.environ.get('OTEL_SDK_DISABLED') == 'false'
+    assert os.environ['PYTHONPATH'].endswith('/opentelemetry/instrumentation/auto_instrumentation')
+    Path(sys.argv[-1]).write_text(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))] for key, value in os.environ.items()]))
 elif probe == 'discovery':
-    print(json.dumps([str(Path(__file__).parent), []]))
+    assert os.environ['OTEL_SDK_DISABLED'] == 'true'
+    assert 'PYTHONPATH' not in os.environ
+    Path(sys.argv[-1]).write_text(json.dumps([str(Path(__file__).parent), []]))
 elif writer:
     path = Path(sys.argv[-3]) / 'config.yaml'
     value = json.loads(path.read_text())
@@ -124,6 +128,11 @@ else:
                 .current_dir(&bin)
                 .env("PATH", std::env::join_paths(paths).unwrap())
                 .env("HERMES_PROBE", probe)
+                .env("OTEL_SDK_DISABLED", "false")
+                .env(
+                    "PYTHONPATH",
+                    "/opt/opentelemetry/instrumentation/auto_instrumentation",
+                )
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("TMPDIR", profile.parent().unwrap());

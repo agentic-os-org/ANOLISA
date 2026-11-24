@@ -88,7 +88,18 @@ fn preserved(fixture: &Fixture) {
 #[test]
 fn empty_policy_starts_native_app_and_releases_owned_files() {
     let fixture = Fixture::new();
-    let document = setup(&fixture);
+    let mut document = setup(&fixture);
+    let launcher = fixture.root.join("qwenpaw");
+    fs::write(
+        &launcher,
+        r#"#!/bin/bash
+"/usr/bin/test" "$#" -gt 0 || exit 2
+exec "$(dirname "$0")/fake qwenpaw" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    document["spec"]["agents"]["qwenpaw"]["argv"][0] = json!(launcher);
     let service = Service::start(&fixture, &document);
     let output = fixture.run(launch(&fixture));
     assert!(

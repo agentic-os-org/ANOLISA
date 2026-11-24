@@ -1,13 +1,19 @@
-//! Nonblocking three-pipe exchange with one absolute execution deadline.
+//! Nonblocking stream exchange with one absolute execution deadline.
 
 mod child;
 pub(super) mod foreground;
 
 use self::child::OwnedChild;
-use crate::{CommandSpec, Error, Limits, Output, Stream};
+use crate::{CleanupMode, CommandSpec, Error, Limits, Output, Stream};
 use std::{
+    ffi::CString,
+    fs::{File, OpenOptions},
     io::{self, Read, Write},
-    os::fd::AsRawFd,
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    },
+    path::Path,
     sync::atomic::AtomicBool,
     thread,
     time::{Duration, Instant},
@@ -35,7 +41,7 @@ fn nonblocking(pipe: &impl AsRawFd) -> Result<(), Error> {
 enum Step {
     /// The peer closed the stream.
     Eof,
-    /// Bytes moved; the loop retries without waiting.
+    /// Bytes moved or a signal interrupted the read; retry without waiting.
     Progress,
     /// Nothing was ready.
     Idle,
@@ -58,14 +64,8 @@ fn drain(
             bytes.extend_from_slice(&buffer[..n]);
             Ok(Step::Progress)
         }
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) =>
-        {
-            Ok(Step::Idle)
-        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(Step::Idle),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(Step::Progress),
         Err(error) => Err(io_error("pipe read", error)),
     }
 }
@@ -101,6 +101,7 @@ fn pollfd(fd: &impl AsRawFd, events: libc::c_short) -> libc::pollfd {
 }
 
 struct Captured {
+    result: Vec<u8>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     sent: usize,
@@ -112,6 +113,7 @@ fn exchange(
     limits: Limits,
     deadline: Instant,
     cancelled: &AtomicBool,
+    mut result_pipe: Option<&File>,
 ) -> Result<Captured, Error> {
     let (stdin, mut stdout, mut stderr) = child.take_pipes()?;
     nonblocking(&stdin)?;
@@ -119,6 +121,7 @@ fn exchange(
     nonblocking(&stderr)?;
     let mut stdin = Some(stdin);
     let mut captured = Captured {
+        result: Vec::new(),
         stdout: Vec::new(),
         stderr: Vec::new(),
         sent: 0,
@@ -172,13 +175,30 @@ fn exchange(
             err_done = step == Step::Eof;
             progressed |= step != Step::Idle;
         }
-        if out_done && err_done && child.observe_exit().map_err(|e| io_error("wait", e))? {
+        let exited =
+            out_done && err_done && child.observe_exit().map_err(|e| io_error("wait", e))?;
+        // Read after observing exit so the writer's final bytes cannot be missed.
+        if let Some(pipe) = result_pipe.as_mut() {
+            let step = drain(
+                pipe,
+                &mut captured.result,
+                limits.stdout_bytes,
+                Stream::Result,
+            )?;
+            if step == Step::Progress {
+                continue;
+            }
+        }
+        if exited {
             return Ok(captured);
         }
         if progressed {
             continue;
         }
-        let mut fds = Vec::with_capacity(3);
+        let mut fds = Vec::with_capacity(4);
+        if let Some(pipe) = result_pipe {
+            fds.push(pollfd(pipe, libc::POLLIN));
+        }
         if let Some(pipe) = stdin.as_ref() {
             fds.push(pollfd(pipe, libc::POLLOUT));
         }
@@ -195,14 +215,31 @@ fn exchange(
     }
 }
 
+fn result_fifo(path: &Path) -> Result<File, Error> {
+    let name = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io_error("result pipe path", e.into()))?;
+    // SAFETY: name is NUL-terminated and remains valid across mkfifo.
+    if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+        return Err(io_error("create result pipe", io::Error::last_os_error()));
+    }
+    // O_RDWR prevents premature EOF before a wrapper opens the FIFO.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| io_error("open result pipe", e))
+}
+
 pub(super) fn run(
     command: &CommandSpec,
     input: &[u8],
     limits: Limits,
     deadline: Instant,
     cancelled: &AtomicBool,
-    cooperative: bool,
-) -> Result<Output, Error> {
+    cleanup: CleanupMode,
+    result_path: Option<&Path>,
+) -> Result<(Output, Vec<u8>), Error> {
     crate::check_active(deadline, cancelled)?;
     if input.len() > limits.input_bytes {
         return Err(Error::InputLimit {
@@ -210,9 +247,17 @@ pub(super) fn run(
             actual: input.len(),
         });
     }
+    let result_pipe = result_path.map(result_fifo).transpose()?;
     let mut child = OwnedChild::spawn(command)?;
-    let result = exchange(&mut child, input, limits, deadline, cancelled);
-    let terminated = if cooperative && result.is_err() {
+    let result = exchange(
+        &mut child,
+        input,
+        limits,
+        deadline,
+        cancelled,
+        result_pipe.as_ref(),
+    );
+    let terminated = if cleanup == CleanupMode::Cooperative && result.is_err() {
         child.terminate()
     } else {
         Ok(())
@@ -227,10 +272,13 @@ pub(super) fn run(
         source,
     })?;
     let captured = result?;
-    Ok(Output {
-        status,
-        stdout: captured.stdout,
-        stderr: captured.stderr,
-        input_bytes_written: captured.sent,
-    })
+    Ok((
+        Output {
+            status,
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            input_bytes_written: captured.sent,
+        },
+        captured.result,
+    ))
 }

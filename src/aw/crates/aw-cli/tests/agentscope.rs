@@ -14,7 +14,7 @@ fn setup(fixture: &Fixture, version: &str) -> Value {
     // alone must never be accepted as native readiness or effect adoption.
     fs::write(
         &host,
-        format!("#!/usr/bin/python3\nimport sys\nif sys.argv[1] == '-c': print('{version}')\n"),
+        format!("#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\nif sys.argv[1] == '-c': Path(sys.argv[3]).write_text('{version}')\n"),
     )
     .unwrap();
     fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
@@ -90,4 +90,34 @@ fn submission_boundary_cleans_turns_and_preserves_failure_policy() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+#[test]
+fn version_probe_accepts_slow_noisy_python_startup() {
+    let fixture = Fixture::new();
+    let modules = fixture.root.join("modules");
+    let metadata = modules.join("agentscope-2.0.6.dist-info");
+    fs::create_dir_all(&metadata).unwrap();
+    fs::write(
+        metadata.join("METADATA"),
+        "Name: agentscope\nVersion: 2.0.6\n",
+    )
+    .unwrap();
+    fs::write(modules.join("sitecustomize.py"), "import sys, time\nif sys.argv[0] == '-c':\n    print('instrumentation startup banner', flush=True)\n    time.sleep(6)\n").unwrap();
+    fs::write(fixture.root.join("worker.py"), "raise SystemExit(23)\n").unwrap();
+    let mut document = fixture.document();
+    document["spec"]["agents"] =
+        json!({"sdk": {"adapter": "agentscope", "argv": [fixture.python, "worker.py"]}});
+    let service = Service::start(&fixture, &document);
+    let mut command = launch(&fixture);
+    command.env("PYTHONPATH", modules);
+    let output = support::Process::spawn(&fixture, command)
+        .finish_with_timeout(std::time::Duration::from_secs(25));
+    assert_eq!(
+        output.status.code(),
+        Some(23),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    service.released(&fixture);
 }

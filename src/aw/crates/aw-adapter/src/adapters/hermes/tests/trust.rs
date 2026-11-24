@@ -9,13 +9,24 @@ fn callback_probe_ignores_project_modules_and_keeps_explicit_import_paths() {
         .expect("Hermes tests require python3 on PATH");
     let project = Profile::new("{}");
     let native = Profile::new("{}");
-    let package = native.0.join("hermes_cli");
-    fs::create_dir(&package).unwrap();
+    let imports = native
+        .0
+        .join("opentelemetry/instrumentation/auto_instrumentation");
+    let package = imports.join("hermes_cli");
+    fs::create_dir_all(&package).unwrap();
     fs::write(package.join("__init__.py"), "").unwrap();
-    fs::write(package.join("main.py"), "").unwrap();
+    fs::write(
+        package.join("main.py"),
+        "print('Hermes initialization banner')\n",
+    )
+    .unwrap();
     fs::write(
         package.join("plugins.py"),
-        "def _resolve_hook_callback_timeout(): return 30\n",
+        r#"import os
+def _resolve_hook_callback_timeout():
+    assert "OTEL_SDK_DISABLED" not in os.environ
+    return float(os.environ["BUSINESS_HOOK_TIMEOUT"])
+"#,
     )
     .unwrap();
     fs::write(
@@ -27,7 +38,10 @@ fn callback_probe_ignores_project_modules_and_keeps_explicit_import_paths() {
         program: "hermes".into(),
         args: vec![],
         cwd: project.0.clone(),
-        environment: BTreeMap::from([("PYTHONPATH".into(), native.0.as_os_str().into())]),
+        environment: BTreeMap::from([
+            ("PYTHONPATH".into(), imports.into()),
+            ("BUSINESS_HOOK_TIMEOUT".into(), "75".into()),
+        ]),
     };
     let cache = tempfile::tempdir().unwrap();
     assert_eq!(
@@ -39,7 +53,7 @@ fn callback_probe_ignores_project_modules_and_keeps_explicit_import_paths() {
             &std::sync::atomic::AtomicBool::new(false)
         )
         .unwrap(),
-        30.0
+        75.0
     );
 }
 

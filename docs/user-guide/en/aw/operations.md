@@ -86,11 +86,25 @@ For `needs_recovery`, stop package writers and follow [package recovery](../../.
 | `native_event_limit` | Restart the AW-managed Agent instance; a new native session does not reset its count |
 | Empty compression statistics | Confirm supported tool calls occurred and check recording settings |
 
-For the Claude Python SDK, `aw run` and `aw instance prepare` allow 15 seconds for
-the version probe, including Python startup and automatic instrumentation. The
-bundled CLI's `--version` command has its own 4-second limit. Enabling
-`security.violation` adds a separate 15-second fingerprint probe. Both probes
-use the configured interpreter and inherit the application's environment.
+AW's internal Python helpers return version metadata and JSON through a private pipe.
+Startup messages on stdout are captured separately. AW stops the probe if its result
+exceeds the byte limit. For runtime discovery, AW sets `OTEL_SDK_DISABLED=true` and
+removes `PYTHONPATH` entries ending in `opentelemetry/instrumentation/auto_instrumentation`.
+Hermes reads dotenv settings, plugin selections and the hook callback timeout in the
+application's environment. The launched application keeps its original instrumentation
+settings and import paths.
+
+QwenPaw uses the console interpreter to inspect a generated entry and read its literal
+version in one probe. A forwarding wrapper can print startup messages or report its own
+version. For a custom launcher or a generated console whose version cannot be read
+statically, AW runs the original
+command with `--version` in the application's environment. Its stdout must contain
+only `QwenPaw, version <version>`. Console inspection and any fallback share one five-second deadline.
+
+For the Claude Python SDK and AgentScope, `aw run` and `aw instance prepare` allow 15 seconds
+for the version probe, including interpreter startup. The bundled Claude CLI's `--version`
+command has its own 4-second limit. Enabling `security.violation` adds a separate
+15-second Claude fingerprint probe.
 
 Use `aw --help` and `aw commands` to discover commands. `aw completion bash` (or `zsh`, `fish`) prints a completion script.
 See the [CLI reference](../../../developer-guide/en/aw/reference/cli.md) for automation reports and [deployment guide](../../../developer-guide/en/aw/deployment/lifecycle.md) for persistence and capacity.

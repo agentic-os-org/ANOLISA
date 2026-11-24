@@ -70,12 +70,15 @@ impl Adapter for AgentScope {
         } else if first.starts_with('-') || !first.ends_with(".py") {
             return Err("AgentScope requires a Python script or -m module entrypoint; interpreter override flags are unsupported".into());
         }
-        let probe = adapter::Probe(cancelled).version_output(
+        let script = r#"import sys
+from importlib.metadata import version
+from pathlib import Path
+Path(sys.argv[1]).write_text(version('agentscope'), encoding='utf-8')
+"#;
+        let probe = adapter::Probe(cancelled).python_output(
             &input.command,
-            &[
-                "-c".into(),
-                "from importlib.metadata import version; print(version('agentscope'))".into(),
-            ],
+            &["-c".into(), script.into()],
+            adapter::PYTHON_PROBE_TIMEOUT,
         )?;
         let version = crate::version::reported(&probe, "AgentScope")?;
         Ok(Box::new(Prepared { input, version }))

@@ -57,6 +57,8 @@ pub enum Stream {
     Stdout,
     /// Command diagnostic bytes.
     Stderr,
+    /// Dedicated command result, separate from diagnostics.
+    Result,
 }
 
 /// Native result, available only after verifying owned process-group cleanup.
@@ -175,7 +177,16 @@ pub fn run(
 ) -> Result<Output, Error> {
     #[cfg(target_os = "linux")]
     {
-        linux::run(command, input, limits, deadline, cancelled, false)
+        linux::run(
+            command,
+            input,
+            limits,
+            deadline,
+            cancelled,
+            CleanupMode::Immediate,
+            None,
+        )
+        .map(|(output, _)| output)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -205,11 +216,65 @@ pub fn run_cooperative(
 ) -> Result<Output, Error> {
     #[cfg(target_os = "linux")]
     {
-        linux::run(command, input, limits, deadline, cancelled, true)
+        linux::run(
+            command,
+            input,
+            limits,
+            deadline,
+            cancelled,
+            CleanupMode::Cooperative,
+            None,
+        )
+        .map(|(output, _)| output)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (command, input, limits, deadline, cancelled);
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+/// Process-group cleanup after a transport failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CleanupMode {
+    /// Stop the group immediately, as in [`run`].
+    Immediate,
+    /// Allow the wrapper to cancel its children first, as in [`run_cooperative`].
+    Cooperative,
+}
+
+/// Capture a dedicated result FIFO alongside stdin, stdout and stderr.
+///
+/// The caller supplies a fresh path in its private temporary directory, passes
+/// that path to the writer, and removes the directory after the call. The FIFO
+/// is created before spawn. The result and stdout each get `limits.stdout_bytes`.
+///
+/// # Errors
+/// Returns the same errors as [`run`], including [`Stream::Result`] overflow.
+pub fn run_with_result_pipe(
+    command: &CommandSpec,
+    input: &[u8],
+    limits: Limits,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    cleanup: CleanupMode,
+    path: &std::path::Path,
+) -> Result<(Output, Vec<u8>), Error> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::run(
+            command,
+            input,
+            limits,
+            deadline,
+            cancelled,
+            cleanup,
+            Some(path),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, input, limits, deadline, cancelled, cleanup, path);
         Err(Error::UnsupportedPlatform)
     }
 }

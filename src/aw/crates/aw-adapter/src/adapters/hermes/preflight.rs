@@ -49,8 +49,8 @@ pub(super) fn checked_profile_command(
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()?;
     trusted_native_path(cache.path())?;
-    let mut discovery = command.clone();
-    discovery.program = python.clone();
+    let mut installation = command.clone();
+    installation.program = python.clone();
     let script = r#"import json, sys, sysconfig, site as site_module
 from importlib.metadata import Distribution
 from pathlib import Path
@@ -69,14 +69,16 @@ if origin.get('dir_info', {}).get('editable') is not True or url.scheme != 'file
     raise RuntimeError('Hermes requires a local editable checkout')
 sites = {site, *site_module.getsitepackages([prefix]),
          *(sysconfig.get_path(name, scheme='venv', vars={'base': prefix, 'platbase': prefix}) for name in ('purelib', 'platlib'))}
-print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(sites) if Path(path).exists()]]))
+with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
+    json.dump([unquote(url.path, errors='strict'), [path for path in sorted(sites) if Path(path).exists()]], stream)
 "#;
-    discovery.args = python_args(
+    installation.args = python_args(
         cache.path(),
         &["-I".into(), "-S".into(), "-c".into(), script.into()],
     );
-    let output = aw_exec::run(
-        &discovery,
+    adapter::isolate_python_environment(&mut installation)?;
+    let (output, bytes) = adapter::Probe(cancelled).run_python(
+        installation,
         &[],
         aw_exec::Limits {
             input_bytes: 0,
@@ -84,7 +86,7 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
             stderr_bytes: 4096,
         },
         std::time::Instant::now() + Duration::from_secs(5),
-        cancelled,
+        aw_exec::CleanupMode::Immediate,
     )
     .map_err(|error| {
         format!(
@@ -96,7 +98,7 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
             "Hermes source discovery requires a local editable installation with UTF-8 paths in its venv".into(),
         );
     }
-    let (source, sites): (PathBuf, Vec<PathBuf>) = serde_json::from_slice(&output.stdout)?;
+    let (source, sites): (PathBuf, Vec<PathBuf>) = serde_json::from_slice(&bytes)?;
     let source = trusted_native_path(&source)?;
     let revision = checked_checkout(command, &source, cancelled)?;
     checked_site_paths(sites, cancelled)?;
@@ -107,10 +109,13 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
 from pathlib import Path
 from hermes_cli.env_loader import load_hermes_dotenv
 load_hermes_dotenv(project_env=Path(sys.argv[1]) / '.env', load_external_secrets=False)
-print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
-    for key, value in os.environ.items()
-    if key in ('PATH', 'HOME', 'XDG_CONFIG_HOME') or key.startswith(('GIT_', 'LD_'))]))
+with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
+    json.dump([[list(os.fsencode(key)), list(os.fsencode(value))]
+        for key, value in os.environ.items()
+        if key in ('PATH', 'HOME', 'XDG_CONFIG_HOME') or key.startswith(('GIT_', 'LD_'))], stream)
 "#;
+    let mut discovery = command.clone();
+    discovery.program = python.clone();
     discovery.args = python_args(
         cache.path(),
         &[
@@ -120,8 +125,8 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
             source.as_os_str().into(),
         ],
     );
-    let output = aw_exec::run(
-        &discovery,
+    let (output, bytes) = adapter::Probe(cancelled).run_python(
+        discovery.clone(),
         &[],
         aw_exec::Limits {
             input_bytes: 0,
@@ -129,12 +134,12 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
             stderr_bytes: 4096,
         },
         std::time::Instant::now() + Duration::from_secs(5),
-        cancelled,
+        aw_exec::CleanupMode::Immediate,
     )?;
     if !output.status.success() {
         return Err("Hermes native dotenv probe failed".into());
     }
-    let effective: Vec<(Vec<u8>, Vec<u8>)> = serde_json::from_slice(&output.stdout)?;
+    let effective: Vec<(Vec<u8>, Vec<u8>)> = serde_json::from_slice(&bytes)?;
     let mut after_dotenv = command.clone();
     after_dotenv.environment.retain(|key, _| {
         !key.to_str().is_some_and(|key| {

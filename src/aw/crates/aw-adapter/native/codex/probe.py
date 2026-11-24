@@ -113,7 +113,8 @@ def probe():
 
 if __name__ == "__main__":
     try:
-        print(json.dumps(probe()))
+        with open(sys.argv[3], "w", encoding="utf-8") as result:
+            json.dump(probe(), result)
     except Exception as error:
         # Native config and diagnostics may contain credentials; report only the boundary.
         print(f"Codex hook inventory failed: {type(error).__name__}", file=sys.stderr)

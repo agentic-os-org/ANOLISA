@@ -1,10 +1,20 @@
-"""Recognize generated consoles and read versions without importing QwenPaw."""
+# A shell must reject -c at the function declaration before reaching any imports.
+def write_result():
+    import json
+    import sys
 
-import ast
-import importlib.util
-import json
-import os
-import sys
+    result = {"entry": "custom"}
+    if generated_console(sys.argv[2]):
+        try:
+            version = installed_version(sys.argv[1])
+        except (OSError, ImportError, SyntaxError, ValueError):
+            # A dynamic version still permits the recognized managed console launch.
+            version = None
+        result = {"entry": "managed", "version": version}
+
+    with open(sys.argv[3], "w", encoding="utf-8") as stream:
+        json.dump(result, stream)
+
 
 ENTRY = """import sys
 from qwenpaw.cli.main import cli
@@ -22,24 +32,36 @@ NORMALIZERS = (
 """),
     ("import re\n", "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"),
 )
-# Parse bytes so PEP 263 transforms match runpy's execution of the console.
-tree = ast.parse(sys.argv[2].encode("utf-8"))
-if (tree.body and isinstance(tree.body[0], ast.Expr)
-        and isinstance(tree.body[0].value, ast.Constant)
-        and isinstance(tree.body[0].value.value, str)):
-    # UV's relocatable shell/Python preamble is a Python module docstring.
-    tree.body.pop(0)
-if ast.dump(tree) not in {
-    ast.dump(ast.parse(prefix + ENTRY.format(normalize=normalize)))
-    for prefix, normalize in NORMALIZERS
-}:
-    raise ValueError("QwenPaw console has custom startup behavior")
 
 
-def installed_version():
+def generated_console(source):
+    import ast
+
+    # Parse bytes so PEP 263 transforms match runpy's execution of the console.
+    try:
+        tree = ast.parse(source.encode("utf-8"))
+    except (SyntaxError, ValueError):
+        return False
+    if (tree.body and isinstance(tree.body[0], ast.Expr)
+            and isinstance(tree.body[0].value, ast.Constant)
+            and isinstance(tree.body[0].value.value, str)):
+        # UV's relocatable shell/Python preamble is a Python module docstring.
+        tree.body.pop(0)
+    return ast.dump(tree) in {
+        ast.dump(ast.parse(prefix + ENTRY.format(normalize=normalize)))
+        for prefix, normalize in NORMALIZERS
+    }
+
+
+def installed_version(console):
+    import ast
+    import importlib.util
+    import os
+    import sys
+
     # Match the original console's import path, cwd and interpreter environment.
     if not sys.flags.safe_path:
-        sys.path[0] = os.path.dirname(os.path.realpath(sys.argv[1]))
+        sys.path[0] = os.path.dirname(os.path.realpath(console))
     spec = importlib.util.find_spec("qwenpaw")
     if spec is None or spec.origin is None or spec.submodule_search_locations is None:
         raise ValueError("QwenPaw package is unavailable")
@@ -60,8 +82,7 @@ def installed_version():
 
 
 try:
-    version = installed_version()
-except (OSError, ImportError, SyntaxError, ValueError):
-    version = None
-# A dynamic version still permits the recognized managed console launch.
-print(json.dumps({"version": version}))
+    write_result()
+except Exception:
+    # EX_SOFTWARE identifies a Python probe failure even if the FIFO is unwritable.
+    raise SystemExit(70)
