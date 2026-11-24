@@ -108,9 +108,40 @@ local function tag(kind, index, relative, inode)
   objects[handle] = file(inode, object_path)
   command(kind .. "/" .. index .. "/" .. hex(relative) .. "/at/" .. hex(handle))
 end
-command("seed/42")
+local function process(ancestor)
+  return task_methods({
+    group_leader = function(self) return self end,
+    is_descendant = function(_, root_task) return root_task == ancestor end,
+  })
+end
+command("root_candidate/42")
+-- Reuse between identity verification and publication must not bind this task.
+tasks[42] = process(nil)
+local _, acknowledgement = module.file_open(file({}, "/control/seed_root/42"))
+assert(acknowledgement ~= ACK and not tasks[42].member and not shared.state.root_pid)
+tasks[42] = root
+command("seed_root/42")
 local exact, tree, protected, excluded, entry, write, deletion = {}, {}, {}, {}, {}, {}, {}
+current = root
+assert(module.file_permission(file(exact), 4) == true)
 tag("tag", 1, "", exact)
+current = root
+assert(module.file_permission(file(exact), 4) == false)
+-- These existing descendants have never received a seed command.
+local reader, forker, forked = process(root), process(root), process(nil)
+current = reader
+assert(module.file_permission(file(exact), 4) == false and reader.member)
+current = forker
+assert(module.task_alloc(forked) and forker.member and forked.member)
+-- A numeric collision (including in another PID namespace) grants no ancestry.
+local unrelated_root = process(nil)
+tasks[42] = unrelated_root
+current = process(unrelated_root)
+assert(module.file_permission(file(exact), 4) == true and not current.member)
+current = forked
+assert(module.file_permission(file(exact), 4) == false)
+tasks[42] = root
+for _, task in ipairs({reader, forker, forked}) do module.task_free(task) end
 tag("tag", 2, "", tree)
 tag("tag", 2, "data", protected)
 tag("tag", 2, "cache", excluded)
@@ -120,7 +151,6 @@ tag("tag", 4, "", deletion)
 local parent = {}
 tag("slot", 4, "delete", parent)
 tag("stable", 4, "", deletion)
-command("activate")
 current = root
 assert(module.file_open(file(exact, "/renamed-hard-link", true)) == false)
 assert(module.file_permission(file(exact), 4) == false)
@@ -226,7 +256,7 @@ command("complete/" .. epoch)
 module.task_free(late)
 command("complete/" .. epoch)
 current = child
--- A second VM sees the same per-object properties and shared activation state.
+-- A second VM sees the same per-object properties.
 module = load_module()
 assert(module.file_permission(file(exact), 4) == false)
 local fault = { inode = function() error("evaluation failed") end }

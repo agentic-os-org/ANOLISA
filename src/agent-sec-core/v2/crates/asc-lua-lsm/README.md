@@ -29,9 +29,9 @@ ReadWritePaths=/sys/kernel/security/lua
 
 `CAP_MAC_ADMIN` must be effective in the initial user namespace. The Client owns
 private state under `/var/lib/agent-sec/lua-lsm`; preserve it with the Policy
-database. Stopping the daemon does not unload modules. Disappearance of a root
-process does not retire Lua Bindings. Binding cleanup through explicit Scope
-removal still unloads them; retained records can accumulate until cleanup.
+database. Modules survive daemon stops. When discovery observes a root process
+exit or an administrator deletes its Scope, the daemon schedules Binding cleanup.
+Surviving descendants lose that Binding's protection when the module unloads.
 Deleting a Policy Template keeps existing frozen Scope snapshots.
 
 ## Implementation
@@ -41,7 +41,7 @@ Production code follows the same Translator/protocol/Client split as AgentSight:
 - `asc-policy-translator-lua-lsm` lowers Bindings to Lua artifacts without I/O.
 - `asc-lua-lsm-protocol` owns the internal plan, module names and canonical Lua
   template encoding, shared by generation and Client source-integrity checks.
-- `asc-lua-lsm-client` owns securityfs I/O, activation, recovery and cleanup. It
+- `asc-lua-lsm-client` owns securityfs I/O, initialization, recovery and cleanup. It
   has no Translator or Cedar dependency.
 - `asc-file-policy` contains backend-neutral data types; shared Cedar lowering
   lives in `asc-policy-cedar::file_protection`.
@@ -81,26 +81,25 @@ are created or linked. Matches follow the inode through hard links. Labels are
 retained for the module lifetime. A scoped task can be denied a rename or link
 that would change protection, including a directory move that would require
 relabeling descendants. If another process relocates a populated directory,
-redeploy to evaluate the new paths of existing descendants. Before activation,
+redeploy to evaluate the new paths of existing descendants. During initialization,
 the Client checks existing mappings against the inode matches reported by Lua.
 
 Mixed Cedar Bindings share one validated PST: the selected file Translator consumes
 the file projection, and Gateway consumes the network projection. All plans prepare
-before mutation. Lua deployments remain retained after root exit, including mixed
-Bindings with credentials.
+before mutation. Binding cleanup covers both deployments.
 
 `prepare_apply` only validates internal input. `create` writes complete Lua source
 to `register` in one syscall. `update` confirms the new version before unregistering
-old names; failed new deployment leaves old protection alone. `delete` writes
+old names. The old modules stay registered if initialization fails. `delete` writes
 saved names to `unregister`. Short writes, `EBUSY` and ambiguous existing modules
 remain Unknown. Synchronous calls are not abandoned while still modifying state.
 
-A full-length write to `register` confirms synchronous kernel registration. The
-Client then reads `modules` and checks the module name and recognized hook count
-(`nlsm`). After `activate`, the Client opens the template's private `status`
-command and requires an active acknowledgement before reporting Present. For an
-update it verifies the new module before retiring old modules and checks its
-status again after retirement.
+The Client saves a local deployment record before writing `register`. A full-length
+write confirms synchronous kernel registration. The Client reads `modules` to
+check the module name and recognized hook count (`nlsm`). It reports Present after
+initialization completes and the completion record is saved. During updates the
+Client completes the new deployment before retiring old modules and checks that
+the new name is still listed after retirement.
 
 After a full-length `unregister` write or `ENOENT`, the Client reads `modules`.
 It reports Absent only when the listing succeeds and omits the requested name.
@@ -110,10 +109,15 @@ successful deployment or deletion from an unverified result.
 After registration, the Client pins filesystem objects with `O_PATH` in SecCore's
 view and opens private command files. Template callbacks use `/proc/self/fd`
 references to label exact kernel inodes, preserving hard-link identity across
-filesystems. Existing process instances are seeded; fork/exec inherit membership.
+filesystems. The Client labels existing processes, starting with the verified root.
+During file access or fork, an unlabelled caller can also establish membership
+through its current ancestry if its PID namespace resolves the saved PID to that
+same marked root task. Fork propagates membership and exec preserves it.
 Callbacks accept commands only with initial-user-namespace `CAP_MAC_ADMIN` and
-acknowledge with `EALREADY`. These commands belong to this template; no securityfs
-endpoint was added. Present requires confirmed initialization and activation.
+acknowledge with `EALREADY`. These commands belong to the template and run through
+the file-open hook. Hooks enforce as soon as both the process and inode are marked.
+Protection can therefore begin during initialization, and a failed deployment can
+leave partial protection until retry or cleanup.
 
 Object/shared caches store only scalar values. The template keeps exclusion
 transitions in Lua tables and stores their numeric state IDs on inodes. It binds
@@ -130,8 +134,9 @@ Read protection rejects existing file mappings, including private and PROT_NONE
 mappings. Write protection rejects existing shared writable mappings. Inspection
 failures block deployment. Existing writable FDs and shared read-only mappings are
 accepted: the live tests verify subsequent writes and shared write upgrades are
-mediated. These checks are snapshots; concurrent mapping creation can still race
-activation, as it can in the AgentSight preflight.
+mediated. A new mapping can appear between a process's snapshot and the point at
+which the relevant hook begins denying access. AgentSight preflight has the same
+snapshot limitation.
 
 Updates transfer members from the old modules rather than rediscovering ancestry.
 Atomic membership/exit counters fence concurrent forks and exits before an old
@@ -139,17 +144,19 @@ module can be removed, including orphaned descendants and threads. A persisted
 registration-instance token prevents reuse of transfer markers after re-registration.
 Incomplete transfer keeps the old protection and uses the existing retry policy.
 
-The Client persists same-boot deployment-input digests, including the source and
-process identity, alongside confirmations. Startup requeues
-Ready Lua Bindings, then checks saved evidence and a live template callback. A
-missing module is reapplied to the original verified process. Names without
+The deployment record includes the boot ID, the digest of the source and other
+deployment inputs including process identity, and whether initialization completed.
+Startup requeues Ready Lua Bindings. The Client checks the native module listing
+against the record. A matching completed deployment skips process and file labelling.
+A matching incomplete deployment repeats initialization on the registered module.
+A missing module is reapplied to the original verified process. Names without
 matching evidence are never overwritten or adopted. Delete invalidates evidence
 before unregister. Template changes require a new revision or explicit cleanup.
 
 ## Boundaries requiring attention
 
-- Bootstrap is limited to 65,536 filesystem objects. The discovery-to-activation
-  gap remains; no controlled-start gate was added.
+- Bootstrap is limited to 65,536 filesystem objects. Workloads can run between
+  discovery and the point when their protection takes effect.
 - Filesystems beyond the acceptance host, user namespaces, chroot/pivot_root and
   additional mount operations need validation. Separate PID/mount namespaces and
   a pre-existing bind alias have live coverage. Procfs must match the daemon's PID view.
@@ -192,7 +199,7 @@ isolated daemon restart check.
 | Existing mappings | Reject private/shared/PROT_NONE read mappings and shared writable mappings; preserve old deployment on failed update; retry after unmap | AgentSight additionally rejects writable FDs/shared mappings conservatively; Lua mapping hooks allow the tested narrower preflight |
 | Deletion and namespace changes | unlink/rmdir, move-out, overwrite, exchange in both directions, ancestor moves; same-tree rename remains usable | Some read/write tree moves and exclusion transitions remain more restrictive |
 | Resource identity | Hard-link aliases, symlink reads, newly created tree members and excluded subtree controls | Lua protects all inode aliases; some AgentSight structured tests permit outside write/delete aliases, so the semantics differ |
-| Subject identity | Existing child, future thread, fork/exec/setsid, orphan after root exit, update after root exit and a child in a separate PID namespace | User namespaces and sustained churn remain unverified |
+| Subject identity | Existing child, future thread, fork/exec/setsid, update of an orphan while the module is still loaded, and a child in a separate PID namespace | Direct Client tests leave cleanup to the caller. The daemon schedules cleanup on root exit. User namespaces and sustained churn remain unverified |
 | Mount view | Separate mount namespace, a pre-existing bind alias, denied bind over a protected root and an allowed unrelated bind | Host filesystem view remains unchanged; move_mount/remount, stacking and chroot/pivot_root need more coverage |
 | Privilege boundary | Protection survives setuid; same-UID unrelated process retains access; unprivileged unload/private-control access fails | Full systemd capability/mount setup remains unverified |
 | Binding isolation | Read/write Bindings overlap on one inode; deleting either preserves the other; same-name re-registration after cleanup | Concurrent update/delete and interrupted cleanup still need stress tests |
@@ -218,7 +225,7 @@ Rust tests cover request bytes, errors, update ordering and restart evidence.
 Local procfs regressions also check mapped descendants, file/tree identities,
 outside hard-link mappings and excluded mappings without modifying kernel state.
 `tests/template.lua` executes Lua 5.1 with mocked kernel objects. Repository and
-daemon tests cover retained Bindings and restart rechecks. On a disposable kernel
+daemon tests cover root-exit cleanup and restart rechecks. On a disposable kernel
 host, explicitly run the default-ignored live test:
 
 ```sh
