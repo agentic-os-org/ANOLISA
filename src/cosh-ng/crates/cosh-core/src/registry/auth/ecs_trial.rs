@@ -106,71 +106,92 @@ pub(super) async fn activate(
             Ok(Err(failure)) => return error(request_id, failure.code()),
             Err(_) => return error(request_id, "trial_preferences_worker"),
         };
-    let mut candidate = config.clone();
     let model = MODEL.to_string();
-    let provider_id = selected
-        .or_else(|| saved_provider(config))
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let mut name = "ecs-free-trial".to_string();
-            let mut suffix = 2;
-            while candidate.ai.providers.contains_key(&name) {
-                name = format!("ecs-free-trial-{suffix}");
-                suffix += 1;
-            }
-            name
-        });
-    if !candidate.ai.providers.contains_key(&provider_id) {
-        let provider = ProviderConfig {
-            provider_type: Some("aliyun".into()),
-            auth_source: Some("ecs_identity".into()),
-            model: Some(model.clone()),
-            ..Default::default()
-        };
-        candidate
-            .ai
-            .providers
-            .insert(provider_id.clone(), provider.clone());
-        candidate
-            .user_ai
-            .providers
-            .insert(provider_id.clone(), provider);
-    }
-    if let Some(provider) = candidate.user_ai.providers.get_mut(&provider_id) {
-        provider.model = Some(model.clone());
-    }
-    if let Some(provider) = candidate.ai.providers.get_mut(&provider_id) {
-        provider.model = Some(model.clone());
-    }
-    candidate.ai.active_provider = Some(provider_id.clone());
-    candidate.user_ai.active_provider = Some(provider_id.clone());
-    candidate.ai.active_model = Some(model.clone());
-    candidate.user_ai.active_model = Some(model.clone());
     if !previous_preference {
         if let Err(code) = save_preference(true).await {
             return error(request_id, &code);
         }
     }
-    let persisted = if guarded {
-        crate::config::persist_config_guarded(&candidate)
-    } else {
-        crate::config::persist_config(&candidate)
-    };
-    if persisted.is_err() {
+    let persisted = crate::config::persist_auth_update(config, guarded, |candidate| {
+        let provider_id = selected
+            .or_else(|| saved_provider(candidate))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let mut name = "ecs-free-trial".to_string();
+                let mut suffix = 2;
+                while candidate.ai.providers.contains_key(&name) {
+                    name = format!("ecs-free-trial-{suffix}");
+                    suffix += 1;
+                }
+                name
+            });
+        if selected.is_some() {
+            match candidate.ai.providers.get(&provider_id) {
+                Some(provider) if provider.is_ecs_identity() => {}
+                Some(_) => return Err("provider_definition_changed".into()),
+                None => return Err("provider_not_found".into()),
+            }
+        }
+        if !candidate.ai.providers.contains_key(&provider_id) {
+            let provider = ProviderConfig {
+                provider_type: Some("aliyun".into()),
+                auth_source: Some("ecs_identity".into()),
+                model: Some(model.clone()),
+                ..Default::default()
+            };
+            candidate
+                .ai
+                .providers
+                .insert(provider_id.clone(), provider.clone());
+            candidate
+                .user_ai
+                .providers
+                .insert(provider_id.clone(), provider);
+        }
+        if let Some(provider) = candidate.user_ai.providers.get_mut(&provider_id) {
+            provider.model = Some(model.clone());
+        }
+        if let Some(provider) = candidate.ai.providers.get_mut(&provider_id) {
+            provider.model = Some(model.clone());
+        }
+        candidate.ai.active_provider = Some(provider_id.clone());
+        candidate.user_ai.active_provider = Some(provider_id.clone());
+        candidate.ai.active_model = Some(model.clone());
+        candidate.user_ai.active_model = Some(model.clone());
+        Ok(candidate
+            .user_ai
+            .providers
+            .contains_key(&provider_id)
+            .then_some(provider_id))
+    });
+    if let Err(failure) = persisted {
         if !previous_preference && save_preference(false).await.is_err() {
             return error(
                 request_id,
                 "trial_activation_save_failed_preference_restore_failed",
             );
         }
-        return error(request_id, "trial_activation_save_failed");
+        let message = match failure.as_str() {
+            "provider_definition_changed" => {
+                "provider definition changed; reload authentication state and activate again"
+            }
+            "provider_not_found" => {
+                "provider no longer exists; reload authentication state and activate again"
+            }
+            _ => return error(request_id, "trial_activation_save_failed"),
+        };
+        return OutputMessage::RegistryResponse {
+            request_id: request_id.into(),
+            success: false,
+            data: Some(serde_json::json!({"error_code":failure})),
+            error: Some(message.into()),
+        };
     }
-    *config = candidate;
     OutputMessage::RegistryResponse {
         request_id: request_id.into(),
         success: true,
         data: Some(
-            serde_json::json!({"active_provider":provider_id,"model":model,"trial_preferences":{"auto_use":true}}),
+            serde_json::json!({"active_provider":config.ai.active_provider,"model":model,"trial_preferences":{"auto_use":true}}),
         ),
         error: None,
     }

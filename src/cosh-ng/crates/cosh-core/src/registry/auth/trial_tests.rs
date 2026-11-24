@@ -2,7 +2,7 @@ use super::*;
 use crate::config::ProviderConfig;
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -60,6 +60,198 @@ fn configured() -> CoreConfig {
     );
     config.user_ai = config.ai.clone();
     config
+}
+
+#[test]
+fn concurrent_auth_trial_activation_preserves_new_provider() {
+    isolated(|home| {
+        run(async {
+            let mut stale = configured();
+            let mut latest = stale.clone();
+            latest.user_ai.providers.insert(
+                "new-provider".into(),
+                ProviderConfig {
+                    provider_type: Some("mock".into()),
+                    api_key: Some("new-secret".into()),
+                    ..Default::default()
+                },
+            );
+            crate::config::persist_config(&latest).unwrap();
+            TEST_ECS_PROBE
+                .scope((Ok(true), Arc::default()), async {
+                    let result = query(
+                        &mut stale,
+                        "activate_trial",
+                        serde_json::json!({"guarded_writes":true}),
+                    )
+                    .await;
+                    assert_eq!(result["success"], true, "{result}");
+                    let saved: toml::Value = toml::from_str(
+                        &std::fs::read_to_string(home.join(".copilot-shell/config.toml")).unwrap(),
+                    )
+                    .unwrap();
+                    assert!(
+                        saved["ai"]["providers"].get("new-provider").is_some(),
+                        "{saved}"
+                    );
+                })
+                .await;
+        });
+    });
+}
+
+#[test]
+fn ecs_activation_live_worker() {
+    if std::env::var("COSH_TEST_ECS_ACTIVATION_WORKER").as_deref() != Ok("1") {
+        return;
+    }
+    use clap::Parser;
+
+    run(async {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let args = crate::cli::CliArgs::try_parse_from([
+            "cosh-core",
+            "--headless",
+            "--bare",
+            "--workspace",
+            home.to_str().unwrap(),
+        ])
+        .unwrap();
+        let config = CoreConfig::load_bare();
+        let workspace = crate::tool::SessionWorkspace::try_new(
+            &home,
+            crate::tool::WorkspaceStartupPolicy::AllowUnavailableFileTools,
+        )
+        .unwrap();
+        TEST_ECS_PROBE
+            .scope((Ok(true), Arc::default()), async {
+                assert_eq!(
+                    crate::headless::run(&args, config, home, workspace)
+                        .await
+                        .unwrap(),
+                    0
+                );
+            })
+            .await;
+    });
+}
+
+fn live_ecs_activation_rechecks_user_definition(changed_type: bool) {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    isolated(|home| {
+        let path = home.join(".copilot-shell/config.toml");
+        std::fs::write(&path, "[ai]\nactive_provider = 'keepme'\n[ai.providers.keepme]\ntype = 'mock'\n[ai.providers.trial]\ntype = 'aliyun'\nauth_source = 'ecs_identity'\nmodel = 'auto'\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::auth::trial_preferences::save(false).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "registry::auth::trial_tests::ecs_activation_live_worker",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("COSH_TEST_ECS_ACTIVATION_WORKER", "1")
+            .env("HOME", home)
+            .env(
+                "COSH_TELEMETRY_DISABLED_PATH",
+                home.join(".copilot-shell/telemetry_disabled"),
+            )
+            .env_remove("COSH_AI_PROVIDER")
+            .env_remove("COSH_MODEL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel::<Value>();
+        let reader = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let Some(start) = line.find('{') else {
+                    continue;
+                };
+                if let Ok(message) = serde_json::from_str(&line[start..]) {
+                    if sender.send(message).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let receive = |request_id: &str| {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    let message = receiver
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .unwrap();
+                    if message["request_id"] == request_id
+                        || message["response"]["request_id"] == request_id
+                    {
+                        break message;
+                    }
+                }
+            };
+            writeln!(stdin, "{}", serde_json::json!({"type":"control_request","request_id":"init","request":{"subtype":"initialize"}})).unwrap();
+            stdin.flush().unwrap();
+            receive("init");
+            let mut document: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if changed_type {
+                document["ai"]["providers"]["trial"] = toml::Value::Table(toml::Table::from_iter(
+                    [("type".into(), toml::Value::String("mock".into()))],
+                ));
+            } else {
+                document["ai"]["providers"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove("trial");
+            }
+            std::fs::write(&path, toml::to_string(&document).unwrap()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            writeln!(stdin, "{}", serde_json::json!({"type":"registry_request","request_id":"activate","domain":"auth","action":"activate","params":{"provider_id":"trial","guarded_writes":true}})).unwrap();
+            stdin.flush().unwrap();
+            let response = receive("activate");
+            assert_eq!(response["success"], false, "{response}");
+            let expected_code = if changed_type {
+                "provider_definition_changed"
+            } else {
+                "provider_not_found"
+            };
+            assert_eq!(response["data"]["error_code"], expected_code, "{response}");
+            assert!(
+                response["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("reload authentication state and activate again"),
+                "{response}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!crate::auth::trial_preferences::load().unwrap());
+            writeln!(stdin, "{}", serde_json::json!({"type":"control_request","request_id":"shutdown","request":{"subtype":"shutdown"}})).unwrap();
+            stdin.flush().unwrap();
+        }));
+        let _ = child.kill();
+        let _ = child.wait();
+        reader.join().unwrap();
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    });
+}
+
+#[test]
+fn ecs_activation_live_rechecks_changed_user_definition() {
+    live_ecs_activation_rechecks_user_definition(true);
+}
+
+#[test]
+fn ecs_activation_live_rechecks_deleted_user_definition() {
+    live_ecs_activation_rechecks_user_definition(false);
 }
 
 #[test]
@@ -244,6 +436,7 @@ fn ecs_builtin_activation_round_trip_preserves_other_provider_and_clears_suppres
             let server = Metadata::start(true).await;
             let mut config = configured();
             crate::auth::trial_preferences::save(false).unwrap();
+            crate::config::persist_config(&config).unwrap();
             TEST_ECS_PROBE
                 .scope(
                     (Ok(server.available), Arc::clone(&server.requests)),
@@ -307,6 +500,7 @@ fn ecs_builtin_activation_does_not_overwrite_a_colliding_provider_name() {
                 .providers
                 .insert("ecs-free-trial".into(), config.ai.providers["mine"].clone());
             config.user_ai = config.ai.clone();
+            crate::config::persist_config(&config).unwrap();
             TEST_ECS_PROBE
                 .scope(
                     (Ok(server.available), Arc::clone(&server.requests)),

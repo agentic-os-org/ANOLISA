@@ -60,8 +60,15 @@ where
         let response = auth_result.response?;
 
         match prepare_auth_candidate(config, &response).await {
-            Ok(candidate) => {
-                if response.persist && crate::config::persist_config(&candidate).is_err() {
+            Ok(mut candidate) => {
+                if response.persist
+                    && crate::config::persist_auth_provider(
+                        &mut candidate,
+                        &response.provider_id,
+                        false,
+                    )
+                    .is_err()
+                {
                     let error = AuthConfigureError::Persistence;
                     tracing::warn!("auth candidate could not be persisted");
                     reason = AuthReason::Invalid;

@@ -1015,7 +1015,10 @@ where
             )
             .await;
             if domain == "auth"
-                && matches!(action.as_str(), "activate" | "activate_trial" | "configure")
+                && matches!(
+                    action.as_str(),
+                    "activate" | "activate_trial" | "configure" | "delete"
+                )
                 && matches!(
                     &response,
                     OutputMessage::RegistryResponse { success: true, .. }
