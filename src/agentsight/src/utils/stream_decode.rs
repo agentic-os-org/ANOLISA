@@ -77,8 +77,12 @@ enum Codec {
     Brotli(Box<BrotliDecoder>, Rc<Cell<usize>>),
 }
 
-pub(crate) struct StreamDecoder {
+struct SingleDecoder {
     codec: Codec,
+}
+
+pub(crate) struct StreamDecoder {
+    stages: Vec<SingleDecoder>,
 }
 
 impl std::fmt::Debug for StreamDecoder {
@@ -91,6 +95,62 @@ impl std::fmt::Debug for StreamDecoder {
 
 impl StreamDecoder {
     pub(crate) fn new(encoding: Option<&str>, limit: usize) -> io::Result<Self> {
+        // HTTP lists codings in application order. Bound decoder contexts as
+        // well as decoded bytes before allocating any attacker-selected stack.
+        let codings: Vec<_> = encoding
+            .unwrap_or("identity")
+            .split(',')
+            .map(str::trim)
+            .filter(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
+            .take(9)
+            .collect();
+        if codings.len() > 8 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many SSE content codings",
+            ));
+        }
+        let stages = codings
+            .into_iter()
+            .rev()
+            .map(|coding| SingleDecoder::new(Some(coding), limit))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Self { stages })
+    }
+
+    pub(crate) fn feed(
+        &mut self,
+        data: &[u8],
+        mut consume: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        Self::feed_stages(&mut self.stages, data, &mut consume)
+    }
+
+    fn feed_stages(
+        stages: &mut [SingleDecoder],
+        data: &[u8],
+        consume: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        match stages.split_first_mut() {
+            Some((outer, inner)) => {
+                outer.feed(data, |decoded| Self::feed_stages(inner, decoded, consume))
+            }
+            None => consume(data),
+        }
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.stages.capacity() * std::mem::size_of::<SingleDecoder>()
+            + self
+                .stages
+                .iter()
+                .map(SingleDecoder::retained_bytes)
+                .sum::<usize>()
+    }
+}
+
+impl SingleDecoder {
+    fn new(encoding: Option<&str>, limit: usize) -> io::Result<Self> {
         let sink = Sink {
             bytes: Vec::new(),
             limit: limit.max(256 * 1024),
@@ -242,5 +302,66 @@ impl StreamDecoder {
                     + std::mem::size_of::<BrotliDecoder>()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn coding_stack_bounds_and_unknown_layers_fail_before_consumption() {
+        for encoding in [
+            "gzip, unsupported",
+            "unsupported, gzip",
+            &["gzip"; 9].join(","),
+        ] {
+            assert!(
+                StreamDecoder::new(Some(encoding), 1024).is_err(),
+                "{encoding}"
+            );
+        }
+        let mut decoder = StreamDecoder::new(Some(" GZip , identity, gzip "), 1024).unwrap();
+        let single = StreamDecoder::new(Some("gzip"), 1024).unwrap();
+        // The extra codec must be accounted for. Container spare capacity
+        // is shared, so total retained memory need not be exactly doubled.
+        assert!(decoder.retained_bytes() > single.retained_bytes());
+        let bytes = gzip(&gzip(b"complete"));
+        let mut decoded = Vec::new();
+        for byte in bytes.chunks(1) {
+            decoder
+                .feed(byte, |chunk| {
+                    decoded.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(decoded, b"complete");
+    }
+
+    #[test]
+    fn inner_codec_and_consumer_errors_propagate() {
+        let mut decoder = StreamDecoder::new(Some("gzip, gzip"), 1024).unwrap();
+        assert!(
+            decoder
+                .feed(&gzip(b"not an inner gzip member"), |_| Ok(()))
+                .is_err()
+        );
+        let mut decoder = StreamDecoder::new(Some("gzip, gzip"), 1024).unwrap();
+        let error = decoder
+            .feed(&gzip(&gzip(b"decoded output")), |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "consumer budget exceeded",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
     }
 }

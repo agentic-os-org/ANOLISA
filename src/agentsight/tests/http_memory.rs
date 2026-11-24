@@ -596,6 +596,12 @@ fn native_rich_content_stays_equivalent_to_the_original_sequence() {
 }
 
 fn compressed(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+    if encoding.contains(',') {
+        return encoding
+            .split(',')
+            .map(str::trim)
+            .fold(bytes.to_vec(), |bytes, coding| compressed(coding, &bytes));
+    }
     match encoding {
         "zstd" => zstd::encode_all(bytes, 3).unwrap(),
         "gzip" => {
@@ -843,13 +849,22 @@ fn h2_frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn http2_uses_streaming_sse_decoding_and_preserves_semantic_fields() {
+fn stacked_sse_and_single_codings_preserve_http2_semantic_fields() {
     let plain = [
         common::make_openai_sse_chunk("h2-fixture", "fixture", "汉字", 4, 2),
         common::make_sse_done(),
     ]
     .concat();
-    for encoding in ["identity", "gzip", "zstd", "br"] {
+    for encoding in [
+        "identity",
+        "gzip",
+        "zstd",
+        "br",
+        "gzip, br",
+        "br, gzip",
+        "gzip, gzip",
+        "deflate, zstd",
+    ] {
         let mut aggregator = Aggregator::new();
         let mut encoder = hpack::Encoder::new();
         let request_headers = encoder.encode([
@@ -892,5 +907,93 @@ fn http2_uses_streaming_sse_decoding_and_preserves_semantic_fields() {
         assert_eq!(calls[0].token_usage.as_ref().unwrap().input_tokens, 4);
         assert_eq!(calls[0].metadata["server.address"], "fixture.example");
         assert!(!aggregator.has_pending());
+    }
+}
+
+#[test]
+fn stacked_sse_codings_preserve_http1_capture() {
+    let plain = [
+        record(json!({
+            "id": "stack-fixture", "object": "chat.completion.chunk", "model": "fixture",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "complete "},
+                "finish_reason": null}]
+        })),
+        common::make_openai_sse_chunk("stack-fixture", "fixture", "answer", 12, 8),
+        common::make_sse_done(),
+    ]
+    .concat();
+    for codings in [
+        vec!["gzip", "br"],
+        vec!["br", "gzip"],
+        vec!["gzip", "gzip"],
+        vec!["deflate", "zstd"],
+    ] {
+        let encoded = codings
+            .iter()
+            .fold(plain.clone(), |bytes, codec| compressed(codec, &bytes));
+        for raw in [false, true] {
+            for chunked in [false, true] {
+                for fragment_size in [1, 17, encoded.len()] {
+                    let mut aggregator = Aggregator::with_limits(
+                        4,
+                        &RuntimeLimits {
+                            retain_raw_sse: raw,
+                            ..Default::default()
+                        },
+                    );
+                    assert!(
+                        feed(
+                            &mut aggregator,
+                            1,
+                            1,
+                            &common::make_openai_request_bytes("fixture", "hello", true)
+                        )
+                        .is_empty()
+                    );
+                    let (framing, wire) = if chunked {
+                        (
+                            "Transfer-Encoding: chunked".to_string(),
+                            [
+                                format!("{:x}\r\n", encoded.len()).into_bytes(),
+                                encoded.clone(),
+                                b"\r\n0\r\n\r\n".to_vec(),
+                            ]
+                            .concat(),
+                        )
+                    } else {
+                        (
+                            format!("Content-Length: {}", encoded.len()),
+                            encoded.clone(),
+                        )
+                    };
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: {}\r\n{framing}\r\n\r\n",
+                        codings.join(", ")
+                    );
+                    let mut results = feed(&mut aggregator, 1, 0, headers.as_bytes());
+                    for fragment in wire.chunks(fragment_size) {
+                        results.extend(feed(&mut aggregator, 1, 0, fragment));
+                    }
+                    let captured = calls(&results);
+                    assert_eq!(
+                        captured.len(),
+                        1,
+                        "{codings:?}, raw={raw}, chunked={chunked}, fragment={fragment_size}: {results:?}"
+                    );
+                    assert_eq!(captured[0].call_id, "stack-fixture");
+                    assert_eq!(captured[0].token_usage.as_ref().unwrap().total_tokens, 20);
+                    if raw {
+                        let AggregatedResult::SseComplete(pair) = &results[0] else {
+                            panic!("expected SSE result");
+                        };
+                        assert_eq!(pair.response.sse_events.len(), 3);
+                    }
+                    assert!(
+                        matches!(captured[0].response.messages[0].parts.as_slice(), [agentsight::genai::MessagePart::Text { content }] if content == "complete answer")
+                    );
+                    assert!(!aggregator.has_pending());
+                }
+            }
+        }
     }
 }

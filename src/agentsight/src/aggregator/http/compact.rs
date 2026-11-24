@@ -54,7 +54,13 @@ impl HttpConnectionAggregator {
         Option<Rc<RefCell<crate::utils::decompress::ZstdStreamDecoder>>>,
     ) {
         let qoder = request.is_some_and(|r| crate::parser::llm::is_qoder_path(&r.path));
-        if !self.compact_sse && !qoder {
+        // The legacy raw buffer recognizes only single codings. A stack must
+        // use incremental decoding too; retain_raw_events below still keeps
+        // every original decoded frame when raw retention is requested.
+        let stacked = response
+            .content_encoding()
+            .is_some_and(|value| value.contains(','));
+        if !self.compact_sse && !qoder && !stacked {
             return Self::sse_entry_state(response);
         }
         match SseStream::new(response, self.max_sse_retained_bytes.max(1024)) {
