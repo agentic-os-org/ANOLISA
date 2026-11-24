@@ -15,9 +15,9 @@ use serde_json::json;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReadbackFault {
-    InactiveAfterActivate,
+    RegistrationReadUnavailable,
     ListedAfterUnregister,
-    StatusUnavailableAfterUnregister,
+    ReplacementMissingAfterUnregister,
 }
 
 #[derive(Default)]
@@ -29,14 +29,24 @@ struct Kernel {
     fail_bootstrap: Mutex<bool>,
     fail_transfer: Mutex<bool>,
     readback_fault: Mutex<Option<ReadbackFault>>,
-    active: Mutex<BTreeSet<String>>,
     members: Mutex<BTreeMap<String, BTreeSet<u32>>>,
 }
 impl SecurityFs for Kernel {
     fn read(&self, node: &str) -> io::Result<Vec<u8>> {
-        self.calls.lock().unwrap().push(format!("read:{node}"));
+        let after_register = {
+            let mut calls = self.calls.lock().unwrap();
+            let after_register = calls.last().is_some_and(|call| call == "write:register");
+            calls.push(format!("read:{node}"));
+            after_register
+        };
         if node == "version" {
             return Ok(b"1".to_vec());
+        }
+        if after_register
+            && *self.readback_fault.lock().unwrap()
+                == Some(ReadbackFault::RegistrationReadUnavailable)
+        {
+            return Err(io::Error::other("registration readback failed"));
         }
         let mut text = "modules for lua-lsm\nname license size nlsm nload shdict kvnode author\n------------------------------------------\n".to_owned();
         for (name, hooks) in self.names.lock().unwrap().iter() {
@@ -80,12 +90,12 @@ impl SecurityFs for Kernel {
             if fault == Some(ReadbackFault::ListedAfterUnregister) {
                 return Ok(payload.len());
             }
-            if self.names.lock().unwrap().remove(text).is_none() {
+            let mut names = self.names.lock().unwrap();
+            if names.remove(text).is_none() {
                 return Err(io::Error::from_raw_os_error(2));
             }
-            self.active.lock().unwrap().remove(text);
-            if fault == Some(ReadbackFault::StatusUnavailableAfterUnregister) {
-                *self.fail_bootstrap.lock().unwrap() = true;
+            if fault == Some(ReadbackFault::ReplacementMissingAfterUnregister) {
+                names.clear();
             }
         }
         Ok(payload.len())
@@ -107,16 +117,7 @@ impl SecurityFs for Kernel {
             .push(format!("bootstrap:{command}"));
         let pid = parts.last().unwrap().parse::<u32>().ok();
         match command.as_str() {
-            "activate"
-                if *self.readback_fault.lock().unwrap()
-                    != Some(ReadbackFault::InactiveAfterActivate) =>
-            {
-                self.active.lock().unwrap().insert(name);
-            }
-            "status" if !self.active.lock().unwrap().contains(&name) => {
-                return Err(io::Error::from_raw_os_error(11));
-            }
-            "seed" => {
+            "seed" | "seed_root" => {
                 self.members
                     .lock()
                     .unwrap()
@@ -250,11 +251,16 @@ fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
     assert_eq!(client.update(&[], &prepared).error, None);
     assert_eq!(
         &kernel.calls.lock().unwrap()[calls..],
-        ["read:version", "read:modules", "bootstrap:status"]
+        ["read:version", "read:modules"]
     );
     // A fresh Client adopts only confirmed same-boot, same-source registrations.
     let client = LuaLsmClient::new(kernel.clone(), &state);
+    let calls = kernel.calls.lock().unwrap().len();
     assert_eq!(client.create(&prepared).error, None);
+    assert_eq!(
+        &kernel.calls.lock().unwrap()[calls..],
+        ["read:version", "read:modules"]
+    );
     // Identical source does not prove attachment to another process instance.
     let mut stale_subject: LuaLsmPlan = serde_json::from_slice(&plan.content).unwrap();
     stale_subject.process.start_time += 1;
@@ -291,7 +297,7 @@ fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
     assert!(calls.ends_with(&[
         "write:unregister".into(),
         "read:modules".into(),
-        "bootstrap:status".into()
+        "read:modules".into()
     ]));
     drop(calls);
     assert_eq!(
@@ -303,7 +309,7 @@ fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
 }
 
 #[test]
-fn acknowledged_writes_require_observed_activation_and_absence() {
+fn acknowledged_writes_require_registration_and_absence_readback() {
     let subject = Probe::start();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("file");
@@ -318,15 +324,15 @@ fn acknowledged_writes_require_observed_activation_and_absence() {
     binding.binding_revision = binding.binding_revision.checked_next().unwrap();
     let new = prepared(&client, &state, &binding);
 
-    *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::InactiveAfterActivate);
+    *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::RegistrationReadUnavailable);
     let pending = client.update(previous, &new);
-    assert_eq!(
-        pending.error.unwrap().code,
-        "LUA_LSM_ACTIVATION_UNCONFIRMED"
-    );
+    assert_eq!(pending.error.unwrap().code, "LUA_LSM_QUERY_UNCONFIRMED");
     assert_eq!(pending.observations[0].presence, Presence::Unknown);
-    assert!(kernel.active.lock().unwrap().contains(&old.target.id));
+    assert!(kernel.names.lock().unwrap().contains_key(&old.target.id));
+    assert!(kernel.names.lock().unwrap().contains_key(&new.target.id));
 
+    // A new Client can finish initialization after losing registration readback.
+    let client = LuaLsmClient::new(kernel.clone(), &state);
     *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::ListedAfterUnregister);
     let pending = client.update(previous, &new);
     assert_eq!(
@@ -336,18 +342,27 @@ fn acknowledged_writes_require_observed_activation_and_absence() {
     assert_eq!(pending.observations[0].presence, Presence::Present);
     assert_eq!(pending.observations[1].presence, Presence::Unknown);
     assert!(state.join(&old.target.id).is_dir());
+    assert_eq!(
+        kernel
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| *call == "write:register")
+            .count(),
+        2
+    );
 
-    *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::StatusUnavailableAfterUnregister);
+    *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::ReplacementMissingAfterUnregister);
     let pending = client.update(previous, &new);
     assert_eq!(
         pending.error.unwrap().code,
-        "LUA_LSM_ACTIVATION_UNCONFIRMED"
+        "LUA_LSM_REGISTRATION_UNCONFIRMED"
     );
     assert_eq!(pending.observations[0].presence, Presence::Unknown);
     assert_eq!(pending.observations[1].presence, Presence::Absent);
 
     *kernel.readback_fault.lock().unwrap() = None;
-    *kernel.fail_bootstrap.lock().unwrap() = false;
     let confirmed = client.update(previous, &new);
     assert_eq!(confirmed.error, None);
     assert_eq!(confirmed.observations[0].presence, Presence::Present);
@@ -436,18 +451,29 @@ fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
         1
     );
     *kernel.short_write.lock().unwrap() = false;
+    *kernel.write_error.lock().unwrap() = Some(17);
+    let result = client.create(&prepared);
+    assert_eq!(result.error.unwrap().code, "LUA_LSM_REGISTER_NAME_CONFLICT");
+    assert_eq!(result.observations[0].presence, Presence::Unknown);
+    assert!(!state.join(format!("{}.json", prepared.target.id)).exists());
     *kernel.fail_bootstrap.lock().unwrap() = true;
     let result = client.create(&prepared);
     assert_eq!(
         result.error.unwrap().code,
         "LUA_LSM_INITIALIZATION_UNCONFIRMED"
     );
-    assert_eq!(
-        client.create(&prepared).error.unwrap().code,
-        "LUA_LSM_EXISTING_MODULE_UNCONFIRMED"
-    );
+    assert_eq!(result.observations[0].presence, Presence::Unknown);
     *kernel.fail_bootstrap.lock().unwrap() = false;
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    let resume = kernel.calls.lock().unwrap().len();
     assert_eq!(client.create(&prepared).error, None);
+    {
+        let calls = kernel.calls.lock().unwrap();
+        let resumed = &calls[resume..];
+        assert!(resumed.starts_with(&["read:version".into(), "read:modules".into()]));
+        assert!(resumed.iter().any(|call| call == "bootstrap:seed_root"));
+        assert!(resumed.iter().all(|call| call != "write:register"));
+    }
     assert_eq!(
         kernel
             .calls
@@ -456,8 +482,26 @@ fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
             .iter()
             .filter(|c| *c == "write:register")
             .count(),
-        2
+        3
     );
+    // A completed receipt alone cannot restore a module lost from the kernel.
+    kernel.names.lock().unwrap().remove(&prepared.target.id);
+    kernel.members.lock().unwrap().remove(&prepared.target.id);
+    let restarted = LuaLsmClient::new(kernel.clone(), &state);
+    let start = kernel.calls.lock().unwrap().len();
+    assert_eq!(restarted.create(&prepared).error, None);
+    {
+        let calls = kernel.calls.lock().unwrap();
+        let recovered = &calls[start..];
+        assert!(recovered.starts_with(&[
+            "read:version".into(),
+            "read:modules".into(),
+            "write:register".into(),
+            "read:modules".into(),
+            "bootstrap:root_candidate".into(),
+            "bootstrap:seed_root".into(),
+        ]));
+    }
     assert_eq!(client.delete(&[prepared.target]).error, None);
 }
 
@@ -577,7 +621,7 @@ fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
         "LUA_LSM_MEMBERSHIP_TRANSFER_PENDING"
     );
     assert!(kernel.names.lock().unwrap().contains_key(&first.target.id));
-    assert!(!kernel.active.lock().unwrap().contains(&next.target.id));
+    assert_eq!(report.observations[0].presence, Presence::Unknown);
     *kernel.fail_transfer.lock().unwrap() = false;
     assert_eq!(client.update(&[first.target], &next).error, None);
     assert_eq!(
@@ -1050,7 +1094,8 @@ fn preexisting_mapping_preflight_rejects_before_registration_and_preserves_old_p
         "LUA_LSM_PREEXISTING_READ_MAPPING"
     );
     assert!(kernel.names.lock().unwrap().contains_key(&old.target.id));
-    assert!(!kernel.active.lock().unwrap().contains(&next.target.id));
+    assert_eq!(report.observations[0].presence, Presence::Unknown);
+    assert!(!kernel.members.lock().unwrap().contains_key(&next.target.id));
 }
 
 #[test]
@@ -1564,10 +1609,11 @@ fn live_kernel_uid_changes_preserve_protection_and_unprivileged_subject_cannot_u
         "errno=1",
         "unload attempt must leave protection active"
     );
-    assert_eq!(
-        probe.run("read", &state.join(&plan.target.id).join("activate")),
-        "errno=13"
-    );
+    let seed = state
+        .join(&plan.target.id)
+        .join("seed")
+        .join(probe.child.id().to_string());
+    assert_eq!(probe.run("read", &seed), "errno=13");
     assert_eq!(
         settle_native(|| client.delete(&installed.targets)).error,
         None

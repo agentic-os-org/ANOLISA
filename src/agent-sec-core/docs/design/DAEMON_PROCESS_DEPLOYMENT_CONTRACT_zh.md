@@ -540,13 +540,14 @@ Translator 和协议。非 Linux 构建显式选择 `lua-lsm` 时，daemon 拒�
 `/var/lib/agent-sec/lua-lsm` 状态目录；管理员的 opt-in drop-in 见
 [后端说明](../../v2/crates/asc-lua-lsm/README_zh.md)。目标 systemd 环境仍需实测。
 
-停止 daemon 不卸载模块，发现根进程消失不清理 Lua 文件 Binding；显式 Scope
-清理导致 Binding 清理时仍下发删除。Policy Template 删除仍保留已有 Scope 快照。
+停止 daemon 时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
+Binding 清理。模块卸载后，仍存活的后代失去该 Binding 的保护。Policy Template 删除仍
+保留已有 Scope 快照。
 启动把 Ready Lua Binding 置为待复核并保留 Unknown 清理责任，
-只有匹配的本次 boot 部署输入证据和活动模板回调才能确认既有部署。
+Client 读取内核模块列表，结合本次 boot 匹配的部署记录和初始化结果确认既有部署。
 缺失模块重下发，无法确认的模块保持 Unknown。其它后端保持原恢复语义。
-Repository 的两项 Lua 生命周期测试和 daemon 的
-`lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes` 验证本地接线；
+daemon 的 `root_exit_cleans_up_mixed_lua_deployment` 和
+`lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes` 验证清理和恢复接线；
 专用内核用例默认忽略，已在 Alibaba Cloud Linux 4 上通过 Translator/Client
 直连防护验收。隔离 QEMU 客体已运行 daemon 场景；宿主完整 daemon 测试在模块开始
 卸载后遇到内核崩溃，原因未明。安装包的 systemd 部署尚未验证。

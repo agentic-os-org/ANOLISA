@@ -56,7 +56,7 @@ local function next_path(index, state, name)
   return node.children[name] or 0
 end
 
-local function scope(task)
+local function marked(task)
   -- The dispatcher creates current before installing the module environment.
   -- Attach that environment before accessing its module-owned object cache.
   bind_environment(task, module_env)
@@ -106,9 +106,29 @@ local function with_task(pid, check)
   return result
 end
 
+local function in_scope()
+  if marked(current) then return true end
+  local pid = shared.state.root_pid
+  if pid == nil then return false end
+  -- PID lookups use the caller's namespace. Only the original task object
+  -- can attest ancestry, even if the number now resolves to another task.
+  local descendant = with_task(pid, function(root)
+    return root.scope_root == true and current:is_descendant(root)
+  end)
+  if descendant then
+    member(current)
+    member(current:group_leader())
+  end
+  return descendant
+end
+
+local function check_in_scope(check, ...)
+  if not in_scope() then return true end
+  return check(...)
+end
+
 local function guarded(check, ...)
-  if not scope(current) or shared.state.ready ~= true then return true end
-  local ok, allowed = pcall(check, ...)
+  local ok, allowed = pcall(check_in_scope, check, ...)
   if ok and allowed == true then return true end
   log(ok and allowed == false and "policy_deny" or "evaluation_error", not ok and allowed or nil)
   return false, errno.EPERM
@@ -135,18 +155,32 @@ local function hex(value)
 end
 
 --@glob include patterns.lua
-local function bootstrap(file)
+local function handle_control_command(file)
   local path = file:path()
   if type(path) ~= "string" or path:sub(1, #control + 1) ~= control .. "/" then return nil end
   if not current:userns():is_initial() or not current:capable("mac_admin") then return nil end
   local command = path:sub(#control + 2)
-  if command == "status" then
-    if shared.state.ready ~= true then return false, errno.EAGAIN end
+  local candidate = command:match("^root_candidate/(%d+)$")
+  if candidate then
+    assert(with_task(candidate, function(task)
+      task.root_candidate = true
+      return task.root_candidate == true
+    end))
     return false, ACK
   end
-  if command == "activate" then
-    shared.state.ready = true
-    assert(shared.state.ready == true)
+  local root_pid = command:match("^seed_root/(%d+)$")
+  if root_pid then
+    root_pid = tonumber(root_pid)
+    -- The Client checked the process instance after marking the candidate.
+    assert(with_task(root_pid, function(task)
+      assert(task.root_candidate == true)
+      member(task)
+      member(task:group_leader())
+      task.scope_root = true
+      return task.scope_root == true
+    end))
+    shared.state.root_pid = root_pid
+    assert(shared.state.root_pid == root_pid)
     return false, ACK
   end
   local pid = command:match("^seed/(%d+)$")
@@ -160,7 +194,7 @@ local function bootstrap(file)
   end
   pid = command:match("^member/(%d+)$")
   if pid then
-    return false, with_task(pid, scope) and ACK or errno.ESRCH
+    return false, with_task(pid, marked) and ACK or errno.ESRCH
   end
   local epoch = command:match("^begin/([0-9a-f]+)$")
   if epoch then
@@ -178,7 +212,7 @@ local function bootstrap(file)
   if pid then
     epoch = assert(shared.state.epoch)
     assert(with_task(pid, function(task)
-      assert(scope(task))
+      assert(marked(task))
       transferred(task, epoch)
       transferred(task:group_leader(), epoch)
       return true
@@ -352,12 +386,13 @@ return {
   description = "AgentSecCore file and process-tree protection",
   version = 1,
   file_open = function(file)
-    local ok, result, code = pcall(bootstrap, file)
+    local ok, result, code = pcall(handle_control_command, file)
     if not ok then
       if not log("bootstrap_error", result) and type(kernel.pr_warn) == "function" then
         pcall(kernel.pr_warn, name .. ": bootstrap_error: " .. tostring(result):sub(1, 256))
       end
-      if scope(current) then return false, errno.EIO end
+      local checked, scoped = pcall(in_scope)
+      if not checked or scoped then return false, errno.EIO end
       return true
     end
     if result ~= nil then return result, code end
@@ -430,22 +465,21 @@ return {
     return tracked(label, inode, parent, name)
   end,
   bprm_check_security = function(binprm)
-    if not scope(current) then return true end
     -- Preserve membership when a non-leader thread becomes the leader on exec.
-    local ok, code = tracked(function()
+    return guarded(function()
       local epoch = inherited_transfer(current)
+      if current:group_leader().scope_root == true then current.scope_root = true end
       member(current)
       if epoch then transferred(current, epoch) end
+      return allowed(assert(binprm:file():inode()), "read")
     end)
-    if not ok then return ok, code end
-    return guarded(function() return allowed(assert(binprm:file():inode()), "read") end)
   end,
   task_alloc = function(child)
-    if not scope(current) then return true end
-    return tracked(function()
+    return guarded(function()
       member(child)
       local epoch = inherited_transfer(current)
       if epoch then transferred(child, epoch) end
+      return true
     end)
   end,
   task_free = function(task)

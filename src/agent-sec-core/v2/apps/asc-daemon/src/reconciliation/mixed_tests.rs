@@ -285,7 +285,7 @@ fn mixed_file_pattern_is_owned_by_the_selected_backend() {
 }
 
 #[test]
-fn mixed_lua_deployment_survives_root_exit() {
+fn root_exit_cleans_up_mixed_lua_deployment() {
     use asc_policy_repository::{BindingStateWrite, Deployment};
 
     let (repository, binding) = setup(&source());
@@ -312,10 +312,29 @@ fn mixed_lua_deployment_survives_root_exit() {
     repository
         .compare_exchange_binding_state(&original, &BindingStateWrite::new(ready))
         .unwrap();
-    let confirmed = repository
-        .get_binding_state(&binding.binding_id)
-        .unwrap()
-        .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let core = BindingReconciler::new(
+        repository.clone(),
+        Arc::new(|binding: &PreparedBinding| AgentSightTranslator.translate(binding)),
+        BTreeMap::from([
+            (
+                LUA_LSM_ROUTE.into(),
+                factory(client(LUA_LSM_ROUTE, &repository, &binding, &calls)),
+            ),
+            (
+                "gateway".into(),
+                factory(client("gateway", &repository, &binding, &calls)),
+            ),
+        ]),
+        LUA_LSM_ROUTE.into(),
+        Arc::new(TestClock::default()),
+        RetryPolicy {
+            max_attempts: 1,
+            base_delay_ms: 1000,
+            max_delay_ms: 1000,
+        },
+    )
+    .unwrap();
     repository
         .sync_scope_instances(&binding.scope.scope_id, &[])
         .unwrap();
@@ -323,8 +342,33 @@ fn mixed_lua_deployment_survives_root_exit() {
         repository
             .get_binding_state(&binding.binding_id)
             .unwrap()
+            .unwrap()
+            .binding
+            .status
+            .phase,
+        BindingStatus::PendingDelete
+    );
+    assert_eq!(
+        core.reconcile(&binding.binding_id, &mut AttemptSchedule::default())
             .unwrap(),
-        confirmed
+        Disposition::Completed
+    );
+    assert_eq!(
+        &*calls.lock().unwrap(),
+        &["gateway:delete", "lua-lsm:delete"]
+    );
+    assert!(
+        repository
+            .get_binding_state(&binding.binding_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        repository
+            .get_scope(&binding.scope.scope_id)
+            .unwrap()
+            .status,
+        ScopeStatus::Active
     );
 }
 

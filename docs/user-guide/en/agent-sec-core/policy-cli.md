@@ -35,9 +35,10 @@ daemon test on that host ended in a kernel crash after module removal began; the
 cause remains unresolved. Packaged systemd deployment is also unverified. See
 the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README.md).
 
-Lua modules survive daemon stops and root-process exit; explicit Scope cleanup
-unloads them. Restart checks existing deployment evidence; updates transfer saved
-kernel membership, including orphans. Some rename operations are more restrictive
+Lua modules survive daemon stops. When discovery observes a root process exit or
+an administrator deletes its Scope, the daemon schedules Binding cleanup. Any
+surviving descendants lose that Binding's protection when the module unloads.
+Restart checks existing deployment evidence. Some rename operations are more restrictive
 than AgentSight. Preserve the Client state directory with the Policy
 database. Changing the default does not migrate existing deployments.
 Applying read protection rejects existing file mappings; write protection rejects

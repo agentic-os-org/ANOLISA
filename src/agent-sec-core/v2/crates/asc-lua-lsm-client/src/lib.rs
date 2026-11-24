@@ -1,4 +1,4 @@
-//! Native securityfs deployment and local activation of Lua-LSM artifacts.
+//! Native securityfs deployment and initialization of Lua-LSM artifacts.
 
 #![forbid(unsafe_code)]
 

@@ -29,8 +29,9 @@ Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随
 完整 daemon 测试中，模块开始卸载后发生内核崩溃，原因尚未确定；安装包的 systemd
 部署也未验证。配置和实现边界见 [后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
 
-daemon 停止和根进程退出都不会卸载 Lua 模块；显式清理 Scope 时卸载，重启时复核
-部署证据；更新通过旧模块迁移成员，覆盖孤儿后代。部分 rename 操作比 AgentSight 更严格。
+daemon 停止时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
+Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保护。重启时复核部署证据。
+部分 rename 操作比 AgentSight 更严格。
 恢复时应同时保留 Client 状态目录和 Policy 数据库。切换默认后端不会迁移已有部署。
 下发读保护时拒绝已有文件映射，写保护拒绝已有共享可写映射。已测系统调用、
 语义差异和剩余验收项见后端说明的覆盖对照表。

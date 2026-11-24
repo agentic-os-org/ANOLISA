@@ -1,4 +1,4 @@
-//! Reject mappings which can bypass syscall mediation before activation.
+//! Check for existing mappings which can bypass file mediation.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
