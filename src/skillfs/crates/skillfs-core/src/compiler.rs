@@ -67,10 +67,34 @@ pub fn compile(content: &str, env: &EnvironmentProfile) -> String {
 /// enclosing `@if` must reach the original-content anomaly fallback, not
 /// fall through to heuristic normalization, which would rewrite a
 /// structurally broken document instead of returning it verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Directive<'a> {
+    If(&'a str),
+    Else,
+    Endif,
+}
+
+fn directive_of(trimmed: &str) -> Option<Directive<'_>> {
+    // Must stay the single source of truth shared between detection and
+    // compilation so any routed directive is parsed identically.
+    if let Some(inner) = trimmed
+        .strip_prefix("<!-- @if ")
+        .and_then(|rest| rest.strip_suffix(" -->"))
+    {
+        Some(Directive::If(inner.trim()))
+    } else if trimmed == "<!-- @else -->" {
+        Some(Directive::Else)
+    } else if trimmed == "<!-- @endif -->" {
+        Some(Directive::Endif)
+    } else {
+        None
+    }
+}
+
 fn has_conditional_blocks(content: &str) -> bool {
-    content.contains("<!-- @if ")
-        || content.contains("<!-- @else -->")
-        || content.contains("<!-- @endif -->")
+    content
+        .split_inclusive('\n')
+        .any(|line| directive_of(split_line_terminator(line).0.trim()).is_some())
 }
 
 /// Compile content that contains `<!-- @if -->` / `<!-- @else -->` / `<!-- @endif -->` blocks.
@@ -111,54 +135,52 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
         let (body, terminator) = split_line_terminator(line);
         let trimmed = body.trim();
 
-        if let Some(expr) = parse_if_directive(trimmed) {
-            // Push: active iff parent scope is active AND condition true.
-            let parent_active = scope_stack.iter().all(|frame| frame.active);
-            let condition = parent_active && evaluate_expr(expr, env);
-            scope_stack.push(ScopeFrame {
-                active: condition,
-                saw_else: false,
-            });
-            continue;
-        }
-
-        if is_else_directive(trimmed) {
-            if scope_stack.len() > 1 {
-                let len = scope_stack.len();
-                if scope_stack[len - 1].saw_else {
-                    // Duplicate @else at the same @if depth.
-                    structural_anomaly = true;
-                } else {
-                    scope_stack[len - 1].saw_else = true;
-                    // Toggle only when all parent depths are true.
-                    let parent_active = scope_stack[..len - 1].iter().all(|frame| frame.active);
-                    if parent_active {
-                        scope_stack[len - 1].active = !scope_stack[len - 1].active;
+        match directive_of(trimmed) {
+            Some(Directive::If(expr)) => {
+                // Push: active iff parent scope is active AND condition true.
+                let parent_active = scope_stack.iter().all(|frame| frame.active);
+                let condition = parent_active && evaluate_expr(expr, env);
+                scope_stack.push(ScopeFrame {
+                    active: condition,
+                    saw_else: false,
+                });
+            }
+            Some(Directive::Else) => {
+                if scope_stack.len() > 1 {
+                    let len = scope_stack.len();
+                    if scope_stack[len - 1].saw_else {
+                        // Duplicate @else at the same @if depth.
+                        structural_anomaly = true;
+                    } else {
+                        scope_stack[len - 1].saw_else = true;
+                        // Toggle only when all parent depths are true.
+                        let parent_active = scope_stack[..len - 1].iter().all(|frame| frame.active);
+                        if parent_active {
+                            scope_stack[len - 1].active = !scope_stack[len - 1].active;
+                        }
                     }
+                } else {
+                    // @else with no enclosing @if.
+                    structural_anomaly = true;
                 }
-            } else {
-                // @else with no enclosing @if.
-                structural_anomaly = true;
             }
-            continue;
-        }
-
-        if is_endif_directive(trimmed) {
-            if scope_stack.len() > 1 {
-                scope_stack.pop();
-            } else {
-                // @endif with no enclosing @if.
-                structural_anomaly = true;
+            Some(Directive::Endif) => {
+                if scope_stack.len() > 1 {
+                    scope_stack.pop();
+                } else {
+                    // @endif with no enclosing @if.
+                    structural_anomaly = true;
+                }
             }
-            continue;
-        }
-
-        // Emit the line when all depth conditions are satisfied, with its own
-        // terminator: directive lines are dropped, but the surviving lines
-        // keep the file's line endings.
-        if scope_stack.iter().all(|frame| frame.active) {
-            output.push_str(body);
-            output.push_str(terminator);
+            None => {
+                // Emit the line when all depth conditions are satisfied, with its
+                // own terminator: directive lines are dropped, but the surviving
+                // lines keep the file's line endings.
+                if scope_stack.iter().all(|frame| frame.active) {
+                    output.push_str(body);
+                    output.push_str(terminator);
+                }
+            }
         }
     }
 
@@ -187,20 +209,6 @@ fn split_line_terminator(line: &str) -> (&str, &str) {
         },
         None => (line, ""),
     }
-}
-
-fn parse_if_directive(line: &str) -> Option<&str> {
-    // Format: <!-- @if <expr> -->
-    let inner = line.strip_prefix("<!-- @if ")?.strip_suffix(" -->")?;
-    Some(inner.trim())
-}
-
-fn is_else_directive(line: &str) -> bool {
-    line == "<!-- @else -->"
-}
-
-fn is_endif_directive(line: &str) -> bool {
-    line == "<!-- @endif -->"
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1199,64 @@ Run: pip install requests
 Run: pip install requests
 ";
         assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_inline_prose_directive_mention_does_not_skip_heuristics() {
+        let env = env_darwin_uv();
+        for ending in ["\n", "\r\n"] {
+            for mention in [
+                "<!-- @if os == darwin -->",
+                "<!-- @else -->",
+                "<!-- @endif -->",
+            ] {
+                let content =
+                    format!("Write `{mention}` to gate.{ending}pip install requests{ending}");
+                let expected =
+                    format!("Write `{mention}` to gate.{ending}uv pip install requests{ending}");
+                assert_eq!(compile(&content, &env), expected, "{content:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_typo_directives_do_not_suppress_heuristics() {
+        let env = env_darwin_uv();
+        for ending in ["\n", "\r\n"] {
+            for typo in [
+                "<!-- @if-->",
+                "<!-- @if -->",
+                "<!-- @else-->",
+                "<!-- @endif-->",
+                "<!-- @endif  -->",
+                "<!-- @else  -->",
+                "<!-- @if os == darwin-->",
+            ] {
+                let content = format!("{typo}{ending}pip install requests{ending}");
+                let expected = format!("{typo}{ending}uv pip install requests{ending}");
+                assert_eq!(compile(&content, &env), expected, "{content:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_indented_conditional_directives_preserve_blocks_and_crlf() {
+        for ending in ["\n", "\r\n"] {
+            let content = format!(
+                "- Setup:{ending}  <!-- @if os == darwin -->{ending}  - mac step{ending}  <!-- @else -->{ending}  - linux step{ending}  <!-- @endif -->{ending}"
+            );
+            assert_eq!(
+                compile(&content, &env_darwin_uv()),
+                format!("- Setup:{ending}  - mac step{ending}"),
+            );
+            assert_eq!(
+                compile(&content, &env_linux_no_uv()),
+                format!("- Setup:{ending}  - linux step{ending}"),
+            );
+        }
+        // Single-line trailing directive without a final terminator.
+        let no_eof_nl = "  <!-- @if os == darwin -->\r\n  mac\r\n  <!-- @endif -->";
+        assert_eq!(compile(no_eof_nl, &env_darwin_uv()), "  mac\r\n");
     }
 
     #[test]
