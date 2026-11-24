@@ -377,7 +377,7 @@ impl TokenConsumptionStore {
     pub fn purge_before(&self, cutoff_ns: u64) -> anyhow::Result<u64> {
         let deleted = self.conn.execute(
             &format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name),
-            params![cutoff_ns as i64],
+            params![cutoff_ns.min(i64::MAX as u64) as i64],
         )?;
         Ok(deleted as u64)
     }
@@ -538,6 +538,24 @@ mod tests {
         assert_eq!(with_rows.record_count, 3);
         assert_eq!(with_rows.total_input_tokens, 450);
         assert_eq!(with_rows.records.len(), 1);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_purge_before_clamps_cutoff_above_i64_max() {
+        let path = unique_db_path("purge_before_overflow");
+        let store = TokenConsumptionStore::new(&path).unwrap();
+        let bd = make_breakdown("openai", "gpt-4o");
+        store.insert(&bd, 1_000_000_000, 123, "python").unwrap();
+
+        let deleted = store.purge_before(u64::MAX).unwrap();
+        assert_eq!(deleted, 1, "u64::MAX cutoff must purge representable rows");
+        assert!(
+            store
+                .query(&TokenConsumptionFilter::default())
+                .unwrap()
+                .is_empty()
+        );
         cleanup_db(&path);
     }
 }
