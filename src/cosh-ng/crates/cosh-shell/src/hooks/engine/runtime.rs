@@ -1,7 +1,7 @@
 use std::fs;
 #[cfg(unix)]
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
@@ -58,8 +58,21 @@ fn redact(value: &str) -> String {
     crate::evidence::redact_sensitive_text(value).0
 }
 
+/// Hard cap on the raw bytes read from a spilled output file to build the
+/// preview, so the read stays bounded no matter how the output is shaped.
+const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
+
 fn read_preview(path: &str, max_lines: usize) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    // The line cap alone cannot bound the read: one pathological line (a
+    // minified dump, base64 blob, or process row with megabytes of arguments)
+    // would otherwise pull the whole spill file into memory and into every
+    // matching hook's stdin payload.
+    file.take(MAX_PREVIEW_BYTES).read_to_end(&mut bytes).ok()?;
+    // Spilled output can be binary; decode lossily so a non-UTF-8 tail still
+    // yields a preview instead of dropping it.
+    let content = String::from_utf8_lossy(&bytes);
     let preview: String = content
         .lines()
         .take(max_lines)
