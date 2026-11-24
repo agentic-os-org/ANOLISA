@@ -504,12 +504,36 @@ export const TokenSavingsPage: React.FC = () => {
     );
   };
 
-  // Load agent names on mount
+  // Reload agent filter options when the selected time range changes.
+  // Fetch immediately on mount; debounce subsequent picker edits to avoid
+  // issuing one request per keystroke while still dropping stale responses.
+  const hasLoadedAgentNamesRef = useRef(false);
   useEffect(() => {
-    const startNs = (Date.now() - 7 * 24 * 3600 * 1000) * 1_000_000;
-    const endNs = Date.now() * 1_000_000;
-    fetchAgentNames(startNs, endNs).then(setAgentNames).catch(() => {});
-  }, []);
+    let cancelled = false;
+    const startNs = startMs * 1_000_000;
+    const endNs = endMs * 1_000_000;
+    const load = () => {
+      fetchAgentNames(startNs, endNs)
+        .then((names) => {
+          if (!cancelled) setAgentNames(names);
+        })
+        .catch(() => {});
+    };
+
+    if (!hasLoadedAgentNamesRef.current) {
+      hasLoadedAgentNamesRef.current = true;
+      load();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const timer = setTimeout(load, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [startMs, endMs]);
 
   const handleQuery = useCallback(async () => {
     setLoading(true);
@@ -592,6 +616,13 @@ export const TokenSavingsPage: React.FC = () => {
   const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
+  const agentOptions = useMemo(() => {
+    if (selectedAgent && !agentNames.includes(selectedAgent)) {
+      return [selectedAgent, ...agentNames];
+    }
+    return agentNames;
+  }, [selectedAgent, agentNames]);
+
   const savingsRate = compoundedSavingsRate(totalCompoundedSaved, baselineTokens);
 
   return (
@@ -628,7 +659,7 @@ export const TokenSavingsPage: React.FC = () => {
             onChange={(e) => setSelectedAgent(e.target.value)}
           >
             <option value="">{t('common.allAgents')}</option>
-            {agentNames.map((n) => (
+            {agentOptions.map((n) => (
               <option key={n} value={n}>{n}</option>
             ))}
           </select>

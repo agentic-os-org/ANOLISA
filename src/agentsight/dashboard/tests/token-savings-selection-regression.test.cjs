@@ -46,6 +46,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 function createHooksDriver() {
   const slots = [];
   const effectDeps = [];
+  const effectCleanups = [];
   const pendingEffects = [];
   const driver = {
     slots,
@@ -60,7 +61,16 @@ function createHooksDriver() {
     // selection reset must key on the sessions snapshot, not every render.
     flushEffects() {
       const due = pendingEffects.splice(0);
-      for (const fn of due) fn();
+      for (const { index, fn } of due) {
+        if (typeof effectCleanups[index] === 'function') {
+          effectCleanups[index]();
+          effectCleanups[index] = undefined;
+        }
+        const cleanup = fn();
+        if (typeof cleanup === 'function') {
+          effectCleanups[index] = cleanup;
+        }
+      }
       return due.length;
     },
     useState(initial) {
@@ -94,7 +104,7 @@ function createHooksDriver() {
         || prev.length !== deps.length
         || deps.some((d, i) => d !== prev[i]);
       effectDeps[index] = deps;
-      if (changed) pendingEffects.push(fn);
+      if (changed) pendingEffects.push({ index, fn });
     },
     useCallback(fn) {
       driver._callbacks.push(fn);
@@ -189,7 +199,7 @@ const findSessionRow = (node, sessionId) =>
   findAll(node, (el) => typeof el.type === 'function' && el.type.name === 'SessionRow'
     && el.props && el.props.session && el.props.session.session_id === sessionId)[0];
 
-function makeHarness() {
+function makeHarness(searchQuery = '') {
   const { calls, stubs } = deferredFetchStubs([
     'fetchTokenSavings',
     'fetchAgentNames',
@@ -209,7 +219,7 @@ function makeHarness() {
   };
   const moduleStubs = {
     'react-router-dom': {
-      useSearchParams: () => [new URLSearchParams(''), () => undefined],
+      useSearchParams: () => [new URLSearchParams(searchQuery), () => undefined],
     },
     recharts: {
       ...componentStub('PieChart'), ...componentStub('Pie'), ...componentStub('Cell'),
@@ -563,5 +573,88 @@ test('source pin: the page wires selection, snapshot reset and disabled gates', 
   assert.ok(
     source.includes('disabled={loading || !!error || sessions.length === 0}'),
     'the complete export keeps its existing gate',
+  );
+});
+
+test('agent dropdown reloads on range changes, ignores stale replies, and keeps selected agent', async () => {
+  const initStart = 1_700_000_000_000;
+  const initEnd = 1_700_086_400_000;
+  const histStart = 1_699_000_000_000;
+  const harness = makeHarness(`start=${initStart}&end=${initEnd}&agent=pinned-agent`);
+
+  let tree = commit(harness);
+  assert.equal(harness.calls.fetchAgentNames.length, 1);
+  assert.deepEqual(
+    harness.calls.fetchAgentNames[0].args,
+    [initStart * 1_000_000, initEnd * 1_000_000],
+    'initial agent fetch must use the selected startMs..endMs range rather than a hardcoded 7-day window',
+  );
+  harness.calls.fetchAgentNames[0].resolve(['claude', 'codex']);
+  await settle();
+  tree = commit(harness);
+
+  const optionValues = (node) =>
+    findAll(node, (el) => el.type === 'option').map((el) => el.props.value);
+  assert.deepEqual(
+    optionValues(tree),
+    ['', 'pinned-agent', 'claude', 'codex'],
+    'deep-linked or selected agent absent from the range list stays visible in the dropdown',
+  );
+
+  // Move startMs to an older historical range; debounce coalesces rapid
+  // edits before firing, then out-of-order replies still drop cleanly.
+  const pickers = findAll(
+    tree,
+    (el) => typeof el.type === 'function' && el.type.name === 'DateTimePicker',
+  );
+  const startPicker = pickers.find((p) => p.props.label === 'common.startTime');
+  assert.ok(startPicker);
+  startPicker.props.onChange(histStart);
+  tree = commit(harness);
+  assert.equal(
+    harness.calls.fetchAgentNames.length,
+    1,
+    'range edits must debounce before firing /api/agent-names',
+  );
+
+  // Coalesce a burst change within the debounce window into a single fetch.
+  const midStart = histStart - 60_000;
+  const startPickerMid = findAll(
+    tree,
+    (el) => typeof el.type === 'function' && el.type.name === 'DateTimePicker',
+  ).find((p) => p.props.label === 'common.startTime');
+  assert.ok(startPickerMid);
+  startPickerMid.props.onChange(midStart);
+  tree = commit(harness);
+  assert.equal(harness.calls.fetchAgentNames.length, 1);
+
+  await new Promise((r) => setTimeout(r, 240));
+  assert.equal(harness.calls.fetchAgentNames.length, 2);
+  assert.deepEqual(harness.calls.fetchAgentNames[1].args, [
+    midStart * 1_000_000,
+    initEnd * 1_000_000,
+  ]);
+
+  const newerStart = histStart + 3_600_000;
+  const startPicker2 = findAll(
+    tree,
+    (el) => typeof el.type === 'function' && el.type.name === 'DateTimePicker',
+  ).find((p) => p.props.label === 'common.startTime');
+  assert.ok(startPicker2);
+  startPicker2.props.onChange(newerStart);
+  tree = commit(harness);
+  await new Promise((r) => setTimeout(r, 240));
+  assert.equal(harness.calls.fetchAgentNames.length, 3);
+
+  harness.calls.fetchAgentNames[2].resolve(['gemini']);
+  await settle();
+  harness.calls.fetchAgentNames[1].resolve(['stale-hist-agent']);
+  await settle();
+  tree = commit(harness);
+
+  assert.deepEqual(
+    optionValues(tree),
+    ['', 'pinned-agent', 'gemini'],
+    'superseded historical fetchAgentNames response must not overwrite newer range options',
   );
 });
