@@ -269,11 +269,11 @@ its caveats as comments, and that text is the artifact a later approval step con
 candidate covers only the command's own demand, so the program, cwd and loader paths are still
 not included; the CLI adds none of them.
 The PDP restricts every request to the PAP-managed Cedar policy set.
-A candidate returns determinable permissions
-plus non-blocking `caveats` for gaps such as an unresolved PATH lookup or unknown
-script behavior; only an inexpressible command yields a clarification, and an empty policy is a
-candidate as well: a command with no file, process or network action grants nothing and keeps
-its caveats instead of becoming a question. There is no TTL.
+A candidate returns determinable permissions plus `caveats` for gaps such as an
+unresolved PATH lookup or unknown script behavior. When a required file target depends
+on shell parameter expansion, the result asks for a literal path. A command with no
+file, process or network action can return an empty candidate and keeps its caveats.
+There is no TTL.
 See the
 [command contract (Chinese)](../docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)
 for field budgets and errors, plus the offline `command_api_*` daemon and `command_*`

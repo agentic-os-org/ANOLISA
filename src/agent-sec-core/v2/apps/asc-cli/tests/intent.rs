@@ -944,6 +944,32 @@ async fn command_clarification_and_invalid_input_emit_no_cedar() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("64 KiB"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_variable_file_targets_require_clarification() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let provider = command_provider(&directory.0);
+    let server = Server::start(&socket, provider.clone(), None).await;
+    for command in [r#"printf x > "$TARGET""#, r#"rm -rf "$DIR""#] {
+        let result = output_json(
+            &cli_command(&socket, &directory.0, command)
+                .output()
+                .unwrap(),
+            0,
+        );
+        assert_eq!(result["outcome"], "needs_clarification", "{command}");
+        assert!(
+            result["reasons"][0]
+                .as_str()
+                .unwrap()
+                .contains("literal path")
+        );
+        assert!(result.get("policy").is_none(), "{command}");
+    }
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    server.stop().await;
+}
+
 /// Results that this build cannot reproduce as Cedar or explain are refused, not rendered.
 #[test]
 fn command_results_are_reverified_before_rendering() {

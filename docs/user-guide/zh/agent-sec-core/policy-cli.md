@@ -282,9 +282,10 @@ agent-sec-cli intent propose-command \
 `none`，并在末尾单列 `Not covered by this candidate`；策略含无法摘要的条件时回退为原始
 Cedar。`--format cedar` 把 `caveats` 写成 `// Not covered:` 注释；澄清时只输出注释，
 不会把 permit 误当成结果。
-只有命令语义本身无法表达时才返回澄清，不输出部分策略；命令很短也应有策略，只有完全没有
-文件、进程、网络动作（如 `pwd`、`echo`、`date`）时才为空。空策略是合法候选：授权为空、
-`caveats` 随候选返回，沙箱只差运行依赖；CLI 在渲染前重新执行一次 Cedar 校验。
+当必要的文件目标依赖 shell 参数展开时，例如 `printf x > "$TARGET"` 或
+`rm -rf "$DIR"`，请提供字面目标路径。此时返回 `needs_clarification` 和原因，不输出
+部分策略。没有文件、进程、网络动作的命令（如无重定向的 `pwd` 或 `echo`）可生成空候选。
+空候选不授予权限，保留 `caveats`。CLI 在渲染前重新执行一次 Cedar 校验。
 两种结果退出码均为 `0`；daemon 会拒绝的输入在本地退出 `2`，不发出请求。
 
 `--format cedar` 输出未审批候选原文，审批与执行不在本子命令范围内。候选只含命令自身需求，

@@ -1278,14 +1278,16 @@ CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务�
 `caveats` 是候选已知但未覆盖的部分，例如 PATH 未解析导致 `file.exec` 目标无法确定、
 脚本内部行为未知或管道数据流无法推导；它不阻断候选，但审批与后续 PDP 映射必须一并查看，
 不得当成已授权。空 `policy` 是合法候选：命令没有文件、进程、网络动作时授权为空，
-`caveats` 随候选返回，沙箱只差运行依赖。任何模型 `unresolved` 仍转成 `needs_clarification`
-并丢弃部分策略；只有命令语义本身无法表达、给不出任何有意义权限时才使用它。非规范路径或
+`caveats` 随候选返回。模型 `unresolved` 转成 `needs_clarification` 并丢弃部分策略。
+简单文件重定向或 `cat`、`rm` 的文件目标依赖 shell 参数展开时，本地返回带原因的
+`needs_clarification`。提示词要求对其它无法静态确定的必要文件目标也返回 `unresolved`。
+非规范路径或
 不支持的身份、模板、注解同样要求澄清。语法或类型错误返回 `internal`。空 `unresolved`
 和 Strict 均不能证明需求完整、最小权限或审批。提示词要求可确定部分照常输出、不确定部分
 写入 `caveats`，不得以根目录、整个 cwd 或全网络权限兜底；没有语义完备性证明器。
 
 Rust 入口为 `asc_intent::propose_command(provider, model, &CommandInput, deadline)`。
-其 `command_retry` 测试覆盖模型漏报启动权限和已有启动条件两种情况。
+其 `command_retry` 测试覆盖模型漏报启动权限、已有启动条件、变量文件目标及字面美元符号。
 调用链为 dispatcher → `asc_daemon_core::intent::IntentService::propose_command` → 意图模块。
 认证、模型配置及错误分类沿用本节规则；与 `intent.propose` 共享每 UID 一个、全局四个实际执行额度。
 完整请求含 LF 最多 256 KiB；模型响应最多 16 KiB，原因最多 128 项，每项最多 4096 字节。
