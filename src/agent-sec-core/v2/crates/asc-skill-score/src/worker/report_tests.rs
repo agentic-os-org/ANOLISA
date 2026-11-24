@@ -44,6 +44,7 @@ fn serve(root: &Path, replies: Vec<String>) -> Result<(Judge, Server)> {
     listener.set_nonblocking(true)?;
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
+        let total = replies.len();
         for reply in replies {
             let (mut socket, _) = loop {
                 match listener.accept() {
@@ -78,9 +79,13 @@ fn serve(root: &Path, replies: Vec<String>) -> Result<(Judge, Server)> {
             let mut body = vec![0; length];
             request.read_exact(&mut body)?;
             requests.push(serde_json::from_slice(&body)?);
-            let body = json!({"content":[{"type":"text","text":reply}],"stop_reason":"end_turn",
-                "usage":{"input_tokens":10,"output_tokens":2}})
-            .to_string();
+            let mut body =
+                json!({"content":[{"type":"text","text":reply}],"stop_reason":"end_turn"});
+            // Simulate a gateway that omits metering on its final response.
+            if requests.len() < total {
+                body["usage"] = json!({"input_tokens":10,"output_tokens":2});
+            }
+            let body = body.to_string();
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
@@ -336,9 +341,12 @@ fn invalid_critical_coverage_exhausts_retries_and_returns_an_unranked_incomplete
         critical_reply(&[]),
         critical_reply(&[correct.clone(), wrong]),
         critical_reply(&[correct.clone(), correct]),
+        critical_reply(&[]),
+        critical_reply(&[]),
+        critical_reply(&[]),
     ];
     let (outcome, requests) = assess_observations(root.path(), &replies, &[], false)?;
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 8);
     assert!(
         contracts::text(&requests[4]["messages"][0], "content")
             .contains("unexpected or duplicate Critical review ID: unexpected")
@@ -349,12 +357,12 @@ fn invalid_critical_coverage_exhausts_retries_and_returns_an_unranked_incomplete
     assert_eq!(outcome.report["failure_stage"], "adjudication");
     assert!(
         contracts::text(&outcome.report, "reason")
-            .contains("Judge critical output invalid after three attempts")
+            .contains("Judge critical output invalid after 6 attempts")
     );
     assert!(!root.path().join("critical.json").exists());
     let attempts: Vec<Value> =
         serde_json::from_slice(&std::fs::read(root.path().join("critical.attempts.json"))?)?;
-    assert_eq!(attempts.len(), 3);
+    assert_eq!(attempts.len(), 6);
     let internal: Value =
         serde_json::from_slice(&std::fs::read(root.path().join("internal-report.json"))?)?;
     assert_eq!(internal["rankable"], false);
@@ -376,6 +384,11 @@ fn an_explicit_evidence_bound_critical_refutation_can_complete() -> Result<()> {
     assert_eq!(outcome.report["execution_status"], "complete");
     assert_eq!(outcome.report["decision"], "scored");
     assert_eq!(outcome.report["score"].as_f64(), Some(100.0));
+    let internal: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("internal-report.json"))?)?;
+    assert_eq!(internal["usage"]["judge_usage_complete"], false);
+    assert_eq!(internal["usage"]["judge_calls_without_usage"], 1);
+    assert_eq!(internal["usage"]["judge_tokens"], 24);
     Ok(())
 }
 

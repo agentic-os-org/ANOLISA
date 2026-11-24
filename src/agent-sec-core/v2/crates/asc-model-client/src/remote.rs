@@ -542,17 +542,14 @@ impl RemoteModel {
         if text.trim().is_empty() {
             return Err(failure("missing_text", stop));
         }
-        if value.get("usage").is_none_or(Value::is_null) {
-            return Err(failure("missing_usage", stop));
-        }
-        if value["usage"]["input_tokens"].as_u64().is_none()
-            || value["usage"]["output_tokens"].as_u64().is_none()
+        let usage = &value["usage"];
+        if !usage.is_null()
+            && (usage["input_tokens"].as_u64().is_none()
+                || usage["output_tokens"].as_u64().is_none())
         {
             return Err(failure("invalid_usage", stop));
         }
-        Ok(
-            json!({"text": self.redact(&text), "usage": value["usage"], "stop_reason": value["stop_reason"]}),
-        )
+        Ok(json!({"text": self.redact(&text), "usage": usage, "stop_reason": value["stop_reason"]}))
     }
 }
 
@@ -834,7 +831,7 @@ mod tests {
             ),
             (
                 "200 OK",
-                r#"{"content":[{"type":"text","text":"ok"}]}"#,
+                r#"{"content":[{"type":"text","text":"ok"}],"usage":{}}"#,
                 "invalid_response",
                 false,
             ),
@@ -920,6 +917,23 @@ mod tests {
     }
 
     #[test]
+    fn a_text_reply_without_usage_preserves_the_text_and_unknown_counts() {
+        for body in [
+            r#"{"content":[{"type":"text","text":"ok"}]}"#,
+            r#"{"content":[{"type":"text","text":"ok"}],"usage":null}"#,
+        ] {
+            let (base, server) = mock_response("200 OK", body, "");
+            let model = configured_model("anthropic-compatible", &base).expect("model");
+            let reply = model
+                .messages("system", "user", 10, false, Duration::from_secs(2))
+                .unwrap();
+            server.join().expect("fixture completed");
+            assert_eq!(reply["text"], "ok");
+            assert!(reply["usage"].is_null());
+        }
+    }
+
+    #[test]
     fn invalid_envelopes_expose_only_bounded_response_metadata() {
         for (body, reason) in [
             ("{", "invalid_json"),
@@ -928,10 +942,6 @@ mod tests {
             (
                 r#"{"content":[{"type":"thinking","thinking":"opaque-test-context"}],"stop_reason":"max_tokens"}"#,
                 "missing_text",
-            ),
-            (
-                r#"{"content":[{"type":"text","text":"opaque-test-context"}],"stop_reason":"opaque-test-context"}"#,
-                "missing_usage",
             ),
             (
                 r#"{"content":[{"type":"text","text":"private"}],"usage":{"output_tokens":"?"}}"#,

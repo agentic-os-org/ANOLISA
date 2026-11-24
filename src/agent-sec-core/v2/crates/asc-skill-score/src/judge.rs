@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 
 use crate::{Error, Result, contracts, fixtures, redaction::redact_value, source::private_json};
 
+// Initial adjudication plus up to five corrections of the model's output.
+const MAX_OUTPUT_ATTEMPTS: usize = 6;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 fn judge_max_tokens(model: &str) -> u32 {
     match model {
         "deepseek-v4.1-flash" | "deepseek-v4.1-flash-1017" => 393_216,
@@ -92,7 +96,7 @@ impl Judge {
         );
         let catalog: BTreeMap<String, String> = serde_json::from_value(payload["catalog"].clone())?;
         let mut last = String::new();
-        for attempt in 1..=3 {
+        for attempt in 1..=MAX_OUTPUT_ATTEMPTS {
             let response = self.transport(stage, &prompt, &message, stage != "audit")?;
             let raw = contracts::text(&response, "text").trim();
             let raw = if raw.starts_with("```") {
@@ -165,7 +169,7 @@ impl Judge {
             }
         }
         Err(Error::Runtime(format!(
-            "Judge {stage} output invalid after three attempts: {last}"
+            "Judge {stage} output invalid after {MAX_OUTPUT_ATTEMPTS} attempts: {last}"
         )))
     }
 
@@ -282,7 +286,7 @@ impl Judge {
                 return Err(Error::Deadline);
             }
             let started = Instant::now();
-            let receive = request(high, remaining.min(Duration::from_secs(300)));
+            let receive = request(high, remaining.min(REQUEST_TIMEOUT));
             let response = loop {
                 if self.cancelled.load(Ordering::Relaxed) {
                     self.record_failure(stage, started, high, "cancelled", None);
@@ -303,6 +307,10 @@ impl Judge {
             };
             match response {
                 Ok(value) => {
+                    if value["usage"].is_null() {
+                        let warning = json!({"stage":stage, "reason":"missing_usage"});
+                        eprintln!("[skill-score] Judge usage warning: diagnostic={warning}");
+                    }
                     let mut call = json!({"code":"success","usage":value["usage"],
                         "seconds":started.elapsed().as_secs_f64(),
                         "reasoning_effort":if high { "high" } else { "medium" },
@@ -1043,7 +1051,7 @@ mod tests {
         let mut efforts = Vec::new();
         let result = judge.transport_with("final", true, |high, timeout| {
             efforts.push(high);
-            assert_eq!(timeout, Duration::from_secs(300));
+            assert_eq!(timeout, Duration::from_secs(600));
             response(match efforts.len() {
                 1 => Err(failure("timeout", true, Duration::ZERO)),
                 2 => Err(failure("server_error", true, Duration::ZERO)),
@@ -1152,7 +1160,7 @@ mod tests {
             reader.read_exact(&mut request_body)?;
             let request: Value = serde_json::from_slice(&request_body)?;
             assert_eq!(request["max_tokens"], 393_216);
-            let body = r#"{"content":[{"type":"text","text":"private-fixture-body"}],"stop_reason":"end_turn"}"#;
+            let body = r#"{"content":[{"type":"text","text":"private-fixture-body"}],"usage":{"input_tokens":"unknown","output_tokens":2},"stop_reason":"end_turn"}"#;
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1170,7 +1178,7 @@ mod tests {
         assert_eq!(saved[0]["code"], "invalid_response");
         let diagnostic = &saved[0]["diagnostic"];
         assert_eq!(diagnostic["stage"], "final");
-        assert_eq!(diagnostic["reason"], "missing_usage");
+        assert_eq!(diagnostic["reason"], "invalid_usage");
         assert_eq!(diagnostic["http_status"], 200);
         assert_eq!(diagnostic["received_bytes"], diagnostic["declared_bytes"]);
         assert!(!saved.to_string().contains("private-fixture-body"));
