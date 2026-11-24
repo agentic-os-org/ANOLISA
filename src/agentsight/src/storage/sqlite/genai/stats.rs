@@ -684,10 +684,10 @@ impl GenAISqliteStore {
 
     /// Return per-agent token usage aggregated over all recorded history.
     ///
-    /// Groups by `COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE`
-    /// so that every LLM call is attributed to some label even when agent_name
-    /// is NULL, and case variants of one agent stay a single series — the same
-    /// rule `list_agent_activity_summaries` and the latency metrics use. The
+    /// Groups by `COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''), 'unknown') COLLATE NOCASE`
+    /// so that every LLM call is attributed to some label even when `agent_name`
+    /// is NULL or blank, and case variants of one agent stay a single series —
+    /// the same rule `list_agent_activity_summaries` and the latency metrics use. The
     /// reported label is the group's `MIN` for a stable spelling.
     pub fn get_agent_token_summary(
         &self,
