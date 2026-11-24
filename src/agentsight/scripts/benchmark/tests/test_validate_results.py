@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -176,6 +177,131 @@ def test_capacity_rejected_metrics_reject_counter_reset(tmp_path: Path) -> None:
         'agentsight_http_conn_removed_total{reason="capacity_rejected",state="admission"} 6\n'
     )
     assert validate_results.load_capacity_rejected_events(metrics, baseline) is None
+
+
+@pytest.mark.parametrize(
+    ("after_lines", "expected_state"),
+    [
+        (
+            ['agentsight_http_conn_removed_total{state="admission",reason="capacity_rejected"} 8'],
+            "http2_stream",
+        ),
+        (
+            ['agentsight_http_conn_removed_total{state="admission",reason="capacity_rejected"} 6'],
+            "http2_stream",
+        ),
+        (
+            ['agentsight_http_conn_removed_total{reason="idle_timeout",state="admission"} 1'],
+            "admission",
+        ),
+    ],
+)
+def test_capacity_rejected_metrics_reject_disappeared_positive_series(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    after_lines: list[str],
+    expected_state: str,
+) -> None:
+    baseline = tmp_path / "before.prom"
+    baseline.write_text(
+        "\n".join(
+            [
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="admission"} 6',
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="http2_stream"} 4',
+            ]
+        )
+        + "\n"
+    )
+    metrics = tmp_path / "after.prom"
+    metrics.write_text("\n".join(after_lines) + "\n")
+
+    with caplog.at_level(logging.WARNING):
+        assert validate_results.load_capacity_rejected_events(metrics, baseline) is None
+
+    assert "run attribution is unavailable" in caplog.text
+    assert expected_state in caplog.text
+
+
+def test_capacity_rejected_metrics_allow_disappeared_zero_and_new_series(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "before.prom"
+    baseline.write_text(
+        "\n".join(
+            [
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="admission"} 6',
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="http2_stream"} 0',
+            ]
+        )
+        + "\n"
+    )
+    metrics = tmp_path / "after.prom"
+    metrics.write_text(
+        "\n".join(
+            [
+                'agentsight_http_conn_removed_total{state="admission",reason="capacity_rejected"} 8',
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="request_body_pending"} 3',
+            ]
+        )
+        + "\n"
+    )
+
+    assert validate_results.load_capacity_rejected_events(metrics, baseline) == 5
+
+
+def test_main_reports_null_capacity_rejected_when_positive_series_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    baseline = tmp_path / "before.prom"
+    baseline.write_text(
+        "\n".join(
+            [
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="admission"} 6',
+                'agentsight_http_conn_removed_total{reason="capacity_rejected",state="http2_stream"} 4',
+            ]
+        )
+        + "\n"
+    )
+    metrics = tmp_path / "after.prom"
+    metrics.write_text(
+        'agentsight_http_conn_removed_total{state="admission",reason="capacity_rejected"} 8\n'
+    )
+    requests = tmp_path / "requests.jsonl"
+    requests.write_text('{"request_id":"one","http_status":200}\n')
+    callbacks = tmp_path / "callbacks.tsv"
+    callbacks.write_text("T\tone\t200\t10\t1\n")
+    output = tmp_path / "report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_results.py",
+            "--load-results",
+            str(requests),
+            "--request-log",
+            str(requests),
+            "--ffi-events",
+            str(callbacks),
+            "--expected-total-tokens",
+            "10",
+            "--metrics-baseline",
+            str(baseline),
+            "--metrics-file",
+            str(metrics),
+            "--output",
+            str(output),
+        ],
+    )
+    with caplog.at_level(logging.WARNING):
+        exit_code = validate_results.main()
+
+    assert exit_code == 0
+    report = json.loads(output.read_text())
+    assert report["capacity_rejected_events"] is None
+    assert report["complete"] == 1
+    assert report["token_correct"] == 1
+    assert "run attribution is unavailable" in caplog.text
 
 
 @pytest.mark.parametrize(
