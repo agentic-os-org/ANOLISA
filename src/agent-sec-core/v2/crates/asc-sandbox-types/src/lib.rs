@@ -120,6 +120,14 @@ impl Validate for ExecutionSpec {
         }
         self.launch.validate()?;
         self.permissions.validate()?;
+        if let Some(path) = &self.permissions.execution.cwd_entry
+            && path != &self.launch.cwd
+        {
+            return Err(ValidationError::new(
+                "cwd_entry",
+                format!("not the launch cwd: {path}"),
+            ));
+        }
         for alias in &self.mount_aliases {
             validate_os_path(alias)?;
         }

@@ -180,13 +180,13 @@ pub fn prepare_launch(
     cwd: &Path,
     env: BTreeMap<String, String>,
 ) -> Result<LaunchSpec, PepError> {
-    let cwd = fs::canonicalize(cwd)?;
+    let cwd = canonicalize(cwd)?;
     if !cwd.is_dir() {
         return Err(PepError::Unsupported("cwd is not a directory".into()));
     }
     let resolved = if program.contains('/') {
         let path = Path::new(program);
-        fs::canonicalize(if path.is_absolute() {
+        canonicalize(&if path.is_absolute() {
             path.to_owned()
         } else {
             cwd.join(path)
@@ -296,14 +296,22 @@ pub fn prepare_path_facts(
 }
 
 fn path_fact(path: &Path) -> Result<PathFact, PepError> {
-    let canonical = fs::canonicalize(path)?;
-    let metadata = fs::metadata(&canonical)?;
+    let canonical = canonicalize(path)?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        PepError::Unsupported(format!("cannot inspect {}: {error}", canonical.display()))
+    })?;
     Ok(PathFact {
         path: path_string(path)?,
         canonical_path: path_string(&canonical)?,
         is_directory: metadata.is_dir(),
         device: metadata.dev(),
         inode: metadata.ino(),
+    })
+}
+
+fn canonicalize(path: &Path) -> Result<PathBuf, PepError> {
+    fs::canonicalize(path).map_err(|error| {
+        PepError::Unsupported(format!("cannot resolve {}: {error}", path.display()))
     })
 }
 

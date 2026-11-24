@@ -61,6 +61,11 @@ pub fn translate(
     name: &str,
 ) -> Result<ContainerPlan, DockerError> {
     spec.validate()?;
+    if spec.permissions.execution.cwd_entry.is_some() {
+        return Err(DockerError::Unsupported(
+            "directory-only cwd requires the Linux sandbox".into(),
+        ));
+    }
     config.validate()?;
     validate_os_path(&spec.launch.program)?;
     if spec.launch.program != spec.launch.resolved_program {
@@ -314,6 +319,14 @@ mod tests {
         ]);
         let cases = vec![
             (spec(&deny, "/work"), "deny"),
+            (
+                {
+                    let mut s = spec(&serde_json::json!([]), "/work");
+                    s.permissions.execution.cwd_entry = Some("/work".into());
+                    s
+                },
+                "directory-only cwd",
+            ),
             (
                 {
                     let mut s = spec(&serde_json::json!([allow("/work", &["read"])]), "/work");

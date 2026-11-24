@@ -380,10 +380,11 @@ root 所有权及父目录安全属性必须有效；配置或依赖失败不降
 通过批准扩大权限。
 默认模板不得直接充当动态权限模式的运行时附加权限，以免隐式增加整个工作目录写权限。
 显式设置 `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` 后，Hook 将原始 command
-（含 sudo）和规范化 cwd 交给 `intent.propose_command`，不传用户任务。`candidate` 与
-`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 指定的 Cedar 预设通过
-`PermissionInput::with_runtime` 合并，保留 forbid，复用转换、调用校验和路径绑定。
-运行预设替代固定模板，其 cwd/tmp 许可和 Git 保护不自动继承。空候选仅申请运行预设；
+（含 sudo）和规范化 cwd 交给 `intent.propose_command`，不传用户任务。Rust Hook 将 Cedar
+候选、本次启动的只读基线及可选的 `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 预设
+合并后校验、绑定路径并提交 PDP。仅进入 cwd 的申请保存在 `execution.cwd_entry`，
+PDP 求值该路径的 file.read，Linux 后端在私有根中创建目录并挂入单独获批的对象。
+空候选只申请基线及显式追加项；
 澄清、异常和超时阻断，无隐式放权。caveats 显示到原生通知/审批说明。候选按调用临时存放
 并在 prepare 后清理；不写 PAP，finish 无需候选文件或固定模板。
 当前 PAP 集合的参与条件及独立授权配置移除见 Sandbox 指南；任务限制须实际参与

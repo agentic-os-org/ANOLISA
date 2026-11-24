@@ -264,6 +264,14 @@ include = [
 > Lint 检查仅在 PR 触发时对增量代码检查，不检查历史代码。违规信息显示在 PR 的 Job Summary 区域。
 > 增量覆盖率门禁仅在 PR 触发，要求本次 PR 新增/修改的代码行中被测试覆盖的比例 ≥ 80%。
 
+Before pushing a sec-core PR, check coverage against the PR target branch.
+The workflow evaluates Python, Rust and TypeScript separately. For Rust,
+run the affected Linux coverage jobs in [ci.yaml](../../.github/workflows/ci.yaml).
+From `src/agent-sec-core`, check their normalized Cobertura reports together
+with `diff-cover rust*-coverage.xml --compare-branch=upstream/main --fail-under=80`
+(use the remote that tracks the PR base). Inspect the reported missing lines
+and test the corresponding behavior, including denial and error paths.
+
 ### 12. Capability View Maintenance
 
 `agent-sec-cli capabilities` is the canonical read-only environment-variable view of agent-sec plugin hook capabilities. Treat it as part of the hook environment contract, but do not treat it as proof of the target Agent's live runtime state.

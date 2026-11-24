@@ -229,25 +229,37 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
         except Exception as error:
             errors.append(error)
     read = 'permit(principal, action == SecCore::Action::"file.read", resource);'
-    write = 'permit(principal, action == SecCore::Action::"file.write", resource);'
+    write = ('permit(principal, action == SecCore::Action::"file.write", resource) '
+        'when { resource.path == "%s" || resource.path like "%s/*" };' % (root, root))
     original_json = {'version':1, 'filesystem':{'default':'deny','rules':[
         {'effect':'allow','path':'/','rights':['read']}]},
         'execution':{'deny_paths':[]}, 'network':{'mode':'off'}}
     output = root / 'new-output'
     create = read + 'permit(principal, action == SecCore::Action::"file.write", resource) when { resource.path == ' + json.dumps(str(output)) + ' && context.input.operation == SecCore::WriteOperation::"create" };'
-    for policy in [read, read + write, json.dumps(original_json), create]:
+    preset = root / 'extra.cedar'
+    extra_file = root / 'readable'
+    extra_file.touch()
+    preset.write_text('permit(principal, action == SecCore::Action::"file.read", resource) '
+        'when { resource.path == %s };' % json.dumps(str(extra_file)))
+    for index, policy in enumerate([read, read + write, json.dumps(original_json), create, '', '']):
         source.write_text(policy)
         thread = threading.Thread(target=receive)
         thread.start()
         result = subprocess.run([sys.argv[1], '--socket', str(endpoint), 'sandbox', 'hook', 'prepare',
-            '--permissions', str(source)], input=json.dumps({'session_id':'cedar-input',
+            '--permissions', str(source), *(['--runtime-permissions', str(preset)] if index == 5 else [])], input=json.dumps({'session_id':'cedar-input',
                 'cwd':str(root),'tool_input':{'command':'true'}}),
             capture_output=True, text=True, timeout=20)
         thread.join(timeout=20)
-        assert not thread.is_alive() and not errors, errors
+        assert not thread.is_alive() and not errors, (errors, result.stderr)
         assert result.returncode != 0 and 'recording request only' in result.stderr, result.stderr
     listener.close()
-    assert len(received) == 4, received
+    assert len(received) == 6, received
+    base, extended = [item['params']['context']['requested_permissions'] for item in received[4:]]
+    assert base['execution']['cwd_entry'] == extended['execution']['cwd_entry'] == str(root)
+    assert all('write' not in r['rights'] for r in base['filesystem']['rules'])
+    assert all(r in extended['filesystem']['rules'] for r in base['filesystem']['rules'])
+    assert not any(r['path'] == str(extra_file) for r in base['filesystem']['rules'])
+    assert any(r['path'] == str(extra_file) and r['rights'] == ['read'] for r in extended['filesystem']['rules'])
     creation = received[3]['params']['context']['requested_permissions']['filesystem']['rules']
     assert any(rule['path'] == str(root) and rule['effect'] == 'allow' and 'write' in rule['rights'] for rule in creation), creation
     assert all(rule['path'] != str(output) for rule in creation) and not output.exists(), creation

@@ -26,6 +26,10 @@ class SuiteTests(unittest.TestCase):
     def test_fixture_directory_contains_scenario_inputs(self):
         root = Path(intent.__file__).resolve().parent
         self.assertEqual(common.FIXTURES, root / "fixtures")
+        self.assertEqual(
+            {path.name for path in common.FIXTURES.glob("*.cedar*")},
+            {"task.cedar", "gateway.cedar.in"},
+        )
         for name in ("task.txt", "task.cedar", "gateway.cedar.in"):
             with self.subTest(name=name):
                 self.assertTrue((common.FIXTURES / name).is_file())
@@ -476,11 +480,7 @@ class SuitePresentationTests(unittest.TestCase):
                 patch.object(
                     full,
                     "fixture_reader",
-                    return_value=lambda name: (
-                        full.RUNTIME_PRESET.read_bytes()
-                        if name == "home/runtime.cedar"
-                        else b"published"
-                    ),
+                    return_value=lambda name: b"published",
                 ),
                 patch.object(full, "start_cosh", return_value=12345),
                 patch.object(full, "CASES", cases),
@@ -508,13 +508,7 @@ class SuitePresentationTests(unittest.TestCase):
         self.assertIn("[OK] cosh/5-fallback：回执与执行证据", text)
 
 
-class CoshRuntimePresetTests(unittest.TestCase):
-    def test_bundled_runtime_preset_matches_pinned_digest(self):
-        self.assertEqual(
-            hashlib.sha256(full.RUNTIME_PRESET.read_bytes()).hexdigest(),
-            full.RUNTIME_PRESET_SHA256,
-        )
-
+class CoshLaunchTests(unittest.TestCase):
     def test_account_command_runs_with_isolated_path_and_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             launcher = Path(directory) / "runuser"
@@ -546,50 +540,9 @@ class CoshRuntimePresetTests(unittest.TestCase):
         ):
             full.account_command("tester", "true")
 
-    def test_missing_or_invalid_preset_stops_real_preflight_before_cosh(self):
+    def test_start_cosh_unsets_runtime_preset_after_login_shell(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            invalid = root / "invalid.cedar"
-            invalid.write_text("not Cedar")
-            for path in (root / "missing.cedar", invalid, Path("relative.cedar")):
-                with (
-                    self.subTest(path=path),
-                    patch.object(full, "RUNTIME_PRESET", path),
-                    PreflightOutputTests().full_stubs(),
-                    patch.object(full.subprocess, "check_output") as start,
-                    self.assertRaisesRegex(RuntimeError, "runtime preset"),
-                ):
-                    full.preflight("tester")
-                start.assert_not_called()
-
-    def test_start_cosh_rejects_missing_or_modified_preset_without_launch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "runtime.cedar"
-            for data in (
-                None,
-                b"",
-                b"not Cedar",
-                b'{"version":1}',
-                b"permit(principal, action, resource);",
-            ):
-                if data is not None:
-                    path.write_bytes(data)
-                with (
-                    self.subTest(data=data),
-                    ExitStack() as cleanup,
-                    patch.object(full.subprocess, "check_output") as start,
-                    self.assertRaisesRegex(RuntimeError, "runtime preset"),
-                ):
-                    full.start_cosh(
-                        "tester", Path(directory), cleanup, "selftest", path
-                    )
-                start.assert_not_called()
-
-    def test_start_cosh_explicitly_passes_preset_after_login_shell(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "runtime with spaces.cedar"
-            path.write_bytes(full.RUNTIME_PRESET.read_bytes())
             with (
                 patch.dict(os.environ, GH_TOKEN="synthetic-admin-only"),
                 patch.object(full.shutil, "which", return_value="/test/runuser"),
@@ -600,13 +553,13 @@ class CoshRuntimePresetTests(unittest.TestCase):
                 ExitStack() as cleanup,
             ):
                 self.assertEqual(
-                    full.start_cosh("tester", root, cleanup, "selftest", path), 12345
+                    full.start_cosh("tester", root, cleanup, "selftest"), 12345
                 )
                 self.assertEqual(start.call_args.args[0][0], "/test/runuser")
                 command = full.shlex.split(start.call_args.args[0][-1])
-                self.assertIn(
-                    f"AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS={path}", command
-                )
+                self.assertIn("AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS", command)
+                preset = command.index("AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS")
+                self.assertEqual(command[preset - 1], "-u")
                 self.assertEqual(command[-1], "cosh")
                 self.assertNotIn("GH_TOKEN", start.call_args.kwargs["env"])
             self.assertNotIn("GH_TOKEN", stop.call_args.kwargs["env"])
@@ -623,9 +576,7 @@ class CoshRuntimePresetTests(unittest.TestCase):
             patch.object(full.subprocess, "run") as stop,
         ):
             with self.assertRaises(subprocess.TimeoutExpired), ExitStack() as cleanup:
-                full.start_cosh(
-                    "tester", Path("/work"), cleanup, "selftest", full.RUNTIME_PRESET
-                )
+                full.start_cosh("tester", Path("/work"), cleanup, "selftest")
             self.assertIn("kill-server", stop.call_args.args[0][-1])
 
 

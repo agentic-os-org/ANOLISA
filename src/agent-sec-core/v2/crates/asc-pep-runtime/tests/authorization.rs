@@ -458,6 +458,30 @@ fn defer_is_terminal_and_reports_once() {
 }
 
 #[test]
+fn decision_cannot_add_an_unrequested_cwd_entry() {
+    let (_directory, mut runtime, launch, permissions) = fixture();
+    let client = client(DecisionVerdict::Allow);
+    let request = request(launch, permissions.0);
+    let mut decision = client.evaluate(&request.request).unwrap();
+    let cwd = decision.launch.cwd.clone();
+    decision
+        .effective_permissions
+        .as_mut()
+        .unwrap()
+        .execution
+        .cwd_entry = Some(cwd.clone());
+    let outcome = runtime.apply(&request, decision, &client, None).unwrap();
+    assert!(!outcome.result.started);
+    assert!(
+        outcome
+            .result
+            .error
+            .unwrap()
+            .contains(&format!("unrequested cwd entry: {cwd}"))
+    );
+}
+
+#[test]
 fn modified_decision_cannot_expand_the_requested_permissions() {
     let (_directory, mut runtime, launch, permissions) = fixture();
     let client = client(DecisionVerdict::Modify);

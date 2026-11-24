@@ -1111,98 +1111,142 @@ impl asc_pep_runtime::AuthorizationClient for Client {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn task_policy_runtime_allows_narrow_case_one_launch() {
-    const PRESET: &str =
-        include_str!("../../../../tests/e2e/intent-policy-enforcement/fixtures/runtime.cedar");
-    let baseline = r#"permit(principal, action == SecCore::Action::"file.read", resource);
-permit(principal, action == SecCore::Action::"process.spawn", resource);
-permit(principal, action == SecCore::Action::"file.write", resource)
-when { resource.path == "/run/anolisa-task-policy/out" ||
-       resource.path like "/run/anolisa-task-policy/out/*" };"#;
-    // File roots also cover descendants so lexical projection needs no host fixtures.
-    let candidate = r#"permit(principal, action == SecCore::Action::"file.read", resource)
-when { resource.path == "/run/anolisa-task-policy/scripts/build-with-setup.sh" ||
-       resource.path like "/run/anolisa-task-policy/scripts/build-with-setup.sh/*" };
-permit(principal, action == SecCore::Action::"file.write", resource)
-when { resource.path == "/run/anolisa-task-policy/out/build.log" ||
-       resource.path like "/run/anolisa-task-policy/out/build.log/*" };"#;
-    let launch = LaunchSpec {
-        program: "/bin/bash".into(),
-        resolved_program: "/usr/bin/bash".into(),
-        args: vec![
-            "-c".into(),
-            "bash scripts/build-with-setup.sh >out/build.log 2>&1".into(),
-        ],
-        cwd: "/run/anolisa-task-policy".into(),
-        env: BTreeMap::new(),
-    };
-    let permissions = PermissionInput::parse(candidate)
+fn empty_launch_baseline_binds_system_aliases_and_only_enters_cwd() {
+    let cwd = tempfile::tempdir().unwrap();
+    let launch =
+        asc_pep_runtime::prepare_launch("/bin/bash", vec![], cwd.path(), BTreeMap::new()).unwrap();
+    let base = PermissionInput::parse("")
         .unwrap()
-        .with_runtime(PermissionInput::parse(PRESET).unwrap())
+        .with_launch_baseline(&launch)
         .unwrap()
-        .resolve(&launch)
+        .prepare(&launch)
         .unwrap();
-    let request = OsAuthorizationRequest::new(
-        "case-one".into(),
-        OsAuthorizationContext {
-            execution_id: "case-one-execution".into(),
-            agent: AgentPrincipal {
-                agent_type: Some("cosh".into()),
-            },
-            launch: (&launch).into(),
-            requested_permissions: permissions,
-        },
+    assert_eq!(
+        base.permissions.execution.cwd_entry.as_ref(),
+        Some(&launch.cwd)
     );
-    let pdp = Client::new(baseline).pdp;
-    let mut missing_cwd = request.clone();
-    missing_cwd
-        .context
-        .requested_permissions
-        .filesystem
-        .rules
-        .retain(|rule| rule.path != launch.cwd);
-    let denied = pdp.evaluate(&missing_cwd, 100).unwrap();
-    assert_eq!(denied.verdict, DecisionVerdict::Deny);
-    assert!(denied.reason.contains(&launch.cwd), "{}", denied.reason);
+    assert_eq!(base.permissions.network.mode, NetworkMode::Off);
+    assert!(
+        base.permissions
+            .filesystem
+            .rules
+            .iter()
+            .all(|rule| !rule.rights.contains(&FileRight::Write))
+    );
+    for link in ["/bin", "/lib", "/lib64"] {
+        if std::path::Path::new(link).is_symlink() {
+            assert!(
+                base.mount_aliases.iter().any(|alias| alias == link),
+                "{link}"
+            );
+        }
+    }
+    assert!(!allows(&base.permissions, &launch.cwd, FileRight::Read));
+    assert!(!allows(&base.permissions, "/etc/passwd", FileRight::Read));
+    let wide = PermissionInput::parse(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource);"#,
+    )
+    .unwrap()
+    .with_launch_baseline(&launch)
+    .unwrap();
+    if std::path::Path::new("/bin").is_symlink() {
+        let error = wide.prepare(&launch).unwrap_err().to_string();
+        assert!(
+            error.contains("writable ancestor: /bin (ancestor /)"),
+            "{error}"
+        );
+    }
+}
 
-    let decision = pdp.evaluate(&request, 100).unwrap();
+#[cfg(target_os = "linux")]
+#[test]
+fn task_policy_runtime_allows_narrow_case_one_launch() {
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("build.sh");
+    let log = dir.path().join("build.log");
+    std::fs::write(dir.path().join("private"), "unrequested").unwrap();
+    std::fs::write(&log, "").unwrap();
+    std::fs::write(&script, "#!/bin/sh\necho built\ntest ! -e private || exit 40\nif touch private 2>build.log; then exit 41; fi\ngrep -q 'Read-only file system' build.log\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let launch = prepare_launch(
+        "/bin/bash",
+        vec!["-c".into(), "./build.sh".into()],
+        dir.path(),
+        BTreeMap::from([
+            ("LC_ALL".into(), "C".into()),
+            ("PATH".into(), "/bin:/usr/bin".into()),
+        ]),
+    )
+    .unwrap();
+    let candidate = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+        when {{ resource.path == {} }};
+        permit(principal, action == SecCore::Action::"file.write", resource)
+        when {{ resource.path == {} }};"#,
+        json!(script),
+        json!(log)
+    );
+    let input = PermissionInput::parse(&candidate)
+        .unwrap()
+        .with_launch_baseline(&launch)
+        .unwrap();
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let policy = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);
+        permit(principal, action == SecCore::Action::"process.spawn", resource);
+        permit(principal, action == SecCore::Action::"file.write", resource) when {{ resource.path == {} }};"#,
+        json!(log)
+    );
+    let client = Client::new(&policy);
+    let helper = std::env::var_os("ASC_SANDBOX_HELPER");
+    let backend = LinuxSandboxBackend::new(helper.clone().unwrap_or_default().into());
+    let mut runtime = PepRuntime::new(backend.clone());
+    let (prepared, decision) = runtime
+        .authorize(&principal, launch.clone(), &input, &client)
+        .unwrap();
     assert_eq!(
         decision.verdict,
         DecisionVerdict::Allow,
         "{}",
         decision.reason
     );
-    let effective = decision.effective_permissions.unwrap();
-    assert!(allows(&effective, &launch.cwd, FileRight::Read));
-    assert!(!allows(&effective, &launch.cwd, FileRight::Write));
-    assert!(allows(
-        &effective,
-        "/run/anolisa-task-policy/scripts/build-with-setup.sh",
+    let effective = decision.effective_permissions.as_ref().unwrap();
+    assert!(!allows(
+        effective,
+        dir.path().join("private").to_str().unwrap(),
         FileRight::Read
     ));
-    assert!(allows(
-        &effective,
-        "/run/anolisa-task-policy/out/build.log",
-        FileRight::Write
-    ));
-    for directory in [
-        "config", "dist", "home", "out", "project", "releases", "scripts",
-    ] {
-        let sibling = format!("{}/{directory}/other", launch.cwd);
-        assert!(!allows(&effective, &sibling, FileRight::Read), "{sibling}");
-        assert!(!allows(&effective, &sibling, FileRight::Write), "{sibling}");
+    assert!(allows(effective, log.to_str().unwrap(), FileRight::Write));
+    let deny_cwd = format!(
+        r#"{policy}
+        forbid(principal, action == SecCore::Action::"file.read", resource) when {{ resource.path == {} }};"#,
+        json!(dir.path())
+    );
+    let denied = Client::new(&deny_cwd)
+        .pdp
+        .evaluate(&prepared.request, 100)
+        .unwrap();
+    assert_eq!(denied.verdict, DecisionVerdict::Deny);
+    assert!(denied.reason.contains(&launch.cwd));
+    if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_some() {
+        assert!(
+            helper.is_some(),
+            "set ASC_SANDBOX_HELPER to the built static helper"
+        );
+        let plan = runtime.prepare_execution(&prepared, &decision).unwrap();
+        let result = backend.execute_bound(&plan.spec).unwrap();
+        assert!(result.installed && result.started, "{result:?}");
+        assert_eq!(result.exit_code, Some(0), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("private")).unwrap(),
+            "unrequested"
+        );
     }
-    assert!(!allows(
-        &effective,
-        "/run/anolisa-task-policy/home/.zshrc",
-        FileRight::Write
-    ));
-    assert!(!allows(
-        &effective,
-        "/run/anolisa-task-policy/project/deploy.env",
-        FileRight::Read
-    ));
-    assert_eq!(effective.network.mode, NetworkMode::Off);
 }
 
 #[cfg(target_os = "linux")]

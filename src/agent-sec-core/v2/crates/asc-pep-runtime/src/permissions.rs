@@ -1,5 +1,6 @@
 //! JSON and Cedar inputs shared by direct execution and per-invocation permission providers.
 
+mod baseline;
 mod cedar;
 
 use asc_daemon_protocol::authorization::{
@@ -19,6 +20,20 @@ enum Input {
 }
 
 impl PermissionInput {
+    /// Requests the read-only launch dependencies of a Cedar shell candidate.
+    ///
+    /// Explicit OS permissions already describe the complete execution environment.
+    /// Use [`PermissionProvider::prepare`] to bind the system aliases to their target objects.
+    ///
+    /// # Errors
+    /// Rejects unresolved dependencies and invalid or oversized Cedar combinations.
+    pub fn with_launch_baseline(self, launch: &LaunchSpec) -> Result<Self, PermissionInputError> {
+        match self.0 {
+            Input::Json(_) => Ok(self),
+            Input::Cedar(_) => self.with_runtime(baseline::input(launch)?),
+        }
+    }
+
     /// Accepts OS permission JSON, raw Cedar, or the existing Cedar policy source envelope.
     ///
     /// In-memory callers can parse a fresh source for each authorization request. Parsing never

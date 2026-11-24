@@ -160,8 +160,8 @@ agent-sec-cli intent propose \
 - 只使用统一 schema：`file.read`、`file.write`、`file.exec`、`process.spawn`、`network.use`。
   修改请求通过 `WriteOperation` 区分 `write/create/delete/rename/setattr`；禁删不等于不可变。
   `file.read` 表示内容读取，不等于仅列目录名或读取元数据。
-- 候选只包含通过校验的任务规则。hook 使用动态命令权限时，部署方可通过
-  `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 单独配置启动 shell 和读取依赖所需的权限。
+- 候选包含通过校验的任务规则。动态命令 Hook 自动生成只读启动基线。若有其他依赖，
+  可通过 `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 指定追加 Cedar 预设的绝对路径。
 - 路径使用 `resource.path`、`context.input.program/cwd`，不使用 File UID。
   前端接受规范绝对字符串的 `==`/`!=`，或仅在目录末尾含 `/*` 通配符的 `like`。
   动态或非规范路径、未绑定模板、模型自报 Subject/File 身份及未知注解均被拒绝。任务 permit 可带 `@id` 和请求人工确认的 `@advice`，后者须含 `escalate` 和非空消息。

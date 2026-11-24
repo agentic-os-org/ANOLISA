@@ -91,7 +91,8 @@ agent-sec-cli sandbox run --permissions permissions.cedar -- /bin/sh -c 'printf 
 转换结果是粗粒度权限申请，不代表所有 Cedar 条件均得到等价执行：
 
 - 文件读写支持字面路径、目录前缀 `/*` 模式及布尔组合。完整目录树须同时包含目录自身的
-  等值条件及其后代模式。精确文件授权会检查本地对象；仅目录自身或仅目录后代的授权被拒绝。
+  等值条件及其后代模式。精确文件授权会检查本地对象。仅读取 cwd 自身时，可以在规范路径
+  建立私有目录，其中仅显示另行授权的挂载。其他目录自身与后代权限不一致的申请会被拒绝。
 - 任一获准写操作（`write`、`create`、`delete`、`rename`、`setattr`）映射为 `write`，
   包括读取与删除。因此，在仍有其他获准修改操作时，仅禁止 delete 不会移除 write 申请。
 - 文件的 `context.input.program` 等值或不等值条件按满足条件的程序投影，所得访问权限
@@ -149,6 +150,7 @@ Cedar 文件读写条件中的路径和程序字面量最多为 4,095 个 UTF-8 
 | `filesystem.rules[].rights` | 非空且不重复的 `read`、`write` 列表。write 包含读取、创建、删除和重命名；禁止 read 也会禁止 write。 |
 | `filesystem.rules[].excluded_paths` | 可选，仅用于 deny：从本条规则范围中排除已经存在的 canonical 后代目录。例外不授予权限，也不取消其他 deny。 |
 | `execution.deny_paths` | 对指定文件或目录子树实施挂载级 noexec，包含范围内可见的子挂载。 |
+| `execution.cwd_entry` | 可选，取值为本次启动的规范 cwd。Linux helper 可在私有根中建立该目录并挂入另行授权的文件。CLI、daemon 与 helper 均须支持此字段。 |
 | `network.mode` | `off` 禁止 IP 联网；`full` 使用宿主网络，不过滤目标地址、端口或方向。 |
 
 路径必须已经存在，是规范化的绝对路径，不使用通配符、点路径段或尾部 `/`，根目录 `/` 除外。
@@ -416,12 +418,11 @@ PreToolUse 启动失败、崩溃、非零退出、空或无效输出、超时时
 ### 按当前命令生成权限
 
 使用支持 `intent.propose_command` 的配套 CLI/daemon，并按[策略指南](policy-cli.md)
-配置 daemon 的意图模型。启动 Cosh 前选择动态来源及明确的 Cedar 运行预设：
+配置 daemon 的意图模型。启动 Cosh 前选择动态来源：
 
 ```bash
 export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
 export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
-export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
 cosh
 ```
 
@@ -429,12 +430,10 @@ cosh
 全 shell 授权开启时生效，本身不会开启授权。已删除的
 `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 在两种模式下均无效。
 
-动态模式使用明确的运行预设，**替代**安装的固定 JSON 模板，不继承模板的 cwd/tmp
-写权限或 Git 保护。所需限制须写入 Cedar 预设或适用的 PAP 策略。预设必须为原始 Cedar
-或源码信封，与候选使用相同 schema，并提供该工作负载已知的 shell/加载器/库访问及
-初始 `/bin/bash -c` 调用许可。目录授权包含后代；整个项目的授权即使在空候选时也已
-申请其内容。不要因脚本内部行为未知而补充推测的写入或网络权限。OS permission JSON
-不能作为动态运行预设，以免合并时丢失 Cedar 调用与网络限制。
+Hook prepare 为 Cedar 候选申请本次 Bash 启动、系统程序目录和运行库目录及加载器缓存的
+读取，以及进入 cwd。基线的写权限和网络权限均为零。工作区文件和输出路径需要单独申请。
+如有其他依赖，可将 `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 设为同 schema 的原始
+Cedar 或 Cedar 源码信封的绝对路径。显式目录授权覆盖其后代，所有申请都经过 PDP。
 
 Hook 在 sandbox 包装之前，将包含 `sudo` 的原始命令及规范化 cwd 交给
 `intent propose-command --format json`，不传原始用户任务。上游须提前在 PAP 准备任务
@@ -444,9 +443,8 @@ Hook 在 sandbox 包装之前，将包含 `sudo` 的原始命令及规范化 cwd
 
 Hook 按 JSON 的 `outcome` 分支，不能仅凭退出码放行：
 
-- `candidate`：展示 `caveats`，将 Cedar 与运行预设合并，复用转换、初始调用校验及
-  路径绑定。任一来源的 forbid 均保留。
-- 空候选不申请业务权限，仅由明确的运行预设提供许可；PDP 仍可拒绝或收窄。
+- `candidate`：展示 `caveats`，将 Cedar 与启动基线和可选预设合并，再转换、校验初始调用和绑定路径。显式 forbid 仍生效。
+- 空候选只申请启动基线和显式配置的追加项。
 - `needs_clarification`：说明缺失信息，并在授权前停止。
 - 接口不可用、异常响应、转换失败及超时均阻断，不回退固定权限或无隔离执行。
   脚本内部行为未知只作为 caveat，不自动扩大权限。

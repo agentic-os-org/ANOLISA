@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use asc_daemon_protocol::authorization::{
     AgentPrincipal, BackendSelection, ClaimPhase, ClaimResponse, Decision, DecisionClaim,
-    DecisionVerdict, ExecutionPlan, LinuxSandboxOptions,
+    DecisionVerdict, ExecutionPlan, LaunchSpec, LinuxSandboxOptions,
 };
 use asc_pep_runtime::{
     ApprovalHandler, DaemonAuthorizationClient, LinuxSandboxBackend, PepError, PepRuntime,
-    prepare_launch,
+    PermissionInput, prepare_launch,
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -26,7 +26,7 @@ mod template;
 pub enum HookCommand {
     /// Authorize the Hook JSON from stdin without executing the target.
     Prepare {
-        /// Installed template or prepared JSON/Cedar request, including runtime dependencies.
+        /// Installed template, complete JSON request, or Cedar candidate for this shell launch.
         #[arg(long)]
         permissions: PathBuf,
         /// Optional Cedar runtime preset, combined before invocation and path validation.
@@ -150,6 +150,24 @@ fn claim(
     }
 }
 
+fn hook_permissions(
+    path: &Path,
+    runtime_permissions: Option<&Path>,
+    launch: &LaunchSpec,
+) -> Result<PermissionInput, SandboxError> {
+    let candidate = if path.extension() == Some(OsStr::new("template")) {
+        let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
+        template::read(path, Path::new(&launch.cwd), tmpdir)?
+    } else {
+        read_permissions(path)?
+    };
+    let permissions = candidate.with_launch_baseline(launch)?;
+    Ok(match runtime_permissions {
+        Some(preset) => permissions.with_runtime(read_permissions(preset)?)?,
+        None => permissions,
+    })
+}
+
 fn prepare(
     permissions: &Path,
     runtime_permissions: Option<&Path>,
@@ -181,15 +199,7 @@ fn prepare(
         &input.cwd,
         super::target_environment()?,
     )?;
-    let mut permissions = if permissions.extension() == Some(OsStr::new("template")) {
-        let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
-        template::read(permissions, Path::new(&launch.cwd), tmpdir)?
-    } else {
-        read_permissions(permissions)?
-    };
-    if let Some(preset) = runtime_permissions {
-        permissions = permissions.with_runtime(read_permissions(preset)?)?;
-    }
+    let permissions = hook_permissions(permissions, runtime_permissions, &launch)?;
     let mut runtime = PepRuntime::new(
         LinuxSandboxBackend::installed()?.with_options(LinuxSandboxOptions { landlock }),
     );

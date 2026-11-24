@@ -516,6 +516,13 @@ fn verify_ceiling(
     facts: &[PathFact],
 ) -> Result<(), PepError> {
     effective.validate()?;
+    if let Some(path) = &effective.execution.cwd_entry
+        && requested.execution.cwd_entry.as_ref() != Some(path)
+    {
+        return Err(PepError::Authorization(format!(
+            "unrequested cwd entry: {path}"
+        )));
+    }
     if effective.network.mode == NetworkMode::Full && requested.network.mode != NetworkMode::Full {
         return Err(PepError::Authorization(
             "effective network exceeds request".into(),
@@ -568,7 +575,9 @@ fn verify_ceiling(
         .collect();
     for canonical in &boundaries {
         let directory = kinds.get(canonical.as_str()).ok_or_else(|| {
-            PepError::Authorization("permission path lacks an authorized identity".into())
+            PepError::Authorization(format!(
+                "permission path lacks an authorized identity: {canonical}"
+            ))
         })?;
         paths.insert((*canonical).clone());
         if *directory {
@@ -659,6 +668,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         verify_ceiling(&requested, &requested, &facts).unwrap();
+        let missing = verify_ceiling(&requested, &requested, &facts[1..]).unwrap_err();
+        assert!(missing.to_string().contains("authorized identity: /a"));
         let mut forged = requested.clone();
         forged.filesystem.rules[1]
             .excluded_paths

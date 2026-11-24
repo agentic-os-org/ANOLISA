@@ -33,6 +33,31 @@ impl PdpRuntime {
         advice: &mut Vec<ScopedAdvice>,
     ) -> Result<Projection, PdpError> {
         let requested = &input.context.requested_permissions;
+        if let Some(path) = &requested.execution.cwd_entry {
+            if path != &input.context.launch.cwd {
+                return Err(PdpError::Denied(format!(
+                    "cwd entry does not match final launch: {path}"
+                )));
+            }
+            let outcome =
+                self.policy
+                    .evaluate(&request::file(input, &self.schema, path, false)?)?;
+            if !outcome.allowed {
+                return Err(PdpError::Denied(format!(
+                    "required launch path is not readable: {path}"
+                )));
+            }
+            advice.extend(outcome.advice.into_iter().map(|value| {
+                (
+                    ApprovalTarget::Filesystem {
+                        path: path.clone(),
+                        right: FileRight::Read,
+                        excluded_paths: Vec::new(),
+                    },
+                    value,
+                )
+            }));
+        }
         if requested.network.mode == NetworkMode::Full {
             let query = request::network(input, &self.schema)?;
             let outcome = self.policy.evaluate(&query)?;
@@ -141,11 +166,13 @@ impl PdpRuntime {
                 effective.filesystem.rules.push(rule.clone());
             }
         }
-        // The backend also mounts these pinned objects at their canonical launch paths.
-        for required in [
-            &input.context.launch.resolved_program,
-            &input.context.launch.cwd,
-        ] {
+        // Only a separately authorized private cwd can omit its host bind.
+        let host_cwd = effective
+            .execution
+            .cwd_entry
+            .is_none()
+            .then_some(&input.context.launch.cwd);
+        for required in std::iter::once(&input.context.launch.resolved_program).chain(host_cwd) {
             if !rules_allow(&effective, required, FileRight::Read) {
                 return Err(PdpError::Denied(format!(
                     "required launch path is not readable: {required}"

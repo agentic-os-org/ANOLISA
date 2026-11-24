@@ -41,6 +41,35 @@ fn os_request() -> OsAuthorizationRequest {
 }
 
 #[test]
+fn cwd_entry_must_match_the_launch_at_both_protocol_boundaries() {
+    use asc_daemon_protocol::authorization::ExecutionSpec;
+
+    let mut request = os_request();
+    let cwd = request.context.launch.cwd.clone();
+    request.context.requested_permissions.execution.cwd_entry = Some(cwd.clone());
+    request.validate().unwrap();
+    let mut spec: ExecutionSpec = serde_json::from_value(json!({
+        "version": 1,
+        "launch": {"program": "true", "resolved_program": "/usr/bin/true", "args": [],
+                   "cwd": cwd, "env": {}},
+        "permissions": request.context.requested_permissions,
+        "path_facts": []
+    }))
+    .unwrap();
+    spec.validate().unwrap();
+
+    request.context.launch.cwd = "/other".into();
+    spec.launch.cwd = "/other".into();
+    for error in [
+        request.validate().unwrap_err(),
+        spec.validate().unwrap_err(),
+    ] {
+        assert_eq!(error.path, "cwd_entry");
+        assert!(error.message.contains(&cwd), "{error}");
+    }
+}
+
+#[test]
 fn os_adapter_rejects_unknown_actions_subjects_resources_and_fields() {
     let request = os_request();
     request.validate().unwrap();
