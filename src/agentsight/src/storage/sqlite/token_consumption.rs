@@ -116,7 +116,7 @@ impl TokenConsumptionStore {
         Ok(self
             .conn
             .prepare_cached(&sql)?
-            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+            .execute(params![super::clamp_cutoff_ns(cutoff_ns)])?)
     }
 
     /// Delegate commit-time checkpoints to the registered maintenance worker.
@@ -373,11 +373,15 @@ impl TokenConsumptionStore {
         })
     }
 
-    /// Purge records older than the given timestamp
+    /// Purge records older than the given timestamp.
+    ///
+    /// Cutoffs above `i64::MAX` are clamped to `i64::MAX`, deleting all
+    /// representable rows (`timestamp_ns < i64::MAX`) rather than treating
+    /// `u64::MAX` as a no-op. Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> anyhow::Result<u64> {
         let deleted = self.conn.execute(
             &format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name),
-            params![cutoff_ns.min(i64::MAX as u64) as i64],
+            params![super::clamp_cutoff_ns(cutoff_ns)],
         )?;
         Ok(deleted as u64)
     }
