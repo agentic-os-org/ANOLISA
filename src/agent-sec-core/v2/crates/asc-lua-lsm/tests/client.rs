@@ -78,11 +78,15 @@ impl SecurityFs for Kernel {
             if names.contains_key(name) {
                 return Err(io::Error::from_raw_os_error(17));
             }
-            let hooks = ["inode_create", "inode_mkdir"]
-                .iter()
-                .filter(|hook| text.contains(&format!("\n  {hook} = function(")))
+            let hooks = text
+                .lines()
+                .filter(|line| {
+                    line.starts_with("  ")
+                        && !line.starts_with("   ")
+                        && line.contains(" = function(")
+                })
                 .count();
-            names.insert(name.into(), 15 + hooks);
+            names.insert(name.into(), hooks);
         } else {
             assert_eq!(node, "unregister");
             assert!(!payload.ends_with(b"\n"));
@@ -679,11 +683,32 @@ fn revision_handover_uses_old_membership_after_the_original_root_is_reaped() {
 #[ignore = "requires a Lua 5.1 interpreter; set LUA_BIN and run explicitly"]
 fn lua51_template_behavior() {
     let executable = std::env::var_os("LUA_BIN").unwrap_or_else(|| "lua5.1".into());
+    // Exercise the exact Rust-rendered syntax as well as the Lua hook fixture.
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let client = LuaLsmClient::new(Arc::new(Kernel::default()), &state);
+    let policy = pattern_binding(
+        Path::new("/work/pre*.txt"),
+        std::process::id(),
+        "write",
+        false,
+    );
+    let plan = prepared(&client, &state, &policy);
+    let decoded: LuaLsmPlan = serde_json::from_slice(&plan.content).unwrap();
+    let views = [BTreeSet::from([asc_lua_lsm_protocol::PathView {
+        base: "/mounted/quoted\"name".into(),
+        logical: Some("/work".into()),
+        filesystem: Some("tmpfs".into()),
+    }])];
+    let source = asc_lua_lsm_protocol::render_module_with_views(&decoded, &state, &views);
+    let rendered = directory.path().join("registered.lua");
+    fs::write(&rendered, source).unwrap();
     let status = std::process::Command::new(executable)
         .args([
             "tests/template.lua",
             "../asc-lua-lsm-protocol/src/file_protection.lua",
         ])
+        .arg(&rendered)
         .status()
         .unwrap();
     assert!(status.success());
@@ -805,7 +830,7 @@ fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
     installed.targets.push(first.target.clone());
     assert_eq!(client.create(&first).error, None);
     assert_eq!(probe.run("read", &protected), "errno=1");
-    assert_eq!(probe.run("read", &alias), "errno=1");
+    assert_eq!(probe.run("read", &alias), "ok");
     assert_eq!(probe.run("readfd", &protected), "errno=1");
     assert_eq!(fs::read(&protected).unwrap(), b"secret");
     // A same-source retry uses a live callback acknowledgement without replacing.
@@ -828,11 +853,13 @@ fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
         None
     );
     assert_eq!(probe.run("read", &protected), "ok");
-    assert_eq!(probe.run("write", &alias), "errno=1");
+    assert_eq!(probe.run("write", &protected), "errno=1");
+    assert_eq!(probe.run("write", &alias), "ok");
     assert_eq!(probe.run("delete", &protected), "errno=1");
     assert!(probe.run("orphan", &protected).starts_with("child="));
     probe.child.wait().unwrap();
-    assert_eq!(probe.run("write", &alias), "errno=1");
+    assert_eq!(probe.run("write", &protected), "errno=1");
+    assert_eq!(probe.run("write", &alias), "ok");
     let restarted = LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
     assert_eq!(restarted.update(&[], &next).error, None);
     binding.binding_revision = binding.binding_revision.checked_next().unwrap();
@@ -845,7 +872,8 @@ fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
         settle_native(|| client.update(std::slice::from_ref(&next.target), &orphan_revision)).error,
         None
     );
-    assert_eq!(probe.run("write", &alias), "errno=1");
+    assert_eq!(probe.run("write", &protected), "errno=1");
+    assert_eq!(probe.run("write", &alias), "ok");
     assert_eq!(
         settle_native(|| client.delete(std::slice::from_ref(&orphan_revision.target))).error,
         None
@@ -909,22 +937,38 @@ fn live_kernel_tree_creation_exclusions_and_aliases() {
     let prepared = client.prepare_apply(&plan).unwrap();
     installed.targets.push(prepared.target.clone());
     assert_eq!(client.create(&prepared).error, None);
-    for path in [&protected, &outside] {
-        for operation in ["read", "write", "delete"] {
-            assert_eq!(probe.run(operation, path), "errno=1");
-        }
+    for operation in ["read", "write", "delete"] {
+        assert_eq!(probe.run(operation, &protected), "errno=1");
+        assert_eq!(probe.run(operation, &outside), "ok");
     }
     let created = tree.join("created-after-deploy");
     fs::write(&created, b"new").unwrap();
     assert_eq!(probe.run("read", &created), "errno=1");
-    for operation in ["create", "mkdir"] {
+    for operation in ["create", "mkdir", "symlink", "mkfifo"] {
         let denied = tree.join(operation);
         assert_eq!(probe.run(operation, &denied), "errno=1");
-        assert!(!denied.try_exists().unwrap());
+        assert_eq!(
+            fs::symlink_metadata(&denied).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
         let allowed = excluded.join(operation);
         assert_eq!(probe.run(operation, &allowed), "ok");
-        assert!(allowed.try_exists().unwrap());
+        assert!(fs::symlink_metadata(&allowed).is_ok());
     }
+    let source = directory.path().join("link-source");
+    fs::write(&source, b"outside").unwrap();
+    let denied = tree.join("hard-link");
+    let allowed = excluded.join("hard-link");
+    assert_eq!(
+        probe.run(&format!("link:{}", denied.display()), &source),
+        "errno=1"
+    );
+    assert!(!denied.exists());
+    assert_eq!(
+        probe.run(&format!("link:{}", allowed.display()), &source),
+        "ok"
+    );
+    assert_eq!(fs::read(&allowed).unwrap(), b"outside");
     for operation in ["read", "write", "delete"] {
         assert_eq!(probe.run(operation, &cached), "ok");
     }
@@ -934,6 +978,89 @@ fn live_kernel_tree_creation_exclusions_and_aliases() {
     );
     installed.targets.clear();
     assert_eq!(probe.run("read", &protected), "ok");
+}
+
+#[test]
+#[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
+fn live_kernel_arms_missing_targets_before_first_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let client = LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
+    let mut probe = Probe::start();
+    let mut installed = Installed {
+        client: &client,
+        targets: vec![],
+    };
+    let parent = directory.path().join("future/parent");
+    let exact = parent.join("config");
+    let tree = parent.join("secrets");
+    for (path, operation, is_tree) in [(&exact, "write", false), (&tree, "read", true)] {
+        let plan = prepared(
+            &client,
+            &state,
+            &permission_binding(path, probe.child.id(), &[operation], is_tree),
+        );
+        installed.targets.push(plan.target.clone());
+        assert_eq!(client.create(&plan).error, None);
+    }
+    fs::create_dir_all(&parent).unwrap();
+    assert_eq!(probe.run("create", &exact), "errno=1");
+    assert!(!exact.exists());
+    let sibling = parent.join("sibling");
+    assert_eq!(probe.run("create", &sibling), "ok");
+    fs::write(&exact, b"configured").unwrap();
+    for operation in [
+        format!("rename:{}", exact.display()),
+        format!("exchange:{}", exact.display()),
+    ] {
+        assert_eq!(probe.run(&operation, &sibling), "errno=1");
+        assert_eq!(fs::read(&exact).unwrap(), b"configured");
+    }
+    assert_eq!(probe.run("write", &exact), "errno=1");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    let secret = tree.join("sub/secret");
+    fs::write(&secret, b"secret").unwrap();
+    assert_eq!(probe.run("read", &secret), "errno=1");
+    assert_eq!(probe.run("read", &sibling), "ok");
+    assert_eq!(
+        settle_native(|| client.delete(&installed.targets)).error,
+        None
+    );
+    installed.targets.clear();
+    assert_eq!(probe.run("read", &secret), "ok");
+}
+
+#[test]
+fn missing_path_requires_no_file_commands_and_dangling_symlink_reports_a_target_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let kernel = Arc::new(Kernel::default());
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    let subject = Probe::start();
+    let missing = directory.path().join("later/secret");
+    let bind = |path| {
+        prepared(
+            &client,
+            &state,
+            &permission_binding(path, subject.child.id(), &["read"], false),
+        )
+    };
+    assert_eq!(client.create(&bind(&missing)).error, None);
+    assert!(
+        kernel
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| call.strip_prefix("bootstrap:"))
+            .all(|cmd| matches!(cmd, "root_candidate" | "seed_root" | "seed"))
+    );
+    let dangling = directory.path().join("alias");
+    std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+    assert_eq!(
+        client.create(&bind(&dangling)).error.unwrap().code,
+        "LUA_LSM_DANGLING_TARGET_SYMLINK"
+    );
 }
 
 fn mapping_test_tempdir() -> tempfile::TempDir {
@@ -1797,6 +1924,10 @@ fn both_pattern_languages_reach_preparation_with_literal_scan_roots() {
         assert_eq!(decoded.policy.targets[0].path, dir.path().to_str().unwrap());
         assert_eq!(decoded.patterns[&0][0].value, pattern.to_str().unwrap());
         assert!(decoded.source.contains("local function pattern_matches"));
+        assert_eq!(
+            decoded.source.contains("prefix = \"\", suffix = \".txt\""),
+            !cedar
+        );
     }
 }
 
@@ -1848,6 +1979,7 @@ fn cedar_scan_scope_uses_all_conditions_in_each_branch() {
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
 fn live_kernel_glob_and_cedar_like_permissions() {
     for (cedar, pattern, nested_matches) in [
+        (false, "s*.txt", false),
         (false, "s?.txt", false),
         (false, "**/s?.txt", true),
         (true, "s*.txt", true),
@@ -1879,7 +2011,7 @@ fn live_kernel_glob_and_cedar_like_permissions() {
             };
             assert_eq!(client.create(&plan).error, None);
             assert_eq!(probe.run(op, &path), "errno=1", "{op} {pattern}");
-            assert_eq!(probe.run(op, &alias), "errno=1");
+            assert_eq!(probe.run(op, &alias), "ok");
             assert_eq!(
                 probe.run(op, &nested),
                 if nested_matches { "errno=1" } else { "ok" }
@@ -1891,7 +2023,8 @@ fn live_kernel_glob_and_cedar_like_permissions() {
             let add_link = format!("link:{}", link.display());
             if op == "delete" {
                 assert_eq!(probe.run(&add_link, &incoming), "ok");
-                assert_eq!(probe.run("delete", &incoming), "errno=1");
+                assert_eq!(probe.run("delete", &link), "errno=1");
+                assert_eq!(probe.run("delete", &incoming), "ok");
             } else {
                 assert_eq!(probe.run(&add_link, &incoming), "errno=1");
                 assert_eq!(
@@ -1953,7 +2086,8 @@ fn live_kernel_pattern_preflight_uses_lua_matches_and_inode_identity() {
     assert_eq!(probe.run("unmap", &alias), "ok");
     assert_eq!(probe.run("holdmap-private-read", &unrelated), "ok");
     assert_eq!(client.create(&plan).error, None);
-    assert_eq!(probe.run("read", &alias), "errno=1");
+    assert_eq!(probe.run("read", &protected), "errno=1");
+    assert_eq!(probe.run("read", &alias), "ok");
 }
 
 #[test]

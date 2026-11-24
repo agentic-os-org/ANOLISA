@@ -29,17 +29,21 @@ An administrator can select `AGENT_SEC_FILE_BACKEND=lua-lsm` for newly deployed
 file Bindings. The default remains `agentsight`; saved deployments keep their
 route. This backend requires a compatible Lua-LSM kernel and effective
 `CAP_MAC_ADMIN` in the initial user
-namespace and writable securityfs. Native Translator/Client enforcement tests
-pass on Alibaba Cloud Linux 4. A later full
-daemon test on that host ended in a kernel crash after module removal began; the
-cause remains unresolved. Packaged systemd deployment is also unverified. See
+namespace and writable securityfs. Native Translator/Client enforcement tests for the earlier inode-label template
+passed on Alibaba Cloud Linux 4. A later full
+daemon test on that host encountered a known Lua-LSM kernel crash during module
+removal. The Lua-LSM owner is backporting the fix. Verification of the backport
+and packaged systemd deployment is pending. Clean up Lua-LSM Scopes and confirm
+module removal before downgrading the daemon. See
 the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README.md).
+
+Lua-LSM matches the path used for each operation. A rule can cover files created after deployment. Existing hard links do not block deployment. Access through a hard-link name outside the protected paths is currently outside the guarantee.
 
 Lua modules survive daemon stops. When discovery observes a root process exit or
 an administrator deletes its Scope, the daemon schedules Binding cleanup. Any
 surviving descendants lose that Binding's protection when the module unloads.
-Restart checks existing deployment evidence. Some rename operations are more restrictive
-than AgentSight. Preserve the Client state directory with the Policy
+A same-boot daemon restart preserves Ready Bindings. A write-protected file
+also rejects atomic replacement by rename. Preserve the Client state directory with the Policy
 database. Changing the default does not migrate existing deployments.
 Applying read protection rejects existing file mappings; write protection rejects
 existing shared writable mappings. See the backend coverage table for tested

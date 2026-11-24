@@ -189,6 +189,9 @@ fn native(
                 value: path.clone(),
                 negated: false,
             };
+            if !is_supported_pattern(&pattern) {
+                return Err(reject("UNSUPPORTED_PATH"));
+            }
             let root = scan_directory(&pattern.value)
                 .ok_or_else(|| reject("UNSUPPORTED_PATH"))?
                 .to_owned();

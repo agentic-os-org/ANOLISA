@@ -176,6 +176,10 @@ def execute(operation: str, path: str) -> None:
         os.rmdir(path)
     elif operation == "mkdir":
         os.mkdir(path)
+    elif operation == "symlink":
+        os.symlink("test-link-target", path)
+    elif operation == "mkfifo":
+        os.mkfifo(path)
     elif operation.startswith("link:"):
         os.link(path, operation.split(":", 1)[1])
     elif operation.startswith("rename:"):

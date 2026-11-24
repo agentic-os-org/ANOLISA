@@ -311,8 +311,6 @@ mod mixed_tests;
 fn recover_file_bindings<R: BindingStateRepository + BindingReconcileCatalog>(
     repository: &R,
 ) -> Result<BTreeMap<asc_policy_types::identifiers::ResourceId, String>, StoreError> {
-    use asc_policy_repository::{BindingStateWrite, ReconciliationPatch, WriteResult};
-    use asc_policy_types::{binding::BindingStatus, target::Presence};
     let mut routes = BTreeMap::new();
     let mut cursor = None;
     loop {
@@ -328,24 +326,7 @@ fn recover_file_bindings<R: BindingStateRepository + BindingReconcileCatalog>(
                 )
                 .then(|| deployment.target.route.clone())
             }) {
-                routes.insert(candidate.id.clone(), route.clone());
-                if route == LUA_LSM_ROUTE && record.binding.status.phase == BindingStatus::Ready {
-                    let mut deployments = record.deployments.clone();
-                    for deployment in &mut deployments {
-                        deployment.presence = Presence::Unknown;
-                    }
-                    let write = BindingStateWrite {
-                        write_id: uuid::Uuid::new_v4(),
-                        next: Some(ReconciliationPatch {
-                            status: Some(BindingStatus::PendingApply.into()),
-                            deployments: Some(deployments),
-                        }),
-                    };
-                    match repository.compare_exchange_binding_state(&record, &write)? {
-                        WriteResult::Applied(_) | WriteResult::AlreadyApplied(_) => {}
-                        WriteResult::Conflict => return Err(StoreError::Contended),
-                    }
-                }
+                routes.insert(candidate.id.clone(), route);
             }
         }
         if batch.len() < 128 {
@@ -386,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes() {
+    fn restart_preserves_ready_mixed_binding_and_saved_file_route() {
         let repository = SqlitePolicyRepository::temporary().unwrap();
         let scope = admit_scope(&repository, "lua-recovery", false, 1);
         let id = binding_ids(&repository, &scope).remove(0);
@@ -403,20 +384,21 @@ mod tests {
             presence: Presence::Present,
             last_confirmed: Some(Presence::Present),
         }];
+        ready.deployments.push(Deployment {
+            target: TargetRef {
+                route: "gateway".into(),
+                id: "gateway_recovery".into(),
+                cleanup: b"gateway_recovery".to_vec(),
+            },
+            ..ready.deployments[0].clone()
+        });
         repository
             .compare_exchange_binding_state(&original, &BindingStateWrite::new(ready))
             .unwrap();
+        let before = repository.get_binding_state(&id).unwrap().unwrap();
         let routes = recover_file_bindings(&repository).unwrap();
         assert_eq!(routes.get(&id).unwrap(), LUA_LSM_ROUTE);
-        let pending = repository.get_binding_state(&id).unwrap().unwrap();
-        assert_eq!(pending.binding.status.phase, BindingStatus::PendingApply);
-        assert_eq!(pending.deployments[0].presence, Presence::Unknown);
-        assert_eq!(
-            pending.deployments[0].last_confirmed,
-            Some(Presence::Present)
-        );
-        assert_eq!(recover_file_bindings(&repository).unwrap(), routes);
-        assert_eq!(repository.get_binding_state(&id).unwrap().unwrap(), pending);
+        assert_eq!(repository.get_binding_state(&id).unwrap().unwrap(), before);
     }
 
     struct TestClock;

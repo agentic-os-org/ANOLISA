@@ -7,7 +7,10 @@
 
 mod artifact;
 
-pub use artifact::{is_supported_path, is_supported_pattern, module_name, render_module};
+pub use artifact::{
+    PathView, is_supported_path, is_supported_pattern, module_name, render_module,
+    render_module_with_views,
+};
 
 use asc_file_policy::{FilePathPattern, FileProtectionPolicy};
 use asc_policy_types::{
@@ -39,7 +42,7 @@ pub struct LuaLsmPlan {
     /// Additional predicates for the zero-based targets that use runtime path matching.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patterns: BTreeMap<usize, Vec<FilePathPattern>>,
-    /// Complete Lua source submitted in a single write.
+    /// Canonical policy source, validated before adding the local mount view.
     pub source: String,
 }
 

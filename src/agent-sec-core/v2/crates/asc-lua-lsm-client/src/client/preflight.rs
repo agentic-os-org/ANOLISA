@@ -10,7 +10,8 @@ use asc_file_policy::{FileProtectionExclusionKind, FileProtectionTargetKind, Fil
 use asc_lua_lsm_protocol::LuaLsmPlan;
 use asc_policy_types::target::Failure;
 
-use super::{MAX_OBJECTS, local_error, rejected, retryable};
+use super::file_targets::{resolve_target, target_error};
+use super::{MAX_OBJECTS, rejected, retryable};
 
 pub(super) struct MappingPreflight {
     identities: BTreeMap<(u64, u64), FileProtections>,
@@ -29,21 +30,23 @@ impl MappingPreflight {
             if !target.protections.read && !target.protections.ordinary_write {
                 continue;
             }
-            // Pattern labels are queried only after the inactive module has tagged candidates.
+            // The registered module evaluates the same path predicate used by its hooks.
             let query = if plan.patterns.contains_key(&index) {
                 let Some(query) = matches else { continue };
                 Some(query)
             } else {
                 None
             };
-            let root = fs::canonicalize(&target.path).map_err(local_error)?;
+            let Some(root) = resolve_target(Path::new(&target.path))? else {
+                continue;
+            };
             let mut pending = vec![root.clone()];
             while let Some(path) = pending.pop() {
                 count += 1;
                 if count > MAX_OBJECTS {
                     return Err(rejected("LUA_LSM_OBJECT_LIMIT_EXCEEDED"));
                 }
-                let metadata = fs::symlink_metadata(&path).map_err(local_error)?;
+                let metadata = fs::symlink_metadata(&path).map_err(target_error)?;
                 let relative = path
                     .strip_prefix(&root)
                     .map_err(|_| rejected("LUA_LSM_INVALID_PATH"))?;
@@ -65,11 +68,11 @@ impl MappingPreflight {
                                     .cast_signed(),
                             )
                             .open(&path)
-                            .map_err(local_error)?;
+                            .map_err(target_error)?;
                         if !matches(index + 1, &pinned)? {
                             continue;
                         }
-                        pinned.metadata().map_err(local_error)?
+                        pinned.metadata().map_err(target_error)?
                     } else {
                         metadata
                     };
@@ -80,8 +83,8 @@ impl MappingPreflight {
                     protections.ordinary_write |= target.protections.ordinary_write;
                 }
                 if is_directory && target.kind == FileProtectionTargetKind::DirectoryTree {
-                    for entry in fs::read_dir(&path).map_err(local_error)? {
-                        pending.push(entry.map_err(local_error)?.path());
+                    for entry in fs::read_dir(&path).map_err(target_error)? {
+                        pending.push(entry.map_err(target_error)?.path());
                     }
                 }
             }

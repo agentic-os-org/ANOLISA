@@ -543,14 +543,14 @@ Translator 和协议。非 Linux 构建显式选择 `lua-lsm` 时，daemon 拒�
 停止 daemon 时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
 Binding 清理。模块卸载后，仍存活的后代失去该 Binding 的保护。Policy Template 删除仍
 保留已有 Scope 快照。
-启动把 Ready Lua Binding 置为待复核并保留 Unknown 清理责任，
-Client 读取内核模块列表，结合本次 boot 匹配的部署记录和初始化结果确认既有部署。
-缺失模块重下发，无法确认的模块保持 Unknown。其它后端保持原恢复语义。
+同一 boot 内重启 daemon 保留 Ready 和各后端回执。等待中的工作继续执行，中断的
+apply/delete 按原重试预算恢复。重试 apply 时，Client 核对本次 boot 的部署记录、
+初始化结果和内核模块列表。缺失模块重下发，无法确认的模块保持 Unknown。
 daemon 的 `root_exit_cleans_up_mixed_lua_deployment` 和
-`lua_recovery_rechecks_ready_deployments_and_preserves_saved_routes` 验证清理和恢复接线；
-专用内核用例默认忽略，已在 Alibaba Cloud Linux 4 上通过 Translator/Client
-直连防护验收。隔离 QEMU 客体已运行 daemon 场景；宿主完整 daemon 测试在模块开始
-卸载后遇到内核崩溃，原因未明。安装包的 systemd 部署尚未验证。
+`restart_preserves_ready_mixed_binding_and_saved_file_route` 验证清理和恢复接线；
+专用内核用例默认忽略。旧版 inode 标签模板已在 Alibaba Cloud Linux 4 上通过 Translator/Client
+直连防护验收，当前路径匹配模板仍待实机复验。隔离 QEMU 客体已运行 daemon 场景；宿主完整 daemon 测试在模块开始
+卸载后遇到 Lua-LSM 负责人确认的已知内核问题，修复正在回移。修复版本及安装包的 systemd 部署尚未验证。
 
 ## 9. 验收矩阵
 

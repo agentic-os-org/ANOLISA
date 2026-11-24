@@ -1,10 +1,10 @@
--- Object properties belong to this module and are shared across Lua VMs.
+-- Only task membership uses module-owned kernel object properties.
 -- Bootstrap commands run only in the initial user namespace with MAC_ADMIN.
 local errno = require("errno")
 local kernel = require("kernel")
-local fs = require("fs")
+--@glob local fs = require("fs")
 local audit_ok, audit = pcall(require, "audit")
-local O_PATH = 2097152
+--@glob local O_PATH = 2097152
 -- Linux EALREADY is not exported by this baseline's errno Lua library.
 local ACK = 114
 local module_env = getfenv(1)
@@ -22,38 +22,6 @@ local function log(reason, detail)
     return ok and recorded == true
   end
   return false
-end
-
-local function key(index) return "path_" .. index end
-
--- Kernel object/shared caches accept scalar values, not strings or Lua tables.
--- Keep the exclusion trie in each VM; only its deterministic state IDs are shared.
-local paths = {}
-for index, target in ipairs(targets) do
-  local states = { { children = {} } }
-  for _, excluded in ipairs(target.exclusions) do
-    local relative = excluded.path:sub(#target.path + (target.path == "/" and 1 or 2))
-    local state = 1
-    for part in relative:gmatch("[^/]+") do
-      local next_state = states[state].children[part]
-      if not next_state then
-        next_state = #states + 1
-        states[next_state] = { children = {} }
-        states[state].children[part] = next_state
-      end
-      state = next_state
-    end
-    states[state].excluded = true
-    if excluded.tree then states[state].subtree = true end
-  end
-  paths[index] = states
-end
-
-local function next_path(index, state, name)
-  if state == nil or state == 0 or state == -1 then return state end
-  local node = assert(paths[index][state])
-  if node.subtree then return -1 end
-  return node.children[name] or 0
 end
 
 local function marked(task)
@@ -134,27 +102,62 @@ local function guarded(check, ...)
   return false, errno.EPERM
 end
 
-local function active(index, state)
-  if state == nil or state == -1 then return false end
-  return state == 0 or not assert(paths[index][state]).excluded
+--@glob include patterns.lua
+
+local function below(path, base)
+  return path == base or (base == "/" and path:sub(1, 1) == "/")
+    or (path:sub(1, #base) == base and path:sub(#base + 1, #base + 1) == "/")
 end
 
-local function allowed(inode, operation)
-  if inode == nil then return true end
-  for index, target in ipairs(targets) do
-    if target[operation] and active(index, inode[key(index)]) then return false end
+local function matches(target, path)
+  if path ~= target.path and not (target.tree and below(path, target.path)) then return false end
+  for _, excluded in ipairs(target.exclusions) do
+    if path == excluded.path or (excluded.tree and below(path, excluded.path)) then return false end
+  end
+--@glob   if target.patterns then return pattern_matches(target, path) end
+  return true
+end
+
+-- A file supplies a namespace path. A dentry supplies a filesystem-relative
+-- path; the Client records the corresponding mount roots when registering.
+local function selected(target, path, filesystem, ancestors)
+  local function check(logical)
+    return matches(target, logical) or (ancestors and below(target.path, logical))
+  end
+  if not filesystem and check(path) then return true end
+  for _, view in ipairs(target.views or {}) do
+    if view.fs == filesystem then
+      if view.logical and below(path, view.base) then
+        local suffix = path:sub(#view.base + 1)
+        if view.base == "/" and suffix ~= "" then suffix = "/" .. suffix end
+        local logical = suffix == "" and view.logical
+          or (view.logical == "/" and suffix or view.logical .. suffix)
+        if check(logical) then return true end
+      elseif ancestors and below(view.base, path) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function allowed(path, operation, filesystem, ancestors)
+  assert(type(path) == "string")
+  for _, target in ipairs(targets) do
+    if (not operation or target[operation]) and selected(target, path, filesystem, ancestors) then
+      return false
+    end
   end
   return true
 end
 
-local function hex(value)
-  value = value:gsub("/", "")
-  if value == "_" then return "" end
-  assert(#value % 2 == 0 and not value:find("[^0-9a-f]"))
-  return (value:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end))
+local function file_allowed(file, operation)
+  local path = assert(file:path())
+  if not allowed(path, operation) then return false end
+  -- d_path appends this suffix to an unlinked file still held by a descriptor.
+  return path:sub(-10) ~= " (deleted)" or allowed(path:sub(1, -11), operation)
 end
 
---@glob include patterns.lua
 local function handle_control_command(file)
   local path = file:path()
   if type(path) ~= "string" or path:sub(1, #control + 1) ~= control .. "/" then return nil end
@@ -233,148 +236,61 @@ local function handle_control_command(file)
     local complete = before == after and after + exited_sent == exited + sent
     return false, complete and ACK or errno.EAGAIN
   end
-  local kind, index, relative, object = command:match("^(%a+)/(%d+)/(.-)/at/(.+)$")
-  index = tonumber(index)
-  assert(index and targets[index])
-  local pinned = assert(fs.filp_open(hex(object), O_PATH, 0))
-  local ok, failure = pcall(function()
-    local inode = pinned:inode()
---@glob     if targets[index].patterns then
---@glob       if kind == "match" then return inode[key(index)] ~= 0 end
---@glob       if kind == "anchor" or kind == "root" or kind == "tag" then
---@glob         pattern_tag(inode, pinned, index, kind, object)
---@glob         return
---@glob       end
---@glob     end
-    if kind == "anchor" or kind == "root" or kind == "tag" then
-      local value = 1
-      if kind == "anchor" then
-        local fd = assert(tonumber(hex(object):match("^/proc/self/fd/(%d+)$")))
-        shared.state["anchor_" .. index] = fd
-        assert(shared.state["anchor_" .. index] == fd)
-      elseif kind == "tag" then
-        local anchor = assert(fs.filp_open("/proc/self/fd/" .. assert(shared.state["anchor_" .. index]), O_PATH, 0))
-        local base = anchor:path()
-        anchor:fput()
-        assert(type(base) == "string")
-        local path = assert(pinned:path())
-        local prefix = base == "/" and "/" or base .. "/"
-        assert(path:sub(1, #prefix) == prefix)
-        for part in path:sub(#prefix + 1):gmatch("[^/]+") do
-          value = next_path(index, value, part)
-        end
-      end
-      -- An alias in an included range dominates an excluded alias of one inode.
-      if not active(index, inode[key(index)]) then inode[key(index)] = value end
-      assert(inode[key(index)] ~= nil)
-    elseif kind == "slot" then
-      local slot = "slot_" .. index .. "_" .. hex(relative)
-      inode[slot] = true
-      assert(inode[slot] == true)
-    elseif kind == "stable" then
-      inode["stable_" .. index] = true
-      assert(inode["stable_" .. index] == true)
-    else
-      error("unknown bootstrap command")
-    end
-  end)
-  pinned:fput()
---@glob   if ok and failure == true then return false, errno.ESRCH end
-  if not ok then error(failure) end
-  return false, ACK
-end
-
-local function inherited(parent, name, index)
-  if parent == nil or type(name) ~= "string" then return nil end
-  local target = targets[index]
---@glob   if target.patterns then
---@glob     local path = child_path(parent, name, index)
---@glob     if path then return pattern_matches(target,path) and 0 or -1 end
---@glob     return nil
+--@glob   local index, fd = command:match("^match/(%d+)/(%d+)$")
+--@glob   if index then
+--@glob     local target = assert(targets[tonumber(index)])
+--@glob     local pinned = assert(fs.filp_open("/proc/self/fd/" .. fd, O_PATH, 0))
+--@glob     local ok, match = pcall(function() return selected(target, assert(pinned:path())) end)
+--@glob     pinned:fput()
+--@glob     if not ok then error(match) end
+--@glob     return false, match and ACK or errno.ESRCH
 --@glob   end
-  if parent["slot_" .. index .. "_" .. name] == true then return 1 end
-  if not target.tree then
-    return nil
-  end
-  return next_path(index, parent[key(index)], name)
+  error("unknown control command")
 end
 
-local function basename(dentry)
-  local path = assert(dentry:path())
-  return assert(path:match("([^/]+)$"))
+local function filesystem(path)
+  return assert(path:vfsmount():superblock():fstype_name())
 end
 
---@create local function creation(parent, dentry)
---@create   local name = basename(dentry)
---@create   for index, target in ipairs(targets) do
---@create     if target.write and active(index, inherited(parent, name, index)) then return false end
---@create   end
---@create   return true
---@create end
-local function label(inode, parent, name)
-  if inode == nil then return end
-  for index in ipairs(targets) do
---@glob     if targets[index].patterns then
---@glob       local path = child_path(parent, name, index)
---@glob       if path then pattern_label(inode,index,path) end
---@glob     else
-    local relative = inherited(parent, name, index)
-    if relative ~= nil and not active(index, inode[key(index)]) then
-      inode[key(index)] = relative
-      assert(inode[key(index)] ~= nil)
-    end
---@glob     end
-  end
-end
-
-local function tracked(check, ...)
-  local ok, failure = pcall(check, ...)
-  if ok then return true end
-  log("evaluation_error", failure)
-  return false, errno.EPERM
-end
-
-local function deletion(parent, dentry)
-  local inode = dentry:backing_inode()
-  if not allowed(inode, "delete") then return false end
-  local name = basename(dentry)
-  for index, target in ipairs(targets) do
-    if target.delete and (inode and inode["stable_" .. index] == true
-      or active(index, inherited(parent, name, index))) then return false end
-  end
-  return true
-end
-
-local function rename(old_dir, old, new_dir, new)
-  local source, destination = old:backing_inode(), new:backing_inode()
-  local old_name, new_name = basename(old), basename(new)
-  for index, target in ipairs(targets) do
-    local from = active(index, source and source[key(index)])
-    local into = active(index, inherited(new_dir, new_name, index))
-    if target.delete then
-      if source and source["stable_" .. index] == true then return false end
-      if destination and (destination["stable_" .. index] == true
-        or active(index, destination[key(index)])) then return false end
-      if from and (not target.tree or not into) then return false end
-      if active(index, inherited(old_dir, old_name, index)) and not into then return false end
-    end
-    -- Lua-LSM has no post-rename callback. Keep labels valid across allowed
-    -- operations by rejecting moves that change a write/read protection scope.
-    if (target.write or target.read) and target.tree and from ~= into then return false end
-    if target.tree and from and into and #target.exclusions > 0
-      and (old_name ~= new_name or old_dir[key(index)] ~= new_dir[key(index)]) then return false end
-  end
-  return true
+local function entry_allowed(parent, entry, operation, ancestors)
+  return allowed(assert(entry:path(true)), operation, filesystem(parent), ancestors)
 end
 
 local function mount_allowed(path)
-  local inode = assert(path:dentry():backing_inode())
-  for index, target in ipairs(targets) do
---@glob     if target.patterns and inode[dir_key(index)] then return false end
-    if (target.read or target.write or target.delete)
-      and (inode["stable_" .. index] == true or active(index, inode[key(index)])) then
-      return false
+  return entry_allowed(path, path:dentry(), nil, true)
+end
+
+local function rename(old_dir, old, new, flags)
+  local fsname = filesystem(old_dir)
+  local from, into = assert(old:path(true)), assert(new:path(true))
+  local overwritten = new:backing_inode()
+  local exchange = bit(flags, 2)
+  for _, target in ipairs(targets) do
+    local source = selected(target, from, fsname)
+    local dest = selected(target, into, fsname)
+    if target.write and (dest or exchange and source) then return false end
+    if target.delete and overwritten and dest then return false end
+    if source ~= dest and (target.read or target.write or source or exchange) then return false end
+    -- Preserve protected root names and their ancestors when moving directories.
+    if selected(target, from, fsname, true) and (not source or not target.tree) then return false end
+    if selected(target, into, fsname, true) and not dest then return false end
+    if target.tree and (target.patterns or #target.exclusions > 0) and old:backing_inode():filetype("dir") then
+      -- A directory name need not itself match a predicate on its descendants.
+      for _, view in ipairs(target.views or {}) do
+        if view.logical and view.fs == fsname and (below(from, view.base) or below(into, view.base)) then return false end
+      end
     end
+  end
+  return true
+end
+
+local function link(old, parent, new)
+  local fsname = filesystem(parent)
+  local from, into = assert(old:path(true)), assert(new:path(true))
+  for _, target in ipairs(targets) do
+    local dest = selected(target, into, fsname)
+    if target.write and dest then return false end
+    if (target.read or target.write) and selected(target, from, fsname) ~= dest then return false end
   end
   return true
 end
@@ -397,24 +313,21 @@ return {
     end
     if result ~= nil then return result, code end
     return guarded(function()
-      local inode = assert(file:inode())
-      return (not (file:fmode("read") or file:fmode("exec")) or allowed(inode, "read"))
-        and (not file:fmode("write") or allowed(inode, "write"))
+      return (not (file:fmode("read") or file:fmode("exec")) or file_allowed(file, "read"))
+        and (not file:fmode("write") or file_allowed(file, "write"))
     end)
   end,
   file_permission = function(file, mask)
     return guarded(function()
-      local inode = assert(file:inode())
-      return (not bit(mask, 4) or allowed(inode, "read"))
-        and (not bit(mask, 2) or allowed(inode, "write"))
+      return (not bit(mask, 4) or file_allowed(file, "read"))
+        and (not bit(mask, 2) or file_allowed(file, "write"))
     end)
   end,
   mmap_file = function(file, reqprot, prot, flags)
     if file == nil then return true end
     return guarded(function()
-      local inode = assert(file:inode())
-      return (prot == 0 or allowed(inode, "read"))
-        and (not (bit(prot, 2) and bit(flags, 1)) or allowed(inode, "write"))
+      return (prot == 0 or file_allowed(file, "read"))
+        and (not (bit(prot, 2) and bit(flags, 1)) or file_allowed(file, "write"))
     end)
   end,
   file_mprotect = function(vma, reqprot, prot)
@@ -422,48 +335,31 @@ return {
       local file = vma:file()
       if file == nil then return true end
       local ok, result = pcall(function()
-        local inode = assert(file:inode())
-        return (prot == 0 or allowed(inode, "read"))
-          and (not (bit(prot, 2) and vma:mapping("shared")) or allowed(inode, "write"))
+        return (prot == 0 or file_allowed(file, "read"))
+          and (not (bit(prot, 2) and vma:mapping("shared")) or file_allowed(file, "write"))
       end)
       file:fput()
       if not ok then error(result) end
       return result
     end)
   end,
-  inode_setattr = function(idmap, dentry, attr)
-    -- ABI v1 kernels also expose the legacy (dentry, attr) argument pair.
-    if attr == nil then dentry, attr = idmap, dentry end
-    return guarded(function()
-      assert(type(attr) == "table")
-      return attr.size == nil or allowed(dentry:backing_inode(), "write")
-    end)
+  path_truncate = function(path)
+    return guarded(function() return entry_allowed(path, path:dentry(), "write") end)
   end,
---@create   inode_create = function(dir, dentry) return guarded(creation, dir, dentry) end,
---@create   inode_mkdir = function(dir, dentry) return guarded(creation, dir, dentry) end,
-  inode_unlink = function(dir, dentry) return guarded(deletion, dir, dentry) end,
-  inode_rmdir = function(dir, dentry) return guarded(deletion, dir, dentry) end,
+  file_truncate = function(file) return guarded(file_allowed, file, "write") end,
+--@create   path_symlink = function(dir, entry) return guarded(entry_allowed, dir, entry, "write") end,
+--@create   path_mknod = function(dir, entry) return guarded(entry_allowed, dir, entry, "write") end,
+--@create   path_mkdir = function(dir, entry) return guarded(entry_allowed, dir, entry, "write") end,
+  path_unlink = function(dir, entry) return guarded(entry_allowed, dir, entry, "delete") end,
+  path_rmdir = function(dir, entry) return guarded(entry_allowed, dir, entry, "delete", true) end,
   sb_mount = function(device, path) return guarded(mount_allowed, path) end,
   move_mount = function(source, destination)
     return guarded(function() return mount_allowed(source) and mount_allowed(destination) end)
   end,
-  inode_rename = function(old_dir, old, new_dir, new)
---@glob     local moving, failure = guarded(pattern_move, old_dir, old, new_dir, new)
---@glob     if not moving then return false, failure end
-    local ok, code = guarded(rename, old_dir, old, new_dir, new)
-    if not ok then return ok, code end
-    -- Tag incoming objects before commit so an existing outside hard link cannot
-    -- bypass protection. Failed namespace changes can retain conservative labels.
-    return tracked(label, old:backing_inode(), new_dir, basename(new))
+  path_rename = function(old_dir, old, new_dir, new, flags)
+    return guarded(rename, old_dir, old, new, flags)
   end,
-  inode_link = function(old, new_dir, new)
---@glob     local ok, code = guarded(pattern_link, old, new_dir, new)
---@glob     if not ok then return false, code end
-    return tracked(label, old:backing_inode(), new_dir, basename(new))
-  end,
-  inode_init_security = function(inode, parent, name)
-    return tracked(label, inode, parent, name)
-  end,
+  path_link = function(old, dir, new) return guarded(link, old, dir, new) end,
   bprm_check_security = function(binprm)
     -- Preserve membership when a non-leader thread becomes the leader on exec.
     return guarded(function()
@@ -471,7 +367,7 @@ return {
       if current:group_leader().scope_root == true then current.scope_root = true end
       member(current)
       if epoch then transferred(current, epoch) end
-      return allowed(assert(binprm:file():inode()), "read")
+      return file_allowed(assert(binprm:file()), "read")
     end)
   end,
   task_alloc = function(child)

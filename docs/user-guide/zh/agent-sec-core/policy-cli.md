@@ -25,13 +25,16 @@ agent-sec-cli --socket "$SOCKET" policy list
 管理员可设置 `AGENT_SEC_FILE_BACKEND=lua-lsm`，为新部署的文件 Binding 选择后端。
 默认仍为 `agentsight`，已有部署保留原 route。该后端需要兼容的 Lua-LSM 内核、
 初始 user namespace 中实际生效的 `CAP_MAC_ADMIN` 和可写的 securityfs，
-Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随后在同机执行的
-完整 daemon 测试中，模块开始卸载后发生内核崩溃，原因尚未确定；安装包的 systemd
-部署也未验证。配置和实现边界见 [后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
+旧版 inode 标签模板的 Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随后在同机执行的
+完整 daemon 测试在卸载模块时触发 Lua-LSM 已知内核问题。负责人正在回移修复，
+修复版本和安装包的 systemd 部署待验证。降级 daemon 前先清理 Lua-LSM Scope 并确认
+模块已卸载。操作步骤见[后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
+
+Lua-LSM 在每次操作时匹配路径，也能保护下发后才创建的文件。已有硬链接不影响下发；通过保护范围外的硬链接名称访问，暂时不在防护保证内。
 
 daemon 停止时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
-Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保护。重启时复核部署证据。
-部分 rename 操作比 AgentSight 更严格。
+Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保护。同一 boot 内重启 daemon
+会保留 Ready Binding。对禁写的文件，使用 rename 原子替换其内容也会被拒绝。
 恢复时应同时保留 Client 状态目录和 Policy 数据库。切换默认后端不会迁移已有部署。
 下发读保护时拒绝已有文件映射，写保护拒绝已有共享可写映射。已测系统调用、
 语义差异和剩余验收项见后端说明的覆盖对照表。

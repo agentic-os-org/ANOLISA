@@ -61,8 +61,8 @@ Individual Binding errors are rescheduled without closing PAP admission; exhaust
 CAS contention is distinct from storage unavailability. There is no automatic restart of a failed reconciliation runtime.
 Scope responses confirm intent admission, and GET/LIST expose subsequent completion.
 Startup restores discovery and pending or interrupted reconciliation from SQLite.
-Ready Lua-LSM Bindings are rechecked on restart. Other Ready Bindings and terminal
-failures are not automatically reapplied.
+A same-boot daemon restart preserves Ready Bindings, their deployment receipts
+and terminal failures. Interrupted apply/delete operations follow the existing retry budget.
 
 The Rust `agent-sec-cli` exposes 12 Policy, Scope and Binding administration commands through
 an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;

@@ -1,7 +1,8 @@
 //! Canonical artifact encoding shared by generation and deployment validation.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use asc_file_policy::{
     FilePathPattern, FileProtectionExclusionKind, FileProtectionTargetKind, PatternSyntax,
@@ -18,6 +19,26 @@ pub fn module_name(id: &ResourceId, revision: Revision) -> String {
 /// Encodes intent with the supported template for generation and integrity checks.
 /// The plan's existing `source` field is ignored. Performs no filesystem I/O.
 pub fn render_module(plan: &LuaLsmPlan, directory: &Path) -> String {
+    render_module_with_views(plan, directory, &[])
+}
+
+/// A visible or filesystem-relative path prefix corresponding to part of a target.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PathView {
+    /// Prefix seen by the hook.
+    pub base: PathBuf,
+    /// Corresponding policy prefix. An absent prefix guards only ancestor moves or mounts.
+    pub logical: Option<PathBuf>,
+    /// Filesystem type for dentry hooks; namespace paths use None.
+    pub filesystem: Option<String>,
+}
+
+/// Adds locally resolved mount prefixes to the validated policy at registration.
+pub fn render_module_with_views(
+    plan: &LuaLsmPlan,
+    directory: &Path,
+    views: &[BTreeSet<PathView>],
+) -> String {
     let name = module_name(&plan.binding_id, plan.binding_revision);
     let control = directory.join(&name);
     let mut source = format!(
@@ -46,8 +67,47 @@ pub fn render_module(plan: &LuaLsmPlan, directory: &Path) -> String {
             )
             .unwrap_or_else(|_| unreachable!("String formatting is infallible"));
         }
+        if let Some(entries) = views.get(index) {
+            source.push_str("  }, views = {\n");
+            for view in entries {
+                writeln!(
+                    source,
+                    "    {{ base = {}, logical = {}, fs = {} }},",
+                    lua_bytes(view.base.as_os_str().as_encoded_bytes()),
+                    view.logical.as_ref().map_or_else(
+                        || "nil".into(),
+                        |p| lua_bytes(p.as_os_str().as_encoded_bytes())
+                    ),
+                    view.filesystem
+                        .as_deref()
+                        .map_or_else(|| "nil".into(), lua_string),
+                )
+                .unwrap_or_else(|_| unreachable!("String formatting is infallible"));
+            }
+        }
         if let Some(predicates) = plan.patterns.get(&index) {
-            source.push_str("  }, patterns = {\n");
+            source.push_str("  }, ");
+            // A single native basename glob needs only the direct child name and two
+            // literal comparisons in the hook. Cedar stars can cross separators.
+            if let [predicate] = predicates.as_slice()
+                && predicate.syntax == PatternSyntax::Glob
+                && !predicate.negated
+                && target.exclusions.is_empty()
+                && let Some((parent, name)) = predicate.value.rsplit_once('/')
+                && (parent == target.path || parent.is_empty() && target.path == "/")
+                && let Some((prefix, suffix)) = name.split_once('*')
+                && !prefix.contains('?')
+                && !suffix.contains(['*', '?'])
+            {
+                write!(
+                    source,
+                    "prefix = {}, suffix = {}, ",
+                    lua_string(prefix),
+                    lua_string(suffix)
+                )
+                .unwrap_or_else(|_| unreachable!("String formatting is infallible"));
+            }
+            source.push_str("patterns = {\n");
             for pattern in predicates {
                 writeln!(
                     source,
@@ -82,8 +142,12 @@ pub fn render_module(plan: &LuaLsmPlan, directory: &Path) -> String {
 }
 
 fn lua_string(value: &str) -> String {
+    lua_bytes(value.as_bytes())
+}
+
+fn lua_bytes(value: &[u8]) -> String {
     let mut encoded = String::from("\"");
-    for byte in value.bytes() {
+    for &byte in value {
         if (b' '..=b'~').contains(&byte) && !matches!(byte, b'"' | b'\\') {
             encoded.push(char::from(byte));
         } else {
@@ -107,24 +171,30 @@ pub fn is_supported_path(path: &str) -> bool {
 /// Checks the predicate encoding consumed by the Lua template. A Cedar predicate
 /// can match a suffix if another condition bounds the target.
 pub fn is_supported_pattern(pattern: &FilePathPattern) -> bool {
+    const MAX_WILDCARDS: usize = 64;
     let value = &pattern.value;
     if value.len() > 4096 || value.contains('\0') {
         return false;
     }
     match pattern.syntax {
         PatternSyntax::Glob => {
-            is_supported_path(value)
+            value.bytes().filter(|b| matches!(b, b'*' | b'?')).count() <= MAX_WILDCARDS
+                && is_supported_path(value)
                 && !value.contains(['[', ']', '{', '}', '\\'])
                 && value.split('/').all(|s| !s.contains("**") || s == "**")
         }
         PatternSyntax::CedarLike => {
+            let mut stars = 0;
             let mut chars = value.chars();
             while let Some(ch) = chars.next() {
+                if ch == '*' {
+                    stars += 1;
+                }
                 if ch == '\\' && !matches!(chars.next(), Some('*' | '\\')) {
                     return false;
                 }
             }
-            true
+            stars <= MAX_WILDCARDS
         }
     }
 }
