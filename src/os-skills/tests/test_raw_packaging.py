@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -15,12 +16,19 @@ PACKAGE = ROOT / "packaging/raw/package.py"
 
 
 class RawPackagingTests(unittest.TestCase):
-    def build(self, source: Path, output: Path, arch: str = "x86_64", version: str | None = None):
+    def build(
+        self,
+        source: Path,
+        output: Path,
+        arch: str = "x86_64",
+        version: str | None = None,
+        epoch: int = 1234567890,
+    ):
         if version is None:
             version = tomllib.loads((source / "component.toml").read_text())["component"]["version"]
         return subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(PACKAGE),
                 "--source-dir",
                 str(source),
@@ -31,7 +39,7 @@ class RawPackagingTests(unittest.TestCase):
                 "--target-arch",
                 arch,
                 "--epoch",
-                "1234567890",
+                str(epoch),
             ],
             capture_output=True,
             text=True,
@@ -85,6 +93,27 @@ class RawPackagingTests(unittest.TestCase):
                 self.assertEqual(set(inventory), set(files))
                 self.assertEqual(sbom["metadata"]["component"]["hashes"][0]["content"], digest)
                 self.assertEqual(sbom["metadata"]["component"]["properties"][2]["value"], arch)
+
+    def test_out_of_range_epoch_preserves_existing_artifacts(self):
+        def hashes(output: Path) -> dict[str, str]:
+            return {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in output.iterdir()
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            first = self.build(ROOT, output)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            original = hashes(output)
+            self.assertEqual(len(original), 4)
+
+            # Milliseconds supplied where the CLI expects Unix seconds.
+            result = self.build(ROOT, output, epoch=1_234_567_890_000)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(hashes(output), original)
+            self.assertIn("--epoch", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_rejects_wrong_version_and_ignores_untracked_files(self):
         with tempfile.TemporaryDirectory() as temporary:
