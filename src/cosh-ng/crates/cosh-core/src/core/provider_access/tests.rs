@@ -322,6 +322,45 @@ async fn activation_retries_the_same_step_and_keeps_the_first_real_event() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn oauth_not_activated_reuses_the_ecs_activation_polling() {
+    let oauth_not_activated = ProviderFailure {
+        code: "Sysom.Identity.SysomNotActivated".into(),
+        kind: ProviderFailureKind::ActivationRequired,
+        dispatch: DispatchState::NotDispatched,
+        request_id: None,
+    };
+    let (provider, access, inner) = fixture(
+        vec![
+            Reply::Events(vec![GenerateEvent::ProviderFailure(oauth_not_activated)]),
+            events(),
+        ],
+        Arc::new(|| true),
+    );
+    let (_client, mut reader, mut writer, _) = io();
+    let result = drive(Some(&access), collect(&*provider), &mut reader, &mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        inner.calls.load(Ordering::SeqCst),
+        2,
+        "OAuth not-activated must reuse the activation retry/poll entry"
+    );
+    assert!(matches!(&result[0], GenerateEvent::TextDelta(text) if text=="answer"));
+    let states: Vec<Value> = String::from_utf8(writer.bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        states
+            .iter()
+            .any(|state| state["phase"] == "waiting_activation"),
+        "OAuth not-activated must surface the same waiting_activation guidance"
+    );
+    assert!(access.failure().is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn only_exact_predispatch_commercial_failures_may_poll() {
     for failure in [
         ProviderFailure {
