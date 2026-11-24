@@ -35,7 +35,7 @@ sec-core CLI/daemon from their backend owner's release or native core package.
 From the downloaded artifact directory, install the prebuilt AW CLI as your user:
 
 ```bash
-export AW_VERSION=0.2.0
+export AW_VERSION=0.2.1
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
 export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"

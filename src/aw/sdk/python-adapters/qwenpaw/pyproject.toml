@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anolisa-aw-sdk-qwenpaw"
-version = "0.2.0"
+version = "0.2.1"
 description = "Optional QwenPaw plugin integration for anolisa-aw-sdk"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 classifiers = ["Operating System :: POSIX :: Linux", "Typing :: Typed"]
-dependencies = ["anolisa-aw-sdk==0.2.0"]
+dependencies = ["anolisa-aw-sdk==0.2.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

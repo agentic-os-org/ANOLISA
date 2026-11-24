@@ -33,7 +33,7 @@ owner 的发行件或原生 core 包安装。
 在下载产物的目录中，以当前用户安装预构建 AW CLI：
 
 ```bash
-export AW_VERSION=0.2.0
+export AW_VERSION=0.2.1
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
 export AW_BUNDLE_DIR="$PWD/$AW_BUNDLE"
