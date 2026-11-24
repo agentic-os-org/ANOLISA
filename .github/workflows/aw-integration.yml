@@ -15,6 +15,10 @@ on:
         type: boolean
         default: false
   workflow_call:
+    outputs:
+      archive_id:
+        description: Artifact ID of the installed archives for this candidate
+        value: ${{ jobs.packages.outputs.archive_id }}
     inputs:
       release_version:
         description: Validated release version for native archives
@@ -35,7 +39,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: aw-integration-${{ github.event_name }}-${{ inputs.candidate_sha || github.ref }}
+  # Keep the nightly queue bounded. Explicit runs each own their acceptance result.
+  group: aw-integration-${{ github.event_name == 'schedule' && github.ref || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -103,6 +108,7 @@ jobs:
     needs: plan
     outputs:
       native_artifact: ${{ steps.upload-native.outputs.artifact-id }}
+      archive_id: ${{ steps.upload-archives.outputs.artifact-id }}
     name: AW / Package install tests
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
@@ -182,8 +188,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         id: upload-native
         with:
-          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          name: aw-native-binaries-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
           path: ${{ env.AW_PACKAGE_DIR }}/native.tar.gz
+          compression-level: 0
           retention-days: 3
           if-no-files-found: error
       - name: Verify sec-core authenticated health contract
@@ -267,9 +274,12 @@ jobs:
           "$aw" uninstall --prefix "$root/split" --yes
           test -f "$runtime/demo/result.json"
       - uses: actions/upload-artifact@v4
+        id: upload-archives
         if: success()
         with:
           name: aw-integration-linux-x86_64-${{ needs.plan.outputs.sha }}
+          overwrite: ${{ github.run_attempt > 1 }}
+          compression-level: 0
           retention-days: 3
           path: |
             ${{ env.AW_PACKAGE_DIR }}/packages/*.tar.gz
@@ -279,6 +289,7 @@ jobs:
         if: always()
         with:
           name: aw-integration-evidence-${{ needs.plan.outputs.sha }}
+          overwrite: ${{ github.run_attempt > 1 }}
           path: |
             ${{ env.AW_PACKAGE_DIR }}/test-evidence/*.log
             ${{ env.AW_PACKAGE_DIR }}/test-evidence/rtk-provenance.json
@@ -321,7 +332,8 @@ jobs:
           key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-cli/tests/fixtures/pi/**/package-lock.json', 'src/aw/crates/aw-cli/tests/fixtures/pi/package-lock.json') }}
       - uses: actions/download-artifact@v4
         with:
-          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          artifact-ids: ${{ needs.packages.outputs.native_artifact }}
+          merge-multiple: true
           path: src/aw/target/native-binaries
       - name: Prepare native Python and candidate binaries
         env:
@@ -347,6 +359,7 @@ jobs:
         if: always()
         with:
           name: aw-native-evidence-${{ matrix.agent }}-${{ needs.plan.outputs.sha }}
+          overwrite: ${{ github.run_attempt > 1 }}
           path: src/aw/target/native-evidence/${{ matrix.agent }}
           retention-days: 7
           if-no-files-found: error
@@ -354,6 +367,8 @@ jobs:
   resident-image:
     needs: [plan, packages]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
+    outputs:
+      image_artifact: ${{ steps.upload-image.outputs.artifact-id }}
     name: AW / Resident image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -365,7 +380,8 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - uses: actions/download-artifact@v4
         with:
-          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          artifact-ids: ${{ needs.packages.outputs.native_artifact }}
+          merge-multiple: true
           path: src/aw/target/native-binaries
       - name: Build one isolated image from the candidate payload
         env:
@@ -375,8 +391,9 @@ jobs:
           python3 -B src/aw/scripts/resident_container.py --candidate-sha "$CANDIDATE_SHA" \
             --bin src/aw/target/native-binaries --build-only --output src/aw/target/resident-image
       - uses: actions/upload-artifact@v4
+        id: upload-image
         with:
-          name: aw-resident-image-${{ needs.plan.outputs.sha }}
+          name: aw-resident-image-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
           path: |
             src/aw/target/resident-image/image.tar
             src/aw/target/resident-image/image.json
@@ -387,6 +404,7 @@ jobs:
         if: always()
         with:
           name: aw-resident-build-evidence-${{ needs.plan.outputs.sha }}
+          overwrite: ${{ github.run_attempt > 1 }}
           path: |
             src/aw/target/resident-image/*.json
             src/aw/target/resident-image/*.jsonl
@@ -396,7 +414,7 @@ jobs:
 
   resident-container:
     needs: [plan, resident-image]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.resident-image.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.resident-image.result == 'success' && needs.resident-image.outputs.image_artifact != '' }}
     name: AW / Resident (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
@@ -411,7 +429,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: aw-resident-image-${{ needs.plan.outputs.sha }}
+          artifact-ids: ${{ needs.resident-image.outputs.image_artifact }}
+          merge-multiple: true
           path: src/aw/target/resident-image
       - name: Run the declared resident shard
         env:
@@ -425,6 +444,7 @@ jobs:
         if: always()
         with:
           name: aw-resident-evidence-${{ matrix.shard }}-${{ needs.plan.outputs.sha }}
+          overwrite: ${{ github.run_attempt > 1 }}
           path: src/aw/target/resident-evidence
           retention-days: 7
           if-no-files-found: error

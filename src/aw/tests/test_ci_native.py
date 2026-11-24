@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from test_ci_checks import AW, GateFixture
-from check_native import load
+from check_native import load, plan
 from native_acceptance import Commands, verify_bundle, verify_case
 from native_reports import validate_case
 from native_summary import summarize
@@ -184,6 +184,42 @@ class NativeTests(GateFixture):
             self.assertIn("!cancelled() && needs.plan.result == 'success' && "
                           "needs.packages.outputs.native_artifact != ''", job)
         self.assertIn("PACKAGE_RESULT: ${{ needs.packages.result }}", jobs)
+
+    def test_handoffs_use_the_artifact_returned_by_each_producer(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        for name, producer in (
+            ("native", "packages.outputs.native_artifact"),
+            ("resident-image", "packages.outputs.native_artifact"),
+            ("resident-container", "resident-image.outputs.image_artifact"),
+        ):
+            job = jobs.split(f"\n  {name}:\n", 1)[1].split("\n\n  ", 1)[0]
+            self.assertIn("needs." + producer + " != ''", job)
+            self.assertIn("artifact-ids: ${{ needs." + producer + " }}", job)
+            self.assertIn("merge-multiple: true", job)
+        self.assertIn("value: ${{ jobs.packages.outputs.archive_id }}", workflow)
+        self.assertIn("archive_id: ${{ steps.upload-archives.outputs.artifact-id }}", jobs)
+        self.assertLess(jobs.index("Verify installed packages"), jobs.index("id: upload-archives"))
+
+    def test_reruns_preserve_successful_siblings_and_replace_owned_evidence(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        self.assertIn("github.event_name == 'schedule' && github.ref || github.run_id", workflow)
+        for step in workflow.split("uses: actions/upload-artifact@v4")[1:]:
+            step = step.split("\n      - ", 1)[0]
+            name = next(line for line in step.splitlines() if line.startswith("          name:"))
+            if "github.run_attempt" not in name:
+                self.assertIn("overwrite: ${{ github.run_attempt > 1 }}", step, name)
+        for label, matrix_key in (("native", "agent"), ("resident", "shard")):
+            self.assertIn(f"name: aw-{label}-evidence-" + "${{ matrix." + matrix_key + " }}", workflow)
+            self.assertIn(f"pattern: aw-{label}-evidence-*-" + "${{ needs.plan.outputs.sha }}", workflow)
+
+    def test_native_plan_offers_long_jobs_first_without_dropping_cases(self) -> None:
+        sha = "f" * 40
+        with patch("check_native.git", return_value=sha):
+            jobs = plan(AW, sha)["include"]
+        self.assertCountEqual([job["agent"] for job in jobs], self.manifest["agents"])
+        minutes = [job["minutes"] for job in jobs]
+        self.assertEqual(minutes, sorted(minutes, reverse=True))
 
     def test_new_agent_requires_native_accounting(self) -> None:
         (self.root / "tests").mkdir()
@@ -501,7 +537,14 @@ class NativeTests(GateFixture):
             if mode != "missing":
                 path.write_text(json.dumps(report))
             with self.subTest(mode=mode):
-                self.assertFalse(summarize(self.manifest, self.root, "a" * 40, jobs)[1])
+                summary, passed = summarize(self.manifest, self.root, "a" * 40, jobs)
+                self.assertFalse(passed)
+                if mode == "failed-case":
+                    self.assertIn(f"FAIL / case `{report['cases'][0]['name']}`", summary)
+                if mode == "missing":
+                    self.assertIn("FAIL / missing report", summary)
+                if mode == "stale":
+                    self.assertIn("FAIL / candidate SHA mismatch", summary)
 
     def test_timeout_allows_fixture_to_reap_its_separate_process_group(self) -> None:
         child_pid = self.root / "child.pid"

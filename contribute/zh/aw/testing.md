@@ -14,6 +14,8 @@
 | 真实后端兼容 | Tokenless/RTK 与 AW Provider 的四项合同 | `check_tokenless.py` |
 | 集成发行 | 包、后端、原生清单与常驻容器 | AW Integration workflow |
 
+夜间检查失败时，在运行摘要中打开 **AW / Integration result**，从对应 Agent 行找到首个失败用例，再打开该 Agent 的证据产物查看命令日志。若摘要提示缺少报告，先查生成报告的 job。遇到临时故障且构建产物仍可用时，选择 **Re-run failed jobs**；中间产物已过期时，在同一提交上重跑全部 job。
+
 OpenClaw 自动验收覆盖官方 loader/Hook runner，完整 Gateway 模型流程需另验。
 Qoder SDK 托管 MCP 仍有手工容器证据要求。以清单记录的实际边界报告结果。
 
