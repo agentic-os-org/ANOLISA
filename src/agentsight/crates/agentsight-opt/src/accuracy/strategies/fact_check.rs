@@ -32,8 +32,11 @@ impl FactCheckStrategy {
     }
 
     fn grep_symbol(repo_root: &Path, symbol: &str, kind: &str) -> GrepOutcome {
+        if symbol.trim().is_empty() {
+            return GrepOutcome::NotFound;
+        }
         if matches!(kind, "file" | "path") {
-            return if repo_root.join(symbol).exists() {
+            return if Self::repo_contains_path(repo_root, symbol) {
                 GrepOutcome::Found
             } else {
                 GrepOutcome::NotFound
@@ -96,7 +99,9 @@ impl FactCheckStrategy {
                 "--include=*.xml",
                 "--include=*.md",
                 "-F",
+                "-e",
                 symbol,
+                "--",
             ])
             .arg(repo_root)
             .output();
@@ -107,6 +112,20 @@ impl FactCheckStrategy {
             Ok(out) if out.status.code() == Some(1) => GrepOutcome::NotFound,
             Ok(_) | Err(_) => GrepOutcome::CheckFailed,
         }
+    }
+
+    fn repo_contains_path(repo_root: &Path, symbol: &str) -> bool {
+        let candidate = Path::new(symbol);
+        if candidate.is_absolute() {
+            return false;
+        }
+        let Ok(root) = repo_root.canonicalize() else {
+            return false;
+        };
+        let Ok(resolved) = root.join(candidate).canonicalize() else {
+            return false;
+        };
+        resolved != root && resolved.starts_with(&root)
     }
 }
 
@@ -259,5 +278,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_treats_leading_dash_symbols_as_literal_patterns() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-opt-factcheck-flags-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "plain_text_only\n").unwrap();
+
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&dir, "--help", "api"),
+                GrepOutcome::NotFound
+            ),
+            "absent `--help` must not be reported Found via grep --help output"
+        );
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&dir, "-V", "api"),
+                GrepOutcome::NotFound
+            ),
+            "absent `-V` must not be reported Found via grep -V output"
+        );
+
+        std::fs::write(
+            dir.join("flags.rs"),
+            "const FLAG_A: &str = \"--help\";\nconst FLAG_B: &str = \"--exclude=*\";\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&dir, "--exclude=*", "api"),
+            GrepOutcome::Found
+        ));
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&dir, "--help", "api"),
+            GrepOutcome::Found
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_check_rejects_paths_outside_repo_root() {
+        let root = std::env::temp_dir().join(format!(
+            "agentsight-opt-factcheck-escape-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::fs::write(repo.join("inside.txt"), "ok\n").unwrap();
+
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "inside.txt", "file"),
+            GrepOutcome::Found
+        ));
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, "../outside.txt", "file"),
+                GrepOutcome::NotFound
+            ),
+            "parent-dir escape must not report Found"
+        );
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, outside.to_str().unwrap(), "path"),
+                GrepOutcome::NotFound
+            ),
+            "absolute path outside repo_root must not report Found"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
