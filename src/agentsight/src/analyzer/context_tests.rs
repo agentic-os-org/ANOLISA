@@ -793,3 +793,107 @@ fn delivery_uses_authoritative_anthropic_input_and_cache_corrections() {
         assert_eq!(actual["token_usage"]["total_tokens"], 14);
     }
 }
+
+#[test]
+fn delivery_merges_sse_continuation_bytes_usage_for_split_terminal_events() {
+    let analyzer = Analyzer::new();
+
+    // 1. OpenAI Chat Completions: content chunks in sse_events, split usage event in sse_continuation_bytes
+    let mut openai_result = captured(
+        "/v1/chat/completions",
+        json!({"model":"fixture","stream":true,"messages":[{"role":"user","content":"hello"}]}),
+        json!([
+            {"id":"split-openai","model":"fixture","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}
+        ]),
+        true,
+    );
+    if let AggregatedResult::SseComplete(pair) = &mut openai_result {
+        pair.response.sse_continuation_bytes = Some(
+            b"data: {\"id\":\"split-openai\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":57,\"completion_tokens\":7,\"total_tokens\":64}}\n\n"
+                .to_vec(),
+        );
+    }
+
+    // 2. Anthropic: preliminary message_start in sse_events, final message_delta split across TLS read in sse_continuation_bytes
+    let mut anthropic_result = captured(
+        "/v1/messages",
+        json!({"model":"fixture","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}),
+        json!([
+            {"type":"message_start","message":{"id":"split-anthropic","role":"assistant","model":"fixture","content":[],"usage":{"input_tokens":12,"cache_creation_input_tokens":40,"cache_read_input_tokens":80,"output_tokens":1}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hello"}}
+        ]),
+        true,
+    );
+    if let AggregatedResult::SseComplete(pair) = &mut anthropic_result {
+        pair.response.sse_continuation_bytes = Some(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":4,\"output_tokens\":9}}\n"
+                .to_vec(),
+        );
+    }
+
+    // 3. Responses API with empty parsed sse_events and a truncated continuation usage tail
+    let mut responses_empty_events_result = captured(
+        "/v1/responses",
+        json!({"model":"fixture","stream":true,"input":"hello"}),
+        json!([]),
+        true,
+    );
+    if let AggregatedResult::SseComplete(pair) = &mut responses_empty_events_result {
+        pair.response.sse_continuation_bytes = Some(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":120,\"output_tokens\":15,\"total_tokens\":135"
+                .to_vec(),
+        );
+    }
+
+    for (name, result, expected_input, expected_output, expected_total) in [
+        ("openai", openai_result, 57u64, 7u64, 64u64),
+        ("anthropic", anthropic_result, 9u64, 9u64, 18u64),
+        (
+            "responses_empty_events",
+            responses_empty_events_result,
+            120u64,
+            15u64,
+            135u64,
+        ),
+    ] {
+        let expected = build(&analyzer.analyze_aggregated(&result));
+        assert_eq!(
+            expected["token_usage"]["input_tokens"], expected_input,
+            "{name} baseline"
+        );
+        assert_eq!(
+            expected["token_usage"]["output_tokens"], expected_output,
+            "{name} baseline"
+        );
+
+        for raw in [false, true] {
+            let delivery = build(&analyzer.analyze_for_delivery(&result, raw));
+            assert_eq!(
+                delivery["token_usage"]["input_tokens"], expected_input,
+                "{name} analyze_for_delivery(raw={raw})"
+            );
+            assert_eq!(
+                delivery["token_usage"]["output_tokens"], expected_output,
+                "{name} analyze_for_delivery(raw={raw})"
+            );
+            assert_eq!(
+                delivery["token_usage"]["total_tokens"], expected_total,
+                "{name} analyze_for_delivery(raw={raw})"
+            );
+
+            let owned = build(&analyzer.analyze_for_owned_delivery(result.clone(), raw));
+            assert_eq!(
+                owned["token_usage"]["input_tokens"], expected_input,
+                "{name} analyze_for_owned_delivery(raw={raw})"
+            );
+            assert_eq!(
+                owned["token_usage"]["output_tokens"], expected_output,
+                "{name} analyze_for_owned_delivery(raw={raw})"
+            );
+            assert_eq!(
+                owned["token_usage"]["total_tokens"], expected_total,
+                "{name} analyze_for_owned_delivery(raw={raw})"
+            );
+        }
+    }
+}
