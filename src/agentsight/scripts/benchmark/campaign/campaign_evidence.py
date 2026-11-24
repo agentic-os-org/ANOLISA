@@ -582,12 +582,19 @@ def audit_campaign(
     grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for _, run in items:
         repetition = run.get("repetition")
+        if (
+            isinstance(repetition, bool)
+            or not isinstance(repetition, (int, float))
+            or (isinstance(repetition, float) and not repetition.is_integer())
+            or repetition <= 0
+        ):
+            continue
         grouped[
             (
                 str(run.get("scenario")),
                 str(run.get("version")),
                 str(run.get("label")),
-                int(repetition) if isinstance(repetition, (int, float)) else 0,
+                int(repetition),
             )
         ].append(run)
     matrix = campaign_data["matrix"]
