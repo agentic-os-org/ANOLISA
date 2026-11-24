@@ -15,6 +15,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
@@ -152,9 +153,15 @@ fn read_salt_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Exclusively create `target` with mode `0o400` without following symlinks, write `salt`,
-/// and flush it to disk before returning.
-fn create_exclusively_file(target: &Path, salt: &[u8]) -> io::Result<()> {
+static FALLBACK_PUBLISH_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Exclusively create `target` with mode `0o400` without following symlinks, write
+/// via `write_fn`, and flush to disk; removes `target` if permission tightening,
+/// writing, or syncing fails so no partial/empty file lingers.
+fn create_exclusively_file_with<F>(target: &Path, write_fn: F) -> io::Result<()>
+where
+    F: FnOnce(&mut File) -> io::Result<()>,
+{
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -164,13 +171,19 @@ fn create_exclusively_file(target: &Path, salt: &[u8]) -> io::Result<()> {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let mut file: File = opts.open(target)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+    let write_res = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+        }
+        write_fn(&mut file)?;
+        file.sync_all()
+    })();
+    if let Err(err) = write_res {
+        remove_staging_file(target);
+        return Err(err);
     }
-    file.write_all(salt)?;
-    file.sync_all()?;
     Ok(())
 }
 
@@ -197,25 +210,57 @@ fn sync_parent_dir(parent: &Path) {
     }
 }
 
-/// Fallback exclusive creation when `hard_link` is unsupported on the target filesystem
-/// (e.g. `EOPNOTSUPP` / `ENOSYS` or Linux VFS `EPERM` for non-hardlink filesystems).
-fn write_salt_direct_fallback(path: &Path, salt: &[u8]) -> io::Result<Option<Vec<u8>>> {
-    match create_exclusively_file(path, salt) {
-        Ok(()) => {
-            if let Some(parent) = path.parent() {
-                sync_parent_dir(parent);
-            }
+#[cfg(unix)]
+fn lock_parent_dir_exclusive(dir: &File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    loop {
+        let rc = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_parent_dir_exclusive(_dir: &File) -> io::Result<()> {
+    Ok(())
+}
+
+/// Publish an already-synced `tmp_path` to `path` under both an in-process mutex and
+/// an exclusive `flock` on the parent directory so filesystems without `hard_link`
+/// still serialize concurrent writers and never expose an empty or partial final file.
+fn publish_salt_via_locked_rename(
+    tmp_path: &Path,
+    path: &Path,
+    salt: &[u8],
+) -> io::Result<Option<Vec<u8>>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let _in_proc_guard = FALLBACK_PUBLISH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir_file = File::open(parent)?;
+    lock_parent_dir_exclusive(&dir_file)?;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            std::fs::rename(tmp_path, path)?;
+            sync_parent_dir(parent);
             Ok(Some(salt.to_vec()))
         }
-        Err(direct_err) if direct_err.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-        Err(direct_err) => Err(direct_err),
+        Err(err) => Err(err),
     }
 }
 
 /// Write `salt` into a unique `0o400` staging file and publish it atomically via `hard_link`
 /// so concurrent writers cannot overwrite an earlier salt and other users can never read it
-/// even transiently. Falls back to direct `O_CREAT | O_EXCL | O_NOFOLLOW` when the
-/// underlying filesystem rejects hard links (`Unsupported` or `PermissionDenied`).
+/// even transiently. Falls back to lock-coordinated atomic `rename` of the already-synced
+/// staging file when the underlying filesystem rejects hard links (`Unsupported` or
+/// `PermissionDenied`).
 fn write_salt_exclusively(path: &Path, salt: &[u8]) -> io::Result<Option<Vec<u8>>> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let seq = TEMP_SALT_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -227,15 +272,9 @@ fn write_salt_exclusively(path: &Path, salt: &[u8]) -> io::Result<Option<Vec<u8>
         std::process::id()
     ));
 
-    if let Err(e) = create_exclusively_file(&tmp_path, salt) {
-        remove_staging_file(&tmp_path);
-        return Err(e);
-    }
+    create_exclusively_file_with(&tmp_path, |file| file.write_all(salt))?;
 
-    let link_res = std::fs::hard_link(&tmp_path, path);
-    remove_staging_file(&tmp_path);
-
-    match link_res {
+    let publish_res = match std::fs::hard_link(&tmp_path, path) {
         Ok(()) => {
             sync_parent_dir(parent);
             Ok(Some(salt.to_vec()))
@@ -248,13 +287,15 @@ fn write_salt_exclusively(path: &Path, salt: &[u8]) -> io::Result<Option<Vec<u8>
             ) =>
         {
             log::warn!(
-                "atomic hard_link for {} unavailable ({e}); falling back to exclusive direct create",
+                "atomic hard_link for {} unavailable ({e}); falling back to lock-coordinated atomic rename",
                 path.display()
             );
-            write_salt_direct_fallback(path, salt)
+            publish_salt_via_locked_rename(&tmp_path, path, salt)
         }
         Err(e) => Err(e),
-    }
+    };
+    remove_staging_file(&tmp_path);
+    publish_res
 }
 
 /// Read the per-install salt without following symlinks, creating it atomically with
@@ -523,21 +564,119 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn direct_create_fallback_sets_mode_400_and_respects_existing_salt() {
+    fn fallback_publish_sets_mode_400_and_preserves_existing_or_symlink_target() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tmp_dir("direct-fallback");
+        let dir = tmp_dir("fallback-publish");
         let salt_path = dir.join(SALT_FILE_NAME);
         let first_salt = [0xABu8; SALT_LEN];
-        let created = write_salt_direct_fallback(&salt_path, &first_salt).unwrap();
+        let tmp_one = dir.join("stage-one.tmp");
+        create_exclusively_file_with(&tmp_one, |f| f.write_all(&first_salt)).unwrap();
+        let created = publish_salt_via_locked_rename(&tmp_one, &salt_path, &first_salt).unwrap();
         assert_eq!(created.as_deref(), Some(&first_salt[..]));
+        assert!(!tmp_one.exists(), "staging file must be moved into place");
         let mode = std::fs::metadata(&salt_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o400);
 
         let second_salt = [0xCDu8; SALT_LEN];
-        let raced = write_salt_direct_fallback(&salt_path, &second_salt).unwrap();
+        let tmp_two = dir.join("stage-two.tmp");
+        create_exclusively_file_with(&tmp_two, |f| f.write_all(&second_salt)).unwrap();
+        let raced = publish_salt_via_locked_rename(&tmp_two, &salt_path, &second_salt).unwrap();
         assert!(raced.is_none(), "fallback must not overwrite existing salt");
+        remove_staging_file(&tmp_two);
         assert_eq!(read_salt_nofollow(&salt_path).unwrap(), first_salt);
+
+        // A pre-existing symlink at `salt_path` must not be overwritten either.
+        let link_dir = dir.join("symlink-dir");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link_salt_path = link_dir.join(SALT_FILE_NAME);
+        let outside = dir.join("outside");
+        std::os::unix::fs::symlink(&outside, &link_salt_path).unwrap();
+        let tmp_three = link_dir.join("stage-three.tmp");
+        create_exclusively_file_with(&tmp_three, |f| f.write_all(&second_salt)).unwrap();
+        assert!(
+            publish_salt_via_locked_rename(&tmp_three, &link_salt_path, &second_salt)
+                .unwrap()
+                .is_none()
+        );
+        remove_staging_file(&tmp_three);
+        assert!(!outside.exists());
+        assert!(read_salt_nofollow(&link_salt_path).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staged_write_failure_cleans_up_temp_file_and_allows_subsequent_seal() {
+        let dir = tmp_dir("write-fail");
+        let tmp_path = dir.join("failing.tmp");
+        let salt_path = dir.join(SALT_FILE_NAME);
+
+        let err = create_exclusively_file_with(&tmp_path, |file| {
+            file.write_all(&[0x11u8; 8])?;
+            Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "injected write error",
+            ))
+        })
+        .expect_err("write failure must surface");
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        assert!(
+            !tmp_path.exists(),
+            "partial staging file must be removed on failure"
+        );
+        assert!(
+            !salt_path.exists(),
+            "salt path must remain absent after staging write failure"
+        );
+
+        let sealed = seal("sk-after-failure", &dir).expect("subsequent seal must succeed");
+        assert_eq!(unseal(&sealed, &dir).as_deref(), Some("sk-after-failure"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_fallback_publish_shares_one_salt_without_corrupt_reads() {
+        use std::sync::{Arc, Barrier};
+
+        for round in 0..25 {
+            let dir = tmp_dir(&format!("fallback-race-{round}"));
+            let workers = 8;
+            let barrier = Arc::new(Barrier::new(workers));
+            let handles: Vec<_> = (0..workers)
+                .map(|idx| {
+                    let dir = dir.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let salt_path = dir.join(SALT_FILE_NAME);
+                        let tmp_path = dir.join(format!("fallback.{idx}.tmp"));
+                        let candidate = [idx as u8 + 1; SALT_LEN];
+                        create_exclusively_file_with(&tmp_path, |f| f.write_all(&candidate))
+                            .unwrap();
+                        barrier.wait();
+                        let res = publish_salt_via_locked_rename(&tmp_path, &salt_path, &candidate)
+                            .unwrap();
+                        remove_staging_file(&tmp_path);
+                        match res {
+                            Some(created) => created,
+                            None => read_salt_nofollow(&salt_path).unwrap(),
+                        }
+                    })
+                })
+                .collect();
+            let salts: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            for s in &salts[1..] {
+                assert_eq!(
+                    s, &salts[0],
+                    "concurrent fallback callers observed divergent salts in round {round}"
+                );
+            }
+            let entries: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(entries, vec![SALT_FILE_NAME.to_string()]);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
