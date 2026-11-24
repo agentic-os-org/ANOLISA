@@ -513,7 +513,16 @@ impl CapabilityCell {
                         "duplicate capability cell Source kind",
                     )?;
                 }
-                if self.sources == [SourceKind::Sight] {
+                // Sight sources are observation-only, so a mixed cell's
+                // authority depends on whether any non-Sight source is
+                // present, never on `self.sources` slice order.
+                let representative = self
+                    .sources
+                    .iter()
+                    .copied()
+                    .find(|kind| *kind != SourceKind::Sight)
+                    .unwrap_or(SourceKind::Sight);
+                if representative == SourceKind::Sight {
                     require(
                         mode == HookAuthority::Observe,
                         "Sight-only capability cell cannot claim control mode",
@@ -524,7 +533,7 @@ impl CapabilityCell {
                     effects: self.effects.clone(),
                     failure_actions: self.failure_actions.clone(),
                 }
-                .validate_for_event(self.sources[0], &self.event)
+                .validate_for_event(representative, &self.event)
             }
         }
     }

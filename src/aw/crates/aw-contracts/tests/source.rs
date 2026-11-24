@@ -358,3 +358,71 @@ assert.equal(createHash('sha256').update(cEnc, 'utf8').digest('hex'), data.capab
         .unwrap();
     assert!(node_status.success());
 }
+
+#[test]
+fn capability_cell_validation_is_independent_of_source_order() {
+    let mut cell = CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources: vec![SourceKind::Sight, SourceKind::Native],
+        mode: Some(HookAuthority::Control),
+        effects: vec![HookEffect::Observe, HookEffect::Block],
+        failure_actions: vec![FailureAction::Block],
+    };
+    cell.validate().unwrap();
+
+    cell.sources = vec![SourceKind::Native, SourceKind::Sight];
+    cell.validate().unwrap();
+
+    let sight_only_control = CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources: vec![SourceKind::Sight],
+        mode: Some(HookAuthority::Control),
+        effects: vec![HookEffect::Observe],
+        failure_actions: Vec::new(),
+    };
+    assert!(sight_only_control.validate().is_err());
+
+    let sight_only_observe = CapabilityCell {
+        mode: Some(HookAuthority::Observe),
+        ..sight_only_control
+    };
+    sight_only_observe.validate().unwrap();
+
+    let observe_with_control_effect = CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources: vec![SourceKind::Sight, SourceKind::Native],
+        mode: Some(HookAuthority::Observe),
+        effects: vec![HookEffect::Observe, HookEffect::Block],
+        failure_actions: Vec::new(),
+    };
+    assert!(observe_with_control_effect.validate().is_err());
+
+    let js_after: CapabilityCell = serde_json::from_value(json!({
+        "adapter": "qoder",
+        "event": "tool.after",
+        "status": "supported",
+        "sources": ["sight", "js"],
+        "mode": "control",
+        "effects": ["observe", "replace_result"],
+        "failure_actions": ["withhold_result"]
+    }))
+    .unwrap();
+    js_after.validate().unwrap();
+
+    let duplicate_sight = CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources: vec![SourceKind::Sight, SourceKind::Sight],
+        mode: Some(HookAuthority::Observe),
+        effects: vec![HookEffect::Observe],
+        failure_actions: Vec::new(),
+    };
+    assert!(duplicate_sight.validate().is_err());
+}
