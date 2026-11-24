@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -45,6 +46,7 @@ class AcceptedArtifactTests(unittest.TestCase):
             ("event", "pull_request"), ("head_branch", "other"), ("head_sha", "b" * 40),
             ("path", ".github/workflows/aw-integration.yml"), ("status", "in_progress"),
             ("conclusion", "cancelled"), ("conclusion", "failure"),
+            ("id", False), ("run_attempt", 0),
             ("head_repository", {"full_name": "other/fork"}),
         ]:
             with self.subTest(field=field, value=value), patch.object(
@@ -59,6 +61,7 @@ class AcceptedArtifactTests(unittest.TestCase):
     def test_expired_missing_ambiguous_or_previous_attempt_requires_validation(self) -> None:
         for assets in [
             [], [self.artifact, self.artifact], [self.artifact | {"expired": True}],
+            [self.artifact | {"expired": None}], [self.artifact | {"id": "17"}],
             [self.artifact | {"workflow_run": {"id": 8, "head_sha": self.sha}}],
             [self.artifact | {"name": f"aw-release-{self.sha}-1"}], [self.artifact | {"digest": None}],
         ]:
@@ -66,6 +69,34 @@ class AcceptedArtifactTests(unittest.TestCase):
                 {"workflow_runs": [self.run]}, {"artifacts": assets},
             ]):
                 self.assertIsNone(release_candidate.accepted_artifact(self.sha, self.repo))
+
+    def test_lookup_failures_leave_promotion_outputs_empty(self) -> None:
+        runs = json.dumps({"workflow_runs": [self.run]})
+        missing_id = self.artifact.copy()
+        del missing_id["id"]
+        missing_attempt = self.run.copy()
+        del missing_attempt["run_attempt"]
+        cases = {
+            "missing gh": [FileNotFoundError("gh")],
+            "timeout": [subprocess.TimeoutExpired("gh api", 20)],
+            "invalid JSON": ["<html>"],
+            "missing run attempt": [json.dumps({"workflow_runs": [missing_attempt]})],
+            "null repository": [json.dumps({"workflow_runs": [self.run | {"head_repository": None}]})],
+            "missing artifact ID": [runs, json.dumps({"artifacts": [missing_id]})],
+            "malformed artifact source": [runs, json.dumps({
+                "artifacts": [self.artifact | {"workflow_run": ["wrong type"]}]
+            })],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            env = {"GITHUB_SHA": self.sha, "GITHUB_REPOSITORY": self.repo, "GITHUB_OUTPUT": str(output)}
+            for name, responses in cases.items():
+                with self.subTest(name=name), patch.dict(os.environ, env), patch(
+                    "release_candidate.subprocess.check_output", side_effect=responses
+                ):
+                    output.write_text("")
+                    release_candidate.main()
+                    self.assertEqual(output.read_text(), "")
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
