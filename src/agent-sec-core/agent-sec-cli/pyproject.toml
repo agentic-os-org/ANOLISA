@@ -46,6 +46,7 @@ dev = [
     "maturin>=1.0,<2.0",
     "pytest>=7.0",
     "pytest-cov",
+    "pytest-xdist",
     "ruff>=0.11",
 ]
 

@@ -166,6 +166,7 @@ test-python-coverage: ## Run Python tests with coverage report
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \
 		--ignore=tests/v2 \
+		-n auto --dist loadfile \
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
 
 .PHONY: test-gateway-addon
