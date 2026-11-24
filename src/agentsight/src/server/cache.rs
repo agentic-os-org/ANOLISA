@@ -182,6 +182,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_agent_and_session_filters_are_unset() {
+        let (request, _) = query("agent_name=&session_id=").resolve(DAY_NS).unwrap();
+        assert_eq!(request.agent_name, None);
+        assert_eq!(request.session_id, None);
+    }
+
+    #[test]
     fn rejects_partial_or_invalid_parameters() {
         for bad in [
             "start_ns=2&end_ns=1",

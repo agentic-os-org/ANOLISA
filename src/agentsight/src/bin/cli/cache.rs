@@ -133,8 +133,8 @@ impl CacheCommand {
         Ok(CacheDiagnosisRequest {
             start_ns,
             end_ns,
-            agent_name: self.agent.clone(),
-            session_id: self.session.clone(),
+            agent_name: self.agent.clone().filter(|name| !name.is_empty()),
+            session_id: self.session.clone().filter(|id| !id.is_empty()),
             baseline,
         })
     }
@@ -420,6 +420,23 @@ mod tests {
         .unwrap();
         assert_eq!((pinned.start_ns, pinned.end_ns), (9 * hour, 10 * hour));
         assert_eq!(pinned.baseline, Some((4 * hour, 5 * hour)));
+    }
+
+    #[test]
+    fn empty_agent_and_session_filters_are_unset() {
+        let empty = parse(&["--agent", "", "--session", ""])
+            .unwrap()
+            .request(HOUR_NS)
+            .unwrap();
+        assert_eq!(empty.agent_name, None);
+        assert_eq!(empty.session_id, None);
+
+        let filtered = parse(&["--agent", "hermes", "--session", "session-1"])
+            .unwrap()
+            .request(HOUR_NS)
+            .unwrap();
+        assert_eq!(filtered.agent_name.as_deref(), Some("hermes"));
+        assert_eq!(filtered.session_id.as_deref(), Some("session-1"));
     }
 
     #[test]
