@@ -252,20 +252,24 @@ pub(crate) fn is_kebab_case(name: &str) -> bool {
 /// 1–6 `#`s, followed by a space/tab or the end of the line. Anything
 /// else that merely starts with `#` — `#hashtag`, seven or more `#`s, or
 /// a deeper-indented line — is ordinary content, not a heading.
-fn is_atx_heading(line: &str) -> bool {
+fn atx_heading_level(line: &str) -> Option<usize> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
-        return false;
+        return None;
     }
     let rest = &line[indent..];
     let hashes = rest.chars().take_while(|c| *c == '#').count();
     if hashes == 0 || hashes > 6 {
-        return false;
+        return None;
     }
     match rest[hashes..].chars().next() {
-        None => true,
-        Some(c) => c == ' ' || c == '\t',
+        None | Some(' ' | '\t') => Some(hashes),
+        Some(_) => None,
     }
+}
+
+fn is_atx_heading(line: &str) -> bool {
+    atx_heading_level(line).is_some()
 }
 
 /// One `##` section heading: the same CommonMark shape [`is_atx_heading`]
@@ -333,6 +337,13 @@ fn extract_first_paragraph(body: &str) -> String {
 // Phase 3: Section Splitting
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: char,
+    len: usize,
+    container_indent: usize,
+}
+
 fn split_sections(
     body: &str,
     issues: &mut Vec<String>,
@@ -340,30 +351,105 @@ fn split_sections(
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<String> = None;
     let mut current_content = String::new();
-    // Fenced code blocks are examples, not contract text: a `## Parameters`
-    // heading (or a parameter-shaped bullet) inside a fence must neither open
-    // a section nor feed structured extraction. Track the open fence so its
-    // lines stay out of `sections` until the matching closing fence.
-    let mut open_fence: Option<(char, usize)> = None;
+    let mut open_fence: Option<Fence> = None;
+    let mut list_indents: Vec<usize> = Vec::new();
+    let mut in_paragraph = false;
 
     for line in body.lines() {
-        if let Some((fence_char, fence_len)) = open_fence {
-            if is_fence_close(line, fence_char, fence_len) {
+        let (indent, trimmed) = split_leading_indent(line);
+
+        if let Some(fence) = open_fence {
+            if is_closing_fence(indent, trimmed, fence) {
                 open_fence = None;
+                in_paragraph = false;
+                while list_indents.last().is_some_and(|&col| indent < col) {
+                    list_indents.pop();
+                }
             }
             continue;
         }
-        if let Some(fence) = fence_open(line) {
-            open_fence = Some(fence);
+
+        if trimmed.is_empty() {
+            in_paragraph = false;
+            if current_name.is_some() {
+                current_content.push_str(line);
+                current_content.push('\n');
+            }
             continue;
         }
+
+        while list_indents.last().is_some_and(|&col| indent < col) {
+            list_indents.pop();
+            in_paragraph = false;
+        }
+        let mut container_indent = list_indents.last().copied().unwrap_or(0);
+
+        if indent <= container_indent.saturating_add(3) {
+            if let Some((marker, len)) = fence_open(trimmed) {
+                open_fence = Some(Fence {
+                    marker,
+                    len,
+                    container_indent,
+                });
+                in_paragraph = false;
+                continue;
+            }
+        }
+
         if let Some(heading) = section_heading(line) {
+            if list_indents.is_empty() || CONTRACT_SECTIONS.contains(&heading) {
+                if let Some(name) = current_name.take() {
+                    record_section(&mut sections, name, current_content, issues);
+                }
+                current_name = Some(heading.to_string());
+                current_content = String::new();
+                in_paragraph = false;
+                continue;
+            }
+        } else if list_indents.is_empty() && atx_heading_level(line).is_some_and(|level| level <= 2)
+        {
+            // An H1 or bare H2 outside list items ends the active H2 section;
+            // headings indented inside a list item belong to that item.
             if let Some(name) = current_name.take() {
                 record_section(&mut sections, name, current_content, issues);
+                current_content = String::new();
             }
-            current_name = Some(heading.to_string());
-            current_content = String::new();
-        } else if current_name.is_some() {
+            in_paragraph = false;
+            continue;
+        }
+
+        // List container updating & in_paragraph tracking
+        let bytes = line.as_bytes();
+        let mut idx = 0usize;
+        while idx < bytes.len() && matches!(bytes[idx], b' ' | b'\t') {
+            idx += 1;
+        }
+        let mut col = indent;
+        let mut pushed_any = false;
+        while col <= container_indent.saturating_add(3) {
+            let Some((next_idx, next_col, content_col, has_content)) = parse_list_marker(
+                bytes,
+                idx,
+                col,
+                if pushed_any { false } else { in_paragraph },
+            ) else {
+                break;
+            };
+            list_indents.push(content_col);
+            container_indent = content_col;
+            idx = next_idx;
+            col = next_col;
+            in_paragraph = has_content;
+            pushed_any = true;
+        }
+
+        if !pushed_any {
+            in_paragraph = !(is_thematic_break(trimmed)
+                || (indent <= container_indent.saturating_add(3)
+                    && atx_heading_level(trimmed).is_some()));
+        }
+
+        if current_name.is_some() {
             current_content.push_str(line);
             current_content.push('\n');
         }
@@ -376,43 +462,142 @@ fn split_sections(
     sections
 }
 
-/// Opening fence of a markdown code block: three or more backticks or
-/// tildes, indented by at most three spaces (CommonMark), optionally
-/// followed by an info string. Returns the fence character and length so
-/// the matching closing fence can be recognized. Per CommonMark the info
-/// string of a backtick fence may not contain a backtick — such a line is
-/// inline code, not a fence — while a tilde fence's info string may.
-fn fence_open(line: &str) -> Option<(char, usize)> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
-        return None;
+fn split_leading_indent(line: &str) -> (usize, &str) {
+    let mut col = 0usize;
+    let mut idx = 0usize;
+    for b in line.bytes() {
+        match b {
+            b' ' => col += 1,
+            b'\t' => col = (col / 4 + 1) * 4,
+            _ => break,
+        }
+        idx += 1;
     }
-    let rest = &line[indent..];
-    let fence_char = rest.chars().next()?;
+    (col, &line[idx..])
+}
+
+fn is_thematic_break_bytes(rest: &[u8], marker: u8) -> bool {
+    let mut count = 0usize;
+    for &b in rest {
+        if b == marker {
+            count += 1;
+        } else if !matches!(b, b' ' | b'\t') {
+            return false;
+        }
+    }
+    count >= 3
+}
+
+fn is_thematic_break(trimmed: &str) -> bool {
+    let marker = match trimmed.chars().next() {
+        Some(c @ ('-' | '_' | '*')) => c,
+        _ => return false,
+    };
+    let mut count = 0usize;
+    for c in trimmed.chars() {
+        if c == marker {
+            count += 1;
+        } else if c != ' ' && c != '\t' {
+            return false;
+        }
+    }
+    count >= 3
+}
+
+fn parse_list_marker(
+    bytes: &[u8],
+    mut idx: usize,
+    mut col: usize,
+    in_paragraph: bool,
+) -> Option<(usize, usize, usize, bool)> {
+    let rest = &bytes[idx..];
+    let first = *rest.first()?;
+    let (marker_len, is_ordered, start_num) = if matches!(first, b'-' | b'*' | b'+') {
+        if matches!(first, b'-' | b'*') && is_thematic_break_bytes(rest, first) {
+            return None;
+        }
+        (1, false, 0)
+    } else if first.is_ascii_digit() {
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        if !(1..=9).contains(&digits) {
+            return None;
+        }
+        if !matches!(rest.get(digits), Some(b'.' | b')')) {
+            return None;
+        }
+        let num: usize = std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()?;
+        (digits + 1, true, num)
+    } else {
+        return None;
+    };
+
+    idx += marker_len;
+    col += marker_len;
+    let has_content = if idx == bytes.len() {
+        false
+    } else if matches!(bytes[idx], b' ' | b'\t') {
+        bytes[idx..].iter().any(|&b| b != b' ' && b != b'\t')
+    } else {
+        return None;
+    };
+
+    if in_paragraph {
+        if !has_content {
+            return None;
+        }
+        if is_ordered && start_num != 1 {
+            return None;
+        }
+    }
+
+    let after_col = col;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b' ' => col += 1,
+            b'\t' => col = (col / 4 + 1) * 4,
+            _ => break,
+        }
+        idx += 1;
+    }
+    let ws_cols = col - after_col;
+    let content_col = if !has_content || ws_cols >= 5 {
+        after_col + 1
+    } else {
+        col
+    };
+    Some((idx, col, content_col, has_content))
+}
+
+/// Opening fence of a markdown code block: three or more backticks or
+/// tildes, optionally followed by an info string. Returns the fence
+/// character and length so the matching closing fence can be recognized.
+/// Per CommonMark the info string of a backtick fence may not contain
+/// a backtick — such a line is inline code, not a fence — while a tilde
+/// fence's info string may.
+fn fence_open(trimmed: &str) -> Option<(char, usize)> {
+    let fence_char = trimmed.chars().next()?;
     if fence_char != '`' && fence_char != '~' {
         return None;
     }
-    let fence_len = rest.chars().take_while(|c| *c == fence_char).count();
+    let fence_len = trimmed.chars().take_while(|c| *c == fence_char).count();
     if fence_len < 3 {
         return None;
     }
-    if fence_char == '`' && rest[fence_len..].contains('`') {
+    if fence_char == '`' && trimmed[fence_len..].contains('`') {
         return None;
     }
     Some((fence_char, fence_len))
 }
 
-/// Closing fence: indented by at most three spaces, the same character
-/// repeated at least as many times as the opening fence, followed only by
-/// whitespace (CommonMark).
-fn is_fence_close(line: &str, fence_char: char, fence_len: usize) -> bool {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
+/// Closing fence: indented by at most three spaces relative to container,
+/// the same character repeated at least as many times as the opening fence,
+/// followed only by whitespace (CommonMark).
+fn is_closing_fence(indent: usize, trimmed: &str, fence: Fence) -> bool {
+    if indent > fence.container_indent.saturating_add(3) {
         return false;
     }
-    let rest = &line[indent..];
-    let count = rest.chars().take_while(|c| *c == fence_char).count();
-    count >= fence_len && rest[count..].trim().is_empty()
+    let count = trimmed.chars().take_while(|c| *c == fence.marker).count();
+    count >= fence.len && trimmed[count..].trim().is_empty()
 }
 
 /// Section names that feed structured extraction. Only these form the
@@ -1496,5 +1681,273 @@ Body.
             "a body thematic break must be preserved: {:?}",
             entry.body
         );
+    }
+
+    #[test]
+    fn test_sections_close_at_following_h1_or_bare_h2_headings() {
+        let content = concat!(
+            "---\n",
+            "name: multi-h1\n",
+            "description: Skill with follow-up H1 sections\n",
+            "---\n",
+            "\n",
+            "# Command\n",
+            "\n",
+            "## Parameters\n",
+            "\n",
+            "- `target` (string, required): Target host\n",
+            "\n",
+            "### Optional\n",
+            "\n",
+            "- `dry-run` (boolean, optional): Dry run flag\n",
+            "\n",
+            "# Troubleshooting\n",
+            "\n",
+            "- Verify SSH connectivity before running\n",
+            "- Check `journalctl` output\n",
+            "\n",
+            "## Returns\n",
+            "\n",
+            "- `exit-code` (integer, required): Command exit status\n",
+            "\n",
+            " #\tAdditional Notes\n",
+            "\n",
+            "- Not a return field\n",
+        );
+        let entry = parse_skill_md(content, "multi-h1");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 2);
+        assert_eq!(entry.parameters[0].name, "target");
+        assert_eq!(entry.parameters[1].name, "dry-run");
+        assert_eq!(entry.returns.len(), 1);
+        assert_eq!(entry.returns[0].name, "exit-code");
+
+        let bare_h2 = concat!(
+            "---\n",
+            "name: bare-h2\n",
+            "description: Skill with bare H2\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "- `path` (string, required): File path\n",
+            "##\n",
+            "- Plain bullet after empty H2\n",
+        );
+        let entry = parse_skill_md(bare_h2, "bare-h2");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 1);
+        assert_eq!(entry.parameters[0].name, "path");
+
+        let indented_hash = concat!(
+            "---\n",
+            "name: indented-hash\n",
+            "description: Four-space indented hash stays inside section\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "    # Not a CommonMark ATX heading\n",
+            "- `limit` (integer, optional): Max items\n",
+        );
+        let entry = parse_skill_md(indented_hash, "indented-hash");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 1);
+        assert_eq!(entry.parameters[0].name, "limit");
+
+        let list_item_heading = concat!(
+            "---\n",
+            "name: demo\n",
+            "description: Parameter section with item details\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "\n",
+            "- `source` (string, required): Input source\n",
+            "\n",
+            "  # Source details\n",
+            "\n",
+            "  Additional information about the source.\n",
+            "\n",
+            "- `target` (string, required): Output target\n",
+        );
+        let entry = parse_skill_md(list_item_heading, "demo");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 2);
+        assert_eq!(entry.parameters[0].name, "source");
+        assert_eq!(entry.parameters[1].name, "target");
+
+        let ordered_item_and_top_h1 = concat!(
+            "---\n",
+            "name: ordered-item\n",
+            "description: Three-space heading inside numbered item then top-level H1\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "\n",
+            "- `source` (string, required): Input source\n",
+            "\n",
+            "  ## Source details\n",
+            "\n",
+            "    ### Deep details\n",
+            "\n",
+            "- `target` (string, required): Output target\n",
+            "\n",
+            "# Outside Section\n",
+            "\n",
+            "- Ordinary prose bullet\n",
+        );
+        let entry = parse_skill_md(ordered_item_and_top_h1, "ordered-item");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 2);
+        assert_eq!(entry.parameters[0].name, "source");
+        assert_eq!(entry.parameters[1].name, "target");
+
+        let tab_h1_alone = concat!(
+            "---\n",
+            "name: tab-h1\n",
+            "description: Indented tab H1 outside list closes section\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "- `target` (string, required): Output target\n",
+            "\n",
+            "   #\tTop H1 after paragraph\n",
+            "\n",
+            "- Trailing bullet\n",
+        );
+        // Directly after a `- ` item (without unindenting first), indent 3 belongs
+        // to that item per CommonMark, so `#\tTop H1` does not close Parameters.
+        let nested_h1_entry = parse_skill_md(tab_h1_alone, "tab-h1");
+        assert!(
+            matches!(
+                &nested_h1_entry.parse_status,
+                ParseStatus::Degraded(msg) if msg.contains("malformed parameter line: - Trailing bullet")
+            ),
+            "expected trailing bullet to stay inside Parameters, got {:?}",
+            nested_h1_entry.parse_status
+        );
+
+        // After a non-list line pops the list stack, 3-space indented H1 is top-level.
+        let tab_h1_after_para = tab_h1_alone.replace(
+            "- `target` (string, required): Output target\n",
+            "- `target` (string, required): Output target\n\nSummary paragraph.\n",
+        );
+        let entry = parse_skill_md(&tab_h1_after_para, "tab-h1");
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(entry.parameters.len(), 1);
+        assert_eq!(entry.parameters[0].name, "target");
+    }
+
+    #[test]
+    fn test_split_leading_indent_and_list_marker_rules() {
+        // Tab stops expand to multiples of 4 columns.
+        assert_eq!(split_leading_indent("\tx"), (4, "x"));
+        assert_eq!(split_leading_indent(" \tx"), (4, "x"));
+        assert_eq!(split_leading_indent("   \tx"), (4, "x"));
+        assert_eq!(split_leading_indent("    \tx"), (8, "x"));
+        assert_eq!(split_leading_indent("  x"), (2, "x"));
+
+        // Ordered marker digit limit (1-9 allowed, 10 rejected) and `.` vs `)`.
+        let nine = b"123456789) item";
+        let ten = b"1234567890. item";
+        assert!(parse_list_marker(nine, 0, 0, false).is_some());
+        assert!(parse_list_marker(ten, 0, 0, false).is_none());
+
+        // Thematic breaks (`---`, `* * *`) are never list markers.
+        assert!(parse_list_marker(b"---", 0, 0, false).is_none());
+        assert!(parse_list_marker(b"* * *", 0, 0, false).is_none());
+        assert!(parse_list_marker(b"- * *", 0, 0, false).is_some());
+
+        // 5+ spaces after marker falls back to `after_col + 1` content column.
+        let (_, _, content_col, has_content) =
+            parse_list_marker(b"-     indented-five", 0, 0, false).unwrap();
+        assert!(has_content);
+        assert_eq!(content_col, 2);
+
+        // Paragraph interruption: empty markers & start != 1 cannot interrupt.
+        assert!(parse_list_marker(b"-", 0, 0, true).is_none());
+        assert!(parse_list_marker(b"1.", 0, 0, true).is_none());
+        assert!(parse_list_marker(b"2. next", 0, 0, true).is_none());
+        assert!(parse_list_marker(b"02) next", 0, 0, true).is_none());
+        assert!(parse_list_marker(b"1. start", 0, 0, true).is_some());
+        assert!(parse_list_marker(b"01) start", 0, 0, true).is_some());
+        assert!(parse_list_marker(b"- item", 0, 0, true).is_some());
+    }
+
+    #[test]
+    fn test_split_sections_list_containers_and_fences() {
+        // 5+ spaces after marker (`content_col = 2`), loose blank lines,
+        // non-contract H2 inside list item, list-relative fence, and CRLF.
+        let rich = concat!(
+            "---\n",
+            "name: rich-list\n",
+            "description: Covers loose lists, 5-space marker fallback, inner H2, and list fences\n",
+            "---\n",
+            "\n",
+            "## Parameters\n",
+            "\n",
+            "-     `first` (string, required): Wide marker spacing\n",
+            "\n",
+            "\n",
+            "  ## Item Details\n",
+            "\n",
+            "     ```markdown\n",
+            "     ## Parameters\n",
+            "     - fake\n",
+            "        ```\n",
+            "     ```\n",
+            "\n",
+            "- `second` (integer, optional): Second param\n",
+            "\n",
+            " # Outer H1 Unindented\n",
+            "\n",
+            "- Trailing prose bullet\n",
+        );
+        for doc in [rich.to_owned(), rich.replace('\n', "\r\n")] {
+            let entry = parse_skill_md(&doc, "rich-list");
+            assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+            assert_eq!(entry.parameters.len(), 2);
+            assert_eq!(entry.parameters[0].name, "first");
+            assert_eq!(entry.parameters[1].name, "second");
+        }
+
+        // Single-line nested markers (`- - x` pushes inner content_col = 4),
+        // verified directly through `split_sections` (before param bullet lint).
+        let nested_body = concat!(
+            "## Parameters\n",
+            "- - nested item\n",
+            "    # Heading at inner col 4\n",
+            "- `kept` (string, required): Kept\n",
+        );
+        let mut issues = Vec::new();
+        let sections = split_sections(nested_body, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(
+            sections["Parameters"].contains("- `kept` (string, required): Kept"),
+            "nested markers must keep following items in Parameters: {:?}",
+            sections.get("Parameters")
+        );
+
+        // Non-interrupting lines (`2.`, empty `1.`, 10-digit `1234567890.`,
+        // and thematic break `* * *`) after a paragraph must NOT push a list container,
+        // so a following top-level `# Outside` still closes Parameters.
+        for non_list in ["2. still paragraph", "1.", "1234567890. too long", "* * *"] {
+            let md = format!(
+                "---\nname: para\ndescription: d\n---\n\n\
+                 ## Parameters\n\
+                 - `only` (string, required): Only param\n\n\
+                 Paragraph text.\n\
+                 {non_list}\n\
+                  # Outside Heading\n\n\
+                 - Trailing prose bullet\n"
+            );
+            let entry = parse_skill_md(&md, "para");
+            assert!(
+                entry.parse_status.is_ok(),
+                "{non_list}: {:?}",
+                entry.parse_status
+            );
+            assert_eq!(entry.parameters.len(), 1);
+            assert_eq!(entry.parameters[0].name, "only");
+        }
     }
 }
