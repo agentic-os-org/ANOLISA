@@ -1161,6 +1161,19 @@ pub fn strip_system_context(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// Returns whether `text` contains non-whitespace user-authored text after
+/// removing [`SYSTEM_TAG_PAIRS`] blocks, without allocating when no injected
+/// opening tag is present.
+pub fn has_user_authored_text(text: &str) -> bool {
+    if !SYSTEM_TAG_PAIRS
+        .iter()
+        .any(|&(open, _)| text.contains(open))
+    {
+        return !text.trim().is_empty();
+    }
+    !strip_system_context(text).is_empty()
+}
+
 /// One-shot schema migration for databases created before the user-message
 /// preview columns existed: adds the columns (no-op on fresh databases where
 /// `CREATE TABLE` already includes them) and (re)computes them from the
@@ -1701,6 +1714,23 @@ mod tests {
             Some("What is in this image?"),
             "the message-less step carries no preview"
         );
+    }
+
+    #[test]
+    fn test_has_user_authored_text() {
+        assert!(has_user_authored_text("plain question"));
+        assert!(!has_user_authored_text("   \n\t "));
+        assert!(!has_user_authored_text(
+            "<command-message>clear</command-message>"
+        ));
+        assert!(!has_user_authored_text(
+            "<system-reminder>ctx</system-reminder>\n  "
+        ));
+        assert!(!has_user_authored_text("<system-reminder>unclosed"));
+        assert!(has_user_authored_text(
+            "<system-reminder>ctx</system-reminder>follow up"
+        ));
+        assert!(has_user_authored_text("keep <command-name>unclosed"));
     }
 
     #[test]
