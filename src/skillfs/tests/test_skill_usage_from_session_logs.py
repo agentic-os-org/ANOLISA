@@ -27,6 +27,7 @@ Baseline on unchanged main:
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -68,13 +69,27 @@ class SessionLogsTestCase(unittest.TestCase):
     def write_log(self, lines):
         self.log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, timeout=60):
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--logs-dir", str(self.logs_dir), *args],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
         )
+
+
+class TestSessionLogDiscovery(SessionLogsTestCase):
+    def test_non_regular_entries_are_skipped(self):
+        self.write_log([tool_call("cat /skills/web/SKILL.md")])
+        os.mkfifo(self.log.with_name("pipe.jsonl"))
+        self.log.with_name("directory.jsonl").mkdir()
+
+        proc = self.run_cli("--mode", "date", timeout=5)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Analyzing agent 'agent-1': 1 session files", proc.stdout)
+        self.assertIn("web: 1", proc.stdout)
+        self.assertIn("Total skill calls: 1", proc.stdout)
 
 
 class TestDateBuckets(SessionLogsTestCase):
