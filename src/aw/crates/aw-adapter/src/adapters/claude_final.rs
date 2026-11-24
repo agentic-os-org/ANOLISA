@@ -1,6 +1,5 @@
 //! Exact bundled-runtime admission and the Claude final tool-result dialect.
 
-use super::claude_sdk::PYTHON_PROBE_TIMEOUT;
 use crate::{
     adapter::{self, LaunchContext, LaunchInput, NativeContext},
     Result,
@@ -23,11 +22,19 @@ pub(super) fn profile(
     {
         return Ok(None);
     }
-    let script = "import claude_agent_sdk, hashlib, json, platform; from pathlib import Path; root = Path(claude_agent_sdk.__file__).parent; print(json.dumps({'platform': platform.machine(), 'sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in ['_bundled/claude', '_internal/query.py', '_internal/transport/subprocess_cli.py', 'types.py']}}))";
-    let output = adapter::Probe(cancelled).version_output_with_timeout(
+    let script = r#"import hashlib, json, platform, sys
+from pathlib import Path
+import claude_agent_sdk
+
+root = Path(claude_agent_sdk.__file__).parent
+files = ['_bundled/claude', '_internal/query.py', '_internal/transport/subprocess_cli.py', 'types.py']
+hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}
+Path(sys.argv[1]).write_text(json.dumps({'platform': platform.machine(), 'sha256': hashes}), encoding='utf-8')
+"#;
+    let output = adapter::Probe(cancelled).python_output(
         &input.command,
         &["-c".into(), script.into()],
-        PYTHON_PROBE_TIMEOUT,
+        adapter::PYTHON_PROBE_TIMEOUT,
     )?;
     let actual: Value = serde_json::from_str(&output)?;
     select_profile(version, cli, &actual)
@@ -167,8 +174,8 @@ mod tests {
             &python,
             r#"#!/bin/sh
 case "$2" in
-    *hashlib*) touch probed-final; cat profile.json ;;
-    *) cat version ;;
+    *hashlib*) touch probed-final; cat profile.json > "$3" ;;
+    *) cat version > "$3" ;;
 esac
 "#,
         )
@@ -200,7 +207,12 @@ esac
                             program: python.clone(),
                             args: vec!["worker.py".into()],
                             cwd: root.path().into(),
-                            environment: Default::default(),
+                            environment: [(
+                                "PYTHONPATH".into(),
+                                "/custom:/opt/opentelemetry/instrumentation/auto_instrumentation"
+                                    .into(),
+                            )]
+                            .into(),
                         },
                     },
                     &AtomicBool::new(false),
@@ -228,7 +240,7 @@ esac
                 let launch = root.path().join(mode);
                 fs::create_dir(&launch).unwrap();
                 let files = crate::test_support::Artifacts(launch);
-                prepared
+                let plan = prepared
                     .configure(&LaunchContext {
                         files: &files,
                         binding_path: &root.path().join("binding"),
@@ -236,6 +248,22 @@ esac
                         steps: &steps,
                     })
                     .unwrap();
+                let paths: Vec<_> = std::env::split_paths(
+                    &plan.command.environment[std::ffi::OsStr::new("PYTHONPATH")],
+                )
+                .collect();
+                assert_eq!(
+                    paths,
+                    [
+                        files.0.clone(),
+                        "/custom".into(),
+                        "/opt/opentelemetry/instrumentation/auto_instrumentation".into()
+                    ]
+                );
+                assert!(!plan
+                    .command
+                    .environment
+                    .contains_key(std::ffi::OsStr::new("OTEL_SDK_DISABLED")));
                 let private: Value = serde_json::from_slice(
                     &fs::read(files.0.join("claude-sdk-hooks.json")).unwrap(),
                 )

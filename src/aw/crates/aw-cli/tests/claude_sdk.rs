@@ -310,7 +310,7 @@ fn sdk_and_cli_releases_reach_readiness_checks_without_a_version_allowlist() {
         let host = fixture.root.join("python-probe");
         fs::write(
             &host,
-            format!("#!/usr/bin/python3\nimport sys\nif sys.argv[1] == '-c': print({version:?})\n"),
+            format!("#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\nif sys.argv[1] == '-c': Path(sys.argv[3]).write_text({version:?})\n"),
         )
         .unwrap();
         fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();

@@ -1,6 +1,8 @@
 //! Native dialects own registration and response semantics; the launcher owns lifetimes.
 
 pub(crate) mod catalog;
+mod python;
+pub(crate) use python::{isolate_python_environment, PYTHON_PROBE_TIMEOUT};
 
 #[cfg(test)]
 use crate::Exit;
@@ -237,6 +239,12 @@ pub fn select(name: &str) -> Result<&'static dyn Adapter> {
 
 pub(crate) struct Probe<'a>(pub(crate) &'a AtomicBool);
 
+pub(crate) const PROBE_LIMITS: aw_exec::Limits = aw_exec::Limits {
+    input_bytes: 0,
+    stdout_bytes: 4096,
+    stderr_bytes: 4096,
+};
+
 impl Probe<'_> {
     pub(crate) fn version_output(
         &self,
@@ -257,21 +265,15 @@ impl Probe<'_> {
         }
         let mut probe = command.clone();
         probe.args = args.to_vec();
-        let output = aw_exec::run(
-            &probe,
-            &[],
-            aw_exec::Limits {
-                input_bytes: 0,
-                stdout_bytes: 4096,
-                stderr_bytes: 4096,
-            },
-            Instant::now() + timeout,
-            self.0,
-        )?;
+        let output = self.run(&probe, Instant::now() + timeout)?;
         if !output.status.success() {
             return Err("native version probe failed".into());
         }
         Ok(std::str::from_utf8(&output.stdout)?.trim().into())
+    }
+
+    pub(crate) fn run(&self, command: &CommandSpec, deadline: Instant) -> Result<aw_exec::Output> {
+        Ok(aw_exec::run(command, &[], PROBE_LIMITS, deadline, self.0)?)
     }
 }
 

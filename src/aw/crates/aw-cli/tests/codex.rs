@@ -93,7 +93,11 @@ fn native_launch_preserves_config_serializes_steps_and_cleans_instances() {
         );
         let mut launch = command(&f, "run");
         if mode == "allow" {
-            launch.env("FAKE_CODEX_VERSION", "0.163.1");
+            fs::write(f.root.join("sitecustomize.py"),
+                "import sys\nif sys.argv[0] == '-c': print('Codex inventory startup banner', flush=True)\n").unwrap();
+            launch
+                .env("PYTHONPATH", &f.root)
+                .env("FAKE_CODEX_VERSION", "0.163.1");
         }
         launch.args(["--", "--", mode]);
         let output = f.run(launch);

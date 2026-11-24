@@ -81,10 +81,18 @@ aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --yes
 | `native_event_limit` | 重启 AW 管理的 Agent 实例；仅新建原生会话不会重置计数 |
 | 压缩统计为空 | 确认发生了受支持的工具调用，并检查录制设置 |
 
-对于 Claude Python SDK，`aw run` 和 `aw instance prepare` 的版本探测上限为 15 秒，
-包含 Python 启动和自动插桩初始化。内置 CLI 的 `--version` 命令单独限时 4 秒。
-启用 `security.violation` 后会另行执行指纹探测，上限同为 15 秒。两次探测均使用配置指定的
-解释器并继承应用环境。
+AW 内部的 Python 探测脚本通过私有管道返回版本元数据和 JSON。AW 单独收集标准输出中的启动提示，结果超出字节上限时终止探测。
+探测运行时时，AW 设置 `OTEL_SDK_DISABLED=true`，并从 `PYTHONPATH` 中移除以
+`opentelemetry/instrumentation/auto_instrumentation` 结尾的目录。Hermes 使用应用环境解析
+dotenv、插件选择和 Hook 回调时限。业务进程保留原有的插桩设置和模块搜索路径。
+
+QwenPaw 通过入口指定的解释器，在一次探测中识别生成的入口并读取静态版本。转发包装器可以打印启动提示，也可以报告自己的版本。
+对于自定义启动器或无法静态读取版本的生成入口，AW 在应用环境中执行原命令的 `--version`，
+其标准输出应只包含 `QwenPaw, version <版本>`。入口检查和必要的回退共享 5 秒时限。
+
+使用 Claude Python SDK 或 AgentScope 时，`aw run` 和 `aw instance prepare` 为版本探测预留
+15 秒，包含解释器启动时间。Claude 内置 CLI 的 `--version` 命令单独限时 4 秒。
+启用 `security.violation` 后，Claude 的指纹探测另有 15 秒时限。
 
 更多命令可用 `aw --help`、`aw commands` 查询。补全脚本由 `aw completion bash`（或 `zsh`、`fish`）输出。
 自动化报告见[CLI 参考](../../../developer-guide/zh/aw/reference/cli.md)，容器持久化和容量见[部署指南](../../../developer-guide/zh/aw/deployment/lifecycle.md)。

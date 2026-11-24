@@ -115,8 +115,9 @@ pub(super) fn hooks(
         command.program.clone().into_os_string(),
         serde_json::to_string(&expected)?.into(),
     ];
-    let output = aw_exec::run_cooperative(
-        &probe,
+    crate::adapter::isolate_python_environment(&mut probe)?;
+    let (output, bytes) = crate::adapter::Probe(cancelled).run_python(
+        probe,
         &[],
         Limits {
             input_bytes: 0,
@@ -124,12 +125,12 @@ pub(super) fn hooks(
             stderr_bytes: 65536,
         },
         Instant::now() + Duration::from_secs(12),
-        cancelled,
+        aw_exec::CleanupMode::Cooperative,
     )?;
     if !output.status.success() {
         return Err("Codex hook inventory probe failed; check native configuration and Python 3 availability".into());
     }
-    let result: Value = serde_json::from_slice(&output.stdout)?;
+    let result: Value = serde_json::from_slice(&bytes)?;
     if result["enabled"] != true || result["errors"] != false {
         return Err("Codex Hooks are disabled or their configuration has errors".into());
     }
