@@ -654,9 +654,10 @@ impl GenAISqliteStore {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             // Same attribution rule as every other agent-scoped view
-            // (`COALESCE(agent_name, process_name)`): a call recorded without
-            // an agent name would otherwise be missing from the filter list
-            // while the dashboard shows its sessions under that label.
+            // (`COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''))`):
+            // a call recorded without a non-blank agent name would otherwise be
+            // missing from the filter list while the dashboard shows its sessions
+            // under that label.
             // The auxiliary guard is bound as a parameter rather than
             // concatenated into the statement.
             "SELECT MIN(COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''))) AS agent_name
