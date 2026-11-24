@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -43,7 +44,8 @@ def run(argv, cwd, environment, evidence, expected=0, timeout=40):
                 pass
             child.wait()
     text = log.read_text(errors="replace")
-    assert code == expected, (argv, code, text[-12000:])
+    expected = (expected,) if isinstance(expected, int) else expected
+    assert code in expected, (argv, code, text[-12000:])
     return text
 
 
@@ -70,6 +72,59 @@ def document(aw, codex, state, mode, evidence):
         policy["spec"]["events"]["tool.after"]["steps"][0]["effects"] = ["observe", "replace_result"]
         policy["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "withhold_result"
     return policy
+
+
+def assert_after_audit(aw, state, mode, callbacks, workspace, environment, evidence):
+    request = evidence / "audit-request.json"
+
+    def query(operation, expected=0):
+        request.write_text(json.dumps({"api_version": "audit-export.aw/v1alpha1", "operation": operation}))
+        output = run([aw, "audit-export", "--state-dir", state, "--request", request],
+                     workspace, environment, evidence, expected=expected, timeout=10)
+        return json.loads(output)
+
+    inventory = query({"type": "enumerate", "cursor": None, "limit": 64})["result"]
+    assert inventory["next_cursor"] is None, inventory
+    structured = mode in ("replace-mcp", "replace-media")
+    calls = 2 if mode == "replace-parallel" else 1
+    assert len(callbacks) == calls, callbacks
+    for callback in callbacks:
+        response = callback["event"]["native"]["tool_response"]
+        if structured:
+            assert response["isError"] is False, response
+        else:
+            assert isinstance(response, str), response
+    prompts = before = after = gaps = 0
+    for key in inventory["keys"]:
+        response = query({"type": "read", "chain_id": key, "cursor": None, "limit": 64}, expected=(0, 1))
+        if response["error"] == "unsupported_history":
+            continue
+        if response["error"] == "projection_unavailable":
+            assert response["result"] is None, response
+            with (state / "journal" / f"{key}.jsonl").open() as chain:
+                plan = json.loads(chain.readline())["record"]["plan"]
+            assert plan["event"]["name"] == "tool.after", plan
+            assert plan["publicProjectionGap"] == "aw.native_metadata_unavailable", plan
+            gaps += 1
+            continue
+        assert response["error"] is None, response
+        page = response["result"]
+        name = page["event"]["data"]["name"]
+        if name not in ("input.submit", "tool.before", "tool.after"):
+            continue
+        assert page["caught_up"] and page["terminal"] and page["event"]["kind"] == "ExecutionEvent", page
+        if name == "input.submit":
+            prompts += 1
+        elif name == "tool.before":
+            before += 1
+        else:
+            after += 1
+            details = page["event"]["data"]["details"]
+            digest = details["resultDigest"]
+            assert digest["algorithm"] == "sha256" and re.fullmatch(r"[0-9a-f]{64}", digest["value"]), digest
+            assert details["resultStatus"] == "success", details
+    assert (prompts, before) == (1, calls), (prompts, before)
+    assert (after, gaps) == ((calls, 0) if structured else (0, calls)), (after, gaps)
 
 
 def case(args, mode):
@@ -214,7 +269,7 @@ def case(args, mode):
                             for item in request["input"] if item.get("type") == "function_call_output"] == model.outputs
                     assert len(after) == 1
                 if mode == "long":
-                    assert "AW_LONG_DONE" in outputs, outputs
+                    assert "Process exited with code 0" in outputs and "AW_LONG_DONE" in outputs, outputs
                     assert len(after) == 1 and model.calls >= 2
                     assert {r["event"]["tool"]["call_id"] for r in events if "tool" in r["event"]} == {"call_1"}
                 if mode in ("deny", "offline", "native-deny", "retry"):
@@ -234,6 +289,9 @@ def case(args, mode):
                 status = json.loads(run([str(args.aw), "service", "status", "--config", str(config)], workspace, environment, evidence))["result"]
                 assert status["bindings"] == 0 and status["events"] == 0, status
                 assert not list(state.glob("launch-*"))
+                if mode in ("allow", "after-failure", "replace", "replace-failure", "long", "replace-parallel",
+                            "replace-mcp", "replace-media"):
+                    assert_after_audit(args.aw, state, mode, after, workspace, environment, evidence)
         finally:
             try:
                 if (state / "aw.sock").exists():

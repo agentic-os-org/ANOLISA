@@ -85,6 +85,9 @@ pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
             }
             _ => None,
         },
+        "codex" if event["native"]["hook_event_name"] == "PostToolUse" => {
+            codex_result_status(result, &event["native"])
+        }
         "openclaw" if event["native"]["hook"] == "after_tool_call" => {
             let native = &event["native"]["event"];
             if native["error"].is_string()
@@ -104,6 +107,31 @@ pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Classify the original Codex response before decoding any text slot.
+pub(crate) fn codex_result_status(result: &Value, native: &Value) -> Option<&'static str> {
+    let response = &native["tool_response"];
+    let source = if response.is_null() { result } else { response };
+    let exit_code = source["exit_code"].as_i64();
+    let camel_exit_code = source["exitCode"].as_i64();
+    if source["interrupted"] == true {
+        Some("interrupted")
+    } else if source["isError"] == true
+        || source["is_error"] == true
+        || exit_code.is_some_and(|code| code != 0)
+        || camel_exit_code.is_some_and(|code| code != 0)
+    {
+        Some("error")
+    } else if source["isError"] == false
+        || source["is_error"] == false
+        || exit_code == Some(0)
+        || camel_exit_code == Some(0)
+    {
+        Some("success")
+    } else {
+        None
     }
 }
 
@@ -368,6 +396,60 @@ mod tests {
                 "native":{"hook_event_name":"PostToolUse"}});
             assert_eq!(result_status("qoder", &event), Some(expected));
         }
+    }
+
+    #[test]
+    fn codex_posttool_uses_native_response_and_explicit_outcomes() {
+        for (response, expected) in [
+            (json!("hello"), None),
+            (json!(""), None),
+            (json!("OUTERR"), None),
+            (json!("Exit code: 0\n..."), None),
+            (json!({}), None),
+            (Value::Null, None),
+            (json!({"isError":false}), Some("success")),
+            (json!({"isError":true}), Some("error")),
+            (json!({"is_error":false}), Some("success")),
+            (json!({"is_error":true}), Some("error")),
+            (json!({"exit_code":0}), Some("success")),
+            (json!({"exit_code":7}), Some("error")),
+            (json!({"exitCode":0}), Some("success")),
+            (json!({"exitCode":7}), Some("error")),
+            (json!({"isError":false,"exit_code":1}), Some("error")),
+            (json!({"isError":true,"exitCode":0}), Some("error")),
+            (
+                json!({"interrupted":true,"exit_code":1}),
+                Some("interrupted"),
+            ),
+        ] {
+            let mut event = json!({"name":"tool.after","tool":{"result":response},
+                "native":{"hook_event_name":"PostToolUse"}});
+            assert_eq!(result_status("codex", &event), expected, "{event}");
+            event["native"]["tool_response"] = Value::Null;
+            assert_eq!(result_status("codex", &event), expected, "{event}");
+            if !response.is_null() {
+                event["native"]["tool_response"] = response;
+                event["tool"]["result"] = json!({"isError":expected == Some("success")});
+                assert_eq!(result_status("codex", &event), expected, "{event}");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_status_requires_the_posttool_seam() {
+        let mut event = json!({"name":"tool.after","tool":{"result":{"isError":false}},
+            "native":{"tool_response":{"isError":false}}});
+        assert_eq!(callback_result_status("codex", &event), None);
+        for hook in ["PreToolUse", "PostToolUseFailure", "unknown"] {
+            event["native"]["hook_event_name"] = json!(hook);
+            assert_eq!(result_status("codex", &event), None, "{event}");
+            assert_eq!(callback_result_status("codex", &event), None, "{event}");
+        }
+        event["native"]["hook_event_name"] = json!("PostToolUse");
+        event["name"] = json!("tool.before");
+        assert_eq!(result_status("codex", &event), None);
+        event["name"] = json!("security.violation");
+        assert_eq!(result_status("codex", &event), Some("success"));
     }
 
     #[test]

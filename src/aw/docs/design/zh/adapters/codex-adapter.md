@@ -33,5 +33,9 @@ AW 只在关闭 Code Mode、没有其他 PostToolUse Hook 时准入这一 Hook �
 Provider 失败或结果缺少可投影文本时，使用 `withhold_result`。Codex 仍在 Hook 前捕获和记录
 部分原结果，原生 Hook 命令失败时也可能交付原文；完整结果保护需要另行验证交付门禁。
 
+Codex PostToolUse 的公开审计仅根据 MCP `isError`、结构化退出码等显式字段确定
+`resultStatus`。shell 的纯字符串 `tool_response` 缺少退出状态时，审计保留
+`aw.native_metadata_unavailable`，导出该事件链时返回 `projection_unavailable`。
+
 配置步骤见[接入指南](../../../../../../docs/developer-guide/zh/aw/agents/codex.md)，
 支持的效果见[能力参考](../../../../../../docs/user-guide/zh/aw/capabilities.md)。

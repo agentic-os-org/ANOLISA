@@ -77,14 +77,20 @@ if mode == "hold":
     sys.exit(1)
 native = {"cwd": os.getcwd(), "session_id": "codex-session", "turn_id": "turn",
           "tool_use_id": "call", "tool_name": "Bash", "tool_input": {"command": mode}, "scenario": mode}
+if mode in ("replace-mcp", "replace-mcp-failure"):
+    native["tool_name"] = "mcp__fixture__echo"
 results = []
 for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
     native["hook_event_name"] = event
     if event == "UserPromptSubmit":
         native["prompt"] = mode
     if event == "PostToolUse":
-        native["tool_response"] = ("original output" if mode == "replace" else
-                                   {"stdout": "original output", "stderr": "original error", "exit_code": 7})
+        if native["tool_name"] == "mcp__fixture__echo":
+            native["tool_response"] = {"content": [{"type": "text", "text": "original output"}], "isError": False}
+        elif mode in ("replace", "replace-failure"):
+            native["tool_response"] = "original output"
+        else:
+            native["tool_response"] = {"stdout": "original output", "stderr": "original error", "exit_code": 7}
     blocked = False
     for group in hooks[event]:
         for hook in group["hooks"]:

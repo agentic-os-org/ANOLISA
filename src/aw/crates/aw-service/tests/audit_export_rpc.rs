@@ -249,6 +249,100 @@ fn legacy_completion_without_call_id_invokes_provider_and_keeps_audit_gap() {
 }
 
 #[test]
+fn codex_posttool_projection_agrees_with_manual_completion() {
+    let fixture = Fixture::new("codex");
+    let mut shell = fixture.event("tool.after", "shell", json!("tool output"));
+    shell["native"] = json!({"hook_event_name":"PostToolUse","tool_name":"bash",
+        "tool_input":shell["tool"]["input"],"tool_response":"tool output"});
+    assert_eq!(aw_adapter::completion::result_status("codex", &shell), None);
+    let (key, _) = fixture.finish(shell.clone(), None);
+    assert_eq!(fixture.read(&key)["error"], "projection_unavailable");
+    for declared in [ResultStatus::Error, ResultStatus::Success] {
+        let (key, _) = fixture.finish(shell.clone(), Some(declared));
+        let page = fixture.read(&key);
+        assert!(page["error"].is_null(), "{page}");
+        assert_eq!(
+            page["result"]["event"]["data"]["details"]["resultStatus"],
+            json!(declared)
+        );
+    }
+
+    let mcp = |flag: &str, value: Value| json!({"content":[{"type":"text","text":"tool output"}],flag:value});
+    for (index, (result, status)) in [
+        (mcp("isError", json!(false)), ResultStatus::Success),
+        (mcp("isError", json!(true)), ResultStatus::Error),
+        (mcp("is_error", json!(true)), ResultStatus::Error),
+        (mcp("exit_code", json!(1)), ResultStatus::Error),
+        (mcp("exitCode", json!(1)), ResultStatus::Error),
+        (mcp("interrupted", json!(true)), ResultStatus::Interrupted),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = fixture.event("tool.after", &format!("call-{index}"), result.clone());
+        let tool = "mcp__fixture__echo";
+        event["tool"]["name"] = json!(tool);
+        event["tool"]["native_name"] = json!(tool);
+        event["native"] = json!({"hook_event_name":"PostToolUse","tool_name":tool,
+            "tool_input":event["tool"]["input"],"tool_response":result});
+        aw_adapter::projection::add_result_projection(&mut event).unwrap();
+        let expected = serde_json::to_value(status).unwrap();
+        let native_status = aw_adapter::completion::result_status("codex", &event);
+        assert_eq!(native_status, expected.as_str(), "{event}");
+        if status == ResultStatus::Success {
+            assert_eq!(
+                event["tool"]["result_projection"]["status"].as_str(),
+                native_status,
+                "{event}"
+            );
+        } else {
+            assert!(event["tool"].get("result_projection").is_none(), "{event}");
+            assert!(aw_adapter::projection::reply("codex", &event["native"], "safe").is_err());
+        }
+        for declared in [None, Some(status)] {
+            let (key, _) = fixture.finish(event.clone(), declared);
+            let page = fixture.read(&key);
+            assert!(page["error"].is_null(), "{page}");
+            assert_eq!(
+                page["result"]["event"]["data"]["details"]["resultStatus"],
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_manual_completion_uses_native_exit_code_over_normalized_text() {
+    let fixture = Fixture::new("codex");
+    let mut event = fixture.event("tool.after", "call", json!("plain output"));
+    event["native"] = json!({"hook_event_name":"PostToolUse","tool_name":"bash",
+        "tool_input":event["tool"]["input"],
+        "tool_response":{"stdout":"","stderr":"boom","exit_code":7}});
+
+    let rejected = fixture.client.call(
+        Operation::OpenEvent {
+            instance_id: fixture.instance.clone(),
+            event: event.clone(),
+            result_status: Some(ResultStatus::Success),
+        },
+        deadline(),
+    );
+    assert!(
+        matches!(rejected, Err(aw_service::Error::Rejected(ref code)) if code == "result_status_conflict"),
+        "{rejected:?}"
+    );
+    for declared in [Some(ResultStatus::Error), None] {
+        let (key, _) = fixture.finish(event.clone(), declared);
+        let page = fixture.read(&key);
+        assert!(page["error"].is_null(), "{page}");
+        assert_eq!(
+            page["result"]["event"]["data"]["details"]["resultStatus"],
+            "error"
+        );
+    }
+}
+
+#[test]
 fn manual_result_fields_only_affect_status_at_native_completion_callbacks() {
     for (adapter, business_field) in [
         ("pi", json!({"isError":true,"body":"tool output"})),

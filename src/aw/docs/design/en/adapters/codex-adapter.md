@@ -48,6 +48,11 @@ Codex still captures and logs some original results before the Hook, and native
 Hook command failures may expose the original; complete result enforcement
 needs an independently verified result-delivery boundary.
 
+Public audit derives `resultStatus` for Codex PostToolUse only from explicit outcome
+fields such as MCP `isError` or a structured exit code. A plain-string shell
+`tool_response` without an exit status leaves an `aw.native_metadata_unavailable`
+gap, which audit export reports as `projection_unavailable`.
+
 See the [integration guide](../../../../../../docs/developer-guide/en/aw/agents/codex.md)
 for setup and the [capability reference](../../../../../../docs/user-guide/en/aw/capabilities.md)
 for supported effects.

@@ -1,9 +1,13 @@
 //! Codex launcher contracts; pinned CLI/model acceptance runs separately in nightly.
 #![cfg(target_os = "linux")]
 
+#[path = "codex/audit.rs"]
+mod audit;
 #[allow(dead_code)]
 #[path = "launcher/support.rs"]
 mod support;
+
+use audit::{assert_after_audit, assert_after_audit_unavailable};
 
 use serde_json::{json, Value};
 use std::{
@@ -119,6 +123,7 @@ fn native_launch_preserves_config_serializes_steps_and_cleans_instances() {
                 json!({"stdout":"original output","stderr":"original error","exit_code":7})
             );
             assert_eq!(result["results"][3]["stdout"], "{}\n");
+            assert_after_audit(&f, &result["response"], "error", None);
         }
         if mode == "retry" {
             assert!(result["results"][2]["stderr"]
@@ -238,35 +243,54 @@ fn submission_denial_prevents_tool_execution_and_releases_event() {
 
 #[test]
 fn native_replacement_returns_feedback_to_codex() {
-    let f = Fixture::new();
-    let mut doc = setup(&f);
-    doc["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
-        json!(["observe", "replace_result"]);
-    doc["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
-    f.save(&doc);
-    let service = Service::start(&f, &doc);
-    install(&f);
-    let mut launch = command(&f, "run");
-    launch.env("FAKE_CODEX_VERSION", "0.166.0");
-    launch.args(["--", "--", "replace"]);
-    let output = f.run(launch);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let reply: Value =
-        serde_json::from_str(result["results"][2]["stdout"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        reply,
-        json!({"continue":false,"reason":"AW_REDACTED_RESULT"})
-    );
-    assert_eq!(
-        fs::read_to_string(f.root.join("policy-calls")).unwrap(),
-        "scan_prompt\nscan\nretry\nrecord\n"
-    );
-    service.released(&f);
+    for (mode, reason, failure_action) in [
+        ("replace", "AW_REDACTED_RESULT", None),
+        ("replace-mcp", "AW_REDACTED_RESULT", None),
+        (
+            "replace-mcp-failure",
+            "AW result withheld",
+            Some("withhold_result"),
+        ),
+        (
+            "replace-failure",
+            "AW result withheld",
+            Some("withhold_result"),
+        ),
+    ] {
+        let f = Fixture::new();
+        let mut doc = setup(&f);
+        doc["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
+            json!(["observe", "replace_result"]);
+        doc["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        f.save(&doc);
+        let service = Service::start(&f, &doc);
+        install(&f);
+        let mut launch = command(&f, "run");
+        launch.env("FAKE_CODEX_VERSION", "0.166.0");
+        launch.args(["--", "--", mode]);
+        let output = f.run(launch);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let reply: Value =
+            serde_json::from_str(result["results"][2]["stdout"].as_str().unwrap()).unwrap();
+        assert_eq!(reply, json!({"continue":false,"reason":reason}));
+        assert_eq!(
+            fs::read_to_string(f.root.join("policy-calls")).unwrap(),
+            "scan_prompt\nscan\nretry\nrecord\n"
+        );
+        service.released(&f);
+        if mode.starts_with("replace-mcp") {
+            assert_eq!(result["response"]["isError"], false);
+            assert_after_audit(&f, &result["response"], "success", failure_action);
+        } else {
+            assert_eq!(result["response"], "original output");
+            assert_after_audit_unavailable(&f);
+        }
+    }
 }
 
 #[test]
