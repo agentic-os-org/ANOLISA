@@ -105,7 +105,7 @@ impl GenAISqliteStore {
              WHERE event_type = 'llm_call' AND status = 'complete'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
                AND (?3 IS NULL
-                    OR COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE)
+                    OR COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE = ?3 COLLATE NOCASE)
                AND (?4 IS NULL OR session_id = ?4)
              ORDER BY start_timestamp_ns DESC, id DESC
              LIMIT ?5"
