@@ -540,6 +540,42 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
   assert.equal(violationRows(rendered.element).length, 0, 'empty list renders zero violation rows');
 });
 
+
+for (const filter of ['', 'agent-b']) {
+  test(`binding capacity is global with agent filter ${filter || '(none)'}`, async () => {
+    for (const maximum of [0, 1, 2, null]) {
+      const driver = createHooksDriver();
+      const requests = [];
+      const binding = { state: 'enforced', request: { binding_id: 'binding-a', agent_id: 'agent-a', root_pid: 123, policy_id: 'p' } };
+      const page = loadPageModule('src/pages/RiskEnforcementPage.tsx', {
+        'react-router-dom': { useSearchParams: () => [new URLSearchParams(filter ? `agent_id=${filter}` : ''), () => {}] },
+        '../i18n': { useI18n: () => ({ t: key => key }), useLocaleTag: () => 'en-US' },
+        '../utils/apiClient': {
+          fetchEnforcementHealth: async () => ({ ready: true, capabilities: { max_active_bindings: maximum } }),
+          fetchEnforcementBindings: async () => ({ bindings: [binding] }),
+          fetchEnforcementViolations: async () => ({ violations: [] }),
+          enforcementSupportsMode: () => true, enforcementViolationTotal: () => 0,
+          createCredentialBinding: async request => requests.push(request),
+        },
+        '../utils/enforcementMode': { effectiveBindingMode: () => 'audit', firstCorrelatedCaseId: () => undefined },
+        '../components/Pagination': componentStub('Pagination'),
+      }, driver).RiskEnforcementPage;
+      driver.render(page).effects[0]();
+      await settle();
+      let element = driver.render(page).element;
+      const inputs = collectElements(element, node => node.type === 'input' && node.props.required);
+      for (let i = 0; i < inputs.length; i++) inputs[i].props.onChange({ target: { value: ['agent-b', '456', '/project/.env'][i] } });
+      element = driver.render(page).element;
+      const full = maximum !== null && maximum <= 1;
+      assert.equal(collectElements(element, node => node.type === 'button' && node.props.type === 'submit')[0].props.disabled, full);
+      await collectElements(element, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+      assert.equal(requests.length, full ? 0 : 1, 'the submit handler must enforce the same capacity as the button');
+      if (filter) assert.equal(collectElements(element, node => node.type === 'tr' && node.props?.key === 'binding-a').length, 0,
+        'capacity accounting must not broaden the visible agent filter');
+    }
+  });
+}
+
 test('read-denial template is capability-gated and submits a file read binding', async () => {
   for (const supported of [false, true]) {
     const driver = createHooksDriver();
