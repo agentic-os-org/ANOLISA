@@ -1197,6 +1197,8 @@ jobs:
     concurrency:
       group: ${{ github.repository }}-agentsight-resource-kernel66
       cancel-in-progress: false
+      # Keep earlier PRs queued when a later job arrives.
+      queue: max
     defaults:
       run:
         shell: bash
