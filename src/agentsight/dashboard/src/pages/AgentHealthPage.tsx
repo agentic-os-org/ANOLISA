@@ -976,6 +976,8 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const handleDelete = async (pid: number) => {
     try {
       await deleteAgentHealth(pid);
+      // A poll started before this acknowledgement still contains the old PID.
+      refreshVersionRef.current += 1;
       setAgents(prev => prev.filter(a => a.pid !== pid));
     } catch (e: any) {
       addToast(t('ah.deleteFailed', { msg: e.message }));
@@ -986,6 +988,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     setRestartingPids(prev => new Set(prev).add(pid));
     try {
       const result = await restartAgentHealth(pid);
+      refreshVersionRef.current += 1;
       addToast(t('ah.restartSucceeded', { pid: result.new_pid }));
       // Remove the old entry from the local list immediately (the new PID appears within 30s)
       setAgents(prev => prev.filter(a => a.pid !== pid));
