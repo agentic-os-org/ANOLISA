@@ -15,6 +15,8 @@ class TokenlessTests(GateFixture):
         upload = workflow.split("      - uses: actions/upload-artifact@v4\n", 1)[1]
         upload = upload.split("      - name:", 1)[0]
         condition = re.search(r"^\s+if: (.+)$", upload, re.MULTILINE).group(1)
+        self.assertIn("name: aw-tokenless-compatibility-${{ github.sha }}-${{ github.run_attempt }}",
+                      upload)
         self.assertIn("always()", condition)
         self.assertIn("if-no-files-found: error", upload)
         for outcome in ("", "skipped", "success", "failure", "cancelled"):

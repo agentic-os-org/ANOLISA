@@ -39,7 +39,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Manual acceptance stays tied to its candidate while newer PRs and pushes supersede stale checks.
+  group: aw-contracts-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -113,16 +114,15 @@ jobs:
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          key: aw-checks
-          workspaces: |
-            src/aw
-            providers/agent-sec-core
-            providers/tokenless
+          # All three workspaces compile into one target; include independent Provider inputs in its key.
+          key: aw-checks-${{ hashFiles('providers/agent-sec-core/Cargo.*', 'providers/tokenless/Cargo.*', 'providers/*/rust-toolchain.toml', 'providers/*/.cargo/config*') }}
+          workspaces: src/aw -> target/cargo-contracts
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
         id: checks
         env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src/aw/target/cargo-contracts
           CHECK_MODE: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'daily' || 'check' }}
         run: '"${pythonLocation}/bin/python3" src/aw/scripts/check.py "$CHECK_MODE"'
 
@@ -150,6 +150,7 @@ jobs:
         working-directory: src/aw
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        id: tokenless-cache
         with:
           key: aw-tokenless
           workspaces: |
@@ -157,13 +158,18 @@ jobs:
             providers/tokenless
             src/tokenless
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Reduce Tokenless link time for cold PR and merge queue builds
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.tokenless-cache.outputs.cache-hit != 'true'
+        run: |
+          echo 'CARGO_PROFILE_RELEASE_LTO=false' >> "$GITHUB_ENV"
+          echo 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16' >> "$GITHUB_ENV"
       - name: Validate real Tokenless and RTK consumer contracts
         id: tokenless
         run: python3 -B src/aw/scripts/check_tokenless.py --output "$AW_TOKENLESS_EVIDENCE"
       - uses: actions/upload-artifact@v4
         if: always() && steps.tokenless.outcome != '' && steps.tokenless.outcome != 'skipped'
         with:
-          name: aw-tokenless-compatibility-${{ github.sha }}
+          name: aw-tokenless-compatibility-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ env.AW_TOKENLESS_EVIDENCE }}/*.json
             ${{ env.AW_TOKENLESS_EVIDENCE }}/*.jsonl

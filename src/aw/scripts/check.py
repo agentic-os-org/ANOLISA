@@ -229,10 +229,12 @@ def package_permissions() -> None:
 def check(*, daily: bool = False) -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
+    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    for root in [AW, *provider_roots]:
+        run(["cargo", "fmt", "--all", "--", "--check"], root)
     selftest()
     run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
          "distribution/packaging/aw/tests"], REPO, timeout=120)
-    run(["cargo", "fmt", "--all", "--", "--check"], AW)
     from check_native import load
 
     load(AW)
@@ -243,10 +245,8 @@ def check(*, daily: bool = False) -> None:
             capture=True,
         )
     )
-    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
     metadata["provider_workspaces"] = []
     for root in provider_roots:
-        run(["cargo", "fmt", "--all", "--", "--check"], root)
         metadata["provider_workspaces"].append(json.loads(run(
             ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
             root, capture=True,
@@ -255,7 +255,8 @@ def check(*, daily: bool = False) -> None:
     for root in [AW, *provider_roots]:
         run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
     check_inventory(metadata)
-    for root in [AW, *provider_roots]:
+    # Surface a Provider regression before starting the longer framework suite.
+    for root in [*provider_roots, AW]:
         run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
     if not daily:
