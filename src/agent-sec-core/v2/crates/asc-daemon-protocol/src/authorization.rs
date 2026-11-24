@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 /// Caller-supplied Agent classification; individual identity is not modeled yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPrincipal {
     /// Agent family, for example codex or qoder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,7 +389,7 @@ impl Validate for AgentPrincipal {
             && (agent_type.is_empty() || agent_type.len() > 256 || agent_type.contains('\0'))
         {
             return Err(ValidationError::new(
-                "principal.agent_type",
+                "principal.agentType",
                 "expected a nonempty bounded type name",
             ));
         }

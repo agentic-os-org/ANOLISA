@@ -22,15 +22,17 @@ pub(crate) struct Outcome {
 impl CompiledPolicySet {
     pub fn from_members(members: &[AuthorizationPolicy]) -> Result<Self, PdpError> {
         let mut policies = PolicySet::new();
+        let mut boundaries = BTreeSet::new();
         for member in members {
-            if !asc_policy_cedar::request_authorization_eligible(&member.source)? {
+            let source = PolicySet::from_pst(asc_policy_cedar::pst(&member.source)?)
+                .map_err(|error| PdpError::Evaluation(error.to_string()))?;
+            if !asc_policy_cedar::request_policy_headers_for_schema(&source, &member.source.schema)?
+            {
                 return Err(PdpError::Configuration(format!(
                     "{} has bare principal headers",
                     member.policy_id
                 )));
             }
-            let source = PolicySet::from_pst(asc_policy_cedar::pst(&member.source)?)
-                .map_err(|error| PdpError::Evaluation(error.to_string()))?;
             for policy in source.policies() {
                 // Length-prefix the repository ID so even IDs containing separators cannot collide.
                 let id = format!(
@@ -40,12 +42,17 @@ impl CompiledPolicySet {
                     member.revision.get(),
                     policy.id()
                 );
+                let policy = policy.new_id(cedar_policy::PolicyId::new(id));
+                path_conditions::collect_boundaries(
+                    &policy,
+                    &member.source.schema,
+                    &mut boundaries,
+                )?;
                 policies
-                    .add(policy.new_id(cedar_policy::PolicyId::new(id)))
+                    .add(policy)
                     .map_err(|error| PdpError::Evaluation(error.to_string()))?;
             }
         }
-        let boundaries = path_conditions::boundaries(&policies)?;
         Ok(Self {
             policies,
             boundaries,

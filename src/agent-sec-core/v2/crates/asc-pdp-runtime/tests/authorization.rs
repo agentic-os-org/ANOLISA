@@ -110,7 +110,7 @@ when { resource.path == "/work" || resource.path like "/work/*" };
 "#;
 const COMMAND: &str = r#"
 permit(principal, action == SecCore::Action::"process.spawn", resource)
-when { resource.program == "python3" && principal has agent_type && principal.agent_type == "codex" };
+when { resource.program == "python3" && principal has agentType && principal.agentType == "codex" };
 "#;
 
 fn member(id: &str, text: &str) -> AuthorizationPolicy {
@@ -162,6 +162,134 @@ fn effective_runtime(sources: &[&str]) -> Result<PdpRuntime, asc_pdp_runtime::Pd
         version: "effective-1".into(),
         policies,
     })
+}
+
+fn evaluate_v3(text: &str, agent_type: Option<&str>) -> OsPermissionSet {
+    let mut policy =
+        snapshot(r#"permit(principal, action == SecCore::Action::"process.spawn", resource);"#);
+    policy.policies.push(AuthorizationPolicy {
+        policy_id: ResourceId::new("v3").unwrap(),
+        revision: Revision::new(1).unwrap(),
+        source: CedarPolicySource {
+            schema: asc_policy_cedar::schema::principal_reference(),
+            text: text.into(),
+        },
+    });
+    let runtime = PdpRuntime::from_policy_set(policy).unwrap();
+    let mut input = request();
+    input.context.agent.agent_type = agent_type.map(str::to_owned);
+    let decision = runtime.evaluate(&input, 100).unwrap();
+    assert!(
+        matches!(
+            decision.verdict,
+            DecisionVerdict::Allow | DecisionVerdict::Modify
+        ),
+        "{}",
+        decision.reason
+    );
+    decision.effective_permissions.unwrap()
+}
+
+#[test]
+fn v3_mixed_source_preserves_the_qoder_file_forbid_without_granting_network() {
+    let text = format!(
+        "{}\n{}",
+        include_str!("../../../fixtures/policy/qoder-v3.cedar"),
+        r#"forbid(principal, action, resource is SecCore::HttpEndpoint)
+           when { resource.host == "blocked.example" };
+           forbid(principal, action, resource == SecCore::HttpEndpoint::"blocked");
+           forbid(principal, action, resource in SecCore::HttpEndpoint::"remote");
+           forbid(principal, action, resource is SecCore::HttpEndpoint in SecCore::HttpEndpoint::"remote");"#
+    );
+    for (agent, restricted) in [(Some("qoder"), true), (Some("cosh"), false), (None, false)] {
+        let permissions = evaluate_v3(&text, agent);
+        assert_eq!(permissions.network.mode, NetworkMode::Off);
+        assert_eq!(
+            permissions
+                .filesystem
+                .rules
+                .iter()
+                .any(|rule| rule.effect == RuleEffect::Deny
+                    && rule.rights.contains(&FileRight::Read)
+                    && rule.covers_path("/work/data/secret.txt", true)),
+            restricted
+        );
+    }
+}
+
+#[test]
+fn a_file_membership_that_cannot_be_mapped_to_a_path_is_reported_in_each_schema() {
+    for revision in [1, 2, 3] {
+        for header in ["in", "is SecCore::File in"] {
+            let text = format!(
+                r#"forbid(principal is SecCore::Subject, action, resource {header} SecCore::File::"private");"#
+            );
+            let mut policy = member("file-member", &text);
+            policy.source.schema.revision = Revision::new(revision).unwrap();
+            let set = AuthorizationPolicySet {
+                version: "file-membership".into(),
+                policies: vec![policy],
+            };
+            assert!(
+                matches!(PdpRuntime::from_policy_set(set), Err(asc_pdp_runtime::PdpError::Unsupported(reason)) if reason.contains("filesystem policy resources must use path predicates"))
+            );
+        }
+    }
+}
+
+#[test]
+fn v3_optional_uid_is_evaluated_with_the_original_cedar_operator() {
+    for (operator, restricted) in [("&&", false), ("||", true)] {
+        let text = format!(
+            r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+               when {{ resource.path == "/work/private" }}
+               when {{ (principal has agentType && principal.agentType == "qoder") {operator}
+                       (principal has ownerUid && principal.ownerUid == 1000) }};"#
+        );
+        let permissions = evaluate_v3(&text, Some("qoder"));
+        let denied = |path| {
+            permissions.filesystem.rules.iter().any(|rule| {
+                rule.effect == RuleEffect::Deny
+                    && rule.rights.contains(&FileRight::Read)
+                    && rule.covers_path(path, true)
+            })
+        };
+        assert_eq!(denied("/work/private"), restricted);
+        assert!(!denied("/work/public"));
+    }
+}
+
+#[test]
+fn each_member_keeps_its_own_operation_contract_in_a_mixed_snapshot() {
+    let operation = r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+        when { context.input.operation == SecCore::WriteOperation::"delete" };"#;
+    let mut mixed = snapshot(operation);
+    let mut v3 = member("shared", operation);
+    v3.source.schema = asc_policy_cedar::schema::principal_reference();
+    mixed.policies.push(v3);
+    assert!(
+        matches!(PdpRuntime::from_policy_set(mixed), Err(asc_pdp_runtime::PdpError::Unsupported(reason)) if reason.contains("runtime file-operation"))
+    );
+}
+
+#[test]
+fn v3_ordinary_write_checks_delete_predicates_and_their_sibling_paths() {
+    for (condition, restrict_a) in [("", false), (r#" || resource.path == "/work/A""#, true)] {
+        let text = format!(
+            r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+               when {{ context.input.operation == SecCore::WriteOperation::"delete"{condition} }};"#
+        );
+        let permissions = evaluate_v3(&text, Some("qoder"));
+        let denied = |path| {
+            permissions.filesystem.rules.iter().any(|rule| {
+                rule.effect == RuleEffect::Deny
+                    && rule.rights.contains(&FileRight::Write)
+                    && rule.covers_path(path, true)
+            })
+        };
+        assert_eq!(denied("/work/A"), restrict_a);
+        assert!(!denied("/work/B"));
+    }
 }
 
 #[test]

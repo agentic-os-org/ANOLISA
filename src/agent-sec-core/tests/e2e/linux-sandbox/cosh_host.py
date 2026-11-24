@@ -20,6 +20,11 @@ def run_host(
     trace = home / "pre.jsonl"
     marker = work / ("stock-" + case)
     command = "rm -rf cache; printf done > " + shlex.quote(str(marker))
+    if case == "v3-subject":
+        command = (
+            "read line < public && ! (read line < private/key) && printf done > "
+            + shlex.quote(str(marker))
+        )
     arguments = {"command": command}
     if case == "timeout":
         arguments.update(command=command + "; sleep 30", timeout_ms=4000)
@@ -189,12 +194,15 @@ def run_host(
             and item["execution_outcome"] == "unknown"
         ), item
     else:
-        started = case in {"allowed", "approved"}
+        started = case in {"allowed", "approved", "v3-subject"}
         assert marker.exists() == started and item["result"]["started"] == started, (
             case,
             item,
             messages,
         )
+    if case == "v3-subject":
+        assert item["principal"] == {"agentType": "cosh"}, item
+        assert item["verdict"] == "MODIFY" and item["result"]["exit_code"] == 0, item
     replay = subprocess.run(
         [str(cli), "sandbox", "hook", "execute", decision],
         env=env,

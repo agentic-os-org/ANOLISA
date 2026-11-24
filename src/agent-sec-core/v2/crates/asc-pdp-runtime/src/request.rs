@@ -105,7 +105,7 @@ fn query(
         .map_err(|error| PdpError::Evaluation(error.to_string()))?;
     let mut subject_attributes = serde_json::Map::new();
     if let Some(agent_type) = &request.context.agent.agent_type {
-        subject_attributes.insert("agent_type".into(), json!(agent_type));
+        subject_attributes.insert("agentType".into(), json!(agent_type));
     }
     let entities = Entities::from_json_value(
         json!([

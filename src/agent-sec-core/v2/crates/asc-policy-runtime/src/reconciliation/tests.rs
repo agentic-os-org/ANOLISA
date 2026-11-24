@@ -556,6 +556,41 @@ fn shutdown_retains_actual_call_until_join_and_closes_write_admission() {
 }
 
 #[test]
+fn policy_commits_and_shutdown_interrupt_the_scope_cleanup_interval() {
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let reconciler = core(
+        repo.clone(),
+        Arc::new(Client::default()),
+        Arc::new(TestClock::default()),
+    );
+    let mut runtime = ReconciliationRuntime::start(
+        repo,
+        reconciler,
+        RuntimeConfig {
+            storage_retry: Duration::from_secs(60),
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap();
+    let queue = runtime.enqueuer();
+    let (pass, observed) = mpsc::channel();
+    runtime
+        .set_scope_cleanup(move || pass.send(()).unwrap())
+        .unwrap();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    queue.request_scope_cleanup();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let (done, stopped) = mpsc::channel();
+    let worker = std::thread::spawn(move || done.send(runtime.shutdown()).unwrap());
+    stopped
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
 fn scope_compensation_runs_without_bindings_and_shutdown_joins_the_call() {
     let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let client = Arc::new(Client::default());

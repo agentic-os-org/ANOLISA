@@ -346,3 +346,123 @@ def test_directory_read_policy_on_a_live_kernel(
         finally:
             process.stdin.close()
             process.wait(timeout=5)
+
+
+# The root and its two helpers all open the file only after the test signals them.
+# Helpers exec Python so their comm does not itself match the Cosh selector.
+_AUTO_WORKER = """
+import os, subprocess, sys, time
+from pathlib import Path
+
+work = Path(sys.argv[1])
+role = sys.argv[2]
+children = []
+def spawn(role):
+    children.append(subprocess.Popen([sys.executable, __file__, str(work), role]))
+if role == "root":
+    Path("/proc/self/comm").write_text(os.environ.get("ASC_TEST_PROCESS_NAME", "cosh-core"))
+    spawn("early")
+(work / (role + ".ready")).touch()
+for _ in range(900):
+    if (work / "probe").exists():
+        break
+    time.sleep(.1)
+else:
+    sys.exit(1)
+if role == "root":
+    spawn("late")
+try:
+    (work / "secret").read_bytes()
+except OSError as error:
+    result = error.errno
+else:
+    result = 0
+(work / (role + ".result")).write_text(str(result))
+(work / (role + ".control")).write_bytes((work / "unrestricted").read_bytes())
+for child in children:
+    if child.wait(timeout=10):
+        sys.exit(1)
+"""
+
+
+def test_automatic_file_scope_covers_existing_and_future_children(
+    start_daemon: Callable[[], "DaemonHandle"], tmp_path: Path
+) -> None:
+    """Exercise process matching, the first attachment and kernel reads together."""
+    assert not _sight("bindings")["bindings"], "use a dedicated enforcer"
+    daemon = start_daemon()
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"test")
+    (tmp_path / "unrestricted").write_bytes(b"ordinary")
+    worker = tmp_path / "probe.py"
+    worker.write_text(_AUTO_WORKER)
+    source = tmp_path / "file.cedar"
+    source.write_text(
+        'forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File) '
+        'when { principal has agentType && principal.agentType == "cosh" '
+        f"&& resource.path == {json.dumps(str(secret))} }};\n"
+        "forbid(principal, action, resource is SecCore::HttpEndpoint) "
+        'when { principal has agentType && principal.agentType == "cosh" '
+        '&& resource.host == "private.example" };\n'
+        'forbid(principal, action, resource in SecCore::HttpEndpoint::"remote") '
+        'when { principal has agentType && principal.agentType == "cosh" };'
+    )
+    with subprocess.Popen([sys.executable, worker, tmp_path, "root"]) as process:
+        policy = None
+        try:
+            _wait_for(lambda: (tmp_path / "early.ready").exists(), bool)
+            policy = daemon.request(
+                "policy",
+                "create",
+                "--name",
+                "automatic-file",
+                "--language",
+                "cedar",
+                "--schema-revision",
+                "3",
+                "--file",
+                str(source),
+            )
+            listing = _wait_for(
+                lambda: daemon.request("binding", "list"),
+                lambda data: any(
+                    b["status"]["phase"] in {"READY", "APPLY_FAILED"}
+                    for b in data["items"]
+                ),
+            )
+            assert [b["status"]["phase"] for b in listing["items"]] == [
+                "READY"
+            ], listing
+            (receipt,) = _sight("bindings")["bindings"]
+            assert receipt["state"] == "enforced", receipt
+            (tmp_path / "probe").touch()
+            assert process.wait(timeout=15) == 0
+            reads = {
+                role: {
+                    "protected_errno": int((tmp_path / f"{role}.result").read_text()),
+                    "unrestricted": (tmp_path / f"{role}.control").read_text(),
+                }
+                for role in ("root", "early", "late")
+            }
+            print(f"ActPlane {receipt['state']}, process reads: {json.dumps(reads)}")
+            for result in reads.values():
+                assert result == {
+                    "protected_errno": errno.EPERM,
+                    "unrestricted": "ordinary",
+                }
+            assert secret.read_bytes() == b"test"
+        finally:
+            (tmp_path / "probe").touch()
+            process.wait(timeout=15)
+            if policy is not None:
+                daemon.request(
+                    "policy",
+                    "delete",
+                    "--policy-id",
+                    policy["policyId"],
+                    "--revision",
+                    "1",
+                )
+                _wait_for(
+                    lambda: _sight("bindings")["bindings"], lambda items: not items
+                )

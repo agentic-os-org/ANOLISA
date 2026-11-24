@@ -22,7 +22,7 @@ use asc_pap::PapService;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
-use asc_policy_types::policy::PreparedPolicy;
+use asc_policy_types::policy::{PolicyDetails, PreparedPolicy};
 use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -209,9 +209,12 @@ impl PolicyAdministration for RecordingAdministration {
         principal: &Principal,
         _id: &ResourceId,
         _revision: Revision,
-    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+    ) -> Result<PolicyDetails, PolicyAdministrationError> {
         self.record(principal, "policy.templates.get")?;
-        Ok(self.policy())
+        Ok(PolicyDetails {
+            policy: self.policy(),
+            automatic_diagnostics: Vec::new(),
+        })
     }
 
     fn list_policies(
@@ -1198,6 +1201,59 @@ async fn real_uds_accepts_domain_and_pagination_boundary_values() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_uds_explains_manual_operations_on_automatic_assignments() {
+    let pap = PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap()))
+        .with_scope_discovery(Arc::new(Discovery))
+        .with_automatic_scopes(
+            Ok(std::collections::BTreeMap::from([(
+                "qoder".into(),
+                asc_policy_types::scope::ProcessMatcher::Name {
+                    process_name: "qoder".into(),
+                },
+            )])),
+            &[asc_policy_translator_agentsight::selection::SELECTOR],
+            || {},
+        );
+    let source = serde_json::from_value(json!({"language":"cedar","content":{
+        "schema":{"schemaId":"seccore.system","revision":3},
+        "text":r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource is SecCore::File) when {principal has agentType && principal.agentType == "qoder"} when {resource.path == "/secret"};"#
+    }})).unwrap();
+    let policy = pap.create_policy("file", &source).unwrap();
+    pap.recover_scopes().unwrap();
+    let scope = pap.list_scopes(10, 0).unwrap().items.remove(0);
+    let daemon = RunningPapDaemon::start_with_application(
+        PrincipalRole::PolicyAdministrator,
+        4 * 1024 * 1024,
+        pap,
+    )
+    .await;
+    for (request, detail) in [
+        (
+            json!({"method":"policy.scopes.create","params":{
+                "selector":ScopeSelector::Pid { pid:42 },
+                "policyTemplates":[{"policyId":policy.policy_id,"policyRevision":policy.revision}]
+            }}),
+            "uses schema v3 and is assigned automatically",
+        ),
+        (
+            json!({"method":"policy.scopes.delete","params":{"id":scope.scope_id}}),
+            "change or delete the source Policy",
+        ),
+    ] {
+        let response = support::request_json(&daemon.socket_path, &request).await;
+        assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(detail),
+            "{response}"
+        );
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(
     clippy::too_many_lines,
     reason = "the stateful CRUD error sequence must retain its captured resource identities"
@@ -1448,14 +1504,20 @@ when {{ resource.host == "api.github.com" && context.input.scheme == "https" }};
         "schema":{"schemaId":"seccore.system", "revision":2}, "text": text
     }});
     let file = serde_json::to_value(file_policy(vec!["/protected".into()])).unwrap();
-    assert_eq!(
-        call(
-            1000,
-            "policy.templates.create",
-            json!({"policyName":"credential","template":template})
-        )["error"]["code"],
-        "permission_denied"
-    );
+    let principal_source = json!({"language":"cedar", "content": {
+        "schema":{"schemaId":"seccore.system", "revision":3},
+        "text":include_str!("../../../fixtures/policy/qoder-v3.cedar")
+    }});
+    for source in [&template, &principal_source] {
+        assert_eq!(
+            call(
+                1000,
+                "policy.templates.create",
+                json!({"policyName":"credential","template":source})
+            )["error"]["code"],
+            "permission_denied"
+        );
+    }
     assert_eq!(registrations.load(Ordering::SeqCst), 0);
     assert_eq!(
         asc_pap::PapRepository::list_policies(repository.as_ref(), 100, 0)

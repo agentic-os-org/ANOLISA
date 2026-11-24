@@ -12,6 +12,7 @@
 
 mod cedar;
 mod plan;
+pub mod selection;
 mod translate;
 
 pub use plan::{

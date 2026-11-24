@@ -6,7 +6,7 @@ use asc_credential_store::ScopeId;
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::PolicySource as AuthoredPolicySource;
 use asc_policy_types::identifiers::{ResourceId, Revision};
-use asc_policy_types::policy::CredentialBinding;
+use asc_policy_types::policy::{CredentialBinding, DeploymentBackend};
 use asc_policy_types::scope::PreparedScope;
 
 use crate::{
@@ -32,9 +32,16 @@ pub fn compile_scope(scope: &PreparedScope) -> Result<Plan, PlanError> {
     for policy in snapshots {
         let authored = match &policy.template {
             AuthoredPolicySource::Cedar(source) => {
-                let syntax = asc_policy_cedar::pst(source)?;
-                let network =
-                    asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network);
+                let network = match &policy.deployment {
+                    Some(selection) if selection.backend == DeploymentBackend::Gateway => Some(
+                        asc_policy_cedar::deployment::selected_pst(source, selection)?,
+                    ),
+                    Some(_) => continue,
+                    None => asc_policy_cedar::project_pst(
+                        &asc_policy_cedar::pst(source)?,
+                        asc_policy_cedar::PolicyDomain::Network,
+                    ),
+                };
                 match network {
                     Some(view) => asc_policy_cedar::http::lower(&view, &source.schema)?,
                     None => Vec::new(),
@@ -55,6 +62,7 @@ pub fn compile_scope(scope: &PreparedScope) -> Result<Plan, PlanError> {
             policy.revision,
             &policy.credential_bindings,
             authored,
+            policy.deployment.is_some(),
         )?;
         for rule in &translated {
             credentials.insert(rule.matcher.credential_id.clone());
@@ -91,6 +99,7 @@ pub fn compile_binding(view: GatewayBindingView<'_>) -> Result<GatewayBindingPla
         view.source.policy_revision,
         view.credential_bindings,
         authored,
+        asc_policy_cedar::schema::uses_principal_targeting(view.schema),
     )?;
     let plan = Plan {
         format: PlanFormat::V2,
@@ -124,8 +133,9 @@ fn policy_rules(
     policy_revision: Revision,
     credential_bindings: &[CredentialBinding],
     authored: Vec<asc_policy_cedar::http::CredentialRule>,
+    selected_only: bool,
 ) -> Result<Vec<Rule>, PlanError> {
-    let bindings = resolve_bindings(credential_bindings, &authored)?;
+    let bindings = resolve_bindings(credential_bindings, &authored, selected_only)?;
     authored
         .into_iter()
         .enumerate()

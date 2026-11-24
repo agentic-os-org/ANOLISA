@@ -629,7 +629,7 @@ this is not CLI/daemon process E2E or kernel enforcement evidence.
 The revision 1 schema covers file access, executable invocation and whole-network permission.
 It retains `SecCore::File` and `file.read/write/exec`; `file.exec` continues to mean
 an executable invocation, not a Linux filesystem X permission check.
-The integration supplies a `SecCore::Subject` with optional `agent_type`. Scope/Binding selects processes for AgentSight. `SecCore::File.path` is
+Schemas 1 and 2 declare the optional `agentType` attribute. Schema 3 defines `agentType` and `ownerUid` on `SecCore::Subject`. Scope/Binding selects processes for AgentSight. `SecCore::File.path` is
 the concrete file or executable path, not a stored policy pattern. Policies
 express path predicates explicitly. `SecCore::Network::"all"` represents network
 use as a whole; it does not model hosts, IP addresses, ports or protocols.
@@ -731,14 +731,11 @@ and rejection. SQLite contracts cover all three snapshots, fixed revisions after
 update/deletion and PST loading after close/reopen. Removing Cedar support
 requires handling existing Cedar snapshots; this change adds no SQL migration.
 
-The sandbox PDP evaluates `Subject.agent_type`, principal constraints, `process.spawn` and
+The Sandbox PDP maps the supplied category to `Subject.agentType`, evaluates principal constraints, `process.spawn` and
 validated `warn`/`escalate`/`transform` advice on permit. It loads the current effective
 policy set derived by PAP through `pst`, combines it into one SDK `PolicySet`, and
-evaluates requests in process. Each request consistently reads all current policies
-and includes Cedar sources whose statements all have explicit principal headers;
-a source mixing bare and constrained headers is rejected as a whole. Updates,
-deletions and eligibility changes affect later requests while Scope/Binding snapshots
-retain their saved revisions. The daemon always enables authorization without a
+evaluates requests in process. PAP includes the full source of every v3 Policy. For schema 1 and 2 it includes Policies whose statements all have explicit principal headers and rejects mixed bare and constrained headers. Updates,
+deletions and eligibility changes affect later requests while manual Scope/Binding snapshots retain their saved revisions. The daemon always enables authorization without a
 separate configuration file; requested permissions and Cedar determine effective
 permissions. Decisions have a fixed 60-second acceptance window. Remove the old
 `--authorization-config` startup argument and migrate required environment limits

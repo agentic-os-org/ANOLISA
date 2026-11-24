@@ -33,7 +33,7 @@ fn another_action_reuses_parc_without_os_fields() {
 
 fn os_request() -> OsAuthorizationRequest {
     OsAuthorizationRequest::new("request".into(), serde_json::from_value(json!({
-        "execution_id": "execution", "agent": {"agent_type": "cosh"},
+        "execution_id": "execution", "agent": {"agentType": "cosh"},
         "launch": {"program": "true", "resolved_program": "/usr/bin/true", "args": [], "cwd": "/work"},
         "requested_permissions": {"version": 1, "filesystem": {"default": "deny", "rules": []},
             "execution": {"deny_paths": []}, "network": {"mode": "off"}}

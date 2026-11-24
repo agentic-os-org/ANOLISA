@@ -252,7 +252,7 @@ mod tests {
             "request".into(),
             serde_json::from_value(json!({
                 "execution_id": "execution",
-                "agent": {"agent_type": "cosh"},
+                "agent": {"agentType": "cosh"},
                 "launch": {"program": "/bin/bash", "resolved_program": "/usr/bin/bash",
                     "args": ["-c", "rm -rf cache"], "cwd": "/work"},
                 "requested_permissions": {"version": 1,

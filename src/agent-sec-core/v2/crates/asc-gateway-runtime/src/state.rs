@@ -37,6 +37,9 @@ impl Attachment {
 pub(crate) struct Domain {
     pub(crate) uid: u32,
     pub(crate) port: u16,
+    /// On restart this listener stays fenced until the daemon re-derives its assignment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) automatic: bool,
     /// Irreversible local fence, retained until PAP confirms Binding cleanup.
     pub(crate) revoked: bool,
     pub(crate) bindings: BTreeMap<ResourceId, Attachment>,

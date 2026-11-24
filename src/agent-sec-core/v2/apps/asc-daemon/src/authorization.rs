@@ -237,7 +237,7 @@ mod tests {
         let policy = pap.list_policies(1, 0).unwrap().items.remove(0);
         pap.update_policy(&policy.policy_id, "codex", &source(r#"
             permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource)
-            when { principal has agent_type && principal.agent_type == "codex" };
+            when { principal has agentType && principal.agentType == "codex" };
             permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);
         "#)).unwrap();
         let mut input = request();
@@ -262,7 +262,7 @@ mod tests {
     fn request() -> OsAuthorizationRequest {
         OsAuthorizationRequest::new("r1".into(), serde_json::from_value(serde_json::json!({
             "execution_id":"e1",
-            "agent":{"agent_type":"codex"},
+            "agent":{"agentType":"codex"},
             "launch":{"program":"true","resolved_program":"/usr/bin/true","args":[],"cwd":"/work"},
             "requested_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
                 "execution":{"deny_paths":[]},"network":{"mode":"off"}}

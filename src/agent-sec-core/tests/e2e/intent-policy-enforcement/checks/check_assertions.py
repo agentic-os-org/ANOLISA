@@ -2234,7 +2234,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_denial_requires_evidence_that_the_process_never_started(self):
         details = {
-            "principal": {"agent_type": "cosh"},
+            "principal": {"agentType": "cosh"},
             "host_finished": True,
             "result": {"started": False},
         }
@@ -2259,7 +2259,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_gateway_approval_requires_a_started_successful_shell(self):
         details = {
-            "principal": {"agent_type": "cosh"},
+            "principal": {"agentType": "cosh"},
             "approval": True,
             "result": {"started": True, "exit_code": 0},
         }

@@ -150,7 +150,7 @@ def check_receipt(case: str, since: str, uid: int) -> dict:
         event
         for event in events
         if event["uid"] == uid
-        and event["details"].get("principal", {}).get("agent_type") == "cosh"
+        and event["details"].get("principal", {}).get("agentType") == "cosh"
     ]
     if case == "4":
         require(not receipts, "Native file read unexpectedly used the shell Hook")

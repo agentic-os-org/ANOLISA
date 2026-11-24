@@ -1334,7 +1334,7 @@ OS 特化 `OsAuthorizationRequest` 的 context 包含 execution_id、agent、lau
 requested_permissions；launch 仅含 program、resolved_program、args、cwd。
 OS 适配器固定 principal 为 `SecCore::Subject::"request"`，action 为
 `SecCore::Action::"process.spawn"`，resource 为与 launch.program 一致的 `SecCore::Process`。
-agent 只含可选 agent_type。未知 action、绑定不一致、未知字段和原 type=os 载荷拒绝。
+agent 只含可选 agentType。未知 action、绑定不一致、未知字段和原 type=os 载荷拒绝。
 通用 context 可供其它 consumer 定义；当前 RPC 只处理 OS 请求，未提供通用非 OS 决策端。
 PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。
 execute 和 abandon 只传标识与阶段。daemon 与授权客户端须同步升级。
@@ -1373,7 +1373,7 @@ installed/started、exit_code/signal/cancel_signal、错误和记录时间。
 非法载荷 `invalid_argument`，跨 UID `permission_denied`，过期/引用冲突 `conflict`，
 容量不足 `resource_exhausted`，存储或内部失败 `internal`。只有所有配置的 SQLite/JSONL
 记录成功后才 Ack；部分写入失败返回错误，不承诺跨存储事务或自动重试。
-身份字段描述逻辑 Agent，由接入方提供；peer UID 约束决策与回执归属，不认证自报 agent_type。
+身份字段描述逻辑 Agent，由接入方提供；peer UID 约束决策与回执归属，不认证自报 agentType。
 
 fixture：`asc-daemon-handler/src/authorization.rs`、`asc-daemon-core/src/authorization.rs`、
 `tests/e2e/linux-sandbox/authorized_cli.py`。部署和后端边界见

@@ -16,11 +16,25 @@ use asc_policy_types::{
     process_discovery::ProcessIdentity,
     scope::{PreparedScope, ScopeSelector, ScopeStatus},
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
+
+const AUTOMATIC_RECORD_LIMIT: usize = 4096;
+const AUTOMATIC_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+const AUTOMATIC_SOURCE_FILTER: &str = "json_extract(current_json,'$.template.language')='cedar'
+    AND json_extract(current_json,'$.template.content.schema.schemaId')=?1
+    AND json_extract(current_json,'$.template.content.schema.revision')=?2";
 
 impl PapRepository for SqlitePolicyRepository {
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError> {
+        if policy.deployment.is_some() {
+            return Err(PapError::InvalidPolicy(
+                asc_policy_types::ValidationError::new(
+                    "deployment",
+                    "authored Policies cannot contain deployment selections",
+                ),
+            ));
+        }
         asc_pap::validate_policy_snapshot(policy)?;
         self.access(true, |tx| {
             let encoded = encode(policy)?;
@@ -44,6 +58,9 @@ impl PapRepository for SqlitePolicyRepository {
             .map_err(|_| StoreError::Invalid)?;
             if policy.revision != next {
                 return Err(PapError::Conflict.into());
+            }
+            if asc_pap::is_automatic_source(policy) {
+                check_automatic_capacity(tx, Some((&policy.policy_id, encoded.len())))?;
             }
             tx.execute(
                 "INSERT INTO policies(policy_id,last_allocated_revision,current_json)
@@ -115,6 +132,24 @@ impl PapRepository for SqlitePolicyRepository {
         })
         .map_err(RepositoryError::pap)
     }
+    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.access(false, |tx| {
+            check_automatic_capacity(tx, None)?;
+            automatic_sources(tx)?
+                .into_iter()
+                .map(|(key, _)| {
+                    read_policy(tx, &key)?
+                        .and_then(|state| state.current)
+                        .ok_or(StoreError::Corrupt.into())
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn automatic_source_revisions(&self) -> Result<Vec<(ResourceId, Revision)>, PapError> {
+        self.access(false, automatic_sources)
+            .map_err(RepositoryError::pap)
+    }
     fn list_policies(&self, limit: u32, offset: u32) -> Result<Page<PreparedPolicy>, PapError> {
         self.access(false, |tx| {
             let total = tx.query_row(
@@ -161,7 +196,7 @@ impl PapRepository for SqlitePolicyRepository {
     fn put_scope(&self, scope: &PreparedScope) -> Result<PreparedScope, PapError> {
         scope.validate().map_err(PapError::InvalidScope)?;
         self.access(true, |tx| {
-            if encode(scope)?.len() > 1024 * 1024 {
+            if encode(scope)?.len() > asc_pap::MAX_SCOPE_BYTES {
                 return Err(
                     PapError::InvalidScope(asc_policy_types::error::ValidationError::new(
                         "policyTemplates",
@@ -182,18 +217,58 @@ impl PapRepository for SqlitePolicyRepository {
                     return Err(PapError::ReferencedPolicyRevisionNotFound.into());
                 }
             }
-            let count: i64 = tx.query_row(
+            let count: usize = tx.query_row(
                 "SELECT count(*) FROM scopes WHERE phase='ACTIVE'",
                 [],
                 |r| r.get(0),
             )?;
-            if count >= 32 {
+            if count >= asc_pap::MAX_ACTIVE_SCOPES {
                 return Err(PapError::Unavailable.into());
             }
             insert_scope(tx, scope)?;
             #[cfg(feature = "fault-injection")]
             fail::fail_point!("policy.sqlite.scope.inserted");
             Ok(scope.clone())
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn validate_automatic_scopes(
+        &self,
+        updates: &asc_pap::ScopePublication,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        self.transaction(crate::TransactionMode::Preview, |tx| {
+            apply_automatic_scopes(tx, updates, sources)
+        })
+        .map_err(RepositoryError::pap)
+    }
+    fn replace_automatic_scopes(
+        &self,
+        updates: &asc_pap::ScopePublication,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        self.access(true, |tx| apply_automatic_scopes(tx, updates, sources))
+            .map_err(RepositoryError::pap)
+    }
+    fn delete_automatic_scope(
+        &self,
+        expected: &PreparedScope,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<PreparedScope, PapError> {
+        self.access(true, |tx| {
+            check_sources(tx, sources)?;
+            let mut scope = read_scope(tx, &expected.scope_id)?
+                .ok_or(PapError::NotFound)?
+                .scope;
+            if &scope != expected || scope.automatic_backend().is_none() {
+                return Err(PapError::Conflict.into());
+            }
+            scope.status = ScopeStatus::Deleting;
+            tx.execute(
+                "UPDATE scopes SET phase='DELETING' WHERE scope_id=?1",
+                [scope.scope_id.as_str()],
+            )?;
+            Ok(scope)
         })
         .map_err(RepositoryError::pap)
     }
@@ -331,10 +406,29 @@ impl PapRepository for SqlitePolicyRepository {
         key: &ResourceId,
         instances: &[ProcessIdentity],
     ) -> Result<Vec<BindingIntentReceipt>, PapError> {
+        self.sync_observed_scope_instances(key, instances, &std::collections::BTreeMap::new(), None)
+    }
+    fn automatic_scope_generation(&self, key: &ResourceId) -> Result<Option<u64>, PapError> {
+        self.access(false, |tx|{
+            let generation=tx.query_row("SELECT json_extract(assignment_json,'$.generation') FROM scopes WHERE scope_id=?1 AND phase='ACTIVE'",[key.as_str()],|row|row.get(0))
+                .optional()?.ok_or(PapError::NotFound)?;
+            Ok(generation)
+        }).map_err(RepositoryError::pap)
+    }
+    fn sync_observed_scope_instances(
+        &self,
+        key: &ResourceId,
+        instances: &[ProcessIdentity],
+        uids: &std::collections::BTreeMap<ProcessIdentity, u32>,
+        generation: Option<u64>,
+    ) -> Result<Vec<BindingIntentReceipt>, PapError> {
         self.access(true, |tx| {
             let scope = read_scope(tx, key)?.ok_or(PapError::NotFound)?;
             if scope.scope.status != ScopeStatus::Active {
                 return Err(PapError::OperationInProgress.into());
+            }
+            if scope.generation != generation {
+                return Err(PapError::Conflict.into());
             }
             if let ScopeSelector::Pid { pid } = scope.scope.selector {
                 if instances.len() > 1 || instances.first().is_some_and(|p| p.pid != pid) {
@@ -362,13 +456,21 @@ impl PapRepository for SqlitePolicyRepository {
                     binding.binding.spec.policy.policy_id.clone(),
                     binding.binding.spec.scope.process.clone(),
                 ));
-                if !instances.contains(&binding.binding.spec.scope.process) && retire(&mut binding)?
-                {
+                let changed_binding = reconcile_existing(&mut binding, &scope.scope, instances)?;
+                if changed_binding {
                     save_binding(tx, &binding)?;
                     changed.push(receipt(&binding));
                 }
             }
             for instance in instances {
+                if scope.scope.automatic_backend().is_some()
+                    && scope
+                        .scope
+                        .owner_uid
+                        .is_some_and(|uid| uids.get(instance) != Some(&uid))
+                {
+                    continue;
+                }
                 for policy in &scope.scope.policy_snapshots {
                     if !known.insert((policy.policy_id.clone(), instance.clone())) {
                         continue;
@@ -486,6 +588,224 @@ fn public_binding(mut binding: BindingView) -> BindingView {
         .as_ref()
         .map(|error| asc_policy_types::target::Failure::new(error.kind, &error.code));
     binding
+}
+
+// Preview and commit exercise the same SQL constraints and complete source CAS.
+fn apply_automatic_scopes(
+    tx: &rusqlite::Transaction<'_>,
+    updates: &asc_pap::ScopePublication,
+    sources: &[(ResourceId, Revision)],
+) -> Result<(), RepositoryError> {
+    check_sources(tx, sources)?;
+    let mut added = false;
+    for (id, update) in updates {
+        let current = read_scope(tx, id)?;
+        if current.as_ref().map(|row| &row.scope) != update.expected.as_ref()
+            || update.expected.as_ref().is_some_and(|scope| {
+                scope.status != ScopeStatus::Active || scope.automatic_backend().is_none()
+            })
+        {
+            return Err(PapError::Conflict.into());
+        }
+        let Some(candidate) = &update.candidate else {
+            if current.is_none() {
+                return Err(PapError::Conflict.into());
+            }
+            tx.execute(
+                "UPDATE scopes SET phase='DELETING' WHERE scope_id=?1",
+                [id.as_str()],
+            )?;
+            continue;
+        };
+        candidate.validate().map_err(PapError::InvalidScope)?;
+        if &candidate.scope_id != id
+            || candidate.automatic_backend().is_none()
+            || candidate.status != ScopeStatus::Active
+            || update.expected.as_ref().is_some_and(|old| {
+                old.selector != candidate.selector
+                    || old.owner_uid != candidate.owner_uid
+                    || old.automatic_backend() != candidate.automatic_backend()
+            })
+        {
+            return Err(PapError::Conflict.into());
+        }
+        if encode(candidate)?.len() > asc_pap::MAX_SCOPE_BYTES {
+            return Err(
+                PapError::InvalidScope(asc_policy_types::ValidationError::new(
+                    "policyTemplates",
+                    "serialized assignment exceeds 1 MiB",
+                ))
+                .into(),
+            );
+        }
+        check_originals(tx, candidate)?;
+        if let Some(row) = current {
+            if row.scope != *candidate {
+                let generation = row
+                    .generation
+                    .and_then(|n| n.checked_add(1))
+                    .ok_or(StoreError::Corrupt)?;
+                crate::records::replace_scope_assignment(tx, candidate, generation)?;
+            }
+        } else {
+            insert_scope(tx, candidate)?;
+            added = true;
+        }
+    }
+    if added {
+        // Check the final membership so the order of source and destination IDs is immaterial.
+        let active: usize = tx.query_row(
+            "SELECT count(*) FROM scopes WHERE phase='ACTIVE'",
+            [],
+            |r| r.get(0),
+        )?;
+        if active > asc_pap::MAX_ACTIVE_SCOPES {
+            return Err(
+                PapError::InvalidScope(asc_policy_types::ValidationError::new(
+                    "scopes",
+                    format!(
+                        "exceeds the limit of {} active Scopes",
+                        asc_pap::MAX_ACTIVE_SCOPES
+                    ),
+                ))
+                .into(),
+            );
+        }
+    }
+    Ok(())
+}
+fn check_originals(
+    tx: &rusqlite::Transaction<'_>,
+    candidate: &PreparedScope,
+) -> Result<(), RepositoryError> {
+    for projected in &candidate.policy_snapshots {
+        if !asc_pap::is_automatic_source(projected) {
+            return Err(PapError::Conflict.into());
+        }
+        let mut original = projected.clone();
+        original.deployment = None;
+        if read_policy(tx, &original.policy_id)?
+            .and_then(|state| state.current)
+            .as_ref()
+            != Some(&original)
+        {
+            return Err(PapError::ReferencedPolicyRevisionNotFound.into());
+        }
+    }
+    Ok(())
+}
+
+fn check_sources(
+    tx: &rusqlite::Transaction<'_>,
+    expected: &[(ResourceId, Revision)],
+) -> Result<(), RepositoryError> {
+    if automatic_sources(tx)? != expected {
+        return Err(PapError::Conflict.into());
+    }
+    Ok(())
+}
+
+// Measure the exact stored UTF-8 bytes. Replacing an existing v3 source with a
+// smaller one must remain possible even if an older database is already over quota.
+fn check_automatic_capacity(
+    tx: &rusqlite::Transaction<'_>,
+    replacement: Option<(&ResourceId, usize)>,
+) -> Result<(), RepositoryError> {
+    let replacing = replacement.map(|(key, _)| key.as_str());
+    let (count, bytes, old): (usize, usize, usize) = tx.query_row(
+        &format!(
+            "SELECT count(*), coalesce(sum(size),0), coalesce(max(CASE WHEN policy_id=?3 THEN size END),0)
+             FROM (SELECT policy_id, length(CAST(current_json AS BLOB)) AS size FROM policies
+                   WHERE {AUTOMATIC_SOURCE_FILTER})"
+        ),
+        params![asc_pap::SCHEMA_ID, asc_pap::PRINCIPAL_SCHEMA_REVISION, replacing],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (count, bytes) = match replacement {
+        Some((_, size)) if size < old => return Ok(()),
+        Some((_, size)) => (count + usize::from(old == 0), bytes - old + size),
+        None => (count, bytes),
+    };
+    if count > AUTOMATIC_RECORD_LIMIT || bytes > AUTOMATIC_BYTE_LIMIT {
+        return Err(PapError::AutomaticPolicyCapacity.into());
+    }
+    Ok(())
+}
+
+fn automatic_sources(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<Vec<(ResourceId, Revision)>, RepositoryError> {
+    let mut stmt = tx.prepare(&format!(
+        "SELECT policy_id,last_allocated_revision FROM policies WHERE {AUTOMATIC_SOURCE_FILTER}
+         ORDER BY policy_id LIMIT ?3"
+    ))?;
+    let mut sources = Vec::new();
+    for row in stmt.query_map(
+        params![
+            asc_pap::SCHEMA_ID,
+            asc_pap::PRINCIPAL_SCHEMA_REVISION,
+            AUTOMATIC_RECORD_LIMIT + 1
+        ],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+    )? {
+        let (key, revision) = row?;
+        sources.push((
+            id(key)?,
+            Revision::new(revision).map_err(|_| StoreError::Corrupt)?,
+        ));
+    }
+    if sources.len() > AUTOMATIC_RECORD_LIMIT {
+        return Err(PapError::AutomaticPolicyCapacity.into());
+    }
+    Ok(sources)
+}
+
+fn reconcile_existing(
+    binding: &mut BindingStateSnapshot,
+    scope: &PreparedScope,
+    instances: &[ProcessIdentity],
+) -> Result<bool, RepositoryError> {
+    let Some(policy) = scope
+        .policy_snapshots
+        .iter()
+        .find(|policy| policy.policy_id == binding.binding.spec.policy.policy_id)
+        .filter(|_| instances.contains(&binding.binding.spec.scope.process))
+    else {
+        return retire(binding);
+    };
+    let Some(backend) = scope.automatic_backend() else {
+        return Ok(false);
+    };
+    if matches!(
+        binding.binding.status.phase,
+        BindingStatus::PendingDelete
+            | BindingStatus::Deleting
+            | BindingStatus::DeleteFailed
+            | BindingStatus::Deleted
+    ) {
+        return Ok(false);
+    }
+    if &binding.binding.spec.policy != policy {
+        binding.binding.spec.binding_revision = binding
+            .binding
+            .spec
+            .binding_revision
+            .checked_next()
+            .map_err(|_| PapError::RevisionExhausted)?;
+        binding.binding.spec.policy = policy.clone();
+    } else if !(backend == asc_policy_types::policy::DeploymentBackend::ActPlane
+        && binding.binding.status.phase == BindingStatus::ApplyFailed
+        && binding
+            .binding
+            .status
+            .error
+            .as_ref()
+            .is_some_and(|failure| failure.code == "AGENTSIGHT_BINDING_CONFLICT"))
+    {
+        return Ok(false);
+    }
+    change_status(binding, BindingStatus::PendingApply.into())?;
+    Ok(true)
 }
 
 fn retire(binding: &mut BindingStateSnapshot) -> Result<bool, RepositoryError> {

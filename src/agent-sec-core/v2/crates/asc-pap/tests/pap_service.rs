@@ -115,6 +115,14 @@ impl PapRepository for FakeRepository {
         self.inner.get_policy(id, revision)
     }
 
+    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.inner.automatic_policies()
+    }
+
+    fn automatic_source_revisions(&self) -> Result<Vec<(ResourceId, Revision)>, PapError> {
+        self.inner.automatic_source_revisions()
+    }
+
     fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
         self.inner.all_current_policies()
     }
@@ -279,6 +287,61 @@ fn service() -> (Service, Arc<FakeRepository>) {
 
 fn policy_template(path: &str) -> PolicySource {
     file_policy(vec![path.to_owned()])
+}
+
+#[test]
+fn policy_details_expose_only_this_revisions_automatic_planning_outcomes() {
+    use asc_policy_types::cedar::CedarPolicySource;
+
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository).with_automatic_scopes(
+        Ok(std::collections::BTreeMap::new()),
+        &[asc_policy_translator_agentsight::selection::SELECTOR],
+        || {},
+    );
+    let policy_for = |agent: &str| {
+        PolicySource::Cedar(CedarPolicySource {
+            schema: asc_policy_cedar::schema::principal_reference(),
+            text: format!(
+                r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+               when {{ principal has agentType && principal.agentType == "{agent}" }}
+               when {{ resource.path == "/work/private" }};"#
+            ),
+        })
+    };
+    let qoder = pap.create_policy("qoder", &policy_for("qoder")).unwrap();
+    pap.create_policy("cosh", &policy_for("cosh")).unwrap();
+    pap.recover_scopes().unwrap();
+
+    let details = pap
+        .policy_details(&qoder.policy_id, qoder.revision)
+        .unwrap();
+    assert_eq!(details.policy, qoder);
+    assert_eq!(details.automatic_diagnostics.len(), 1);
+    let diagnostic = &details.automatic_diagnostics[0];
+    assert_eq!(diagnostic.policy_id, qoder.policy_id);
+    assert_eq!(diagnostic.revision, qoder.revision);
+    assert_eq!(diagnostic.state, "unassigned");
+    assert!(diagnostic.reason.as_ref().unwrap().contains("qoder"));
+    let wire = serde_json::to_value(details).unwrap();
+    assert_eq!(wire["policyId"], qoder.policy_id.as_str());
+    assert_eq!(wire["automaticDiagnostics"][0]["state"], "unassigned");
+    assert!(
+        serde_json::to_value(&qoder)
+            .unwrap()
+            .get("automaticDiagnostics")
+            .is_none()
+    );
+
+    let newer = pap
+        .update_policy(&qoder.policy_id, "renamed", &policy_for("qoder"))
+        .unwrap();
+    assert!(
+        pap.policy_details(&newer.policy_id, newer.revision)
+            .unwrap()
+            .automatic_diagnostics
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1665,5 +1728,92 @@ fn discovery_start_error_survives_compensation_failures() {
             let pap = pap.with_scope_discovery(Arc::new(Discovery));
             assert!(pap.delete_scope(&scope.scope_id).unwrap().completed);
         }
+    }
+}
+
+#[test]
+fn v3_write_registers_credentials_before_persisting_and_reads_full_source() {
+    let (pap, _) = service();
+    let lifecycle = Arc::new(ScopeLifecycle::default());
+    let pap = pap.with_credential_registration(lifecycle.clone());
+    let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
+    let mut source = asc_policy_types::cedar::CedarPolicySource {
+        schema: asc_policy_cedar::schema::principal_reference(),
+        text: fixture.into(),
+    };
+    let first = pap
+        .create_policy("qoder", &PolicySource::Cedar(source.clone()))
+        .unwrap();
+    assert_eq!(first.credential_bindings.len(), 1);
+    assert_eq!(first.credential_bindings[0].rule_id, "qoder-github");
+    source.text.push_str(r#"forbid(principal, action, resource is SecCore::HttpEndpoint) when { resource.host == "api.github.com" };"#);
+    let mixed = PolicySource::Cedar(source.clone());
+    assert_eq!(
+        pap.update_file_policy(&first.policy_id, "qoder", &mixed),
+        Err(PapError::CredentialAuthorityRequired)
+    );
+    *lifecycle.fail.lock().unwrap() = Some("register");
+    assert_eq!(
+        pap.update_policy(&first.policy_id, "qoder", &mixed),
+        Err(PapError::Unavailable)
+    );
+    assert_eq!(
+        pap.get_policy(&first.policy_id, first.revision).unwrap(),
+        first
+    );
+    *lifecycle.fail.lock().unwrap() = None;
+    let updated = pap
+        .update_policy(&first.policy_id, "qoder", &mixed)
+        .unwrap();
+    assert_eq!(updated.revision.get(), 2);
+    assert_eq!(updated.credential_bindings, first.credential_bindings);
+    let members = pap.authorization_policies().unwrap().policies;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].policy_id, first.policy_id);
+    assert_eq!(members[0].revision, updated.revision);
+    assert_eq!(members[0].source, source);
+}
+
+#[test]
+fn manual_scope_and_v3_upgrade_respect_commit_order() {
+    let old = PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
+        schema: asc_policy_types::cedar::CedarSchemaReference {
+            schema_id: ResourceId::new("seccore.system").unwrap(),
+            revision: Revision::new(2).unwrap(),
+        },
+        text: r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File) when { resource.path == "/secret.txt" };"#.into(),
+    });
+    let new = PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
+        schema: asc_policy_cedar::schema::principal_reference(),
+        text: r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource is SecCore::File) when { principal has agentType && principal.agentType == "qoder" && resource.path == "/secret.txt" };"#.into(),
+    });
+    for scope_first in [true, false] {
+        let (pap, _) = service();
+        let pap = pap.with_scope_discovery(Arc::new(Discovery));
+        let original = pap.create_policy("file", &old).unwrap();
+        let control = pap.create_policy("manual control", &old).unwrap();
+        let pinned = scope_first.then(|| assignment(&pap, &original));
+        let upgraded = pap
+            .update_policy(&original.policy_id, "file", &new)
+            .unwrap();
+        let mut mixed = references(&control);
+        mixed.extend(references(&upgraded));
+        let result = pap.create_scope_assignment(&process_selector(), &mixed, None);
+        assert!(matches!(result, Err(PapError::InvalidScope(error))
+            if error.message.contains("assigned automatically") && error.message.contains(original.policy_id.as_str())));
+        match pinned {
+            Some(scope) => assert_eq!(
+                pap.get_scope(&scope.scope_id).unwrap().policy_snapshots,
+                vec![original]
+            ),
+            None => assert_eq!(
+                pap.create_scope_assignment(&process_selector(), &references(&original), None),
+                Err(PapError::ReferencedPolicyRevisionNotFound)
+            ),
+        }
+        assert_eq!(
+            pap.list_scopes(10, 0).unwrap().total,
+            u64::from(scope_first)
+        );
     }
 }

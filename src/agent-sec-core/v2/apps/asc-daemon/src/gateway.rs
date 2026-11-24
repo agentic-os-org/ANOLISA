@@ -203,6 +203,7 @@ mod tests {
         ] {
             let repository = SqlitePolicyRepository::temporary().unwrap();
             let policy = PreparedPolicy {
+                deployment: None,
                 policy_id: ResourceId::new("gateway-policy").unwrap(),
                 policy_name: "gateway policy".into(),
                 revision: Revision::new(1).unwrap(),

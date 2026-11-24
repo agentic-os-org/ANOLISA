@@ -158,21 +158,29 @@ fn target_plans(binding: &PreparedBinding) -> Result<Vec<(String, TargetBindingP
             translated_plan(AgentSightTranslator.translate(binding))?,
         )]);
     };
-    let syntax = asc_policy_cedar::pst(source)
-        .map_err(|_| Failure::new(FailureKind::Rejected, "INVALID_CEDAR_POLICY"))?;
+    let invalid_source = |_| Failure::new(FailureKind::Rejected, "INVALID_CEDAR_POLICY");
+    let (files, network) = if let Some(selection) = &binding.policy.deployment {
+        let selected = asc_policy_cedar::deployment::selected_pst(source, selection)
+            .map_err(invalid_source)?;
+        match selection.backend {
+            asc_policy_types::policy::DeploymentBackend::ActPlane => (Some(selected), None),
+            asc_policy_types::policy::DeploymentBackend::Gateway => (None, Some(selected)),
+        }
+    } else {
+        let syntax = asc_policy_cedar::pst(source).map_err(invalid_source)?;
+        (
+            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File),
+            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network),
+        )
+    };
     let mut plans = Vec::new();
-    // Share one validated PST across target plans; order file protections before routing.
-    if let Some(files) =
-        asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File)
-    {
+    if let Some(files) = files {
         plans.push((
             "agentsight".into(),
             translated_plan(AgentSightTranslator.translate_cedar_pst(binding, &files))?,
         ));
     }
-    if let Some(network) =
-        asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network)
-    {
+    if let Some(network) = network {
         let plan = asc_gateway_plan::compile_binding(asc_gateway_plan::GatewayBindingView {
             source: asc_gateway_plan::GatewayBindingSource::from_binding(binding),
             schema: &source.schema,

@@ -50,10 +50,13 @@ impl GatewayService {
         binding.scope.scope_id == scope.scope_id
             && binding.scope.selector == scope.selector
             && binding.scope.process == attachment.process
-            && scope
-                .policy_snapshots
-                .iter()
-                .any(|policy| *policy == binding.policy && policy.uses_credentials())
+            && scope.policy_snapshots.iter().any(|policy| {
+                policy.uses_credentials()
+                    && (*policy == binding.policy
+                        || (scope.automatic_backend().is_some()
+                            && binding.policy.deployment.is_some()
+                            && policy.policy_id == binding.policy.policy_id))
+            })
     }
     fn admitted_binding(
         &self,
@@ -361,10 +364,23 @@ impl GatewayService {
             result => result,
         }
     }
-    pub(crate) fn recover_attachments(&self, inner: &mut Inner) -> Result<(), GatewayError> {
-        inner.pins.clear();
+    pub(crate) fn recover_attachments(
+        &self,
+        inner: &mut Inner,
+        observed: Option<(
+            &ScopeId,
+            &[asc_policy_types::process_discovery::ProcessIdentity],
+        )>,
+    ) -> Result<(), GatewayError> {
+        if observed.is_none() {
+            inner.pins.retain(|binding, _| {
+                inner.state.scopes.values().any(|domain| {
+                    domain.automatic && !domain.revoked && domain.bindings.contains_key(binding)
+                })
+            });
+        }
         for (id, domain) in &inner.state.scopes {
-            if domain.revoked {
+            if domain.revoked || observed.map_or(domain.automatic, |(target, _)| id != target) {
                 continue;
             }
             let resource = ResourceId::new(id.as_str())
@@ -375,6 +391,10 @@ impl GatewayService {
                 Err(error) => return Err(error.into()),
             };
             for (binding_id, attachment) in &domain.bindings {
+                inner.pins.remove(binding_id);
+                if observed.is_some_and(|(_, selected)| !selected.contains(&attachment.process)) {
+                    continue;
+                }
                 let view = match self.repository.get_binding(binding_id) {
                     Ok(view) => view,
                     Err(PapError::NotFound) => continue,
@@ -437,14 +457,22 @@ impl GatewayService {
     }
     fn deploy(&self, prepared: &PreparedApply) -> Result<(), GatewayError> {
         let plan = decode_binding_plan(&prepared.format, &prepared.content)?;
+        let mut inner = self.lock();
         let (binding, scope) = self.admitted_plan(&plan)?;
+        let scope_id = ScopeId::new(scope.scope_id.as_str())?;
+        if inner.waiting_for_validation.contains(&scope_id)
+            || inner.waiting_for_scan.contains(&scope_id)
+        {
+            return Err(GatewayError::unavailable(
+                "automatic Scope awaits current Policy and process discovery",
+            ));
+        }
         let cleanup = cleanup_of(&binding)?;
         if prepared.target != target_of(&cleanup)? {
             return Err(GatewayError::invalid(
                 "prepared Binding target differs from cleanup identity",
             ));
         }
-        let mut inner = self.lock();
         let mut plan = self.gather_attachment(&inner, &scope, &cleanup)?;
         let mut attached = self
             .gather_shared_attachments(&inner, &binding, &scope, &mut plan)
@@ -971,6 +999,47 @@ impl TargetDeploymentClient for GatewayBindingClient {
     }
 }
 impl ScopeExecution for GatewayService {
+    fn publish_automatic(
+        &self,
+        updates: &asc_pap::ScopePublication,
+        sources: &[(ResourceId, asc_policy_types::identifiers::Revision)],
+    ) -> Result<(), PapError> {
+        self.publish_candidate(updates, sources).map_err(|error| {
+            PapError::InvalidScope(asc_policy_types::error::ValidationError::new(
+                "gateway",
+                error.to_string(),
+            ))
+        })
+    }
+    fn resume_observed(
+        &self,
+        resource: &ResourceId,
+        generation: u64,
+        selected: &[asc_policy_types::process_discovery::ProcessIdentity],
+    ) -> Result<(), PapError> {
+        let id = ScopeId::new(resource.as_str()).map_err(|_| PapError::Conflict)?;
+        let mut inner = self.lock();
+        if !inner.waiting_for_scan.contains(&id) || inner.waiting_for_validation.contains(&id) {
+            return Ok(());
+        }
+        if self.repository.automatic_scope_generation(resource)? != Some(generation) {
+            return Err(PapError::Conflict);
+        }
+        // A process can exec while the daemon is offline without changing its pidfd or UID.
+        // Restore only the roots selected by the first current-generation discovery pass.
+        let result = self
+            .recover_attachments(&mut inner, Some((&id, selected)))
+            .and_then(|()| {
+                if inner.state.enabled {
+                    let plans = self.active_plans(&mut inner)?;
+                    self.route(&inner, &plans)?;
+                }
+                Ok(())
+            });
+        result.map_err(|error| pap_failure(&self.fail_closed(error)))?;
+        inner.waiting_for_scan.remove(&id);
+        Ok(())
+    }
     fn validate(&self, scope: &PreparedScope) -> Result<(), PapError> {
         self.validate_scope_pairs(scope)
             .map_err(|error| pap_failure(&error))

@@ -6,7 +6,7 @@ include!(concat!(
     "/../../fixtures/policy.rs"
 ));
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
@@ -121,6 +121,7 @@ impl ScopeDiscoveryJob {
             return Err(PapError::Unavailable);
         }
         let scope_id = seed.scope_id.clone();
+        let automatic = seed.automatic_backend().is_some();
         let previous_count = seed.instances.len();
         // A reboot proves these instances exited even if their PIDs are now unreadable.
         // Retain the PID pin so a PID Scope never follows a replacement instance.
@@ -129,7 +130,17 @@ impl ScopeDiscoveryJob {
         let retired = seed.instances.len() != previous_count;
         let state = ScopeDiscoveryState::from_seed(seed).map_err(|_| PapError::Conflict)?;
         if retired {
-            sink.sync_instances(&scope_id, &state.instances().cloned().collect::<Vec<_>>())?;
+            let generation = if automatic {
+                sink.automatic_scope_generation(&scope_id)?
+            } else {
+                None
+            };
+            sink.sync_observed_instances(
+                &scope_id,
+                &state.instances().cloned().collect::<Vec<_>>(),
+                &BTreeMap::new(),
+                generation,
+            )?;
         }
         let facts = ProcessFacts {
             uid: state.requires_owner_uid(),
@@ -145,6 +156,11 @@ impl ScopeDiscoveryJob {
             while !worker_stop.load(Ordering::Acquire) {
                 let run_span = tracing::info_span!("scope_discovery.scan", scope_id = %worker_scope_id);
                 let entered = run_span.enter();
+                let generation=if automatic {match sink.automatic_scope_generation(&worker_scope_id) {
+                    Ok(generation)=>generation,
+                    Err(PapError::OperationInProgress|PapError::NotFound)=>break,
+                    Err(error)=>{tracing::warn!(target:"asc_process_diagnostic",%error,"cannot read Scope before process scan");thread::park_timeout(interval);continue;}
+                }} else {None};
                 let scan = scan_proc(&root, boot_id.trim(), &worker_stop, facts);
                 if worker_stop.load(Ordering::Acquire) { break; }
                 match scan {
@@ -153,6 +169,9 @@ impl ScopeDiscoveryJob {
                             tracing::error!(target: "asc_process_diagnostic", scope_id = %worker_scope_id, "scope discovery state poisoned; worker stopped");
                             break;
                         };
+                        let uids = scan.observations.iter().filter_map(|observation|
+                            observation.fingerprint.uid.map(|uid| (observation.identity.clone(), uid))
+                        ).collect();
                         let result = state.reconcile(scan.observations, &scan.present, scan.complete);
                         if result.instances_selected > 0 {
                             tracing::info!(target: "asc_process_diagnostic", scope_id = %worker_scope_id,
@@ -160,7 +179,7 @@ impl ScopeDiscoveryJob {
                                 "process discovery selected new instances");
                         }
                         let instances: Vec<_> = state.instances().cloned().collect();
-                        let submission_failed = match sink.sync_instances(&worker_scope_id, &instances) {
+                        let submission_failed = match sink.sync_observed_instances(&worker_scope_id, &instances, &uids, generation) {
                             Ok(()) => false,
                             Err(PapError::OperationInProgress | PapError::NotFound) => break,
                             Err(error) => {

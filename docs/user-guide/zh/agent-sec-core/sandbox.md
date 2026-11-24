@@ -295,26 +295,23 @@ resource 和 context 的公共 PARC 信封，旧 OS 载荷会被拒绝。
 挂载 noexec 仍由请求中的 `execution.deny_paths` 明确指定。Cedar 的 `file.exec` forbid
 约束本次启动，不能代替对子孙进程生效的 noexec 挂载；必要的 noexec 约束须保留在权限请求中。
 
-请求通过 `context.agent.agent_type` 提供可选 Agent 分类，不要求 Agent 身份或 UID 登记。
+请求通过 `context.agent.agentType` 提供可选 Agent 分类，不要求 Agent 身份或 UID 登记。
 类型由调用方自报，未经认证；本阶段不按身份隔离单个 Agent。
 
-PAP 从全部当前策略推导请求策略集，按精确的
-`schema: {schemaId: "seccore.system", revision: 1}` 引用校验。
-纳入的源码中每条语句都必须有显式 principal header。当前请求使用
-`principal is SecCore::Subject`，在条件中匹配 `agent_type`：
+使用 `seccore.system` revision 3 时，PAP 将完整 Cedar 原文交给 PDP。
+PDP 按本次请求提供的可选 `principal.agentType` 求值。Sandbox 请求省略
+`ownerUid`，因此 `principal has ownerUid` 为假。以下规则允许 Cosh 启动进程。
 
 ```cedar
 permit(principal is SecCore::Subject,
        action == SecCore::Action::"process.spawn", resource)
-when { principal has agent_type && principal.agent_type == "cosh" };
+when { principal has agentType && principal.agentType == "cosh" };
 ```
 
 此规则只授权进程启动，还须补充应用所需的文件/网络策略。缺少类型时不会匹配此条件。
-原生 JSON 和全部使用裸 `principal` header 的源码不进入此链路；仅在 `when` 中引用
-principal 不算加入。单份存储策略混用裸 header 与显式约束会报错。
-需要共同约束请求的每条规则，包括 permit 和 forbid，都必须使用显式 principal header。
-单纯拆分不能保留共同约束语义：拆出的裸 principal forbid 不会进入请求授权集。
-只有确实面向不同处理路径的规则才适合拆分。这是 ANOLISA 的加载约定，不是 Cedar 的启用字段。
+revision 1 和 2 沿用已有分流规则。每条语句都有显式 principal header 的源码才进入请求授权。
+混用裸 header 和显式约束会被拒绝，原生 JSON 和全部使用裸 header 的旧版策略走下发路径。
+使用旧字段名 `agent_type` 的客户端和 Cedar 策略须改用 `agentType`。
 
 每次 evaluate 拉取一个一致的当前策略快照，摘要覆盖成员、版本、schema 和正文。
 未变化时复用编译缓存，变化后整体验证成功才替换。读取、验证或运行兼容性失败时停止授权，
@@ -391,7 +388,7 @@ Git 指针路径中的空白原样保留。这些默认值不能替代策略，�
 
 PDP 仍决定允许、拒绝、修改或要求原生审批，有效权限不能超过申请。批准命令不等于开放
 网络或授予宿主 root。不可用的提权能力在沙箱内失败，不剥离 `sudo`、扩大权限或无隔离重试。
-请求提供 `principal.agent_type: "cosh"`；Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
+请求提供 `principal.agentType: "cosh"`；Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
 会话 ID 不建立授权身份。现有 PDP 命令变换仍然支持；Hook 自身不在授权前改写原始命令。
 
 模板缺失、无效或不可信，依赖缺失，daemon 不可用，授权超时及异常响应均报告可见错误并

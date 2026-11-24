@@ -1004,6 +1004,7 @@ fn raw_cedar_create_and_update_preserve_text_and_schema_selection() {
     std::fs::write(&file, text).unwrap();
     let cases: &[(&[&str], &str, u32)] = &[
         (&["--language", "cedar"], "seccore.system", 1),
+        (&["--schema-revision", "3"], "seccore.system", 3),
         (
             &["--language", "cedar", "--schema-revision", "2"],
             "seccore.system",

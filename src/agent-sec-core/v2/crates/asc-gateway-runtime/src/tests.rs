@@ -1,5 +1,6 @@
 //! Execution and retirement contracts through real PAP persistence and public deployment ports.
 
+mod automatic;
 mod mixed_delivery;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,7 +125,7 @@ impl Host for FakeHost {
     }
     fn user_groups(&self, uid: u32) -> Option<Vec<u32>> {
         let log = self.log();
-        (uid == UID || uid == 4002).then(|| {
+        (UID..=UID + 2).contains(&uid).then(|| {
             if log.active && log.owner_sensitive_on_start {
                 vec![uid, 0]
             } else {
@@ -176,6 +177,9 @@ impl Host for FakeHost {
             if matches!(log.failed_operation, Some("unroute" | "all")) {
                 return Err(GatewayError::unavailable("unroute failed"));
             }
+        }
+        if rules != crate::nft::render_delete() && log.failed_operation == Some("publish routes") {
+            return Err(GatewayError::unavailable("route installation failed"));
         }
         log.installed_rules = (rules != crate::nft::render_delete()).then(|| rules.into());
         Ok(())
@@ -497,6 +501,7 @@ impl Fixture {
                 })
                 .collect();
             PreparedPolicy {
+                deployment: None,
                 policy_id: ResourceId::new(format!("policy:{name}-{index}")).unwrap(),
                 revision: Revision::new(1).unwrap(),
                 policy_name: format!("{name}-{index}"),
@@ -535,7 +540,17 @@ impl Fixture {
             .map(process)
             .collect();
         self.repository
-            .sync_scope_instances(&scope.scope_id, &identities)
+            .sync_observed_scope_instances(
+                &scope.scope_id,
+                &identities,
+                &identities
+                    .iter()
+                    .map(|instance| (instance.clone(), UID))
+                    .collect(),
+                self.repository
+                    .automatic_scope_generation(&scope.scope_id)
+                    .unwrap(),
+            )
             .unwrap()
             .into_iter()
             .filter(|receipt| receipt.spec.scope.process.pid == pid)
@@ -564,10 +579,12 @@ impl Fixture {
         let PolicySource::Cedar(source) = &binding.policy.template else {
             unreachable!()
         };
-        let syntax = asc_policy_cedar::pst(source).unwrap();
-        let network =
-            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network)
-                .unwrap();
+        let network = if let Some(selection) = &binding.policy.deployment {
+            asc_policy_cedar::deployment::selected_pst(source, selection).unwrap()
+        } else {
+            let syntax = asc_policy_cedar::pst(source).unwrap();
+            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network).unwrap()
+        };
         let plan = asc_gateway_plan::compile_binding(asc_gateway_plan::GatewayBindingView {
             source: asc_gateway_plan::GatewayBindingSource::from_binding(binding),
             schema: &source.schema,
@@ -1169,6 +1186,7 @@ fn one_mixed_policy_keeps_its_canonical_binding_through_gateway_deployment() {
     let policy = fixture
         .repository
         .put_policy(&PreparedPolicy {
+            deployment: None,
             policy_id: ResourceId::new("policy:mixed").unwrap(),
             policy_name: "mixed".into(),
             revision: Revision::new(1).unwrap(),
@@ -2942,6 +2960,7 @@ fn prepare_mixed_scope_with_failed_file_binding(
     let credential = fixture
         .repository
         .put_policy(&PreparedPolicy {
+            deployment: None,
             policy_id: ResourceId::new("policy:mixed-credential").unwrap(),
             policy_name: "credential".into(),
             revision: Revision::new(1).unwrap(),

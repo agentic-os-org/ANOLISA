@@ -2,49 +2,51 @@
 
 use std::collections::BTreeSet;
 
-use cedar_policy::{ActionConstraint, Policy, PolicySet, ResourceConstraint};
+use asc_policy_types::cedar::CedarSchemaReference;
+use cedar_policy::{Policy, ResourceConstraint};
 use cedar_policy_core::ast::{BinaryOp, Expr, ExprKind, Literal, PatternElem, Var};
 
 use crate::PdpError;
 
-pub(crate) fn boundaries(policies: &PolicySet) -> Result<BTreeSet<String>, PdpError> {
-    let mut paths = BTreeSet::new();
-    for policy in policies
-        .policies()
-        .filter(|policy| applies_to_files(policy))
-    {
-        match policy.resource_constraint() {
-            ResourceConstraint::Any | ResourceConstraint::Is(_) => {}
-            _ => {
-                return Err(unsupported(
-                    policy,
-                    "filesystem policy resources must use path predicates",
-                ));
-            }
-        }
-        let ast: &cedar_policy_core::ast::Policy = policy.as_ref();
-        if let Some(condition) = ast.non_scope_constraints() {
-            inspect(policy, condition, &mut paths)?;
-        }
+pub(crate) fn collect_boundaries(
+    policy: &Policy,
+    schema: &CedarSchemaReference,
+    paths: &mut BTreeSet<String>,
+) -> Result<(), PdpError> {
+    if !asc_policy_cedar::deployment::header_may_match(
+        &policy.action_constraint(),
+        &policy.resource_constraint(),
+        &["file.read", "file.write"],
+        "SecCore::File",
+    ) {
+        return Ok(());
     }
-    Ok(paths)
-}
-
-fn applies_to_files(policy: &Policy) -> bool {
-    let is_file_action = |action: &cedar_policy::EntityUid| {
-        matches!(action.id().as_ref(), "file.read" | "file.write")
-    };
-    match policy.action_constraint() {
-        ActionConstraint::Any => true,
-        ActionConstraint::Eq(action) => is_file_action(&action),
-        ActionConstraint::In(actions) => actions.iter().any(is_file_action),
+    if !matches!(
+        policy.resource_constraint(),
+        ResourceConstraint::Any | ResourceConstraint::Is(_)
+    ) {
+        return Err(unsupported(
+            policy,
+            "filesystem policy resources must use path predicates",
+        ));
     }
+    let ast: &cedar_policy_core::ast::Policy = policy.as_ref();
+    if let Some(condition) = ast.non_scope_constraints() {
+        inspect(
+            policy,
+            condition,
+            paths,
+            asc_policy_cedar::schema::uses_principal_targeting(schema),
+        )?;
+    }
+    Ok(())
 }
 
 fn inspect(
     policy: &Policy,
     expression: &Expr,
     paths: &mut BTreeSet<String>,
+    ordinary_write: bool,
 ) -> Result<(), PdpError> {
     match expression.expr_kind() {
         ExprKind::BinaryApp {
@@ -94,6 +96,16 @@ fn inspect(
                 "resource may only appear in exact or directory-prefix path predicates",
             ));
         }
+        // Schema v3 shares rules with other consumers. Cedar evaluates operation
+        // against an ordinary write, while sibling path predicates still partition it.
+        ExprKind::GetAttr { expr, attr }
+            if ordinary_write
+                && attr == "operation"
+                && matches!(expr.expr_kind(), ExprKind::GetAttr { expr, attr } if attr == "input"
+                && matches!(expr.expr_kind(), ExprKind::Var(Var::Context))) =>
+        {
+            return Ok(());
+        }
         ExprKind::Var(Var::Context) => {
             return Err(unsupported(
                 policy,
@@ -102,39 +114,48 @@ fn inspect(
         }
         _ => {}
     }
-    // Process each immediate child once; subexpressions() includes the root.
+    visit_children(expression, |child| {
+        inspect(policy, child, paths, ordinary_write)
+    })
+}
+
+// Traverse immediate children because subexpressions() includes the root itself.
+fn visit_children(
+    expression: &Expr,
+    mut visit: impl FnMut(&Expr) -> Result<(), PdpError>,
+) -> Result<(), PdpError> {
     match expression.expr_kind() {
         ExprKind::If {
             test_expr,
             then_expr,
             else_expr,
         } => {
-            inspect(policy, test_expr, paths)?;
-            inspect(policy, then_expr, paths)?;
-            inspect(policy, else_expr, paths)?;
+            visit(test_expr)?;
+            visit(then_expr)?;
+            visit(else_expr)?;
         }
         ExprKind::And { left, right } | ExprKind::Or { left, right } => {
-            inspect(policy, left, paths)?;
-            inspect(policy, right, paths)?;
+            visit(left)?;
+            visit(right)?;
         }
-        ExprKind::UnaryApp { arg, .. } => inspect(policy, arg, paths)?,
+        ExprKind::UnaryApp { arg, .. } => visit(arg)?,
         ExprKind::BinaryApp { arg1, arg2, .. } => {
-            inspect(policy, arg1, paths)?;
-            inspect(policy, arg2, paths)?;
+            visit(arg1)?;
+            visit(arg2)?;
         }
         ExprKind::ExtensionFunctionApp { args, .. } | ExprKind::Set(args) => {
             for argument in args.iter() {
-                inspect(policy, argument, paths)?;
+                visit(argument)?;
             }
         }
         ExprKind::GetAttr { expr, .. }
         | ExprKind::HasAttr { expr, .. }
         | ExprKind::ExtHasAttr { expr, .. }
         | ExprKind::Like { expr, .. }
-        | ExprKind::Is { expr, .. } => inspect(policy, expr, paths)?,
+        | ExprKind::Is { expr, .. } => visit(expr)?,
         ExprKind::Record(fields) => {
             for expression in fields.values() {
-                inspect(policy, expression, paths)?;
+                visit(expression)?;
             }
         }
         _ => {}

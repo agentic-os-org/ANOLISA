@@ -859,6 +859,9 @@ provenance；标准策略只交付 `gateway/github.cedar` 可读源码，source/
 导入；`policy create/update --file` 缺省读取 raw Cedar，schema 默认为 `seccore.system@1`，
 HTTP 凭据策略须显式指定 `--schema-revision 2`。`--language json` 保留原生 JSON 模板与
 Cedar envelope 导入，禁止额外 schema 参数覆盖 envelope 的引用。
+当前 Cedar 主体属性使用 `agentType`。数据库打开时校验当前 Policy 和 Scope、Binding 的
+固定快照。若发现旧 `agent_type`，在启动授权服务前拒绝打开，并报告待迁移的 Policy ID
+及修订号。SQLite 回归见 `startup_reports_legacy_agent_type_in_current_and_pinned_revisions`。
 详见 [网关设计 §2.1](V2_SECRET_GATEWAY_DESIGN_zh.md#21-policy-authoring)。构建只 staging 到 `DESTDIR`。
 安装自动启动基础 daemon，但网关默认关闭：
 不启动代理、不创建网关账户、不携带或下载 mitmproxy、不添加引流。未配置凭据 Scope、
@@ -973,7 +976,7 @@ OS 权限和命令，不访问 daemon、不读取其数据库、不取得策略�
 daemon 默认启用授权，空策略集返回 DENY。独立授权配置文件已移除，决定接收期限固定为
 60 秒。升级时移除启动命令及 systemd drop-in 中的 `--authorization-config` 参数，并将
 必要环境约束迁移为 PAP 管理的 Cedar；不自动转换旧配置。daemon 与授权客户端须同步
-升级到公共 PARC 请求结构。请求通过 context.agent.agent_type 提供可选分类，Cosh Hook
+升级到公共 PARC 请求结构。请求通过 context.agent.agentType 提供可选分类，Cosh Hook
 使用 cosh。
 本阶段不认证 Agent 身份/类型，不要求 UID 登记；类型只用于策略分类匹配。
 内核 peer UID 仍用于 claim/report 的凭据归属校验，不参与策略主体选择。
@@ -997,7 +1000,9 @@ PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运�
 | TTY 输入、默认信号行为、父进程退出及后台子进程清理 | `v2/apps/asc-cli/tests/sandbox.rs`（`ASC_SANDBOX_INTEGRATION=1`） |
 | Cosh Hook 授权、一次性交接、拒绝清理、越界写保护 | `tests/e2e/linux-sandbox/authorized_cli.py` 与原版 Cosh 的 `cosh_host.py` 端到端用例 |
 | 真实授权、ask 后直行、版本更新、双存储回执 | `tests/e2e/linux-sandbox/authorized_cli.py` |
-| agent_type 分类匹配、PAP 全集刷新、删除后空集 DENY | `tests/e2e/linux-sandbox/authorized_cli.py`；`v2/apps/asc-daemon/src/authorization.rs` |
+| agentType 分类匹配、PAP 全集刷新、删除后空集 DENY | `tests/e2e/linux-sandbox/authorized_cli.py`；`v2/apps/asc-daemon/src/authorization.rs` |
+| v3 通过 principal 自动发现进程、更新 Binding 并核验本轮 UID | `v2/crates/asc-pap/tests/automatic_scopes.rs` |
+| 实际进程树文件保护、自动 Gateway 发布与撤回 | `tests/v2/e2e/test_agentsight_directory_read_live.py`、`v2/crates/asc-gateway-runtime/src/tests/automatic.rs` |
 | 新请求策略不改写已有 Scope/Binding 快照 | `v2/crates/asc-pap/tests/pap_service.rs::request_policy_resolution_does_not_rewrite_existing_scope_or_binding` |
 
 这些 fixture 不替代 RPM/systemd、多架构或完整 DPROC 安装验收。可执行命令由

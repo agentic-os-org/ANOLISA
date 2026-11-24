@@ -1,5 +1,7 @@
 # Policy Template、Scope 与 Binding 生命周期契约
 
+本文中由用户创建、固定 Policy 快照的 Scope 指手工分配。对于 Cedar schema v3，daemon 根据 `principal` 自动维护 Scope，已发布修订与后端应用结果分别查询。详见[基于 Cedar 的统一策略管理与自动下发](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT_zh.md)。
+
 文档类型：`[TARGET V2][IMPLEMENTED]` 对象与生命周期契约；第 7 节为 `[IMPLEMENTED]` 通用规则结构与首阶段执行边界。
 本契约的对象职责、revision 与快照生命周期与
 [AgentSecCore 安全策略语言](https://alidocs.dingtalk.com/i/nodes/20eMKjyp810mMdK4HrdLaNnXJxAZB1Gv)

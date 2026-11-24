@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+asc-gateway-plan.workspace = true
+asc-policy-translator-agentsight.workspace = true
 asc-policy-repository-sqlite = { workspace = true, features = ["test-support"] }
 
 [lints]

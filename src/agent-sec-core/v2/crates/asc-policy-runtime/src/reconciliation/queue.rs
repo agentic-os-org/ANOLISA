@@ -23,6 +23,10 @@ pub(super) enum Entry {
 /// Binding intent, status/error and deployment records live in the Repository.
 /// Attempt counts and monotonic deadlines are owned here and never persisted.
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "pending Scope work is independent of queue shutdown and scan health"
+)]
 pub(super) struct State {
     /// FIFO of distinct IDs ready for pickup. Each has exactly one Queued entry;
     /// running, waiting and exhausted IDs are absent from this deque.
@@ -36,6 +40,8 @@ pub(super) struct State {
     /// Stops admission, new pickup and scanning. Existing synchronous calls still
     /// finish and must be joined; setting this flag does not cancel Client I/O.
     pub stopped: bool,
+    /// Coalesces Policy commits until the Scope worker starts its next pass.
+    scope_cleanup_pending: bool,
     /// Scheduling code/scanner panicked or a thread could not start. Also sets stopped;
     /// retained so shutdown and the daemon can distinguish failure from a normal stop.
     pub fatal: bool,
@@ -228,6 +234,26 @@ impl WorkQueue {
             state.entries.insert(id, Entry::Exhausted);
         }
         self.wake.notify_all();
+    }
+
+    /// Wakes the Scope worker after PAP commits a policy change.
+    /// # Panics
+    /// Panics if the queue mutex is poisoned.
+    pub fn request_scope_cleanup(&self) {
+        self.state.lock().unwrap().scope_cleanup_pending = true;
+        self.wake.notify_all();
+    }
+
+    pub(super) fn wait_scope_cleanup(&self, interval: Duration) -> bool {
+        let state = self.state.lock().unwrap();
+        let (mut state, _) = self
+            .wake
+            .wait_timeout_while(state, interval, |state| {
+                !state.stopped && !state.scope_cleanup_pending
+            })
+            .unwrap();
+        state.scope_cleanup_pending = false;
+        !state.stopped
     }
 
     pub(super) fn wait_tick(&self, interval: Duration) -> bool {

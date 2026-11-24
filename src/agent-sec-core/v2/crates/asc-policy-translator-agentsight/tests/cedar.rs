@@ -329,7 +329,7 @@ fn conflicts_limits_empty_output_and_unknown_schema_fail_without_a_plan() {
     else {
         unreachable!()
     };
-    source.schema.revision = asc_policy_types::identifiers::Revision::new(3).unwrap();
+    source.schema.revision = asc_policy_types::identifiers::Revision::new(999).unwrap();
     assert!(matches!(
         AgentSightTranslator.translate(&input).unwrap(),
         TranslationOutcome::Rejected(_)

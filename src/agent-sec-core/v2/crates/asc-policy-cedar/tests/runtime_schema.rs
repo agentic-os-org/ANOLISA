@@ -18,7 +18,7 @@ fn runtime_subject_and_advice_round_trip_in_schema_one() {
     let text = r#"
 @advice("{\"verdict\":\"escalate\",\"reason\":\"approval_required\"}")
 permit(principal == SecCore::Subject::"worker", action == SecCore::Action::"process.spawn", resource)
-when { principal has agent_type && principal.agent_type == "codex" && resource.program == "gh" };
+when { principal has agentType && principal.agentType == "codex" && resource.program == "gh" };
 "#;
     validate(&source(text)).unwrap();
     let policies = PolicySet::from_pst(pst(&source(text)).unwrap()).unwrap();

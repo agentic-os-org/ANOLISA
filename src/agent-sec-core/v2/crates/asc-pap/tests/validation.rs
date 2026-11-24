@@ -173,7 +173,7 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
     );
     for (text, revision, expected) in [
         ("not a Cedar policy", 1, "syntax"),
-        ("forbid(principal, action, resource);", 3, "revision 3"),
+        ("forbid(principal, action, resource);", 999, "revision 999"),
         (
             "forbid(principal, action == SecCore::Action::\"file.unknown\", resource);",
             1,
@@ -289,7 +289,7 @@ fn effective_set_tracks_membership_without_scope_assignments() {
         .unwrap();
     let bare = runtime_cedar(
         r#"permit(principal, action == SecCore::Action::"process.spawn", resource)
-        when { principal has agent_type && principal.agent_type == "codex" };"#,
+        when { principal has agentType && principal.agentType == "codex" };"#,
     );
     let deployment = pap.create_policy("deployment", &bare).unwrap();
     assert_eq!(pap.authorization_policies().unwrap(), empty);
@@ -350,7 +350,7 @@ fn mixed_headers_reject_whole_policy_at_admission_and_resolution() {
 
 #[test]
 fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
-    for revision in [1, 3] {
+    for corrupt_syntax in [true, false] {
         let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
         let pap = PapService::new(repository.clone());
         pap.create_policy(
@@ -362,7 +362,7 @@ fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
         stored.policy_name = "corrupt".into();
         stored.template = runtime_cedar("permit(principal is SecCore::Subject, action, resource);");
         // Corruption happens after admission; normal repository writes must still reject it.
-        SqlitePolicyRepository::before_next_commit_for_test(if revision == 1 {
+        SqlitePolicyRepository::before_next_commit_for_test(if corrupt_syntax {
             |tx| {
                 tx.execute(
                     "UPDATE policies SET current_json = json_set(current_json,
@@ -376,7 +376,7 @@ fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
             |tx| {
                 tx.execute(
                     "UPDATE policies SET current_json = json_set(current_json,
-                     '$.template.content.schema.revision', 3)
+                     '$.template.content.schema.revision', 999)
                      WHERE json_extract(current_json, '$.policyName') = 'corrupt'",
                     [],
                 )
@@ -398,7 +398,7 @@ fn runtime_cedar_admission_validates_before_replacing_the_current_revision() {
     let source = runtime_cedar(
         r#"@advice("{\"verdict\":\"warn\",\"message\":\"review output\"}")
 permit(principal, action == SecCore::Action::"process.spawn", resource)
-when { principal has agent_type && principal.agent_type == "codex" };"#,
+when { principal has agentType && principal.agentType == "codex" };"#,
     );
     let first = pap.create_policy("baseline", &source).unwrap();
     assert_eq!(first.template, source);
