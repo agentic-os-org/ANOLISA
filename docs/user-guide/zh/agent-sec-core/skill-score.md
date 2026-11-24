@@ -66,11 +66,15 @@ raw 用户用 `sudo anolisa --install-mode system uninstall sec-core-skill-score
   "remote": {
     "provider": "bailian-payg-anthropic",
     "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "defaultModel": "qwen3.8-max",
+    "defaultModel": "deepseek-v4.1-flash-1017",
     "apiKeyEnv": "AGENT_SEC_MODEL_API_KEY"
   }
 }
 ```
+
+Judge 每次请求的输出上限按模型 ID 选择。`deepseek-v4.1-flash` 和 `deepseek-v4.1-flash-1017` 使用 393,216 tokens，`qwen3.8-max` 及其 `-0902`、`-2026-09-02` 快照别名使用 131,072。其他模型 ID（含自定义部署别名）使用 24,000。
+
+如果网关限额较低，可在 `remote` 对象中设置 `"judgeMaxTokens": 24000`。请按实际限额选择正整数，并为输入提示留出空间。Judge 取该值与模型默认上限中的较小值。被测 Agent 使用自己的输出预算。
 
 通过调用进程环境或平台密钥管理注入 `AGENT_SEC_MODEL_API_KEY`。不要把实际值放入参数、任务 JSON、模板或发布清单。Judge 和被测 Agent 复用解析后的 provider 配置，worker 只获得 Agent 必需的模型凭据。已有本地/Ollama 扫描器默认行为保持不变。
 
@@ -78,9 +82,9 @@ raw 用户用 `sudo anolisa --install-mode system uninstall sec-core-skill-score
 
 ASC 通过已有 Anthropic 凭据通道原样传递引用的值，其中 Rust 请求使用 `x-api-key`。ASC 不生成或解析用户／任务身份，也不上报账单。调用平台负责授权代理地址并生成访问上下文，代理负责鉴权与计量。同一配置用于规划、判分和 Claude Code 动态执行。代理支持时应限制凭据的作用范围与有效期：被测 Agent 会获得该值，允许访问模型端点不构成数据防泄漏边界。
 
-代理须支持现有 Messages 请求参数（包括 `thinking` 和 `output_config`）、token usage 字段及 Claude Code 流式／工具调用。不兼容时明确失败，不静默删除参数或切换服务。离线兼容测试不能证明模型质量、网络可达性或计费正确性。
+Judge 经 `anthropic-compatible` 代理发送 `model`、`system`、`messages` 和 `max_tokens`，代理需返回 token 用量。直连百炼时额外发送温度、思考开关及推理强度。被测 Agent 还需要流式响应和工具调用。不兼容时明确失败，不静默删除参数或切换服务。离线兼容测试不能证明模型质量、网络可达性或计费正确性。
 
-配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；两个旧变量都必须提供且保留百炼端点约束，自定义代理必须显式使用配置文件。回滚代理路由时恢复上面的百炼配置。
+配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；该路径默认使用 `deepseek-v4.1-flash-1017`。两个旧变量都必须提供且保留百炼端点约束，自定义代理必须显式使用配置文件。回滚代理路由时恢复上面的百炼配置。
 
 Judge 失败日志保留原错误码，并在 `diagnostic=` 后追加有界 JSON。字段 `stage` 标识审计、探针修复、最终裁决或严重风险复核。字段 `reason` 区分传输中断（`body_truncated`）、缺少正文（`missing_text`）、用量缺失或格式错误（`missing_usage`、`invalid_usage`），以及裁决输出的 JSON 或契约错误（`output_json`、`output_contract`）。收到响应时可记录 HTTP 状态和已知字节数。每个模型请求在既有截止时间和三次传输尝试上限内，最多重放一次中断的传输。纠正提示后会发起新的请求。探针修复返回合法 JSON 但仍未通过校验时，会记录 `probe_repair/output_contract`。缺正文或用量会终止该次调用。重发请求可能产生额外模型费用。
 

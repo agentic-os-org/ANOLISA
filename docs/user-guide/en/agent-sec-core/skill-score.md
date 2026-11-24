@@ -58,6 +58,10 @@ For raw, `sudo anolisa --install-mode system uninstall sec-core-skill-score` rem
 
 ## Configure the model service
 
+The Judge requests up to 393,216 output tokens per call for `deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017`. For `qwen3.8-max` and its `-0902` / `-2026-09-02` snapshot aliases, it requests 131,072. Other model IDs, including custom deployment aliases, use 24,000.
+
+If your gateway allows fewer tokens, add `"judgeMaxTokens": 24000` to the `remote` object below, choosing a positive integer that leaves room for the prompt. The Judge uses the smaller of this cap and the model default. The evaluated Agent keeps its own output budget.
+
 Place this secret-free configuration in `/etc/agent-sec/model-service.json`, or select another file with `AGENT_SEC_MODEL_CONFIG`:
 
 ```json
@@ -66,7 +70,7 @@ Place this secret-free configuration in `/etc/agent-sec/model-service.json`, or 
   "remote": {
     "provider": "bailian-payg-anthropic",
     "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "defaultModel": "qwen3.8-max",
+    "defaultModel": "deepseek-v4.1-flash-1017",
     "apiKeyEnv": "AGENT_SEC_MODEL_API_KEY"
   }
 }
@@ -78,9 +82,9 @@ For an operator-managed Anthropic Messages proxy, set `provider` to `anthropic-c
 
 ASC passes the referenced value through the existing Anthropic credential channel, including `x-api-key` for its Rust calls. It does not generate or parse user/task identities or submit billing records. The calling platform must authorize the proxy and generate its access context; the proxy owns authentication and metering. The same configuration supplies planning, judging and Claude Code execution. Keep credentials scoped and short-lived where the proxy supports it: the evaluated Agent receives the value, and an allowed model endpoint is not a data-loss prevention boundary.
 
-The proxy must support the existing Messages request parameters (`thinking` and `output_config` included), token usage fields, and Claude Code streaming/tool calls. Unsupported behavior fails explicitly, without dropping parameters or falling back to a different service. Offline compatibility tests do not establish model quality, network reachability or billing correctness.
+For Judge calls, an `anthropic-compatible` proxy receives `model`, `system`, `messages`, and `max_tokens` and must return token usage. Direct Bailian calls also send temperature, thinking, and effort. The evaluated Agent requires streaming and tool calls. Unsupported behavior fails explicitly, without dropping parameters or falling back to a different service. Offline compatibility tests do not establish model quality, network reachability or billing correctness.
 
-An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. Both legacy variables are required and retain Bailian endpoint restrictions; a custom proxy requires the explicit configuration file. To roll back proxy routing, restore the Bailian configuration above.
+An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. This legacy route selects `deepseek-v4.1-flash-1017`. Both legacy variables are required and retain Bailian endpoint restrictions; a custom proxy requires the explicit configuration file. To roll back proxy routing, restore the Bailian configuration above.
 
 Judge failure lines keep the error code and append a bounded JSON object after `diagnostic=`. Its `stage` identifies audit, probe repair, final judgment or critical review. Its `reason` distinguishes interrupted transfer (`body_truncated`), missing answer text (`missing_text`), missing or malformed token usage (`missing_usage`, `invalid_usage`), and invalid Judge output (`output_json`, `output_contract`). Response failures include the HTTP status and observed byte counts when available. Each model request may replay one interrupted transfer within its deadline and three transport attempts. A corrected prompt starts a new request. A probe repair that returns valid JSON but leaves required probes invalid records `probe_repair/output_contract`. Missing text or usage fails the attempt. A repeated request can incur provider charges.
 

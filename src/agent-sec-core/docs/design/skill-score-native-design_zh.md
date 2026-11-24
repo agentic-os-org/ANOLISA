@@ -100,11 +100,13 @@ raw 和 RPM 均使用 `install-runtime`。ASC 按已装主包版本从配置的 
   "remote": {
     "provider": "bailian-payg-anthropic",
     "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "defaultModel": "qwen3.8-max",
+    "defaultModel": "deepseek-v4.1-flash-1017",
     "apiKeyEnv": "AGENT_SEC_MODEL_API_KEY"
   }
 }
 ```
+
+可选正整数 `remote.judgeMaxTokens` 用于按部署限额缩小 Judge 的输出预算。被测 Agent 使用自己的输出预算。
 
 配置只保存密钥引用；实际值由用户会话或平台秘密管理注入。`bailian-payg-anthropic` provider 保留 HTTPS endpoint 约束。显式选择的 `anthropic-compatible` provider 接受运维方授权的 HTTP(S) DNS/IPv4 前缀并追加 `/v1/messages`，拒绝 URL 凭据、查询参数、片段、空白和反斜线，不跟随重定向。Judge 与 Agent 共用解析后的 provider/model 和不透明凭据。平台身份生成、端点授权和计量由调用方／代理负责，不进入 ASC；平台专属 provider 名须在生成 ASC 配置前转换。Judge 向通用代理只发送 Messages 基础字段（`model`、`system`、`messages`、`max_tokens`）。百炼请求另外指定 temperature、thinking 和 effort。两者共用重试预算、usage 解析和脱敏逻辑，每个代理的真实推理仍需单独验收。
 
