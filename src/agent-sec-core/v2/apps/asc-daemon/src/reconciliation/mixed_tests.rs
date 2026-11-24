@@ -247,6 +247,20 @@ fn lua_file_projection_preserves_gateway_rules_and_statement_errors() {
 }
 
 #[test]
+fn native_seccore_policy_is_rejected_on_the_lua_lsm_route() {
+    let binding: PreparedBinding = serde_json::from_str(include_str!(
+        "../../../../crates/asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    let failure = target_plans(&binding, FilePolicyBackend::LuaLsm).unwrap_err();
+    assert_eq!(failure.kind, FailureKind::Rejected);
+    assert_eq!(failure.code, "LUA_LSM_CEDAR_REQUIRED");
+    let plans = target_plans(&binding, FilePolicyBackend::AgentSight).unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].0, "agentsight");
+}
+
+#[test]
 fn mixed_file_pattern_is_owned_by_the_selected_backend() {
     let mut binding: PreparedBinding =
         serde_json::from_value(fixture()["binding"].clone()).unwrap();

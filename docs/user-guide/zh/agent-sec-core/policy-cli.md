@@ -23,7 +23,7 @@ agent-sec-cli --socket "$SOCKET" policy list
 ## Lua-LSM 文件后端
 
 管理员可设置 `AGENT_SEC_FILE_BACKEND=lua-lsm`，为新部署的文件 Binding 选择后端。
-默认仍为 `agentsight`，已有部署保留原 route。该后端需要兼容的 Lua-LSM 内核、
+Lua-LSM 只接受 Cedar 策略。默认仍为 `agentsight`，已有部署保留原 route。该后端需要兼容的 Lua-LSM 内核、
 初始 user namespace 中实际生效的 `CAP_MAC_ADMIN` 和可写的 securityfs，
 旧版 inode 标签模板的 Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随后在同机执行的
 完整 daemon 测试在卸载模块时触发 Lua-LSM 已知内核问题。负责人正在回移修复，
@@ -31,6 +31,12 @@ agent-sec-cli --socket "$SOCKET" policy list
 模块已卸载。操作步骤见[后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
 
 Lua-LSM 在每次操作时匹配路径，也能保护下发后才创建的文件。已有硬链接不影响下发；通过保护范围外的硬链接名称访问，暂时不在防护保证内。
+
+如果目标位于 overlayfs，或受保护的目录树包含 overlayfs 挂载，下发会返回
+`LUA_LSM_OVERLAYFS_UNSUPPORTED`。空目录也会检查。目标尚不存在时，按最近已存在的祖先判断挂载类型。
+
+需要保护全部后代时，应在首次下发期间保持进程树稳定。如果一个尚未打标的后代在被客户端发现前
+就被重新托管到树外，即使 Binding 进入 `Ready`，该后代仍可能不受保护。
 
 daemon 停止时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
 Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保护。同一 boot 内重启 daemon
@@ -415,7 +421,7 @@ PolicyTemplate 是可被多个 Scope 按 ID/revision 选用的可复用策略。
 block/allow/require_confirmation 决策均可保存；Network 和 AgentHook 的目标格式尚未定义，
 目前不能保存。
 
-对于原生 JSON，PEP Translator 只支持不带历史条件的 block + file/write + operation=delete 规则。
+对于 SecCore 原生 JSON，AgentSight Translator 只支持不带历史条件的 block + file/write + operation=delete 规则。
 任意规则不支持，整个 Binding 失败，例如返回有界错误码 `RULE_1_UNSUPPORTED_EFFECT`，
 不发送受支持的规则子集。目标 DSL 不支持转义语法，because 包含引号、反斜杠或控制字符时
 转换失败，普通 Unicode 文本保持原样；省略理由时使用 Translator 默认值。

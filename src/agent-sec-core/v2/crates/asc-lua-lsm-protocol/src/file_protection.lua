@@ -263,19 +263,20 @@ end
 local function rename(old_dir, old, new, flags)
   local fsname = filesystem(old_dir)
   local from, into = assert(old:path(true)), assert(new:path(true))
-  local overwritten = new:backing_inode()
+  local dest_inode = new:backing_inode()
   local exchange = bit(flags, 2)
   for _, target in ipairs(targets) do
     local source = selected(target, from, fsname)
     local dest = selected(target, into, fsname)
     if target.write and (dest or exchange and source) then return false end
-    if target.delete and overwritten and dest then return false end
+    if target.delete and dest_inode and dest then return false end
     if source ~= dest and (target.read or target.write or source or exchange) then return false end
     -- Preserve protected root names and their ancestors when moving directories.
     if selected(target, from, fsname, true) and (not source or not target.tree) then return false end
     if selected(target, into, fsname, true) and not dest then return false end
-    if target.tree and (target.patterns or #target.exclusions > 0) and old:backing_inode():filetype("dir") then
-      -- A directory name need not itself match a predicate on its descendants.
+    if target.tree and (target.patterns or #target.exclusions > 0)
+        and (old:backing_inode():filetype("dir") or (exchange and dest_inode:filetype("dir"))) then
+      -- Either side of an exchange can move a directory whose descendants match.
       for _, view in ipairs(target.views or {}) do
         if view.logical and view.fs == fsname and (below(from, view.base) or below(into, view.base)) then return false end
       end

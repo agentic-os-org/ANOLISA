@@ -28,6 +28,8 @@ struct Kernel {
     short_write: Mutex<bool>,
     fail_bootstrap: Mutex<bool>,
     fail_transfer: Mutex<bool>,
+    on_first_match: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_root_reseed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     readback_fault: Mutex<Option<ReadbackFault>>,
     members: Mutex<BTreeMap<String, BTreeSet<u32>>>,
 }
@@ -121,13 +123,25 @@ impl SecurityFs for Kernel {
             .push(format!("bootstrap:{command}"));
         let pid = parts.last().unwrap().parse::<u32>().ok();
         match command.as_str() {
+            "match" => {
+                if let Some(checkpoint) = self.on_first_match.lock().unwrap().take() {
+                    checkpoint();
+                }
+            }
             "seed" | "seed_root" => {
-                self.members
+                let inserted = self
+                    .members
                     .lock()
                     .unwrap()
                     .entry(name)
                     .or_default()
                     .insert(pid.unwrap());
+                if !inserted
+                    && command == "seed_root"
+                    && let Some(checkpoint) = self.on_root_reseed.lock().unwrap().take()
+                {
+                    checkpoint();
+                }
             }
             "member"
                 if !self
@@ -234,7 +248,7 @@ fn prepared(
 #[test]
 fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
     let subject = Probe::start();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("config");
     fs::write(&protected, b"secret").unwrap();
     let state = directory.path().join("state");
@@ -315,7 +329,7 @@ fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
 #[test]
 fn acknowledged_writes_require_registration_and_absence_readback() {
     let subject = Probe::start();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let path = directory.path().join("file");
     fs::write(&path, b"data").unwrap();
     let state = directory.path().join("state");
@@ -427,7 +441,7 @@ fn writable_state_ancestors_are_rejected_before_kernel_io() {
 #[test]
 fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
     let subject = Probe::start();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("file");
     fs::write(&protected, b"x").unwrap();
     let state = directory.path().join("state");
@@ -512,7 +526,7 @@ fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
 #[test]
 fn failed_update_preserves_old_modules_and_busy_delete_invalidates_evidence() {
     let subject = Probe::start();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("file");
     fs::write(&protected, b"x").unwrap();
     let state = directory.path().join("state");
@@ -590,7 +604,7 @@ fn preparation_rejects_edited_source_and_translation_is_deterministic() {
 #[test]
 fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
     let subject = Probe::start();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("file");
     fs::write(&protected, b"secret").unwrap();
     let state = directory.path().join("state");
@@ -642,7 +656,7 @@ fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
 
 #[test]
 fn revision_handover_uses_old_membership_after_the_original_root_is_reaped() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("file");
     fs::write(&protected, b"secret").unwrap();
     let state = directory.path().join("state");
@@ -687,12 +701,7 @@ fn lua51_template_behavior() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");
     let client = LuaLsmClient::new(Arc::new(Kernel::default()), &state);
-    let policy = pattern_binding(
-        Path::new("/work/pre*.txt"),
-        std::process::id(),
-        "write",
-        false,
-    );
+    let policy = pattern_binding(Path::new("/work/pre*.txt"), std::process::id(), "write");
     let plan = prepared(&client, &state, &policy);
     let decoded: LuaLsmPlan = serde_json::from_slice(&plan.content).unwrap();
     let views = [BTreeSet::from([asc_lua_lsm_protocol::PathView {
@@ -806,7 +815,7 @@ impl Drop for Installed<'_> {
 #[ignore = "requires a disposable host with Lua-LSM v1, root CAP_MAC_ADMIN and python3; private targets only"]
 fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
     assert!(Path::new("/sys/kernel/security/lua/register").exists());
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let protected = directory.path().join("protected");
     let alias = directory.path().join("alias");
     fs::write(&protected, b"secret").unwrap();
@@ -890,7 +899,7 @@ fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
 #[ignore = "requires a disposable host with Lua-LSM v1, root CAP_MAC_ADMIN and python3; private targets only"]
 fn live_kernel_tree_creation_exclusions_and_aliases() {
     assert!(Path::new("/sys/kernel/security/lua/register").exists());
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let tree = directory.path().join("tree");
     let excluded = tree.join("cache");
     fs::create_dir_all(&excluded).unwrap();
@@ -983,7 +992,7 @@ fn live_kernel_tree_creation_exclusions_and_aliases() {
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
 fn live_kernel_arms_missing_targets_before_first_creation() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let state = directory.path().join("state");
     let client = LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
     let mut probe = Probe::start();
@@ -1032,7 +1041,7 @@ fn live_kernel_arms_missing_targets_before_first_creation() {
 
 #[test]
 fn missing_path_requires_no_file_commands_and_dangling_symlink_reports_a_target_error() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let state = directory.path().join("state");
     let kernel = Arc::new(Kernel::default());
     let client = LuaLsmClient::new(kernel.clone(), &state);
@@ -1063,14 +1072,113 @@ fn missing_path_requires_no_file_commands_and_dangling_symlink_reports_a_target_
     );
 }
 
+fn tmpfs_test_tempdir() -> tempfile::TempDir {
+    let directory =
+        tempfile::tempdir_in("/dev/shm").expect("create a supported tmpfs fixture in /dev/shm");
+    assert_eq!(
+        rustix::fs::statfs(directory.path()).unwrap().f_type,
+        0x0102_1994,
+        "/dev/shm must be tmpfs"
+    );
+    directory
+}
+
+fn supported_test_tempdir() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    if rustix::fs::statfs(directory.path()).unwrap().f_type == 0x794c_7630 {
+        // Positive apply tests need a supported filesystem even on kernels where
+        // an overlay file has consistent stat and maps identities.
+        tmpfs_test_tempdir()
+    } else {
+        directory
+    }
+}
+
+#[test]
+fn overlay_scope_rejection_preserves_the_previous_deployment() {
+    let probe = Probe::start();
+    let dir = tempfile::tempdir().unwrap();
+    let supported = tmpfs_test_tempdir();
+    let state = dir.path().join("state");
+    let kernel = Arc::new(Kernel::default());
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    let empty = supported.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let old_binding = permission_binding(&empty, probe.child.id(), &["read"], true);
+    let old = prepared(&client, &state, &old_binding);
+    assert_eq!(client.create(&old).error, None);
+
+    let mut targets = Vec::new();
+    if rustix::fs::statfs(dir.path()).unwrap().f_type == 0x794c_7630 {
+        let tree = dir.path().join("empty");
+        fs::create_dir(&tree).unwrap();
+        targets.push((tree, true));
+        let file = dir.path().join("existing");
+        fs::write(&file, b"data").unwrap();
+        targets.push((file, false));
+        targets.push((dir.path().join("future/file"), false));
+    } else {
+        // A read-only overlay suffices to exercise pre-arming a missing file.
+        // The mount-table unit test covers rejection even on hosts without overlay.
+        let mounts = fs::read("/proc/self/mounts").unwrap();
+        for line in String::from_utf8_lossy(&mounts).lines() {
+            let mut fields = line.split_whitespace().skip(1);
+            let mount = Path::new(fields.next().unwrap());
+            if matches!(fields.next(), Some("overlay" | "overlayfs"))
+                && mount.is_dir()
+                && rustix::fs::statfs(mount).is_ok_and(|fs| fs.f_type == 0x794c_7630)
+            {
+                targets.push((mount.join(uuid::Uuid::new_v4().to_string()), false));
+                break;
+            }
+        }
+    }
+    if targets.is_empty() {
+        eprintln!(
+            "No visible overlay mount for the native mount check; the mount-table regression runs on every host."
+        );
+    }
+    for (path, tree) in targets {
+        let mut binding = permission_binding(&path, probe.child.id(), &["delete"], tree);
+        binding.binding_id = old_binding.binding_id.clone();
+        binding.binding_revision = old_binding.binding_revision.checked_next().unwrap();
+        let new = prepared(&client, &state, &binding);
+        let report = client.update(std::slice::from_ref(&old.target), &new);
+        let error = report.error.unwrap();
+        assert_eq!(error.kind, FailureKind::Rejected);
+        assert_eq!(
+            error.code,
+            "LUA_LSM_OVERLAYFS_UNSUPPORTED",
+            "{}",
+            path.display()
+        );
+        assert_eq!(report.observations[0].presence, Presence::Unknown);
+        assert!(!state.join(format!("{}.json", new.target.id)).exists());
+        eprintln!(
+            "Rejected overlay target {} before registration",
+            path.display()
+        );
+    }
+    assert!(kernel.names.lock().unwrap().contains_key(&old.target.id));
+    let calls = kernel.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| *call == "write:register")
+            .count(),
+        1
+    );
+    assert!(!calls.iter().any(|call| call == "write:unregister"));
+}
+
 fn mapping_test_tempdir() -> tempfile::TempDir {
     // The preflight joins stat and /proc/<pid>/maps by device and inode. On the
     // Linux 6.6 test host, overlayfs reported the overlay device in stat and the
     // backing device in maps. This reproduced the missing preflight error in
     // GitHub Actions job 137576531148 (expected LUA_LSM_PREEXISTING_READ_MAPPING).
     // Linux 6.8 gained the file_user_inode fix (upstream commit 3efdc78fdc21).
-    // Probe the actual filesystem to handle both kernel backports and mount
-    // differences. Keep the CI assertions active on a verified fallback.
+    // Production now rejects overlay on every kernel. On the supported fixture
+    // mount still verify the identities used by these mapping assertions.
     type Identity = (u32, u32, u64);
     let mut probe = Probe::start();
     let mut identities = |directory: &Path| {
@@ -1086,7 +1194,7 @@ fn mapping_test_tempdir() -> tempfile::TempDir {
             )
         })
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let [stat, maps] = identities(directory.path());
     if stat == maps {
         return directory;
@@ -1106,17 +1214,7 @@ fn mapping_test_tempdir() -> tempfile::TempDir {
         kernel.trim()
     );
 
-    let fallback = tempfile::tempdir_in("/dev/shm")
-        .expect("create a mapping-test directory under /dev/shm after a file identity mismatch");
-    let tmpfs_magic = 0x0102_1994;
-    assert_eq!(
-        rustix::fs::statfs(fallback.path())
-            .expect("identify the mapping-test fallback filesystem")
-            .f_type,
-        tmpfs_magic,
-        "mapping-test fallback {} must be tmpfs",
-        fallback.path().display()
-    );
+    let fallback = tmpfs_test_tempdir();
     let [stat, maps] = identities(fallback.path());
     assert_eq!(
         stat,
@@ -1226,6 +1324,91 @@ fn preexisting_mapping_preflight_rejects_before_registration_and_preserves_old_p
 }
 
 #[test]
+fn second_scan_skips_a_child_reaped_before_seeding() {
+    let directory = supported_test_tempdir();
+    let path = directory.path().join("protected");
+    fs::write(&path, b"data").unwrap();
+    let mut root = Probe::start();
+    assert_eq!(root.run("spawn-child", &path), "ok");
+    let state = directory.path().join("state");
+    let kernel = Arc::new(Kernel::default());
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    let plan = prepared(&client, &state, &binding_for_pid(&path, root.child.id()));
+    // The second scan has captured both identities and always seeds the root first.
+    let root = Arc::new(Mutex::new(root));
+    *kernel.on_root_reseed.lock().unwrap() = Some(Box::new({
+        let root = root.clone();
+        move || assert_eq!(root.lock().unwrap().run("reap-child", Path::new("-")), "ok")
+    }));
+    let report = client.create(&plan);
+    assert!(kernel.on_root_reseed.lock().unwrap().is_none());
+    assert_eq!(report.error, None);
+    assert_eq!(report.observations[0].presence, Presence::Present);
+    let calls = kernel.calls.lock().unwrap();
+    assert_eq!(calls.iter().filter(|c| *c == "bootstrap:seed").count(), 1);
+}
+
+#[test]
+fn pattern_preflight_checks_a_grandchild_reparented_after_seeding() {
+    let directory = mapping_test_tempdir();
+    let tree = directory.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    let path = tree.join("protected.txt");
+    fs::write(&path, [b's'; 4096]).unwrap();
+    for (operation, mapping, expected) in [
+        (
+            "read",
+            "holdmap-private-read",
+            "LUA_LSM_PREEXISTING_READ_MAPPING",
+        ),
+        (
+            "write",
+            "holdmap-shared-write",
+            "LUA_LSM_PREEXISTING_WRITABLE_MAPPING",
+        ),
+    ] {
+        let probe = Arc::new(Mutex::new(Probe::start()));
+        let pids = probe
+            .lock()
+            .unwrap()
+            .run(&format!("mapped-grandchild:{mapping}"), &path);
+        let (root, grandchild) = pids.split_once(' ').unwrap();
+        let root = root.parse().unwrap();
+        let grandchild = grandchild.parse().unwrap();
+        let kernel = Arc::new(Kernel::default());
+        let state = directory.path().join(operation);
+        let client = LuaLsmClient::new(kernel.clone(), &state);
+        let plan = prepared(
+            &client,
+            &state,
+            &pattern_binding(&tree.join("*.txt"), root, operation),
+        );
+        *kernel.on_first_match.lock().unwrap() = Some(Box::new({
+            let probe = probe.clone();
+            move || {
+                let mut probe = probe.lock().unwrap();
+                assert_eq!(probe.run("reparent", Path::new("-")), "reparented");
+                let status = fs::read_to_string(format!("/proc/{grandchild}/status")).unwrap();
+                assert!(
+                    status
+                        .lines()
+                        .any(|line| line == format!("PPid:\t{}", probe.child.id()))
+                );
+            }
+        }));
+        let report = client.create(&plan);
+        assert!(kernel.on_first_match.lock().unwrap().is_none());
+        assert_eq!(probe.lock().unwrap().run("finish", Path::new("-")), "ok");
+        assert!(kernel.members.lock().unwrap()[&plan.target.id].contains(&grandchild));
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code.as_str()),
+            Some(expected)
+        );
+        assert_eq!(report.observations[0].presence, Presence::Unknown);
+    }
+}
+
+#[test]
 fn preexisting_descendant_mapping_and_exclusions_follow_policy_scope() {
     let directory = mapping_test_tempdir();
     let root = directory.path().join("tree");
@@ -1270,7 +1453,7 @@ fn preexisting_descendant_mapping_and_exclusions_follow_policy_scope() {
 fn live_kernel_permissions_are_independent_for_files_and_trees() {
     for tree in [false, true] {
         for denied in ["read", "write", "delete"] {
-            let directory = tempfile::tempdir().unwrap();
+            let directory = supported_test_tempdir();
             let root = directory.path().join("tree");
             fs::create_dir(&root).unwrap();
             let path = root.join("protected");
@@ -1327,7 +1510,7 @@ fn live_kernel_permissions_are_independent_for_files_and_trees() {
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN; private targets only"]
 fn live_kernel_reads_cover_descriptor_aliases_zero_copy_and_mapping_upgrades() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let path = directory.path().join("secret");
     fs::write(&path, [b's'; 4096]).unwrap();
     let symlink = directory.path().join("symlink");
@@ -1416,7 +1599,7 @@ fn live_kernel_writes_cover_existing_descriptors_truncation_and_mapping_upgrades
         "mprotect-write",
     ];
     for tree in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = supported_test_tempdir();
         let root = directory.path().join("tree");
         fs::create_dir(&root).unwrap();
         let path = root.join("protected");
@@ -1486,7 +1669,7 @@ fn live_kernel_writes_cover_existing_descriptors_truncation_and_mapping_upgrades
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN; private targets only"]
 fn live_kernel_delete_rename_exchange_and_ancestor_stability() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let ancestor = directory.path().join("parent");
     let root = ancestor.join("tree");
     let outside = directory.path().join("outside");
@@ -1578,7 +1761,7 @@ fn live_kernel_mapping_preflight_and_failed_update_keep_old_protection() {
             "LUA_LSM_PREEXISTING_WRITABLE_MAPPING",
         ),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = supported_test_tempdir();
         let path = directory.path().join("protected");
         fs::write(&path, [b's'; 4096]).unwrap();
         let mut probe = Probe::start();
@@ -1599,7 +1782,7 @@ fn live_kernel_mapping_preflight_and_failed_update_keep_old_protection() {
         assert_eq!(report.observations[0].presence, Presence::Unknown);
         drop(installed);
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let path = directory.path().join("protected");
     fs::write(&path, [b's'; 4096]).unwrap();
     let mut probe = Probe::start();
@@ -1654,7 +1837,7 @@ fn live_kernel_mapping_preflight_and_failed_update_keep_old_protection() {
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN; private targets only"]
 fn live_kernel_existing_children_threads_exec_and_setsid_keep_subject_membership() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let path = directory.path().join("protected");
     fs::write(&path, b"secret").unwrap();
     let mut probe = Probe::start();
@@ -1699,7 +1882,7 @@ fn live_kernel_existing_children_threads_exec_and_setsid_keep_subject_membership
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN; private targets only"]
 fn live_kernel_uid_changes_preserve_protection_and_unprivileged_subject_cannot_unload() {
     use std::os::unix::fs::PermissionsExt;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
     let path = directory.path().join("protected");
     fs::write(&path, b"secret").unwrap();
@@ -1752,7 +1935,7 @@ fn live_kernel_uid_changes_preserve_protection_and_unprivileged_subject_cannot_u
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN; private targets only"]
 fn live_kernel_overlapping_bindings_keep_independent_permissions_and_cleanup() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let path = directory.path().join("protected");
     fs::write(&path, b"secret").unwrap();
     let mut probe = Probe::start();
@@ -1809,7 +1992,7 @@ fn live_kernel_overlapping_bindings_keep_independent_permissions_and_cleanup() {
 #[test]
 #[ignore = "requires root, Lua-LSM and unshare; mounts stay in a private PID/mount namespace"]
 fn live_kernel_pid_namespace_bind_aliases_and_mount_guards() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = supported_test_tempdir();
     let tree = directory.path().join("tree");
     let alias = directory.path().join("alias");
     let unrelated_source = directory.path().join("unrelated-source");
@@ -1883,52 +2066,32 @@ fn live_kernel_pid_namespace_bind_aliases_and_mount_guards() {
     assert!(!via_alias.exists());
 }
 
-fn pattern_binding(path: &Path, pid: u32, operation: &str, cedar: bool) -> PreparedBinding {
+fn pattern_binding(path: &Path, pid: u32, operation: &str) -> PreparedBinding {
     let mut binding = permission_binding(path, pid, &[operation], false);
-    if cedar {
-        let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut binding.policy.template
-        else {
-            unreachable!()
-        };
-        source.text = source
-            .text
-            .replace("resource.path == ", "resource.path like ");
-    } else {
-        let mut rule = json!({"effect":"block","category":"file",
-            "action":if operation == "read" {"read"} else {"write"},
-            "target":{"type":"file","path":path}});
-        if operation != "read" {
-            rule["where"] = json!({"operation":{"eq":operation}});
-        }
-        binding.policy.template = serde_json::from_value(
-            json!({"language":"seccore","content":{"specVersion":"0.1","rules":[rule]}}),
-        )
-        .unwrap();
-    }
+    let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut binding.policy.template
+    else {
+        unreachable!()
+    };
+    source.text = source
+        .text
+        .replace("resource.path == ", "resource.path like ");
     binding
 }
 
 #[test]
-fn both_pattern_languages_reach_preparation_with_literal_scan_roots() {
+fn cedar_pattern_reaches_preparation_with_literal_scan_root() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     let client = LuaLsmClient::new(Arc::new(Kernel::default()), &state);
-    for cedar in [true, false] {
-        let pattern = dir.path().join("*.txt");
-        let prepared = prepared(
-            &client,
-            &state,
-            &pattern_binding(&pattern, std::process::id(), "read", cedar),
-        );
-        let decoded: LuaLsmPlan = serde_json::from_slice(&prepared.content).unwrap();
-        assert_eq!(decoded.policy.targets[0].path, dir.path().to_str().unwrap());
-        assert_eq!(decoded.patterns[&0][0].value, pattern.to_str().unwrap());
-        assert!(decoded.source.contains("local function pattern_matches"));
-        assert_eq!(
-            decoded.source.contains("prefix = \"\", suffix = \".txt\""),
-            !cedar
-        );
-    }
+    let pattern = dir.path().join("*.txt");
+    let plan = prepared(
+        &client,
+        &state,
+        &pattern_binding(&pattern, std::process::id(), "read"),
+    );
+    let decoded: LuaLsmPlan = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(decoded.policy.targets[0].path, dir.path().to_str().unwrap());
+    assert_eq!(decoded.patterns[&0][0].value, pattern.to_str().unwrap());
 }
 
 #[test]
@@ -1977,87 +2140,88 @@ fn cedar_scan_scope_uses_all_conditions_in_each_branch() {
 
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
-fn live_kernel_glob_and_cedar_like_permissions() {
-    for (cedar, pattern, nested_matches) in [
-        (false, "s*.txt", false),
-        (false, "s?.txt", false),
-        (false, "**/s?.txt", true),
-        (true, "s*.txt", true),
-    ] {
-        for op in ["read", "write", "delete"] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().join("files");
-            fs::create_dir_all(root.join("sub")).unwrap();
-            let path = root.join("s1.txt");
-            let alias = directory.path().join("outside");
-            fs::write(&path, b"data").unwrap();
-            fs::hard_link(&path, &alias).unwrap();
-            let nested = root.join("sub/s2.txt");
-            fs::write(&nested, b"data").unwrap();
-            let other = root.join("other.txt");
-            fs::write(&other, b"data").unwrap();
-            let mut probe = Probe::start();
-            let state = directory.path().join("state");
-            let client =
-                LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
-            let plan = prepared(
-                &client,
-                &state,
-                &pattern_binding(&root.join(pattern), probe.child.id(), op, cedar),
-            );
-            let _installed = Installed {
-                client: &client,
-                targets: vec![plan.target.clone()],
-            };
-            assert_eq!(client.create(&plan).error, None);
-            assert_eq!(probe.run(op, &path), "errno=1", "{op} {pattern}");
-            assert_eq!(probe.run(op, &alias), "ok");
+fn live_kernel_cedar_like_permissions() {
+    let pattern = "s*.txt";
+    for op in ["read", "write", "delete"] {
+        let directory = supported_test_tempdir();
+        let root = directory.path().join("files");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let path = root.join("s1.txt");
+        let alias = directory.path().join("outside");
+        fs::write(&path, b"data").unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        let nested = root.join("sub/s2.txt");
+        fs::write(&nested, b"data").unwrap();
+        let other = root.join("other.txt");
+        fs::write(&other, b"data").unwrap();
+        let mut probe = Probe::start();
+        let state = directory.path().join("state");
+        let client = LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
+        let plan = prepared(
+            &client,
+            &state,
+            &pattern_binding(&root.join(pattern), probe.child.id(), op),
+        );
+        let _installed = Installed {
+            client: &client,
+            targets: vec![plan.target.clone()],
+        };
+        assert_eq!(client.create(&plan).error, None);
+        let subdir = root.join("sub");
+        let outside = directory.path().join("outside-file");
+        fs::write(&outside, b"outside").unwrap();
+        for (from, to) in [(&outside, &subdir), (&subdir, &outside)] {
             assert_eq!(
-                probe.run(op, &nested),
-                if nested_matches { "errno=1" } else { "ok" }
+                probe.run(&format!("exchange:{}", to.display()), from),
+                "errno=1",
+                "{op} {pattern}: exchange {} and {}",
+                from.display(),
+                to.display()
             );
-            assert_eq!(probe.run(op, &other), "ok");
-            let incoming = root.join("incoming.log");
-            fs::write(&incoming, b"incoming").unwrap();
-            let link = root.join("s5.txt");
-            let add_link = format!("link:{}", link.display());
-            if op == "delete" {
-                assert_eq!(probe.run(&add_link, &incoming), "ok");
-                assert_eq!(probe.run("delete", &link), "errno=1");
-                assert_eq!(probe.run("delete", &incoming), "ok");
-            } else {
-                assert_eq!(probe.run(&add_link, &incoming), "errno=1");
-                assert_eq!(
-                    probe.run(&format!("rename:{}", link.display()), &incoming),
-                    "errno=1"
-                );
-            }
+            assert_eq!(fs::read(&nested).unwrap(), b"data");
+            assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        }
+        assert_eq!(probe.run(op, &path), "errno=1", "{op} {pattern}");
+        assert_eq!(probe.run(op, &alias), "ok");
+        assert_eq!(probe.run(op, &nested), "errno=1");
+        assert_eq!(probe.run(op, &other), "ok");
+        let incoming = root.join("incoming.log");
+        fs::write(&incoming, b"incoming").unwrap();
+        let link = root.join("s5.txt");
+        let add_link = format!("link:{}", link.display());
+        if op == "delete" {
+            assert_eq!(probe.run(&add_link, &incoming), "ok");
+            assert_eq!(probe.run("delete", &link), "errno=1");
+            assert_eq!(probe.run("delete", &incoming), "ok");
+        } else {
+            assert_eq!(probe.run(&add_link, &incoming), "errno=1");
             assert_eq!(
-                probe.run(
-                    &format!("rename:{}", root.join("relocated").display()),
-                    &root.join("sub")
-                ),
+                probe.run(&format!("rename:{}", link.display()), &incoming),
                 "errno=1"
             );
-            let created = root.join("s3.txt");
-            fs::write(&created, b"new").unwrap();
-            assert_eq!(probe.run(op, &created), "errno=1");
-            let late = root.join("sub-new");
-            fs::create_dir(&late).unwrap();
-            let late = late.join("s4.txt");
-            fs::write(&late, b"new").unwrap();
-            assert_eq!(
-                probe.run(op, &late),
-                if nested_matches { "errno=1" } else { "ok" }
-            );
         }
+        assert_eq!(
+            probe.run(
+                &format!("rename:{}", root.join("relocated").display()),
+                &root.join("sub")
+            ),
+            "errno=1"
+        );
+        let created = root.join("s3.txt");
+        fs::write(&created, b"new").unwrap();
+        assert_eq!(probe.run(op, &created), "errno=1");
+        let late = root.join("sub-new");
+        fs::create_dir(&late).unwrap();
+        let late = late.join("s4.txt");
+        fs::write(&late, b"new").unwrap();
+        assert_eq!(probe.run(op, &late), "errno=1");
     }
 }
 
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
 fn live_kernel_pattern_preflight_uses_lua_matches_and_inode_identity() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = supported_test_tempdir();
     let root = dir.path().join("files");
     fs::create_dir(&root).unwrap();
     let protected = root.join("secret.txt");
@@ -2072,7 +2236,7 @@ fn live_kernel_pattern_preflight_uses_lua_matches_and_inode_identity() {
     let plan = prepared(
         &client,
         &state,
-        &pattern_binding(&root.join("*.txt"), probe.child.id(), "read", true),
+        &pattern_binding(&root.join("*.txt"), probe.child.id(), "read"),
     );
     let _installed = Installed {
         client: &client,
@@ -2093,7 +2257,7 @@ fn live_kernel_pattern_preflight_uses_lua_matches_and_inode_identity() {
 #[test]
 #[ignore = "requires a disposable Lua-LSM host and root CAP_MAC_ADMIN"]
 fn live_kernel_like_keeps_literal_wildcards_and_exclusions() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = supported_test_tempdir();
     let root = dir.path().join("data");
     fs::create_dir_all(root.join("nested")).unwrap();
     let mut probe = Probe::start();

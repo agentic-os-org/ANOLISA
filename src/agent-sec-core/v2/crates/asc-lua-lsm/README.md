@@ -50,6 +50,9 @@ Production code follows the same Translator/protocol/Client split as AgentSight:
 daemon uses the concrete crates directly. The internal plan is not a kernel ABI:
 `register` receives Lua source, and `unregister` receives the module name.
 
+Lua-LSM accepts only Cedar policies. A native SecCore template is rejected during
+translation with `LUA_LSM_CEDAR_REQUIRED`.
+
 One template implements independent read, ordinary-write and delete protection
 for exact regular files, directory trees and path patterns, with target-owned
 exclusions. Unsupported policy constructs reject the entire translation. The
@@ -66,10 +69,8 @@ has its own enforcement contract. A write policy requires 18 recognized hooks,
 including the path hooks for directory entries and both truncate hooks. A kernel
 missing required hooks cannot confirm a deployment.
 
-Native file rules accept `*` and `?` within one path component and a whole
-`**` component across zero or more directories. For example, `/data/*.txt`
-covers `/data/a.txt`; `/data/**/*.txt` also covers `/data/nested/a.txt`.
-In a Cedar rule, `resource.path like "/data/*.txt"` covers both files:
+The Cedar condition `resource.path like "/data/*.txt"` covers both
+`/data/a.txt` and `/data/nested/a.txt`.
 Cedar's star spans separators, its question mark is literal, and `\*` is a
 literal star. For `resource.path like "/data/*" && resource.path like "*.txt"`,
 the Lua-LSM Translator scans `/data` and Lua evaluates both predicates. Each
@@ -79,7 +80,14 @@ matches its current path, including newly created entries and files that replace
 an earlier object at the same name. Exact exclusions apply only to that entry.
 Subtree exclusions also cover its descendants.
 
-For example, blocking writes to `/work/secrets/**` covers
+Deployment rejects an overlayfs target or an overlayfs submount inside a protected
+tree with `LUA_LSM_OVERLAYFS_UNSUPPORTED`. This applies to empty directories and
+all file operations. For a missing target, the nearest existing ancestor determines
+the mount. A separate tmpfs mount inside an overlay root can still be protected.
+The check applies on every kernel because existing mappings on some overlayfs
+mounts report a different device and inode from the target path.
+
+For example, blocking writes with `resource.path like "/work/secrets/*"` covers
 `/work/secrets/key` even after the kernel evicts and reloads its inode.
 An existing hard link at `/tmp/key` does not prevent deployment. Reads, writes
 and unlink through that outside name are outside the protection guarantee.
@@ -89,9 +97,7 @@ process may also be denied when creating a new hard link across the boundary.
 The Client resolves existing symlinks in the target or its ancestors at
 registration. A dangling target symlink is rejected. Redeploy after retargeting
 a symlink. A new symlink inside a tree does not pull an external referent into
-scope. Native `/**` uses a directory prefix with a component boundary.
-Single-component prefix/suffix globs compare the basename. Cedar `like` compares
-ordered literal fragments. Other native globs use the component matcher.
+scope. Cedar `like` compares ordered literal fragments.
 Each pattern allows up to 4,096 bytes and 64 unescaped wildcards.
 
 Mixed Cedar Bindings share one validated PST: the selected file Translator consumes
@@ -128,7 +134,13 @@ The template binds `current` to the module environment before reading task
 properties. File and directory inodes carry no policy state.
 
 Mapping preflight matches `/proc/<pid>/maps` device/inode identities against the
-included files, across the initial family and old-module members during updates.
+included files. During a first deployment, the final check covers surviving processes
+seen in either scan, including descendants seen in the first scan and later reparented
+outside the tree. The client keeps the initial snapshot in memory for that deployment
+attempt. A descendant that leaves the tree before either scan sees it and has no
+membership label can remain unprotected even when the Binding reaches `Ready`.
+Keep the process tree stable during first deployment when all descendants must be
+protected. Updates check members of the old module.
 Read protection rejects existing file mappings, including private and PROT_NONE
 mappings. Write protection rejects existing shared writable mappings. Inspection
 failures block deployment. Existing writable FDs and shared read-only mappings are
@@ -169,6 +181,12 @@ before unregister. Template changes require a new revision or explicit cleanup.
   original root. Lost kernel ownership cannot be reconstructed from a reused PID.
   Concurrent fork/exit behavior has deterministic fixture coverage; sustained
   kernel stress and namespace combinations remain unverified.
+- **Known issue with PID reuse.** During deployment or membership transfer, Lua
+  labels existing descendants by PID. If the PID is reused after SecCore checks
+  the process identity, Lua can label an unrelated task. A failed identity check
+  after labeling leaves the label in place, so the Binding can restrict that task
+  and its future children. Resolving this requires a Lua-LSM API to verify the
+  expected process instance on the same task object that receives the label.
 - Moves and new links that cross read/write scopes, directory moves involving
   filters, and mount operations over protected entries or their ancestors may
   be denied conservatively.
@@ -210,8 +228,8 @@ The recorded live runs used the earlier template.
 Before production acceptance, add user-namespace, chroot/pivot_root and more mount-operation tests;
 cross-Binding exclusions/overlapping trees, replacement and deep/non-ASCII paths;
 fork/exit/mapping/update races; live audit/runtime-error evidence; and a complete
-packaged systemd deployment and restart test. Filesystem variants such as overlayfs,
-tmpfs and network filesystems need separate acceptance. Lua callback/VM faults
+packaged systemd deployment and restart test. Filesystem variants such as tmpfs
+and network filesystems need separate acceptance. Lua callback/VM faults
 outside the template retain the kernel's existing failure behavior.
 
 ## Verification and rollback
@@ -219,7 +237,7 @@ outside the template retain the kernel's existing failure behavior.
 From `src/agent-sec-core/v2`:
 
 ```sh
-cargo test -p asc-lua-lsm -p asc-policy-translator-agentsight
+cargo test -p asc-lua-lsm -p asc-lua-lsm-client -p asc-policy-translator-agentsight
 LUA_BIN=/path/to/lua5.1 cargo test -p asc-lua-lsm lua51_template_behavior -- --ignored
 ```
 
@@ -227,9 +245,10 @@ Rust tests cover request bytes, errors, update ordering and restart evidence.
 Local procfs regressions also check mapped descendants, file/tree identities,
 outside hard-link mappings and excluded mappings without modifying kernel state.
 `tests/template.lua` runs in Ubuntu CI with Lua 5.1 and mocked kernel objects,
-including native glob and Cedar matching. Repository and daemon tests cover
+including Cedar path matching. Repository and daemon tests cover
 root-exit cleanup and recovery. Native enforcement is tested manually on a
-disposable kernel host with the following command.
+disposable kernel host with the following command. Set `TMPDIR` to a writable
+non-overlay filesystem that allows execution for the native exec and mmap tests.
 
 ```sh
 cargo test -p asc-lua-lsm live_kernel_ -- --ignored --test-threads=1

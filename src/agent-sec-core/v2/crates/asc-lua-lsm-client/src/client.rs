@@ -168,7 +168,7 @@ impl LuaLsmClient {
                 return Err(rejected("LUA_LSM_UNSUPPORTED_HOOK_SET"));
             }
             let controls = self.directory.join(&prepared.target.id);
-            let instance = if registered {
+            let confirmation = if registered {
                 // A name alone does not expose LIVE state or identify the source.
                 let record = self
                     .read_confirmation(&prepared.target)
@@ -178,18 +178,26 @@ impl LuaLsmClient {
                             && valid_instance(&record.instance)
                     })
                     .ok_or_else(|| retryable("LUA_LSM_EXISTING_MODULE_UNCONFIRMED"))?;
-                if record.initialized {
-                    return Ok(());
-                }
-                record.instance
+                Some(record)
             } else {
-                uuid::Uuid::new_v4().simple().to_string()
+                None
             };
             if fs::read_link("/proc/self").map_err(local_error)?
                 != Path::new(&std::process::id().to_string())
             {
                 return Err(rejected("LUA_LSM_PROCFS_VIEW_MISMATCH"));
             }
+            let views = file_targets::path_views(&plan)?;
+            if confirmation
+                .as_ref()
+                .is_some_and(|record| record.initialized)
+            {
+                return Ok(());
+            }
+            let instance = confirmation.map_or_else(
+                || uuid::Uuid::new_v4().simple().to_string(),
+                |record| record.instance,
+            );
             let family = if previous.is_empty() {
                 verify_process(&plan.process)?;
                 process_family(&plan.process)?
@@ -208,7 +216,6 @@ impl LuaLsmClient {
                 instance,
             };
             if !registered {
-                let views = file_targets::path_views(&plan)?;
                 let source = render_module_with_views(&plan, &self.directory, &views);
                 if source.len() > MAX_BYTES {
                     return Err(rejected("LUA_LSM_MODULE_SIZE_LIMIT"));
@@ -233,7 +240,7 @@ impl LuaLsmClient {
                     return Err(retryable("LUA_LSM_REGISTRATION_UNCONFIRMED"));
                 }
             }
-            self.label_existing_processes(&plan.process, &controls, family)?;
+            self.label_existing_processes(&plan.process, &controls, &family)?;
             let matches = |index, pinned: &File| match self
                 .request(&controls, &format!("match/{index}/{}", pinned.as_raw_fd()))
             {
@@ -255,7 +262,12 @@ impl LuaLsmClient {
             if previous.is_empty() {
                 // Catch children born after the initial snapshot but before
                 // their parent's membership was installed. Later forks inherit.
-                self.label_current_process_tree(&controls, &plan.process, &mapping_preflight)?;
+                self.label_current_process_tree(
+                    &controls,
+                    &plan.process,
+                    &mapping_preflight,
+                    family,
+                )?;
                 verify_process(&plan.process)?;
             }
             record.initialized = true;
@@ -310,7 +322,12 @@ impl LuaLsmClient {
         }
         if owners.is_empty() {
             verify_process(&plan.process)?;
-            return self.label_current_process_tree(controls, &plan.process, mapping_preflight);
+            return self.label_current_process_tree(
+                controls,
+                &plan.process,
+                mapping_preflight,
+                Vec::new(),
+            );
         }
         for process in process_tasks()? {
             for owner in &owners {

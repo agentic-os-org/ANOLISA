@@ -55,6 +55,39 @@ def mapping_identities(path: str) -> list[tuple[int, int, int]]:
     raise RuntimeError(f"No /proc/self/maps entry for the probe file {path!r}")
 
 
+def mapped_grandchild(operation: str, path: str) -> None:
+    # This probe adopts the grandchild outside the Binding root and reaps it.
+    checked(libc.prctl(36, 1, 0, 0, 0))  # PR_SET_CHILD_SUBREAPER
+    release_parent, exit_parent = os.pipe()
+    release_family, finish = os.pipe()
+    root = os.fork()
+    if root == 0:
+        os.close(exit_parent)
+        os.close(finish)
+        root_pid = os.getpid()
+        parent = os.fork()
+        if parent == 0:
+            if os.fork() == 0:
+                execute(operation, path)
+                print(root_pid, os.getpid(), flush=True)
+                os.read(release_family, 1)
+            else:
+                os.read(release_parent, 1)
+            os._exit(0)
+        os.waitpid(parent, 0)
+        print("reparented", flush=True)
+        os.read(release_family, 1)
+        os._exit(0)
+    os.close(release_parent)
+    os.close(release_family)
+    sys.stdin.readline()
+    os.close(exit_parent)
+    sys.stdin.readline()
+    os.close(finish)
+    os.waitpid(root, 0)
+    os.wait()
+
+
 def execute(operation: str, path: str) -> None:
     global held, mapping, existing_child
     if operation in ("hold", "hold-rw"):
@@ -239,6 +272,10 @@ for line in sys.stdin:
         existing_child.stdin.write(path + "\n")
         existing_child.stdin.flush()
         assert existing_child.stdout.readline().strip() == "ok"
+    elif operation == "reap-child":
+        existing_child.stdin.close()
+        assert existing_child.wait() == 0
+        existing_child = None
     elif operation == "existing-child-read":
         existing_child.stdin.write(path + "\n")
         existing_child.stdin.flush()
@@ -284,7 +321,10 @@ for line in sys.stdin:
             os._exit(0)
         continue
     try:
-        if op == "mapping-identities":
+        if op.startswith("mapped-grandchild:"):
+            mapped_grandchild(op.split(":", 1)[1], target)
+            print("ok", flush=True)
+        elif op == "mapping-identities":
             print(json.dumps(mapping_identities(target)), flush=True)
         else:
             execute(op, target)

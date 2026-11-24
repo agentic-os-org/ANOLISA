@@ -4,12 +4,14 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use asc_file_policy::FileProtectionTargetKind;
 use asc_lua_lsm_protocol::{LuaLsmPlan, PathView};
 use asc_policy_types::target::Failure;
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, StatxFlags};
 
 use super::{local_error, rejected, retryable, verify_process};
 
@@ -38,10 +40,107 @@ pub(super) fn resolve_target(path: &Path) -> Result<Option<PathBuf>, Failure> {
 }
 
 struct Mount {
+    id: u64,
     device: Vec<u8>,
     root: PathBuf,
     point: PathBuf,
     filesystem: String,
+}
+
+impl Mount {
+    fn is_overlay(&self) -> bool {
+        matches!(self.filesystem.as_str(), "overlay" | "overlayfs")
+    }
+}
+
+struct MountView {
+    root: OwnedFd,
+    mounts: Vec<Mount>,
+}
+
+impl MountView {
+    fn read(proc: &Path) -> Result<Self, Failure> {
+        let unavailable = || retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE");
+        let root = rustix::fs::open(
+            proc.join("root"),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| unavailable())?;
+        let mounts = mounts(&fs::read(proc.join("mountinfo")).map_err(|_| unavailable())?)
+            .ok_or_else(unavailable)?;
+        Ok(Self { root, mounts })
+    }
+
+    fn checked_type(&self, fd: &OwnedFd) -> Result<FileType, Failure> {
+        let required = StatxFlags::MNT_ID | StatxFlags::TYPE;
+        let stat = rustix::fs::statx(fd, "", AtFlags::EMPTY_PATH, required)
+            .map_err(|e| target_error(e.into()))?;
+        if stat.stx_mask & required.bits() != required.bits() {
+            return Err(retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"));
+        }
+        let containing = self
+            .mounts
+            .iter()
+            .find(|m| m.id == stat.stx_mnt_id)
+            .ok_or_else(|| retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"))?;
+        if containing.is_overlay() {
+            return Err(rejected("LUA_LSM_OVERLAYFS_UNSUPPORTED"));
+        }
+        Ok(FileType::from_raw_mode(u32::from(stat.stx_mode)))
+    }
+
+    fn reject_overlay(&self, path: &Path, tree: bool) -> Result<(), Failure> {
+        // Resolve absolute symlinks against this process's root. For a future
+        // target its nearest existing ancestor determines the mount.
+        for ancestor in path.ancestors() {
+            let open = |flags| {
+                rustix::fs::openat2(
+                    &self.root,
+                    ancestor,
+                    OFlags::PATH | OFlags::CLOEXEC | flags,
+                    Mode::empty(),
+                    ResolveFlags::IN_ROOT,
+                )
+            };
+            // Entry hooks also protect a final symlink itself. A symlink in a
+            // missing target's parent path only selects the backing directory.
+            let flags = if ancestor == path {
+                OFlags::NOFOLLOW
+            } else {
+                OFlags::empty()
+            };
+            let mut fd = match open(flags) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(error) => return Err(target_error(error.into())),
+            };
+            if self.checked_type(&fd)? == FileType::Symlink {
+                fd = open(OFlags::empty()).map_err(|e| target_error(e.into()))?;
+                self.checked_type(&fd)?;
+            }
+            if tree && ancestor == path {
+                // mountinfo paths are relative to the subject's root. Resolve the
+                // directory first so symlink spellings include the same submounts.
+                let fd_path = |fd: &OwnedFd| {
+                    fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).map_err(target_error)
+                };
+                let root = fd_path(&self.root)?;
+                let directory = fd_path(&fd)?;
+                let relative = directory
+                    .strip_prefix(root)
+                    .map_err(|_| retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"))?;
+                let canonical = Path::new("/").join(relative);
+                if self.mounts.iter().any(|m| {
+                    m.is_overlay() && m.point != canonical && m.point.starts_with(&canonical)
+                }) {
+                    return Err(rejected("LUA_LSM_OVERLAYFS_UNSUPPORTED"));
+                }
+            }
+            return Ok(());
+        }
+        Err(retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"))
+    }
 }
 
 fn unescape(field: &[u8]) -> Option<PathBuf> {
@@ -69,7 +168,8 @@ fn mounts(bytes: &[u8]) -> Option<Vec<Mount>> {
         .filter(|line| !line.is_empty())
         .map(|line| {
             let mut fields = line.split(|&b| b == b' ');
-            let device = fields.nth(2)?.to_vec();
+            let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+            let device = fields.nth(1)?.to_vec();
             let root = unescape(fields.next()?)?;
             let point = unescape(fields.next()?)?;
             fields.find(|&field| field == b"-")?;
@@ -80,6 +180,7 @@ fn mounts(bytes: &[u8]) -> Option<Vec<Mount>> {
                 .next()?
                 .to_owned();
             Some(Mount {
+                id,
                 device,
                 root,
                 point,
@@ -192,15 +293,12 @@ fn views_for_target(
 }
 
 pub(super) fn path_views(plan: &LuaLsmPlan) -> Result<Vec<BTreeSet<PathView>>, Failure> {
-    let unavailable = || retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE");
-    let host = mounts(&fs::read("/proc/self/mountinfo").map_err(|_| unavailable())?)
-        .ok_or_else(unavailable)?;
+    let host = MountView::read(Path::new("/proc/self"))?;
     // Updates can transfer surviving members after their original root exits.
-    let subject = if verify_process(&plan.process).is_ok() {
-        let bytes =
-            fs::read(format!("/proc/{}/mountinfo", plan.process.pid)).map_err(|_| unavailable())?;
+    let subject = if super::process_tree::same_process(&plan.process)? {
+        let view = MountView::read(&PathBuf::from(format!("/proc/{}", plan.process.pid)))?;
         verify_process(&plan.process)?;
-        Some(mounts(&bytes).ok_or_else(unavailable)?)
+        Some(view)
     } else {
         None
     };
@@ -211,11 +309,25 @@ pub(super) fn path_views(plan: &LuaLsmPlan) -> Result<Vec<BTreeSet<PathView>>, F
             let authored = Path::new(&target.path);
             let tree = target.kind == FileProtectionTargetKind::DirectoryTree;
             let canonical = canonical_target(authored, tree)?;
-            let subject = subject.as_deref().unwrap_or(&host);
-            let mut views = views_for_target(authored, &canonical, tree, &host, subject)?;
+            host.reject_overlay(authored, tree)?;
+            let subject_mounts = subject.as_ref().map_or(&host.mounts, |view| &view.mounts);
+            let mut views =
+                views_for_target(authored, &canonical, tree, &host.mounts, subject_mounts)?;
             if canonical != authored {
                 // Unlink and overwrite operate on the symlink entry itself.
-                views.extend(views_for_target(authored, authored, tree, &host, subject)?);
+                views.extend(views_for_target(
+                    authored,
+                    authored,
+                    tree,
+                    &host.mounts,
+                    subject_mounts,
+                )?);
+            }
+            if let Some(subject) = &subject {
+                subject.reject_overlay(authored, tree)?;
+                for view in views.iter().filter(|view| view.filesystem.is_none()) {
+                    subject.reject_overlay(&view.base, tree)?;
+                }
             }
             Ok(views)
         })
@@ -225,6 +337,50 @@ pub(super) fn path_views(plan: &LuaLsmPlan) -> Result<Vec<BTreeSet<PathView>>, F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_rejection_uses_the_resolved_mount_and_directory_submounts() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir(fixture.path().join("tree")).unwrap();
+        fs::write(fixture.path().join("file"), b"data").unwrap();
+        std::os::unix::fs::symlink("/tree", fixture.path().join("alias")).unwrap();
+        let root = rustix::fs::open(fixture.path(), OFlags::PATH, Mode::empty()).unwrap();
+        let id = rustix::fs::statx(&root, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
+            .unwrap()
+            .stx_mnt_id;
+        let table = format!("{id} 0 0:1 / / rw - overlay none rw\n");
+        let mut view = MountView {
+            root,
+            mounts: mounts(table.as_bytes()).unwrap(),
+        };
+        for (path, tree) in [
+            ("/file", false),
+            ("/tree", true),
+            ("/future/secret", false),
+            ("/future/tree", true),
+        ] {
+            assert_eq!(
+                view.reject_overlay(Path::new(path), tree).unwrap_err().code,
+                "LUA_LSM_OVERLAYFS_UNSUPPORTED",
+                "{path}"
+            );
+        }
+
+        // An overlaid parent with a supported mount on top is also reported in
+        // mountinfo. Only the ID returned for the opened target is authoritative.
+        let table = format!(
+            "1 0 0:9 / / rw - overlay none rw\n{id} 1 0:1 / / rw - tmpfs none rw\n3 {id} 0:3 / /tree/sub rw - overlayfs none rw\n"
+        );
+        view.mounts = mounts(table.as_bytes()).unwrap();
+        assert!(view.reject_overlay(Path::new("/file"), false).is_ok());
+        assert!(view.reject_overlay(Path::new("/future/tree"), true).is_ok());
+        for tree in ["/tree", "/alias"] {
+            assert_eq!(
+                view.reject_overlay(Path::new(tree), true).unwrap_err().code,
+                "LUA_LSM_OVERLAYFS_UNSUPPORTED"
+            );
+        }
+    }
 
     #[test]
     fn mount_relative_entries_and_visible_bind_aliases_project_to_authored_paths() {
