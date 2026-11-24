@@ -1,8 +1,8 @@
 // Approval cards must disclose repo-embedded hook execution for the git family.
 use crate::tools::command_risk::is_high_risk_explanation;
 use crate::tools::{
-    assess_shell_command, AssessmentPolicy, AssessmentSource, CommandAssessment, ExecutionDecision,
-    RiskImpact,
+    assess_shell_command, launcher_walk_count, reset_launcher_walk_count, AssessmentPolicy,
+    AssessmentSource, CommandAssessment, ExecutionDecision, RiskImpact,
 };
 
 const DISCLOSURE: &str = "git-repo-config-execution";
@@ -315,6 +315,170 @@ fn issue_9514_pipeline_env_assignment_discloses() {
         }
     }
     assert_disclosed_both_modes("LANG=C git diff");
+}
+
+#[test]
+fn issue_10499_plumbing_patch_and_signature_forms_disclose() {
+    for command in [
+        "git diff-tree -p HEAD",
+        "git diff-tree --no-commit-id --name-only -r HEAD",
+        "git diff-index --cached HEAD",
+        "git diff-files -p",
+        "git verify-tag v1.0.0",
+        "git verify-commit HEAD",
+    ] {
+        assert_disclosed_both_modes(command);
+    }
+}
+
+#[test]
+fn issue_10499_carried_escalated_command_keeps_privilege_primary() {
+    for command in [
+        "su -c 'git diff'",
+        "su -c \"git status --short\"",
+        "sudo su -c 'git log -p'",
+    ] {
+        for assessment in [auto(command), ask(command)] {
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+            assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+            assert_eq!(
+                assessment.reasons.first().copied(),
+                Some("privilege-escalation"),
+                "{command}: {:?}",
+                assessment.reasons
+            );
+            assert!(
+                assessment.reasons.contains(&DISCLOSURE),
+                "{command}: {:?}",
+                assessment.reasons
+            );
+        }
+    }
+}
+
+#[test]
+fn issue_10499_carried_interpreter_command_discloses() {
+    // An unescalated interpreter carrier has no stronger explanation of
+    // its own, so the git capability takes the card primary slot.
+    for command in [
+        "sh -c 'git diff'",
+        "bash -c 'git log -p'",
+        "dash -c 'git status --short'",
+    ] {
+        assert_disclosed_both_modes(command);
+    }
+}
+
+#[test]
+fn issue_10499_carried_rest_command_takes_card_priority() {
+    for command in [
+        "eval 'git diff'",
+        "eval 'echo ok; git status --short'",
+        "eval 'git diff-tree -p HEAD'",
+    ] {
+        assert_disclosed_both_modes(command);
+    }
+}
+
+#[test]
+fn issue_10499_carried_command_pipeline_discloses() {
+    for command in ["su -c 'git diff' | head", "sh -c 'git diff' | head"] {
+        for assessment in [auto(command), ask(command)] {
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+            assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+            assert!(
+                assessment.reasons.contains(&DISCLOSURE),
+                "{command}: {:?}",
+                assessment.reasons
+            );
+        }
+    }
+}
+
+#[test]
+fn issue_10499_nested_carrier_disclosure_stays_bounded() {
+    // Disclosure may walk the launcher chain once per carrier level. Judging
+    // the carried command inside every disclosure step re-ran the whole
+    // recursive walk per level, so an 800-deep 4KB carrier chain stalled the
+    // approval card for tens of seconds (#10499 review). Count walker
+    // invocations instead of wall-clock time so the bound is deterministic.
+    const DEPTH: usize = 800;
+    // Every carrier level costs a classifier stack frame; give the probe its
+    // own stack instead of the 2 MiB test-thread default.
+    let (disclosed, disclosed_assessment, disclosed_walks, opaque, opaque_assessment, opaque_walks) =
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let disclosed = format!("{}git diff", "eval ".repeat(DEPTH));
+                reset_launcher_walk_count();
+                let disclosed_assessment = ask(&disclosed);
+                let disclosed_walks = launcher_walk_count();
+
+                // The cost came from disclosure alone, so a Git-free chain
+                // must stay bounded too.
+                let opaque = format!("{}:", "eval ".repeat(DEPTH));
+                reset_launcher_walk_count();
+                let opaque_assessment = ask(&opaque);
+                let opaque_walks = launcher_walk_count();
+                (
+                    disclosed,
+                    disclosed_assessment,
+                    disclosed_walks,
+                    opaque,
+                    opaque_assessment,
+                    opaque_walks,
+                )
+            })
+            .expect("spawn nested-carrier probe")
+            .join()
+            .expect("nested-carrier probe panicked");
+
+    assert_disclosed(&disclosed_assessment, &disclosed);
+    assert!(
+        disclosed_walks <= 3 * DEPTH,
+        "{disclosed_walks} walker invocations for {DEPTH} carriers"
+    );
+    assert_eq!(
+        opaque_assessment.execution,
+        ExecutionDecision::AskUser,
+        "{opaque}"
+    );
+    assert!(
+        opaque_walks <= 3 * DEPTH,
+        "{opaque_walks} walker invocations for {DEPTH} carriers"
+    );
+}
+
+#[test]
+fn issue_10499_unknown_global_flag_keeps_generic_approval() {
+    // git itself rejects an unknown global flag (exit 129, nothing runs),
+    // so the classifier must not invent the git disclosure for it while
+    // still keeping the command behind approval.
+    for command in [
+        "git --not-a-real-global-flag diff",
+        "git --bogus-flags diff-tree -p HEAD",
+    ] {
+        for assessment in [auto(command), ask(command)] {
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+            assert!(
+                !assessment.reasons.contains(&DISCLOSURE),
+                "{command}: {:?}",
+                assessment.reasons
+            );
+        }
+    }
 }
 
 #[test]

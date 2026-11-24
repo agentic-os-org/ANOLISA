@@ -1,17 +1,22 @@
 //! Capability-based disclosure of git subcommands that can execute
 //! repo-embedded config: diff.external, textconv, fsmonitor, sshCommand,
 //! signature verification (log/shortlog, ref listing sort/format atoms,
-//! tag/commit verification), and object reads that lazy-fetch from the
-//! repo-configured remote in partial clones.
+//! tag/commit verification, verify-tag/verify-commit), plumbing patch
+//! generation (diff-tree/diff-index/diff-files), and object reads that
+//! lazy-fetch from the repo-configured remote in partial clones.
 use super::command_risk::{
     insert_structural_reason, AssessmentConfidence, RiskImpact, StageAssessment,
 };
 use super::command_risk_build::basename;
-use super::command_risk_parser::is_env_assignment;
+use super::command_risk_launcher::{launcher_payload, LauncherPayload};
+use super::command_risk_parser::{is_env_assignment, parse_command};
 use super::readonly_interceptor::interceptor_payload_for_assessment;
 
 const GIT_REPO_CONFIG_SUBCOMMANDS: &[&str] = &[
     "diff",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
     "show",
     "blame",
     "describe",
@@ -24,6 +29,8 @@ const GIT_REPO_CONFIG_SUBCOMMANDS: &[&str] = &[
     "stash",
     "branch",
     "tag",
+    "verify-tag",
+    "verify-commit",
     "for-each-ref",
     "name-rev",
     "rev-parse",
@@ -139,7 +146,7 @@ pub(super) fn disclose_stage_git_repo_config(
     stage: &mut StageAssessment,
     tokens: &[String],
 ) -> bool {
-    match git_repo_config_reason(tokens) {
+    match launcher_git_repo_config_reason(tokens) {
         Some(reason) => {
             stage.impact = RiskImpact::High;
             stage.confidence = AssessmentConfidence::High;
@@ -148,4 +155,31 @@ pub(super) fn disclose_stage_git_repo_config(
         }
         None => false,
     }
+}
+
+/// Reason for a stage that may sit behind launchers, including the
+/// command string an inline-code carrier holds (`su -c 'git diff'`,
+/// `sh -c 'git diff'`, `eval …`). The launcher walk decides where the
+/// payload lives; a carried command is parsed again and every segment
+/// and pipeline stage is checked, so `eval 'echo ok; git status'`
+/// discloses like the naked command.
+pub(super) fn launcher_git_repo_config_reason(tokens: &[String]) -> Option<&'static str> {
+    match launcher_payload(tokens) {
+        Some(LauncherPayload::Program(offset)) => git_repo_config_reason(&tokens[offset..]),
+        Some(LauncherPayload::Carried(command)) => carried_git_repo_config_reason(&command),
+        None => git_repo_config_reason(tokens),
+    }
+}
+
+fn carried_git_repo_config_reason(command: &str) -> Option<&'static str> {
+    let parsed = parse_command(command);
+    let segments: Vec<&[Vec<String>]> = if parsed.segments.is_empty() {
+        vec![parsed.stages.as_slice()]
+    } else {
+        parsed.segments.iter().map(Vec::as_slice).collect()
+    };
+    segments
+        .into_iter()
+        .flatten()
+        .find_map(|stage| launcher_git_repo_config_reason(stage))
 }

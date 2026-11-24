@@ -6,8 +6,7 @@ use super::command_risk_build::{
     max_output_stability, min_confidence, network_download_effect,
 };
 use super::command_risk_compound::{assess_stripped_compound, compound_segments, finalize_complex};
-use super::command_risk_git::{disclose_stage_git_repo_config, git_repo_config_reason};
-use super::command_risk_launcher::launcher_payload_offset;
+use super::command_risk_git::{disclose_stage_git_repo_config, launcher_git_repo_config_reason};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
 use super::command_risk_pipeline::assess_pipeline;
 use super::command_risk_verdict::high_risk_program_assessment;
@@ -228,10 +227,7 @@ pub(super) fn assess_simple_command(
         &program,
         command_tokens,
     ) {
-        let payload = launcher_payload_offset(command_tokens)
-            .map(|offset| &command_tokens[offset..])
-            .unwrap_or(command_tokens);
-        if let Some(reason) = git_repo_config_reason(payload) {
+        if let Some(reason) = launcher_git_repo_config_reason(command_tokens) {
             high.impact = RiskImpact::High;
             insert_structural_reason(&mut high.reasons, reason);
         }
@@ -288,10 +284,7 @@ pub(super) fn assess_simple_command(
         );
     }
 
-    let payload = launcher_payload_offset(command_tokens)
-        .map(|offset| &command_tokens[offset..])
-        .unwrap_or(command_tokens);
-    disclose_stage_git_repo_config(&mut stage, payload);
+    disclose_stage_git_repo_config(&mut stage, command_tokens);
     finalize_simple(policy, command, parsed.shape, stage, None)
 }
 

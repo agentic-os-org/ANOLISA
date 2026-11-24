@@ -11,6 +11,8 @@ mod command_risk_parser;
 mod command_risk_pipeline;
 #[cfg(test)]
 mod command_risk_tests;
+#[cfg(test)]
+pub(crate) use command_risk_launcher::{launcher_walk_count, reset_launcher_walk_count};
 mod command_risk_verdict;
 pub mod display;
 pub(crate) mod guarded_diagnostic;

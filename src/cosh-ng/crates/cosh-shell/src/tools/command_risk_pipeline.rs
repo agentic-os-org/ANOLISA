@@ -12,8 +12,8 @@ use super::command_risk_build::{
     interpreter_consumes_stdin_as_program, max_output_exposure, max_output_stability,
     min_confidence, network_download_effect,
 };
-use super::command_risk_git::{disclose_stage_git_repo_config, git_repo_config_reason};
-use super::command_risk_launcher::{launcher_payload_offset, walk_launcher_chain, LauncherWalk};
+use super::command_risk_git::{disclose_stage_git_repo_config, launcher_git_repo_config_reason};
+use super::command_risk_launcher::{walk_launcher_chain, LauncherWalk};
 use super::command_risk_parser::{is_env_assignment, ParsedCommand};
 use super::command_risk_verdict::launcher_walk_verdict;
 use super::is_sensitive_target;
@@ -65,10 +65,7 @@ pub(super) fn assess_pipeline(
                 }
                 side_effects.extend(effects);
                 reasons.extend(stage_reasons);
-                let payload = launcher_payload_offset(stage_tokens)
-                    .map(|offset| &stage_tokens[offset..])
-                    .unwrap_or(stage_tokens);
-                if let Some(reason) = git_repo_config_reason(payload) {
+                if let Some(reason) = launcher_git_repo_config_reason(stage_tokens) {
                     insert_structural_reason(&mut reasons, reason);
                     git_family_present = true;
                 }
@@ -93,10 +90,7 @@ pub(super) fn assess_pipeline(
             downloaded_files.extend(output_files);
         }
         let mut stage = stage_assessment(&program, stage_tokens);
-        let payload = launcher_payload_offset(stage_tokens)
-            .map(|offset| &stage_tokens[offset..])
-            .unwrap_or(stage_tokens);
-        git_family_present |= disclose_stage_git_repo_config(&mut stage, payload);
+        git_family_present |= disclose_stage_git_repo_config(&mut stage, stage_tokens);
         impact = impact.max(stage.impact);
         confidence = min_confidence(confidence, stage.confidence);
         output_stability = max_output_stability(output_stability, stage.output_stability);

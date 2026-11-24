@@ -561,16 +561,55 @@ fn tokens_carry_inline_code_flag(tokens: &[String], spec: &LauncherSpec) -> bool
 /// high-risk program nor a known launcher — the caller's existing path
 /// applies unchanged.
 pub(super) fn walk_launcher_chain(tokens: &[String]) -> Option<LauncherWalk> {
-    walk_launcher_chain_inner(tokens).map(|(walk, _)| walk)
+    walk_launcher_chain_inner(tokens, classify_carried_command).map(|(walk, _)| walk)
 }
 
-/// Payload program offset for classification-only disclosure; `None` when the
-/// chain ends in a carried command, query form, or unresolved step.
-pub(super) fn launcher_payload_offset(tokens: &[String]) -> Option<usize> {
-    walk_launcher_chain_inner(tokens).and_then(|(_, offset)| offset)
+/// Where the walker found the payload: a program token offset, or the
+/// command string an inline-code carrier holds.
+pub(super) enum LauncherPayload {
+    Program(usize),
+    Carried(String),
 }
 
-fn walk_launcher_chain_inner(tokens: &[String]) -> Option<(LauncherWalk, Option<usize>)> {
+/// Payload location for classification-only disclosure, resolved without
+/// judging the carried command. Disclosure only needs to know where the
+/// payload sits, and classifying it here again re-ran the full recursive
+/// walk at every nesting level, so traversal work grew cubically in carrier
+/// depth (#10499 review).
+pub(super) fn launcher_payload(tokens: &[String]) -> Option<LauncherPayload> {
+    // The placeholder verdict is discarded: neither the payload nor the
+    // walk's control flow depends on how the carried command classifies.
+    walk_launcher_chain_inner(tokens, |_, escalated| LauncherWalk::Other {
+        escalated,
+        high: None,
+    })
+    .and_then(|(_, payload)| payload)
+}
+
+// Test-only walker invocation count: the nested-carrier regression asserts
+// traversal work stays bounded in carrier depth, a signal wall-clock timing
+// cannot pin down.
+#[cfg(test)]
+thread_local! {
+    static LAUNCHER_WALK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_launcher_walk_count() {
+    LAUNCHER_WALK_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn launcher_walk_count() -> usize {
+    LAUNCHER_WALK_COUNT.with(std::cell::Cell::get)
+}
+
+fn walk_launcher_chain_inner(
+    tokens: &[String],
+    classify_payload: impl Fn(&str, bool) -> LauncherWalk,
+) -> Option<(LauncherWalk, Option<LauncherPayload>)> {
+    #[cfg(test)]
+    LAUNCHER_WALK_COUNT.with(|count| count.set(count.get() + 1));
     let start = tokens.iter().position(|token| !is_env_assignment(token))?;
     let mut index = start;
     let mut escalated = false;
@@ -585,7 +624,10 @@ fn walk_launcher_chain_inner(tokens: &[String]) -> Option<(LauncherWalk, Option<
             // Whole-machine systemctl invocations outrank the generic
             // service-control entry from `high_risk_program` (#2064).
             if systemctl_targets_machine(program, &tokens[index + 1..]) {
-                return Some((LauncherWalk::SystemControl { escalated }, Some(index)));
+                return Some((
+                    LauncherWalk::SystemControl { escalated },
+                    Some(LauncherPayload::Program(index)),
+                ));
             }
             let high = high_risk_program(program);
             // Only a zero-link chain (direct high-risk program) or a
@@ -601,7 +643,7 @@ fn walk_launcher_chain_inner(tokens: &[String]) -> Option<(LauncherWalk, Option<
                     }
                     high => LauncherWalk::Other { escalated, high },
                 },
-                Some(index),
+                Some(LauncherPayload::Program(index)),
             ));
         };
         if SHELL_CARRIER_PROGRAMS.contains(&program)
@@ -638,7 +680,8 @@ fn walk_launcher_chain_inner(tokens: &[String]) -> Option<(LauncherWalk, Option<
                 // pipeline stages, and nested launchers — not just its
                 // first word, which would let `sh -c 'echo ok; reboot'`
                 // hide the payload behind a benign prefix (#2064).
-                return Some((classify_carried_command(&command, escalated), None));
+                let walk = classify_payload(&command, escalated);
+                return Some((walk, Some(LauncherPayload::Carried(command))));
             }
             ChainStep::Query => {
                 return Some((
