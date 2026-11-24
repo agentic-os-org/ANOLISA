@@ -178,7 +178,9 @@ pub async fn run_login(
 mod tests {
     use super::super::client::TEST_IDENTITY_ENDPOINT;
     use super::super::store::{OAuthSecretBackend, OAuthStore};
-    use super::super::test_support::{http_response, success_credentials, OAuthFixture};
+    use super::super::test_support::{
+        error_envelope, http_response, success_credentials, OAuthFixture,
+    };
     use super::*;
     use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -532,6 +534,43 @@ mod tests {
             Err(OAuthError::InvalidResponse)
         ));
         assert!(harness.store.read_state().unwrap().active.is_none());
+    }
+
+    #[tokio::test]
+    async fn first_issue_not_activated_delivers_no_login_and_asks_new_challenge() {
+        let _serial = PORT_LOCK.lock().await;
+        let fixture = OAuthFixture::start().await;
+        *fixture.credentials_response.lock().await = http_response(
+            "200 OK",
+            &error_envelope("Sysom.Identity.SysomNotActivated"),
+        );
+        *fixture.client_id.lock().await = super::contract::expected_client_id()
+            .unwrap_or("4038181954510891234")
+            .to_string();
+        let harness = harness(&fixture).await;
+        let login = tokio::spawn(run_login(
+            harness.client.clone(),
+            harness.store.clone(),
+            harness.opener.clone(),
+            LoginParams::default(),
+            harness.rx.clone(),
+        ));
+        let url = wait_for_open(&harness).await;
+        browser_callback(
+            CALLBACK_PORT,
+            &format!("state={}&code=code-1", state_of(&url)),
+        )
+        .await;
+        assert!(matches!(
+            login.await.unwrap(),
+            Err(OAuthError::SysomNotActivated)
+        ));
+        let state = harness.store.read_state().unwrap();
+        assert!(
+            state.active.is_none(),
+            "not-activated first issue must not deliver a login"
+        );
+        assert!(!state.selected);
     }
 
     #[tokio::test]

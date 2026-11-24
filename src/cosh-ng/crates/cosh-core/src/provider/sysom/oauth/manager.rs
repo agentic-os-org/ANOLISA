@@ -221,7 +221,9 @@ mod tests {
     use super::super::client::TEST_IDENTITY_ENDPOINT;
     use super::super::contract::OAuthError;
     use super::super::store::{OAuthSecretBackend, OAuthStore};
-    use super::super::test_support::{error_envelope, http_response, OAuthFixture};
+    use super::super::test_support::{
+        error_envelope, http_response, success_credentials, OAuthFixture,
+    };
     use super::*;
     use std::sync::Mutex as StdMutex;
 
@@ -455,6 +457,48 @@ mod tests {
         assert_eq!(
             harness.store.load_refresh(4).unwrap().as_deref(),
             Some("refresh-canary")
+        );
+    }
+
+    #[tokio::test]
+    async fn not_activated_renewal_keeps_selection_and_recovers_after_fix() {
+        let fixture = OAuthFixture::start().await;
+        *fixture.credentials_response.lock().await = http_response(
+            "200 OK",
+            &error_envelope("Sysom.Identity.SysomNotActivated"),
+        );
+        let harness = harness(&fixture, 4).await;
+        assert!(matches!(
+            harness.manager.ensure().await,
+            Err(OAuthError::SysomNotActivated)
+        ));
+        let state = harness.store.read_state().unwrap();
+        assert!(
+            state.selected,
+            "not-activated must keep the OAuth selection"
+        );
+        assert_eq!(
+            state.active.as_ref().unwrap().generation,
+            4,
+            "not-activated must keep the current login (only PermissionDenied clears)"
+        );
+        assert_eq!(
+            harness.store.load_refresh(4).unwrap().as_deref(),
+            Some("refresh-canary")
+        );
+        *fixture.credentials_response.lock().await =
+            http_response("200 OK", &success_credentials(900, false));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let lease = harness
+            .manager
+            .ensure()
+            .await
+            .expect("after activation fix the original refresh must exchange again");
+        assert_eq!(lease.generation, 4);
+        assert_eq!(
+            harness.store.load_refresh(4).unwrap().as_deref(),
+            Some("refresh-canary"),
+            "recovery reuses the same refresh token"
         );
     }
 

@@ -195,8 +195,18 @@ pub(crate) fn poll<W: Write>(
                 if let Some(auth) = state.auth.state.as_mut() {
                     auth.sysom.refresh_oauth("oauth_needs_login");
                 }
+                set_status(state, failure_hint(&code));
+            } else if code == "Sysom.Identity.SysomNotActivated" {
+                set_status(
+                    state,
+                    format!(
+                        "{}\n开通或修复服务关联角色后，请重新发起登录（将使用新的 challenge）。",
+                        crate::ui::trial_layout::activation_guidance(state.language)
+                    ),
+                );
+            } else {
+                set_status(state, failure_hint(&code));
             }
-            set_status(state, failure_hint(&code));
         }
     }
     redraw(state, output)
