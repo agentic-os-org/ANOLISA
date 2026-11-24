@@ -68,7 +68,7 @@ class CoverageReports(unittest.TestCase):
         outside = Path(self.temp.name) / "external.rs"
         outside.write_text("fn external() {}")
         for source in (outside, self.component / "missing.rs"):
-            with self.subTest(source=source):
+            with self.subTest(source=str(source)):
                 self.write_report(self.component, source)
                 with self.assertRaises(ValueError):
                     normalize_report(self.report, self.component)
