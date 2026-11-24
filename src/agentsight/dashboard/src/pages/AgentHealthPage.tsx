@@ -417,7 +417,7 @@ const AgentCard: React.FC<{
     if (seeded) void loadProtectionDefaults().catch(() => undefined);
   };
 
-  const applyProtection = async (sourcePaths?: string[]) => {
+  const applyProtection = async (sourcePaths?: string[], trustedEndpoints?: string[]) => {
     const selected = sourcePaths ?? sources;
     if (selected.length === 0) {
       setShowProtection(true);
@@ -434,7 +434,7 @@ const AgentCard: React.FC<{
         agent_id: agent.agent_name,
         root_pid: agent.pid,
         source_paths: selected,
-        trusted_endpoints: trustedTarget.trim() ? [trustedTarget.trim()] : [],
+        trusted_endpoints: trustedEndpoints ?? (trustedTarget.trim() ? [trustedTarget.trim()] : []),
         revision: Date.now(),
         mode: 'audit',
         taint_ttl_secs: 900,
@@ -474,7 +474,9 @@ const AgentCard: React.FC<{
     setDirectory(defaultProtectionDir(agent.workspace_path));
     try {
       const preview = await loadProtectionDefaults();
-      await applyProtection(preview.source_paths);
+      // React state updates do not refresh this activation's closure. Use the
+      // complete preview rather than a previous (possibly cancelled) draft.
+      await applyProtection(preview.source_paths, preview.trusted_endpoints ?? []);
     } catch (error: any) {
       addToast(`无法生成默认策略: ${error.message ?? '请检查 Agent 工作目录'}`);
     } finally {
