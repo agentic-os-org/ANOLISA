@@ -150,10 +150,7 @@ impl SkillStore {
                         let dir_name = name.to_string();
                         adopt_directory_name(&mut entry, &dir_name);
                         info!(name = %dir_name, "loaded skill");
-                        if let Some(error) = self.insert_discovered(entry, "") {
-                            errors.push(error);
-                        }
-                        loaded_count += 1;
+                        self.record_discovered(entry, "", &mut loaded_count, &mut errors);
                     }
                     Err(e) => {
                         errors.push(LoadError {
@@ -167,6 +164,24 @@ impl SkillStore {
 
         info!(count = loaded_count, "finished loading skills");
         errors
+    }
+
+    /// Record one parsed skill and advance `loaded_count` only when the
+    /// unique skill map actually gains a new key.
+    fn record_discovered(
+        &mut self,
+        entry: SkillEntry,
+        category: &str,
+        loaded_count: &mut usize,
+        errors: &mut Vec<LoadError>,
+    ) {
+        let prev_len = self.skills.len();
+        if let Some(error) = self.insert_discovered(entry, category) {
+            errors.push(error);
+        }
+        if self.skills.len() > prev_len {
+            *loaded_count += 1;
+        }
     }
 
     /// Insert a discovered skill, reporting a same-key collision.
@@ -368,10 +383,7 @@ impl SkillStore {
                     let dir_name = name.to_string();
                     adopt_directory_name(&mut entry, &dir_name);
                     info!(name = %dir_name, category = %cat_name, "loaded skill");
-                    if let Some(error) = self.insert_discovered(entry, cat_name) {
-                        errors.push(error);
-                    }
-                    *loaded_count += 1;
+                    self.record_discovered(entry, cat_name, loaded_count, &mut errors);
                 }
                 Err(e) => {
                     errors.push(LoadError {
@@ -1726,6 +1738,53 @@ mod tests {
         assert_eq!(store.len(), 1, "the first skill still loads");
         assert_eq!(errors.len(), 1, "the second skill still errors");
         assert!(errors[0].error.contains("max skills"));
+    }
+
+    #[test]
+    fn record_discovered_does_not_count_duplicate_collisions_against_max_skills() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for (cat, content) in [("alpha", "first"), ("beta", "second")] {
+            let dir = temp_dir.path().join(cat).join("notes");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: notes\ndescription: {content}\n---\n"),
+            )
+            .unwrap();
+        }
+        let solo = temp_dir.path().join("solo");
+        std::fs::create_dir_all(&solo).unwrap();
+        std::fs::write(
+            solo.join("SKILL.md"),
+            "---\nname: solo\ndescription: unique\n---\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        let first =
+            parser::parse_skill_file(&temp_dir.path().join("alpha/notes/SKILL.md")).unwrap();
+        let dup = parser::parse_skill_file(&temp_dir.path().join("beta/notes/SKILL.md")).unwrap();
+        let mut loaded_count = 0;
+        let mut direct_errors = Vec::new();
+        store.record_discovered(first, "alpha", &mut loaded_count, &mut direct_errors);
+        store.record_discovered(dup, "beta", &mut loaded_count, &mut direct_errors);
+        assert_eq!(
+            loaded_count, 1,
+            "duplicate collision must not consume a budget slot"
+        );
+        assert_eq!(direct_errors.len(), 1);
+        assert!(direct_errors[0].error.contains("duplicate skill name"));
+
+        let mut full_store = SkillStore::new();
+        let errors = full_store.load_from_directory(temp_dir.path(), &limit_config(2));
+        assert_eq!(
+            full_store.len(),
+            2,
+            "both unique skills load under max_skills=2"
+        );
+        assert!(full_store.get("notes").is_some());
+        assert!(full_store.get("solo").is_some());
+        assert_eq!(errors.len(), 1, "expected 1 error, got: {errors:?}");
     }
 
     #[cfg(target_os = "linux")]
