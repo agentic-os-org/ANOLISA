@@ -1,0 +1,85 @@
+name: CI / Shared release changes
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/*-prebuilt-ci.yaml'
+      - '.github/workflows/release-prebuilt-scope.yml'
+      - '.github/scripts/select_release_prebuilt.py'
+      - '.github/scripts/test_select_release_prebuilt.py'
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/*-prebuilt-ci.yaml'
+      - '.github/workflows/release-prebuilt-scope.yml'
+      - '.github/scripts/select_release_prebuilt.py'
+      - '.github/scripts/test_select_release_prebuilt.py'
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      components: ${{ steps.select.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the workflow parser
+        run: sudo apt-get install -y python3-yaml
+      - name: Check release routing
+        run: /usr/bin/python3 -B .github/scripts/test_select_release_prebuilt.py
+      - name: Select additional component checks
+        id: select
+        run: /usr/bin/python3 -B .github/scripts/select_release_prebuilt.py
+
+  agent-memory:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'agent-memory')
+    uses: ./.github/workflows/agent-memory-prebuilt-ci.yaml
+
+  agentsight:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'agentsight')
+    uses: ./.github/workflows/agentsight-prebuilt-ci.yaml
+
+  anolisa:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'anolisa')
+    uses: ./.github/workflows/anolisa-prebuilt-ci.yaml
+
+  cosh-ng:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'cosh-ng')
+    uses: ./.github/workflows/cosh-ng-prebuilt-ci.yaml
+
+  os-skills:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'os-skills')
+    uses: ./.github/workflows/os-skills-prebuilt-ci.yaml
+
+  sec-core:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'sec-core')
+    uses: ./.github/workflows/sec-core-prebuilt-ci.yaml
+
+  skillfs:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'skillfs')
+    uses: ./.github/workflows/skillfs-prebuilt-ci.yaml
+
+  tokenless:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'tokenless')
+    uses: ./.github/workflows/tokenless-prebuilt-ci.yaml
+
+  ws-ckpt:
+    needs: scope
+    if: contains(fromJSON(needs.scope.outputs.components), 'ws-ckpt')
+    uses: ./.github/workflows/ws-ckpt-prebuilt-ci.yaml

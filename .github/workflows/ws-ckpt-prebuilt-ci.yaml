@@ -7,7 +7,6 @@ on:
       - '.github/actions/build-ws-ckpt-prebuilt/**'
       - '.github/actions/prebuilt-rust-common/**'
       - '.github/workflows/ws-ckpt-prebuilt-ci.yaml'
-      - '.github/workflows/release.yaml'
       - '.github/workflows/release-preview.yaml'
       - 'src/ws-ckpt/**'
       - 'distribution/anolisa/manifests/components/ws-ckpt/**'
@@ -17,10 +16,10 @@ on:
       - '.github/actions/build-ws-ckpt-prebuilt/**'
       - '.github/actions/prebuilt-rust-common/**'
       - '.github/workflows/ws-ckpt-prebuilt-ci.yaml'
-      - '.github/workflows/release.yaml'
       - '.github/workflows/release-preview.yaml'
       - 'src/ws-ckpt/**'
       - 'distribution/anolisa/manifests/components/ws-ckpt/**'
+  workflow_call:
   workflow_dispatch:
 
 permissions:
