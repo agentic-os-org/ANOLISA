@@ -877,8 +877,8 @@ function renderCausalPanel() {
   });
   assert.equal(driver.slots[0].value, '', 'slot 0 must be the complaint field');
   assert.equal(driver.slots[3].value, null, 'slot 3 must be caseData');
-  rendered.effects[0](); // mount: load this (session, round)'s history
-  return { calls, driver, panel, rendered, ApiRequestError, navigations };
+  const cleanup = rendered.effects[0](); // mount: load this (session, round)'s history
+  return { calls, driver, panel, rendered, ApiRequestError, navigations, cleanup };
 }
 
 test('causal attribution survives storage being denied before mount or after a run', async () => {
@@ -2673,3 +2673,94 @@ test('system audit: a case filter change re-queries the list from the first page
   assert.equal(lastQuery().blocked, undefined, 'cleared: no blocked flag is sent');
   assert.equal(lastQuery().offset, 0, 'the cleared query must start from the first page');
 });
+
+for (const navigation of ['clear', 'select']) {
+  for (const outcome of ['success', 'failure']) {
+    test(`causal history ${navigation} retires a pending run's ${outcome}`, async () => {
+      const previousWindow = global.window;
+      const key = 'agentsight.causal.history.v2:session:sess-1:r0';
+      const saved = { complaint: 'saved complaint', ranAt: '2026-01-01T00:00:00Z',
+        caseData: { id: 'saved', title: 'Saved verdict', nodes: [], edges: [], outcome: 'pass' } };
+      const storage = new Map([[key, JSON.stringify([saved])]]);
+      const timers = new Map();
+      let nextTimer = 0;
+      try {
+        global.window = {
+          confirm: () => true,
+          setInterval(fn) { timers.set(++nextTimer, fn); return nextTimer; },
+          clearInterval(id) { timers.delete(id); },
+          localStorage: { getItem: (k) => storage.get(k), setItem: (k, v) => storage.set(k, v),
+            removeItem: (k) => storage.delete(k) },
+        };
+        const { driver, panel, calls } = renderCausalPanel();
+        const render = () => driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 }).element;
+        driver.slots[0].setter('new complaint');
+        const runButton = findNode(render(), (n) => n.type === 'button' && n.children?.includes('发起归因'));
+        const pending = runButton.props.onClick();
+        assert.equal(calls.runCausalAttribution.length, 1);
+        const action = findNode(render(), (n) => n.type === 'button'
+          && (navigation === 'clear' ? n.children?.includes('清空历史')
+            : elementText(n).join('').includes('Saved verdict')));
+        assert.ok(action && !action.props.disabled, 'history navigation is available during a run');
+        action.props.onClick({ preventDefault() {} });
+        if (outcome === 'success') calls.runCausalAttribution[0].resolve({
+          case: { id: 'obsolete', nodes: [], edges: [], outcome: 'fail' }, cached: false,
+        });
+        else calls.runCausalAttribution[0].reject(new Error('obsolete attribution failure'));
+        await pending;
+        assert.equal(driver.slots[3].value?.id ?? null, navigation === 'clear' ? null : 'saved');
+        assert.equal(driver.slots[0].value, navigation === 'clear' ? '' : saved.complaint);
+        assert.equal(driver.slots[2].value, null);
+        assert.equal(driver.slots[1].value, false);
+        assert.equal(timers.size, 0);
+        assert.equal(storage.get(key), navigation === 'clear' ? undefined : JSON.stringify([saved]));
+      } finally {
+        if (previousWindow === undefined) delete global.window;
+        else global.window = previousWindow;
+      }
+    });
+  }
+}
+
+for (const outcome of ['success', 'failure']) {
+  test(`causal navigation lets a new run own its timer despite an old ${outcome}`, async () => {
+    const previousWindow = global.window;
+    const storage = new Map();
+    const timers = new Set();
+    let timerId = 0;
+    try {
+      global.window = { confirm: () => true,
+        setInterval() { timers.add(++timerId); return timerId; },
+        clearInterval(id) { timers.delete(id); },
+        localStorage: { getItem: key => storage.get(key), setItem: (k, v) => storage.set(k, v),
+          removeItem: key => storage.delete(key) } };
+      const { driver, panel, calls, cleanup } = renderCausalPanel();
+      const render = () => driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 }).element;
+      const saved = { complaint: 'saved', ranAt: '2026-01-01', caseData: { id: 'saved', nodes: [], edges: [] } };
+      driver.slots[5].setter([saved]);
+      driver.slots[0].setter('old');
+      const start = () => findNode(render(), n => n.type === 'button' && n.children?.includes('发起归因')).props.onClick();
+      const old = start();
+      findNode(render(), n => n.type === 'button' && n.children?.includes('清空历史')).props.onClick({ preventDefault() {} });
+      assert.equal(timers.size, 0, 'navigation immediately stops the obsolete progress timer');
+      driver.slots[0].setter('new');
+      const fresh = start();
+      assert.equal(calls.runCausalAttribution.length, 2, 'new run is available without waiting for the old response');
+      if (outcome === 'success') calls.runCausalAttribution[0].resolve({ case: saved.caseData, cached: false });
+      else calls.runCausalAttribution[0].reject(new Error('old failure'));
+      await old;
+      assert.equal(driver.slots[1].value, true, 'obsolete finally cannot clear the new loading state');
+      assert.equal(driver.slots[2].value, null);
+      assert.equal(timers.size, 1, 'new progress timer stays active');
+      // Leaving the panel must also retire writes from the newest run.
+      cleanup?.();
+      calls.runCausalAttribution[1].resolve({ case: { ...saved.caseData, id: 'new' }, cached: false });
+      await fresh;
+      assert.equal(storage.size, 0, 'unmounted run must not recreate cleared history');
+      assert.equal(timers.size, 0);
+    } finally {
+      if (previousWindow === undefined) delete global.window;
+      else global.window = previousWindow;
+    }
+  });
+}
