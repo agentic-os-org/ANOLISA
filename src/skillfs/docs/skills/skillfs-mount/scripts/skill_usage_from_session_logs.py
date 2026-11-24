@@ -326,7 +326,7 @@ def analyze_all_sessions(logs_dir: Path) -> dict:
         if not sessions_dir.exists():
             continue
 
-        session_files = list(sessions_dir.glob("*.jsonl"))
+        session_files = [path for path in sessions_dir.glob("*.jsonl") if path.is_file()]
         print(f"Analyzing agent '{agent_id}': {len(session_files)} session files")
 
         for session_file in session_files:
