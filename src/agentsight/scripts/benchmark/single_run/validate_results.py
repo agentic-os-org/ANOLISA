@@ -62,16 +62,27 @@ def load_capacity_rejected_events(
     attributed to the measured run.
     """
     current = _capacity_rejected_series(path)
-    if not current:
+    if current is None:
         return None
     if baseline is None:
-        logging.warning(
-            "No capacity-rejection baseline snapshot; capacity_rejected_events is unavailable"
-        )
+        if current:
+            logging.warning(
+                "No capacity-rejection baseline snapshot; capacity_rejected_events is unavailable"
+            )
         return None
     previous = _capacity_rejected_series(baseline)
     if previous is None:
-        logging.warning("Cannot read capacity-rejection baseline: %s", baseline)
+        if current:
+            logging.warning("Cannot read capacity-rejection baseline: %s", baseline)
+        return None
+    for key in sorted(previous):
+        if previous[key] > 0 and key not in current:
+            logging.warning(
+                "Capacity rejection series missing from final snapshot for %s; run attribution is unavailable",
+                dict(key),
+            )
+            return None
+    if not current:
         return None
     total = 0
     for key, value in current.items():
