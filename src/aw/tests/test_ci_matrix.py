@@ -1,6 +1,7 @@
 """Exercise omitted coverage, ignored tests and script size limits without Cargo."""
 
 import copy
+import io
 import json
 import unittest
 from pathlib import Path
@@ -10,11 +11,16 @@ from test_ci_checks import GateFixture, gate
 from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
 from check_matrix import (
+    AW_PRODUCED_EVENTS,
     CAPABILITY_DOCS,
+    COVERAGE_END,
+    COVERAGE_EVENTS,
+    COVERAGE_START,
     END,
     HOOK_EVENTS,
     START,
     capability_cells,
+    coverage_table,
     main,
     table,
     validate,
@@ -113,7 +119,10 @@ class MatrixTests(GateFixture):
         for name in CAPABILITY_DOCS:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
+            path.write_text(
+                f"{START}\n{table(self.matrix)}\n{END}\n\n"
+                f"{COVERAGE_START}\n{coverage_table(self.matrix)}\n{COVERAGE_END}\n"
+            )
 
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
@@ -203,14 +212,35 @@ class MatrixTests(GateFixture):
         runnable[self.matrix["required_targets"][0]] = set()
         with self.assertRaisesRegex(ValueError, "target is missing or empty"):
             validate(self.matrix, runnable, self.root)
+        valid_grid = f"{START}\n{table(self.matrix)}\n{END}\n"
+        valid_coverage = f"{COVERAGE_START}\n{coverage_table(self.matrix)}\n{COVERAGE_END}\n"
         for name in CAPABILITY_DOCS:
             path = self.root / name
             original = path.read_text()
             for text, error in (
-                (f"{START}\nstale\n{END}\n", "update the grid"),
-                ("no generated table", "missing unique matrix markers"),
-                (original + original, "missing unique matrix markers"),
-                (f"<details>\n{original}</details>\n", "keep the Hook grid expanded"),
+                (f"{START}\nstale\n{END}\n{valid_coverage}", "update the grid"),
+                (f"no generated table\n{valid_coverage}", "missing unique matrix markers"),
+                (valid_grid + valid_grid + valid_coverage, "missing unique matrix markers"),
+                (f"<details>\n{valid_grid}</details>\n{valid_coverage}", "keep the Hook grid expanded"),
+                (
+                    f"<details>\n<details>inner</details>\n{valid_grid}</details>\n{valid_coverage}",
+                    "keep the Hook grid expanded",
+                ),
+                (f"{valid_grid}{COVERAGE_START}\nstale\n{COVERAGE_END}\n", "update the coverage grid"),
+                (valid_grid, "missing unique coverage markers"),
+                (valid_grid + valid_coverage + valid_coverage, "missing unique coverage markers"),
+                (
+                    f"{valid_grid}<details>\n{valid_coverage}</details>\n",
+                    "keep the Hook coverage grid expanded",
+                ),
+                (
+                    f"{valid_grid}<details>\n<details>inner</details>\n{valid_coverage}</details>\n",
+                    "keep the Hook coverage grid expanded",
+                ),
+                (
+                    f"{valid_grid}<details>\n<!-- </details> -->\n{valid_coverage}</details>\n",
+                    "keep the Hook coverage grid expanded",
+                ),
             ):
                 with self.subTest(document=name, content=text), self.assertRaisesRegex(
                     ValueError, error
@@ -223,7 +253,10 @@ class MatrixTests(GateFixture):
         (self.root / "tests").mkdir()
         (self.root / "tests/regression-matrix.json").write_text(json.dumps(self.matrix))
         for name in CAPABILITY_DOCS:
-            (self.root / name).write_text(f"intro\n{START}\nstale\n{END}\nfooter\n")
+            (self.root / name).write_text(
+                f"intro\n{START}\nstale\n{END}\nmiddle\n"
+                f"{COVERAGE_START}\nstale\n{COVERAGE_END}\nfooter\n"
+            )
         with patch("check_matrix.__file__", str(self.root / "scripts/check_matrix.py")), patch(
             "sys.argv", ["check_matrix.py", "--write-docs"]
         ):
@@ -232,8 +265,43 @@ class MatrixTests(GateFixture):
         for name in CAPABILITY_DOCS:
             self.assertEqual(
                 (self.root / name).read_text(),
-                f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
+                f"intro\n{START}\n{table(self.matrix)}\n{END}\nmiddle\n"
+                f"{COVERAGE_START}\n{coverage_table(self.matrix)}\n{COVERAGE_END}\nfooter\n",
             )
+
+    def test_coverage_table_lists_13_agent_hooks_and_excludes_aw_produced_events(self) -> None:
+        self.assertEqual(len(COVERAGE_EVENTS), 13)
+        for event in AW_PRODUCED_EVENTS:
+            self.assertNotIn(event, COVERAGE_EVENTS)
+        rendered = coverage_table(self.matrix)
+        lines = rendered.splitlines()
+        header_columns = [cell.strip() for cell in lines[0].strip("|").split("|")]
+        self.assertEqual(header_columns[0], "Agent")
+        self.assertEqual(header_columns[1:], [f"`{event}`" for event in COVERAGE_EVENTS])
+        for event in AW_PRODUCED_EVENTS:
+            self.assertNotIn(event, rendered)
+        self.assertEqual(len(lines), 2 + len(self.matrix["agents"]))
+        rows_by_agent = {}
+        for line in lines[2:]:
+            cols = [cell.strip() for cell in line.strip("|").split("|")]
+            rows_by_agent[cols[0].strip("`")] = dict(zip(COVERAGE_EVENTS, cols[1:]))
+        self.assertEqual(list(rows_by_agent), sorted(self.matrix["agents"]))
+        self.assertEqual(rows_by_agent["qoder"]["tool.before"], "o b ri")
+        self.assertEqual(rows_by_agent["qoder"]["tool.after"], "o rr")
+        self.assertEqual(rows_by_agent["qoder"]["permission.request"], "×")
+        self.assertEqual(rows_by_agent["deepseek-harness"]["security.violation"], "o b")
+        self.assertEqual(rows_by_agent["openclaw"]["input.submit"], "×")
+
+        stdout = io.StringIO()
+        with patch("sys.argv", ["check_matrix.py", "--coverage"]), patch("sys.stdout", stdout):
+            main()
+        self.assertEqual(stdout.getvalue(), rendered + "\n")
+
+        for pair in (["--write-docs", "--coverage"], ["--coverage", "--cells-json"]):
+            with self.subTest(flags=pair), patch(
+                "sys.argv", ["check_matrix.py", *pair]
+            ), self.assertRaises(SystemExit):
+                main()
 
     def test_structured_16_hook_capability_cells_match_schemas_and_reject_unknown_hooks(self) -> None:
         config_schema = json.loads(

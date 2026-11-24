@@ -18,9 +18,9 @@ pub mod startup;
 mod version;
 
 pub use adapter::{
-    block_reason, select, Adapter, HookEvent, HookOutput, InstallOptions, LaunchContext,
-    LaunchFiles, LaunchInput, LaunchPlan, NativeContext, NativeOptions, PreparedLaunch, Readiness,
-    OBSERVE_STEP,
+    block_reason, coverage_cells, select, Adapter, HookEvent, HookOutput, InstallOptions,
+    LaunchContext, LaunchFiles, LaunchInput, LaunchPlan, NativeContext, NativeOptions,
+    PreparedLaunch, Readiness, OBSERVE_STEP,
 };
 
 pub use adapters::hermes::prepare_gateway as prepare_hermes_gateway;

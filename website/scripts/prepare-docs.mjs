@@ -1,5 +1,8 @@
 import {copyFile, mkdir, readFile, rm, stat, writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import remarkGfm from 'remark-gfm';
+import remarkParse from 'remark-parse';
+import {unified} from 'unified';
 import {
   exists,
   generatedDir,
@@ -149,18 +152,49 @@ async function rewriteLinks(markdown, source) {
   return output;
 }
 
+// MDX treats indented prose as paragraphs and uses explicit fences for code.
+const fenceParser = unified().use(remarkParse).use(remarkGfm).use(function () {
+  this.data().micromarkExtensions.push({disable: {null: ['codeIndented']}});
+});
+
+function fencedCodeLines(markdown) {
+  const lines = new Set();
+  let line = 1;
+  let nextBreak = markdown.indexOf('\n');
+
+  // Code nodes occur in source order. Count only LF to match split('\n'),
+  // even when CommonMark advances its own line counter for a lone CR.
+  function lineAt(offset) {
+    while (nextBreak !== -1 && nextBreak < offset) {
+      line++;
+      nextBreak = markdown.indexOf('\n', nextBreak + 1);
+    }
+    return line;
+  }
+
+  function visit(node) {
+    if (node.type === 'code') {
+      const start = lineAt(node.position.start.offset);
+      const end = lineAt(node.position.end.offset - 1);
+      for (let number = start; number <= end; number++) lines.add(number);
+    }
+    for (const child of node.children ?? []) visit(child);
+  }
+
+  visit(fenceParser.parse(markdown));
+  return lines;
+}
+
 function stripLocaleSwitchLinks(markdown) {
-  let inFence = false;
+  const fencedLines = fencedCodeLines(markdown);
   let dropFollowingBlank = false;
   return markdown
     .split('\n')
-    .filter((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
+    .filter((line, index) => {
+      if (fencedLines.has(index + 1)) {
         dropFollowingBlank = false;
         return true;
       }
-      if (inFence) return true;
       if (dropFollowingBlank && /^[ \t]*\r?$/.test(line)) {
         dropFollowingBlank = false;
         return false;
@@ -175,16 +209,25 @@ function stripLocaleSwitchLinks(markdown) {
     .join('\n');
 }
 
-function makeMdxSafe(markdown) {
-  let inFence = false;
+function stripGeneratedGridMarkers(markdown) {
+  const fencedLines = fencedCodeLines(markdown);
   return markdown
     .split('\n')
-    .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
-        return line;
-      }
-      if (inFence) return line;
+    .map((line, index) => {
+      if (fencedLines.has(index + 1)) return line;
+      // Keep a blank line so prose following a marker stays outside the table.
+      return /^<!-- aw-(?:regression-matrix|hook-coverage):(?:start|end) -->[ \t]*\r?$/.test(line)
+        ? '' : line;
+    })
+    .join('\n');
+}
+
+function makeMdxSafe(markdown) {
+  const fencedLines = fencedCodeLines(markdown);
+  return markdown
+    .split('\n')
+    .map((line, index) => {
+      if (fencedLines.has(index + 1)) return line;
       // Preserve explicit fragment targets used by published section links.
       if (/^ {0,3}<a id="[\p{L}\p{M}\p{N}_-]+"><\/a>[ \t]*$/u.test(line)) return line;
       return line
@@ -370,7 +413,9 @@ async function prepareLocale(documents, outputRoot, locale) {
     const sourceMarkdown = document.target === 'user-guide/index.md'
       ? insertNavigation(originalMarkdown, navigation, locale)
         .replace(navigationStart, '').replace(navigationEnd, '') : originalMarkdown;
-    const websiteMarkdown = stripCopilotShellNavigation(stripLocaleSwitchLinks(sourceMarkdown));
+    const websiteMarkdown = stripGeneratedGridMarkers(
+      stripCopilotShellNavigation(stripLocaleSwitchLinks(sourceMarkdown)),
+    );
     const markdown = preserveLegacyQuickstartId(
       makeMdxSafe(await rewriteLinks(websiteMarkdown, document.source)), document.target,
     );

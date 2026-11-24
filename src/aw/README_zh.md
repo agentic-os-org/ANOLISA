@@ -68,6 +68,29 @@ AW core 可独立使用；需要安全检查（`sec-core`）或输出压缩（`T
 | `sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
 
+### 按 Agent 的 16 Hook 覆盖
+
+图例：`o` observe、`b` block、`ri` replace_input、`rr` replace_result、`a` ask、`×` 不支持。
+
+本表由 [tests/regression-matrix.json](tests/regression-matrix.json) 生成，展示已声明的默认 Profile，不代表条件准备的 Profile 或原生采纳认证。
+`runtime.observed`、`runtime.exited` 与 `coverage.changed` 由 AW（Service/AgentSight）产生而非 Agent Adapter，因此未列入下表。
+
+<!-- aw-hook-coverage:start -->
+| Agent | `session.start` | `input.submit` | `tool.before` | `tool.after` | `permission.request` | `compact.before` | `compact.after` | `subagent.start` | `subagent.stop` | `turn.stop` | `session.end` | `model.before_request` | `security.violation` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `claude-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+| `codex` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | × |
+| `deepseek-harness` | o | o b | o b | o rr | × | × | × | × | × | o | × | × | o b |
+| `hermes` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `openclaw` | o | × | o b | o rr | × | × | × | × | × | o | o | × | × |
+| `pi` | o | o b | o b ri | o rr | × | × | × | × | × | o | o | × | × |
+| `qoder` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qoder-sdk` | o | o b | o b ri | o rr | × | × | × | × | × | × | o | × | × |
+| `qwenpaw` | × | o b | o b ri | o rr | × | × | × | × | × | o | × | × | × |
+| `sdk` | o | o b | o b ri | o rr | × | × | × | × | × | o b | o | × | × |
+<!-- aw-hook-coverage:end -->
+
 <a id="hook-支持"></a>
 <a id="adapter-能力覆盖"></a>
 

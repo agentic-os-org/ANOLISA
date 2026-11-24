@@ -8,10 +8,16 @@ import {fileURLToPath} from 'node:url';
 import {evaluate} from '@mdx-js/mdx';
 import * as jsxRuntime from 'react/jsx-runtime';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {exists, walkFiles} from './lib.mjs';
+import remarkGfm from 'remark-gfm';
+import {exists, repoRoot, walkFiles} from './lib.mjs';
 import {loadDocumentRedirects, redirectDestination, writeDocumentRedirects} from './document-routes.mjs';
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
+const gridExampleFences = ['```', '~~~', '````', '~~~~'];
+const gridMarkerExamples = gridExampleFences.map((fence) => `${fence}markdown\n`
+  + '<!-- aw-regression-matrix:start -->\n<!-- aw-regression-matrix:end -->\n'
+  + (fence.length === 4 ? `${fence.slice(1)}\n` : '')
+  + `<!-- aw-hook-coverage:start -->\n<!-- aw-hook-coverage:end -->\n${fence}\n`).join('\n');
 
 const awLegacyAnchors = {
   en: {
@@ -23,6 +29,51 @@ const awLegacyAnchors = {
     installation: ['创建配置', '启动并验证'],
   },
 };
+
+const crlfFence = [
+  '```bash', '<tag> {expr}', '<!-- aw-hook-coverage:start -->',
+  '[English](https://example.com/)', '```',
+].join('\r\n');
+const listFence = [
+  '10. Run the command', '', '    ```bash', '    <tag> {expr}', '    ```',
+].join('\n');
+const lazyListFence = [
+  '10. Run the command.', 'This continues the same paragraph.', '',
+  '    ```bash', '    cat < input', '    ```',
+].join('\n');
+
+const indentedFence = ['    ```bash', '    indented < input', '    ```'].join('\n');
+
+async function assertRenderedBashFences(markdown) {
+  assert.ok(markdown.includes(crlfFence));
+  assert.ok(markdown.includes(listFence));
+  assert.ok(markdown.includes(lazyListFence));
+  assert.ok(markdown.includes('> Quote\nlazy line\n> ```bash\n> quote < input\n&lt;after-quote>'));
+  assert.ok(markdown.includes('- List\n\n  ```bash\n  list < input\n&lt;after-list>'));
+  assert.ok(markdown.endsWith('A\rB\n\n```bash\nend < input\n'));
+  assert.ok(markdown.includes(indentedFence));
+  assert.ok(markdown.includes('    &lt;a id="indented-code">&lt;/a>'));
+  const {default: Document} = await evaluate(
+    markdown.replace(/^---\n[\s\S]*?\n---\n/, ''), {...jsxRuntime, remarkPlugins: [remarkGfm]},
+  );
+  const html = renderToStaticMarkup(jsxRuntime.jsx(Document, {}));
+  const crlfCode = '<pre><code class="language-bash">&lt;tag&gt; {expr}\r\n'
+    + '&lt;!-- aw-hook-coverage:start --&gt;\r\n[English](https://example.com/)\n</code></pre>';
+  assert.ok(html.includes(crlfCode));
+  assert.doesNotMatch(html.replace(crlfCode, ''), /aw-hook-coverage/);
+  const lists = [...html.matchAll(/<ol start="10">\s*<li>([\s\S]*?)<\/li>\s*<\/ol>/g)];
+  assert.ok(lists.some(([, item]) => item.includes(
+    '<pre><code class="language-bash">&lt;tag&gt; {expr}\n</code></pre>',
+  )));
+  assert.ok(lists.some(([, item]) => item.includes(
+    '<p>Run the command.\nThis continues the same paragraph.</p>\n'
+    + '<pre><code class="language-bash">cat &lt; input\n</code></pre>',
+  )));
+  const quote = html.match(/<blockquote>([\s\S]*?)<\/blockquote>/)?.[1];
+  assert.ok(quote?.includes('<pre><code class="language-bash">&lt;quoted&gt; {expr}\n</code></pre>'));
+  assert.ok(html.includes('<pre><code class="language-bash">indented &lt; input\n</code></pre>'));
+  assert.ok(html.includes('&lt;a id=&quot;indented-code&quot;&gt;&lt;/a&gt;'));
+}
 
 function awAnchorFixture(title, anchors) {
   const example = `<a id="${anchors[0]}"></a>`;
@@ -58,6 +109,26 @@ async function assertRenderedAnchors(markdown, anchors) {
   assert.ok(html.includes('&lt;div id=&quot;raw-element&quot;&gt;Other raw HTML&lt;/div&gt;'));
 }
 
+async function assertRenderedGridTables(markdown, expectedAgents) {
+  assert.doesNotMatch(markdown, /aw-(?:hook-coverage|regression-matrix)/);
+  const {default: Document} = await evaluate(
+    markdown.replace(/^---\n[\s\S]*?\n---\n/, ''), {...jsxRuntime, remarkPlugins: [remarkGfm]},
+  );
+  const html = renderToStaticMarkup(jsxRuntime.jsx(Document, {}));
+  assert.doesNotMatch(html, /aw-(?:hook-coverage|regression-matrix)/);
+  const tables = [...html.matchAll(/<table>[\s\S]*?<\/table>/g)];
+  for (const [index, label] of ['Hook support matrix', '16-Hook coverage'].entries()) {
+    assert.ok(tables[index], `${label} must render as a table`);
+    const body = tables[index][0].match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1];
+    assert.ok(body, `${label} must have a table body`);
+    const renderedAgents = [...body.matchAll(/<tr>\s*<td><code>([^<]+)<\/code><\/td>/g)]
+      .map((match) => match[1]);
+    assert.equal([...body.matchAll(/<tr>/g)].length, renderedAgents.length,
+      `${label} must contain only adapter rows`);
+    assert.deepEqual(renderedAgents, expectedAgents);
+  }
+}
+
 test('publishes current guides and changelogs without Copilot Shell entry points', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'prepare-docs-test-'));
   t.after(() => rm(root, {recursive: true, force: true}));
@@ -78,8 +149,17 @@ test('publishes current guides and changelogs without Copilot Shell entry points
     files[`docs/user-guide/${locale}/tokenless/index.md`] = '# Tokenless\n';
     files[`docs/user-guide/${locale}/aw/index.md`] = awAnchorFixture('AW', awLegacyAnchors[locale].index);
     files[`docs/user-guide/${locale}/aw/installation.md`] = awAnchorFixture('Install AW', awLegacyAnchors[locale].installation);
-    files[`docs/user-guide/${locale}/aw/cli-reference.md`] = '# AW CLI\n';
-    files[`docs/user-guide/${locale}/aw/capabilities.md`] = '# AW Capabilities\n';
+    files[`docs/user-guide/${locale}/aw/cli-reference.md`] = `# AW CLI\n\n${gridMarkerExamples}`;
+    files[`docs/user-guide/${locale}/aw/examples.md`] = [
+      '# Examples', crlfFence, '<!-- aw-hook-coverage:end -->', listFence,
+      '> 10.\t~~~bash\n>\t\t<quoted> {expr}\n<!-- aw-hook-coverage:end -->',
+      lazyListFence, 'Outside the list.', '    <a id="indented-code"></a>', indentedFence,
+      '> Quote\nlazy line\n> ```bash\n> quote < input\n<after-quote>',
+      '- List\n\n  ```bash\n  list < input\n<after-list>',
+      'A\rB', '```bash\nend < input\n',
+    ].join('\n\n');
+    const capabilities = `docs/user-guide/${locale}/aw/capabilities.md`;
+    files[capabilities] = await readFile(path.join(repoRoot, capabilities), 'utf8');
     files[`docs/developer-guide/${locale}/index.md`] = '# Developer Guide\n';
     files[`docs/developer-guide/${locale}/aw/index.md`] = '# AW Integration\n';
     files[`docs/developer-guide/${locale}/aw/providers/index.md`] = '# Providers\n';
@@ -101,6 +181,11 @@ test('publishes current guides and changelogs without Copilot Shell entry points
   files['src/aw/scripts/check_layout.py'] = '# Layout check\n';
   files['src/aw/crates/aw-provider/schemas/request.schema.json'] = '{}\n';
   files['src/aw/crates/aw-provider/examples/policy.rs'] = 'fn main() {}\n';
+  for (const manifest of ['regression-matrix.json', 'native-matrix.json']) {
+    const source = `src/aw/tests/${manifest}`;
+    files[source] = await readFile(path.join(repoRoot, source), 'utf8');
+  }
+  const expectedAgents = Object.keys(JSON.parse(files['src/aw/tests/regression-matrix.json']).agents).sort();
   files['docs/navigation.yaml'] = `version: 1
 groups:
   - id: start
@@ -238,8 +323,25 @@ groups:
     await assertRenderedAnchors(awEntry, awLegacyAnchors[locale].index);
     const awReference = await readFile(path.join(output, 'user-guide/aw/cli-reference.md'), 'utf8');
     assert.match(awReference, /sidebar_position: 4\n/);
+    assert.ok(awReference.includes(gridMarkerExamples), 'Fenced grid marker examples must remain code');
+    const {default: Reference} = await evaluate(
+      awReference.replace(/^---\n[\s\S]*?\n---\n/, ''), jsxRuntime,
+    );
+    const referenceHtml = renderToStaticMarkup(jsxRuntime.jsx(Reference, {}));
+    const renderedExamples = [...referenceHtml.matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)];
+    assert.equal(renderedExamples.length, gridExampleFences.length);
+    for (const [, code] of renderedExamples) {
+      for (const grid of ['regression-matrix', 'hook-coverage']) {
+        for (const boundary of ['start', 'end']) {
+          assert.ok(code.includes(`&lt;!-- aw-${grid}:${boundary} --&gt;`),
+            'Fenced grid markers must render literally inside code');
+        }
+      }
+    }
     const awCapabilities = await readFile(path.join(output, 'user-guide/aw/capabilities.md'), 'utf8');
+    await assertRenderedBashFences(await readFile(path.join(output, 'user-guide/aw/examples.md'), 'utf8'));
     assert.match(awCapabilities, /sidebar_position: 9\n/);
+    await assertRenderedGridTables(awCapabilities, expectedAgents);
     const contribute = await readFile(path.join(output, 'contribute/index.md'), 'utf8');
     assert.ok(contribute.includes('[AW](/docs/contribute/aw)'));
     assert.ok(contribute.includes('[CI](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml)'));
