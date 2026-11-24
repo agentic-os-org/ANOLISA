@@ -20,6 +20,7 @@ from agent_sec_cli.correlation_context import (
     clear_process_trace_context,
     get_current_trace_context,
 )
+from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_middleware.result import ActionResult
 from click import unstyle
 from typer.testing import CliRunner
@@ -567,6 +568,33 @@ def test_events_summary_forwards_session_and_run_filters():
     assert result.output == "No security events recorded.\n\n"
     assert reader.query.call_args.kwargs["session_id"] == "session-abc"
     assert reader.query.call_args.kwargs["run_id"] == "run-abc"
+
+
+@pytest.mark.parametrize(
+    ("last_hours", "expected_label"),
+    [
+        ("0.1", "last 0.1 hours"),
+        ("0.5", "last 0.5 hours"),
+        ("1.5", "last 1.5 hours"),
+        ("0.12345678", "last 0.12345678 hours"),
+        ("24", "last 24 hours"),
+    ],
+)
+def test_events_summary_header_preserves_exact_hours(
+    last_hours: str, expected_label: str
+) -> None:
+    reader = Mock()
+    reader.query.return_value = [
+        SecurityEvent(event_type="harden", category="hardening", details={})
+    ]
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app, ["events", "--summary", "--last-hours", last_hours]
+        )
+
+    assert result.exit_code == 0
+    assert f"({expected_label})" in result.output
 
 
 def test_events_help_lists_session_and_run_filters():
