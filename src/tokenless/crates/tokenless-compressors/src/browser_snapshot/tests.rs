@@ -139,6 +139,60 @@ fn pw_orphan_url_and_bad_indent_reject_whole_snapshot() {
 }
 
 #[test]
+fn pw_url_lookup_stops_at_shallower_ancestor_boundary() {
+    // A misindented /url: under a depth-0 element must fail open rather than
+    // scanning past that shallower element and attaching to an unrelated
+    // depth-1 node from an earlier closed subtree.
+    let misindented = pw_input(
+        "- generic [ref=e1]:\n  - link \"First\" [ref=e2]:\n    - text: label\n- link \"Second\" [ref=e3]:\n    - /url: https://second.example.com/",
+    );
+    assert!(
+        super::pw::parse(&misindented).is_none(),
+        "parent_depth == 1 boundary did not fail open"
+    );
+    assert!(
+        BrowserSnapshotCompressor.compress(&misindented).is_none(),
+        "parent_depth == 1 compress did not fail open"
+    );
+
+    // Same boundary violation at a deeper level (parent_depth == 2) must also fail open.
+    let nested_misindented = pw_input(
+        "- generic [ref=e1]:\n  - link \"A\" [ref=e2]:\n    - generic [ref=e3]:\n      - text: x\n  - link \"B\" [ref=e4]:\n      - /url: https://b.example.com/",
+    );
+    assert!(
+        super::pw::parse(&nested_misindented).is_none(),
+        "parent_depth == 2 boundary did not fail open"
+    );
+    assert!(
+        BrowserSnapshotCompressor
+            .compress(&nested_misindented)
+            .is_none(),
+        "parent_depth == 2 compress did not fail open"
+    );
+
+    // A valid /url: following multiple deeper child subtrees of the same parent
+    // still binds to that parent because no shallower ancestor separates them.
+    let valid_after_child = pw_input(
+        "- link \"Parent\" [ref=e1]:\n  - generic [ref=e2]:\n    - generic [ref=e3]:\n      - text: child\n  - button \"One\" [ref=e4] [cursor=pointer]:\n    - generic [ref=e5]:\n      - text: first\n  - button \"Two\" [ref=e6] [cursor=pointer]:\n    - generic [ref=e7]:\n      - text: second\n  - /url: https://parent.example.com/",
+    );
+    let parsed = super::pw::parse(&valid_after_child).unwrap();
+    assert_eq!(parsed.records[0].url, "https://parent.example.com/");
+    assert!(parsed.records[1..].iter().all(|r| r.url.is_empty()));
+
+    let compressed = BrowserSnapshotCompressor
+        .compress(&valid_after_child)
+        .unwrap();
+    let body = compressed.strip_prefix(PW_WRAP).unwrap();
+    let table = match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with("U1=") => rest,
+        _ => body,
+    };
+    let decoded = decode_table(table, encode::PW_COLS);
+    assert_eq!(decoded[0].reference, "e1");
+    assert_eq!(decoded[0].url, "https://parent.example.com/");
+}
+
+#[test]
 fn pw_trailer_after_fence_is_preserved() {
     let input = format!(
         "{PW_WRAP}```yaml\n- link \"Home\" [ref=e2]\n```\n### Events\n- New console entries: file.log#L1-L2"

@@ -62,7 +62,17 @@ pub(crate) fn parse(input: &str) -> Option<Parsed> {
         let rest = &trimmed[2..];
         if let Some(url) = rest.strip_prefix("/url: ") {
             let parent_depth = depth.checked_sub(1)?;
-            let parent = records.iter_mut().rev().find(|r| r.depth == parent_depth)?;
+            // Stop at the first preceding record whose depth is <= parent_depth,
+            // i.e. the enclosing boundary, so a misindented `/url:` cannot scan
+            // past a shallower ancestor and bind to an unrelated element from
+            // an earlier closed subtree. If that record is shallower, the
+            // `/url:` has no element at its own level and the snapshot fails
+            // open.
+            let parent = records
+                .iter_mut()
+                .rev()
+                .find(|r| r.depth <= parent_depth)
+                .filter(|r| r.depth == parent_depth)?;
             // A second /url for one element is ambiguous; keeping the last
             // would silently drop a URL from the view.
             if !parent.url.is_empty() {
