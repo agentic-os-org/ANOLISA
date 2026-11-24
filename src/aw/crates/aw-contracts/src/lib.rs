@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod deployment;
 pub mod evidence;
 pub mod hook_plan;
+pub mod instrumentation;
 pub mod objects;
 pub mod orchestration;
 pub mod registry;

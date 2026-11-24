@@ -1,0 +1,1340 @@
+{
+  "valid": [
+    {
+      "name": "valid_python_builtin",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.client.python",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": {
+          "name": "example-sdk",
+          "versions": ">=1.9,<2"
+        },
+        "targets": [
+          {
+            "id": "session-call-tool",
+            "module": "example_sdk.client.session",
+            "qualname": "ClientSession.call_tool",
+            "call": "async",
+            "hooks": {
+              "tool.before": {
+                "mode": "control",
+                "effects": ["observe", "block", "replace_input"],
+                "failure_actions": ["block"]
+              },
+              "tool.after": {
+                "mode": "control",
+                "effects": ["observe", "replace_result"],
+                "failure_actions": ["withhold_result"]
+              }
+            },
+            "fields": {
+              "session_id": { "from": "receiver.session_id", "codec": "text" },
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "call_id": { "from": "kwarg.call_id", "codec": "text" },
+              "input": { "from": "arg.1.payload.0", "codec": "json" },
+              "result": { "from": "result", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid_js_builtin_streaming",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.agent.js",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": {
+          "name": "@example/agent",
+          "versions": ">=2.0.0,<3.0.0"
+        },
+        "targets": [
+          {
+            "id": "stream-tool-exec",
+            "module": "@example/agent/client/session.js",
+            "qualname": "AgentClient.streamTool",
+            "call": "async_iter",
+            "hooks": {
+              "tool.before": {
+                "mode": "control",
+                "effects": ["observe", "block"],
+                "failure_actions": []
+              },
+              "tool.after": {
+                "mode": "control",
+                "effects": ["observe", "replace_result"],
+                "failure_actions": ["withhold_result"]
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" },
+              "result": { "from": "result.chunks.0", "codec": "json" }
+            },
+            "stream": {
+              "buffer": true,
+              "max_items": 1024,
+              "max_bytes": 1048576
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid_python_custom_fingerprinted",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.custom.python",
+        "origin": "custom",
+        "runtime": "python",
+        "package": {
+          "name": "example_sdk",
+          "versions": "==1.12.3.4"
+        },
+        "targets": [
+          {
+            "id": "fixed-shell-call",
+            "module": "example_sdk.tools.runner",
+            "qualname": "Runner.exec_shell",
+            "call": "sync",
+            "code_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "hooks": {
+              "tool.before": {
+                "mode": "control",
+                "effects": ["observe", "replace_input"],
+                "failure_actions": []
+              },
+              "permission.request": {
+                "mode": "control",
+                "effects": ["observe", "ask"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "tool_name": { "const": "shell" },
+              "input": { "from": "arg.0", "codec": "json_string" }
+            }
+          },
+          {
+            "id": "prompt-submit",
+            "module": "example_sdk.client.prompt",
+            "qualname": "submit_prompt",
+            "call": "sync_iter",
+            "code_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+            "hooks": {
+              "input.submit": {
+                "mode": "observe",
+                "effects": ["observe"],
+                "failure_actions": []
+              },
+              "turn.stop": {
+                "mode": "observe",
+                "effects": ["observe"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "prompt": { "from": "arg.0", "codec": "text" },
+              "output": { "from": "result", "codec": "text" }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "r1_wrong_version",
+      "rule": "R1",
+      "document": {
+        "version": "aw-instrumentation-profile/v2",
+        "id": "example.r1",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r2_invalid_profile_id",
+      "rule": "R2",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "bad id with spaces",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r3_invalid_origin",
+      "rule": "R3",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r3",
+        "origin": "remote",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r4_invalid_runtime",
+      "rule": "R4",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r4",
+        "origin": "builtin",
+        "runtime": "rust",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5_invalid_python_package_name",
+      "rule": "R5",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r5.py",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "-example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5_invalid_js_package_name_uppercase",
+      "rule": "R5",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r5.js",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@Example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "@example/agent",
+            "qualname": "Client.call_tool",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5_versions_with_whitespace",
+      "rule": "R5",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r5.ws",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0, <2.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5_versions_invalid_operator",
+      "rule": "R5",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r5.op",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": "^1.9.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5_versions_too_many_comparators",
+      "rule": "R5",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r5.many",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1,>=2,>=3,>=4,>=5,>=6,>=7,>=8,>=9" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r6_empty_targets",
+      "rule": "R6",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r6.empty",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": []
+      }
+    },
+    {
+      "name": "r6_duplicate_target_id",
+      "rule": "R6",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r6.dup-id",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "same-id",
+            "module": "example_sdk.a",
+            "qualname": "Client.first",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          },
+          {
+            "id": "same-id",
+            "module": "example_sdk.b",
+            "qualname": "Client.second",
+            "call": "sync",
+            "hooks": { "session.end": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r6_duplicate_module_qualname",
+      "rule": "R6",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r6.dup-seam",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "first-id",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          },
+          {
+            "id": "second-id",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "session.end": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_python_module_dunder_segment",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.py",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.__internal__.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_relative_path",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.js.rel",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "./local/client.js",
+            "qualname": "Client.run",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_absolute_path",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.js.abs",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "/opt/example/client.js",
+            "qualname": "Client.run",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_node_builtin",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.js.node",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "node:fs",
+            "qualname": "readFile",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_url",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.js.url",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "file:///tmp/agent.js",
+            "qualname": "Client.run",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_parent_traversal",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.js.dotdot",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "@example/agent/../escape.js",
+            "qualname": "Client.run",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r7_js_module_mismatched_package",
+      "rule": "R7",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r7.mismatched-package",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "@example/other/tools",
+            "qualname": "Client.run",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r8_qualname_dunder",
+      "rule": "R8",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r8.dunder",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.__call__",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r8_qualname_wildcard",
+      "rule": "R8",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r8.wildcard",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.*",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r8_qualname_too_deep",
+      "rule": "R8",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r8.deep",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "A.B.C.D.e",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r9_invalid_call_shape",
+      "rule": "R9",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r9",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "callback",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r10_empty_hooks",
+      "rule": "R10",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r10.empty",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": {},
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r10_non_instrumentable_runtime_observed",
+      "rule": "R10",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r10.observed",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "runtime.observed": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r10_non_instrumentable_runtime_exited",
+      "rule": "R10",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r10.exited",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "runtime.exited": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r10_non_instrumentable_coverage_changed",
+      "rule": "R10",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r10.coverage",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "coverage.changed": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r10_incompatible_effect_for_event",
+      "rule": "R10",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r10.effect",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": {
+              "tool.before": {
+                "mode": "control",
+                "effects": ["observe", "replace_result"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_disallowed_field_for_hooks",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.disallowed",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" },
+              "prompt": { "from": "arg.2", "codec": "text" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_missing_required_tool_before_input",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.req-before",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_missing_required_tool_after_result",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.req-after",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.after": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_missing_required_permission_tool_name",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.req-perm",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.ask_permission",
+            "call": "sync",
+            "hooks": { "permission.request": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_missing_required_input_submit_prompt",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.req-prompt",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.submit",
+            "call": "sync",
+            "hooks": { "input.submit": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_const_disallowed_for_non_tool_name",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.const",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "const": "{}" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_replace_input_with_text_codec",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.replace-input",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": {
+              "tool.before": {
+                "mode": "control",
+                "effects": ["observe", "replace_input"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "text" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_replace_result_not_from_result_root",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.replace-result",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": {
+              "tool.after": {
+                "mode": "control",
+                "effects": ["observe", "replace_result"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "result": { "from": "arg.2", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r11_missing_required_security_violation_output",
+      "rule": "R11",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r11.req-security-output",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "security.violation": { "mode": "control", "effects": ["observe", "block"], "failure_actions": ["block"] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_kwarg_rejected_for_js",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.js-kwarg",
+        "origin": "builtin",
+        "runtime": "js",
+        "package": { "name": "@example/agent", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "@example/agent",
+            "qualname": "Client.callTool",
+            "call": "async",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "kwarg.name", "codec": "text" },
+              "input": { "from": "arg.0", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_result_root_disallowed_for_input",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.result-root",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "input": { "from": "result", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_arg_index_out_of_range",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.arg-range",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.32", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_too_many_path_segments",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.segments",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0.a.b.c.d.e.f.g", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_dunder_path_segment",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.dunder",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0.__class__", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r12_segment_index_out_of_range",
+      "rule": "R12",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r12.idx-range",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0.1024", "codec": "text" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r13_invalid_codec",
+      "rule": "R13",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r13",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "sync",
+            "hooks": { "tool.before": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "binary" },
+              "input": { "from": "arg.1", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_stream_on_non_iterator",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.non-iter",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.call_tool",
+            "call": "async",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {},
+            "stream": { "buffer": true, "max_items": 16, "max_bytes": 4096 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_iter_replace_result_missing_stream",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.missing",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.stream_tool",
+            "call": "async_iter",
+            "hooks": {
+              "tool.after": {
+                "mode": "control",
+                "effects": ["observe", "replace_result"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "result": { "from": "result", "codec": "json" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_iter_withhold_result_unbuffered",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.unbuffered",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.stream_tool",
+            "call": "sync_iter",
+            "hooks": {
+              "tool.after": {
+                "mode": "control",
+                "effects": ["observe"],
+                "failure_actions": ["withhold_result"]
+              }
+            },
+            "fields": {
+              "tool_name": { "from": "arg.0", "codec": "text" },
+              "result": { "from": "result", "codec": "json" }
+            },
+            "stream": { "buffer": false, "max_items": 128, "max_bytes": 65536 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_iter_security_violation_result_unbuffered",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.security-unbuffered",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.stream_tool",
+            "call": "async_iter",
+            "hooks": {
+              "security.violation": {
+                "mode": "control",
+                "effects": ["observe", "block"],
+                "failure_actions": []
+              }
+            },
+            "fields": {
+              "output": { "from": "result", "codec": "text" }
+            },
+            "stream": { "buffer": false, "max_items": 64, "max_bytes": 4096 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_stream_max_items_exceeded",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.items",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.stream_tool",
+            "call": "sync_iter",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {},
+            "stream": { "buffer": false, "max_items": 65537, "max_bytes": 65536 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r14_stream_max_bytes_exceeded",
+      "rule": "R14",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r14.bytes",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.stream_tool",
+            "call": "sync_iter",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {},
+            "stream": { "buffer": false, "max_items": 128, "max_bytes": 16777217 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "r15_invalid_code_sha256_uppercase",
+      "rule": "R15",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r15.hex",
+        "origin": "builtin",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "code_sha256": "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "r15_custom_origin_missing_code_sha256",
+      "rule": "R15",
+      "document": {
+        "version": "aw-instrumentation-profile/v1alpha1",
+        "id": "example.r15.custom",
+        "origin": "custom",
+        "runtime": "python",
+        "package": { "name": "example-sdk", "versions": ">=1.0" },
+        "targets": [
+          {
+            "id": "t1",
+            "module": "example_sdk.client",
+            "qualname": "Client.run",
+            "call": "sync",
+            "hooks": { "session.start": { "mode": "observe", "effects": ["observe"], "failure_actions": [] } },
+            "fields": {}
+          }
+        ]
+      }
+    }
+  ]
+}

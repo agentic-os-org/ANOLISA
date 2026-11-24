@@ -123,6 +123,35 @@ Profile 身份、能力声明和更严格的服务要求；CLI 从 Adapter 声�
   并独立编译 `AdmittedStep`，在全部已注册框架 Profile 与 SDK 部署 Profile 上核对
   Shadow Plan 与 `admission::preflight` 的准入判定及步骤编译结果完全一致，同时保持当前运行期准入主路径不变。
 
+## 插桩 Profile（仅合同层）
+
+`aw_contracts::instrumentation::InstrumentationProfile`
+（`instrumentation-profile-v1alpha1`，版本
+`aw-instrumentation-profile/v1alpha1`）是无副作用的声明式合同，用于描述要包装的
+Python 或 JS SDK 函数／方法、所服务的语义 Hook 以及 Hook 字段从调用参数、接收者、
+常量或返回值的映射关系。调用
+`InstrumentationProfile::source_capability(adapter, entrypoint)` 可将已校验的
+Profile 纯函数编译为 `python` 或 `js` 类型的 `SourceCapability`，供离线求解器推演候选语言插桩 Source：
+
+- **仅合同层（未接入运行期派发）**：配置 schema、`aw-service`、`aw-adapter`、
+  `aw-cli` 以及 Python/JS SDK 运行时均尚未消费 `instrumentation-profile-v1alpha1`。
+  声明或校验 Profile 不授予任何可执行支持、不启用任何运行期包装，也不改变能力网格。
+- **多目标保守合并**：同一 Profile 中多个目标声明同一语义 Hook 事件时，
+  `source_capability` 对 `effects` 与 `failure_actions` 取交集，仅当该事件的全部目标均为
+  `control` 时才保留 `HookAuthority::Control`；否则降级为 `HookAuthority::Observe`
+  并丢弃控制类效果与失败动作。只有所有被包装路径都能执行的效果，Source 才可宣称。
+- **自定义接点指纹约束**：`builtin` Profile 可省略 `code_sha256`，但 `origin: "custom"`
+  Profile 的每个目标都必须提供 64 位小写十六进制 SHA-256 `code_sha256` 指纹。
+- **JS 包版本绑定**：JS 目标的 `module` 必须等于声明的 `package.name`，或为该包内的
+  子路径，使版本范围对应目标所属的包。
+- **最终结果候选映射**：声明 `security.violation` 的目标必须提供 `output` 字段绑定，
+  用于映射待检查的候选输出。
+- **流式与事件边界约束**：由 AW 自身产生的事件（`runtime.observed`、`runtime.exited`、
+  `coverage.changed`）不可插桩；迭代器调用形态（`sync_iter` / `async_iter`）在
+  `tool.after` 声明 `replace_result` 或 `withhold_result`，或声明 `output` 读取
+  `result` 及其子路径的 `security.violation` 控制门时，必须声明带 `buffer: true`
+  的有界 `stream` 配置。
+
 ## 不可变 Scope 路由编译与缓存
 
 `aw_core::routes` 独立于 `Core::prepare/execute`，将 `AdmittedStep` 切片与精确 `u64`

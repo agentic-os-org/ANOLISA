@@ -923,6 +923,59 @@
       }
     }
   },
+  "instrumentation-profile-v1alpha1": {
+    "version": "aw-instrumentation-profile/v1alpha1",
+    "id": "example.client.python",
+    "origin": "builtin",
+    "runtime": "python",
+    "package": {
+      "name": "example-sdk",
+      "versions": ">=1.9,<2"
+    },
+    "targets": [
+      {
+        "id": "session-call-tool",
+        "module": "example_sdk.client.session",
+        "qualname": "ClientSession.call_tool",
+        "call": "async",
+        "hooks": {
+          "tool.before": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "block",
+              "replace_input"
+            ],
+            "failure_actions": []
+          },
+          "tool.after": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "replace_result"
+            ],
+            "failure_actions": [
+              "withhold_result"
+            ]
+          }
+        },
+        "fields": {
+          "tool_name": {
+            "from": "arg.0",
+            "codec": "text"
+          },
+          "input": {
+            "from": "arg.1",
+            "codec": "json"
+          },
+          "result": {
+            "from": "result",
+            "codec": "json"
+          }
+        }
+      }
+    ]
+  },
   "resolved-hook-plan-v1alpha1": {
     "version": "aw-resolved-hook-plan/v1alpha1",
     "target": "qwenpaw",

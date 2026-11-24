@@ -60,6 +60,11 @@ Plan remain development targets, while the versioned wire contracts
 `aw_contracts::hook_plan::ResolvedHookPlan` (`resolved-hook-plan-v1alpha1`) and
 the side-effect-free solver `aw_core::resolver` are defined and contract-tested
 (see [Core admission](../core-admission.md#pure-source-resolution-and-shadow-plan-equivalence)).
+The declarative instrumentation contract
+`aw_contracts::instrumentation::InstrumentationProfile`
+(`instrumentation-profile-v1alpha1`) is likewise contract-tested and compiles to
+`SourceCapability` offline, but is not wired into runtime dispatch
+(see [Instrumentation profiles](../core-admission.md#instrumentation-profiles-contract-only)).
 Current Adapters expose prepared capabilities and native wiring; preserve those
 executable contracts while introducing the shared abstraction. Do not describe
 an unwired runtime SPI, wire field or CLI as active in runtime dispatch.
