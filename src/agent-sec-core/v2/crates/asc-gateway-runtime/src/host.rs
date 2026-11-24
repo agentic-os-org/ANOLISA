@@ -112,6 +112,9 @@ pub trait Host: Send + Sync {
     /// Whether a systemd unit is active.
     fn unit_active(&self, unit: &str) -> bool;
 
+    /// Current systemd `MainPID`, used with the publication generation to reject stale health.
+    fn unit_pid(&self, unit: &str) -> Option<u32>;
+
     /// Whether gateway routing remains installed, independently of systemd and runtime files.
     /// # Errors
     /// Returns failures to inspect the host ruleset.
@@ -241,6 +244,19 @@ impl Host for SystemHost {
 
     fn unit_active(&self, unit: &str) -> bool {
         run("systemctl", &["is-active", "--quiet", unit], None).is_ok()
+    }
+
+    fn unit_pid(&self, unit: &str) -> Option<u32> {
+        run(
+            "systemctl",
+            &["show", "--property=MainPID", "--value", unit],
+            None,
+        )
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid != 0)
     }
 
     fn routing_active(&self) -> Result<bool, GatewayError> {

@@ -54,6 +54,57 @@ Binding 受理不等于流量保护生效。`--wait-seconds N` 等待已有匹�
 ready 条件、响应改写限制及部分失败恢复见
 [网关契约](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)。
 
+## Gateway CA 格式（未发布的 V2）
+
+安装匹配的 V2 CLI、daemon 和 gateway addon，启用网关后查询公开信任文件。
+查询认证 daemon、只读；任一格式未 ready 时明确失败，不现场生成或修复文件。
+所有 Scope 共用 daemon 主机上的这两个文件；返回路径不会将文件复制到远程客户端，
+也不会配置 Agent 的 TLS 库。
+
+```bash
+agent-sec-cli --socket "$SOCKET" gateway ca
+agent-sec-cli --socket "$SOCKET" gateway ca --format pem
+agent-sec-cli --socket "$SOCKET" gateway ca --format pkcs12
+```
+
+默认结果为：
+
+```json
+{
+  "caBundlePaths": {
+    "pem": "/run/agent-sec-gateway/ca-bundle.pem",
+    "pkcs12": "/run/agent-sec-gateway/ca-bundle.p12"
+  }
+}
+```
+
+`--format pem` 或 `--format pkcs12` 只保留 `caBundlePaths` 内所选项；未知格式拒绝。
+两个文件包含相同完整证书集合：主机系统 PEM 信任根加网关公开 CA，绝不包含私钥。
+PKCS12 使用 Java trusted certificate entries 和公开密码 `changeit`。
+该密码只用于加载和完整性检查，不是秘密，也不承担访问控制。不要使用 mitmproxy 的私钥 keystore。
+
+支持 PEM 的库可按需将 `SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE` 或 `GIT_SSL_CAINFO`
+指向 `caBundlePaths.pem`。`inject-credential` 在可用时于 `gateway.caBundlePaths`
+报告双路径，并给出 PEM 配置提示。JVM TLS 通常不读取这些环境变量，需显式配置
+应用的 truststore，例如：
+
+```bash
+"$JAVA_HOME/bin/java" \
+  -Djavax.net.ssl.trustStore=/run/agent-sec-gateway/ca-bundle.p12 \
+  -Djavax.net.ssl.trustStoreType=PKCS12 \
+  -Djavax.net.ssl.trustStorePassword=changeit \
+  -jar agent.jar
+```
+
+此配置用系统加网关根**替代** JVM 默认 `cacerts`，不会自动加入 JVM 独有的企业根。
+如有需要，操作者自行准备应用专用的合并 truststore。网关不修改系统信任库、JDK `cacerts`、
+`JAVA_TOOL_OPTIONS` 或 Agent 启动参数；daemon 主机生成 PKCS12 不需要 JDK 或外部 crypto 工具。
+
+网关重启复用自身 CA，不按格式生成新 CA。信任内容变化后，应用须重载 TLS context。
+`gateway disable` 保留两个公开文件并删除 plan 和 secrets；fake Token 不会因此在直连时有效。
+`/run` 文件在主机重启后丢失。CLI、daemon 和 addon 须成套更新或回滚；
+该未发布契约不增加旧数据迁移或格式版本变更。
+
 ## Policy 数据库位置
 
 未设置非空 `AGENT_SEC_DATA_DIR` 时，daemon 检查两处 Policy 数据库：

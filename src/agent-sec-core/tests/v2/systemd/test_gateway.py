@@ -113,10 +113,11 @@ try:
                                   "stage": "ca"}), flush=True)
                 continue
             ca = json.loads(grant.stdout)
-            assert set(ca) == {"caBundlePath"}
+            assert set(ca) == {"caBundlePaths"}
+            assert set(ca["caBundlePaths"]) == {"pem", "pkcs12"}
             for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
                              "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
-                environment[variable] = ca["caBundlePath"]
+                environment[variable] = ca["caBundlePaths"]["pem"]
         if request.get("probe"):
             descendant = subprocess.run(
                 ["/usr/bin/python3", "-c",
@@ -556,14 +557,18 @@ def public_ca(cli, user, check=True):
 
 def agent_environment(ca, fake):
     """Only harness-generated fake values enter the Agent; CA has no credential data."""
-    assert set(ca) == {"caBundlePath"}
-    assert Path(ca["caBundlePath"]).is_file()
+    assert set(ca) == {"caBundlePaths"}
+    assert set(ca["caBundlePaths"]) == {"pem", "pkcs12"}
+    assert all(
+        Path(path).is_absolute() and Path(path).is_file()
+        for path in ca["caBundlePaths"].values()
+    )
     return {
         "environment": {
             "GH_TOKEN": fake,
             "GITHUB_TOKEN": fake,
             **{
-                variable: ca["caBundlePath"]
+                variable: ca["caBundlePaths"]["pem"]
                 for variable in (
                     "SSL_CERT_FILE",
                     "REQUESTS_CA_BUNDLE",
@@ -806,8 +811,12 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None, shared_pair=F
                 for domain in domains.values():
                     cleanup.callback(domain.close)
     assert gateway(cli, "status")["scopes"] == []
-    assert sorted(path.name for path in RUNTIME.iterdir()) == ["ca-bundle.pem"]
+    assert sorted(path.name for path in RUNTIME.iterdir()) == [
+        "ca-bundle.p12",
+        "ca-bundle.pem",
+    ]
     assert (RUNTIME / "ca-bundle.pem").is_file()
+    assert (RUNTIME / "ca-bundle.p12").is_file()
     assert command("nft", "list", "table", "inet", TABLE, check=False).returncode != 0
     logs = command("journalctl", "--no-pager", "-u", UNIT, "-u", DAEMON_UNIT).stdout
     assert real not in logs
@@ -820,7 +829,8 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
     with protected_token(cli, user, foreign_user=nobody.pw_name) as (real, domains):
         agent, foreign = domains[AGENT], domains[OTHER_AGENT]
         ca = gateway(cli, "ca")
-        assert set(ca) == {"caBundlePath"}
+        assert set(ca) == {"caBundlePaths"}
+        assert set(ca["caBundlePaths"]) == {"pem", "pkcs12"}
         assert public_ca(cli, nobody.pw_name) == ca
         assert real not in json.dumps(ca) and fake_of(agent) not in json.dumps(ca)
         for snapshot in (False, True):
@@ -842,7 +852,7 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
                 "CURL_CA_BUNDLE",
                 "GIT_SSL_CAINFO",
             ):
-                assert environment[variable] == ca["caBundlePath"]
+                assert environment[variable] == ca["caBundlePaths"]["pem"]
                 assert Path(environment[variable]).is_file()
         before = agent.request(probe=True, refresh=False)["cgroup"]
         own = agent.execute([cli, "gateway", "ca"], refresh=False)
@@ -1049,7 +1059,7 @@ def test_inject_credential_shortcut_carries_the_real_token_upstream(host, upstre
             assert result["gateway"] == {
                 "enabled": False,
                 "ready": False,
-                "caBundlePath": None,
+                "caBundlePaths": None,
             }
             assert result["teardown"][0].endswith(result["scopeId"])
             fake_file = Path(result["fakeTokenFile"])
@@ -1539,7 +1549,8 @@ def test_credential_survives_daemon_and_gateway_restarts(host, upstream):
             command("systemctl", "stop", UNIT)
             wait_status(cli, lambda status: not status["ready"])
             # An existing public bundle is not proof of live unit/generation readiness.
-            assert Path(ca["caBundlePath"]).is_file()
+            assert Path(ca["caBundlePaths"]["pem"]).is_file()
+            assert Path(ca["caBundlePaths"]["pkcs12"]).is_file()
             for denied in (
                 gateway(cli, "ca", check=False),
                 public_ca(cli, user, check=False),

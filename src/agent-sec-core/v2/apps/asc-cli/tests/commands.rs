@@ -854,7 +854,19 @@ async fn gateway_cli_preserves_minimal_results_and_conflicts() {
             &["ca"],
             "gateway.ca",
             json!({}),
-            json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"}),
+            json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}}),
+        ),
+        (
+            &["ca", "--format", "pem"],
+            "gateway.ca",
+            json!({}),
+            json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}}),
+        ),
+        (
+            &["ca", "--format", "pkcs12"],
+            "gateway.ca",
+            json!({}),
+            json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}}),
         ),
         (
             &["key", "remove", "pair-1"],
@@ -897,13 +909,18 @@ async fn gateway_cli_preserves_minimal_results_and_conflicts() {
         .await
         .unwrap();
         let output = cli.await.unwrap();
-        assert_gateway_output(&output, result, &response);
+        assert_gateway_output(&output, result, &response, arguments);
         drop(listener);
         std::fs::remove_file(&socket).unwrap();
     }
 }
 
-fn assert_gateway_output(output: &std::process::Output, result: &Value, response: &Value) {
+fn assert_gateway_output(
+    output: &std::process::Output,
+    result: &Value,
+    response: &Value,
+    arguments: &[&str],
+) {
     if result.is_null() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
@@ -914,9 +931,18 @@ fn assert_gateway_output(output: &std::process::Output, result: &Value, response
     } else {
         assert_eq!(output.status.code(), Some(0));
         assert!(output.stderr.is_empty());
+        let expected = match arguments {
+            ["ca", "--format", "pem"] => {
+                json!({"caBundlePaths": {"pem": result["caBundlePaths"]["pem"]}})
+            }
+            ["ca", "--format", "pkcs12"] => {
+                json!({"caBundlePaths": {"pkcs12": result["caBundlePaths"]["pkcs12"]}})
+            }
+            _ => result.clone(),
+        };
         assert_eq!(
             serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            *result
+            expected
         );
     }
 }

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -713,7 +715,20 @@ class GatewayCase(unittest.TestCase):
         ]
         write_generation(runtime, 1, listeners, DECISIONS["secrets"])
         cls.process = cls.start_mitmdump()
-        cls.wait_health(lambda health: health["loadedGeneration"] == 1)
+        certificate_path = runtime / "status" / "ca-cert.pem"
+        cls.wait_health(
+            lambda health: health["loadedGeneration"] == 1
+            and certificate_path.is_file()
+        )
+        certificate = certificate_path.read_bytes()
+        bundle = (cls.workdir / "ca.pem").read_bytes() + certificate
+        (runtime / "ca-bundle.pem").write_bytes(bundle)
+        digest = hashlib.sha256(bundle).hexdigest()
+        cls.wait_health(
+            lambda health: health["caPkcs12"]["pemSha256"] == digest
+            and health["caPkcs12"]["pkcs12Sha256"] is not None
+            and health["caPkcs12"]["error"] is None
+        )
 
     @classmethod
     def start_mitmdump(cls, *extra: str) -> subprocess.Popen[bytes]:
@@ -918,6 +933,106 @@ class InjectionTest(GatewayCase):
         self.assertEqual(
             published, (self.workdir / "conf" / "mitmproxy-ca-cert.pem").read_bytes()
         )
+
+    def test_pkcs12_preserves_complete_pem_certificate_set_without_private_keys(
+        self,
+    ) -> None:
+        runtime = self.workdir / "runtime"
+        bundle = (runtime / "ca-bundle.pem").read_bytes()
+        output_path = runtime / "status" / "ca-bundle.p12"
+        keystore = output_path.read_bytes()
+        report = self.health()["caPkcs12"]
+        self.assertEqual(report["pemSha256"], hashlib.sha256(bundle).hexdigest())
+        self.assertEqual(report["pkcs12Sha256"], hashlib.sha256(keystore).hexdigest())
+        decoded = subprocess.run(
+            [
+                "openssl",
+                "pkcs12",
+                "-in",
+                str(output_path),
+                "-passin",
+                "pass:changeit",
+                "-nokeys",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+
+        def fingerprints(pem: bytes) -> set[str]:
+            return {
+                hashlib.sha256(base64.b64decode(block)).hexdigest()
+                for block in re.findall(
+                    rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+                    pem,
+                    re.S,
+                )
+            }
+
+        self.assertEqual(fingerprints(decoded), fingerprints(bundle))
+        self.assertGreaterEqual(len(fingerprints(decoded)), 2)
+        private = subprocess.run(
+            [
+                "openssl",
+                "pkcs12",
+                "-in",
+                str(output_path),
+                "-passin",
+                "pass:changeit",
+                "-nocerts",
+                "-nodes",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+        self.assertNotIn(b"PRIVATE KEY", private)
+
+    def test_private_key_input_clears_success_and_public_input_recovers(self) -> None:
+        runtime = self.workdir / "runtime"
+        source = runtime / "ca-bundle.pem"
+        original = source.read_bytes()
+        previous = (runtime / "status" / "ca-bundle.p12").read_bytes()
+        unsafe = original + (self.workdir / "leaf.key").read_bytes()
+        try:
+            source.write_bytes(unsafe)
+            rejected = self.wait_health(
+                lambda health: health["caPkcs12"]["pemSha256"]
+                == hashlib.sha256(unsafe).hexdigest()
+                and health["caPkcs12"]["error"] is not None
+            )["caPkcs12"]
+            self.assertIsNone(rejected["pkcs12Sha256"])
+            self.assertEqual(
+                (runtime / "status" / "ca-bundle.p12").read_bytes(), previous
+            )
+        finally:
+            source.write_bytes(original)
+            self.wait_health(
+                lambda health: health["caPkcs12"]["pemSha256"]
+                == hashlib.sha256(original).hexdigest()
+                and health["caPkcs12"]["pkcs12Sha256"] is not None
+                and health["caPkcs12"]["error"] is None
+            )
+
+    def test_proxy_only_restart_reuses_current_public_truststore(self) -> None:
+        runtime = self.workdir / "runtime"
+        staged = runtime / "status" / "ca-bundle.p12"
+        public = runtime / "ca-bundle.p12"
+        previous = staged.read_bytes()
+        public.write_bytes(previous)
+        previous_pid = self.health()["pid"]
+        self.assertEqual(previous_pid, self.process.pid)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        type(self).process = self.start_mitmdump()
+        digest = hashlib.sha256(previous).hexdigest()
+        self.wait_health(
+            lambda health: health["pid"] != previous_pid
+            and health["loadedGeneration"] == 1
+            and health["caPkcs12"]["pkcs12Sha256"] == digest
+            and health["caPkcs12"]["error"] is None
+        )
+        self.assertEqual(self.health()["pid"], self.process.pid)
+        self.assertEqual(staged.read_bytes(), previous)
+        self.assertEqual(public.read_bytes(), previous)
 
     def test_bearer_is_injected_and_echo_rewritten(self) -> None:
         response = self.send(

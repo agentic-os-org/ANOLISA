@@ -835,10 +835,17 @@ root 提交 Policy 前，准备 daemon 主机上的两个规范绝对文件，�
 root `key remove <pairid>` 全局退役指定配对及所有引用授权；旧 fake 永久 tombstone，
 不可重导入复活，无自动轮换。remove 返回 `{pairid:"<pairid>"}`，list 返回
 `{pairids:["<pairid>"]}`，只列 active opaque ID，不输出秘密/摘要；enable/disable 成功 `{}`。
-status 返回 `{enabled, ready, scopes:[{scopeId,bindings}]}`；`ca` 无 Scope 参数且仅返回
-`{caBundlePath}`，各 Scope 共用 CA，不构成证书隔离。ready 同时要求 enabled、cgroup v2、
-unit active、loaded generation 匹配、实际 CA 可用；已启用 status 每次重查 cgroup，失败
-`ready=false`。CA 查询核验全部 ready 条件，失败不返回路径或部分配置，无凭据 owner 检查。
+status 返回 `{enabled, ready, scopes:[{scopeId,bindings}]}`；`gateway.ca` 无 Scope/format 参数，
+始终返回 `{caBundlePaths: {pem, pkcs12}}`，均为 daemon 主机共享公开文件的绝对路径，
+各 Scope 共用 CA，不构成证书隔离。CLI 默认双路径，`--format pem|pkcs12` 只筛选经完整校验的
+成功响应，RPC params 仍为 `{}`，未知格式或非法成功字段明确失败。
+ready 同时要求 enabled、cgroup v2、unit active、health PID 与当前 systemd `MainPID` 相同、
+loaded generation 匹配、加载及 CA 发布无当前错误，并且 root 公开 PEM/PKCS12 均匹配
+health 的输入/输出摘要；转换 error 非 null 时，即使旧摘要一致也失败。固定 one-file 制品的
+addon 子进程报告 bootloader 父进程 PID，以匹配 systemd `MainPID`；单独重启代理会校验并
+复用当前 root 公开 PKCS12，不改变同一 PEM 的公开产物摘要。
+已启用 status 每次只读重查，失败 `ready=false`。CA 查询核验全部 ready 条件，失败不返回
+路径或部分配置，不生成或修复文件，无凭据 owner 检查，不自动修改 Agent 环境。
 generation/fence/tombstone 保留在内部。网关 ready 不替代 Binding `READY` 与引流完成。
 
 enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
@@ -875,7 +882,21 @@ raw 包包含相同网关静态资产，由组件 manifest 渲染 unit 和卸载
 持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
 `/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
 两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
-secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。
+secrets 快照为 0640，`status/` 归网关账户所有，公开 `ca-bundle.pem`、`ca-bundle.p12`
+均为 root 发布的 0644。先等待当前实例 plan 加载（20s），daemon 发布系统 PEM 根加网关公开 CA
+的完整 PEM，再等待 addon 转换及 health 摘要（20s），核验后发布 PKCS12，最后安装引流。
+网关输出 `status/ca-bundle.p12` 与 health 均须归网关账户所有；同一打开 fd 核验普通文件、
+属主、单链接、group/other 不可写及大小，不跟随末级 symlink。root 公开文件同样核验。
+health 上限 64 KiB，完整 PEM 上限 8 MiB + 64 KiB + 1 字节，PKCS12 使用独立 16 MiB 上限，
+给证书 bag、别名、加密和 MAC 留出空间，不假定小证书集封装开销总小于 PEM。health 的 `caPkcs12` 为
+`{pemSha256: string|null, pkcs12Sha256: string|null, error: string|null}`；两个 SHA-256 为小写
+十六进制，error 为固定、有界、无敏感值信息。失败清除成功标记，超时或混代材料不 ready。
+网关重启复用已有 CA，两种格式包含同一完整证书集合且无私钥；PKCS12 为 Java trusted entries，
+公开密码 `changeit` 用于加载及 MAC，不是秘密或访问控制。转换复用固定 standalone 的证书库，
+不要求生产 JDK、keytool/OpenSSL 或新增 Rust crypto 依赖。选用该库替代 JVM 默认根，
+不读取或修改 `cacerts`；JVM 独有企业根须自行合并，不改全局信任或 Agent 启动参数。
+信任变化后应用须重载 TLS context。响应和 health 成套更新、回滚，不增加旧数据迁移或
+现有格式版本变更。详见[双格式指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#gateway-ca-格式未发布的-v2)。
 
 本次 Cedar 配对及 bool 响应契约不兼容旧 Gateway 数据，包括 `PreparedPolicy`、Scope
 `policySnapshots`、Binding 内嵌 Policy 与 pinnedScope。旧原生凭据规则即使含 bool，也不能
@@ -888,7 +909,7 @@ Plan 不足。内部旧环境需先备份并在旧版本按生命周期撤销和
 [网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
 
 主动 `disable` 先应用 nft delete 事务撤流，成功后停止 unit，两步均成功后才通过
-`remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 外的全部内容（包括 `status/`），
+`remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 和 `ca-bundle.p12` 外的全部内容（包括 `status/`），
 并保存 `enabled=false`；持久 key 与 canonical Policy/Scope assignment 保留。执行投影不保存
 第二套授权规则，只保存 Scope owner/port/revoked fence、Binding 责任与完整实例身份。
 撤流失败立即返回，不停止 unit、不删文件、不修改期望 `enabled`；unit 停止失败也立即返回

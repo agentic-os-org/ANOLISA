@@ -15,6 +15,7 @@ pub use binding::{GATEWAY_BINDING_FORMAT, GatewayBindingClient};
 pub use error::{GatewayError, GatewayErrorKind};
 pub use host::{GatewayAccount, Host, SystemHost};
 pub use processes::{MAX_PROCESS_TREE, ProcessIdentity};
+pub use runtime::CaBundlePaths;
 pub use service::{
     CaBundle, GatewayConfig, GatewayService, GatewayStatus, KeyList, KeyOutcome, ScopeStatusView,
 };

@@ -1073,7 +1073,7 @@ Cedar HTTP 网关六个方法的清单、
 | `gateway.status` | LocalUser，owner UID 隔离 | 无 | `GatewayStatus` |
 | `gateway.key.remove` | UID 0 | `{pairid}` | `KeyOutcome` |
 | `gateway.key.list` | UID 0 | 无 | `KeyList` |
-| `gateway.ca` | LocalUser，认证本机 peer，无 owner 限制 | 无 | `{caBundlePath}` |
+| `gateway.ca` | LocalUser，认证本机 peer，无 owner 限制 | 无 | `{caBundlePaths: {pem, pkcs12}}` |
 
 - 无参数方法只接受省略、`null` 或 `{}`；有参数方法拒绝未知字段。
 - 管理方法要求内核认证的 UDS peer UID 0，非 root PolicyAdministrator 不获得凭据管理权。
@@ -1131,16 +1131,24 @@ Binding 内嵌 Policy、pinnedScope、Store/Plan/投影及旧注解模式均明�
 
 - `gateway.enable`、`gateway.disable` 成功返回 `{}`；失败仍明确返回错误。
 - `GatewayStatus`：`{enabled: bool, ready: bool, scopes: ScopeStatusView[]}`。`ready` 必须同时满足
-  enabled、cgroup v2 检查通过、代理 unit active、loaded generation 与内部当前 generation
-  匹配、CA 可用。已启用时每次查询重新只读检查 cgroup，失败返回 `ready=false`，不改变状态。
+  enabled、cgroup v2 检查通过、代理 unit active、health PID 等于当前 systemd `MainPID`、
+  loaded generation 等于当前 generation、当前加载及 CA 发布无错误，且 root 发布的 PEM/PKCS12
+  均与当前 health 的输入/输出 SHA-256 一致。转换 error 非 null 时，旧成功摘要也不能通过。
+  已启用时每次查询重新只读检查，失败返回 `ready=false`，不改变状态。
   网关 ready 不替代实例 Binding `READY` 与引流完成的等待。
 - `ScopeStatusView`：`{scopeId, bindings}`。bindings 为绑定责任 ID 数组；空数组不代表 Scope
   无授权，其 fake/plan 可先于进程准备。
 - remove 成功结果：`{pairid}`，值为 opaque pair ID。
 - list 成功结果：`{pairids: string[]}`，只列 active opaque pair IDs，不输出秘密或摘要。
-- CA 查询：仅 `{caBundlePath: string}`，为各 Scope 共用的公开 CA bundle 绝对路径。
-  每次重新检查 enabled、cgroup v2、unit、loaded generation 与 CA ready；未就绪明确失败，
-  不需要 active Scope 或凭据 owner，不返回部分环境配置。
+- CA 查询：`{caBundlePaths: {pem: string, pkcs12: string}}`，固定为各 Scope 共用的 daemon
+  主机公开 bundle 绝对路径 `/run/agent-sec-gateway/ca-bundle.pem` 和 `ca-bundle.p12`。
+  每次重新检查全部 ready 条件；任一格式未就绪明确失败，不需要 Active Scope 或凭据 owner，
+  不返回部分配置，不现场生成或修复。RPC 不接受 format；CLI 默认双路径，`--format pem|pkcs12`
+  只在完整成功响应校验后保留所选路径，未知格式、缺失/非法路径或未知成功字段均失败。
+  两者包含相同完整系统 PEM 根加网关公开 CA，无私钥；PKCS12 使用 Java trusted entries 和
+  公开非秘密密码 `changeit`。选用该库替代 JVM 默认根，不读取或修改 JDK `cacerts`。
+  CLI/daemon/addon 响应及 health 成套更新、回滚，不新增格式版本、旧结构兼容或迁移。
+  用法及 JVM 独有企业根限制见[双格式指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#gateway-ca-格式未发布的-v2)。
 
 cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SUPER_MAGIC`，
 且 daemon 自身 `/proc/self/cgroup` 视图有 `0::` 条目；证据不可读或非 v2 时失败。
@@ -1161,8 +1169,12 @@ cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SU
 | `unavailable` | gateway 未配置/禁用、账户缺失、cgroup 不可检查或非 v2、unit/CA/generation 未 ready |
 | `internal` | 数据面 generation 拒绝、存储损坏或宿主操作失败 |
 
-gateway dispatch 预算为 45 秒，CLI 默认 60 秒，generation 加载最长 20 秒。错误可以含路径、
-Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态与协议运行验收。
+gateway dispatch 预算为 45 秒，CLI 默认 60 秒。generation 加载最长 20 秒，随后先发布完整 PEM，
+再等待匹配的 PKCS12 转换，最长 20 秒；双格式 ready 后才引流，不能循环等待。
+内部 health 增加 `caPkcs12: {pemSha256: string|null, pkcs12Sha256: string|null, error: string|null}`；
+摘要为小写十六进制 SHA-256，error 为固定、有界、无敏感值信息。公开查询不展示这些内部字段。
+文件身份与预算及发布/故障契约见[网关设计 §5](V2_SECRET_GATEWAY_DESIGN_zh.md#5-执行投影发布与清理)。
+错误可以含路径、Scope ID 或 UID，不含真实值/fake。源码接口核对不替代安装态与协议运行验收。
 
 ## 19. [TARGET V2，已实现] Intent 任务策略候选
 

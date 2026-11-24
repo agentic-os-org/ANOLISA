@@ -7,7 +7,9 @@ mitmproxy's parser, wire protocol, or standalone process integration.
 import base64
 import copy
 import gzip
+import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -336,6 +338,126 @@ class AddonHookTest(unittest.TestCase):
                     [call(self.client), call(self.server)],
                 )
                 self.flow.kill.assert_not_called()
+
+
+class TruststorePublicationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="asc-public-ca-")
+        self.addCleanup(temporary.cleanup)
+        self.runtime = Path(temporary.name)
+        (self.runtime / "status").mkdir()
+        context = patch.object(
+            addon,
+            "ctx",
+            SimpleNamespace(
+                options=SimpleNamespace(agent_sec_runtime_dir=str(self.runtime))
+            ),
+        )
+        context.start()
+        self.addCleanup(context.stop)
+        self.gateway = addon.SecretGateway()
+        self.convert = patch.object(
+            addon, "_serialize_truststore", side_effect=lambda pem: b"p12:" + pem
+        )
+        self.serializer = self.convert.start()
+        self.addCleanup(self.convert.stop)
+
+    def health(self) -> dict:
+        return json.loads((self.runtime / "status" / "health.json").read_bytes())
+
+    def test_missing_pem_does_not_publish_success_then_recovers_when_input_arrives(
+        self,
+    ) -> None:
+        self.gateway._refresh_ca_pkcs12()
+        report = self.health()["caPkcs12"]
+        self.assertIsNone(report["pkcs12Sha256"])
+        self.assertIsInstance(report["error"], str)
+        self.serializer.assert_not_called()
+        pem = b"public certificate input"
+        (self.runtime / addon.CA_BUNDLE_NAME).write_bytes(pem)
+        (self.runtime / addon.CA_BUNDLE_NAME).chmod(0o644)
+        self.gateway._refresh_ca_pkcs12()
+        self.assertEqual(
+            self.health()["caPkcs12"],
+            {
+                "pemSha256": hashlib.sha256(pem).hexdigest(),
+                "pkcs12Sha256": hashlib.sha256(b"p12:" + pem).hexdigest(),
+                "error": None,
+            },
+        )
+        self.assertEqual(
+            (self.runtime / "status" / addon.CA_PKCS12_NAME).read_bytes(), b"p12:" + pem
+        )
+        self.gateway._refresh_ca_pkcs12()
+        self.serializer.assert_called_once_with(pem)
+
+    def test_updated_pem_failure_invalidates_old_keystore_and_changed_input_recovers(
+        self,
+    ) -> None:
+        source = self.runtime / addon.CA_BUNDLE_NAME
+        source.write_bytes(b"first")
+        source.chmod(0o644)
+        self.gateway._refresh_ca_pkcs12()
+        previous = (self.runtime / "status" / addon.CA_PKCS12_NAME).read_bytes()
+        source.write_bytes(b"second input")
+        self.serializer.side_effect = ValueError("sensitive synthetic conversion error")
+        self.gateway._refresh_ca_pkcs12()
+        report = self.health()["caPkcs12"]
+        self.assertEqual(
+            report["pemSha256"], hashlib.sha256(b"second input").hexdigest()
+        )
+        self.assertIsNone(report["pkcs12Sha256"])
+        self.assertNotIn("sensitive", json.dumps(report))
+        self.assertEqual(
+            (self.runtime / "status" / addon.CA_PKCS12_NAME).read_bytes(), previous
+        )
+        self.gateway._refresh_ca_pkcs12()
+        self.assertEqual(self.serializer.call_count, 2)
+        source.write_bytes(b"third")
+        self.serializer.side_effect = lambda pem: b"p12:" + pem
+        self.gateway._refresh_ca_pkcs12()
+        self.assertIsNone(self.health()["caPkcs12"]["error"])
+        self.assertEqual(self.serializer.call_count, 3)
+
+    def test_missing_output_is_regenerated_for_unchanged_input(self) -> None:
+        (self.runtime / addon.CA_BUNDLE_NAME).write_bytes(b"first")
+        (self.runtime / addon.CA_BUNDLE_NAME).chmod(0o644)
+        self.gateway._refresh_ca_pkcs12()
+        (self.runtime / "status" / addon.CA_PKCS12_NAME).unlink()
+        self.gateway._refresh_ca_pkcs12()
+        self.assertEqual(self.serializer.call_count, 2)
+        self.assertTrue((self.runtime / "status" / addon.CA_PKCS12_NAME).is_file())
+
+    def test_cached_success_is_invalidated_by_permission_change(self) -> None:
+        source = self.runtime / addon.CA_BUNDLE_NAME
+        source.write_bytes(b"public input")
+        source.chmod(0o644)
+        self.gateway._refresh_ca_pkcs12()
+        self.assertIsNone(self.health()["caPkcs12"]["error"])
+        source.chmod(0o666)
+        self.gateway._refresh_ca_pkcs12()
+        self.assertIsNone(self.health()["caPkcs12"]["pkcs12Sha256"])
+        self.assertIsInstance(self.health()["caPkcs12"]["error"], str)
+        self.serializer.assert_called_once_with(b"public input")
+
+    def test_unsafe_public_inputs_are_rejected_before_conversion(self) -> None:
+        source = self.runtime / addon.CA_BUNDLE_NAME
+        other = self.runtime / "other.pem"
+        other.write_bytes(b"public input")
+        for defect in ("symlink", "hardlink", "writable"):
+            with self.subTest(defect=defect):
+                if defect == "symlink":
+                    source.symlink_to(other)
+                elif defect == "hardlink":
+                    os.link(other, source)
+                else:
+                    source.write_bytes(b"unsafe")
+                    source.chmod(0o666)
+                self.gateway._refresh_ca_pkcs12()
+                self.assertIsNone(self.health()["caPkcs12"]["pkcs12Sha256"])
+                self.assertIsInstance(self.health()["caPkcs12"]["error"], str)
+                self.serializer.assert_not_called()
+                source.unlink()
 
 
 class FocusLoaderTest(unittest.TestCase):

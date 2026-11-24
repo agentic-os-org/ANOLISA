@@ -20,7 +20,7 @@ use crate::binding::RouteFault;
 use crate::files::Owner;
 use crate::host::{GatewayAccount, Host};
 use crate::nft::{self, Redirect};
-use crate::runtime::{PublishedScope, RuntimeDirectory};
+use crate::runtime::{CaBundlePaths, PublishedScope, RuntimeDirectory};
 use crate::state::{Domain, State};
 use crate::{GatewayError, GatewayErrorKind, ProcessIdentity};
 
@@ -43,7 +43,7 @@ pub struct GatewayConfig {
     pub ports: RangeInclusive<u16>,
     /// First available system trust bundle is extended with the gateway CA.
     pub system_ca_bundles: Vec<PathBuf>,
-    /// Generation acknowledgement deadline.
+    /// Deadline for plan/public CA startup and, separately, PKCS#12 conversion.
     pub load_timeout: Duration,
 }
 impl GatewayConfig {
@@ -104,8 +104,8 @@ pub struct KeyList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaBundle {
-    /// Public CA bundle on the daemon host, shared by all Scopes.
-    pub ca_bundle_path: PathBuf,
+    /// Public PEM and PKCS#12 bundles on the daemon host, shared by all Scopes.
+    pub ca_bundle_paths: CaBundlePaths,
 }
 
 pub(crate) struct Inner {
@@ -622,15 +622,9 @@ impl GatewayService {
     /// Rejects disabled, unloaded or otherwise unready data planes.
     pub fn ca(&self) -> Result<CaBundle, GatewayError> {
         let inner = self.lock();
-        if !self.status_of(&inner.state).ready {
-            return Err(GatewayError::unavailable(
-                "gateway generation or CA is not ready",
-            ));
-        }
-        let runtime = self.runtime(self.account()?);
-        Ok(CaBundle {
-            ca_bundle_path: runtime.published_ca_bundle()?,
-        })
+        self.ready_ca_bundle(&inner.state)
+            .map(|ca_bundle_paths| CaBundle { ca_bundle_paths })
+            .ok_or_else(|| GatewayError::unavailable("gateway generation or CA is not ready"))
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner
@@ -794,12 +788,30 @@ impl GatewayService {
             self.canonical(scope)?;
         }
         self.host.start_unit(&self.config.unit)?;
-        runtime.await_generation(generation, self.config.load_timeout)?;
+        let pid = self
+            .host
+            .unit_pid(&self.config.unit)
+            .ok_or_else(|| GatewayError::unavailable("gateway main process is unavailable"))?;
+        runtime.await_generation(generation, pid, self.config.load_timeout)?;
+        let ca_deadline = std::time::Instant::now() + self.config.load_timeout;
+        // The addon converts this complete PEM; waiting for conversion before publishing it deadlocks.
+        runtime.publish_ca_bundle(&self.config.system_ca_bundles, self.config.load_timeout)?;
+        runtime.await_pkcs12(
+            generation,
+            pid,
+            ca_deadline.saturating_duration_since(std::time::Instant::now()),
+        )?;
+        if !self.host.unit_active(&self.config.unit)
+            || self.host.unit_pid(&self.config.unit) != Some(pid)
+        {
+            return Err(GatewayError::unavailable(
+                "gateway restarted during CA publication",
+            ));
+        }
         for (scope, _) in plans.values() {
             self.canonical(scope)
                 .map_err(|error| self.fail_closed(error))?;
         }
-        runtime.publish_ca_bundle(&self.config.system_ca_bundles)?;
         self.route(inner, &plans)?;
         runtime.remove_stale(generation)
     }
@@ -899,18 +911,27 @@ impl GatewayService {
     pub(crate) fn fail_closed(&self, error: GatewayError) -> GatewayError {
         withdraw_on_failure(&self.config, self.host.as_ref(), error)
     }
+    fn ready_ca_bundle(&self, state: &State) -> Option<CaBundlePaths> {
+        if !state.enabled
+            || self.host.check_cgroup_v2().is_err()
+            || !self.host.unit_active(&self.config.unit)
+        {
+            return None;
+        }
+        let account = self.account().ok().flatten()?;
+        let pid = self.host.unit_pid(&self.config.unit)?;
+        let paths = self
+            .runtime(Some(account))
+            .published_ca_bundle(state.generation, pid)
+            .ok()?;
+        (self.host.unit_active(&self.config.unit)
+            && self.host.unit_pid(&self.config.unit) == Some(pid))
+        .then_some(paths)
+    }
     fn status_of(&self, state: &State) -> GatewayStatus {
-        let ready = state.enabled
-            && self.host.check_cgroup_v2().is_ok()
-            && self.host.unit_active(&self.config.unit)
-            && self.account().ok().flatten().is_some_and(|account| {
-                let runtime = self.runtime(Some(account));
-                runtime.health().loaded_generation == Some(state.generation)
-                    && runtime.published_ca_bundle().is_ok()
-            });
         GatewayStatus {
             enabled: state.enabled,
-            ready,
+            ready: self.ready_ca_bundle(state).is_some(),
             scopes: Self::scopes_of(state),
         }
     }

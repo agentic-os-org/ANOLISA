@@ -700,8 +700,14 @@ Scope 可显式共用指定 fake；撤销一个不影响其它 Active Scope，�
 
 原生凭据执行、KeyAdd、`gateway credentials` 及 RPC 全部删除。旧 Gateway 策略/Store/
 plan/快照数据明确拒绝，不迁移、不覆盖、不推断转换。root pair list/remove 使用 opaque ID。
-无 Scope 参数的 `gateway ca` 仅在真实 Gateway ready 时返回共享公开 CA 的 `{caBundlePath}`，
-不提供 GitHub 环境映射。remove 返回 `{pairid}`，list 返回 `{pairids: string[]}`。
+无 Scope 参数的 `gateway.ca` 在当前实例、generation 和 PEM/PKCS12 摘要均匹配时，返回
+共享公开信任库绝对路径 `{caBundlePaths: {pem, pkcs12}}`；两者含系统 PEM 根加网关 CA，无私钥。
+CLI `gateway ca --format pem|pkcs12` 只筛选输出，RPC params 仍为 `{}`，非法成功响应明确失败。
+PKCS12 使用 Java trusted entries 和公开非秘密密码 `changeit`；选用时替代 JVM 默认根，
+不修改其 `cacerts` 文件。查询不修复文件、不改 Agent 配置。现有格式版本不变，
+CLI/daemon/addon 成套更新或回滚，不增加旧数据迁移。见
+[双格式指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#gateway-ca-格式未发布的-v2)。
+remove 返回 `{pairid}`，list 返回 `{pairids: string[]}`。
 仅 `github.cedar` 资产覆盖八条 auto/basic REST/Smart HTTP 规则；source/raw/RPM 不交付
 `github.json` 或 `github-policy.json` wrapper。八条规则均开启响应改写，包括流式
  git-upload-pack 响应。源码资产不自动注册：[`policy.rs`](../../v2/apps/asc-cli/src/commands/policy.rs)

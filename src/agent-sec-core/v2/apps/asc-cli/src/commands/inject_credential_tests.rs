@@ -387,7 +387,11 @@ fn reports_gateway_guidance_and_unique_pair_ids_without_token_values() {
     for (enabled, ready, ca) in [
         (false, false, None),
         (true, false, None),
-        (true, true, Some("/run/test-ca.pem")),
+        (
+            true,
+            true,
+            Some(json!({"pem": "/run/test-ca.pem", "pkcs12": "/run/test-ca.p12"})),
+        ),
         (true, true, None),
     ] {
         let mut steps = vec![(
@@ -397,14 +401,17 @@ fn reports_gateway_guidance_and_unique_pair_ids_without_token_values() {
         if ready {
             steps.push((
                 GATEWAY_CA,
-                Some(ca.map_or_else(rejected, |path| success(json!({"caBundlePath": path})))),
+                Some(
+                    ca.clone()
+                        .map_or_else(rejected, |paths| success(json!({"caBundlePaths": paths}))),
+                ),
             ));
         }
         let daemon = Daemon::new(steps);
         let report = command().report(&daemon.socket, TIMEOUT, &plan, &created, &json!([]));
         assert_eq!(
             report["gateway"],
-            json!({"enabled": enabled, "ready": ready, "caBundlePath": ca})
+            json!({"enabled": enabled, "ready": ready, "caBundlePaths": ca})
         );
         assert_eq!(report["pairIds"], json!(["pair-a", "pair-z"]));
         assert_eq!(report["teardown"], json!(["delete scope", "delete policy"]));
@@ -422,7 +429,7 @@ fn reports_gateway_guidance_and_unique_pair_ids_without_token_values() {
     let report = command().report(&daemon.socket, TIMEOUT, &plan, &created, &Value::Null);
     assert_eq!(
         report["gateway"],
-        json!({"enabled": false, "ready": false, "caBundlePath": null})
+        json!({"enabled": false, "ready": false, "caBundlePaths": null})
     );
     daemon.finish();
 }
