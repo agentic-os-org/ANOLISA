@@ -1,7 +1,7 @@
 //! Native exec-form startup uses the real service over a deterministic Qoder host.
 
 use super::{
-    attachment::{action, native_command, success, wait},
+    attachment::{action, native_command, send_action, success, wait},
     support::{Fixture, Process, Service},
 };
 use serde_json::{json, Value};
@@ -101,11 +101,7 @@ fn native_print_startup_updates_and_releases_without_aw_run() {
         .unwrap()
         .iter()
         .all(|hook| hook["code"] == 0));
-    fs::write(
-        fixture.root.join("attach-command-2.json"),
-        br#"{"action":"stop"}"#,
-    )
-    .unwrap();
+    send_action(&fixture.root, 2, "stop");
     let output = process.finish();
     assert!(
         output.status.success(),
@@ -160,11 +156,7 @@ fn start(fixture: &Fixture, work: &Path) -> Process {
 }
 
 fn turn(work: &Path, index: usize) -> Value {
-    fs::write(
-        work.join(format!("attach-command-{index}.json")),
-        br#"{"action":"turn"}"#,
-    )
-    .unwrap();
+    send_action(work, index, "turn");
     wait(&work.join(format!("attach-result-{index}.json")))
 }
 
@@ -243,11 +235,7 @@ fn rejected_configuration_keeps_active_policy_and_exit_independent_of_disk() {
         .unwrap()
         .iter()
         .all(|hook| hook["code"] == 0));
-    fs::write(
-        fixture.root.join("attach-command-5.json"),
-        br#"{"action":"stop"}"#,
-    )
-    .unwrap();
+    send_action(&fixture.root, 5, "stop");
     assert!(process.finish().status.success());
     let ended = wait(&fixture.root.join("native-end.json"));
     assert!(
@@ -344,11 +332,7 @@ fn shared_profile_owners_reject_missing_stale_and_cross_owner_locators() {
     let result = fixture.run(remove);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("live owner"));
-    fs::write(
-        first_work.join("attach-command-7.json"),
-        br#"{"action":"stop"}"#,
-    )
-    .unwrap();
+    send_action(&first_work, 7, "stop");
     assert!(first.finish().status.success());
     second.signal(libc::SIGKILL);
     assert!(!second.finish().status.success());
