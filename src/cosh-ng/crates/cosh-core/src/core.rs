@@ -1182,8 +1182,13 @@ impl CoshCore {
             // Set once a tool call ends the run. The error is returned only after
             // this batch is fully answered.
             let mut fatal_turn: Option<FatalTurn> = None;
+            // The detector still runs per call, but its warning is appended to
+            // the transcript only after the whole batch: a system message
+            // between two results of one assistant message leaves declared call
+            // IDs unanswered at compaction boundaries.
+            let mut loop_warnings = 0usize;
 
-            for tc in &tool_calls {
+            for (position, tc) in tool_calls.iter().enumerate() {
                 provider_access::drive(
                     trial_access.as_ref(),
                     std::future::ready(()),
@@ -1873,18 +1878,37 @@ impl CoshCore {
                 ));
 
                 if self.loop_detector.record_action(&tc.name, &tc.arguments) {
-                    self.messages
-                        .push(Message::system(LoopDetector::loop_warning()));
+                    loop_warnings += 1;
                 }
 
                 if interrupted {
-                    self.audit.record_turn_terminal(
-                        turn_scope,
-                        AuditOutcomeStatus::Cancelled,
-                        Some("interrupted"),
-                    );
-                    return Ok(AgentTurnOutcome::Completed);
+                    // The run ends here, but the assistant message declared the
+                    // rest of the batch too: each of those IDs still needs one
+                    // result or the persisted transcript cannot be compacted.
+                    for pending in tool_calls[position + 1..]
+                        .iter()
+                        .filter(|call| !call.name.is_empty())
+                    {
+                        self.skip_unexecuted_tool_call(
+                            CoreAuditScope::tool(&run_id, &turn_id, &pending.id),
+                            writer,
+                            pending,
+                        );
+                    }
+                    break;
                 }
+            }
+            for _ in 0..loop_warnings {
+                self.messages
+                    .push(Message::system(LoopDetector::loop_warning()));
+            }
+            if interrupted {
+                self.audit.record_turn_terminal(
+                    turn_scope,
+                    AuditOutcomeStatus::Cancelled,
+                    Some("interrupted"),
+                );
+                return Ok(AgentTurnOutcome::Completed);
             }
             // Also checked after the last call: a failure there never re-enters
             // the loop boundary above.
