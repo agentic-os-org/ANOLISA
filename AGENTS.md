@@ -214,7 +214,8 @@ Three invariants repeated here:
 > GitHub workflow mechanics for `/claim` and `/unclaim` are documented in
 > [`.github/TRIAGE.md`](.github/TRIAGE.md).
 
-Three invariants repeated here so agents do not conflict across components:
+Four invariants keep agents from conflicting across components or with PR
+authors:
 
 - **Check all active locks before implementing**: inspect trusted
   `github-actions[bot]` claim markers (`<!-- anolisa-claim ... state=claimed -->`),
@@ -228,4 +229,14 @@ Three invariants repeated here so agents do not conflict across components:
   resolved or closed as not planned, superseded **non-draft** competing PRs
   must be closed with a polite note linking the resolution; lingering
   unconverted **Draft PRs** do not block closing the issue.
+- **Assist another contributor's PR only when authorized**: follow [lifecycle rules §7](specs/issue-claim-and-pr-lifecycle.md#7-mandatory-rules-for-ai-agents-and-automation)
+  and the [maintainer assistance scope](CONTRIBUTING.md#maintainer-assistance).
+  When assisting another contributor's PR, a review request authorizes
+  diagnosis and recommendations only; CI retries, PR metadata edits, and
+  source-branch updates require explicit direction from an authorized
+  maintainer and the relevant permissions. Branch rewrites MUST use an explicit
+  lease tied to the reviewed head SHA. The authorization and lease requirements
+  apply only when assisting another contributor's PR; authors directing their
+  own agents on their own PR remain subject to all other repository
+  requirements.
 

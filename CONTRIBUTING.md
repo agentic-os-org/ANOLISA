@@ -318,6 +318,55 @@ for formal review and merge gates:
 The full normative lifecycle matrix and automation rules are defined in
 [`specs/issue-claim-and-pr-lifecycle.md`](specs/issue-claim-and-pr-lifecycle.md).
 
+### Maintainer assistance
+
+Some problems are unrelated to the PR's implementation but can block merging.
+To avoid asking authors to rework their PRs for these reasons, maintainers may
+handle the following problems directly without changing the implementation:
+
+- Retry each eligible failed workflow run once per PR revision when the failure
+  is caused by a known flaky test or a transient fault.
+- Correct PR title formatting, or restore missing template headings and
+  placeholders. Validation results, risk assessments, and issue links remain
+  for the author to fill in.
+- Rebase the PR branch to resolve merge conflicts where both sides' intent can
+  be preserved without choosing behavior, ordering, or precedence, such as
+  identical content, formatting-only differences, or independent additions at
+  the same location.
+
+Updating the PR branch requires write access to it. Authors of personal forks
+can grant this access by enabling **Allow edits from maintainers**. If the fork
+contains GitHub Actions workflows, GitHub labels the option **Allow edits and
+access to secrets by maintainers**, because maintainers can then edit the
+fork's workflows. If you prefer not to have others modify your branch, leave it
+disabled or turn it off at any time on the PR page.
+Rebasing changes commit hashes and invalidates existing cryptographic
+signatures, but keeps commit authors, messages, and `Signed-off-by` trailers.
+If cryptographic signatures are required, rewritten commits must be signed
+again. Maintainers record the old and new branch heads in the PR. Before making
+further changes, switch to your local PR branch, separately save uncommitted
+work (including untracked files), and back up the branch; a backup branch
+preserves only existing commits. The commands act on the checked-out branch.
+After switching and backing up, confirm the old head is an ancestor of your
+`HEAD`. If the check fails, your local history has diverged: the chain stops
+before the rebase, so keep the backup and review which commits to replay first
+using the [rebase recovery guidance](https://git-scm.com/docs/git-rebase#_recovering_from_upstream_rebase).
+Otherwise, replay any local commits after the old head onto the new head:
+
+```bash
+git checkout <pr-branch> &&
+git fetch origin &&
+git branch <backup-branch> &&
+git merge-base --is-ancestor <old-head> HEAD &&
+git -c rebase.updateRefs=false rebase --onto <new-head> <old-head>
+```
+
+`rebase.updateRefs=false` keeps the backup branch at the original tip.
+
+Maintainers describe what they changed in the PR. If CI still fails after the
+retry, a conflict involves an implementation choice, or the PR branch cannot be
+updated, the author handles it.
+
 ## Documentation synchronization
 
 Follow the [PR documentation update rules in §5 of the documentation standard](specs/documentation-standard.md#5-pr-documentation-update-rules)
