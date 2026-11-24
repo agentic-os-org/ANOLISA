@@ -18,7 +18,7 @@ from test_packages import Fixture
 
 class IntegrationTests(Fixture):
     def test_backend_selection_never_compiles_framework_or_provider(self) -> None:
-        for selected in (["sec-core"], ["tokenless"], ["sec-core tokenless"]):
+        for selected in (["sec-core"], ["tokenless"], ["ws-ckpt"], ["sec-core tokenless ws-ckpt"]):
             with self.subTest(selected=selected), patch.object(
                 integration.platform, "system", return_value="Linux"
             ), patch.object(integration.platform, "machine", return_value="x86_64"), patch.object(
@@ -37,6 +37,12 @@ class IntegrationTests(Fixture):
                 expected = set()
                 if "sec-core" in integration.backends(selected):
                     expected.update(("asc-cli", "asc-daemon"))
+                if "ws-ckpt" in integration.backends(selected):
+                    expected.add("ws-ckpt-cli")
+                    self.assertIn(
+                        call(self.repo / "src/ws-ckpt/src", ("ws-ckpt-cli",), self.cancel),
+                        compile_target.call_args_list,
+                    )
                 if "tokenless" in integration.backends(selected):
                     expected.add("tokenless-cli")
                     prepare.assert_called_once()

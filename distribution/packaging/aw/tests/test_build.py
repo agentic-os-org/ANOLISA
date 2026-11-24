@@ -23,7 +23,10 @@ class BuildTests(Fixture):
             "core": {"aw-cli"},
             "sec-core": {"aw-provider-sec-core"},
             "tokenless": {"aw-provider-tokenless"},
-            "core sec-core tokenless": {"aw-cli", "aw-provider-sec-core", "aw-provider-tokenless"},
+            "ws-ckpt": {"aw-provider-ws-ckpt"},
+            "core sec-core tokenless ws-ckpt": {
+                "aw-cli", "aw-provider-sec-core", "aw-provider-tokenless", "aw-provider-ws-ckpt",
+            },
         }
         for selection, names in expected.items():
             with self.subTest(selection=selection):
@@ -31,7 +34,9 @@ class BuildTests(Fixture):
                 self.assertEqual({name for _, packages in targets for name in packages}, names)
                 self.assertFalse(
                     any(
-                        "src/tokenless" in str(path) or "agent-sec-core/v2" in str(path)
+                        any(backend in str(path) for backend in (
+                            "src/tokenless", "agent-sec-core/v2", "src/ws-ckpt",
+                        ))
                         for path, _ in targets
                     )
                 )

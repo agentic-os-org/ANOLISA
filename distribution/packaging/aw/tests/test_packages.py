@@ -58,12 +58,15 @@ class Fixture(unittest.TestCase):
                 f"docs/user-guide/{language}/aw/installation.md",
                 b"[guide](configuration.md) [build](../../../../contribute/en/aw/building.md)",
             )
-        for role in ("sec-core", "tokenless"):
+        for role in ("sec-core", "tokenless", "ws-ckpt"):
             if role in selected:
                 source = "providers/" + ("agent-sec-core" if role == "sec-core" else role)
                 self.binary(source, f"aw-provider-{role}")
                 self.file(f"{source}/examples/aw.yaml")
                 self.file(f"{source}/schemas/provider.json", b"{}")
+        if "ws-ckpt" in selected:
+            for filename in ("README.md", "README_zh.md"):
+                self.file(f"providers/ws-ckpt/{filename}", b"ws-ckpt Provider guide")
 
     def assemble(self, selection: str) -> list[Path]:
         return package.assemble(
@@ -104,7 +107,7 @@ class Fixture(unittest.TestCase):
 
 class ArchiveTests(Fixture):
     def test_explicit_selection_emits_only_independent_packages(self) -> None:
-        for selection in (*package.COMPONENTS, "core sec-core tokenless"):
+        for selection in (*package.COMPONENTS, "core sec-core tokenless ws-ckpt"):
             with self.subTest(selection=selection):
                 self.output = self.repo / selection.replace(" ", "-") / "output"
                 self.prepare(selection)
@@ -126,6 +129,8 @@ class ArchiveTests(Fixture):
                             "agent-sec-cli",
                             "agent-sec-daemon",
                             "agent-sec-daemon-health",
+                            "ws-ckpt",
+                            "SKILL.md",
                         }
                         self.assertFalse(forbidden & {Path(name).name for name in files})
                         templates = {name for name in files if name.startswith("templates/")}
@@ -144,17 +149,23 @@ class ArchiveTests(Fixture):
                             self.assertNotIn("bin/aw", files)
                             self.check_provider(archive, files, "", identity)
                             role = identity.removeprefix("aw-provider-")
-                            self.assertEqual(
-                                templates,
-                                {
-                                    f"templates/{role}.json",
+                            expected_templates = {f"templates/{role}.json"}
+                            if role in ("sec-core", "tokenless"):
+                                expected_templates.update({
                                     "templates/sec-core-tokenless.json",
                                     "templates/tokenless-openclaw.json",
                                     "templates/sec-core-tokenless-openclaw.json",
-                                },
-                            )
+                                })
+                            if role == "ws-ckpt":
+                                self.assertIn("payload/share/aw/providers/ws-ckpt/examples/aw.yaml", files)
+                                for filename in ("README.md", "README_zh.md"):
+                                    self.assertEqual(
+                                        archive.extractfile(files[filename]).read(), b"ws-ckpt Provider guide"
+                                    )
+                            self.assertEqual(templates, expected_templates)
                 self.assertFalse((self.repo / "src/tokenless").exists())
                 self.assertFalse((self.repo / "src/agent-sec-core").exists())
+                self.assertFalse((self.repo / "src/ws-ckpt").exists())
 
     def test_empty_duplicate_or_unknown_selection_is_rejected_before_publication(self) -> None:
         for selection in ("", "all", "core core", "unknown"):
@@ -207,6 +218,7 @@ class ArchiveTests(Fixture):
         expected = {
             "sec-core": {"PROVIDERS_DIR", "SEC_CORE_CLI", "SOCKET"},
             "tokenless": {"PROVIDERS_DIR", "TOKENLESS_CLI", "STATE"},
+            "ws-ckpt": {"PROVIDERS_DIR", "WS_CKPT_CLI"},
             "tokenless-openclaw": {"PROVIDERS_DIR", "TOKENLESS_CLI", "STATE"},
             "sec-core-tokenless": {
                 "PROVIDERS_DIR",

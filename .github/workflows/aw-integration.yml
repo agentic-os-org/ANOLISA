@@ -135,8 +135,10 @@ jobs:
             src/aw
             providers/agent-sec-core
             providers/tokenless
+            providers/ws-ckpt
             src/agent-sec-core/v2
             src/tokenless
+            src/ws-ckpt/src
       - name: Test installer without Python
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -154,8 +156,8 @@ jobs:
           make -C distribution test-aw-packages
           # Standalone integration uses the candidate Makefile's default version.
           make -C distribution aw-packages ${RELEASE_VERSION:+"VERSION=$RELEASE_VERSION"} \
-            OUTPUT="$AW_PACKAGE_DIR/packages" COMPONENTS="core sec-core tokenless"
-          make -C distribution aw-integration-backends BACKENDS="sec-core tokenless"
+            OUTPUT="$AW_PACKAGE_DIR/packages" COMPONENTS="core sec-core tokenless ws-ckpt"
+          make -C distribution aw-integration-backends BACKENDS="sec-core tokenless ws-ckpt"
       - name: Stage the same build for native acceptance
         shell: bash
         env:
@@ -184,6 +186,21 @@ jobs:
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}
           path: ${{ env.AW_PACKAGE_DIR }}/native.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+      - name: Stage the candidate ws-ckpt backend
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          mkdir -p "$AW_PACKAGE_DIR/ws-ckpt-backend"
+          install -m 0755 src/ws-ckpt/src/target/release/ws-ckpt "$AW_PACKAGE_DIR/ws-ckpt-backend/ws-ckpt"
+          cd "$AW_PACKAGE_DIR/ws-ckpt-backend"
+          sha256sum ws-ckpt > SHA256SUMS
+          printf '%s\n' "$CANDIDATE_SHA" > source-sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aw-ws-ckpt-backend-${{ needs.plan.outputs.sha }}
+          path: ${{ env.AW_PACKAGE_DIR }}/ws-ckpt-backend/
           retention-days: 3
           if-no-files-found: error
       - name: Verify sec-core authenticated health contract
@@ -226,10 +243,11 @@ jobs:
           core_bundle="$(bundle_dir aw-core)"
           security_bundle="$(bundle_dir aw-provider-sec-core)"
           tokenless_bundle="$(bundle_dir aw-provider-tokenless)"
+          checkpoint_bundle="$(bundle_dir aw-provider-ws-ckpt)"
           test -x "$core_bundle/bin/aw"
           test -f "$core_bundle/Makefile"
           test ! -e "$core_bundle/manifest.json"
-          for bundle in "$security_bundle" "$tokenless_bundle"; do
+          for bundle in "$security_bundle" "$tokenless_bundle" "$checkpoint_bundle"; do
             test -f "$bundle/package.json"
             test -d "$bundle/payload"
             test ! -e "$bundle/manifest.json"
@@ -241,6 +259,19 @@ jobs:
           "$aw" config init --prefix "$root/core-only" \
             --config "$runtime/core/aw.yaml" --state-dir "$runtime/core/state" --qoder /bin/true
           "$aw" config validate --config "$runtime/core/aw.yaml"
+          checkpoint_prefix="$root/checkpoint"
+          "$aw" install --bundle "$checkpoint_bundle" --prefix "$checkpoint_prefix"
+          checkpoint_binary="$checkpoint_prefix/libexec/aw/providers/ws-ckpt/aw-provider-ws-ckpt"
+          test -x "$checkpoint_binary"
+          test -f "$checkpoint_prefix/share/aw/providers/ws-ckpt/examples/aw.yaml"
+          "$aw" config init --prefix "$checkpoint_prefix" \
+            --config "$runtime/checkpoint.yaml" --state-dir "$runtime/checkpoint-state" \
+            --qoder /bin/true --template "$checkpoint_bundle/templates/ws-ckpt.json" \
+            --template-var "PROVIDERS_DIR=$checkpoint_prefix/libexec/aw/providers" \
+            --template-var "WS_CKPT_CLI=/bin/true"
+          "$aw" config validate --config "$runtime/checkpoint.yaml"
+          "$aw" uninstall --prefix "$checkpoint_prefix" --yes
+          test ! -e "$checkpoint_binary"
           "$aw" install --bundle "$security_bundle" --prefix "$root/split"
           "$aw" install --bundle "$tokenless_bundle" --prefix "$root/split"
           "$aw" list --installed --prefix "$root/split" --json > "$runtime/split.json"
@@ -285,6 +316,70 @@ jobs:
             ${{ env.AW_PACKAGE_DIR }}/demo/result.json
             ${{ env.AW_PACKAGE_DIR }}/demo/*.log
           if-no-files-found: ignore
+
+  ws-ckpt-btrfs:
+    needs: [plan, packages]
+    name: AW / ws-ckpt Btrfs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            providers/ws-ckpt
+            src/aw/crates/aw-cli/tests/fixtures/launcher
+            src/ws-ckpt/src/skills/ws-ckpt
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-integration-linux-x86_64-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/aw-checkpoint/packages
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-ws-ckpt-backend-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/aw-checkpoint/backend
+      - name: Prepare the VM for Btrfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends btrfs-progs rsync
+          if ! grep -qw btrfs /proc/filesystems; then sudo modprobe btrfs; fi
+          if ! test -c /dev/loop-control; then sudo modprobe loop; fi
+          test -c /dev/loop-control
+      - name: Verify snapshots using the packaged Provider and candidate backend
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/aw-checkpoint"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(cat "$root/backend/source-sha.txt")" = "$CANDIDATE_SHA"
+          (cd "$root/backend" && sha256sum -c SHA256SUMS)
+          chmod 0755 "$root/backend/ws-ckpt"
+          (cd "$root/packages" && sha256sum -c SHA256SUMS && for archive in *.tar.gz; do tar -xzf "$archive"; done)
+          shopt -s nullglob
+          core=("$root/packages/"aw-core-*/)
+          checkpoint=("$root/packages/"aw-provider-ws-ckpt-*/)
+          test "${#core[@]}" -eq 1
+          test "${#checkpoint[@]}" -eq 1
+          python3 -B - "$CANDIDATE_SHA" "${core[0]}share/doc/aw/source.json" "${checkpoint[0]}package.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          for path in map(Path, sys.argv[2:]):
+              if json.loads(path.read_text())["source_commit"] != sys.argv[1]:
+                  raise SystemExit(f"Candidate SHA mismatch in {path}")
+          PY
+          sudo bash providers/ws-ckpt/tests/btrfs-integration.sh \
+            "${core[0]}bin/aw" "${checkpoint[0]}" "$root/backend/ws-ckpt" 2>&1 | tee "$root/ws-ckpt-btrfs.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aw-ws-ckpt-btrfs-evidence-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/aw-checkpoint/ws-ckpt-btrfs.log
+          retention-days: 7
+          if-no-files-found: warn
 
   native:
     needs: [plan, packages]
@@ -430,7 +525,7 @@ jobs:
           if-no-files-found: error
 
   result:
-    needs: [plan, packages, native, resident-image, resident-container]
+    needs: [plan, packages, ws-ckpt-btrfs, native, resident-image, resident-container]
     if: always()
     name: AW / Integration result
     runs-on: ubuntu-24.04
@@ -466,6 +561,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PACKAGE_RESULT: ${{ needs.packages.result }}
+          WS_CKPT_BTRFS_RESULT: ${{ needs.ws-ckpt-btrfs.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           CREDENTIAL_FREE: ${{ inputs.credential_free || false }}
           RESIDENT_IMAGE_RESULT: ${{ needs.resident-image.result }}

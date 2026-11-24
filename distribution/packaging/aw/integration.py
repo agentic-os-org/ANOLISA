@@ -22,9 +22,9 @@ def backends(selection: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     if (
         not selected
         or len(selected) != len(set(selected))
-        or any(v not in {"sec-core", "tokenless"} for v in selected)
+        or any(v not in {"sec-core", "tokenless", "ws-ckpt"} for v in selected)
     ):
-        raise ValueError("backends must be a nonempty unique list of sec-core, tokenless")
+        raise ValueError("backends must be a nonempty unique list of sec-core, tokenless, ws-ckpt")
     return selected
 
 
@@ -98,6 +98,8 @@ def build(repo: Path, selection: list[str] | tuple[str, ...], cancel: Cancellati
     provenance = None
     if "sec-core" in selected:
         compile_target(repo / "src/agent-sec-core/v2", ("asc-cli", "asc-daemon"), cancel)
+    if "ws-ckpt" in selected:
+        compile_target(repo / "src/ws-ckpt/src", ("ws-ckpt-cli",), cancel)
     if "tokenless" in selected:
         cli = repo / "src/tokenless/target/release/tokenless"
         with tempfile.TemporaryDirectory(prefix="aw-integration-tokenless-") as temporary:

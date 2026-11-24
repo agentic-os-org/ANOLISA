@@ -460,7 +460,7 @@ class NativeTests(GateFixture):
             verify_case(case, output, self.root)
 
     def test_summary_rechecks_results_instead_of_trusting_passed_status(self) -> None:
-        outcomes = {name: "success" for name in ("plan", "packages", "native")}
+        outcomes = {name: "success" for name in ("plan", "packages", "ws-ckpt-btrfs", "native")}
         for agent, case in self.custom_cases():
             self.reports()
             path = self.root / agent / case["results"][0]["file"]
@@ -477,7 +477,7 @@ class NativeTests(GateFixture):
         self.assertFalse(summarize(self.manifest, self.root, "a" * 40, outcomes)[1])
 
     def test_missing_stale_skipped_or_failed_evidence_rejects_nightly(self) -> None:
-        outcomes = {name: "success" for name in ("plan", "packages", "native")}
+        outcomes = {name: "success" for name in ("plan", "packages", "ws-ckpt-btrfs", "native")}
         self.reports()
         text, passed = summarize(self.manifest, self.root, "a" * 40, outcomes)
         self.assertTrue(passed)
@@ -501,6 +501,11 @@ class NativeTests(GateFixture):
             if mode != "missing":
                 path.write_text(json.dumps(report))
             with self.subTest(mode=mode):
+                self.assertFalse(summarize(self.manifest, self.root, "a" * 40, jobs)[1])
+        self.reports()
+        for outcome in (None, "failure", "cancelled", "skipped"):
+            with self.subTest(ws_ckpt_btrfs=outcome):
+                jobs = {**outcomes, "ws-ckpt-btrfs": outcome}
                 self.assertFalse(summarize(self.manifest, self.root, "a" * 40, jobs)[1])
 
     def test_timeout_allows_fixture_to_reap_its_separate_process_group(self) -> None:
