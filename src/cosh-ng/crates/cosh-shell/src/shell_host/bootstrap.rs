@@ -153,7 +153,7 @@ fn start_shell_session(
         let marker_token = generate_marker_token();
         let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
         let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
-        let marker_script = marker_script_with_token(
+        let mut marker_script = marker_script_with_token(
             adapter.marker_script(),
             &marker_token,
             &recovery_request_file_str,
@@ -161,6 +161,15 @@ fn start_shell_session(
             &assistance_state_file.to_string_lossy(),
             config.input_classifier.ai_enabled(),
         );
+        if adapter.isolates_readline() {
+            marker_script.insert_str(
+                0,
+                &format!(
+                    "COSH_MARKER_LANGUAGE='{}'\n",
+                    config.hint_language.as_config_value()
+                ),
+            );
+        }
         fs::write(&rcfile, &marker_script)?;
         fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
         if adapter.uses_login_identity_inject(config) {

@@ -75,6 +75,10 @@ unset _cosh_user_handler_definition _cosh_user_handler_xtrace_prefix \
 _cosh_command_not_found_handle() {
   local command="$1"
   shift || true
+  if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 && "${BASH_SUBSHELL:-0}" != 0 ]]; then
+    _cosh_delegate_bash_command_not_found "$command" "$@"
+    return $?
+  fi
   local _cosh_route_chars=${#command}
   local _cosh_route_arg
   for _cosh_route_arg in "$@"; do
@@ -86,7 +90,20 @@ _cosh_command_not_found_handle() {
   fi
   if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
     local history_entry history_no history_command classification_command first_word
-    if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
+    if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 ]]; then
+      if [[ -z "${_COSH_SUBMITTED_LINE+x}" ]]; then
+        _cosh_delegate_bash_command_not_found "$command" "$@"
+        return $?
+      fi
+      history_command="$_COSH_SUBMITTED_LINE"
+      classification_command="$_COSH_SUBMITTED_LINE"
+      while [[ "$classification_command" == ' '* || "$classification_command" == $'\t'* ]]; do
+        classification_command="${classification_command#?}"
+      done
+      _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+      history_no="$_COSH_ATTEMPT_GENERATION"
+      unset _COSH_SUBMITTED_LINE _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION
+    elif [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
       history_command="$_COSH_PENDING_RECOVERY_INPUT"
       classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$history_command}"
       unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
@@ -458,11 +475,26 @@ _cosh_precmd_marker() {
   # accept boundary. The widget inspects and clears Readline's unexpanded
   # buffer so guarded slash controls never reach Bash parsing.
   for _cosh_keymap in emacs-standard emacs-meta vi-insert vi-command; do
-    bind -m "$_cosh_keymap" -x '"\e[99~":_cosh_guard_slash_submission' 2>/dev/null || true
-    bind -m "$_cosh_keymap" -x '"\e[100~":_cosh_guard_private_slash_submission' 2>/dev/null || true
-    bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
+    if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 ]]; then
+      bind -m "$_cosh_keymap" -x '"\C-x\C-]":_cosh_guard_slash_submission' 2>/dev/null || true
+      bind -m "$_cosh_keymap" -x '"\C-x\C-^":_cosh_guard_private_slash_submission' 2>/dev/null || true
+      bind -m "$_cosh_keymap" -x '"\C-x\C-_":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
+    else
+      bind -m "$_cosh_keymap" -x '"\e[99~":_cosh_guard_slash_submission' 2>/dev/null || true
+      bind -m "$_cosh_keymap" -x '"\e[100~":_cosh_guard_private_slash_submission' 2>/dev/null || true
+      bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
+    fi
   done
   unset _cosh_keymap
+  if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 ]]; then
+    printf '\033]1337;COSH;{"event":"shell_capabilities","token":"%s","session_id":"%s","legacy_bash_readline":true}\a' \
+      "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" "$(_cosh_json_escape "$COSH_SESSION_ID")" > /dev/tty
+    case "${COSH_MARKER_LANGUAGE:-en-US}" in
+      zh-CN) printf 'cosh: Bash 4.2/4.3 不提供精确命令边界；普通命令记录和自动失败分析不可用，/help 与自然语言提问仍可使用。\n' >&2 ;;
+      *) printf 'cosh: Bash 4.2/4.3 command observation is unavailable; the Cosh command ledger and automatic failure analysis are disabled. /help and natural-language questions remain available.\n' >&2 ;;
+    esac
+  fi
+  unset COSH_MARKER_LANGUAGE
   IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true
   rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
   if [[ -n "${_COSH_USER_DEBUG_TRAP:-}" ]]; then

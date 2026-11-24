@@ -38,6 +38,13 @@ impl Store {
         self.records_at(&directory, true)
     }
 
+    pub fn settled_records(&self) -> Result<Vec<Record>> {
+        let Some(directory) = self.directory(false)? else {
+            return Ok(Vec::new());
+        };
+        self.records_at(&directory, false)
+    }
+
     /// Removes one record whose UID no longer has an account, after re-reading it
     /// under the caller's transaction lock so a concurrent edit is never dropped.
     pub fn remove_orphan(&self, expected: &Record) -> Result<()> {

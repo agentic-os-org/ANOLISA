@@ -90,6 +90,10 @@ _COSH_USER_HISTORY_ENABLED=0
 [[ -o history ]] && _COSH_USER_HISTORY_ENABLED=1
 set +o history
 _COSH_AT_PROMPT=0
+_COSH_LEGACY_BASH_READLINE=0
+if (( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4 )); then
+  _COSH_LEGACY_BASH_READLINE=1
+fi
 _COSH_ATTEMPT_GENERATION=0
 _COSH_ATTEMPT_ACTIVE=0
 _COSH_ATTEMPT_INPUT=
@@ -539,6 +543,9 @@ _cosh_emit_intercept_marker() {
   local input="$1"
   local reason="$2"
   local top_level_missing="${3:-false}"
+  if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 ]]; then
+    top_level_missing=false
+  fi
   local sensitive="${4:-false}"
   local restore_xtrace=0
   if [[ $- == *x* ]]; then
@@ -696,6 +703,9 @@ _cosh_commit_pending_slash() {
   history_no="$(_cosh_history_no "$history_entry")"
   history_command="$(_cosh_history_command_from_entry "$history_entry")"
   if [[ "$history_command" == 'case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac' ]]; then
+    if [[ "$_COSH_LEGACY_BASH_READLINE" == 1 && "$sensitive" != true && -o history ]]; then
+      builtin history -s "$input" 2>/dev/null || true
+    fi
     builtin history -d "$history_no" 2>/dev/null || true
   fi
   if [[ "$sensitive" != true && -o history ]]; then

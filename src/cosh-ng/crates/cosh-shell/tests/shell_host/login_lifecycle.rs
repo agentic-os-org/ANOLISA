@@ -2,6 +2,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 fn run_missing_backend_preinstall(directory: &Path) -> std::process::Output {
+    run_profile_preinstall(directory, true)
+}
+
+fn run_profile_preinstall(directory: &Path, gateway: bool) -> std::process::Output {
     use std::os::unix::fs::PermissionsExt;
     let state = directory.join("login");
     let stat = directory.join("stat-fixture");
@@ -19,6 +23,9 @@ fn run_missing_backend_preinstall(directory: &Path) -> std::process::Output {
         .unwrap()
         .0;
     let mut script = script
+        .replace("%{with gateway_service}", if gateway { "1" } else { "0" })
+        .replace("%{_unitdir}", &directory.display().to_string())
+        .replace("%{with login_lifecycle}", "1")
         .replace(
             "for cosh_parent in / /var /var/lib /var/lib/cosh /var/lib/cosh/login; do",
             &format!(
@@ -43,6 +50,21 @@ fn run_missing_backend_preinstall(directory: &Path) -> std::process::Output {
         .args(["-c", &script])
         .output()
         .unwrap()
+}
+
+#[test]
+fn no_service_profile_refuses_replacing_an_installed_service_unit() {
+    use std::os::unix::fs::symlink;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    assert!(run_profile_preinstall(&root, false).status.success());
+    let unit = root.join("cosh-gateway@.service");
+    std::fs::write(&unit, b"installed service").unwrap();
+    assert!(!run_profile_preinstall(&root, false).status.success());
+    assert!(run_profile_preinstall(&root, true).status.success());
+    std::fs::remove_file(&unit).unwrap();
+    symlink(root.join("missing-unit"), &unit).unwrap();
+    assert!(!run_profile_preinstall(&root, false).status.success());
 }
 
 #[test]

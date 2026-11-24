@@ -31,7 +31,7 @@ pub(super) fn parse_local_accounts(passwd: &str) -> Result<Vec<Account>> {
 }
 
 pub(in crate::runtime::login) fn local_accounts() -> Result<Vec<Account>> {
-    super::require_platform()?;
+    super::require_package_platform()?;
     let bytes = super::read_trusted(std::path::Path::new("/etc/passwd"), 1024 * 1024)?;
     let passwd =
         String::from_utf8(bytes).map_err(|_| Error::new("invalid local account encoding"))?;
@@ -40,7 +40,7 @@ pub(in crate::runtime::login) fn local_accounts() -> Result<Vec<Account>> {
 
 #[cfg(target_os = "linux")]
 pub(in crate::runtime::login) fn nss_accounts() -> Result<Vec<Account>> {
-    super::require_platform()?;
+    super::require_package_platform()?;
     struct Enumeration;
     impl Drop for Enumeration {
         fn drop(&mut self) {

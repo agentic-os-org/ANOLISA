@@ -4251,6 +4251,66 @@ fn recoverable_history_submission_uses_distinct_guard() {
 }
 
 #[test]
+fn legacy_bash_uses_short_guards_without_changing_modern_transport() {
+    let classifier = InputClassifier::default().with_bash_legacy_readline(true);
+    let line_submits = LineSubmitCounter::default();
+    for (private, recoverable, expected) in [
+        (false, false, b"/help\x18\x1d\n".as_slice()),
+        (true, false, b"/help\x18\x1e\n".as_slice()),
+        (true, true, b"/help\x18\x1f\n".as_slice()),
+    ] {
+        assert_eq!(
+            guarded_bash_submission(
+                true,
+                private,
+                recoverable,
+                &classifier,
+                &line_submits,
+                b"/help\n"
+            ),
+            Some(expected.to_vec())
+        );
+    }
+    let modern = InputClassifier::default();
+    assert_eq!(
+        guarded_bash_submission(true, false, false, &modern, &line_submits, b"/help\n"),
+        Some(b"/help\x1b[99~\n".to_vec())
+    );
+}
+
+#[test]
+fn legacy_bash_requires_a_readline_proof_for_clean_natural_language() {
+    let legacy = InputClassifier::default().with_bash_legacy_readline(true);
+    let modern = InputClassifier::default();
+    let state = NativeLineState::default();
+    let counter = LineSubmitCounter::default();
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &legacy,
+        &state,
+        &counter,
+        b"Explain the new task\n"
+    ));
+    assert!(!bash_submission_needs_guard(
+        true,
+        true,
+        &modern,
+        &state,
+        &counter,
+        b"Explain the new task\n"
+    ));
+    assert!(!bash_submission_needs_guard(
+        true,
+        false,
+        &legacy,
+        &state,
+        &counter,
+        b"Explain the new task\n"
+    ));
+}
+
+#[test]
 fn slash_guard_precedes_ctrl_o_submission() {
     let classifier = InputClassifier::default();
     let line_submits = LineSubmitCounter::default();

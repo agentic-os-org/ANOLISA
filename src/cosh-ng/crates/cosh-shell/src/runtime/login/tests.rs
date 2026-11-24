@@ -316,6 +316,27 @@ fn login_management_refuses_platforms_outside_the_validated_alinux4_rpm_scope() 
 }
 
 #[test]
+fn package_audit_platform_does_not_grant_alinux2_login_management() {
+    use account::PackagePlatform;
+    assert_eq!(
+        account::validate_package_platform("ID=alinux\nVERSION_ID=2.1903\n").unwrap(),
+        PackagePlatform::Alinux2
+    );
+    assert_eq!(
+        account::validate_package_platform("ID=alinux\nVERSION_ID=4.0\n").unwrap(),
+        PackagePlatform::Alinux4
+    );
+    assert!(account::validate_platform("ID=alinux\nVERSION_ID=2.1903\n").is_err());
+    for release in [
+        "ID=alinux\nVERSION_ID=3\n",
+        "ID=centos\nVERSION_ID=7\n",
+        "ID=alinux\nVERSION_ID=2.1903\nVERSION_ID=4\n",
+    ] {
+        assert!(account::validate_package_platform(release).is_err());
+    }
+}
+
+#[test]
 fn recovery_record_rejects_wrong_name_schema_and_non_system_shell_paths() {
     for mutation in 0..4 {
         let mut record = record(Phase::Applied);

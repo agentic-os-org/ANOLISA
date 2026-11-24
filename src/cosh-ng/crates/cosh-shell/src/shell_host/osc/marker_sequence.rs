@@ -101,6 +101,7 @@ pub(super) struct Marker {
     pub(super) sensitive: Option<bool>,
     #[serde(rename = "unsafe")]
     pub(super) unsafe_input: Option<bool>,
+    pub(super) legacy_bash_readline: Option<bool>,
     /// Handoff claim token echoed by the approved handoff marker pair.
     #[serde(alias = "x")]
     pub(super) handoff: Option<String>,

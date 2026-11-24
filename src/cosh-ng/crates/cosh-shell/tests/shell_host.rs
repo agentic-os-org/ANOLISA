@@ -83,6 +83,9 @@ mod input_intent;
 mod marker;
 #[path = "shell_host/native.rs"]
 mod native;
+
+#[path = "shell_host/bash_legacy.rs"]
+mod bash_legacy;
 #[path = "shell_host/parity.rs"]
 mod parity;
 #[path = "shell_host/relay.rs"]

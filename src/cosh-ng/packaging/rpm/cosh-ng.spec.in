@@ -1,6 +1,19 @@
 %define anolis_release 1
 %global debug_package %{nil}
+%bcond_with alinux2
+%if %{with alinux2}
+%bcond_with login_lifecycle
+%bcond_with gateway_service
+%else
 %bcond_without login_lifecycle
+%bcond_without gateway_service
+%endif
+%if %{with alinux2} && %{with login_lifecycle}
+%{error:The alinux2 profile cannot enable login_lifecycle}
+%endif
+%if %{with alinux2} && %{with gateway_service}
+%{error:The alinux2 profile cannot enable gateway_service}
+%endif
 %if ! 0%{?_libexecdir_cosh:1}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
 %endif
@@ -18,10 +31,16 @@ BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
 BuildRequires:  bash
 BuildRequires:  gcc
+%if %{with gateway_service}
 BuildRequires:  systemd-rpm-macros
+%endif
 Requires(pre):    /usr/bin/stat
 Requires(post):   lua
+%if %{with alinux2}
+Requires(preun):  %{_bindir}/systemctl /usr/bin/getent /usr/bin/awk
+%else
 Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
+%endif
 Requires(postun): /usr/bin/awk /usr/bin/cat /usr/bin/cp /usr/bin/dirname /usr/bin/id /usr/bin/mkdir /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
 Requires(posttrans): /usr/bin/cat /usr/bin/dirname /usr/bin/id /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
@@ -37,10 +56,16 @@ Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interfa
 providing cross-distro structured system operations with JSON output for AI Agents.
 
 %prep
+%if %{with alinux2}
+if [ "%{with login_lifecycle}" -ne 0 ] || [ "%{with gateway_service}" -ne 0 ]; then
+    echo 'error: the alinux2 profile cannot enable managed login or Gateway service capabilities.' >&2
+    exit 1
+fi
+%endif
 %setup -q
 
 %build
-cargo build --locked --workspace --release
+CARGO_TARGET_DIR=target cargo build --locked --workspace --release
 
 %install
 rm -rf %{buildroot}
@@ -51,11 +76,13 @@ bash packaging/payload.sh resources "%{buildroot}%{_libexecdir_cosh}/resources.c
     "%{_skilldir_cosh}" "%{_datadir}/anolisa/extensions"
 
 # Install the rendered system-level Gateway template.
+%if %{with gateway_service}
 install -d %{buildroot}%{_unitdir}
 sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
     packaging/systemd/cosh-gateway@.service.in \
     > %{buildroot}%{_unitdir}/cosh-gateway@.service
 chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
+%endif
 
 # /usr/bin/cosh is the compiled entry: a symlink onto cosh-shell, which
 # dispatches on argv[0]. A script launcher would lose the login argv[0]
@@ -99,11 +126,18 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %{_libexecdir_cosh}/cosh-shell
 %{_libexecdir_cosh}/resources.conf
 %{_libexecdir_cosh}/cosh-integration.bash
+%if %{with gateway_service}
 %{_unitdir}/cosh-gateway@.service
+%endif
 
 %{_skilldir_cosh}/manage-task-checkpoints/
 
 %pre
+if [ "%{with gateway_service}" -eq 0 ] && \
+    { [ -e "%{_unitdir}/cosh-gateway@.service" ] || [ -L "%{_unitdir}/cosh-gateway@.service" ]; }; then
+  echo 'error: cannot remove Gateway service capability by replacement; explicitly erase the service-containing package first.' >&2
+  exit 1
+fi
 cosh_login_path_safe() {
   [ ! -L "$1" ] || return 1
   if [ "$2" = d ]; then [ -d "$1" ] || return 1; else [ -f "$1" ] || return 1; fi
@@ -129,7 +163,11 @@ cosh_login_state_empty() {
   done
 }
 if [ -x /usr/libexec/cosh/login-preflight ]; then
-  /usr/libexec/cosh/login-preflight check-protocol 1 --record-version 1 --entry /usr/bin/cosh || exit 1
+  if [ "%{with login_lifecycle}" -eq 1 ]; then
+    /usr/libexec/cosh/login-preflight check-protocol 1 --record-version 1 --entry /usr/bin/cosh || exit 1
+  else
+    /usr/libexec/cosh/login-preflight check-erase || exit 1
+  fi
 elif ! cosh_login_state_empty; then
   echo 'error: cannot replace cosh-ng: login state remains or its path is unsafe; use the controlled lifecycle backend first.' >&2
   exit 1
@@ -147,7 +185,9 @@ if [ "$1" -eq 0 ]; then
     exit 1
   fi
 fi
+%if %{with gateway_service}
 %systemd_preun cosh-gateway@.service
+%endif
 
 %post -p <lua>
 local nl = '\n'

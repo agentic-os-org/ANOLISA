@@ -229,7 +229,8 @@ SYSTEMCTL_LOG="$TMP/systemctl.log"
 install -d -m 0755 "$SYSTEMD_RUNTIME"
 
 PREUN="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
-    sed -e '/^%systemd_preun cosh-gateway@\.service$/d')"
+    sed -e '/^%systemd_preun cosh-gateway@\.service$/d' \
+        -e '/^%if %{with gateway_service}$/d' -e '/^%endif$/d')"
 PREUN="${PREUN//\/usr\/libexec\/cosh\/login-preflight/$STUB/login-preflight}"
 PREUN="${PREUN//\/run\/systemd\/system/$SYSTEMD_RUNTIME}"
 
@@ -277,6 +278,22 @@ install -d -m 0755 "$SYSTEMD_RUNTIME"
 chmod 0644 "$STUB/login-preflight"
 expect_preun "unavailable lifecycle backend fails closed" 0 1
 expect_preun "upgrade without executable backend" 1 0
+PREUN_DEFAULT="$PREUN"
+PREUN="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
+    sed -e '/^%if %{with gateway_service}$/,/^%endif$/d')"
+PREUN="${PREUN//\/usr\/libexec\/cosh\/login-preflight/$STUB/login-preflight}"
+PREUN="${PREUN//\/run\/systemd\/system/$SYSTEMD_RUNTIME}"
+chmod 0755 "$STUB/login-preflight"
+write_stub systemctl "printf '%s\\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
+: > "$SYSTEMCTL_LOG"
+export COSH_TEST_ERASE_STATUS=0
+expect_preun "legacy erase keeps the runtime instance stop guard" 0 0
+grep -Fxq 'stop cosh-gateway@*.service cosh-gateway-acp@*.service' "$SYSTEMCTL_LOG"
+export COSH_TEST_ERASE_STATUS=1
+: > "$SYSTEMCTL_LOG"
+expect_preun "legacy erase still fails closed on managed state" 0 1
+test ! -s "$SYSTEMCTL_LOG"
+PREUN="$PREUN_DEFAULT"
 unset COSH_TEST_ERASE_STATUS
 
 # --- %postun /etc/shells removal matrix through fixture-backed bash runs ---

@@ -22,6 +22,12 @@
 集成状态在启动时确定，Enhanced 是默认值。需要长期使用无 Hook 会话时，在
 用户配置中设置 `shell.integration = "native"`；只使用一次时设置环境变量。
 
+Bash 4.2 和 4.3 保留 slash 控制与符合条件的自然语言请求，但缺少 `PS0`，
+无法提供精确命令开始边界。Cosh 会在启动时提示，此类会话不声明普通命令账本
+或自动失败洞察；不会安装全局 `DEBUG` 观察器或替换用户 trap。
+旧 Bash 会话为私有 Readline 守卫保留 `Ctrl-X Ctrl-]`、`Ctrl-X Ctrl-^` 和
+`Ctrl-X Ctrl-_`。现代 Bash 保持原有传输与原生快捷键，Native 集成不变。
+
 即使配置为 Native，`--ask` 也只为本次会话选择 Enhanced，不修改保存的集成偏好。
 初始问题交给 Agent，不作为 Shell 命令执行；回答后仍可输入普通命令或自然语言。
 启动引导、独立的资源展示开关和默认登录管理见

@@ -1000,6 +1000,18 @@ EOF
 # =============================================================================
 build_cosh_ng() {
     log "=========================================="
+
+    local profile="${COSH_RPM_PROFILE:-default}"
+    local profile_args=()
+    local DIST_TAG="$DIST_TAG"
+    case "$profile" in
+        default) ;;
+        alinux2)
+            profile_args=( --with alinux2 )
+            [ -n "$DIST_TAG" ] || DIST_TAG=.alinux2
+            ;;
+        *) err "Unsupported COSH_RPM_PROFILE: $profile"; return 1 ;;
+    esac
     log "Building RPM: cosh-ng"
     log "=========================================="
 
@@ -1064,9 +1076,7 @@ build_cosh_ng() {
     rm -rf "$tmp_dir"
 
     log "Step 2/2: Running rpmbuild..."
-    "$RPMBUILD" -ba --nodeps \
-        --define "_topdir ${BUILD_DIR}" \
-        "$spec_file"
+    rpmbuild_with_dist "$spec_file" ${profile_args[@]+"${profile_args[@]}"}
 
     ok "cosh-ng RPM built successfully"
 }
@@ -1087,6 +1097,7 @@ gvisor_arch() {
 # Run rpmbuild with optional --define dist override (alinux4/alinux3 etc.)
 rpmbuild_with_dist() {
     local spec_file="$1"
+    shift
     local extra_defines=()
     # Pass spec_release_suffix through if set (used by cmdoutput-fix.patch path).
     if [ -n "${SPEC_RELEASE_SUFFIX:-}" ]; then
@@ -1096,12 +1107,14 @@ rpmbuild_with_dist() {
         "$RPMBUILD" -ba --nodeps \
             --define "_topdir ${BUILD_DIR}" \
             --define "dist ${DIST_TAG}" \
-            "${extra_defines[@]}" \
+            ${extra_defines[@]+"${extra_defines[@]}"} \
+            "$@" \
             "$spec_file"
     else
         "$RPMBUILD" -ba --nodeps \
             --define "_topdir ${BUILD_DIR}" \
-            "${extra_defines[@]}" \
+            ${extra_defines[@]+"${extra_defines[@]}"} \
+            "$@" \
             "$spec_file"
     fi
 }
@@ -1361,6 +1374,7 @@ usage() {
     echo "  VERSION                   Override version for .spec.in templates"
     echo "  RPMBUILD                  Path to rpmbuild binary (default: rpmbuild)"
     echo "  DIST_TAG                  Override %{dist} (e.g. .alinux4, .alinux3)"
+    echo "  COSH_RPM_PROFILE          cosh-ng RPM profile: default or alinux2"
     echo "  GVISOR_RELEASE            gVisor upstream release date (default: 20260601)"
     echo "  GVISOR_BASE_URL           gVisor mirror base URL (overridable for offline)"
     echo "  TARGET_ARCH               Force arch (x86_64|aarch64; default: uname -m)"

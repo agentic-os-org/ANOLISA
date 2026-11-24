@@ -234,6 +234,54 @@ fn only_installed_capability_audit_is_available_before_sudo() {
 }
 
 #[test]
+fn unmanaged_package_audit_requires_empty_records_and_both_account_views() {
+    let (_directory, store) = state_fixture();
+    unmanaged_package_audit(&store, || Ok(vec![account("/bin/bash")]), || Ok(Vec::new())).unwrap();
+    for shell in [
+        COSH_PATH,
+        "/bin/cosh",
+        "/usr/bin/cosh-login",
+        "/bin/cosh-login",
+    ] {
+        assert!(
+            unmanaged_package_audit(&store, || Ok(vec![account(shell)]), || Ok(Vec::new()))
+                .is_err()
+        );
+        assert!(unmanaged_package_audit(
+            &store,
+            || Ok(vec![account("/bin/bash")]),
+            || Ok(vec![account(shell)])
+        )
+        .is_err());
+    }
+    assert!(
+        unmanaged_package_audit(&store, || Err(Error::new("NSS failed")), || Ok(Vec::new()))
+            .is_err()
+    );
+    store.write(&record(Phase::Restored)).unwrap();
+    assert!(unmanaged_package_audit(
+        &store,
+        || panic!("accounts must not be read after record rejection"),
+        || Ok(Vec::new())
+    )
+    .is_err());
+    assert_eq!(store.records().unwrap(), vec![record(Phase::Restored)]);
+}
+
+#[test]
+fn unmanaged_package_audit_refuses_unfinished_temporary_records() {
+    let (directory, store) = state_fixture();
+    std::fs::write(
+        directory
+            .path()
+            .join(".aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp"),
+        b"unfinished",
+    )
+    .unwrap();
+    assert!(unmanaged_package_audit(&store, || Ok(Vec::new()), || Ok(Vec::new())).is_err());
+}
+
+#[test]
 fn transaction_exec_preserves_only_the_exact_store_lock_descriptor() {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
