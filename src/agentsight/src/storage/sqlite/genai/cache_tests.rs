@@ -204,3 +204,39 @@ fn keeps_fully_cached_legacy_rows_and_drops_zero_usage() {
     drop(store);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn cache_window_filters_blank_agent_name_via_process_name() {
+    let (store, path) = temp_store("blank_agent");
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, status, call_id, trace_id, session_id, start_timestamp_ns,
+              end_timestamp_ns, agent_name, process_name, provider, model,
+              input_tokens, cache_read_tokens, input_tokens_includes_cache, event_json)
+             VALUES ('llm_call', 'complete', 'blank-agent', 't1', 'sess-1', 100,
+                     150, '   ', 'claude', 'anthropic', 'claude-sonnet',
+                     500, 100, 1, '{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let unfiltered = store.get_cache_call_window(0, 500, None, None).unwrap();
+    assert_eq!(unfiltered.rows.len(), 1);
+    assert_eq!(unfiltered.rows[0].agent_name.as_deref(), Some("claude"));
+
+    let filtered = store
+        .get_cache_call_window(0, 500, Some("claude"), None)
+        .unwrap();
+    assert_eq!(
+        filtered.rows.len(),
+        1,
+        "blank agent_name rows displayed as 'claude' must match ?agent_name=claude"
+    );
+    assert_eq!(filtered.rows[0].agent_name.as_deref(), Some("claude"));
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
