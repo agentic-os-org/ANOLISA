@@ -783,3 +783,51 @@ fn ci_logs_and_prose_mentioning_refs_do_not_become_snapshots() {
         "See [ref=e1] and uid=1_2 in the documentation for details.\nThey are not snapshots.\n";
     assert_eq!(detect(prose), ContentType::PlainText);
 }
+
+#[test]
+fn quoted_playwright_snapshots_do_not_hijack_enclosing_documents() {
+    let html_quoting_pw = format!(
+        "<!DOCTYPE html><html><head><title>Docs</title></head><body><pre>\n{PW_SNAPSHOT}\n</pre></body></html>"
+    );
+    assert_eq!(detect(&html_quoting_pw), ContentType::Html);
+
+    let test_log_quoting_pw = format!(
+        "$ cargo test\nrunning 3 tests\ntest snap_case ... FAILED\n\nfailures:\n---- snap_case stdout ----\n{PW_SNAPSHOT}\n\ntest result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+    );
+    assert_eq!(detect(&test_log_quoting_pw), ContentType::BuildLog);
+
+    let unordered_markdown = "### Deployment Notes\n```yaml\nreplicas: 3\n```\nSee [ref=section-2] for details.\n### Snapshot\nTake a disk snapshot before upgrading.\n";
+    assert_eq!(detect(unordered_markdown), ContentType::PlainText);
+
+    let non_ref_yaml_under_snapshot =
+        "### Page\n### Snapshot\n```yaml\nreplicas: 3\n```\nSee [ref=e1] in prose below.\n";
+    assert_eq!(detect(non_ref_yaml_under_snapshot), ContentType::PlainText);
+
+    let snapshot_then_other_heading = "### Snapshot\nNotes before next section.\n### Example\n```yaml\n- link \"Demo\" [ref=e1]\n```\n";
+    assert_eq!(detect(snapshot_then_other_heading), ContentType::PlainText);
+
+    let crlf_html = html_quoting_pw.replace('\n', "\r\n");
+    assert_eq!(detect(&crlf_html), ContentType::Html);
+}
+
+#[test]
+fn wrapped_playwright_snapshot_variants_keep_snapshot_domain() {
+    let prose_before_fence = "### Page\n### Snapshot\nTree captured after navigation:\n```yaml\n- link \"Home\" [ref=e1]\n```\n";
+    assert_eq!(detect(prose_before_fence), ContentType::BrowserSnapshot);
+
+    let blank_before_fence = "### Snapshot\n\n```yaml\n- link \"Home\" [ref=e1]\n```\n";
+    assert_eq!(detect(blank_before_fence), ContentType::BrowserSnapshot);
+
+    let frame_ref_wrapped =
+        "### Page\n### Snapshot\n```yaml\n- textbox \"Search\" [ref=f2e38]\n```\n";
+    assert_eq!(detect(frame_ref_wrapped), ContentType::BrowserSnapshot);
+
+    let repeated_snapshot_heading = "### Snapshot\n(no aria tree available)\n### Snapshot\n```yaml\n- navigation [ref=e1]:\n  - link \"Story 0\" [ref=e2]\n```\n";
+    assert_eq!(
+        detect(repeated_snapshot_heading),
+        ContentType::BrowserSnapshot
+    );
+
+    let crlf_wrapped = prose_before_fence.replace('\n', "\r\n");
+    assert_eq!(detect(&crlf_wrapped), ContentType::BrowserSnapshot);
+}

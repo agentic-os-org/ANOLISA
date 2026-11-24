@@ -219,3 +219,24 @@ fn diffs_of_snapshot_files_keep_the_diff_domain() {
     let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
     assert_eq!(run.response.content_type, Some(ContentType::Diff));
 }
+
+#[test]
+fn html_document_quoting_playwright_snapshot_stays_html() {
+    let input = format!(
+        "<!DOCTYPE html><html><head><title>Demo</title></head><body><pre>\n{}\n</pre></body></html>",
+        pw_snapshot_input(25)
+    );
+    let mut config = build_log_config();
+    config.browser_snapshot_enabled = true;
+    config.html_extraction_enabled = true;
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
+    assert_eq!(run.response.content_type, Some(ContentType::Html));
+    assert!(
+        !run.response
+            .applied_operations
+            .contains(&AppliedOperation::BrowserSnapshotReduction)
+    );
+    assert!(run.response.stash_keys.is_empty());
+}

@@ -47,16 +47,19 @@ fn is_playwright(scan: &str) -> bool {
     let Some(first) = lines.first() else {
         return false;
     };
-    // Wrapped snapshot: a column-0 `### Snapshot` section heading plus a fenced
-    // YAML aria tree. Playwright can precede it with `### Open tabs`,
-    // `### Ran Playwright code`, or `### Page` sections, so anchor on the
-    // snapshot section rather than requiring `### Page` on the first line.
-    // The heading must start at column 0: a diff of a snapshot file carries
-    // ` ### Snapshot` as an indented context row, and the Diff domain owns it.
-    if scan.lines().any(|l| l.trim_end() == "### Snapshot")
-        && scan.contains("```yaml")
-        && scan.contains("[ref=")
-    {
+    // Wrapped snapshot: the response opens with a column-0 Playwright markdown
+    // section heading (`### Open tabs`, `### Ran Playwright code`, `### Page`,
+    // `### Snapshot`, etc.) and contains a column-0 `### Snapshot` heading
+    // followed by a fenced `yaml` block carrying at least one well-formed
+    // `[ref=eN]`/`[ref=fNeM]` row. Anchoring both the opening section and the
+    // fenced YAML body keeps HTML pages, test logs, and prose markdown that
+    // quote a snapshot from being hijacked as BrowserSnapshot. Note that
+    // plain-text action preambles and ANSI-styled first headings fail open by
+    // design, whereas documents that themselves open with a column-0 `### `
+    // heading and quote a verbatim snapshot remain an inherent boundary of
+    // shape-based detection.
+    let first_raw = scan.lines().find(|l| !l.trim().is_empty());
+    if first_raw.is_some_and(|l| l.starts_with("### ")) && has_wrapped_pw_snapshot(scan) {
         return true;
     }
     // Bare snapshot (e.g. a saved .yml body quoted into a tool result). The
@@ -68,6 +71,39 @@ fn is_playwright(scan: &str) -> bool {
     let pw_lines = lines.iter().filter(|l| is_pw_line(l)).count();
     let refs = lines.iter().filter(|l| ref_value(l).is_some()).count();
     refs >= 3 && pw_lines * 5 >= lines.len() * 4
+}
+
+/// True when a column-0 `### Snapshot` heading is followed by a ```` ```yaml ````
+/// fence containing at least one valid Playwright element reference before the
+/// fence closes (or the scan window ends). Stops before any subsequent `### `
+/// heading without consuming it so repeated `### Snapshot` headings still work.
+fn has_wrapped_pw_snapshot(scan: &str) -> bool {
+    let mut lines = scan.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_end() != "### Snapshot" {
+            continue;
+        }
+        while let Some(sub_line) = lines.peek() {
+            let trimmed = sub_line.trim_end();
+            if trimmed.starts_with("### ") {
+                // Leave the next section heading to the outer loop.
+                break;
+            }
+            lines.next();
+            if trimmed == "```yaml" {
+                for body_line in lines.by_ref() {
+                    if body_line.trim_end() == "```" {
+                        break;
+                    }
+                    if ref_value(body_line).is_some() {
+                        return true;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    false
 }
 
 fn is_pw_line(line: &str) -> bool {
