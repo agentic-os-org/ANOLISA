@@ -597,7 +597,7 @@ impl TokenStore {
         let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
         let deleted = self
             .conn
-            .execute(&sql, params![cutoff_ns as i64])
+            .execute(&sql, params![cutoff_ns.min(i64::MAX as u64) as i64])
             .map_err(|e| anyhow::anyhow!("Failed to purge token records: {e}"))?;
         Ok(deleted as u64)
     }
@@ -1148,6 +1148,20 @@ mod tests {
         assert_eq!(deleted, 1);
         assert_eq!(store.count(), 1);
         assert_eq!(store.all()[0].agent.as_deref(), Some("new"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_purge_before_clamps_cutoff_above_i64_max() {
+        let path = unique_db_path("purge_before_overflow");
+        let store = TokenStore::new(&path).unwrap();
+        store
+            .insert(&make_record(1_000, Some("agent"), 1, 1))
+            .unwrap();
+
+        let deleted = store.purge_before(u64::MAX).unwrap();
+        assert_eq!(deleted, 1, "u64::MAX cutoff must purge representable rows");
+        assert_eq!(store.count(), 0);
         cleanup_db(&path);
     }
 
