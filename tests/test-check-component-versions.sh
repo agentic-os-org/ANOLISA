@@ -130,6 +130,21 @@ assert not errors, errors
 (checker.ROOT / target).write_text(json.dumps({"version": "1.2.2"}))
 checker.check_equal(errors, source, target)
 assert len(errors) == 1 and target in errors[0], errors
+
+# Both npm lockfiles record the package version at two levels.
+for source, target in checker.NPM_LOCK_CONTRACTS:
+    (checker.ROOT / source).parent.mkdir(parents=True, exist_ok=True)
+    (checker.ROOT / source).write_text('[workspace.package]\nversion = "1.2.3"\n')
+    (checker.ROOT / target).parent.mkdir(parents=True, exist_ok=True)
+    fixture = {"version": "1.2.3", "packages": {"": {"version": "1.2.3"}}}
+    (checker.ROOT / target).write_text(json.dumps(fixture))
+    errors = []
+    checker.check_npm_lock(errors, source, target)
+    assert not errors, errors
+    fixture["packages"][""]["version"] = "1.2.2"
+    (checker.ROOT / target).write_text(json.dumps(fixture))
+    checker.check_npm_lock(errors, source, target)
+    assert len(errors) == 1 and target in errors[0] and "packages root" in errors[0], errors
 PYEOF
 
 # The tree must be back in its pre-test state and synchronized.
