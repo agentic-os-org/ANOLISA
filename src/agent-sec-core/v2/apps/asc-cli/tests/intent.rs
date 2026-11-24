@@ -757,8 +757,9 @@ async fn uds_timeout_does_not_release_actual_execution_capacity() {
 const COMMAND: &str = "read -r line < report.csv";
 const COMMAND_POLICY: &str = "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/work/report.csv\" };";
 const COMMAND_CAVEAT: &str = "cat resolved through PATH, exec target unknown";
+const CONDITIONED_EXEC_POLICY: &str = r#"permit(principal, action == SecCore::Action::"file.exec", resource is SecCore::File) when { resource.path == "/usr/bin/ls" && context.input.arg_count == 0 };"#;
 
-/// Answers only the two command fixtures; any other command would change the wire contract.
+/// Answers only the command fixtures; any other command would change the wire contract.
 struct CommandReplay {
     calls: AtomicUsize,
     cwd: String,
@@ -792,6 +793,7 @@ impl ModelProvider for CommandReplay {
             "deploy --env prod" => {
                 Ok(json!({"policy":"","unresolved":["deployment target and runtime dependencies need confirmation"]}).to_string())
             }
+            "ls" => Ok(json!({"policy": CONDITIONED_EXEC_POLICY, "unresolved": []}).to_string()),
             other => unreachable!("unexpected command {other}"),
         }
     }
@@ -863,6 +865,35 @@ async fn command_proposals_send_only_command_and_cwd() {
     )
     .unwrap();
     assert!(cedar.contains("// Not covered:"), "{cedar}");
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_file_exec_conditions_survive_projection() {
+    use asc_daemon_protocol::authorization::LaunchSpec;
+    use asc_pep_runtime::PermissionInput;
+
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let provider = command_provider(&directory.0);
+    let server = Server::start(&socket, provider.clone(), None).await;
+    let result = output_json(
+        &cli_command(&socket, &directory.0, "ls").output().unwrap(),
+        0,
+    );
+    assert_eq!(result["outcome"], "candidate");
+    assert_eq!(result["policy"], CONDITIONED_EXEC_POLICY);
+    let candidate = PermissionInput::parse(result["policy"].as_str().unwrap()).unwrap();
+    let mut launch = LaunchSpec {
+        program: "ls".into(),
+        resolved_program: "/usr/bin/ls".into(),
+        args: Vec::new(),
+        cwd: provider.cwd.clone(),
+        env: std::collections::BTreeMap::new(),
+    };
+    assert!(candidate.resolve(&launch).is_ok());
+    launch.args.push("--version".into());
+    assert!(candidate.resolve(&launch).is_err());
     server.stop().await;
 }
 
@@ -962,6 +993,8 @@ async fn command_file_candidates_project_to_the_requested_os_scopes() {
     use asc_daemon_protocol::authorization::{FileRight, LaunchSpec, RuleEffect};
     use asc_pep_runtime::PermissionInput;
 
+    const SHELL_LAUNCH: &str = r#"permit(principal, action == SecCore::Action::"process.spawn", resource is SecCore::Process) when { resource.program == "/bin/bash" };"#;
+
     let directory = common::Directory::new();
     let cwd = fs::canonicalize(&directory.0).unwrap();
     let input = cwd.join("input files");
@@ -986,7 +1019,18 @@ async fn command_file_candidates_project_to_the_requested_os_scopes() {
         ),
     ] {
         let result = output_json(&cli_command(&socket, &cwd, &command).output().unwrap(), 0);
-        let candidate = PermissionInput::parse(result["policy"].as_str().unwrap()).unwrap();
+        let text = cli_command(&socket, &cwd, &command)
+            .args(["--format", "text"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(text.stdout).unwrap();
+        let program = command.split_whitespace().next().unwrap();
+        assert!(text.contains(&format!("start {program}")), "{text}");
+        // The hook combines the command's request with the preset that permits its Bash wrapper.
+        let candidate = PermissionInput::parse(result["policy"].as_str().unwrap())
+            .unwrap()
+            .with_runtime(PermissionInput::parse(SHELL_LAUNCH).unwrap())
+            .unwrap();
         let permissions = candidate
             .resolve(&LaunchSpec {
                 program: "/bin/bash".into(),

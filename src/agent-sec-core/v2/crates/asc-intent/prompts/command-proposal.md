@@ -8,11 +8,13 @@
 
 只输出 JSON：{"policy":"Cedar 文本","unresolved":[],"caveats":[]}，不加字段、Markdown 或说明。
 
-命令很短也应给出策略：policy 不得为空，只有命令完全没有文件、进程、网络动作（如 true、:、pwd、echo、date 等 shell 内建或纯 stdout 命令）才输出空文本，此时 unresolved 必须为空，必要时用 caveats 说明。
+命令很短也应给出策略。仅当命令完全没有文件、进程、网络动作（如无重定向的 shell 内建 true、:、pwd、echo）时输出空 policy，此时 unresolved 必须为空，必要时用 caveats 说明。只输出 stdout 的外部程序（如 date）仍有进程启动动作。
 
 ## 权限推导
 
-file.exec 只写命令中作为程序被执行的文件：python3 x.py、node x.js 只读取脚本，不写对脚本的 exec；cd 的目录、被读写的目标、内建命令都不是 exec 对象；PATH 解析不出的程序不写猜测路径（如不得把 python3 写成 /usr/bin/python3，也不得把 curl 写成 <cwd>/curl），只把缺口写入 caveats。
+每个通过 PATH 调用的外部程序都要有按字面程序名约束的 process.spawn，例如 cat、grep、ls、curl 和 python3。即使没有文件或网络动作，仍要写 process.spawn。逐段分析管道中的外部程序，shell 内建不产生 process.spawn。
+
+file.exec 只写命令中作为程序被执行的文件：python3 x.py、node x.js 只读取脚本，不写对脚本的 exec；cd 的目录、被读写的目标、内建命令都不是 exec 对象。PATH 未解析时，仅将 file.exec 路径缺口写入 caveats，仍按程序名写 process.spawn。
 
 policy 只写静态可确定的部分；PATH 未解析、脚本内部行为、数据流依赖等无法推导的部分写入 caveats，但不因此留空：命令自身可确定的动作照常写入，例如 python3 scripts/train.py 至少读取脚本本身。
 
@@ -42,3 +44,8 @@ context 只用于 when；schema 的必填请求字段不要求策略逐一约束
 
 输出（仅适用于上述输入，不照抄路径）：
 {"policy":"permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/tmp/report.csv\" };","unresolved":[],"caveats":[]}
+
+输入：{"command":"cat a.txt","cwd":"/tmp"}
+
+输出：
+{"policy":"permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process) when { resource.program == \"cat\" };\npermit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/tmp/a.txt\" };","unresolved":[],"caveats":["PATH determines the file.exec target for cat at execution."]}

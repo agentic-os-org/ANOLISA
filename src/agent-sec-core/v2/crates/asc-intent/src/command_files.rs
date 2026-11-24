@@ -2,12 +2,26 @@
 
 use std::path::{Component, Path};
 
+use crate::policy_validation::spawn_rule;
 use crate::{CommandInput, IntentSpec};
 
 #[derive(Default)]
 struct Word {
     text: String,
     glob: bool,
+}
+
+/// Names common external utilities without consulting the daemon's PATH or shell environment.
+/// Other programs and shell constructs stay on the model path.
+pub(crate) fn path_program(input: &CommandInput) -> Option<&'static str> {
+    match words(&input.command)?.first()?.text.as_str() {
+        "cat" => Some("cat"),
+        "grep" => Some("grep"),
+        "ls" => Some("ls"),
+        "curl" => Some("curl"),
+        "tar" => Some("tar"),
+        _ => None,
+    }
 }
 
 /// Recognizes only complete commands, so parsing a prefix never hides another shell operation.
@@ -51,15 +65,21 @@ pub(crate) fn file_request(input: &CommandInput) -> Option<(String, Vec<String>)
         _ => return None,
     };
     let mut caveats = vec![scope.to_owned()];
-    if program.text.starts_with('/') {
+    let policy = if program.text.starts_with('/') {
         spec.allow_exec.push(program.text.clone());
+        spec.render_cedar().ok()?
     } else {
         caveats.push(format!(
-            "{} is resolved by PATH at execution.",
+            "PATH determines the file.exec target for {} at execution.",
             program.text
         ));
-    }
-    Some((spec.render_cedar().ok()?, caveats))
+        format!(
+            "{}\n{}",
+            spec.render_cedar().ok()?,
+            spawn_rule(&program.text)
+        )
+    };
+    Some((policy, caveats))
 }
 
 /// GNU tar resolves the archive path against the invocation cwd. Positional -C applies only to

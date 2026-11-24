@@ -144,7 +144,7 @@ pub enum ProposalOutcome {
 pub enum CommandPolicyOutcome {
     /// Passed the Cedar syntax, path and Strict-type checks; completeness is still unproven.
     Candidate {
-        /// Raw Cedar text with no added rules; an empty string requests no permission.
+        /// Validated Cedar text for the command; an empty string requests no permission.
         policy: String,
         /// Known but uncovered parts, such as an unresolved PATH lookup or script behavior; never
         /// treat them as authorized.
@@ -165,8 +165,10 @@ const COMMAND_ATTEMPTS: u8 = 2;
 /// Generates Cedar from a hook command/cwd; it reads no base policy and computes no effective
 /// permission.
 ///
-/// Reads no file and runs no command. Only a model-reported unresolved item yields no candidate;
-/// caveats travel with the candidate. Syntax, Strict-typing and path-literal rejections are
+/// Reads no file and runs no command. A model-reported unresolved item yields no candidate;
+/// caveats travel with the candidate. For recognized PATH utilities, proposals include a
+/// name-scoped launch request when the model describes other actions but omits launch.
+/// Syntax, Strict-typing and path-literal rejections are
 /// retried once with the local reason; unsupported-policy features are never retried. After the
 /// retry a syntax or typing failure is an error, while a persistent path rejection becomes a
 /// clarification. Validation proves Cedar syntax and types only, never command completeness or
@@ -193,6 +195,7 @@ pub fn propose_command(
             caveats,
         });
     }
+    let path_program = crate::command_files::path_program(input);
     let mut attempt = 1;
     let mut rejection: Option<String> = None;
     loop {
@@ -211,7 +214,7 @@ pub fn propose_command(
         }
         // An empty policy is the answer for a command with no file, process or network action:
         // it grants nothing, so `prepare_policy` admits it and the caveats stay attached.
-        match prepare_policy(&response.policy) {
+        match crate::policy_validation::prepare_command_policy(&response.policy, path_program) {
             Ok(artifact) => {
                 check_deadline(deadline)?;
                 return Ok(CommandPolicyOutcome::Candidate {

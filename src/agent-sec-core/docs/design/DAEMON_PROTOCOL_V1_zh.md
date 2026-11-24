@@ -1270,7 +1270,10 @@ CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务�
 
 示例仅演示结构，不承诺模型对该命令一定返回相同策略。`policy` 是 Cedar 文本，不是
 `permission.json` 或完整候选信封；命令很短也应有策略，只有命令完全没有文件、进程、网络
-动作（如 `true`、`:`、`pwd`、`echo`、`date`）时才是空文本。程序沿用原生 parser、路径检查与 Strict 校验 ，不追加规则。
+动作（如无重定向的 shell 内建 `true`、`:`、`pwd`、`echo`）时才是空文本。
+提示词要求按 PATH 程序名推导 `process.spawn`。对可静态识别的常用 PATH 程序，
+当模型策略只描述其他动作时，程序补充按名称约束的启动申请。已有启动规则的条件
+继续生效。候选沿用原生 parser、路径检查与 Strict 校验。
 
 `caveats` 是候选已知但未覆盖的部分，例如 PATH 未解析导致 `file.exec` 目标无法确定、
 脚本内部行为未知或管道数据流无法推导；它不阻断候选，但审批与后续 PDP 映射必须一并查看，
@@ -1282,6 +1285,7 @@ CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务�
 写入 `caveats`，不得以根目录、整个 cwd 或全网络权限兜底；没有语义完备性证明器。
 
 Rust 入口为 `asc_intent::propose_command(provider, model, &CommandInput, deadline)`。
+其 `command_retry` 测试覆盖模型漏报启动权限和已有启动条件两种情况。
 调用链为 dispatcher → `asc_daemon_core::intent::IntentService::propose_command` → 意图模块。
 认证、模型配置及错误分类沿用本节规则；与 `intent.propose` 共享每 UID 一个、全局四个实际执行额度。
 完整请求含 LF 最多 256 KiB；模型响应最多 16 KiB，原因最多 128 项，每项最多 4096 字节。

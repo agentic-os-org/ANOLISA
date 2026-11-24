@@ -236,6 +236,10 @@ hook 集成：只发送 hook 已有的 `command` 与 `cwd`，返回该条命令�
 `tool_input.command`；cosh-ng 另提供 `tool_name` 与会话 `cwd`，未提供 `cwd` 的宿主
 需显式传 `--cwd`。
 
+对于通过 PATH 查找的外部程序，候选按程序名申请 `process.spawn`，例如
+`cat a.txt` 中的 `cat`，并同时申请相应的文件或网络权限。可执行文件路径取决于运行时的
+PATH，路径未知时在 `caveats` 中标记 `file.exec` 缺口。
+
 简单的 `cat src/*.txt > out/all.txt` 和 `tar -czf out/a.tgz -C src .` 由 intent 在本地解析。
 Bash 在执行时展开通配符。候选申请读取源目录，以及写入 cat 的目标文件或 tar 的输出目录。
 如果归档输出目录是工作目录或其上级目录，只申请写入归档文件。
