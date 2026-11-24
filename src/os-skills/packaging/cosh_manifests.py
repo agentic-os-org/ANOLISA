@@ -20,19 +20,27 @@ def sync_manifests(source: Path, *, write: bool) -> List[Path]:
     for category in sorted(categories):
         expected[category] = [path.name for path in released if path.parent == category]
 
-    changed = []
+    pending = []
     for directory, skills in expected.items():
         path = source / directory / "cosh-extension.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"cannot read COSH manifest {path}: {error}") from error
+        if not isinstance(manifest, dict):
+            raise ValueError(f"COSH manifest {path} must contain a JSON object")
         if manifest.get("skills") != skills:
-            changed.append(path)
-            if write:
-                manifest["skills"] = skills
-                path.write_text(
-                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-    return changed
+            manifest["skills"] = skills
+            pending.append((path, manifest))
+
+    # Validate every input before changing any checked-in manifest.
+    if write:
+        for path, manifest in pending:
+            path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+    return [path for path, _ in pending]
 
 
 def main() -> int:
