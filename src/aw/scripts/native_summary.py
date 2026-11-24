@@ -41,24 +41,33 @@ def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) ->
             and all(case["status"] == "passed" for case in cases)
         )
         if complete:
-            try:
-                recorded = {case["name"]: case for case in cases}
-                for case in row["cases"]:
+            recorded = {case["name"]: case for case in cases}
+            for case in row["cases"]:
+                try:
                     log = recorded[case["name"]]["log"]
                     if Path(log).name != log:
                         raise ValueError("native log must be within its artifact")
                     verify_case(case, (evidence / log).read_text(), evidence)
-            except (OSError, ValueError, KeyError, TypeError):
-                complete = False
+                except (OSError, ValueError, KeyError, TypeError):
+                    complete = False
+                    reason = f"invalid evidence for `{case['name']}`"
+                    break
+        elif not report:
+            reason = "missing report"
+        elif report.get("candidate_sha") != expected:
+            reason = "candidate SHA mismatch"
+        else:
+            failed = next((case for case in cases if case.get("status") == "failed"), None)
+            reason = f"case `{failed['name']}`" if failed else "setup or incomplete case evidence"
         passed = passed and complete
-        rows.append(f"| {agent} | {'PASS' if complete else 'FAIL / missing'} | {row['boundary']} |")
+        status = "PASS" if complete else f"FAIL / {reason}"
+        rows.append(f"| {agent} | {status} | {row['boundary']} |")
     rows.extend(
         [
             "",
             f"Job outcomes: `{json.dumps(outcomes, sort_keys=True)}`.",
             "",
-            "A green run covers only the declared native boundaries. "
-            "Before release, rerun this workflow on the exact release SHA.",
+            "Release acceptance combines these native results with contract checks on the same commit.",
         ]
     )
     return "\n".join(rows) + "\n", passed

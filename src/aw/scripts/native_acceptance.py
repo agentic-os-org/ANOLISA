@@ -377,6 +377,11 @@ def main() -> None:
             environment["OPENCLAW_PACKAGE_DIR"] = values["npm"] + "/node_modules/openclaw"
             for case in row["cases"]:
                 start = time.monotonic()
+                record = {
+                    "name": case["name"], "status": "failed",
+                    "log": f"command-{commands.number + 1:02}.log",
+                }
+                result["cases"].append(record)
                 log = commands.run(
                     [arg.format_map(values) for arg in case["argv"]],
                     AW,
@@ -384,13 +389,9 @@ def main() -> None:
                     containers=case["name"] == "sec-core",
                 )
                 verify_case(case, log, work)
-                result["cases"].append(
-                    {
-                        "name": case["name"],
-                        "status": "passed",
-                        "log": f"command-{commands.number:02}.log",
-                        "seconds": round(time.monotonic() - start, 2),
-                    }
+                record.update(
+                    status="passed",
+                    seconds=round(time.monotonic() - start, 2),
                 )
             result["status"] = "passed"
         finally:

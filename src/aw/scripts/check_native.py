@@ -153,14 +153,16 @@ def plan(root: Path, expected: str, credential_free: bool = False) -> dict:
     if git("rev-parse", "HEAD", repo=root.parents[1]) != sha(expected):
         raise ValueError("native plan checkout does not match candidate SHA")
     manifest = select(load(root), credential_free)
-    return {
-        "include": [
-            {"agent": agent, "python": row["python"],
-             "minutes": math.ceil((sum(c["timeout_seconds"] + 20 for c in row["cases"]) + 1800) / 60)}
-            for agent, row in manifest["agents"].items()
-            if row["mode"] == "automated"
-        ]
-    }
+    jobs = []
+    for agent, row in manifest["agents"].items():
+        if row["mode"] != "automated":
+            continue
+        seconds = sum(case["timeout_seconds"] + 20 for case in row["cases"])
+        jobs.append({
+            "agent": agent, "python": row["python"], "minutes": math.ceil((seconds + 1800) / 60),
+        })
+    # Offer the longest suites first so short jobs can fill the final matrix slots.
+    return {"include": sorted(jobs, key=lambda job: job["minutes"], reverse=True)}
 
 
 def main() -> None:

@@ -14,6 +14,13 @@ Start daily development with the [AW gate](../../../src/aw/CONTRIBUTING.md). Use
 | Real backend compatibility | Four Tokenless/RTK and AW Provider contracts | `check_tokenless.py` |
 | Release integration | Packages, backends, native manifest and resident containers | AW Integration workflow |
 
+For a failed nightly run, open **AW / Integration result** in the run summary.
+Find the first failed case in its Agent row, then open that Agent's evidence
+artifact for the command log. A missing report points to the producer job.
+Use **Re-run failed jobs** for a transient failure while the build artifacts
+are available. If an intermediate artifact has expired, rerun all jobs for
+that commit.
+
 OpenClaw automation covers the official loader/Hook runner; validate complete Gateway model flow separately.
 Qoder SDK hosted MCP still requires manual container evidence. Report the actual boundary recorded in the manifest.
 
