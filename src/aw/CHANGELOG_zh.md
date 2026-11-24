@@ -2,6 +2,41 @@
 
 [English](CHANGELOG.md)
 
+## [0.2.1] - 2026-11-24
+
+### 新增
+
+- **AW**：更新至 v0.2.1，支持 Qoder 公开 `tool.after` Hook 文本结果替换与 WarmQuery
+  辅助导出（`qoderProfile`、`qoderCapabilities`、`qoderInstallRoutes`），并为
+  `aw-provider-sec-core` 新增 `pii.output_mode: mask` 局部脱敏模式，保留敏感片段周围正常文本
+  （[#10507](https://github.com/agentic-os-org/ANOLISA/pull/10507)、
+  [#10533](https://github.com/agentic-os-org/ANOLISA/pull/10533)）。
+- **AW**：更新至 v0.2.1，新增 `match.agents` 目标选择器、步骤级 `off`/`shadow`/`enforce`
+  模式、`native:<adapter>:*` 通配符及 Provider 保护动作（obligation）路由，支持共享策略按目标隔离与灰度生效
+  （[#10520](https://github.com/agentic-os-org/ANOLISA/pull/10520)、
+  [#10404](https://github.com/agentic-os-org/ANOLISA/pull/10404)）。
+- **AW**：更新至 v0.2.1，Python 与 TypeScript `LanguageSource` 支持 `replace_input`、
+  `replace_result`、`on_error: withhold_result` 及有界流缓冲
+  （[#10480](https://github.com/agentic-os-org/ANOLISA/pull/10480)）。
+- **AW**：更新至 v0.2.1，在适配器和 SDK 接入 `session.start`、`turn.stop`、`session.end`
+  生命周期钩子，并支持通过 `open_event.result_status` 向 `aw audit-export` 导出显式完成状态
+  （[#10403](https://github.com/agentic-os-org/ANOLISA/pull/10403)、
+  [#10174](https://github.com/agentic-os-org/ANOLISA/pull/10174)）。
+
+### 变更
+
+- **AW**：更新至 v0.2.1，精简 `scripts/build-all.sh` 默认统一构建中的独立插件包；单独选择后端时仍安装完整独立适配包
+  （[#9736](https://github.com/agentic-os-org/ANOLISA/pull/9736)）。
+
+### 修复
+
+- **AW**：更新至 v0.2.1，未启用 `session.start` 与 `input.submit` 时延迟冷启动 Qoder Query 准入，使首轮模型请求可与 PID 挂接并行
+  （[#10507](https://github.com/agentic-os-org/ANOLISA/pull/10507)）。
+- **AW**：更新至 v0.2.1，加固双语言 SDK 运行稳定性：完成 RPC 后排空连接并串行记录共享连接、拒收已关闭会话的迟到生命周期响应，并将 Claude Python 探测时限延至 15 秒
+  （[#10392](https://github.com/agentic-os-org/ANOLISA/pull/10392)、
+  [#10474](https://github.com/agentic-os-org/ANOLISA/pull/10474)、
+  [#10389](https://github.com/agentic-os-org/ANOLISA/pull/10389)）。
+
 ## [0.2.0] - 2026-11-20
 
 ### 新增

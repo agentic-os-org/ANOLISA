@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/aw-sdk-pi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Optional Pi coding agent worker integration for @anolisa/aw-sdk",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,7 +17,7 @@
     }
   },
   "peerDependencies": {
-    "@anolisa/aw-sdk": "0.2.0"
+    "@anolisa/aw-sdk": "0.2.1"
   },
   "files": [
     "dist"

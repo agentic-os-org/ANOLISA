@@ -2,6 +2,50 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## [0.2.1] - 2026-11-24
+
+### Added
+
+- **AW**: Updated to v0.2.1, support `tool.after` text-slot replacement in public
+  Qoder Hooks with exported WarmQuery helpers (`qoderProfile`, `qoderCapabilities`,
+  `qoderInstallRoutes`), and add `pii.output_mode: mask` in `aw-provider-sec-core`
+  to redact only sensitive spans while keeping surrounding safe text
+  ([#10507](https://github.com/agentic-os-org/ANOLISA/pull/10507),
+  [#10533](https://github.com/agentic-os-org/ANOLISA/pull/10533)).
+- **AW**: Updated to v0.2.1, add `match.agents` target selectors, per-step
+  `off`/`shadow`/`enforce` modes, `native:<adapter>:*` tool wildcards, and
+  Provider obligation routing so shared policies can scope and stage checks per
+  target ([#10520](https://github.com/agentic-os-org/ANOLISA/pull/10520),
+  [#10404](https://github.com/agentic-os-org/ANOLISA/pull/10404)).
+- **AW**: Updated to v0.2.1, support `replace_input`, `replace_result`,
+  `on_error: withhold_result`, and bounded stream buffering in Python and
+  TypeScript `LanguageSource`
+  ([#10480](https://github.com/agentic-os-org/ANOLISA/pull/10480)).
+- **AW**: Updated to v0.2.1, wire `session.start`, `turn.stop`, and `session.end`
+  lifecycle Hooks across adapters and SDKs, and accept explicit
+  `open_event.result_status` for `aw audit-export`
+  ([#10403](https://github.com/agentic-os-org/ANOLISA/pull/10403),
+  [#10174](https://github.com/agentic-os-org/ANOLISA/pull/10174)).
+
+### Changed
+
+- **AW**: Updated to v0.2.1, trim standalone plugin bundles from the default
+  unified AW build in `scripts/build-all.sh`; selecting a backend alone still
+  installs its full standalone bundle
+  ([#9736](https://github.com/agentic-os-org/ANOLISA/pull/9736)).
+
+### Fixed
+
+- **AW**: Updated to v0.2.1, defer cold Qoder Query admission when `session.start`
+  and `input.submit` are disabled so model requests overlap PID attachment
+  ([#10507](https://github.com/agentic-os-org/ANOLISA/pull/10507)).
+- **AW**: Updated to v0.2.1, harden SDK runtime stability by draining completed
+  Python/TypeScript RPC connections, rejecting late lifecycle replies on closed
+  sessions, and extending Claude Python probe timeouts to 15 seconds
+  ([#10392](https://github.com/agentic-os-org/ANOLISA/pull/10392),
+  [#10474](https://github.com/agentic-os-org/ANOLISA/pull/10474),
+  [#10389](https://github.com/agentic-os-org/ANOLISA/pull/10389)).
+
 ## [0.2.0] - 2026-11-20
 
 ### Added
