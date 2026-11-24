@@ -354,11 +354,11 @@ behavior, and approval must review them; the array is empty when there are none.
 absent categories, then lists `Not covered by this candidate`, and falls back to the
 exact Cedar when a condition cannot be summarized. `--format cedar` writes `caveats` as
 `// Not covered:` comments; a clarification prints only comments, so no permit can be
-mistaken for a result. A clarification is returned only when the command itself cannot
-be expressed, never with a partial policy; even a short command carries a policy, and the
-text is empty only when the command has no file, process or network action (`true`, `pwd`,
-`echo`, `date`). An empty policy is a candidate too: it grants nothing, keeps its `caveats`,
-and needs only runtime dependencies to run in the sandbox. The CLI
+mistaken for a result. When a required file target depends on shell parameter expansion,
+such as in `printf x > "$TARGET"` or `rm -rf "$DIR"`, supply the literal target path.
+The result is `needs_clarification` with a reason and no partial policy. Commands with no
+file, process or network action, such as `pwd` or `echo` without redirection, can
+produce an empty candidate. It grants nothing and keeps its `caveats`. The CLI
 re-runs Cedar validation before rendering. Both outcomes exit `0`; an input the daemon
 would reject exits `2` without a request.
 

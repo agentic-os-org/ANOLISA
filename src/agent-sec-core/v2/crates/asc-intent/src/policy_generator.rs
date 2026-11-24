@@ -165,8 +165,9 @@ const COMMAND_ATTEMPTS: u8 = 2;
 /// Generates Cedar from a hook command/cwd; it reads no base policy and computes no effective
 /// permission.
 ///
-/// Reads no file and runs no command. A model-reported unresolved item yields no candidate;
-/// caveats travel with the candidate. For recognized PATH utilities, proposals include a
+/// Reads no file and runs no command. A file target that requires shell parameter expansion
+/// or a model-reported unresolved requirement yields a clarification. Caveats travel with
+/// the candidate. For recognized PATH utilities, proposals include a
 /// name-scoped launch request when the model describes other actions but omits launch.
 /// Syntax, Strict-typing and path-literal rejections are
 /// retried once with the local reason; unsupported-policy features are never retried. After the
@@ -187,7 +188,23 @@ pub fn propose_command(
     check_deadline(deadline)?;
     input.validate()?;
     crate::intent_extraction::validate_model(model)?;
-    if let Some((policy, caveats)) = crate::command_files::file_request(input) {
+    let words = crate::command_files::words(&input.command);
+    if words
+        .as_deref()
+        .is_some_and(crate::command_files::has_parameter_file_target)
+    {
+        check_deadline(deadline)?;
+        return Ok(CommandPolicyOutcome::NeedsClarification {
+            reasons: vec![
+                "A file target depends on shell parameter expansion. Provide a literal path."
+                    .to_owned(),
+            ],
+        });
+    }
+    if let Some((policy, caveats)) = words
+        .as_deref()
+        .and_then(|words| crate::command_files::file_request(words, &input.cwd))
+    {
         let artifact = prepare_policy(&policy)?;
         check_deadline(deadline)?;
         return Ok(CommandPolicyOutcome::Candidate {
@@ -195,7 +212,9 @@ pub fn propose_command(
             caveats,
         });
     }
-    let path_program = crate::command_files::path_program(input);
+    let path_program = words
+        .as_deref()
+        .and_then(crate::command_files::path_program);
     let mut attempt = 1;
     let mut rejection: Option<String> = None;
     loop {

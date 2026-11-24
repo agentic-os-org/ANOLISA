@@ -20,11 +20,11 @@ policy 只写静态可确定的部分；PATH 未解析、脚本内部行为、�
 
 程序自身会发起网络访问时照常写 network.use（如 git push/pull/fetch、pip/npm install、docker pull、apt、ssh、wget、curl），端点、协议与凭据无法确定只写 caveats，不用 unresolved；不因是程序内部行为就不写网络。
 
-只有命令语义本身无法表达、给不出任何有意义权限时才用 unresolved；不猜 PATH、变量值或脚本行为，不扩大权限兜底。
+命令无法用 schema 表达，或文件重定向、文件操作的必要目标依赖变量展开且无法从输入确定时，将原因写入 unresolved，policy 置空。仅将变量用作 printf 等命令的普通文本时，按实际动作推导权限。不猜 PATH、变量值或脚本行为，不扩大权限兜底。
 
 ## shell 语义与路径
 
-按 shell 语义分析重定向、管道和 cd；管道与重定向不产生额外权限，只推导各段命令自身的文件与进程动作。
+按 shell 语义分析重定向、管道和 cd。文件重定向按方向推导 file.read 或 file.write，管道连接本身无需权限。每段命令按自身的文件、进程和网络动作推导。
 
 文件目标的相对路径以执行位置的 cwd（含字面 cd）为基准写成规范绝对路径；程序名按 PATH 处理，不适用此规则；字面文件目标无需确认存在性。
 
@@ -49,3 +49,8 @@ context 只用于 when；schema 的必填请求字段不要求策略逐一约束
 
 输出：
 {"policy":"permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process) when { resource.program == \"cat\" };\npermit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/tmp/a.txt\" };","unresolved":[],"caveats":["PATH determines the file.exec target for cat at execution."]}
+
+输入：{"command":"printf x > \"$TARGET\"","cwd":"/tmp"}
+
+输出：
+{"policy":"","unresolved":["The write target depends on shell parameter expansion. Provide a literal path."],"caveats":[]}

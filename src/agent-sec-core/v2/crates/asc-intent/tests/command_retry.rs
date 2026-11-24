@@ -243,6 +243,61 @@ fn clarification_is_not_retried() {
 }
 
 #[test]
+fn parameter_dependent_file_targets_require_clarification() {
+    for command in [
+        r#"printf x > "$TARGET""#,
+        r#"printf x>"${TARGET}""#,
+        r#"printf x 2>>"$LOG""#,
+        r#"read -r line < "$INPUT""#,
+        r#"rm -rf "$DIR""#,
+        r#"/bin/rm -- "$1""#,
+        r#"cat "$INPUT""#,
+    ] {
+        let provider = Scripted::new(&[json!({
+            "policy": "",
+            "unresolved": [],
+            "caveats": ["The filename is not known."],
+        })
+        .to_string()]);
+        let input = CommandInput {
+            command: command.into(),
+            cwd: "/tmp".into(),
+        };
+        let outcome = propose_command(&provider, "fixture", &input, deadline()).unwrap();
+        let CommandPolicyOutcome::NeedsClarification { reasons } = outcome else {
+            panic!("{command} requires a literal file target");
+        };
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("parameter expansion"), "{command}");
+        assert_eq!(provider.calls(), 0);
+    }
+}
+
+#[test]
+fn literal_dollars_and_expanded_text_still_use_the_model() {
+    const WRITE: &str = r#"permit(principal, action == SecCore::Action::"file.write", resource is SecCore::File) when { resource.path == "/tmp/$TARGET" };"#;
+    for (command, expected_policy) in [
+        ("printf x > '$TARGET'", WRITE),
+        (r"printf x > \$TARGET", WRITE),
+        (r#"printf x > "\$TARGET""#, WRITE),
+        (r#"printf '%s' "$TEXT""#, ""),
+        ("printf '%s' '$TEXT'", ""),
+    ] {
+        let provider = Scripted::new(&[body(expected_policy)]);
+        let input = CommandInput {
+            command: command.into(),
+            cwd: "/tmp".into(),
+        };
+        let outcome = propose_command(&provider, "fixture", &input, deadline()).unwrap();
+        let CommandPolicyOutcome::Candidate { policy, .. } = outcome else {
+            panic!("{command} does not require clarification");
+        };
+        assert_eq!(policy, expected_policy);
+        assert_eq!(provider.calls(), 1);
+    }
+}
+
+#[test]
 fn a_persistent_path_rejection_becomes_a_clarification() {
     let relative = "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"a.csv\" };";
     let provider = Scripted::new(&[body(relative), body(relative)]);
@@ -337,6 +392,10 @@ fn commands_with_ambiguous_operands_or_unsupported_syntax_use_the_model() {
         "cat src/*/*.txt > out/all",
         "cat src/*.txt > out/all; pwd",
         "cat src/*.txt 2>out/errors",
+        r#"read -r line <<< "$TEXT""#,
+        r#"printf x > "${TARGET:-literal}""#,
+        "printf x > $'literal'",
+        "printf '%s' $",
         "tar -cf . -C src .",
         "tar -cf /work -C src .",
         "tar -cf out/a.tar README.md",
