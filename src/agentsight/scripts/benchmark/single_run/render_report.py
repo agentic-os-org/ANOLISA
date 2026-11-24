@@ -159,7 +159,10 @@ def qps_key(value: Any) -> str:
     number = numeric(value)
     if number is None:
         return "unknown"
-    return str(int(number)) if number.is_integer() else f"{number:g}"
+    # Integral rates keep their integer display; fractional rates use the
+    # round-trip representation so distinct recorded rates never collapse
+    # into one group through display rounding.
+    return str(int(number)) if number.is_integer() else repr(number)
 
 
 def qps_sort_key(value: str) -> tuple[bool, float, str]:
