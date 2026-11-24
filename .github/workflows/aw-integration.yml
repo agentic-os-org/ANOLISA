@@ -39,8 +39,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Keep the nightly queue bounded. Explicit runs each own their acceptance result.
-  group: aw-integration-${{ github.event_name == 'schedule' && github.ref || github.run_id }}
+  # Coalesce stale nightlies and serialize explicit acceptance of the same commit.
+  group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}
+  queue: ${{ github.event_name == 'schedule' && 'single' || 'max' }}
   cancel-in-progress: false
 
 jobs:

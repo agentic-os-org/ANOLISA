@@ -201,9 +201,18 @@ class NativeTests(GateFixture):
         self.assertIn("archive_id: ${{ steps.upload-archives.outputs.artifact-id }}", jobs)
         self.assertLess(jobs.index("Verify installed packages"), jobs.index("id: upload-archives"))
 
+    def test_explicit_integration_runs_queue_by_candidate(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        concurrency = workflow.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertIn(
+            "group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}",
+            concurrency,
+        )
+        self.assertIn("queue: ${{ github.event_name == 'schedule' && 'single' || 'max' }}", concurrency)
+        self.assertIn("cancel-in-progress: false", concurrency)
+
     def test_reruns_preserve_successful_siblings_and_replace_owned_evidence(self) -> None:
         workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
-        self.assertIn("github.event_name == 'schedule' && github.ref || github.run_id", workflow)
         for step in workflow.split("uses: actions/upload-artifact@v4")[1:]:
             step = step.split("\n      - ", 1)[0]
             name = next(line for line in step.splitlines() if line.startswith("          name:"))
