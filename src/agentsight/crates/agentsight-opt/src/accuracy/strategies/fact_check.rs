@@ -33,7 +33,7 @@ impl FactCheckStrategy {
 
     fn grep_symbol(repo_root: &Path, symbol: &str, kind: &str) -> GrepOutcome {
         if symbol.trim().is_empty() {
-            return GrepOutcome::NotFound;
+            return GrepOutcome::CheckFailed;
         }
         if matches!(kind, "file" | "path") {
             return if Self::repo_contains_path(repo_root, symbol) {
@@ -115,14 +115,10 @@ impl FactCheckStrategy {
     }
 
     fn repo_contains_path(repo_root: &Path, symbol: &str) -> bool {
-        let candidate = Path::new(symbol);
-        if candidate.is_absolute() {
-            return false;
-        }
         let Ok(root) = repo_root.canonicalize() else {
             return false;
         };
-        let Ok(resolved) = root.join(candidate).canonicalize() else {
+        let Ok(resolved) = root.join(symbol).canonicalize() else {
             return false;
         };
         resolved != root && resolved.starts_with(&root)
@@ -335,10 +331,18 @@ mod tests {
         std::fs::write(&outside, "secret\n").unwrap();
         std::fs::write(repo.join("inside.txt"), "ok\n").unwrap();
 
+        let inside_abs = repo.join("inside.txt");
         assert!(matches!(
             FactCheckStrategy::grep_symbol(&repo, "inside.txt", "file"),
             GrepOutcome::Found
         ));
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, inside_abs.to_str().unwrap(), "file"),
+                GrepOutcome::Found
+            ),
+            "absolute path inside repo_root must still report Found"
+        );
         assert!(
             matches!(
                 FactCheckStrategy::grep_symbol(&repo, "../outside.txt", "file"),
@@ -353,6 +357,14 @@ mod tests {
             ),
             "absolute path outside repo_root must not report Found"
         );
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "   ", "api"),
+            GrepOutcome::CheckFailed
+        ));
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "", "file"),
+            GrepOutcome::CheckFailed
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
