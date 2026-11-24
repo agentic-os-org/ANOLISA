@@ -393,6 +393,72 @@ test('conversation-list: model names cannot overwrite the time-axis label', () =
 
 // ─── Bug 4: the risk sort only covers one page of the server result ──────────
 
+for (const action of ['new scan', 'edit sources', 'close', 'reopen']) {
+  test(`protection preview cannot overwrite a later ${action}`, async () => {
+    const { calls, stubs } = deferredFetchStubs(['fetchAgentProtectionPreview', 'createCredentialBinding']);
+    const fixture = protectionFixture(stubs);
+    fixture.open();
+    const preview = (directory, target) => ({ workspace_path: directory, source_paths: [directory+'/.env'], trusted_endpoints: [target] });
+    const first = calls.fetchAgentProtectionPreview[0];
+    if (action === 'new scan') {
+      const directory = collectElements(fixture.render(), n => n.type === 'input' && n.props.value === '/project')[0];
+      directory.props.onChange({ target: { value: '/other' } });
+      fixture.button('扫描').props.onClick();
+      calls.fetchAgentProtectionPreview[1].resolve(preview('/other', '192.0.2.2:443'));
+      await settle();
+    } else if (action === 'edit sources') {
+      collectElements(fixture.render(), n => n.type === 'textarea')[0].props.onChange({ target: { value: '/manual/.env' } });
+    } else {
+      fixture.button('取消').props.onClick();
+      if (action === 'reopen') {
+        fixture.open();
+        calls.fetchAgentProtectionPreview[1].resolve(preview('/project', '192.0.2.2:443'));
+        await settle();
+      }
+    }
+    const expected = JSON.stringify(fixture.render());
+    first.resolve(preview('/project', '192.0.2.1:443'));
+    await settle();
+    assert.equal(JSON.stringify(fixture.render()), expected, 'a retired scan must not mutate the active draft');
+    if (action === 'new scan' || action === 'edit sources') {
+      fixture.button('开启审计保护').props.onClick();
+      assert.deepEqual(calls.createCredentialBinding[0].args[0].source_paths,
+        [action === 'new scan' ? '/other/.env' : '/manual/.env']);
+      calls.createCredentialBinding[0].resolve({ request: { binding_id: 'created' } });
+      await settle();
+    }
+  });
+}
+
+test('late scan failure does not report an error on a closed dialog', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchAgentProtectionPreview']);
+  const fixture = protectionFixture(stubs);
+  fixture.open();
+  calls.fetchAgentProtectionPreview[0].resolve({ workspace_path: '/project', source_paths: ['/project/.env'] });
+  await settle();
+  fixture.button('扫描').props.onClick();
+  fixture.button('取消').props.onClick();
+  calls.fetchAgentProtectionPreview[1].reject(new Error('obsolete scan failed'));
+  await settle();
+  assert.deepEqual(fixture.notices, []);
+});
+
+test('opening settings retires a pending one-click activation', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchAgentProtectionPreview', 'createCredentialBinding']);
+  const fixture = protectionFixture(stubs);
+  collectElements(fixture.render(), node => node.props?.role === 'switch')[0].props.onClick();
+  fixture.open();
+  calls.fetchAgentProtectionPreview[0].resolve({ workspace_path: '/project', source_paths: ['/old/.env'] });
+  await settle();
+  assert.equal(calls.createCredentialBinding.length, 0, 'superseded quick action must not apply old sources');
+  calls.fetchAgentProtectionPreview[1].resolve({ workspace_path: '/project', source_paths: ['/current/.env'] });
+  await settle();
+  fixture.button('开启审计保护').props.onClick();
+  assert.deepEqual(calls.createCredentialBinding[0].args[0].source_paths, ['/current/.env']);
+  calls.createCredentialBinding[0].resolve({ request: { binding_id: 'current' } });
+  await settle();
+});
+
 test('system-audit: risk sort is disabled and annotated while more than one page exists', () => {
   const source = readSource('src/pages/SystemAuditPage.tsx');
 
