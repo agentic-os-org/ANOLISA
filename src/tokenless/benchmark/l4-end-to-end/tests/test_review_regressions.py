@@ -1,6 +1,7 @@
 # Copyright 2026 Alibaba Cloud
 # Licensed under the Apache License, Version 2.0.
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -1505,6 +1506,42 @@ def test_l4_regressions_have_an_explicit_ci_entry() -> None:
     workflow = (TOKENLESS.parents[1] / ".github" / "workflows" / "ci.yaml").read_text()
     assert "test-benchmark-l4:" in makefile
     assert "make -C src/tokenless test-benchmark-l4" in workflow
+
+
+@pytest.mark.parametrize("explicit_runs", (False, True))
+def test_solve_rate_retains_collected_host_identity(tmp_path: Path, explicit_runs: bool) -> None:
+    solve = load_analysis("analyze_solve_rate")
+    # The collection's parent name may contain text that looks like a host ID.
+    collected = tmp_path / "archive-host7"
+    for host_id in (1, 10):
+        host = collected / f"host{host_id}-192.0.2.{host_id}"
+        repeat = host / "out" / "repeat-1"
+        run = repeat / "arm-a" / "run"
+        run.mkdir(parents=True)
+        (run.parent / "selection.json").write_text('{"instance_ids":["case"]}', encoding="utf-8")
+        predictions = b"{}"
+        (run / "preds.json").write_bytes(predictions)
+        evaluation = host / "eval" / "repeat-1-arm-a"
+        (evaluation / "evaluate").mkdir(parents=True)
+        (evaluation / ".eval-complete").write_text(
+            f"{hashlib.sha256(predictions).hexdigest()} run-1\n", encoding="utf-8"
+        )
+        (evaluation / "evaluate" / "model.run-1.json").write_text(
+            '{"submitted_instances":1,"resolved_ids":["case"]}', encoding="utf-8"
+        )
+        unfinished = repeat / "arm-b"
+        unfinished.mkdir()
+        (unfinished / "selection.json").write_text(
+            '{"instance_ids":["waiting"]}', encoding="utf-8"
+        )
+
+    reports = solve.load_reports(str(collected), str(collected) if explicit_runs else None)
+    assert sorted((row["host"], row["evaluation_status"]) for row in reports) == [
+        ("host1", "scored"),
+        ("host1", "unscored"),
+        ("host10", "scored"),
+        ("host10", "unscored"),
+    ]
 
 
 def test_solve_rate_counts_selected_tasks_without_predictions(
