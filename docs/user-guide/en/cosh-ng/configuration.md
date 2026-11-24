@@ -37,6 +37,18 @@ change it, and project models are never saved by selecting this access method.
 Use `/auth` to configure another provider when you want to choose a model;
 automatic ECS access does not require `/auth` first.
 
+On non-ECS desktops, `/auth` offers "Alibaba Cloud account login (browser)":
+after authorizing in the system browser, Cosh uses short-lived STS to reach the
+existing SysOM models and agents. The refresh token lives in an isolated
+namespace of the OS secure store; STS stays in memory only. Switching accounts
+or re-logging in starts a new session generation, so old history is never sent
+to the new identity; logout invalidates locally first, then attempts remote
+revoke. When the account is not activated or the service-linked role is missing,
+the same reviewed activation guidance as ECS is shown, and the original login
+can resume renewing after the fix. The selection is written to a dedicated local
+state file that older versions ignore; `[ai]` and the original credential
+sources stay unchanged. The first release ships only verified macOS desktops.
+
 ## Minimal user configuration
 
 ```toml
