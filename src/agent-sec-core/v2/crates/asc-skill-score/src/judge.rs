@@ -15,6 +15,15 @@ use serde_json::{Value, json};
 
 use crate::{Error, Result, contracts, fixtures, redaction::redact_value, source::private_json};
 
+fn judge_max_tokens(model: &str) -> u32 {
+    match model {
+        "deepseek-v4.1-flash" | "deepseek-v4.1-flash-1017" => 393_216,
+        "qwen3.8-max" | "qwen3.8-max-0902" | "qwen3.8-max-2026-09-02" => 131_072,
+        // Custom gateways may use opaque model IDs with lower output limits.
+        _ => 24_000,
+    }
+}
+
 pub(crate) struct Judge {
     pub model: RemoteModel,
     pub calls: Vec<Value>,
@@ -244,7 +253,8 @@ impl Judge {
             let user = message.to_owned();
             let (send, receive) = mpsc::sync_channel(1);
             std::thread::spawn(move || {
-                let _ = send.send(client.messages(&system, &user, 24_000, high, timeout));
+                let max_tokens = judge_max_tokens(client.model());
+                let _ = send.send(client.messages(&system, &user, max_tokens, high, timeout));
             });
             receive
         })
@@ -1091,6 +1101,20 @@ mod tests {
     }
 
     #[test]
+    fn output_budgets_match_supported_models_and_preserve_custom_routes() {
+        for (model, expected) in [
+            ("deepseek-v4.1-flash", 393_216),
+            ("deepseek-v4.1-flash-1017", 393_216),
+            ("qwen3.8-max", 131_072),
+            ("qwen3.8-max-0902", 131_072),
+            ("qwen3.8-max-2026-09-02", 131_072),
+            ("custom-deployment", 24_000),
+        ] {
+            assert_eq!(judge_max_tokens(model), expected, "{model}");
+        }
+    }
+
+    #[test]
     fn final_judge_persists_the_response_diagnostic_without_a_verdict() -> Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
         let directory = tempfile::tempdir()?;
@@ -1101,7 +1125,7 @@ mod tests {
             &config,
             &json!({"schemaVersion":1,"remote":{
             "provider":"anthropic-compatible","baseUrl":base_url,
-            "defaultModel":"fixture","apiKeyEnv":"FIXTURE_KEY"}}),
+            "defaultModel":"deepseek-v4.1-flash-1017","apiKeyEnv":"FIXTURE_KEY"}}),
         )?;
         let mut judge = judge(Duration::from_secs(5))?;
         judge.model = RemoteModel::resolve(
@@ -1118,16 +1142,16 @@ mod tests {
                 if let Some((key, value)) = header.split_once(':')
                     && key.eq_ignore_ascii_case("content-length")
                 {
-                    length = value.trim().parse::<u64>().ok();
+                    length = value.trim().parse::<usize>().ok();
                 }
                 header.clear();
             }
             let length = length.expect("loopback request has a body length");
             assert!(length < 2_000_000);
-            assert_eq!(
-                std::io::copy(&mut reader.take(length), &mut std::io::sink())?,
-                length
-            );
+            let mut request_body = vec![0; length];
+            reader.read_exact(&mut request_body)?;
+            let request: Value = serde_json::from_slice(&request_body)?;
+            assert_eq!(request["max_tokens"], 393_216);
             let body = r#"{"content":[{"type":"text","text":"private-fixture-body"}],"stop_reason":"end_turn"}"#;
             write!(
                 socket,

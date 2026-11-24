@@ -100,11 +100,13 @@ The format below retains the preview's default model name without promising that
   "remote": {
     "provider": "bailian-payg-anthropic",
     "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "defaultModel": "qwen3.8-max",
+    "defaultModel": "deepseek-v4.1-flash-1017",
     "apiKeyEnv": "AGENT_SEC_MODEL_API_KEY"
   }
 }
 ```
+
+The optional positive integer `remote.judgeMaxTokens` caps Judge requests at the deployment limit. The evaluated Agent uses its own output budget.
 
 Configuration stores only a key reference; the user session or platform secret management injects its value. The `bailian-payg-anthropic` provider retains its HTTPS endpoint restrictions. The explicit `anthropic-compatible` provider accepts an operator-authorized HTTP(S) DNS/IPv4 prefix and appends `/v1/messages`; it rejects URL credentials, query, fragment, whitespace and backslashes, and never follows redirects. Judge and Agent share the resolved provider/model and opaque credential. Platform identity generation, endpoint authorization and metering belong to the caller/proxy, not ASC. Platform-specific provider names must be translated before creating ASC configuration. Judge requests to compatible proxies use the basic Messages fields (`model`, `system`, `messages`, and `max_tokens`). Bailian requests additionally set temperature, thinking and effort. Both providers use the same retry budget, usage parsing and redaction. Verify real inference separately for each proxy.
 

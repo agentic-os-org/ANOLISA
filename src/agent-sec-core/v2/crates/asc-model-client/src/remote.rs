@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read as _};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
 
@@ -67,6 +68,7 @@ struct RemoteConfig {
     base_url: String,
     default_model: String,
     api_key_env: String,
+    judge_max_tokens: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub struct RemoteModel {
     model: String,
     api_key: String,
     provider: Provider,
+    judge_max_tokens: Option<NonZeroU32>,
 }
 
 impl std::fmt::Debug for RemoteModel {
@@ -212,7 +215,7 @@ impl RemoteModel {
         path: &Path,
         environment: &BTreeMap<String, String>,
     ) -> Result<Self, RemoteError> {
-        let (base, model, key, provider) = match std::fs::File::open(path) {
+        let (base, model, key, provider, judge_max_tokens) = match std::fs::File::open(path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
                 file.take(65_537)
@@ -248,7 +251,13 @@ impl RemoteModel {
                     .get(name)
                     .cloned()
                     .ok_or_else(|| config_error("referenced model key is missing"))?;
-                (base, config.remote.default_model, key, provider)
+                (
+                    base,
+                    config.remote.default_model,
+                    key,
+                    provider,
+                    config.remote.judge_max_tokens,
+                )
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let key = environment.get("ANTHROPIC_API_KEY").cloned();
@@ -256,9 +265,10 @@ impl RemoteModel {
                 match (key, base) {
                     (Some(key), Some(base)) => (
                         validate_bailian_url(&base)?,
-                        "qwen3.8-max".into(),
+                        "deepseek-v4.1-flash-1017".into(),
                         key,
                         Provider::LegacyBailian,
+                        None,
                     ),
                     _ => {
                         return Err(config_error(
@@ -288,6 +298,7 @@ impl RemoteModel {
             model,
             api_key: key,
             provider,
+            judge_max_tokens,
         })
     }
 
@@ -402,6 +413,9 @@ impl RemoteModel {
             .retry(reqwest::retry::never())
             .build()
             .map_err(|e| transport_failure(&e, e.is_connect()))?;
+        let max_tokens = self
+            .judge_max_tokens
+            .map_or(max_tokens, |cap| max_tokens.min(cap.get()));
         let mut body = json!({"model": self.model, "max_tokens": max_tokens,
             "messages": [{"role":"user", "content": user}], "system": system});
         if self.provider != Provider::AnthropicCompatible {
@@ -763,7 +777,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let explicit = configured_model("bailian-payg-anthropic", base).unwrap();
         let legacy = RemoteModel::resolve(&directory.path().join("absent.json"), &env).unwrap();
-        for (mut model, high_effort) in [(explicit, false), (legacy, true)] {
+        for (mut model, high_effort, expected_model) in [
+            (explicit, false, "fixture-model"),
+            (legacy, true, "deepseek-v4.1-flash-1017"),
+        ] {
+            assert_eq!(
+                model.worker_environment()["ANTHROPIC_MODEL"],
+                expected_model
+            );
             let (address, server) = mock_response(
                 "200 OK",
                 r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
@@ -774,6 +795,7 @@ mod tests {
                 .messages("system", "user", 256, high_effort, Duration::from_secs(2))
                 .unwrap();
             let (_, body) = server.join().unwrap();
+            assert_eq!(body["model"], expected_model);
             assert_eq!(body["temperature"], 0);
             assert_eq!(body["thinking"], json!({"type":"enabled"}));
             assert_eq!(
@@ -1086,6 +1108,7 @@ mod tests {
                 model: "fixture".into(),
                 api_key: "fixture-secret".into(),
                 provider: Provider::AnthropicCompatible,
+                judge_max_tokens: None,
             };
             let result = model.messages("system", "user", 10, true, Duration::from_millis(100));
             server.join().expect("HTTP fixture completed");
@@ -1141,6 +1164,7 @@ mod tests {
             model: String::new(),
             api_key: "fixture\"key\\with\ncontrol".into(),
             provider: Provider::AnthropicCompatible,
+            judge_max_tokens: None,
         };
         let message = format!(
             "path={:?}; raw={}; other=\"/tmp/line\\nname\"",
@@ -1159,6 +1183,7 @@ mod tests {
             model: String::new(),
             api_key: "secret-value".into(),
             provider: Provider::AnthropicCompatible,
+            judge_max_tokens: None,
         };
         let mut bytes = b"\xffsecret-value\0secret-value/path/read_text()".to_vec();
         let size = bytes.len();

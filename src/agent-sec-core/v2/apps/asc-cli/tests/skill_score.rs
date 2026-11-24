@@ -328,6 +328,7 @@ exit 77
 #[derive(Clone, Copy)]
 enum PlanReply {
     Valid,
+    GatewayLimit(u32),
     EmptyProbes,
     NonObject(&'static str),
     Truncated,
@@ -365,6 +366,18 @@ fn respond_to_plan(
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes).unwrap();
     let request: Value = serde_json::from_slice(&bytes).unwrap();
+    if let PlanReply::GatewayLimit(limit) = variant {
+        assert_eq!(request["model"], "deepseek-v4.1-flash-1017");
+        if request["max_tokens"].as_u64().unwrap() > u64::from(limit) {
+            stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            return true;
+        }
+        assert_eq!(request["max_tokens"], limit);
+    }
     let prompt = request["messages"][0]["content"].as_str().unwrap();
     let payload = prompt.split("\nRequired JSON schema:").next().unwrap();
     let payload: Value = serde_json::from_str(payload).unwrap();
@@ -411,7 +424,10 @@ fn respond_to_plan(
         PlanReply::MissingUsage => {
             envelope.as_object_mut().unwrap().remove("usage");
         }
-        PlanReply::Valid | PlanReply::EmptyProbes | PlanReply::Truncated => {}
+        PlanReply::Valid
+        | PlanReply::GatewayLimit(_)
+        | PlanReply::EmptyProbes
+        | PlanReply::Truncated => {}
     }
     let mut reply = serde_json::to_vec(&envelope).unwrap();
     let declared = reply.len();
@@ -433,6 +449,7 @@ fn run_fixture_plan(
     output: &Path,
     replies: &'static [PlanReply],
     scratch: Option<&Path>,
+    judge_cap: Option<u32>,
 ) -> (std::process::Output, usize) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -449,14 +466,13 @@ fn run_fixture_plan(
         count
     });
     let config = prefix.join("model.json");
-    std::fs::write(
-        &config,
-        json!({"schemaVersion":1,"remote":{
+    let mut model = json!({"schemaVersion":1,"remote":{
         "provider":"anthropic-compatible","baseUrl":format!("http://{address}"),
-        "defaultModel":"fixture-model","apiKeyEnv":"FIXTURE_MODEL_KEY"}})
-        .to_string(),
-    )
-    .unwrap();
+        "defaultModel":"deepseek-v4.1-flash-1017","apiKeyEnv":"FIXTURE_MODEL_KEY"}});
+    if let Some(cap) = judge_cap {
+        model["remote"]["judgeMaxTokens"] = cap.into();
+    }
+    std::fs::write(&config, model.to_string()).unwrap();
     let mut plan = command(prefix);
     if let Some(scratch) = scratch {
         plan.env("TMPDIR", scratch);
@@ -473,6 +489,32 @@ fn run_fixture_plan(
     // An empty connection wakes the listener even if the CLI made no requests.
     drop(std::net::TcpStream::connect(address).unwrap());
     (plan, server.join().unwrap())
+}
+
+#[test]
+fn plan_honors_a_compatible_gateways_judge_output_cap() {
+    const LIMITED: &[PlanReply] = &[PlanReply::GatewayLimit(24_000)];
+    const FULL: &[PlanReply] = &[PlanReply::GatewayLimit(393_216)];
+    for (cap, gateway, success, calls) in [
+        (None, LIMITED, false, 1),
+        (Some(24_000), LIMITED, true, 1),
+        (Some(500_000), FULL, true, 1),
+        (Some(0), LIMITED, false, 0),
+    ] {
+        let prefix = installation();
+        let skill = prefix.0.join("skill");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
+        let task = prefix.0.join("task.json");
+        let (plan, count) = run_fixture_plan(&prefix.0, &skill, &task, gateway, None, cap);
+        let stderr = String::from_utf8_lossy(&plan.stderr);
+        assert_eq!(plan.status.success(), success, "cap={cap:?}: {stderr}");
+        assert_eq!(count, calls, "cap={cap:?}: {stderr}");
+        assert_eq!(task.exists(), success);
+        if cap.is_none() {
+            assert!(stderr.contains("request_rejected"), "{stderr}");
+        }
+    }
 }
 
 #[test]
@@ -507,7 +549,7 @@ fn plan_distinguishes_unusable_responses_and_recovers_an_interrupted_body_once()
         )
         .unwrap();
         let task = prefix.0.join("task.json");
-        let (plan, count) = run_fixture_plan(&prefix.0, &skill, &task, replies, None);
+        let (plan, count) = run_fixture_plan(&prefix.0, &skill, &task, replies, None, None);
         let stderr = String::from_utf8(plan.stderr).unwrap();
         assert_eq!(count, calls, "{stderr}");
         assert_eq!(plan.status.success(), success, "{stderr}");
@@ -552,7 +594,7 @@ fn plan_reports_unresolved_repairs_and_preserves_partial_plans() {
         std::fs::create_dir(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
         let task = prefix.0.join("task.json");
-        let (plan, calls) = run_fixture_plan(&prefix.0, &skill, &task, replies, None);
+        let (plan, calls) = run_fixture_plan(&prefix.0, &skill, &task, replies, None, None);
         let stderr = String::from_utf8(plan.stderr).unwrap();
         assert!(plan.status.success(), "{stderr}");
         assert_eq!(calls, replies.len());
@@ -595,7 +637,7 @@ fn plan_retries_non_object_judge_outputs_and_reports_each_attempt() {
         std::fs::create_dir(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
         let task = prefix.0.join("task.json");
-        let (plan, count) = run_fixture_plan(&prefix.0, &skill, &task, replies, None);
+        let (plan, count) = run_fixture_plan(&prefix.0, &skill, &task, replies, None, None);
         let stderr = String::from_utf8(plan.stderr).unwrap();
         assert_eq!(count, replies.len(), "{stderr}");
         assert_eq!(plan.status.code(), Some(exit), "{stderr}");
@@ -632,6 +674,7 @@ fn installed_cli_writes_a_bound_plan_and_reports_the_missing_runtime() {
         &output,
         &[PlanReply::Valid],
         Some(&scratch),
+        None,
     );
     assert!(plan.status.success(), "{plan:?}");
     assert_eq!(calls, 1);
@@ -728,7 +771,7 @@ fn run_identifies_invalid_runtime_artifacts_and_preserves_exit_status() {
     let task = dir.0.join("task.json");
     std::fs::create_dir(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "# Example").unwrap();
-    let (plan, _) = run_fixture_plan(&prefix, &skill, &task, &[PlanReply::Valid], None);
+    let (plan, _) = run_fixture_plan(&prefix, &skill, &task, &[PlanReply::Valid], None, None);
     assert!(plan.status.success(), "{plan:?}");
     let verify = |stage: &str, reason: &str, file: Option<&str>, code| {
         let mut expected = json!({"stage":stage,"reason":reason});
