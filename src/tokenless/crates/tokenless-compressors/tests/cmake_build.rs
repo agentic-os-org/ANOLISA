@@ -251,8 +251,17 @@ fn routing_fences_crlf_and_anchored_fallback_keep_safety_boundaries() {
         Some(&verbose_store),
         &RecoveryMethod::Shell,
     );
-    assert_eq!(verbose_out.output, verbose_stream);
+    assert!(!verbose_out.output.contains(BUILD_HEADER));
+    assert!(verbose_out.output.contains("C/C++ compile templates"));
+    assert_eq!(verbose_out.recoverability, Recoverability::Lossless);
     assert!(verbose_out.stash_writes.is_empty());
+    assert_eq!(
+        oracle::decode(
+            &verbose_out.output,
+            "C/C++ compile templates (id<TAB>fields; interleave with literals): "
+        ),
+        verbose_stream
+    );
 
     let no_work_then_make = format!(
         "ninja: no work to do.\n{}",

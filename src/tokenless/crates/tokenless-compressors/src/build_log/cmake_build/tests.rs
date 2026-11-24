@@ -1,10 +1,7 @@
-use super::super::{BuildLogCompressor, sample_lines};
+use super::super::{BuildLogCompressor, oracle, sample_lines};
 use super::*;
 use crate::Recoverability;
 use tokenless_ccr::{InMemoryStore, RecoveryMethod};
-
-#[path = "../../../tests/common/literal_oracle.rs"]
-mod oracle;
 
 fn compress_lossless(input: &str) -> crate::build_log::BuildLogOutcome {
     BuildLogCompressor.compress_with_recovery(input, None, &RecoveryMethod::None)
@@ -82,7 +79,9 @@ fn single_lines_prose_fences_crlf_and_non_cmake_logs_do_not_trigger_detection() 
         "/usr/bin/cc -O3 -c /work/source/src/b.c -o CMakeFiles/app.dir/src/b.c.o\n",
     );
     assert!(!detect(&sample(verbose_make)));
-    assert!(!BuildLogCompressor::detect(verbose_make));
+    assert!(BuildLogCompressor::detect(verbose_make));
+    let verbose_outcome = compress_lossless(verbose_make);
+    assert!(!verbose_outcome.output.contains(HEADER));
 }
 
 #[test]
@@ -839,7 +838,15 @@ fn custom_counter_heads_reconfigure_and_scored_or_generic_fallbacks_preserve_com
     );
     assert_eq!(verbose_out.recoverability, Recoverability::Lossless);
     assert!(verbose_out.stash_writes.is_empty());
-    assert_eq!(verbose_out.output, verbose_anchored);
+    assert!(!verbose_out.output.contains(HEADER));
+    assert!(verbose_out.output.contains("C/C++ compile templates"));
+    assert_eq!(
+        oracle::decode(
+            &verbose_out.output,
+            "C/C++ compile templates (id<TAB>fields; interleave with literals): "
+        ),
+        verbose_anchored
+    );
 
     // Unicode-leading custom counter steps work both as log heads and under Generic-fallback shielding.
     let c_compile_tail = (21..=32)
@@ -1077,4 +1084,94 @@ fn custom_counter_heads_reconfigure_and_scored_or_generic_fallbacks_preserve_com
             );
         }
     }
+}
+
+#[test]
+fn blank_separated_progress_reopens_after_diagnostic_and_respects_claimed_limit() {
+    let head = (1..=4)
+        .map(|i| format!("[{i}/12] Building CXX object src/CMakeFiles/lib.dir/unit_{i:02}.cpp.o\n"))
+        .collect::<String>();
+    let tail = (5..=12)
+        .map(|i| {
+            format!("[{i}/12] Building CXX object src/CMakeFiles/lib.dir/unit_{i:02}.cpp.o\n\n")
+        })
+        .collect::<String>();
+    let input = format!("{head}warning: single diagnostic closes scope\n{tail}");
+
+    let store = InMemoryStore::new();
+    let out =
+        BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
+    assert_eq!(out.recoverability, Recoverability::Lossless);
+    assert!(out.stash_writes.is_empty());
+    assert_eq!(out.output.matches(HEADER).count(), 2);
+    assert!(
+        out.output
+            .contains("warning: single diagnostic closes scope\n")
+    );
+    assert_eq!(oracle::decode(&out.output, HEADER), input);
+    assert_eq!(
+        BuildLogCompressor
+            .compress_with_recovery(&out.output, Some(&store), &RecoveryMethod::Shell)
+            .output,
+        out.output
+    );
+
+    let isolated_with_blanks = format!(
+        "{}warning: single diagnostic closes scope\n\
+         [5/12] Building CXX object src/CMakeFiles/lib.dir/e.cpp.o\n\n\
+         another unknown line before reopen\n\n\
+         [6/12] Linking CXX executable bin/app\n",
+        head
+    );
+    let isolated_out = compress_lossless(&isolated_with_blanks);
+    assert_eq!(isolated_out.output.matches(HEADER).count(), 1);
+    assert!(
+        isolated_out
+            .output
+            .contains("[5/12] Building CXX object src/CMakeFiles/lib.dir/e.cpp.o\n")
+    );
+    assert!(
+        isolated_out
+            .output
+            .contains("another unknown line before reopen\n")
+    );
+    assert!(
+        isolated_out
+            .output
+            .contains("[6/12] Linking CXX executable bin/app\n")
+    );
+    assert_eq!(
+        oracle::decode(&isolated_out.output, HEADER),
+        isolated_with_blanks
+    );
+
+    let two_blank_gap = format!(
+        "{}warning: single diagnostic closes scope\n\
+         [5/12] Building CXX object src/CMakeFiles/lib.dir/e.cpp.o\n\n\n\
+         [6/12] Linking CXX executable bin/app\n",
+        head
+    );
+    let two_blank_out = compress_lossless(&two_blank_gap);
+    assert_eq!(two_blank_out.output.matches(HEADER).count(), 1);
+    assert!(
+        two_blank_out
+            .output
+            .contains("[5/12] Building CXX object src/CMakeFiles/lib.dir/e.cpp.o\n")
+    );
+    assert!(
+        two_blank_out
+            .output
+            .contains("[6/12] Linking CXX executable bin/app\n")
+    );
+    assert_eq!(oracle::decode(&two_blank_out.output, HEADER), two_blank_gap);
+
+    let claimed_lines = [
+        "unknown line closes scope\n",
+        "[1/4] Building C object CMakeFiles/app.dir/a.c.o\n",
+        "\n",
+        "[2/4] Building C object CMakeFiles/app.dir/b.c.o\n",
+        "[3/4] Building C object CMakeFiles/app.dir/c.c.o\n",
+    ];
+    let claimed = 3..5;
+    assert!(plan(&claimed_lines, std::slice::from_ref(&claimed)).is_empty());
 }

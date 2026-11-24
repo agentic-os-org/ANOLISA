@@ -127,10 +127,8 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
                 || trimmed.starts_with("ok  \t"),
         ),
         BuildLogFormat::Make => (
-            trimmed.starts_with("make: ***")
-                || (trimmed.starts_with("make")
-                    && (trimmed.contains("Entering directory")
-                        || trimmed.contains("Leaving directory")))
+            is_make_failure(trimmed)
+                || super::cmake_build::is_make_dir_notice(trimmed)
                 || is_c_diagnostic(trimmed),
             is_compiler_command(trimmed),
         ),
@@ -405,6 +403,12 @@ fn is_pytest_progress(line: &str) -> bool {
         && outcomes
             .chars()
             .all(|character| matches!(character, '.' | 's' | 'S'))
+}
+
+// Failure notices deliberately omit `scope::valid_line` (unlike `is_make_dir_notice`)
+// so long or control-laden Make failure tails still register as strong `Make` evidence.
+fn is_make_failure(line: &str) -> bool {
+    super::cmake_build::make_notice_tail(line).is_some_and(|tail| tail.starts_with(": ***"))
 }
 
 fn is_compiler_command(line: &str) -> bool {

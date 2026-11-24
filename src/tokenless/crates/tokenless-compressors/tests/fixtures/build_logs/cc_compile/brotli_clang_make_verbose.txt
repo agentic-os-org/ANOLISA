@@ -1,0 +1,125 @@
+/usr/bin/cmake -S/work/source -B/work/build-make-clang --check-build-system CMakeFiles/Makefile.cmake 0
+/usr/bin/cmake -E cmake_progress_start /work/build-make-clang/CMakeFiles /work/build-make-clang//CMakeFiles/progress.marks
+/usr/bin/gmake  -f CMakeFiles/Makefile2 all
+gmake[1]: Entering directory '/work/build-make-clang'
+/usr/bin/gmake  -f CMakeFiles/brotlicommon.dir/build.make CMakeFiles/brotlicommon.dir/depend
+gmake[2]: Entering directory '/work/build-make-clang'
+cd /work/build-make-clang && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make-clang /work/build-make-clang /work/build-make-clang/CMakeFiles/brotlicommon.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make-clang'
+/usr/bin/gmake  -f CMakeFiles/brotlicommon.dir/build.make CMakeFiles/brotlicommon.dir/build
+gmake[2]: Entering directory '/work/build-make-clang'
+[  2%] Building C object CMakeFiles/brotlicommon.dir/c/common/constants.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/constants.c.o -MF CMakeFiles/brotlicommon.dir/c/common/constants.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/constants.c.o -c /work/source/c/common/constants.c
+[  5%] Building C object CMakeFiles/brotlicommon.dir/c/common/context.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/context.c.o -MF CMakeFiles/brotlicommon.dir/c/common/context.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/context.c.o -c /work/source/c/common/context.c
+[  7%] Building C object CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o -MF CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o -c /work/source/c/common/dictionary.c
+[ 10%] Building C object CMakeFiles/brotlicommon.dir/c/common/platform.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/platform.c.o -MF CMakeFiles/brotlicommon.dir/c/common/platform.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/platform.c.o -c /work/source/c/common/platform.c
+[ 12%] Building C object CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o -MF CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o -c /work/source/c/common/shared_dictionary.c
+[ 15%] Building C object CMakeFiles/brotlicommon.dir/c/common/transform.c.o
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/transform.c.o -MF CMakeFiles/brotlicommon.dir/c/common/transform.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/transform.c.o -c /work/source/c/common/transform.c
+[ 17%] Linking C shared library libbrotlicommon.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlicommon.dir/link.txt --verbose=1
+/usr/bin/clang -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlicommon.so.1 -o libbrotlicommon.so.1.2.1 CMakeFiles/brotlicommon.dir/c/common/constants.c.o CMakeFiles/brotlicommon.dir/c/common/context.c.o CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/platform.c.o CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/transform.c.o  -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlicommon.so.1.2.1 libbrotlicommon.so.1 libbrotlicommon.so
+gmake[2]: Leaving directory '/work/build-make-clang'
+[ 17%] Built target brotlicommon
+/usr/bin/gmake  -f CMakeFiles/brotlidec.dir/build.make CMakeFiles/brotlidec.dir/depend
+/usr/bin/gmake  -f CMakeFiles/brotlienc.dir/build.make CMakeFiles/brotlienc.dir/depend
+gmake[2]: Entering directory '/work/build-make-clang'
+cd /work/build-make-clang && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make-clang /work/build-make-clang /work/build-make-clang/CMakeFiles/brotlidec.dir/DependInfo.cmake "--color="
+gmake[2]: Entering directory '/work/build-make-clang'
+cd /work/build-make-clang && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make-clang /work/build-make-clang /work/build-make-clang/CMakeFiles/brotlienc.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make-clang'
+/usr/bin/gmake  -f CMakeFiles/brotlidec.dir/build.make CMakeFiles/brotlidec.dir/build
+gmake[2]: Entering directory '/work/build-make-clang'
+[ 20%] Building C object CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o -MF CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o -c /work/source/c/dec/bit_reader.c
+gmake[2]: Leaving directory '/work/build-make-clang'
+/usr/bin/gmake  -f CMakeFiles/brotlienc.dir/build.make CMakeFiles/brotlienc.dir/build
+gmake[2]: Entering directory '/work/build-make-clang'
+[ 22%] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o -MF CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o -c /work/source/c/enc/backward_references.c
+[ 25%] Building C object CMakeFiles/brotlidec.dir/c/dec/decode.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/decode.c.o -MF CMakeFiles/brotlidec.dir/c/dec/decode.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/decode.c.o -c /work/source/c/dec/decode.c
+[ 27%] Building C object CMakeFiles/brotlidec.dir/c/dec/huffman.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/huffman.c.o -MF CMakeFiles/brotlidec.dir/c/dec/huffman.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/huffman.c.o -c /work/source/c/dec/huffman.c
+[ 30%] Building C object CMakeFiles/brotlidec.dir/c/dec/prefix.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/prefix.c.o -MF CMakeFiles/brotlidec.dir/c/dec/prefix.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/prefix.c.o -c /work/source/c/dec/prefix.c
+[ 32%] Building C object CMakeFiles/brotlidec.dir/c/dec/state.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/state.c.o -MF CMakeFiles/brotlidec.dir/c/dec/state.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/state.c.o -c /work/source/c/dec/state.c
+[ 35%] Building C object CMakeFiles/brotlidec.dir/c/dec/static_init.c.o
+/usr/bin/clang -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/static_init.c.o -MF CMakeFiles/brotlidec.dir/c/dec/static_init.c.o.d -o CMakeFiles/brotlidec.dir/c/dec/static_init.c.o -c /work/source/c/dec/static_init.c
+[ 37%] Linking C shared library libbrotlidec.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlidec.dir/link.txt --verbose=1
+/usr/bin/clang -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlidec.so.1 -o libbrotlidec.so.1.2.1 CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o CMakeFiles/brotlidec.dir/c/dec/decode.c.o CMakeFiles/brotlidec.dir/c/dec/huffman.c.o CMakeFiles/brotlidec.dir/c/dec/prefix.c.o CMakeFiles/brotlidec.dir/c/dec/state.c.o CMakeFiles/brotlidec.dir/c/dec/static_init.c.o  -Wl,-rpath,/work/build-make-clang: -lm libbrotlicommon.so.1.2.1 -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlidec.so.1.2.1 libbrotlidec.so.1 libbrotlidec.so
+gmake[2]: Leaving directory '/work/build-make-clang'
+[ 37%] Built target brotlidec
+[ 40%] Building C object CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o -MF CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o -c /work/source/c/enc/backward_references_hq.c
+[ 42%] Building C object CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o -MF CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o -c /work/source/c/enc/bit_cost.c
+[ 45%] Building C object CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o -MF CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o -c /work/source/c/enc/block_splitter.c
+[ 47%] Building C object CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o -MF CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o -c /work/source/c/enc/brotli_bit_stream.c
+[ 50%] Building C object CMakeFiles/brotlienc.dir/c/enc/cluster.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/cluster.c.o -MF CMakeFiles/brotlienc.dir/c/enc/cluster.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/cluster.c.o -c /work/source/c/enc/cluster.c
+[ 52%] Building C object CMakeFiles/brotlienc.dir/c/enc/command.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/command.c.o -MF CMakeFiles/brotlienc.dir/c/enc/command.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/command.c.o -c /work/source/c/enc/command.c
+[ 55%] Building C object CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o -MF CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o -c /work/source/c/enc/compound_dictionary.c
+[ 57%] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o -MF CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o -c /work/source/c/enc/compress_fragment.c
+[ 60%] Building C object CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o -MF CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o -c /work/source/c/enc/compress_fragment_two_pass.c
+[ 62%] Building C object CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o -MF CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o -c /work/source/c/enc/dictionary_hash.c
+[ 65%] Building C object CMakeFiles/brotlienc.dir/c/enc/encode.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/encode.c.o -MF CMakeFiles/brotlienc.dir/c/enc/encode.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/encode.c.o -c /work/source/c/enc/encode.c
+[ 67%] Building C object CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o -MF CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o -c /work/source/c/enc/encoder_dict.c
+[ 70%] Building C object CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o -MF CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o -c /work/source/c/enc/entropy_encode.c
+[ 72%] Building C object CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o -MF CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o -c /work/source/c/enc/fast_log.c
+[ 75%] Building C object CMakeFiles/brotlienc.dir/c/enc/histogram.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/histogram.c.o -MF CMakeFiles/brotlienc.dir/c/enc/histogram.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/histogram.c.o -c /work/source/c/enc/histogram.c
+[ 77%] Building C object CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o -MF CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o -c /work/source/c/enc/literal_cost.c
+[ 80%] Building C object CMakeFiles/brotlienc.dir/c/enc/memory.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/memory.c.o -MF CMakeFiles/brotlienc.dir/c/enc/memory.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/memory.c.o -c /work/source/c/enc/memory.c
+[ 82%] Building C object CMakeFiles/brotlienc.dir/c/enc/metablock.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/metablock.c.o -MF CMakeFiles/brotlienc.dir/c/enc/metablock.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/metablock.c.o -c /work/source/c/enc/metablock.c
+[ 85%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o -MF CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o -c /work/source/c/enc/static_dict.c
+[ 87%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o -MF CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o -c /work/source/c/enc/static_dict_lut.c
+[ 90%] Building C object CMakeFiles/brotlienc.dir/c/enc/static_init.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/static_init.c.o -MF CMakeFiles/brotlienc.dir/c/enc/static_init.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/static_init.c.o -c /work/source/c/enc/static_init.c
+[ 92%] Building C object CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o
+/usr/bin/clang -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o -MF CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o.d -o CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o -c /work/source/c/enc/utf8_util.c
+[ 95%] Linking C shared library libbrotlienc.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlienc.dir/link.txt --verbose=1
+/usr/bin/clang -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlienc.so.1 -o libbrotlienc.so.1.2.1 CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o CMakeFiles/brotlienc.dir/c/enc/cluster.c.o CMakeFiles/brotlienc.dir/c/enc/command.c.o CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o CMakeFiles/brotlienc.dir/c/enc/encode.c.o CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o CMakeFiles/brotlienc.dir/c/enc/histogram.c.o CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o CMakeFiles/brotlienc.dir/c/enc/memory.c.o CMakeFiles/brotlienc.dir/c/enc/metablock.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o CMakeFiles/brotlienc.dir/c/enc/static_init.c.o CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o  -Wl,-rpath,/work/build-make-clang: -lm libbrotlicommon.so.1.2.1 -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlienc.so.1.2.1 libbrotlienc.so.1 libbrotlienc.so
+gmake[2]: Leaving directory '/work/build-make-clang'
+[ 95%] Built target brotlienc
+/usr/bin/gmake  -f CMakeFiles/brotli.dir/build.make CMakeFiles/brotli.dir/depend
+gmake[2]: Entering directory '/work/build-make-clang'
+cd /work/build-make-clang && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make-clang /work/build-make-clang /work/build-make-clang/CMakeFiles/brotli.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make-clang'
+/usr/bin/gmake  -f CMakeFiles/brotli.dir/build.make CMakeFiles/brotli.dir/build
+gmake[2]: Entering directory '/work/build-make-clang'
+[ 97%] Building C object CMakeFiles/brotli.dir/c/tools/brotli.c.o
+/usr/bin/clang -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -MD -MT CMakeFiles/brotli.dir/c/tools/brotli.c.o -MF CMakeFiles/brotli.dir/c/tools/brotli.c.o.d -o CMakeFiles/brotli.dir/c/tools/brotli.c.o -c /work/source/c/tools/brotli.c
+[100%] Linking C executable brotli
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotli.dir/link.txt --verbose=1
+/usr/bin/clang -O3 -DNDEBUG CMakeFiles/brotli.dir/c/tools/brotli.c.o -o brotli  -Wl,-rpath,/work/build-make-clang: libbrotlienc.so.1.2.1 libbrotlidec.so.1.2.1 libbrotlicommon.so.1.2.1 -lm 
+gmake[2]: Leaving directory '/work/build-make-clang'
+[100%] Built target brotli
+gmake[1]: Leaving directory '/work/build-make-clang'
+/usr/bin/cmake -E cmake_progress_start /work/build-make-clang/CMakeFiles 0

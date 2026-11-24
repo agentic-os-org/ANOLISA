@@ -604,7 +604,13 @@ SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符
 
 已识别的成功 Ninja（`[k/N] <action>`）与非冗长 CMake Unix Makefiles（`[PPP%] <action>`）构建进度输出会通过现有 PostTool 内容路由压紧连续的编译、链接、符号链接、目标完成、代码生成及 Qt AutoMOC/UIC/RCC 进度行，沿用 `build_log_reduction` 操作并报告 `lossless`，无需恢复能力且不写入 Stash。压缩块以 `CMake/Ninja templates (id<TAB>fields; interleave with literals): ` 与包含模板字面量及行数的 JSON 头部开始；将后续每行的步数/百分比字段及目标短名按模板编号与字面量交错拼接，即可在既有 SGR 颜色清理后按原顺序逐字还原每条步数、动态 `/total`、空格对齐百分比、目标路径与扩展名后缀。
 
-`FAILED:`、`ninja: build stopped:`、自定义 `[k/N]` / `[PPP%]` 计数步骤、编译器告警/错误/注释诊断、源码摘录、全部采用 CRLF 换行、含非 SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符数与估算 token 数的块均在原位保持原文。手写 `Makefile` 继续沿用既有 `Make` 路由，`Make VERBOSE=1` 编译命令行亦不进入该无损布局通道；在开启 Stash 与恢复通道时，混合输出会在已压紧的 CMake/Ninja 块、自定义计数步骤、Markdown 代码围栏与含非 SGR 控制字符行之外保留既有的可恢复常规省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 通用进度缩减），合并配置与构建等未命中 `CmakeBuild` 头部检测的输出同样继续支持带锚点的 `Generic` 缩减。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
+`FAILED:`、`ninja: build stopped:`、自定义 `[k/N]` / `[PPP%]` 计数步骤、编译器告警/错误/注释诊断、源码摘录、全部采用 CRLF 换行、含非 SGR 控制字符、位于 Markdown 代码围栏内，或无法同时减少字符数与估算 token 数的块均在原位保持原文。手写短 `Makefile` 继续沿用既有 `Make` 路由，而 `Make VERBOSE=1` 与 `ninja -v` 编译命令行则会由下方 C/C++ 编译命令行无损通道处理，并在混合日志中与非冗长进度在互不重叠的行区间上协同压缩；在开启 Stash 与恢复通道时，混合输出会在已压紧的 CMake/Ninja 块、自定义计数步骤、Markdown 代码围栏与含非 SGR 控制字符行之外保留既有的可恢复常规省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 通用进度缩减），合并配置与构建等未命中 `CmakeBuild` 头部检测的输出同样继续支持带锚点的 `Generic` 缩减。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
+
+### C/C++ 编译命令行输出
+
+已识别的 CMake `VERBOSE=1`、Ninja `-v` 与原生 GNU Make `V=1` 编译命令行输出（匹配 `cc`、`gcc`、`c++`、`g++`、`gcc-<N>`、`g++-<N>`、`clang`、`clang++`、`clang-<N>`、`clang++-<N>`，并支持 `-MQ`/`-MT`/`-MF` 依赖选项）会通过现有 PostTool 内容路由压紧连续的 `-c` 编译命令及成对 `[PPP%] Building ...` / `CC` / `CXX` / `AS` 标签行，沿用 `build_log_reduction` 操作并报告 `lossless`，无需恢复能力且不写入 Stash；开头由计数器前缀引导的自定义或代码生成步骤（如 `[1/N] cd ... && /usr/bin/cmake -E ...`）保持原文，同时允许后续编译命令行建立格式识别；同时包含非冗长 Ninja/CMake 进度与冗长 `-c` 编译块的混合日志会在互不重叠的行区间上协同应用两套无损通道。对于此前会落入 `Make` 或 `Generic` 可恢复（Stash）省略的冗长 GNU Make `V=1` / `VERBOSE=1` 编译输出，该通道以略高的原始 token 占用换取无需 Stash 写入与取回往返的无损原位还原。压缩块以 `C/C++ compile templates (id<TAB>fields; interleave with literals): ` 与包含共享编译选项字面量（含归一化公共目录前缀）及行数的 JSON 头部开始；将后续每行的步数/百分比字段及变化的目标与源码路径片段按模板编号与字面量交错拼接，即可在既有 SGR 颜色清理后按原顺序逐字还原每条编译命令行。
+
+`FAILED:`、`ninja: build stopped:`、`make[N]: ***`、编译器告警/错误/注释诊断、源码摘录、编译启动器包装（`ccache`、`sccache`）、目标三元组编译器名（如 `x86_64-linux-gnu-gcc`）、含 shell 元字符的命令、手写短 `Makefile`（保留走既有 `Make` 路由）、非冗长 CMake/Ninja 进度（保留由 CMake/Ninja 通道处理）、全部采用 CRLF 换行、含非 SGR 控制字符、位于 Markdown 代码围栏内、超 4 KiB 行（或含超 64 KiB 行的输出），或无法同时减少字符数与估算 token 数的块均在原位保持原文；开启 Stash 与恢复通道时，混合输出会在已压紧的编译块、未处理计数步骤、Markdown 围栏与非 SGR 控制字符行之外保留可恢复常规省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 进度），同时保持既有 `Make` 路由的裸编译器常规行分类不变（`cd <dir> &&` 与绝对路径形式的串联命令原位保留，而以裸 `cc`/`gcc`/`clang`/`c++`/`g++` 开头的行继续沿用既有 `Make` 回退行为）。`Tool Error` 继续保持原文，PreTool RTK 命令改写行为不变。
 
 ### CSV/TSV 压紧保留完整表格
 

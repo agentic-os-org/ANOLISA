@@ -1,0 +1,25 @@
+Change Dir: '/work/build-ninja-fail'
+
+Run Build Command(s): /usr/bin/ninja -v
+[1/43] /usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -Weverything -Werror -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/context.c.o -MF CMakeFiles/brotlicommon.dir/c/common/context.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/context.c.o -c /work/source/c/common/context.c
+FAILED: CMakeFiles/brotlicommon.dir/c/common/context.c.o 
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -Weverything -Werror -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/context.c.o -MF CMakeFiles/brotlicommon.dir/c/common/context.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/context.c.o -c /work/source/c/common/context.c
+In file included from /work/source/c/common/context.c:1:
+/work/source/c/common/context.h:102:40: error: identifier '_kBrotliContextLookupTable' is reserved because it starts with '_' at global scope [-Werror,-Wreserved-identifier]
+  102 | BROTLI_COMMON_API extern const uint8_t _kBrotliContextLookupTable[2048];
+      |                                        ^
+1 error generated.
+[2/43] /usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -Weverything -Werror -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/constants.c.o -MF CMakeFiles/brotlicommon.dir/c/common/constants.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/constants.c.o -c /work/source/c/common/constants.c
+FAILED: CMakeFiles/brotlicommon.dir/c/common/constants.c.o 
+/usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -Weverything -Werror -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/constants.c.o -MF CMakeFiles/brotlicommon.dir/c/common/constants.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/constants.c.o -c /work/source/c/common/constants.c
+In file included from /work/source/c/common/constants.c:7:
+/work/source/c/common/constants.h:189:9: error: padding size of 'BrotliPrefixCodeRange' with 1 byte to alignment boundary [-Werror,-Wpadded]
+  189 | typedef struct {
+      |         ^
+/work/source/c/common/constants.h:196:23: error: identifier '_kBrotliPrefixCodeRanges' is reserved because it starts with '_' at global scope [-Werror,-Wreserved-identifier]
+  196 | BrotliPrefixCodeRange _kBrotliPrefixCodeRanges[BROTLI_NUM_BLOCK_LEN_SYMBOLS];
+      |                       ^
+2 errors generated.
+[3/43] /usr/bin/clang -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -Weverything -Werror -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o -MF CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o.d -o CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o -c /work/source/c/common/dictionary.c
+ninja: build stopped: subcommand failed.
+

@@ -52,7 +52,7 @@ const EXT_SUFFIXES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy)]
-enum Counter<'a> {
+pub(super) enum Counter<'a> {
     Ninja { step: &'a str, total: &'a str },
     Percent(&'a str),
 }
@@ -99,14 +99,35 @@ pub(super) fn plan(lines: &[&str], claimed: &[Range<usize>]) -> Vec<LayoutEdit> 
 
     while index < lines.len() {
         // Invariant: claimed spans come from verified unfenced lossless blocks, so skipping them
-        // keeps `open_fence` and `active` state intact.
+        // keeps `open_fence` intact; preserve `active` only when every claimed line stays inside
+        // this pass's scope lifecycle, matching an unclaimed scan while closing on foreign lines.
         if let Some(next_index) = claimed.skip_if_claimed(index) {
+            if active
+                && !lines.get(index..next_index).is_some_and(|span| {
+                    span.iter().all(|raw| {
+                        complete(raw).is_some_and(|line| plain(line) && is_in_scope_lifecycle(line))
+                    })
+                })
+            {
+                active = false;
+            }
             index = next_index;
             continue;
         }
-        let Some(line) = scope::enter_line(lines, index, &mut active, &mut open_fence, |row| {
-            parse_row(row).is_some()
-        }) else {
+        let row_limit = claimed.unclaimed_end(index, lines.len());
+        let Some(line) = scope::enter_line_indexed(
+            lines,
+            index,
+            row_limit,
+            &mut active,
+            &mut open_fence,
+            |idx| {
+                lines
+                    .get(idx)
+                    .and_then(|raw| complete(raw))
+                    .is_some_and(|row| parse_row(row).is_some())
+            },
+        ) else {
             index += 1;
             continue;
         };
@@ -124,7 +145,7 @@ pub(super) fn plan(lines: &[&str], claimed: &[Range<usize>]) -> Vec<LayoutEdit> 
         let mut bytes = 0usize;
         let mut row_count = 0usize;
         let mut parsed_chunk = Vec::new();
-        let chunk_limit = claimed.unclaimed_end(start, lines.len());
+        let chunk_limit = row_limit;
         while scan_end < chunk_limit && scan_end - start < MAX_ROWS {
             let Some(next) = complete(lines[scan_end]) else {
                 break;
@@ -178,7 +199,7 @@ pub(super) fn plan(lines: &[&str], claimed: &[Range<usize>]) -> Vec<LayoutEdit> 
     edits
 }
 
-fn parse_counter(line: &str) -> Option<(Counter<'_>, &str)> {
+pub(super) fn parse_counter(line: &str) -> Option<(Counter<'_>, &str)> {
     let inner = line.strip_prefix('[')?;
     let (inside, body) = inner.split_once("] ")?;
     if let Some((raw_step, total)) = inside.split_once('/') {
@@ -235,7 +256,7 @@ fn is_single_path(path: &str) -> bool {
     !path.is_empty() && !path.bytes().any(|b| b.is_ascii_whitespace())
 }
 
-fn is_object_path(path: &str) -> bool {
+pub(super) fn is_object_path(path: &str) -> bool {
     is_single_path(path)
         && OBJECT_SUFFIXES
             .iter()
@@ -249,7 +270,7 @@ fn is_target_ident(target: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-' | b'/'))
 }
 
-fn parse_action(body: &str) -> Option<(&str, &str)> {
+pub(super) fn parse_action(body: &str) -> Option<(&str, &str)> {
     if let Some(target) = body.strip_prefix("Building NVCC (Device) object ") {
         return is_object_path(target).then(|| (&body[..body.len() - target.len()], target));
     }
@@ -335,48 +356,43 @@ fn is_ninja_diagnostic(line: &str) -> bool {
     valid_line(line) && (line.starts_with("ninja: error: ") || line.starts_with("ninja: fatal: "))
 }
 
-fn is_ninja_warning(line: &str) -> bool {
+pub(super) fn is_ninja_warning(line: &str) -> bool {
     valid_line(line) && line.starts_with("ninja: warning: ")
 }
 
-fn is_ninja_no_work(line: &str) -> bool {
+pub(super) fn is_ninja_no_work(line: &str) -> bool {
     valid_line(line) && line == "ninja: no work to do."
 }
 
-fn is_ninja_dir_notice(line: &str) -> bool {
+pub(super) fn is_ninja_dir_notice(line: &str) -> bool {
     valid_line(line) && line.starts_with("ninja: Entering directory ")
 }
 
-fn is_make_dir_notice(line: &str) -> bool {
-    if !valid_line(line) {
-        return false;
-    }
-    let Some(rest) = line
+pub(super) fn make_notice_tail(line: &str) -> Option<&str> {
+    let rest = line
         .strip_prefix("mingw32-make")
         .or_else(|| line.strip_prefix("gmake"))
-        .or_else(|| line.strip_prefix("make"))
-    else {
-        return false;
-    };
-    let tail = if let Some(after_open) = rest.strip_prefix('[') {
-        let Some((digits, tail)) = after_open.split_once(']') else {
-            return false;
-        };
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        tail
+        .or_else(|| line.strip_prefix("make"))?;
+    if let Some(after_open) = rest.strip_prefix('[') {
+        let (digits, tail) = after_open.split_once(']')?;
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(tail)
     } else {
-        rest
-    };
-    tail.starts_with(": Entering directory ") || tail.starts_with(": Leaving directory ")
+        Some(rest)
+    }
 }
 
-fn is_non_control_line(line: &str) -> bool {
+pub(super) fn is_make_dir_notice(line: &str) -> bool {
+    valid_line(line)
+        && make_notice_tail(line).is_some_and(|tail| {
+            tail.starts_with(": Entering directory ") || tail.starts_with(": Leaving directory ")
+        })
+}
+
+pub(super) fn is_non_control_line(line: &str) -> bool {
     line.len() <= MAX_LINE_BYTES && !line.chars().any(|ch| ch != '\t' && ch.is_control())
 }
 
-fn is_counter_step(line: &str) -> bool {
+pub(super) fn is_counter_step(line: &str) -> bool {
     line.starts_with('[')
         && is_non_control_line(line)
         && parse_counter(line).is_some_and(|(_, body)| {
@@ -391,7 +407,7 @@ pub(super) fn is_custom_counter_step(line: &str) -> bool {
     is_counter_step(line) && parse_row(line).is_none()
 }
 
-fn is_cmake_regen_step(line: &str) -> bool {
+pub(super) fn is_cmake_regen_step(line: &str) -> bool {
     valid_line(line)
         && (line == "Re-running CMake..."
             || parse_counter(line).is_some_and(|(_, body)| {
@@ -439,8 +455,14 @@ fn is_in_scope_lifecycle(line: &str) -> bool {
             && (line.starts_with("Change Dir: ") || line.starts_with("Run Build Command(s): ")))
 }
 
+/// Detects unfenced strong evidence in a sample whose head was already verified by a sibling build-step pass.
+pub(super) fn has_sampled_evidence(sample: &[String]) -> bool {
+    scope::has_unfenced_evidence(sample, has_strong_evidence)
+}
+
 fn is_log_head(line: &str) -> bool {
     scope::is_compacted_header(line, HEADER)
+        || scope::is_compacted_header(line, super::cc_compile::HEADER)
         || parse_row(line).is_some()
         || is_counter_step(line)
         || is_ninja_no_work(line)

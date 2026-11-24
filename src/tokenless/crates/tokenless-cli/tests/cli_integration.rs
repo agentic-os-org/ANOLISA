@@ -6693,3 +6693,275 @@ fn cmake_build_post_tool_handles_custom_head_and_scored_or_generic_fallbacks() {
         );
     }
 }
+
+#[test]
+fn cc_compile_post_tool_preserves_v2_lossless_contract_without_stash() {
+    const CC_COMPILE_HEADER: &str =
+        "C/C++ compile templates (id<TAB>fields; interleave with literals): ";
+
+    for (fixture_tag, input) in [
+        (
+            "cmake --build /work/build-make -j 2 -- VERBOSE=1",
+            include_str!(
+                "../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_make_verbose.txt"
+            ),
+        ),
+        (
+            "cmake --build /work/build-ninja -v",
+            include_str!(
+                "../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_ninja_verbose.txt"
+            ),
+        ),
+        (
+            "make -C /work/source/lib V=1 libzstd.a",
+            include_str!(
+                "../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/zstd_make_lib_v1_gcc.txt"
+            ),
+        ),
+    ] {
+        for recovery in [
+            serde_json::json!({"kind":"none"}),
+            serde_json::json!({"kind":"shell"}),
+            serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+        ] {
+            let fixture = TempDataDir::new().unwrap();
+            let mut request: serde_json::Value =
+                serde_json::from_str(&build_log_request(input, "success", fixture_tag)).unwrap();
+            request["input"]["capabilities"]["recovery"] = recovery;
+            let output = spawn_with_stdin(
+                fixture
+                    .command()
+                    .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                    .env("TOKENLESS_STATS_ENABLED", "0")
+                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                &["compress"],
+                &request.to_string(),
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["protocol_version"], 2);
+            let result = &response["result"];
+            assert_eq!(result["disposition"], "applied");
+            assert_eq!(result["content_type"], "build_log");
+            assert_eq!(result["recoverability"], "lossless");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["build_log_reduction"])
+            );
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            let compressed = result["output"].as_str().unwrap();
+            assert!(compressed.contains(CC_COMPILE_HEADER));
+            assert!(!compressed.contains("tokenless retrieve"));
+            assert!(
+                result["after_tokens"].as_u64().unwrap()
+                    < result["before_tokens"].as_u64().unwrap()
+            );
+            let database = fixture.data_dir.join("stash.db");
+            if database.exists() {
+                assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+            }
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_clang_ninja_verbose_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(failed, "error", "cmake --build /work/build-ninja-fail -v");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+
+    let mut partial_fail = String::new();
+    for step in 1..=10 {
+        partial_fail.push_str(&format!(
+            "[{step}/12] /usr/bin/c++ -O2 -I/work/include -MD -MT CMakeFiles/app.dir/mod_{step:02}.cpp.o -MF CMakeFiles/app.dir/mod_{step:02}.cpp.o.d -o CMakeFiles/app.dir/mod_{step:02}.cpp.o -c /work/src/mod_{step:02}.cpp\n"
+        ));
+    }
+    partial_fail.push_str(concat!(
+        "[11/12] /usr/bin/c++ -O2 -I/work/include -MD -MT CMakeFiles/app.dir/broken.cpp.o -MF CMakeFiles/app.dir/broken.cpp.o.d -o CMakeFiles/app.dir/broken.cpp.o -c /work/src/broken.cpp\n",
+        "FAILED: CMakeFiles/app.dir/broken.cpp.o \n",
+        "/usr/bin/c++ -O2 -I/work/include -MD -MT CMakeFiles/app.dir/broken.cpp.o -MF CMakeFiles/app.dir/broken.cpp.o.d -o CMakeFiles/app.dir/broken.cpp.o -c /work/src/broken.cpp\n",
+        "src/broken.cpp:12:5: error: use of undeclared identifier 'missing'\n",
+        "ninja: build stopped: subcommand failed.\n",
+    ));
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(
+        &partial_fail,
+        "success",
+        "cmake --build /work/build-ninja -v || true",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["recoverability"], "lossless");
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+    let compressed = result["output"].as_str().unwrap();
+    assert!(compressed.contains(CC_COMPILE_HEADER));
+    assert!(compressed.contains("FAILED: CMakeFiles/app.dir/broken.cpp.o \n"));
+    assert!(
+        compressed.contains("src/broken.cpp:12:5: error: use of undeclared identifier 'missing'\n")
+    );
+    assert!(compressed.contains("ninja: build stopped: subcommand failed.\n"));
+    assert_eq!(
+        literal_oracle::decode(compressed, CC_COMPILE_HEADER),
+        partial_fail
+    );
+
+    let leading_custom = "[1/13] cd /work/build && /usr/bin/cmake -E copy_if_different /work/src/in.h /work/build/generated.h\n";
+    let with_leading_gen = format!(
+        "{leading_custom}{}",
+        (2..=13)
+            .map(|i| format!(
+                "[{i}/13] /usr/bin/cc -O2 -I/work/build -MD -MT CMakeFiles/app.dir/src/m_{i:02}.c.o -MF CMakeFiles/app.dir/src/m_{i:02}.c.o.d -o CMakeFiles/app.dir/src/m_{i:02}.c.o -c /work/src/m_{i:02}.c\n"
+            ))
+            .collect::<String>()
+    );
+    let gen_fixture = TempDataDir::new().unwrap();
+    let gen_req = build_log_request(&with_leading_gen, "success", "cmake --build build -v -j 2");
+    let gen_out = spawn_with_stdin(
+        gen_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &gen_req,
+    );
+    assert!(gen_out.status.success());
+    let gen_json: serde_json::Value = serde_json::from_slice(&gen_out.stdout).unwrap();
+    let gen_result = &gen_json["result"];
+    assert_eq!(gen_result["disposition"], "applied");
+    assert_eq!(gen_result["content_type"], "build_log");
+    assert_eq!(gen_result["recoverability"], "lossless");
+    assert_eq!(gen_result["stash_keys"], serde_json::json!([]));
+    assert!(
+        gen_result["after_tokens"].as_u64().unwrap()
+            < gen_result["before_tokens"].as_u64().unwrap()
+    );
+    let gen_text = gen_result["output"].as_str().unwrap();
+    assert!(gen_text.starts_with(leading_custom));
+    assert!(gen_text.contains(CC_COMPILE_HEADER));
+    assert_eq!(
+        literal_oracle::decode(gen_text, CC_COMPILE_HEADER),
+        with_leading_gen
+    );
+
+    let chained_recipes = (1..=12)
+        .map(|i| {
+            format!(
+                "cd /work/project && /usr/bin/gcc -O2 -Wall -c src/a_{i:02}.c -o obj/a_{i:02}.o && cp obj/a_{i:02}.o stage/a_{i:02}.o\n"
+            )
+        })
+        .collect::<String>();
+    let ninja_then_chained = format!(
+        "{}make: Entering directory '/work/project'\n{chained_recipes}make: Leaving directory '/work/project'\n",
+        (1..=6)
+            .map(|i| format!(
+                "[{i}/6] /usr/bin/cc -O2 -MD -MT CMakeFiles/n.dir/s_{i:02}.c.o -MF CMakeFiles/n.dir/s_{i:02}.c.o.d -o CMakeFiles/n.dir/s_{i:02}.c.o -c /work/s_{i:02}.c\n"
+            ))
+            .collect::<String>()
+    );
+    let chained_fixture = TempDataDir::new().unwrap();
+    let chained_req = build_log_request(&ninja_then_chained, "success", "ninja -v && make");
+    let chained_out = spawn_with_stdin(
+        chained_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &chained_req,
+    );
+    assert!(chained_out.status.success());
+    let chained_json: serde_json::Value = serde_json::from_slice(&chained_out.stdout).unwrap();
+    let chained_result = &chained_json["result"];
+    assert_eq!(chained_result["disposition"], "applied");
+    assert_eq!(chained_result["recoverability"], "lossless");
+    assert_eq!(chained_result["stash_keys"], serde_json::json!([]));
+    let chained_text = chained_result["output"].as_str().unwrap();
+    assert!(chained_text.contains(CC_COMPILE_HEADER));
+    assert!(chained_text.contains(&chained_recipes));
+    assert_eq!(
+        literal_oracle::decode(chained_text, CC_COMPILE_HEADER),
+        ninja_then_chained
+    );
+
+    const CMAKE_HEADER: &str = "CMake/Ninja templates (id<TAB>fields; interleave with literals): ";
+    let mixed_ninja = format!(
+        "{}{}",
+        (1..=24)
+            .map(|i| format!("[{i}/26] Building C object CMakeFiles/app.dir/mod_{i:02}.c.o\n"))
+            .collect::<String>(),
+        concat!(
+            "[25/26] /usr/bin/cc -O1 -DVARIANT=1 -MD -MT CMakeFiles/app.dir/v1.c.o -MF CMakeFiles/app.dir/v1.c.o.d -o CMakeFiles/app.dir/v1.c.o -c /work/src/v1.c\n",
+            "[26/26] /usr/bin/cc -O2 -DVARIANT=2 -MD -MT CMakeFiles/app.dir/v2.c.o -MF CMakeFiles/app.dir/v2.c.o.d -o CMakeFiles/app.dir/v2.c.o -c /work/src/v2.c\n",
+        )
+    );
+    let mixed_fixture = TempDataDir::new().unwrap();
+    let mixed_req = build_log_request(&mixed_ninja, "success", "cmake --build build -v");
+    let mixed_out = spawn_with_stdin(
+        mixed_fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &mixed_req,
+    );
+    assert!(mixed_out.status.success());
+    let mixed_json: serde_json::Value = serde_json::from_slice(&mixed_out.stdout).unwrap();
+    let mixed_result = &mixed_json["result"];
+    assert_eq!(mixed_result["disposition"], "applied");
+    assert_eq!(mixed_result["content_type"], "build_log");
+    assert_eq!(mixed_result["recoverability"], "lossless");
+    assert_eq!(mixed_result["stash_keys"], serde_json::json!([]));
+    assert!(
+        mixed_result["after_tokens"].as_u64().unwrap()
+            < mixed_result["before_tokens"].as_u64().unwrap()
+    );
+    let mixed_text = mixed_result["output"].as_str().unwrap();
+    assert!(!mixed_text.contains(CC_COMPILE_HEADER));
+    assert!(mixed_text.contains(CMAKE_HEADER));
+    assert_eq!(
+        literal_oracle::decode(mixed_text, CMAKE_HEADER),
+        mixed_ninja
+    );
+}

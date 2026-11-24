@@ -677,6 +677,73 @@ fn cmake_build_plan_skips_claimed_ranges_without_overlap() {
 }
 
 #[test]
+fn cmake_build_plan_closes_scope_after_claimed_span() {
+    let foreign_input = concat!(
+        "[1/10] Building CXX object src/CMakeFiles/app.dir/lead.cpp.o\n",
+        "/usr/bin/cc -O3 -c /work/src/claimed_a.c -o claimed_a.o\n",
+        "/usr/bin/cc -O3 -c /work/src/claimed_b.c -o claimed_b.o\n",
+        "/usr/bin/cc -O3 -c /work/src/claimed_c.c -o claimed_c.o\n",
+        "[5/10] Building CXX object src/CMakeFiles/app.dir/isolated_a.cpp.o\n",
+        "\n",
+        "\n",
+        "[6/10] Building CXX object src/CMakeFiles/app.dir/isolated_b.cpp.o\n",
+        "\n",
+        "\n",
+        "[7/10] Building CXX object src/CMakeFiles/app.dir/reopen_1.cpp.o\n",
+        "[8/10] Building CXX object src/CMakeFiles/app.dir/reopen_2.cpp.o\n",
+        "[9/10] Building CXX object src/CMakeFiles/app.dir/reopen_3.cpp.o\n",
+        "[10/10] Building CXX object src/CMakeFiles/app.dir/reopen_4.cpp.o\n",
+    );
+    let foreign_lines = foreign_input.split_inclusive('\n').collect::<Vec<_>>();
+    let claimed = 1..4;
+    let foreign_edits = cmake_build::plan(&foreign_lines, std::slice::from_ref(&claimed));
+    assert_eq!(foreign_edits.len(), 1);
+    assert_eq!((foreign_edits[0].start, foreign_edits[0].end), (10, 14));
+    let foreign_rendered = render_reduced(
+        &foreign_lines,
+        &[],
+        &[],
+        &RecoveryMethod::Shell,
+        &foreign_edits,
+    );
+    assert!(foreign_rendered.contains("isolated_a.cpp.o\n"));
+    assert!(foreign_rendered.contains("isolated_b.cpp.o\n"));
+
+    let lifecycle_input = concat!(
+        "[1/10] Building CXX object src/CMakeFiles/app.dir/lead.cpp.o\n",
+        "[2/10] /usr/bin/cc -O3 -c /work/src/claimed_a.c -o claimed_a.o\n",
+        "[3/10] /usr/bin/cc -O3 -c /work/src/claimed_b.c -o claimed_b.o\n",
+        "[4/10] /usr/bin/cc -O3 -c /work/src/claimed_c.c -o claimed_c.o\n",
+        "[5/10] Building CXX object src/CMakeFiles/app.dir/isolated_a.cpp.o\n",
+        "\n",
+        "\n",
+        "[6/10] Building CXX object src/CMakeFiles/app.dir/isolated_b.cpp.o\n",
+        "\n",
+        "\n",
+        "[7/10] Building CXX object src/CMakeFiles/app.dir/reopen_1.cpp.o\n",
+        "[8/10] Building CXX object src/CMakeFiles/app.dir/reopen_2.cpp.o\n",
+        "[9/10] Building CXX object src/CMakeFiles/app.dir/reopen_3.cpp.o\n",
+        "[10/10] Building CXX object src/CMakeFiles/app.dir/reopen_4.cpp.o\n",
+    );
+    let lifecycle_lines = lifecycle_input.split_inclusive('\n').collect::<Vec<_>>();
+    let lifecycle_edits = cmake_build::plan(&lifecycle_lines, std::slice::from_ref(&claimed));
+    assert_eq!(lifecycle_edits.len(), 1);
+    assert_eq!((lifecycle_edits[0].start, lifecycle_edits[0].end), (4, 14));
+    let lifecycle_rendered = render_reduced(
+        &lifecycle_lines,
+        &[],
+        &[],
+        &RecoveryMethod::Shell,
+        &lifecycle_edits,
+    );
+    assert!(lifecycle_rendered.contains("CMake/Ninja templates ("));
+    assert_eq!(
+        oracle::decode(&lifecycle_rendered, cmake_build::HEADER),
+        lifecycle_input
+    );
+}
+
+#[test]
 fn compose_non_overlapping_passes_merges_disjoint_passes_and_respects_diagnostics() {
     type TestStepPass<'a> = Box<dyn FnOnce(&[&str], &[Range<usize>]) -> Vec<LayoutEdit> + 'a>;
 
@@ -769,6 +836,10 @@ fn scoped_compacted_header_guards_scored_routes_and_ignores_fences() {
         CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): {\"rows\":2,\"total\":\"2\",\"start_indent\":6,\"idx_width\":1,\"id_width\":1,\"col\":40,\"prefixes\":[]}\n\
         P\t1\t\ta\t0.01\n\
         P\t2\t\tb\t0.01\n";
+    let cc_compile_block = "\
+        C/C++ compile templates (id<TAB>fields; interleave with literals): {\"literals\":[[\"[\",\"/2] /usr/bin/cc -c \",\".c -o \",\".o\"]],\"rows\":2}\n\
+        0\t1\ta\ta\n\
+        0\t2\tb\tb\n";
 
     let mut unsampled_head = String::from("make: Entering directory '/work'\n");
     for i in 0..105 {
@@ -791,7 +862,7 @@ fn scoped_compacted_header_guards_scored_routes_and_ignores_fences() {
     );
     assert!(!unguarded_outcome.stash_writes.is_empty());
 
-    for block in [cmake_block, gradle_block, ctest_block] {
+    for block in [cmake_block, gradle_block, ctest_block, cc_compile_block] {
         // Push the valid compacted block into the unsampled middle beyond both 100-line ends.
         let input = format!("{unsampled_head}{block}{unsampled_tail}");
         assert!(matches!(
@@ -1026,11 +1097,39 @@ fn clipped_compacted_logs_stay_out_of_stash_fallback() {
          {make_progress}"
     );
 
+    let cc_base = format!(
+        "$ ninja -v\n\
+         [1/20] cd /work/build && /usr/bin/cmake -E touch gen.h\n\
+         {make_progress}\
+         exit code: 0\n"
+    );
+    let cc_clipped_block = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] /usr/bin/cc -c \",\".c -o \",\".o\"]],\"rows\":20\
+         }}\n\
+         0\t1\ta\ta\n\
+         0\t2\tb\tb\n",
+        cc_compile::HEADER
+    );
+    let cc_clipped = format!(
+        "$ ninja -v\n\
+         [1/20] cd /work/build && /usr/bin/cmake -E touch gen.h\n\
+         {make_progress}\
+         {cc_clipped_block}"
+    );
+    let cc_head_clipped = format!(
+        "$ ninja -v\n\
+         {cc_clipped_block}\
+         {make_progress}"
+    );
+
     for (base, clipped) in [
         (gradle_base, gradle_clipped),
         (ctest_base, ctest_clipped),
         (cmake_base.clone(), cmake_clipped),
         (cmake_base, cmake_head_clipped),
+        (cc_base.clone(), cc_clipped),
+        (cc_base, cc_head_clipped),
     ] {
         let base_out =
             BuildLogCompressor.compress_with_recovery(&base, Some(&store), &RecoveryMethod::Shell);
@@ -1053,6 +1152,7 @@ fn clipped_compacted_logs_stay_out_of_stash_fallback() {
 
     let make_only = format!(
         "make: Entering directory '/work/make'\n\
+         echo building target\n\
          {make_progress}\
          make: Leaving directory '/work/make'\n"
     );
@@ -1068,9 +1168,11 @@ fn clipped_compacted_logs_stay_out_of_stash_fallback() {
         gradle_clipped_block,
         ctest_clipped_block,
         cmake_clipped_block,
+        cc_clipped_block,
     ] {
         let scored_clipped = format!(
             "make: Entering directory '/work/make'\n\
+             echo building target\n\
              {make_progress}\
              {clipped_block}"
         );
@@ -1087,4 +1189,222 @@ fn clipped_compacted_logs_stay_out_of_stash_fallback() {
         assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
         assert!(outcome.stash_writes.is_empty());
     }
+}
+
+#[test]
+fn compacted_build_step_header_allows_uncompacted_sibling_pass_without_stash() {
+    let store = InMemoryStore::new();
+    let cc_compacted = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] /usr/bin/cc -c \",\".c -o \",\".o\"]],\"rows\":2\
+         }}\n\
+         0\t1\ta\ta\n\
+         0\t2\tb\tb\n",
+        cc_compile::HEADER
+    );
+    let fresh_progress = (1..=20)
+        .map(|i| format!("[{i}/20] Building C object CMakeFiles/app.dir/unit_{i:02}.c.o\n"))
+        .collect::<String>();
+    let cc_then_progress = format!("{cc_compacted}{fresh_progress}");
+    assert!(BuildLogCompressor::detect(&cc_then_progress));
+    let progress_out = BuildLogCompressor.compress_with_recovery(
+        &cc_then_progress,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert!(progress_out.output.contains(cc_compile::HEADER));
+    assert!(progress_out.output.contains(cmake_build::HEADER));
+    assert_eq!(progress_out.recoverability, crate::Recoverability::Lossless);
+    assert!(progress_out.stash_writes.is_empty());
+    assert_eq!(
+        oracle::decode(&progress_out.output, cmake_build::HEADER),
+        cc_then_progress
+    );
+    let progress_again = BuildLogCompressor.compress_with_recovery(
+        &progress_out.output,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert_eq!(progress_again.output, progress_out.output);
+    assert_eq!(
+        progress_again.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(progress_again.stash_writes.is_empty());
+
+    let cmake_compacted = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] Building CXX object \",\".cpp.o\"]],\"rows\":2\
+         }}\n\
+         0\t1\ta\n\
+         0\t2\tb\n",
+        cmake_build::HEADER
+    );
+    let fresh_compiles = (1..=20)
+        .map(|i| {
+            format!(
+                "/usr/bin/gcc -O2 -I/work/include -MD -MT build/f_{i:02}.o -MF build/f_{i:02}.d -c src/f_{i:02}.c -o build/f_{i:02}.o\n"
+            )
+        })
+        .collect::<String>();
+    let cmake_then_compile = format!("{cmake_compacted}{fresh_compiles}");
+    assert!(BuildLogCompressor::detect(&cmake_then_compile));
+    let compile_out = BuildLogCompressor.compress_with_recovery(
+        &cmake_then_compile,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert!(compile_out.output.contains(cmake_build::HEADER));
+    assert!(compile_out.output.contains(cc_compile::HEADER));
+    assert_eq!(compile_out.recoverability, crate::Recoverability::Lossless);
+    assert!(compile_out.stash_writes.is_empty());
+    assert_eq!(
+        oracle::decode(&compile_out.output, cc_compile::HEADER),
+        cmake_then_compile
+    );
+    let compile_again = BuildLogCompressor.compress_with_recovery(
+        &compile_out.output,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert_eq!(compile_again.output, compile_out.output);
+    assert_eq!(
+        compile_again.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(compile_again.stash_writes.is_empty());
+}
+
+#[test]
+fn unsampled_middle_build_step_header_keeps_residual_out_of_stash() {
+    let store = InMemoryStore::new();
+    let trailing = format!(
+        "{}exit code: 0\n",
+        (1..=16)
+            .map(|i| format!("progress: downloading artifact_{i:02}.tar.gz from mirror\n"))
+            .collect::<String>()
+    );
+    let ninja_row =
+        |i: usize| format!("[{i}/230] Building C object CMakeFiles/app.dir/unit_{i:03}.c.o\n");
+
+    let control = format!(
+        "$ ninja -C /work/build\n{}{trailing}",
+        (1..=230).map(ninja_row).collect::<String>()
+    );
+    assert!(matches!(
+        detect_log(&control).route,
+        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(
+            BuildStepPasses {
+                cc_compile: false,
+                cmake_build: true,
+            }
+        )))
+    ));
+    let control_out =
+        BuildLogCompressor.compress_with_recovery(&control, Some(&store), &RecoveryMethod::Shell);
+    assert!(control_out.output.contains(cmake_build::HEADER));
+    assert_eq!(
+        control_out.recoverability,
+        crate::Recoverability::Retrievable
+    );
+    assert!(!control_out.stash_writes.is_empty());
+
+    let cc_compacted = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] /usr/bin/cc -c \",\".c -o \",\".o\"]],\"rows\":2\
+         }}\n\
+         0\t1\ta\ta\n\
+         0\t2\tb\tb\n",
+        cc_compile::HEADER
+    );
+    let ninja_with_middle_cc = format!(
+        "$ ninja -C /work/build\n{}{cc_compacted}{}{trailing}",
+        (1..=115).map(ninja_row).collect::<String>(),
+        (116..=230).map(ninja_row).collect::<String>()
+    );
+    assert!(matches!(
+        detect_log(&ninja_with_middle_cc).route,
+        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(
+            BuildStepPasses {
+                cc_compile: false,
+                cmake_build: true,
+            }
+        )))
+    ));
+    let ninja_mid_out = BuildLogCompressor.compress_with_recovery(
+        &ninja_with_middle_cc,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert!(ninja_mid_out.output.contains(cmake_build::HEADER));
+    assert!(ninja_mid_out.output.contains(&cc_compacted));
+    assert!(ninja_mid_out.output.contains(&trailing));
+    assert_eq!(
+        ninja_mid_out.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(ninja_mid_out.stash_writes.is_empty());
+    let ninja_mid_again = BuildLogCompressor.compress_with_recovery(
+        &ninja_mid_out.output,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert_eq!(ninja_mid_again.output, ninja_mid_out.output);
+    assert_eq!(
+        ninja_mid_again.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(ninja_mid_again.stash_writes.is_empty());
+
+    let compile_row = |i: usize| {
+        format!(
+            "[{i}/230] /usr/bin/cc -O3 -I/work/include -MD -MT CMakeFiles/app.dir/src/f_{i:03}.c.o -MF CMakeFiles/app.dir/src/f_{i:03}.c.o.d -o CMakeFiles/app.dir/src/f_{i:03}.c.o -c /work/src/f_{i:03}.c\n"
+        )
+    };
+    let cmake_compacted = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] Building CXX object \",\".cpp.o\"]],\"rows\":2\
+         }}\n\
+         0\t1\ta\n\
+         0\t2\tb\n",
+        cmake_build::HEADER
+    );
+    let compile_with_middle_cmake = format!(
+        "$ ninja -v\n{}{cmake_compacted}{}{trailing}",
+        (1..=115).map(compile_row).collect::<String>(),
+        (116..=230).map(compile_row).collect::<String>()
+    );
+    assert!(matches!(
+        detect_log(&compile_with_middle_cmake).route,
+        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(
+            BuildStepPasses {
+                cc_compile: true,
+                cmake_build: false,
+            }
+        )))
+    ));
+    let compile_mid_out = BuildLogCompressor.compress_with_recovery(
+        &compile_with_middle_cmake,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert!(compile_mid_out.output.contains(cc_compile::HEADER));
+    assert!(compile_mid_out.output.contains(&cmake_compacted));
+    assert!(compile_mid_out.output.contains(&trailing));
+    assert_eq!(
+        compile_mid_out.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(compile_mid_out.stash_writes.is_empty());
+    let compile_mid_again = BuildLogCompressor.compress_with_recovery(
+        &compile_mid_out.output,
+        Some(&store),
+        &RecoveryMethod::Shell,
+    );
+    assert_eq!(compile_mid_again.output, compile_mid_out.output);
+    assert_eq!(
+        compile_mid_again.recoverability,
+        crate::Recoverability::Lossless
+    );
+    assert!(compile_mid_again.stash_writes.is_empty());
 }

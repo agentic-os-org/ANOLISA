@@ -219,15 +219,45 @@ class TestCaptureCtestSourcePinning(unittest.TestCase):
         for repo, *_ in capture_ctest.PROJECTS.values():
             self.assertIn(repo, ctest_repos)
 
-    def test_suite_flag_defaults_to_ctest_and_accepts_build_suites(self) -> None:
+        cc_entries = json.loads(
+            (
+                COMPONENT_ROOT
+                / "crates/tokenless-compressors/tests/fixtures/build_logs/cc_compile/provenance.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(cc_entries), 8)
+        all_specs = {
+            **{name: spec[:4] for name, spec in capture_ctest.PROJECTS.items()},
+            **{
+                name: (repo, tag, commit, [])
+                for name, (repo, tag, commit) in capture_ctest.NATIVE_MAKE_PROJECTS.items()
+            },
+        }
+        cc_repos = set()
+        for entry in cc_entries:
+            env = entry["environment"]
+            cc_repos.add(env["repository"])
+            matching = [spec for spec in all_specs.values() if spec[0] == env["repository"]]
+            self.assertEqual(len(matching), 1)
+            _, expected_tag, expected_commit, base_opts = matching[0]
+            self.assertEqual((env["tag"], env["commit"]), (expected_tag, expected_commit))
+            for opt in base_opts:
+                self.assertIn(opt, env["cmake_options"])
+        self.assertIn("facebook/zstd", cc_repos)
+
+    def test_suite_flag_defaults_to_ctest_and_accepts_build_and_verbose_suites(self) -> None:
         parser = capture_ctest.build_parser()
         default_args = parser.parse_args(["--project", "brotli", "--output", "/tmp/out"])
         self.assertEqual(default_args.suite, "ctest")
-        for suite in ("ctest", "build", "all"):
+        for suite in ("ctest", "build", "verbose", "all"):
             parsed = parser.parse_args(
                 ["--project", "brotli", "--suite", suite, "--output", "/tmp/out"]
             )
             self.assertEqual(parsed.suite, suite)
+        zstd_parsed = parser.parse_args(
+            ["--project", "zstd", "--suite", "verbose", "--output", "/tmp/out"]
+        )
+        self.assertEqual((zstd_parsed.project, zstd_parsed.suite), ("zstd", "verbose"))
 
 
 if __name__ == "__main__":

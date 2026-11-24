@@ -184,3 +184,47 @@ fn generic_requires_a_preselected_dominant_template() {
         LineRole::Routine(RoutineFamily::Generic)
     );
 }
+
+#[test]
+fn make_notices_failures_and_compiler_command_boundaries() {
+    let templates = HashSet::new();
+    for strong in [
+        "make: *** [Makefile:12: all] Error 2",
+        "make[1]: *** [CMakeFiles/app.dir/build.make:76: a.o] Error 1",
+        "gmake[2]: *** [Makefile:9: b.o] Error 1",
+        "mingw32-make: *** [all] Error 2",
+        "gmake[2]: Entering directory '/work/build'",
+        "gmake[2]: Leaving directory '/work/build'",
+    ] {
+        assert_eq!(
+            format_evidence(BuildLogFormat::Make, strong),
+            Evidence { strong: 1, weak: 0 },
+            "expected strong Make evidence for: {strong}"
+        );
+    }
+    assert_eq!(
+        format_evidence(BuildLogFormat::Make, "make[abc]: *** [bad] Error 1"),
+        Evidence { strong: 0, weak: 0 }
+    );
+
+    assert_eq!(
+        classify(
+            "cc -O2 -c src/a.c -o build/a.o",
+            BuildLogFormat::Make,
+            &templates,
+        ),
+        LineRole::Routine(RoutineFamily::MakeCompile)
+    );
+    for kept_inline in [
+        "cd /work/project && /usr/bin/gcc -O2 -Wall -c src/a.c -o obj/a.o && cp obj/a.o stage/a.o",
+        "/usr/bin/gcc -O2 -Wall -c src/m0.c -o build/m0.o && echo built m0",
+        "ccache gcc -O2 -c src/a.c -o build/a.o",
+        "gcc-13 -O2 -c src/a.c -o build/a.o",
+    ] {
+        assert_eq!(
+            classify(kept_inline, BuildLogFormat::Make, &templates),
+            LineRole::Unknown,
+            "expected Unknown for: {kept_inline}"
+        );
+    }
+}

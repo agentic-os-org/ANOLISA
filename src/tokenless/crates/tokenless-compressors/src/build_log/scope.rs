@@ -63,6 +63,33 @@ pub(super) fn enter_line<'a>(
     open_fence: &mut Option<(u8, usize)>,
     reopen: impl Fn(&str) -> bool,
 ) -> Option<&'a str> {
+    enter_line_checked(lines, index, active, open_fence, |line| {
+        index + 1 < lines.len() && reopen(line) && complete(lines[index + 1]).is_some_and(&reopen)
+    })
+}
+
+/// Validates and enters a scoped line during planning, delegating 2-row anchor checks by index
+/// within `limit` while skipping up to one intra-block blank line (`"\n"`) between the two anchor rows.
+pub(super) fn enter_line_indexed<'a>(
+    lines: &[&'a str],
+    index: usize,
+    limit: usize,
+    active: &mut bool,
+    open_fence: &mut Option<(u8, usize)>,
+    is_row_at: impl Fn(usize) -> bool,
+) -> Option<&'a str> {
+    enter_line_checked(lines, index, active, open_fence, |_| {
+        is_row_at(index) && has_next_anchor_row(lines, index, limit, &is_row_at)
+    })
+}
+
+fn enter_line_checked<'a>(
+    lines: &[&'a str],
+    index: usize,
+    active: &mut bool,
+    open_fence: &mut Option<(u8, usize)>,
+    can_reopen: impl FnOnce(&'a str) -> bool,
+) -> Option<&'a str> {
     let raw = lines[index];
     let raw_body = raw.strip_suffix('\n').unwrap_or(raw);
     if step_fence(open_fence, raw_body) {
@@ -78,7 +105,7 @@ pub(super) fn enter_line<'a>(
         return None;
     }
     if !*active {
-        if reopen_anchor(lines, index, reopen) {
+        if can_reopen(line) {
             *active = true;
         } else {
             return None;
@@ -87,27 +114,37 @@ pub(super) fn enter_line<'a>(
     Some(line)
 }
 
-/// Detects a format from a bounded head-and-tail sample while keeping Markdown fences isolated.
-pub(super) fn detect_sampled(
-    sample: &[String],
-    skip_preambles: impl FnOnce(&[String]) -> usize,
-    is_log_head: impl Fn(&str) -> bool,
-    has_strong_evidence: impl Fn(&[String]) -> bool,
+const MAX_REOPEN_BLANKS: usize = 1;
+
+fn has_next_anchor_row(
+    lines: &[&str],
+    index: usize,
+    limit: usize,
+    is_row_at: impl Fn(usize) -> bool,
 ) -> bool {
-    // Keep head inspection inside the head window so a sample gap never hides an enclosing
-    // document or spans preambles.
-    let (head, tail) = match sample.iter().position(|line| line == "\0") {
+    let bound = limit.min(lines.len());
+    let mut next = index + 1;
+    let mut blanks = 0usize;
+    while next < bound && blanks < MAX_REOPEN_BLANKS && lines[next] == "\n" {
+        next += 1;
+        blanks += 1;
+    }
+    next < bound && is_row_at(next)
+}
+
+fn sample_windows(sample: &[String]) -> (&[String], Option<&[String]>) {
+    match sample.iter().position(|line| line == "\0") {
         Some(gap) => (&sample[..gap], Some(&sample[gap + 1..])),
         None => (sample, None),
-    };
-    let head_start = skip_preambles(head);
-    let first = head[head_start..]
-        .iter()
-        .find(|line| !line.trim().is_empty());
-    if first.is_none_or(|line| !is_log_head(line)) {
-        return false;
     }
+}
 
+/// Checks whether a bounded sample contains unfenced evidence while isolating `\0` gaps.
+pub(super) fn has_unfenced_evidence(
+    sample: &[String],
+    has_strong_evidence: impl Fn(&[String]) -> bool,
+) -> bool {
+    let (head, tail) = sample_windows(sample);
     let head_fences = unfenced_runs(head);
     if head_fences.runs.iter().any(|run| has_strong_evidence(run)) {
         return true;
@@ -121,6 +158,27 @@ pub(super) fn detect_sampled(
             !tail_fences.saw_fence && tail_fences.runs.iter().any(|run| has_strong_evidence(run))
         }
     })
+}
+
+/// Detects a format from a bounded head-and-tail sample while keeping Markdown fences isolated.
+pub(super) fn detect_sampled(
+    sample: &[String],
+    skip_preambles: impl FnOnce(&[String]) -> usize,
+    is_log_head: impl Fn(&str) -> bool,
+    has_strong_evidence: impl Fn(&[String]) -> bool,
+) -> bool {
+    // Keep head inspection inside the head window so a sample gap never hides an enclosing
+    // document or spans preambles.
+    let (head, _) = sample_windows(sample);
+    let head_start = skip_preambles(head);
+    let first = head[head_start..]
+        .iter()
+        .find(|line| !line.trim().is_empty());
+    if first.is_none_or(|line| !is_log_head(line)) {
+        return false;
+    }
+
+    has_unfenced_evidence(sample, has_strong_evidence)
 }
 
 pub(super) fn is_exit_anchor(line: &str) -> bool {
@@ -289,14 +347,6 @@ fn unfenced_runs(segment: &[String]) -> Unfenced<'_> {
         saw_fence,
         unclosed: open_fence.is_some(),
     }
-}
-
-fn reopen_anchor(lines: &[&str], index: usize, is_row: impl Fn(&str) -> bool) -> bool {
-    complete(lines[index]).is_some_and(&is_row)
-        && lines
-            .get(index + 1)
-            .and_then(|line| complete(line))
-            .is_some_and(is_row)
 }
 
 fn is_env_assignment(token: &str) -> bool {

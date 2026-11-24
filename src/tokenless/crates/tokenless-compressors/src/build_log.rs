@@ -2,6 +2,7 @@
 //!
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
+mod cc_compile;
 mod classify;
 mod cmake_build;
 mod ctest;
@@ -347,16 +348,22 @@ fn render_marker(
 
 #[derive(Debug, Clone, Copy)]
 struct BuildStepPasses {
+    cc_compile: bool,
     cmake_build: bool,
 }
 
 impl BuildStepPasses {
     fn any(self) -> bool {
-        self.cmake_build
+        self.cc_compile || self.cmake_build
     }
 
-    fn has_compacted_header(self, lines: &[&str]) -> bool {
-        self.cmake_build && cmake_build::is_compacted(lines)
+    fn is_protected_step(self, line: &str) -> bool {
+        if !cmake_build::is_counter_step(line) {
+            return false;
+        }
+        let handled_by_cmake = self.cmake_build && !cmake_build::is_custom_counter_step(line);
+        let handled_by_cc = self.cc_compile && !cc_compile::is_unhandled_counter_step(line);
+        !handled_by_cmake && !handled_by_cc
     }
 }
 
@@ -389,7 +396,7 @@ enum ResidualPolicy {
     MavenTransfersOrGeneric,
     AnchoredGeneric,
     ScopedMixed {
-        is_protected_step: fn(&str) -> bool,
+        passes: BuildStepPasses,
         protected_ranges: Vec<Range<usize>>,
     },
     Scored(BuildLogFormat),
@@ -408,7 +415,19 @@ struct ComposedLayouts {
 }
 
 fn has_scoped_compacted_header(lines: &[&str]) -> bool {
-    scope::is_any_compacted(lines, &[gradle::HEADER, ctest::HEADER, cmake_build::HEADER])
+    scope::is_any_compacted(
+        lines,
+        &[
+            gradle::HEADER,
+            ctest::HEADER,
+            cmake_build::HEADER,
+            cc_compile::HEADER,
+        ],
+    )
+}
+
+fn has_build_step_compacted_header(lines: &[&str]) -> bool {
+    scope::is_any_compacted(lines, &[cc_compile::HEADER, cmake_build::HEADER])
 }
 
 fn overlaps_diagnostic(diagnostic_mask: &[bool], range: Range<usize>) -> bool {
@@ -462,6 +481,9 @@ fn plan_build_steps(
 ) -> ComposedLayouts {
     type StepPlanner = fn(&[&str], &[Range<usize>]) -> Vec<LayoutEdit>;
     let mut planners: Vec<StepPlanner> = Vec::new();
+    if passes.cc_compile {
+        planners.push(cc_compile::plan);
+    }
     if passes.cmake_build {
         planners.push(cmake_build::plan);
     }
@@ -518,11 +540,13 @@ fn plan_stage1(route: DetectedRoute, lines: &[&str], diagnostic_mask: &[bool]) -
         }
         DetectedRoute::Stage1(Stage1Selection::BuildSteps(passes)) => {
             let composed = plan_build_steps(lines, diagnostic_mask, passes);
-            let residual = if composed.layouts.is_empty() && passes.has_compacted_header(lines) {
+            let residual = if has_build_step_compacted_header(lines) {
+                // Keep already-compacted BuildSteps outputs out of Stash fallback while still
+                // letting an uncompacted sibling pass compact fresh disjoint spans.
                 ResidualPolicy::KeepResidual
             } else {
                 ResidualPolicy::ScopedMixed {
-                    is_protected_step: cmake_build::is_custom_counter_step,
+                    passes,
                     protected_ranges: composed.protected_ranges,
                 }
             };
@@ -563,7 +587,7 @@ fn scoped_fallback_roles(
     sample: &[String],
     protected_ranges: &[Range<usize>],
     store: Option<&dyn StashStore>,
-    is_protected_step: fn(&str) -> bool,
+    passes: BuildStepPasses,
 ) -> Vec<LineRole> {
     let sub_format = if store.is_some() {
         detect_scored_format(sample).or_else(|| detect_generic(sample))
@@ -582,7 +606,7 @@ fn scoped_fallback_roles(
         .map(|line| {
             if scope::step_fence(&mut open_fence, line)
                 || line.chars().any(|ch| ch != '\t' && ch.is_control())
-                || is_protected_step(line)
+                || passes.is_protected_step(line)
             {
                 LineRole::Summary
             } else {
@@ -639,16 +663,10 @@ fn build_stage2_roles(
             (vec![LineRole::Summary; lines.len()], HashSet::new())
         }
         ResidualPolicy::ScopedMixed {
-            is_protected_step,
+            passes,
             protected_ranges,
         } => (
-            scoped_fallback_roles(
-                stripped,
-                sample,
-                &protected_ranges,
-                store,
-                is_protected_step,
-            ),
+            scoped_fallback_roles(stripped, sample, &protected_ranges, store, passes),
             HashSet::new(),
         ),
         ResidualPolicy::Scored(format) => {
@@ -662,10 +680,18 @@ fn detect_log(input: &str) -> DetectedLog {
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
     let ctest = ctest::detect(&sample);
+    let mut cc_compile = cc_compile::detect(&sample);
+    let mut cmake_build = cmake_build::detect(&sample);
+    if cc_compile && !cmake_build {
+        cmake_build = cmake_build::has_sampled_evidence(&sample);
+    } else if cmake_build && !cc_compile {
+        cc_compile = cc_compile::has_sampled_evidence(&sample);
+    }
     let build_steps = BuildStepPasses {
-        cmake_build: cmake_build::detect(&sample),
+        cc_compile,
+        cmake_build,
     };
-    // Keep CR visible to Maven, Gradle, CTest, and CMakeBuild, whose layout grammars only handle LF records.
+    // Keep CR visible to Maven, Gradle, CTest, CcCompile, and CMakeBuild, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
@@ -805,6 +831,10 @@ fn sample_lines(input: &str) -> Vec<String> {
     sampled.extend(tail);
     sampled
 }
+
+#[cfg(test)]
+#[path = "../tests/common/literal_oracle.rs"]
+mod oracle;
 
 #[cfg(test)]
 mod tests;

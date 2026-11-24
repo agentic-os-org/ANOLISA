@@ -45,4 +45,4 @@ cargo test --locked -p tokenless-compressors --test cmake_build regenerate_cmake
 | `fmt_make_incremental.txt` | 207 | 207 | 145 | 29.95% |
 | `brotli_unknown_target_failure.txt` | 15 | 15 | 15 | 0.00% |
 
-失败样本仅检验压缩器内部对失败诊断的保真；Runtime 仍按 `Tool Error` 原样透传失败结果。手写 `Makefile` 继续走既有 `Make` 路由，`Make VERBOSE=1` 编译命令行亦不进入无损布局通道；自定义 `[k/N]` / `[PPP%]` 计数步骤与含非 SGR 控制字符的行在 `CmakeBuild` 路由下原位保留原文，同时混合日志在开启 Stash 与恢复能力时，仍会在已压紧的 CMake/Ninja 块、自定义计数步骤、Markdown 围栏与非 SGR 控制行之外保留可恢复省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 省略；未命中 `CmakeBuild` 头部检测的合并配置与构建日志亦继续支持带锚点的 `Generic` 回退）。Runtime、CLI 与通用 Hook 回归覆盖了路由、元数据保留及宿主门禁保护。本轮未调用真实 Agent。
+失败样本仅检验压缩器内部对失败诊断的保真；Runtime 仍按 `Tool Error` 原样透传失败结果。手写短 `Makefile` 继续走既有 `Make` 路由，而 `Make VERBOSE=1` 与 `ninja -v` 编译命令行会由同级 `cc_compile` 无损布局通道处理并在互不重叠的行区间上与 `cmake_build` 协同组合；自定义 `[k/N]` / `[PPP%]` 计数步骤与含非 SGR 控制字符的行在 `cmake_build` 通道下原位保留原文，同时混合日志在开启 Stash 与恢复能力时，仍会在已压紧的 CMake/Ninja 块、自定义计数步骤、Markdown 围栏与非 SGR 控制行之外保留可恢复省略（包括 `Make`、`Cargo` 等评分格式以及带命令/退出码锚点的 `Generic` 省略；未命中 `CmakeBuild` 头部检测的合并配置与构建日志亦继续支持带锚点的 `Generic` 回退）。Runtime、CLI 与通用 Hook 回归覆盖了路由、元数据保留及宿主门禁保护。本轮未调用真实 Agent。

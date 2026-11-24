@@ -1,0 +1,50 @@
+Change Dir: '/work/build-ninja'
+
+Run Build Command(s): /usr/bin/ninja -v
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":7,"literals":[["[","/43] /usr/bin/cc -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/",".c.o -MF CMakeFiles/brotlicommon.dir/c/common/",".c.o.d -o CMakeFiles/brotlicommon.dir/c/common/",".c.o -c /work/source/c/common/",".c"],["[","/43] /usr/bin/cc -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT ",".c.o -MF ",".c.o.d -o ",".c.o -c ",".c"]]}
+0	1	constants	constants	constants	constants
+0	2	context	context	context	context
+0	3	platform	platform	platform	platform
+0	4	shared_dictionary	shared_dictionary	shared_dictionary	shared_dictionary
+0	5	dictionary	dictionary	dictionary	dictionary
+1	6	CMakeFiles/brotlidec.dir/c/dec/bit_reader	CMakeFiles/brotlidec.dir/c/dec/bit_reader	CMakeFiles/brotlidec.dir/c/dec/bit_reader	/work/source/c/dec/bit_reader
+0	7	transform	transform	transform	transform
+[8/43] : && /usr/bin/cc -fPIC -O3 -DNDEBUG   -shared -Wl,-soname,libbrotlicommon.so.1 -o libbrotlicommon.so.1.2.1 CMakeFiles/brotlicommon.dir/c/common/constants.c.o CMakeFiles/brotlicommon.dir/c/common/context.c.o CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/platform.c.o CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/transform.c.o  -lm && :
+[9/43] /usr/bin/cmake -E cmake_symlink_library libbrotlicommon.so.1.2.1  libbrotlicommon.so.1 libbrotlicommon.so && :
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":5,"literals":[["[","/43] /usr/bin/cc -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/",".c.o -MF CMakeFiles/brotlidec.dir/c/dec/",".c.o.d -o CMakeFiles/brotlidec.dir/c/dec/",".c.o -c /work/source/c/dec/",".c"]]}
+0	10	prefix	prefix	prefix	prefix
+0	11	state	state	state	state
+0	12	huffman	huffman	huffman	huffman
+0	13	static_init	static_init	static_init	static_init
+0	14	decode	decode	decode	decode
+[15/43] : && /usr/bin/cc -fPIC -O3 -DNDEBUG   -shared -Wl,-soname,libbrotlidec.so.1 -o libbrotlidec.so.1.2.1 CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o CMakeFiles/brotlidec.dir/c/dec/decode.c.o CMakeFiles/brotlidec.dir/c/dec/huffman.c.o CMakeFiles/brotlidec.dir/c/dec/prefix.c.o CMakeFiles/brotlidec.dir/c/dec/state.c.o CMakeFiles/brotlidec.dir/c/dec/static_init.c.o  -Wl,-rpath,/work/build-ninja:  -lm  libbrotlicommon.so.1.2.1  -lm && :
+[16/43] /usr/bin/cmake -E cmake_symlink_library libbrotlidec.so.1.2.1  libbrotlidec.so.1 libbrotlidec.so && :
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":24,"literals":[["[","/43] /usr/bin/cc -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/",".c.o -MF CMakeFiles/brotlienc.dir/c/enc/",".c.o.d -o CMakeFiles/brotlienc.dir/c/enc/",".c.o -c /work/source/c/enc/",".c"],["[","/43] /usr/bin/cc -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -MD -MT ",".c.o -MF ",".c.o.d -o ",".c.o -c ",".c"]]}
+0	17	bit_cost	bit_cost	bit_cost	bit_cost
+0	18	backward_references_hq	backward_references_hq	backward_references_hq	backward_references_hq
+0	19	brotli_bit_stream	brotli_bit_stream	brotli_bit_stream	brotli_bit_stream
+0	20	block_splitter	block_splitter	block_splitter	block_splitter
+0	21	command	command	command	command
+0	22	compound_dictionary	compound_dictionary	compound_dictionary	compound_dictionary
+0	23	cluster	cluster	cluster	cluster
+0	24	compress_fragment	compress_fragment	compress_fragment	compress_fragment
+0	25	dictionary_hash	dictionary_hash	dictionary_hash	dictionary_hash
+0	26	compress_fragment_two_pass	compress_fragment_two_pass	compress_fragment_two_pass	compress_fragment_two_pass
+0	27	encoder_dict	encoder_dict	encoder_dict	encoder_dict
+0	28	entropy_encode	entropy_encode	entropy_encode	entropy_encode
+0	29	fast_log	fast_log	fast_log	fast_log
+0	30	histogram	histogram	histogram	histogram
+0	31	literal_cost	literal_cost	literal_cost	literal_cost
+0	32	memory	memory	memory	memory
+0	33	encode	encode	encode	encode
+0	34	static_dict	static_dict	static_dict	static_dict
+0	35	metablock	metablock	metablock	metablock
+0	36	static_init	static_init	static_init	static_init
+0	37	utf8_util	utf8_util	utf8_util	utf8_util
+0	38	static_dict_lut	static_dict_lut	static_dict_lut	static_dict_lut
+1	39	CMakeFiles/brotli.dir/c/tools/brotli	CMakeFiles/brotli.dir/c/tools/brotli	CMakeFiles/brotli.dir/c/tools/brotli	/work/source/c/tools/brotli
+0	40	backward_references	backward_references	backward_references	backward_references
+[41/43] : && /usr/bin/cc -fPIC -O3 -DNDEBUG   -shared -Wl,-soname,libbrotlienc.so.1 -o libbrotlienc.so.1.2.1 CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o CMakeFiles/brotlienc.dir/c/enc/cluster.c.o CMakeFiles/brotlienc.dir/c/enc/command.c.o CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o CMakeFiles/brotlienc.dir/c/enc/encode.c.o CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o CMakeFiles/brotlienc.dir/c/enc/histogram.c.o CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o CMakeFiles/brotlienc.dir/c/enc/memory.c.o CMakeFiles/brotlienc.dir/c/enc/metablock.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o CMakeFiles/brotlienc.dir/c/enc/static_init.c.o CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o  -Wl,-rpath,/work/build-ninja:  -lm  libbrotlicommon.so.1.2.1  -lm && :
+[42/43] /usr/bin/cmake -E cmake_symlink_library libbrotlienc.so.1.2.1  libbrotlienc.so.1 libbrotlienc.so && :
+[43/43] : && /usr/bin/cc -O3 -DNDEBUG  CMakeFiles/brotli.dir/c/tools/brotli.c.o -o brotli  -Wl,-rpath,/work/build-ninja:  libbrotlienc.so.1.2.1  libbrotlidec.so.1.2.1  libbrotlicommon.so.1.2.1  -lm && :
+
