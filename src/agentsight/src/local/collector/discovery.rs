@@ -534,7 +534,7 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
     ];
 
     let mut last_match_idx: Option<usize> = None;
-    for (i, part) in parts.iter().enumerate() {
+    for (i, part) in parts[..parts.len().saturating_sub(1)].iter().enumerate() {
         if MARKERS.contains(&part.to_lowercase().as_str()) {
             last_match_idx = Some(i);
         }
@@ -741,6 +741,28 @@ mod tests {
         let path = Path::new("simple");
         let root = Path::new("/root");
         assert_eq!(decode_project_dir(path, root), "simple");
+    }
+
+    #[test]
+    fn test_decode_project_dir_marker_named_project() {
+        let root = Path::new("/root/.qoder/projects");
+        assert_eq!(
+            decode_project_dir(Path::new("-Users-alice-projects-dev"), root),
+            "dev"
+        );
+        assert_eq!(
+            decode_project_dir(Path::new("-Users-alice-projects-my-dev"), root),
+            "my-dev"
+        );
+        assert_eq!(
+            decode_project_dir(Path::new("-Users-alice-work-projects"), root),
+            "projects"
+        );
+        assert_eq!(
+            decode_project_dir(Path::new("-Users-alice-src"), root),
+            "Users-alice-src"
+        );
+        assert_eq!(decode_project_dir(Path::new("-dev"), root), "dev");
     }
 
     #[test]
