@@ -9,7 +9,7 @@ class DailyWorkflowTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
         workflow = (AW.parents[1] / ".github/workflows/aw-ci.yml").read_text()
-        jobs = workflow.split("\njobs:\n", 1)[1]
+        self.triggers, jobs = workflow.split("\njobs:\n", 1)
         self.jobs = dict(re.findall(
             r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs, re.MULTILINE | re.DOTALL,
         ))
@@ -59,6 +59,35 @@ class DailyWorkflowTests(GateFixture):
         # Only scope compares base and head. Workers test the selected checkout.
         self.assertIn("fetch-depth: 0", self.jobs["scope"])
         self.assertNotIn("fetch-depth: 0", self.jobs["checks"])
+
+    def test_manual_acceptance_does_not_cancel_branch_or_pr_checks(self) -> None:
+        concurrency = self.triggers.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
+        self.assertIn("${{ github.workflow }}-${{ github.event_name }}", concurrency)
+        self.assertIn("github.event_name == 'workflow_dispatch' && github.run_id || "
+                      "github.event.pull_request.number || github.ref", concurrency)
+        self.assertIn("cancel-in-progress: true", concurrency)
+
+    def test_contract_build_and_cache_share_a_single_target(self) -> None:
+        checks = self.jobs["checks"]
+        workspace, target = re.search(r"^          workspaces: (\S+) -> (\S+)$",
+                                      checks, re.MULTILINE).groups()
+        self.assertIn(f"CARGO_TARGET_DIR: ${{{{ github.workspace }}}}/{workspace}/{target}", checks)
+        for provider in ("agent-sec-core", "tokenless"):
+            self.assertIn(f"'providers/{provider}/Cargo.*'", checks)
+
+    def test_only_cold_pr_and_queue_builds_override_the_tokenless_link_profile(self) -> None:
+        tokenless = self.jobs["tokenless"]
+        restore, daily = tokenless.split("      - name: Reduce Tokenless link time", 1)
+        daily, validate = daily.split("      - name: Validate real Tokenless", 1)
+        self.assertIn("id: tokenless-cache", restore)
+        self.assertIn("save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+                      restore)
+        self.assertIn("if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') "
+                      "&& steps.tokenless-cache.outputs.cache-hit != 'true'", daily)
+        self.assertIn("CARGO_PROFILE_RELEASE_LTO=false", daily)
+        self.assertIn("CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16", daily)
+        self.assertIn("src/aw/scripts/check_tokenless.py", validate)
+        self.assertNotIn("CARGO_PROFILE_RELEASE_", self.triggers + restore + validate)
 
     def test_contract_checks_use_a_compatible_trusted_system_python(self) -> None:
         checks = self.jobs["checks"]
