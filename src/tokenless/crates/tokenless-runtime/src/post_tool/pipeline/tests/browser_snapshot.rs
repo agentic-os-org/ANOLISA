@@ -219,3 +219,262 @@ fn diffs_of_snapshot_files_keep_the_diff_domain() {
     let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
     assert_eq!(run.response.content_type, Some(ContentType::Diff));
 }
+
+#[test]
+fn browser_find_compresses_with_stash_recovery_and_respects_kill_switch() {
+    let mut blocks = Vec::with_capacity(30);
+    for i in 0..30 {
+        blocks.push(format!(
+            "- link \"Story number {i} with a reasonably long title\" [ref=e{}] [cursor=pointer]:\n  - /url: https://news.example.com/item?id={i}",
+            i + 10
+        ));
+    }
+    let input = format!("### Result\n{}", blocks.join("\n----\n"));
+
+    let mut disabled = build_log_config();
+    disabled.browser_snapshot_enabled = false;
+    let store_off = Arc::new(CountingStore::default());
+    let store_off_dyn: Arc<dyn StashStore> = store_off.clone();
+    let run_off = PostToolPipeline::run(&request(&input), &disabled, Some(&store_off_dyn));
+    assert_eq!(run_off.response.disposition, Disposition::Passthrough);
+    assert_eq!(run_off.response.content_type, Some(ContentType::PlainText));
+    assert_eq!(run_off.response.output, input);
+    assert_eq!(store_off.stash_calls.load(Ordering::Relaxed), 0);
+
+    let mut enabled = build_log_config();
+    enabled.browser_snapshot_enabled = true;
+    let store_on = Arc::new(CountingStore::default());
+    let store_on_dyn: Arc<dyn StashStore> = store_on.clone();
+    let run_on = PostToolPipeline::run(&request(&input), &enabled, Some(&store_on_dyn));
+    assert_eq!(run_on.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run_on.response.content_type,
+        Some(ContentType::BrowserSnapshot)
+    );
+    assert_eq!(
+        run_on.response.applied_operations,
+        [AppliedOperation::BrowserSnapshotReduction]
+    );
+    assert_eq!(run_on.response.recoverability, Recoverability::Retrievable);
+    assert!(
+        run_on
+            .response
+            .output
+            .contains("block\tdepth\trole\tname\tref\tattrs\turl\ttext")
+    );
+    assert_eq!(
+        store_on.retrieve(&run_on.response.stash_keys[0]).unwrap(),
+        Some(input)
+    );
+}
+
+#[test]
+fn browser_find_with_upstream_summary_compresses_and_recovers_byte_exact() {
+    let mut blocks = Vec::with_capacity(30);
+    for i in 0..30 {
+        blocks.push(format!(
+            "- link \"Story number {i} with a reasonably long title\" [ref=e{}] [cursor=pointer]:\n  - /url: https://news.example.com/item?id={i}",
+            i + 10
+        ));
+    }
+    let input = format!(
+        "### Result\nFound 30 matches for \"Story\":\n\n{}\n",
+        blocks.join("\n----\n")
+    );
+
+    let mut disabled = build_log_config();
+    disabled.browser_snapshot_enabled = false;
+    let mut req_off = request(&input);
+    req_off.content_origin = ContentOrigin::ApiResponse;
+    let store_off = Arc::new(CountingStore::default());
+    let store_off_dyn: Arc<dyn StashStore> = store_off.clone();
+    let run_off = PostToolPipeline::run(&req_off, &disabled, Some(&store_off_dyn));
+    assert_eq!(run_off.response.disposition, Disposition::Passthrough);
+    assert_eq!(run_off.response.content_type, Some(ContentType::PlainText));
+    assert_eq!(run_off.response.output, input);
+    assert_eq!(store_off.stash_calls.load(Ordering::Relaxed), 0);
+
+    let mut enabled = build_log_config();
+    enabled.browser_snapshot_enabled = true;
+    let mut req_on = request(&input);
+    req_on.content_origin = ContentOrigin::ApiResponse;
+    let store_on = Arc::new(CountingStore::default());
+    let store_on_dyn: Arc<dyn StashStore> = store_on.clone();
+    let run_on = PostToolPipeline::run(&req_on, &enabled, Some(&store_on_dyn));
+    assert_eq!(run_on.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run_on.response.content_type,
+        Some(ContentType::BrowserSnapshot)
+    );
+    assert_eq!(
+        run_on.response.applied_operations,
+        [AppliedOperation::BrowserSnapshotReduction]
+    );
+    assert!(
+        run_on
+            .response
+            .output
+            .contains("Found 30 matches for \"Story\":")
+    );
+    assert!(
+        run_on
+            .response
+            .output
+            .contains("block\tdepth\trole\tname\tref\tattrs\turl\ttext")
+    );
+    assert!(run_on.response.output.contains("\te10\t"));
+    assert_eq!(
+        store_on.retrieve(&run_on.response.stash_keys[0]).unwrap(),
+        Some(input)
+    );
+}
+
+#[test]
+fn browser_find_folded_name_containing_heading_compresses_through_post_tool() {
+    let mut blocks = Vec::with_capacity(30);
+    blocks.push(
+        "- link \"Story number 0\n  ### Events\n  with a long folded title\" [ref=e10] [cursor=pointer]:\n  - /url: https://news.example.com/item?id=0".to_owned()
+    );
+    for i in 1..30 {
+        blocks.push(format!(
+            "- link \"Story number {i} with a reasonably long title\" [ref=e{}] [cursor=pointer]:\n  - /url: https://news.example.com/item?id={i}",
+            i + 10
+        ));
+    }
+    let input = format!(
+        "### Result\nFound 30 matches for \"Story\":\n\n{}\n### Events\n- ready",
+        blocks.join("\n----\n")
+    );
+
+    let mut config = build_log_config();
+    config.browser_snapshot_enabled = true;
+    let mut req = request(&input);
+    req.content_origin = ContentOrigin::ApiResponse;
+    let store = Arc::new(CountingStore::default());
+    let store_dyn: Arc<dyn StashStore> = store.clone();
+    let run = PostToolPipeline::run(&req, &config, Some(&store_dyn));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.content_type,
+        Some(ContentType::BrowserSnapshot)
+    );
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::BrowserSnapshotReduction]
+    );
+    assert!(run.response.output.contains("\te10\t"));
+    assert_eq!(
+        store.retrieve(&run.response.stash_keys[0]).unwrap(),
+        Some(input)
+    );
+}
+
+#[test]
+fn browser_find_with_context_gaps_compresses_and_recovers_byte_exact() {
+    let mut blocks = Vec::with_capacity(30);
+    for i in 0..30 {
+        blocks.push(format!(
+            "- toolbar:\n  ...\n  - link \"Story number {i} with a reasonably long title\" [ref=e{}] [cursor=pointer]:\n    - /url: https://news.example.com/item?id={i}",
+            i + 10
+        ));
+    }
+    let input = format!(
+        "### Result\nFound 30 matches for \"Story\":\n\n{}\n",
+        blocks.join("\n----\n")
+    );
+
+    let mut disabled = build_log_config();
+    disabled.browser_snapshot_enabled = false;
+    let mut req_off = request(&input);
+    req_off.content_origin = ContentOrigin::ApiResponse;
+    let store_off = Arc::new(CountingStore::default());
+    let store_off_dyn: Arc<dyn StashStore> = store_off.clone();
+    let run_off = PostToolPipeline::run(&req_off, &disabled, Some(&store_off_dyn));
+    assert_eq!(run_off.response.disposition, Disposition::Passthrough);
+    assert_eq!(run_off.response.content_type, Some(ContentType::PlainText));
+    assert_eq!(run_off.response.output, input);
+    assert_eq!(store_off.stash_calls.load(Ordering::Relaxed), 0);
+
+    let mut enabled = build_log_config();
+    enabled.browser_snapshot_enabled = true;
+    let mut req_on = request(&input);
+    req_on.content_origin = ContentOrigin::ApiResponse;
+    let store_on = Arc::new(CountingStore::default());
+    let store_on_dyn: Arc<dyn StashStore> = store_on.clone();
+    let run_on = PostToolPipeline::run(&req_on, &enabled, Some(&store_on_dyn));
+    assert_eq!(run_on.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run_on.response.content_type,
+        Some(ContentType::BrowserSnapshot)
+    );
+    assert_eq!(
+        run_on.response.applied_operations,
+        [AppliedOperation::BrowserSnapshotReduction]
+    );
+    assert!(run_on.response.output.contains("\t1\t...\t\t\t\t\t\n"));
+    assert!(run_on.response.output.contains("\te10\t"));
+    assert_eq!(
+        store_on.retrieve(&run_on.response.stash_keys[0]).unwrap(),
+        Some(input)
+    );
+}
+
+#[test]
+fn browser_find_literal_ref_in_name_detects_and_compresses_real_refs() {
+    let mut blocks = Vec::with_capacity(30);
+    for i in 0..30 {
+        blocks.push(format!(
+            "- link \"Story [ref=e999] item {i} with long title\" [ref=e{}] [cursor=pointer]",
+            i + 10
+        ));
+    }
+    let input = format!(
+        "### Result\nFound 30 matches for \"ref\":\n\n{}\n",
+        blocks.join("\n----\n")
+    );
+
+    let mut config = build_log_config();
+    config.browser_snapshot_enabled = true;
+    let mut req = request(&input);
+    req.content_origin = ContentOrigin::ApiResponse;
+    let store = Arc::new(CountingStore::default());
+    let store_dyn: Arc<dyn StashStore> = store.clone();
+    let run = PostToolPipeline::run(&req, &config, Some(&store_dyn));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.content_type,
+        Some(ContentType::BrowserSnapshot)
+    );
+    assert!(run.response.output.contains("Story [ref=e999] item 0"));
+    assert!(run.response.output.contains("\te10\t"));
+    assert_eq!(
+        store.retrieve(&run.response.stash_keys[0]).unwrap(),
+        Some(input)
+    );
+}
+
+#[test]
+fn browser_find_orphan_url_under_context_gap_passes_through_without_stash() {
+    let fixture = include_str!(
+        "../../../../../tokenless-compressors/tests/fixtures/content/browser_find_multi_block.txt"
+    );
+    let mutated = fixture.replacen(
+        "  ...\n",
+        "  ...\n    - /url: https://example.test/orphan\n",
+        1,
+    );
+    assert_ne!(mutated, fixture, "fixture must contain a `  ...` gap line");
+
+    let mut config = build_log_config();
+    config.browser_snapshot_enabled = true;
+    let mut req = request(&mutated);
+    req.content_origin = ContentOrigin::ApiResponse;
+    let store = Arc::new(CountingStore::default());
+    let store_dyn: Arc<dyn StashStore> = store.clone();
+    let run = PostToolPipeline::run(&req, &config, Some(&store_dyn));
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert_eq!(run.response.output, mutated);
+    assert!(run.response.applied_operations.is_empty());
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(store.stash_calls.load(Ordering::Relaxed), 0);
+}

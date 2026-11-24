@@ -1,12 +1,15 @@
-//! Lossless re-encoding of Playwright MCP accessibility snapshots.
+//! Lossless re-encoding of Playwright MCP accessibility snapshots and `browser_find` matches.
 //!
-//! Playwright's fenced YAML aria tree (`- role "name" [ref=eN]`) escapes
-//! embedded quotes, so its field boundaries are explicit and the tree flattens
-//! into a record table losslessly: redundant cursor annotations on interactive
-//! roles are dropped and repeated URL prefixes share a legend. Every element
-//! reference, role/name binding, URL, and text byte is retained; the Runtime
-//! stashes the original snapshot for retrieval. Any parse or fidelity failure
-//! returns `None` so the caller passes the input through unchanged.
+//! Playwright's fenced YAML aria tree (`- role "name" [ref=eN]`) and
+//! `browser_find` responses (`### Result` + `----`-separated aria subtrees)
+//! escape embedded quotes in YAML scalars, so record boundaries are explicit
+//! and flatten into a TSV table losslessly: redundant cursor annotations on
+//! interactive roles are dropped and repeated URL prefixes share a legend. For
+//! multi-block `browser_find` results, the `----` separators move into a `block`
+//! column rather than being echoed verbatim. Every element reference,
+//! role/name binding, URL, and text byte is retained; the Runtime stashes the
+//! original response for retrieval. Any parse or fidelity failure returns
+//! `None` so the caller passes the input through unchanged.
 //!
 //! chrome-devtools-mcp uid snapshots are recognized by the detector but never
 //! compressed: upstream wraps names and attribute values in raw quotes without
@@ -15,7 +18,10 @@
 //! snapshots therefore pass through unchanged.
 
 mod encode;
+mod find;
 mod pw;
+
+pub use pw::{fold_advance, is_pw_element_line, name_continues, pw_element_ref};
 
 use tokenless_protocol::estimate_tokens;
 
@@ -23,6 +29,7 @@ use tokenless_protocol::estimate_tokens;
 /// and `text` carries Playwright node content.
 #[derive(Clone, PartialEq)]
 pub(crate) struct Record {
+    pub block: usize,
     pub depth: usize,
     pub role: String,
     pub name: String,
@@ -37,6 +44,7 @@ pub(crate) struct Parsed {
     pub prefix: String,
     pub suffix: String,
     pub records: Vec<Record>,
+    pub use_block_column: bool,
 }
 
 /// Scans a double-quoted scalar from the start of `s`, backslash-aware.
@@ -131,11 +139,15 @@ impl BrowserSnapshotCompressor {
         if is_cdt_listing(input) {
             return None;
         }
-        let parsed = pw::parse(input)?;
+        let parsed = pw::parse(input).or_else(|| find::parse(input))?;
         let original = parsed.records;
         let mut records = original.clone();
         encode::strip_redundant_cursor(&mut records);
-        let cols: &[encode::Col] = encode::PW_COLS;
+        let cols: &[encode::Col] = if parsed.use_block_column {
+            encode::FIND_COLS
+        } else {
+            encode::PW_COLS
+        };
         let mut table = encode::table(&records, cols);
         let mut legend_text = String::new();
         let mut legend: Vec<(String, String)> = Vec::new();

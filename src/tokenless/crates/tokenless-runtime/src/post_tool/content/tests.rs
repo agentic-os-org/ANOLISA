@@ -934,3 +934,57 @@ fn ci_logs_and_prose_mentioning_refs_do_not_become_snapshots() {
         "See [ref=e1] and uid=1_2 in the documentation for details.\nThey are not snapshots.\n";
     assert_eq!(detect(prose), ContentType::PlainText);
 }
+
+#[test]
+fn detects_playwright_browser_find_results_and_guards_false_positives() {
+    let find_result = "### Result\n- link \"Story 1\" [ref=e10] [cursor=pointer]:\n  - /url: https://example.com/1\n----\n- link \"Story 2\" [ref=e11] [cursor=pointer]:\n  - /url: https://example.com/2\n----\n- link \"Story 3\" [ref=e12] [cursor=pointer]:\n  - /url: https://example.com/3";
+    assert_eq!(detect(find_result), ContentType::BrowserSnapshot);
+    let two_match_find =
+        "### Result\n- link \"Only one\" [ref=e1]\n----\n- link \"Only two\" [ref=e2]";
+    assert_eq!(detect(two_match_find), ContentType::BrowserSnapshot);
+    let with_preamble_and_bom = format!(
+        "\u{feff}### Page\n- Page URL: https://example.com/\n{find_result}\n### Events\n- ready"
+    );
+    assert_eq!(detect(&with_preamble_and_bom), ContentType::BrowserSnapshot);
+
+    let upstream_find = "### Result\nFound 2 matches for \"example\":\n\n- link \"Story 1\" [ref=e10]\n----\n- link \"Story 2\" [ref=e11]";
+    assert_eq!(detect(upstream_find), ContentType::BrowserSnapshot);
+
+    let gap_find = "### Result\nFound 2 matches for \"example\":\n\n- toolbar:\n  ...\n  - link \"Story 1\" [ref=e10]\n----\n- toolbar:\n  ...\n  - link \"Story 2\" [ref=e11]";
+    assert_eq!(detect(gap_find), ContentType::BrowserSnapshot);
+
+    let ref_in_name_find = "### Result\nFound 2 matches for \"ref\":\n\n- link \"Sample [ref=e999]\" [ref=e10]\n----\n- link \"Other [ref=e999]\" [ref=e11]";
+    assert_eq!(detect(ref_in_name_find), ContentType::BrowserSnapshot);
+
+    let only_literal_ref_in_name =
+        "### Result\n- link \"Doc [ref=e1]\"\n----\n- link \"Doc [ref=e2]\"";
+    assert_eq!(detect(only_literal_ref_in_name), ContentType::PlainText);
+
+    let folded_heading_in_name = "### Result\n- link \"Title\n  ### Not a real section\n  rest of text\" [ref=e10]\n----\n- link \"Story 2\" [ref=e11]";
+    assert_eq!(detect(folded_heading_in_name), ContentType::BrowserSnapshot);
+
+    let duplicate_ref_only = "### Result\n- link \"Same\" [ref=e1]\n----\n- link \"Same\" [ref=e1]";
+    assert_eq!(detect(duplicate_ref_only), ContentType::PlainText);
+
+    let crlf_find =
+        "### Result\r\n- link \"Story 1\" [ref=e10]\r\n----\r\n- link \"Story 2\" [ref=e11]";
+    assert_eq!(detect(crlf_find), ContentType::PlainText);
+
+    let prose_result = "### Result\nMatching [ref=e1] [ref=e2] [ref=e3] failed.\n----\nSee docs.";
+    assert_eq!(detect(prose_result), ContentType::PlainText);
+
+    let json_result = "### Result\n[\"alpha\", \"beta\"]";
+    assert_eq!(detect(json_result), ContentType::PlainText);
+
+    let diff_result = "$ git diff result.md\ndiff --git a/result.md b/result.md\n--- a/result.md\n+++ b/result.md\n@@ -1,5 +1,5 @@\n ### Result\n - link \"A\" [ref=e1]\n ----\n+- link \"B\" [ref=e2]\n - link \"C\" [ref=e3]\n";
+    assert_eq!(detect(diff_result), ContentType::Diff);
+
+    let html_quoting_find =
+        format!("<!DOCTYPE html><html><body><pre>\n{find_result}\n</pre></body></html>");
+    assert_eq!(detect(&html_quoting_find), ContentType::Html);
+
+    let log_quoting_find = format!(
+        "$ cargo test\nrunning 2 tests\ntest case_a ... FAILED\n\nfailures:\n---- case_a stdout ----\n{find_result}\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+    );
+    assert_eq!(detect(&log_quoting_find), ContentType::BuildLog);
+}

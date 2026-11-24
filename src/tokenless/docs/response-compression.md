@@ -116,9 +116,7 @@ PreTool 按宿主声明的 `post_tool_replacement`（默认 `full_retrievable`�
 `BrowserSnapshotCompressor` 处理 Playwright MCP 的无障碍快照（a11y snapshot），
 重编码为 TSV 记录表（视图保留每个 ref、name 与 URL；完整原文经 Stash 可恢复，管线整体无损）：
 
-- **Playwright MCP（PW）**：`### Page` markdown 包装（Page URL/Title）加 ```yaml 围栏内的
-  aria YAML 快照，记录形如 `- role "name" [ref=eN] [cursor=pointer]:`，含 `- /url:` 子行、
-  `- text:` 文本节点与单引号整行包裹形态；无包装的裸 YAML 树同样识别。
+- **Playwright MCP（PW）**：覆盖三种无障碍结果形态——① `### Page` markdown 包装（Page URL/Title）加 ```yaml 围栏内的 aria YAML 快照（记录形如 `- role "name" [ref=eN] [cursor=pointer]:`，含 `- /url:` 子行、`- text:` 文本节点与单引号整行包裹形态）；② 无包装的裸 YAML 树；③ `browser_find` 的 `### Result` 形态（行首 `### …` 标题开头、`### Result` 段落内可带 Playwright MCP 的 `Found N matches for …:\n\n` 摘要头及无围栏 aria 子树，多组匹配间以列 0 独立行 `----` 分隔，后可跟 `### Ran Playwright code` 等尾注；段内要求 LF 换行且至少含 2 个不重复 `[ref=]`）。
 
 **chrome-devtools-mcp（CDT）仅识别、不压缩**：CDT 快照（`## Latest page snapshot` 头下的扁平
 uid 列表，记录形如 `uid=N_M role "name" url="…"`，容忍 `Successfully clicked…`/`Page navigated to…`
@@ -133,14 +131,15 @@ name/属性加转义提供显式边界，可再引入 CDT 压缩。
 
 检测位于域链最前（二进制门之后、Diff 之前）：ref/uid 锚点是最独特的形状，快照内嵌的
 diff/测试/源码标记会被后续检测器误抢；真 diff 以首非空行的 `diff --git`/`---`/`+++`/`@@`
-头锚定，不被抢占。检测只在 64 KiB / 200 行窗口内判形状，解析权威在压缩器；任何解析失败
-整体透传原文（fail-open）——ref/uid 动作空间不容混合权威。
+头锚定，不被抢占。`browser_find` 以列 0 `### …` 标题与 `### Result` 段落锚定，按块检查 `----`
+外是否存在有效节点并要求 ≥2 个不重复 `[ref=]`。检测只在 64 KiB / 200 行窗口内判形状，解析权威在压缩器；
+任何解析失败整体透传原文（fail-open）——ref/uid 动作空间不容混合权威。
 
 视图变换（v1 不做有损折叠或去 URL）：
 
 | 变换 | 内容 | 约束 |
 |---|---|---|
-| TSV 重编码 | PW 列 `depth role name ref attrs url text`；转义 `\\` `\t` `\n`，单遍还原 | 包装头与尾注逐字保留；PW 多行 name 按 YAML 双引号折叠语义合并为一个空格 |
+| TSV 重编码 | PW 快照及单块 find 用 `depth role name ref attrs url text`；多块 `browser_find` 用 `block depth role name ref attrs url text`（`block` 索引取代 `----` 分隔行，`...` 省略行保留为 `role=...` 结构断点）；转义 `\\` `\t` `\n`，单遍还原 | 包装头、块前后 `### …` 尾注逐字保留；PW 多行 name 按 YAML 双引号折叠语义合并为一个空格；`browser_find` 按匹配块隔离 `/url:` 父节点查找 |
 | 冗余 cursor 去除 | 仅对 17 种交互角色（link/button/textbox 等）去除 `cursor=pointer` | generic 容器上保留（可点击信号） |
 | URL 前缀共享 | 出现 ≥2 次的前缀（取至最后一个 `/`，不短于 scheme://host/ 根）入 `U1=…` legend，表内 URL 编码为 `U1/后缀`，空后缀编码为裸 `U1` | 任一原始 URL 形如 `U<数字>` 或 `U<数字>/…` 时整体禁用（碰撞守卫）；仅当字符与估算 Token 双降且优于不共享候选时启用 |
 
@@ -155,8 +154,11 @@ MCP 工具结果通常为 `api_response` 来源，不要求 shell 输出。
 `TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0`（SDK：`browser_snapshot_enabled=False`）关闭整个域；
 关闭时检测结果在标注前重映射为 `plain_text`，直通响应不携带新 wire 值，旧严格解析器完全安全。
 
-离线参考实测（o200k tokenizer，真实公开页面捕获，仅无损变换）：PW 组合变换
-HN 约 32% / GitHub 约 21% / 百度约 13%。CDT 快照一律原文直通、不参与压缩，故无 CDT 收益数字
+离线参考实测（真实公开页面捕获，仅无损变换）：PW 快照组合变换（o200k tokenizer）
+HN 约 32% / GitHub 约 21% / 百度约 13%。`browser_find` 合成样本（内置 `heuristic-v1` 估算）：
+3 块包含官方 `Found 3 matches for …` 摘要头与 `...` 省略断点的 golden 夹具 `browser_find_multi_block`（压缩器自身）
+812 → 601 字节，30 块全流水线夹具（含 Stash 恢复指令前缀）2020 → 1156 估算 Token（约 42.8%）。
+CDT 快照一律原文直通、不参与压缩，故无 CDT 收益数字
 （早期原型曾测得 HN 约 19%，但那是把不可无损分解的格式强行压缩的上界，已废弃）。这些数字
 不是任意页面的保证值；运行时仲裁使用内置 heuristic-v1 估算器，实际节省取决于页面结构与 URL 重复度。
 
@@ -270,7 +272,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
-| `browser_snapshot` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `BrowserSnapshotCompressor`：PW 快照无损重编码为 TSV 记录表，交互角色去冗余 cursor，URL 前缀按净收益共享；包装与尾注逐字保留，解析失败整体透传。CDT 快照仅识别、原文直通（裸引号无显式边界，无损不可分解） | 启用，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 |
+| `browser_snapshot` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `BrowserSnapshotCompressor`：PW 快照（含 `browser_find` `### Result` 多块匹配）无损重编码为 TSV 记录表，交互角色去冗余 cursor，URL 前缀按净收益共享；包装与尾注逐字保留，解析失败整体透传。CDT 快照仅识别、原文直通（裸引号无显式边界，无损不可分解） | 启用，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 |
 
 **JSON 值中的嵌入内容**：`json/embedded.rs` 按节点路由字符串值，判断只看值本身，不看字段
 名。目前识别的唯一内容域是 HTML：值至少 256 个字符，以受支持的 HTML5 或 SVG 标签、注释或
