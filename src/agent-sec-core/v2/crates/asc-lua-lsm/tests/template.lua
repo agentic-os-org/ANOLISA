@@ -1,5 +1,8 @@
 -- Run from asc-lua-lsm: lua tests/template.lua ../asc-lua-lsm-protocol/src/file_protection.lua
 local template = assert(io.open(arg[1], "r")):read("*a")
+local patterns = assert(io.open(arg[1]:gsub("file_protection%.lua$", "patterns.lua"), "r")):read("*a")
+template = template:gsub("%-%-@glob include patterns.lua", function() return patterns end)
+template = template:gsub("\n%-%-@glob ", "\n")
 template = template:gsub("\n%-%-@create ", "\n")
 local events, objects, tasks = {}, {}, {}
 -- Real kernel objects are userdata; these mock objects carry ordinary Lua tables.
@@ -8,6 +11,7 @@ math = nil
 local cached = setmetatable({}, { __mode = "k" })
 local function cache(object)
   if cached[object] then return object end
+  object.filetype = function(self, kind) return kind == "dir" and self.directory == true end
   local values = {}
   for key, value in pairs(object) do
     if type(value) ~= "function" then
@@ -64,10 +68,6 @@ local function file(inode, path, read, write)
     fput = function() end,
   }
 end
-local function hex(value)
-  if value == "" then return "_" end
-  return (value:gsub(".", function(ch) return string.format("%02x", ch:byte()) end))
-end
 local function load_module()
   local prefix = [[
 local name, control, root_pid = "asc_test_r1", "/control", 42
@@ -78,7 +78,23 @@ local targets = {
   { path = "/write", tree = false, read = false, write = true, delete = false, exclusions = {} },
   { path = "/delete", tree = false, read = false, write = false, delete = true, exclusions = {} },
   { path = "/read-tree", tree = true, read = true, write = false, delete = false, exclusions = {} },
+  { path = "/later/dir/secret", read = true, exclusions = {} },
+  { path = "/glob", tree = true, read = true, exclusions = {}, patterns = {
+    { value = "/glob/**/?.txt", negated = false } } },
+  { path = "/like", tree = true, read = true, exclusions = {}, patterns = {
+    { value = [=[/like/*literal\*?]=], cedar = true, negated = false },
+    { value = "*skip*", cedar = true, negated = true } } },
+  { path = "/simple", tree = true, read = true, exclusions = {}, prefix = "pre", suffix = ".txt",
+    patterns = { { value = "/simple/pre*.txt", negated = false } } },
+  { path = "/chain", tree = true, read = true, exclusions = {}, patterns = {
+    { value = "/chain/a*ab*ab", cedar = true, negated = false } } },
 }
+for _, target in ipairs(targets) do
+  target.views = { { base = target.path, logical = target.path, fs = "ext4" } }
+end
+targets[2].views[2] = { base = "/inner", logical = "/tree", fs = "tmpfs" }
+targets[2].views[3] = { base = "/bind", logical = "/tree" }
+targets[2].views[4] = { base = "/outer/mounted", fs = "fuse" }
 ]]
   local loader = loadstring or load
   return assert(loader(prefix .. template))()
@@ -86,27 +102,11 @@ end
 local module = load_module()
 local hook_count = 0
 for _, value in pairs(module) do if type(value) == "function" then hook_count = hook_count + 1 end end
-assert(hook_count == 17)
+assert(hook_count == 18)
 local function command(command)
   current = admin
   local allowed, code = module.file_open(file({}, "/control/" .. command))
   assert(allowed == false and code == ACK, command .. ": " .. tostring(code))
-end
-local function tag(kind, index, relative, inode)
-  local handle = "/proc/self/fd/" .. tostring(10 + index)
-  local roots = { "/exact", "/tree", "/write", "/delete", "/read-tree" }
-  local object_path = roots[index] .. (relative == "" and "" or "/" .. relative)
-  if kind == "tag" then
-    if relative == "" then
-      kind = "anchor"
-    else
-      -- Keep the root descriptor available while tagging descendants.
-      handle = "/proc/self/fd/99"
-    end
-    relative = ""
-  end
-  objects[handle] = file(inode, object_path)
-  command(kind .. "/" .. index .. "/" .. hex(relative) .. "/at/" .. hex(handle))
 end
 local function process(ancestor)
   return task_methods({
@@ -121,87 +121,101 @@ local _, acknowledgement = module.file_open(file({}, "/control/seed_root/42"))
 assert(acknowledgement ~= ACK and not tasks[42].member and not shared.state.root_pid)
 tasks[42] = root
 command("seed_root/42")
-local exact, tree, protected, excluded, entry, write, deletion = {}, {}, {}, {}, {}, {}, {}
+local exact = {}
 current = root
-assert(module.file_permission(file(exact), 4) == true)
-tag("tag", 1, "", exact)
-current = root
-assert(module.file_permission(file(exact), 4) == false)
+assert(not module.file_permission(file(exact, "/exact"), 4))
 -- These existing descendants have never received a seed command.
 local reader, forker, forked = process(root), process(root), process(nil)
 current = reader
-assert(module.file_permission(file(exact), 4) == false and reader.member)
+assert(module.file_permission(file(exact, "/exact"), 4) == false and reader.member)
 current = forker
 assert(module.task_alloc(forked) and forker.member and forked.member)
 -- A numeric collision (including in another PID namespace) grants no ancestry.
 local unrelated_root = process(nil)
 tasks[42] = unrelated_root
 current = process(unrelated_root)
-assert(module.file_permission(file(exact), 4) == true and not current.member)
+assert(module.file_permission(file(exact, "/exact"), 4) == true and not current.member)
 current = forked
-assert(module.file_permission(file(exact), 4) == false)
+assert(module.file_permission(file(exact, "/exact"), 4) == false)
 tasks[42] = root
 for _, task in ipairs({reader, forker, forked}) do module.task_free(task) end
-tag("tag", 2, "", tree)
-tag("tag", 2, "data", protected)
-tag("tag", 2, "cache", excluded)
-tag("tag", 2, "entry", entry)
-tag("tag", 3, "", write)
-tag("tag", 4, "", deletion)
-local parent = {}
-tag("slot", 4, "delete", parent)
-tag("stable", 4, "", deletion)
 current = root
-assert(module.file_open(file(exact, "/renamed-hard-link", true)) == false)
-assert(module.file_permission(file(exact), 4) == false)
-assert(module.file_permission(file(exact), 2) == true)
-assert(module.mmap_file(file(exact), 1, 1, 2) == false)
-assert(module.mmap_file(file(write), 2, 2, 1) == false)
-assert(module.mmap_file(file(write), 2, 2, 2) == true)
-assert(module.mmap_file(nil, 1, 1, 1) == true)
-assert(module.file_open(file(write, "/write", true, false)) == true)
-assert(module.file_open(file(write, "/write", false, true)) == false)
-assert(module.file_permission(file(protected), 2) == false)
-assert(module.file_permission(file(excluded), 2) == true)
-assert(module.file_permission(file(entry), 2) == true)
-local function dentry(inode, path)
-  if inode then cache(inode) end
-  return { backing_inode = function() return inode end, path = function() return path end }
+-- The same name remains protected when the kernel supplies a fresh object.
+assert(not module.file_permission(file({}, "/exact"), 4))
+assert(module.file_open(file(exact, "/outside-alias", true)))
+assert(not module.file_open(file(exact, "/exact", true)))
+assert(not module.file_permission(file(exact, "/exact (deleted)"), 4))
+assert(module.file_permission(file(exact, "/exact"), 2))
+assert(not module.mmap_file(file(exact, "/exact"), 1, 1, 2))
+assert(not module.mmap_file(file({}, "/write"), 2, 2, 1))
+assert(module.mmap_file(file({}, "/write"), 2, 2, 2))
+assert(module.mmap_file(nil, 1, 1, 1))
+assert(module.file_open(file({}, "/write", true)))
+assert(not module.file_open(file({}, "/write", false, true)))
+for _, name in ipairs({"/tree/data", "/tree/new/sub/file", "/tree/entry/inside", "/bind/data"}) do
+  assert(not module.file_permission(file({}, name), 2), name)
 end
-for _, hook in ipairs({module.inode_create, module.inode_mkdir}) do
-  assert(hook(tree, dentry(nil, "/tree/new")) == false)
-  assert(hook(tree, dentry(nil, "/tree/entry")) == true)
-  assert(hook(excluded, dentry(nil, "/tree/cache/new")) == true)
-  assert(hook(parent, dentry(nil, "/delete")) == true)
+for _, name in ipairs({"/trees/data", "/tree/cache/new", "/tree/entry", "/bind/cache/new"}) do
+  assert(module.file_permission(file({}, name), 2), name)
 end
-assert(module.inode_unlink(parent, dentry(write, "/write")) == true)
-assert(module.inode_unlink(parent, dentry(deletion, "/delete")) == false)
-assert(module.inode_rmdir({}, dentry(tree, "/tree")) == false)
-local function path(inode) return { dentry = function() return dentry(inode, "/mount") end } end
-assert(module.sb_mount(nil, path(tree)) == false)
-assert(module.move_mount(path({}), path(tree)) == false)
-assert(module.sb_mount(nil, path({})) == true)
-assert(module.inode_setattr(nil, dentry(write, "/write"), { size = 0 }) == false)
-assert(module.inode_setattr(nil, dentry(write, "/write"), { mode = 420 }) == true)
-assert(module.inode_setattr(dentry(write, "/write"), { size = 0 }) == false)
-assert(module.inode_setattr(dentry(write, "/write"), { mode = 420 }) == true)
-local created, excluded_child = cache({}), cache({})
-assert(module.inode_init_security(created, tree, "created"))
-assert(module.inode_init_security(excluded_child, excluded, "new"))
-assert(module.file_permission(file(created), 2) == false)
-assert(module.file_permission(file(excluded_child), 2) == true)
-local incoming = {}
-assert(module.inode_link(dentry(incoming, "/outside-alias"), tree, dentry(nil, "/tree/incoming")))
-assert(module.file_permission(file(incoming), 2) == false)
+local function dentry(name, kind)
+  return { path = function(_, raw) assert(raw); return name end,
+    backing_inode = function() return kind and { filetype = function(_, k) return k == kind end } end }
+end
+local function mount(name, fsname)
+  local sb = { fstype_name = function() return fsname or "ext4" end }
+  return { dentry = function() return dentry(name, "dir") end,
+    vfsmount = function() return { superblock = function() return sb end } end }
+end
+local root_mount, ram = mount("/"), mount("/", "tmpfs")
+for _, operation in ipairs({"path_mknod", "path_symlink", "path_mkdir"}) do
+  local hook = assert(module[operation])
+  assert(not hook(root_mount, dentry("/tree/new")))
+  assert(hook(root_mount, dentry("/tree/entry")))
+  assert(hook(root_mount, dentry("/tree/cache/new")))
+  assert(not hook(ram, dentry("/inner/new")))
+  assert(hook(root_mount, dentry("/inner/new")))
+end
+assert(module.path_unlink(root_mount, dentry("/write")))
+assert(not module.path_unlink(root_mount, dentry("/delete")))
+assert(not module.path_rmdir(root_mount, dentry("/tree")))
+assert(not module.path_truncate(mount("/write")))
+assert(not module.file_truncate(file({}, "/write")))
+assert(not module.sb_mount(nil, mount("/tree"), nil, 0))
+assert(not module.move_mount(mount("/outside"), mount("/tree")))
+assert(module.sb_mount(nil, mount("/outside"), nil, 0))
+assert(not module.sb_mount(nil, mount("/outer", "fuse"), nil, 0))
+assert(module.path_unlink(mount("/", "fuse"), dentry("/outer/mounted/data")))
+assert(module.sb_mount("/unrelated", mount("/outside"), nil, 4096))
+assert(not module.path_rename(root_mount, dentry("/outside", "reg"), root_mount, dentry("/write"), 0))
+assert(not module.path_rename(root_mount, dentry("/write", "reg"), root_mount, dentry("/outside"), 2))
+assert(not module.path_link(dentry("/outside", "reg"), root_mount, dentry("/tree/incoming")))
+current = admin
+assert(module.path_link(dentry("/outside", "reg"), root_mount, dentry("/tree/incoming")))
+current = root
+assert(not module.file_permission(file({}, "/tree/incoming"), 2))
+assert(module.file_permission(file({}, "/outside"), 2))
+assert(not module.file_permission(file({}, "/later/dir/secret"), 4))
+assert(module.file_permission(file({}, "/later/dir/other"), 4))
+for _, fixture in ipairs({
+  {"/glob/", "深.txt", "ab.txt", true}, {"/like/", "literal*?", "skipliteral*?", true},
+  {"/simple/", "pre.txt", "pre.log", false}, {"/chain/", "aabab", "aab", false},
+}) do
+  assert(not module.file_permission(file({}, fixture[1] .. fixture[2]), 4))
+  assert(module.file_permission(file({}, fixture[1] .. fixture[3]), 4))
+  assert(module.file_permission(file({}, fixture[1] .. "sub/" .. fixture[2]), 4) == not fixture[4])
+end
+objects["/proc/self/fd/99"] = file({}, "/glob/深.txt")
+command("match/7/99")
+objects["/proc/self/fd/99"] = file({}, "/glob/ignored")
+local _, mismatch = module.file_open(file({}, "/control/match/7/99"))
+assert(mismatch == errno.ESRCH)
 local thread = task_methods({ group_leader = function() return root end })
 current = thread
-assert(module.bprm_check_security({ file = function() return file({}) end }))
+assert(module.bprm_check_security({ file = function() return file({}, "/executable") end }))
 assert(thread.member == true)
 function thread:group_leader() return self end
 current = root
-local replacement = cache({})
-assert(module.inode_init_security(replacement, parent, "delete"))
-assert(module.inode_unlink(parent, dentry(replacement, "/delete")) == false)
 local child = task_methods({ })
 function child:group_leader() return self end
 function child:is_descendant() return false end
@@ -210,7 +224,7 @@ assert(child.member == true)
 -- Reparenting and root exit do not remove the inherited object property.
 tasks[42] = nil
 current = child
-assert(module.file_permission(file(exact), 4) == false)
+assert(module.file_permission(file(exact, "/exact"), 4) == false)
 local grandchild = task_methods({})
 function grandchild:group_leader() return self end
 assert(module.task_alloc(grandchild))
@@ -256,19 +270,27 @@ command("complete/" .. epoch)
 module.task_free(late)
 command("complete/" .. epoch)
 current = child
--- A second VM sees the same per-object properties.
+-- A second VM retains task membership and evaluates the same path policy.
 module = load_module()
-assert(module.file_permission(file(exact), 4) == false)
+assert(module.file_permission(file(exact, "/exact"), 4) == false)
 local fault = { inode = function() error("evaluation failed") end }
 assert(module.file_permission(fault, 4) == false)
 assert(events[#events] == "evaluation_error")
 assert(module.file_permission({ inode = function() return nil end }, 4) == false)
-assert(module.bprm_check_security({ file = function() return file(exact) end }) == false)
-assert(module.file_permission(file(exact), 4) == false)
+assert(module.bprm_check_security({ file = function() return file(exact, "/exact") end }) == false)
+assert(module.file_permission(file(exact, "/exact"), 4) == false)
 assert(events[#events] == "policy_deny")
-local vma = { file = function() return file(exact) end, mapping = function() return false end }
+local vma = { file = function() return file(exact, "/exact") end, mapping = function() return false end }
 assert(module.file_mprotect(vma, 1, 1) == false)
 current = admin
-assert(module.file_permission(file(exact), 4) == true)
+assert(module.file_permission(file(exact, "/exact"), 4) == true)
 assert(module.file_permission(fault, 4) == true)
-print("Lua-LSM template: object aliases, independent operations, exclusions, inheritance, VM reload and error policy passed")
+if arg[2] then
+  local generated = assert(loadfile(arg[2]))()
+  current = child
+  assert(not generated.file_permission(file({}, "/work/prefix.txt"), 2))
+  assert(generated.file_permission(file({}, "/work/sub/prefix.txt"), 2))
+  assert(not generated.path_mknod(ram, dentry('/mounted/quoted"name/prefix.txt')))
+  assert(generated.path_mknod(ram, dentry('/mounted/quoted"name/prefix.log')))
+end
+print("Lua-LSM template: runtime paths, hard-link boundary, independent operations, exclusions, inheritance, VM reload and error policy passed")

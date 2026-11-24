@@ -418,7 +418,7 @@ the following boundaries when adding a file condition or a backend.
 | Can SecCore accept this source? | The Cedar frontend checks syntax, the referenced schema and the common authoring rules. PAP uses this result when saving the source, independently of the selected file backend. |
 | What does the file rule require? | Shared file translation extracts the operation, path conditions and exclusions from the file-domain PST. It preserves the source matching semantics, including negation and escaping. |
 | Can the selected backend enforce the complete rule? | Its Translator owns that decision and generates the target plan. If a required condition cannot be represented, it rejects the translation before deployment. Keep backend capability switches out of shared expression parsing. |
-| Can this host install the plan now? | The Deployment Client checks host prerequisites and reports the deployment result. For Lua-LSM, a missing scan directory or a conflicting existing memory mapping can prevent activation. |
+| Can this host install the plan now? | The Deployment Client checks host prerequisites and reports the deployment result. For Lua-LSM, a missing target can be deployed, while a conflicting existing memory mapping blocks deployment. |
 
 For example, Cedar `resource.path like "/work/*.txt"` matches both `/work/a.txt`
 and `/work/sub/a.txt`. Native SecCore `/work/*.txt` matches only the first path.

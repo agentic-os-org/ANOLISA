@@ -75,7 +75,11 @@ jobs:
         if: matrix.container == ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap gnupg jq
+          sudo apt-get install -y bubblewrap gnupg jq lua5.1
+      - name: Check Lua-LSM template behavior (Ubuntu 22.04)
+        if: matrix.container == ''
+        working-directory: src/agent-sec-core/v2/crates/asc-lua-lsm
+        run: lua5.1 tests/template.lua ../asc-lua-lsm-protocol/src/file_protection.lua
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: clippy, rustfmt, rust-src

@@ -26,14 +26,17 @@ use sha2::{Digest, Sha256};
 use crate::{NativeSecurityFs, SecurityFs};
 use asc_lua_lsm_protocol::{
     DEFAULT_STATE_DIRECTORY, LUA_LSM_PLAN_FORMAT, LUA_LSM_ROUTE, LuaLsmPlan, is_supported_path,
-    is_supported_pattern, module_name, render_module,
+    is_supported_pattern, module_name, render_module, render_module_with_views,
 };
 
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_OBJECTS: usize = 65_536;
 // The kernel ignores unknown return-table keys; every generated hook is required.
 const BASE_HOOKS: u64 = 15;
-const HOOKS_WITH_CREATION: u64 = BASE_HOOKS + 2;
+// The previous write template exported create/mkdir and implements the same handover commands.
+const PREVIOUS_WRITE_HOOKS: u64 = 17;
+const PREVIOUS_FULL_HOOKS: u64 = 19;
+const HOOKS_WITH_CREATION: u64 = BASE_HOOKS + 3;
 
 /// Synchronous Client; dropping it never unregisters kernel modules.
 pub struct LuaLsmClient {
@@ -205,10 +208,15 @@ impl LuaLsmClient {
                 instance,
             };
             if !registered {
+                let views = file_targets::path_views(&plan)?;
+                let source = render_module_with_views(&plan, &self.directory, &views);
+                if source.len() > MAX_BYTES {
+                    return Err(rejected("LUA_LSM_MODULE_SIZE_LIMIT"));
+                }
                 // Persist the instance before registration so retries can resume initialization.
                 self.save_confirmation(&prepared.target, &record)
                     .map_err(local_error)?;
-                let count = match self.kernel.write("register", plan.source.as_bytes()) {
+                let count = match self.kernel.write("register", source.as_bytes()) {
                     Ok(count) => count,
                     Err(error) => {
                         if error.kind() == io::ErrorKind::AlreadyExists {
@@ -218,7 +226,7 @@ impl LuaLsmClient {
                         return Err(kernel_error(&error, "REGISTER"));
                     }
                 };
-                if count != plan.source.len() {
+                if count != source.len() {
                     return Err(retryable("LUA_LSM_REGISTER_SHORT_WRITE"));
                 }
                 if self.module_names()?.get(&prepared.target.id) != Some(&required_hooks) {
@@ -226,19 +234,14 @@ impl LuaLsmClient {
                 }
             }
             self.label_existing_processes(&plan.process, &controls, family)?;
-            let _pins = self.label_file_targets(&plan, &controls)?;
-            let matches = |index, pinned: &File| {
-                let handle = format!("/proc/self/fd/{}", pinned.as_raw_fd());
-                match self.request(
-                    &controls,
-                    &format!("match/{index}/_/at/{}", encode(handle.as_bytes())),
-                ) {
-                    Ok(()) => Ok(true),
-                    Err(e) if e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
-                        Ok(false)
-                    }
-                    Err(_) => Err(retryable("LUA_LSM_PATTERN_INSPECTION_FAILED")),
+            let matches = |index, pinned: &File| match self
+                .request(&controls, &format!("match/{index}/{}", pinned.as_raw_fd()))
+            {
+                Ok(()) => Ok(true),
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                    Ok(false)
                 }
+                Err(_) => Err(retryable("LUA_LSM_PATTERN_INSPECTION_FAILED")),
             };
             let mapping_preflight = MappingPreflight::collect(&plan, Some(&matches))?;
             self.transfer(
@@ -291,7 +294,12 @@ impl LuaLsmClient {
             // Both template generations implement the same membership handover.
             if !matches!(
                 names.get(&target.id),
-                Some(&BASE_HOOKS | &HOOKS_WITH_CREATION)
+                Some(
+                    &BASE_HOOKS
+                        | &PREVIOUS_WRITE_HOOKS
+                        | &PREVIOUS_FULL_HOOKS
+                        | &HOOKS_WITH_CREATION
+                )
             ) || !valid_instance(&record.instance)
             {
                 return Err(retryable("LUA_LSM_PREVIOUS_MODULE_UNCONFIRMED"));
@@ -466,22 +474,6 @@ impl TargetDeploymentClient for LuaLsmClient {
         }
         result
     }
-}
-
-fn encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    if bytes.is_empty() {
-        return "_".into();
-    }
-    let mut value = String::new();
-    for (index, byte) in bytes.iter().enumerate() {
-        if index > 0 && index % 100 == 0 {
-            value.push('/');
-        }
-        write!(&mut value, "{byte:02x}")
-            .unwrap_or_else(|_| unreachable!("String formatting is infallible"));
-    }
-    value
 }
 
 fn modules(bytes: &[u8]) -> Result<BTreeMap<String, u64>, Failure> {

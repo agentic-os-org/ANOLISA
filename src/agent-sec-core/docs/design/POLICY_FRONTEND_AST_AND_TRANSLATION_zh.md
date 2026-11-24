@@ -355,7 +355,7 @@ daemon 对源码快照做一次校验，再将解析后的语法树（PST）按�
 | SecCore 能否接受这份源码？ | Cedar 前端检查语法、引用的 schema 和公共编写规则。PAP 据此保存源码，准入结果与选用哪个文件后端无关。 |
 | 文件规则要求保护什么？ | 共享文件翻译逻辑从文件域 PST 提取操作、路径条件和排除项，保留原有的匹配、取反和转义语义。 |
 | 所选后端能否完整执行规则？ | 该后端的 Translator 作出判断并生成计划。任何必要条件无法表达时，Translator 在部署前拒绝翻译。共享表达式解析层应独立于后端能力开关。 |
-| 这台主机现在能否安装计划？ | Deployment Client 检查主机条件并报告部署结果。例如，扫描目录缺失或已有内存映射与保护要求冲突，都可能阻止 Lua-LSM 策略激活。 |
+| 这台主机现在能否安装计划？ | Deployment Client 检查主机条件并报告部署结果。例如，目标路径缺失时仍可下发 Lua-LSM 策略；已有内存映射与策略冲突时会阻止部署。 |
 
 例如，Cedar 的 `resource.path like "/work/*.txt"` 同时匹配 `/work/a.txt` 和
 `/work/sub/a.txt`，SecCore 原生的 `/work/*.txt` 只匹配前者。Lua-LSM Translator
