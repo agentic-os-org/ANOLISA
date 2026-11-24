@@ -893,6 +893,104 @@ fn savings_sessions_report_the_resolved_agent_name() {
 }
 
 #[test]
+fn agent_filters_and_labels_treat_blank_agent_name_as_process_name() {
+    let (store, path) = create_populated_store("blank_agent_parity");
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (
+                call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,
+                provider, model, input_tokens, output_tokens, total_tokens,
+                session_id, trace_id, conversation_id, agent_name, pid,
+                status, event_json, process_name
+             ) VALUES (
+                'call-blank', 'llm_call', ?1, ?2, ?3,
+                'openai', 'gpt-4', 111, 222, 333,
+                'sess-blank', 'trace-blank', 'conv-blank', '   ', 101,
+                'complete', '{}', 'proc-blank'
+             )",
+            params![BASE_NS, BASE_NS + STEP_NS, STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let activities = store.list_agent_activity_summaries().unwrap();
+    assert!(
+        activities.iter().any(|a| a.agent_name == "proc-blank"),
+        "activity summary already resolves blank agent_name to process_name"
+    );
+
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    assert!(
+        names.iter().any(|n| n == "proc-blank"),
+        "list_agent_names must fall back to process_name when agent_name is blank: {names:?}"
+    );
+
+    let ts = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-blank"), 1)
+        .unwrap();
+    assert_eq!(ts.len(), 1, "token timeseries must match process_name");
+    assert_eq!(ts[0].total_tokens, 333);
+
+    let mts = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-blank"), 1)
+        .unwrap();
+    assert_eq!(mts.len(), 1, "model timeseries must match process_name");
+    assert_eq!(mts[0].total_tokens, 333);
+
+    let latency_all = store
+        .get_latency_metrics(BASE_NS, BASE_NS + 6 * STEP_NS, None)
+        .unwrap();
+    assert!(
+        latency_all
+            .iter()
+            .any(|m| m.agent_name.as_deref() == Some("proc-blank")),
+        "unfiltered latency metrics must resolve blank agent_name to process_name"
+    );
+    let latency_filtered = store
+        .get_latency_metrics(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-blank"))
+        .unwrap();
+    assert_eq!(latency_filtered.len(), 1);
+
+    let summary = store.get_agent_token_summary().unwrap();
+    assert!(
+        summary.iter().any(|s| s.agent_name == "proc-blank"),
+        "agent token summary must resolve blank agent_name to process_name"
+    );
+
+    let savings = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-blank"))
+        .unwrap();
+    assert_eq!(savings.len(), 1);
+    assert_eq!(savings[0].agent_name.as_deref(), Some("proc-blank"));
+
+    let single = store
+        .get_session_for_savings("sess-blank")
+        .unwrap()
+        .expect("sess-blank exists");
+    assert_eq!(single.agent_name.as_deref(), Some("proc-blank"));
+
+    let sessions = store
+        .list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    let sess = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-blank")
+        .expect("sess-blank listed");
+    assert_eq!(sess.agent_name.as_deref(), Some("proc-blank"));
+
+    let events = store
+        .get_events_in_time_range(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-blank"))
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].call_id.as_deref(), Some("call-blank"));
+
+    cleanup_db(&path);
+}
+
+#[test]
 fn savings_sessions_agent_filter_matches_case_insensitively() {
     let (store, path) = create_populated_store("sav_case");
     let lower = store
