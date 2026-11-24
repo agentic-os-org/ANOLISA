@@ -811,7 +811,7 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let mut usage = sse_events.iter().fold(None, |usage, event| {
+        let usage = sse_events.iter().fold(None, |usage, event| {
             let Some(parsed) = self.token.parse_event(event) else {
                 return usage;
             };
@@ -832,60 +832,7 @@ impl Analyzer {
         // that would correct them sat unread in the same call. The event merge
         // preserves cumulative counters and honors explicit final Anthropic
         // input/cache values.
-        if let Some(extra) = continuation_bytes {
-            // Re-parse with the legacy SSEParser, which concatenates
-            // multi-line `data:` fields — what the OpenAI Responses API's
-            // final `response.completed` event needs when its payload exceeds
-            // a single record.
-            let text = String::from_utf8_lossy(extra);
-            let reassembled = SSEParser::parse_stream(&text);
-            // Any bytes after the last blank line — whether an incomplete line
-            // in `reassembled.remaining` or complete lines of an un-terminated
-            // frame ending at `\n` — were never emitted into `reassembled.events`.
-            // Frame that un-emitted tail first as `data:` events, and otherwise
-            // scan only that unframed tail so already-parsed events are never
-            // re-scanned while line-boundary and mid-line split tails merge.
-            let unframed_tail = unframed_sse_tail(&text);
-            let tail = (!unframed_tail.trim().is_empty())
-                .then(|| SSEParser::parse_stream(&format!("{unframed_tail}\n\n")));
-            let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
-
-            usage =
-                reassembled
-                    .events
-                    .iter()
-                    .chain(tail_events.iter())
-                    .fold(usage, |usage, event| {
-                        let parsed = self.token.parse_data(&event.data);
-                        let event_json =
-                            serde_json::from_str::<serde_json::Value>(&event.data).ok();
-                        match parsed {
-                            Some(parsed) => match event_json {
-                                Some(event_json) => {
-                                    merge_usage_from_event(usage, parsed, &event_json)
-                                }
-                                None => crate::analyzer::token::merge_usage(usage, parsed),
-                            },
-                            None => usage,
-                        }
-                    });
-
-            if !unframed_tail.trim().is_empty() && tail_events.is_empty() {
-                if let Some(parsed) = self.token.parse_data(unframed_tail) {
-                    usage = crate::analyzer::token::merge_usage(usage, parsed);
-                }
-            }
-
-            if usage.is_none() {
-                log::debug!(
-                    "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                    extra.len(),
-                    reassembled.events.len(),
-                );
-            }
-        }
-
-        let usage = usage?;
+        let usage = self.merge_continuation_usage(usage, continuation_bytes)?;
 
         let record = TokenRecord::new(
             pid,
@@ -908,6 +855,65 @@ impl Analyzer {
         }
 
         Some(record)
+    }
+
+    /// Merge usage recovered from SSE TLS-split continuation bytes into `usage`.
+    pub(super) fn merge_continuation_usage(
+        &self,
+        mut usage: Option<TokenUsage>,
+        continuation_bytes: Option<&[u8]>,
+    ) -> Option<TokenUsage> {
+        let Some(extra) = continuation_bytes else {
+            return usage;
+        };
+        // Re-parse with the legacy SSEParser, which concatenates
+        // multi-line `data:` fields — what the OpenAI Responses API's
+        // final `response.completed` event needs when its payload exceeds
+        // a single record.
+        let text = String::from_utf8_lossy(extra);
+        let reassembled = SSEParser::parse_stream(&text);
+        // Any bytes after the last blank line — whether an incomplete line
+        // in `reassembled.remaining` or complete lines of an un-terminated
+        // frame ending at `\n` — were never emitted into `reassembled.events`.
+        // Frame that un-emitted tail first as `data:` events, and otherwise
+        // scan only that unframed tail so already-parsed events are never
+        // re-scanned while line-boundary and mid-line split tails merge.
+        let unframed_tail = unframed_sse_tail(&text);
+        let tail = (!unframed_tail.trim().is_empty())
+            .then(|| SSEParser::parse_stream(&format!("{unframed_tail}\n\n")));
+        let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
+
+        usage = reassembled
+            .events
+            .iter()
+            .chain(tail_events.iter())
+            .fold(usage, |usage, event| {
+                let parsed = self.token.parse_data(&event.data);
+                let event_json = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+                match parsed {
+                    Some(parsed) => match event_json {
+                        Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                        None => crate::analyzer::token::merge_usage(usage, parsed),
+                    },
+                    None => usage,
+                }
+            });
+
+        if !unframed_tail.trim().is_empty() && tail_events.is_empty() {
+            if let Some(parsed) = self.token.parse_data(unframed_tail) {
+                usage = crate::analyzer::token::merge_usage(usage, parsed);
+            }
+        }
+
+        if usage.is_none() {
+            log::debug!(
+                "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                extra.len(),
+                reassembled.events.len(),
+            );
+        }
+
+        usage
     }
 
     fn extract_token_from_json_body(
