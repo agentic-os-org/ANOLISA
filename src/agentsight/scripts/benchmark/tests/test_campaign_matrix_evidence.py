@@ -137,6 +137,37 @@ def complete_formal_evidence(repetitions: int) -> tuple[Any, ...]:
     return campaign_data, items, capacities, recovery, faults, regression
 
 
+@pytest.mark.parametrize(
+    ("repetition", "valid"),
+    [
+        (1, True),
+        (1.0, True),
+        (True, False),
+        (1.5, False),
+        (float("inf"), False),
+        (float("nan"), False),
+    ],
+)
+def test_final_report_requires_an_exact_repetition_number(
+    tmp_path: Path, repetition: int | float, valid: bool
+) -> None:
+    campaign_data, items, capacities, recovery, faults, regression = (
+        complete_formal_evidence(1)
+    )
+    campaign_data["versions"] = {version: {} for version in campaign_evidence.VERSIONS}
+    items[0][1]["repetition"] = repetition
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+
+    final = aggregate_report.write_final(
+        tmp_path, campaign_data, [], capacities, items, recovery, faults, regression
+    )
+
+    expected_issues = [] if valid else ["baseline matrix 100 QPS rep 1 is missing"]
+    assert final["issues"] == expected_issues
+    assert final["verdict"] == ("PASS" if valid else "INCONCLUSIVE")
+    assert (tmp_path / "final-report.md").is_file()
+
+
 @pytest.mark.parametrize("repetitions", [1, 3])
 @pytest.mark.parametrize(
     "matrix_inputs", ["matching", "baseline_drift", "both_drift", "missing"]
