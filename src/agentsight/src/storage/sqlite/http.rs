@@ -195,7 +195,9 @@ impl HttpStore {
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
         let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
-        let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
+        let deleted = self
+            .conn
+            .execute(&sql, params![cutoff_ns.min(i64::MAX as u64) as i64])?;
         Ok(deleted as u64)
     }
 
@@ -473,6 +475,36 @@ mod tests {
 
         let v1_records = store.query_by_path("/v1/%").unwrap();
         assert_eq!(v1_records.len(), 3);
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_purge_before_clamps_cutoff_above_i64_max() {
+        let path = test_db_path("purge_before_overflow");
+        let _ = fs::remove_file(&path);
+        let store = HttpStore::new(&path).unwrap();
+        let record = HttpRecord {
+            timestamp_ns: 1_000_000_000,
+            pid: 1000,
+            comm: "test".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: None,
+            response_headers: "{}".to_string(),
+            response_body: None,
+            duration_ns: 0,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        };
+        store.insert(&record).unwrap();
+
+        let deleted = store.purge_before(u64::MAX).unwrap();
+        assert_eq!(deleted, 1, "u64::MAX cutoff must purge representable rows");
+        assert_eq!(store.count().unwrap(), 0);
 
         cleanup_db(&path);
     }
