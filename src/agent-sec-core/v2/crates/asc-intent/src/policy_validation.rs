@@ -1,7 +1,8 @@
 //! Validates model-generated Cedar against the shared schema and task or command constraints.
 
 use cedar_policy::{
-    PolicySet, PrincipalConstraint, Schema, ValidationMode, ValidationWarning, Validator,
+    ActionConstraint, PolicySet, PrincipalConstraint, Schema, ValidationMode, ValidationWarning,
+    Validator,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -81,7 +82,35 @@ pub enum PolicyError {
 /// # Errors
 /// Rejects invalid Cedar, non-canonical paths, unsupported policy features and oversized artifacts.
 pub fn prepare_policy(model_text: &str) -> Result<Artifact, PolicyError> {
-    prepare(model_text, false)
+    prepare(model_text, &parse(model_text)?, false)
+}
+
+/// Renders a name-scoped launch rule for a recognized literal utility name.
+pub(crate) fn spawn_rule(program: &str) -> String {
+    format!(
+        r#"permit(principal, action == SecCore::Action::"process.spawn", resource is SecCore::Process) when {{ resource.program == "{program}" }};"#
+    )
+}
+
+/// Supplies a missing launch request only when neither launch action is present.
+pub(crate) fn prepare_command_policy(
+    model_text: &str,
+    path_program: Option<&str>,
+) -> Result<Artifact, PolicyError> {
+    let policies = parse(model_text)?;
+    if let Some(program) = path_program
+        && policies.policies().next().is_some()
+        && policies.policies().all(|policy| {
+            matches!(
+                policy.action_constraint(),
+                ActionConstraint::Eq(action)
+                    if !matches!(action.id().unescaped(), "process.spawn" | "file.exec")
+            )
+        })
+    {
+        return prepare_policy(&format!("{model_text}\n{}", spawn_rule(program)));
+    }
+    prepare(model_text, &policies, false)
 }
 
 /// Admits a task draft: the one place a `permit` may ask a human before it takes effect.
@@ -89,12 +118,15 @@ pub fn prepare_policy(model_text: &str) -> Result<Artifact, PolicyError> {
 /// # Errors
 /// Rejects invalid Cedar, paths, unsupported policy features and malformed confirmation advice.
 pub fn prepare_task_policy(model_text: &str) -> Result<Artifact, PolicyError> {
-    prepare(model_text, true)
+    prepare(model_text, &parse(model_text)?, true)
 }
 
 /// Shared admission; `confirmations` decides whether an escalation advice is within contract.
-fn prepare(model_text: &str, confirmations: bool) -> Result<Artifact, PolicyError> {
-    let policies = parse(model_text)?;
+fn prepare(
+    model_text: &str,
+    policies: &PolicySet,
+    confirmations: bool,
+) -> Result<Artifact, PolicyError> {
     for policy in policies.policies() {
         for (name, value) in policy.annotations() {
             match name {
@@ -119,7 +151,7 @@ fn prepare(model_text: &str, confirmations: bool) -> Result<Artifact, PolicyErro
         check_entity_references(&est)?;
     }
     if confirmations {
-        let eligible = asc_policy_cedar::request_policy_headers(&policies)
+        let eligible = asc_policy_cedar::request_policy_headers(policies)
             .map_err(|_| PolicyError::PrincipalHeaders)?;
         if !eligible
             && policies
@@ -131,7 +163,7 @@ fn prepare(model_text: &str, confirmations: bool) -> Result<Artifact, PolicyErro
     }
     let (schema, _) =
         Schema::from_cedarschema_str(CEDAR_SCHEMA).map_err(|_| PolicyError::Validation)?;
-    let validation = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+    let validation = Validator::new(schema).validate(policies, ValidationMode::Strict);
     // Policy admission rejects an action that cannot apply to the resource type; the SDK reports
     // it as a warning, so `validation_passed` alone would emit a forbid that restricts nothing.
     let inapplicable_action = validation

@@ -299,6 +299,10 @@ through it as well. These payloads supply `tool_input.command`; cosh-ng also sup
 `tool_name` and the session `cwd`, while a host without `cwd` must pass `--cwd`
 explicitly.
 
+Proposals request `process.spawn` for PATH utilities by program name, such as
+`cat` in `cat a.txt`, alongside their file or network actions. The executable
+path depends on the runtime's PATH and is left as a `file.exec` caveat when unknown.
+
 For simple `cat src/*.txt > out/all.txt` and `tar -czf out/a.tgz -C src .` commands,
 Intent derives data permissions from literal operands locally. Bash expands the glob.
 The request covers the input directory for reading, and the existing output file (cat) or

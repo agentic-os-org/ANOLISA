@@ -268,7 +268,10 @@ fn write_summary(out: &mut impl io::Write, summary: &PolicySummary) -> io::Resul
 fn describe(permission: &Permission) -> String {
     let mut line = match permission.action {
         ActionCategory::Network => "whole network".to_owned(),
-        ActionCategory::Spawn => "any process start".to_owned(),
+        ActionCategory::Spawn => permission.program.as_ref().map_or_else(
+            || "any process start".to_owned(),
+            |program| format!("start {program}"),
+        ),
         _ => permission
             .path
             .as_ref()

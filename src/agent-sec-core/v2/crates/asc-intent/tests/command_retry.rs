@@ -5,7 +5,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use asc_intent::{CommandInput, CommandPolicyOutcome, PolicyError, ProposalError, propose_command};
+use asc_intent::{
+    ActionCategory, CommandInput, CommandPolicyOutcome, PolicyError, ProposalError,
+    propose_command, summarize,
+};
 use asc_model_client::provider::{ModelProvider, ProviderError};
 use serde_json::json;
 
@@ -18,7 +21,7 @@ fn body(policy: &str) -> String {
 
 fn input() -> CommandInput {
     CommandInput {
-        command: "cat a.csv".into(),
+        command: "read -r line < a.csv".into(),
         cwd: "/tmp".into(),
     }
 }
@@ -139,6 +142,61 @@ fn caveats_accompany_the_candidate() {
 }
 
 #[test]
+fn path_utility_proposals_include_spawn_when_the_model_omits_it() {
+    const NETWORK: &str = r#"permit(principal, action == SecCore::Action::"network.use", resource is SecCore::Network);"#;
+    for (command, name, model_policy) in [
+        ("cat a.csv", "cat", VALID),
+        ("grep abc a.csv", "grep", VALID),
+        ("ls -l a.csv", "ls", VALID),
+        ("curl https://example.com", "curl", NETWORK),
+    ] {
+        let provider = Scripted::new(&[body(model_policy)]);
+        let input = CommandInput {
+            command: command.into(),
+            cwd: "/tmp".into(),
+        };
+        let outcome = propose_command(&provider, "fixture", &input, deadline()).unwrap();
+        let CommandPolicyOutcome::Candidate { policy, .. } = outcome else {
+            panic!("{command} should produce a candidate");
+        };
+        assert!(policy.starts_with(model_policy));
+        let summary = summarize(&policy).unwrap();
+        assert_eq!(summary.permits.len(), 2);
+        assert_eq!(summary.permits[1].action, ActionCategory::Spawn);
+        assert_eq!(summary.permits[1].program.as_deref(), Some(name));
+        assert_eq!(provider.calls(), 1);
+    }
+}
+
+#[test]
+fn path_utility_proposals_preserve_existing_launch_conditions() {
+    for (command, launch) in [
+        (
+            "cat a.csv",
+            r#"(principal, action == SecCore::Action::"process.spawn", resource is SecCore::Process) when { resource.program == "cat" && context.input.cwd == "/tmp" };"#,
+        ),
+        (
+            "ls",
+            r#"(principal, action == SecCore::Action::"file.exec", resource is SecCore::File) when { resource.path == "/usr/bin/ls" && context.input.arg_count == 0 };"#,
+        ),
+    ] {
+        let input = CommandInput {
+            command: command.into(),
+            cwd: "/tmp".into(),
+        };
+        for effect in ["permit", "forbid"] {
+            let policy = format!("{VALID}\n{effect}{launch}");
+            let provider = Scripted::new(&[body(&policy)]);
+            let outcome = propose_command(&provider, "fixture", &input, deadline()).unwrap();
+            let CommandPolicyOutcome::Candidate { policy: actual, .. } = outcome else {
+                panic!("expected a candidate with the model's launch conditions");
+            };
+            assert_eq!(actual, policy, "{command}: {effect}");
+        }
+    }
+}
+
+#[test]
 fn the_retry_replays_the_local_rejection() {
     let provider = Scripted::new(&[body(INVALID), body(VALID)]);
     propose_command(&provider, "fixture", &input(), deadline()).unwrap();
@@ -156,7 +214,11 @@ fn an_empty_policy_is_admitted_with_its_caveats() {
         "caveats": ["the command has no file, process or network action"],
     })
     .to_string()]);
-    let outcome = propose_command(&provider, "fixture", &input(), deadline()).unwrap();
+    let input = CommandInput {
+        command: "printf hello".into(),
+        cwd: "/tmp".into(),
+    };
+    let outcome = propose_command(&provider, "fixture", &input, deadline()).unwrap();
     let CommandPolicyOutcome::Candidate { policy, caveats } = outcome else {
         panic!("a command with no file, process or network action yields an empty candidate");
     };
@@ -194,7 +256,6 @@ fn a_persistent_path_rejection_becomes_a_clarification() {
 
 #[test]
 fn literal_archive_and_glob_commands_request_only_their_data_scopes() {
-    use asc_intent::summarize;
     let provider = Scripted::new(&[]);
     for (command, read, write) in [
         (
@@ -232,6 +293,7 @@ fn literal_archive_and_glob_commands_request_only_their_data_scopes() {
         let permissions: Vec<_> = summary
             .permits
             .iter()
+            .filter(|p| p.action != ActionCategory::Spawn)
             .map(|p| (p.action.label(), p.path.as_ref().unwrap().display()))
             .collect();
         assert_eq!(
@@ -239,6 +301,9 @@ fn literal_archive_and_glob_commands_request_only_their_data_scopes() {
             [("read", read.to_owned()), ("write", write.to_owned())],
             "{command}"
         );
+        let spawn = summary.permits.last().unwrap();
+        assert_eq!(spawn.action, ActionCategory::Spawn);
+        assert_eq!(spawn.program.as_deref(), command.split_whitespace().next());
     }
     assert_eq!(provider.calls(), 0);
 }

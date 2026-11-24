@@ -80,7 +80,7 @@ pub struct Permission {
     pub action: ActionCategory,
     /// Target path or subtree; `None` when the statement leaves the path unconstrained.
     pub path: Option<PathScope>,
-    /// Requesting program from `context.input.program`.
+    /// Requested process name or the requesting executable for file access.
     pub program: Option<String>,
     /// Working directory from `context.input.cwd`.
     pub cwd: Option<String>,
@@ -241,7 +241,7 @@ fn equality(left: &Value, right: &Value, constraints: &mut Constraints) -> Optio
             &mut constraints.path,
             PathScope::Exact(literal["Value"].as_str()?.to_owned()),
         ),
-        ("context.input", "program") => set(
+        ("context.input" | "resource", "program") => set(
             &mut constraints.program,
             literal["Value"].as_str()?.to_owned(),
         ),
@@ -273,8 +273,10 @@ fn whole_network(subject: &Value, object: &Value) -> bool {
 fn attribute(value: &Value) -> Option<(&'static str, &str)> {
     let projection = value.get(".")?;
     let name = projection["attr"].as_str()?;
-    if projection["left"] == serde_json::json!({"Var": "resource"}) && name == "path" {
-        return Some(("resource", "path"));
+    if projection["left"] == serde_json::json!({"Var": "resource"})
+        && matches!(name, "path" | "program")
+    {
+        return Some(("resource", name));
     }
     let context_input = serde_json::json!({".": {"left": {"Var": "context"}, "attr": "input"}});
     if projection["left"] == context_input {
