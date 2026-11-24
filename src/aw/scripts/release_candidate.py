@@ -35,24 +35,31 @@ def accepted_artifact(sha: str, repository: str) -> dict | None:
     ):
         return None
 
+    if type(run["run_attempt"]) is not int or run["run_attempt"] < 1:
+        return None
+    if type(run["id"]) is not int or run["id"] < 1:
+        return None
     name = f"aw-release-{sha}-{run['run_attempt']}"
     artifacts = api(f"runs/{run['id']}/artifacts?name={name}")["artifacts"]
     if len(artifacts) == 1:
         artifact = artifacts[0]
-        source = artifact.get("workflow_run") or {}
+        source = artifact["workflow_run"]
         if (
-            source.get("id") == run["id"] and source.get("head_sha") == sha
-            and artifact["name"] == name and not artifact["expired"]
-            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or "")
+            source["id"] == run["id"] and source["head_sha"] == sha
+            and artifact["name"] == name and artifact["expired"] is False
+            and type(artifact["id"]) is int and artifact["id"] > 0
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"] or "")
         ):
             return artifact
     return None
 
 
 def main() -> None:
+    sha = os.environ["GITHUB_SHA"]
+    repository = os.environ["GITHUB_REPOSITORY"]
     try:
-        artifact = accepted_artifact(os.environ["GITHUB_SHA"], os.environ["GITHUB_REPOSITORY"])
-    except subprocess.SubprocessError as error:
+        artifact = accepted_artifact(sha, repository)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"::warning::Candidate lookup unavailable; running release validation ({error})")
         return
     if artifact is None:
