@@ -45,10 +45,15 @@ BOOTSTRAP_SEED = 42
 REPEAT = 1
 
 
+def glob_under(directory: str, pattern: str) -> list[str]:
+    """Match a pattern below a literal directory path."""
+    return glob.glob(os.path.join(glob.escape(directory), pattern))
+
+
 def hosts(runs: str) -> dict[str, str]:
     """Map `hostN` to its on-disk directory name, which carries the IP."""
     out = {}
-    for d in sorted(glob.glob(f"{runs}/host*")):
+    for d in sorted(glob_under(runs, "host*")):
         out[os.path.basename(d).split("-", 1)[0]] = os.path.basename(d)
     if not out:
         raise SystemExit(f"no host* run trees under {runs}")
@@ -69,7 +74,7 @@ def discover_arms(runs: str, hosts_map: dict[str, str]) -> list[str]:
     """
     found = set()
     for hdir in hosts_map.values():
-        for d in glob.glob(f"{runs}/{hdir}/out/repeat-{REPEAT}/arm-*"):
+        for d in glob_under(f"{runs}/{hdir}/out/repeat-{REPEAT}", "arm-*"):
             letter = os.path.basename(d).split("-", 1)[1]
             if letter:
                 found.add(letter)
@@ -81,7 +86,7 @@ def load_arm(runs, hosts_map, host, arm):
     d = arm_dir(runs, hosts_map, host, arm)
     rep = json.load(open(f"{d}/report.json"))
     res = {}
-    for f in glob.glob(f"{d}/run/results/*.json"):
+    for f in glob_under(d, "run/results/*.json"):
         o = json.load(open(f))
         res[o["instance_id"]] = o
     return rep, res
@@ -322,9 +327,9 @@ def proxy(runs, hosts_map):
 def tokenless_activation(runs, hosts_map):
     """Structural activation evidence for the component under test."""
     out = {}
-    for host, hdir in hosts_map.items():
-        fs = glob.glob(
-            f"{runs}/{hdir}/out/repeat-{REPEAT}/arm-b/run/openclaw-tokenless-evidence/*.json"
+    for host in hosts_map:
+        fs = glob_under(
+            arm_dir(runs, hosts_map, host, "b"), "run/openclaw-tokenless-evidence/*.json"
         )
         out[host] = {
             "instances": len(fs),
@@ -796,7 +801,7 @@ DESIGN = {
 def shared_configuration(config_dir):
     """从本次指定的配置快照读取共享字段，拒绝配置之间的分歧。"""
     values = []
-    paths = sorted(glob.glob(f"{config_dir}/arm-*.json"))
+    paths = sorted(glob_under(config_dir, "arm-*.json"))
     required = {DESIGN["arm_definitions"][arm]["config"] for arm in ARMS}
     missing = required - {os.path.basename(path) for path in paths}
     if missing:
@@ -990,8 +995,8 @@ def report_date(runs, hosts_map):
     """
     latest = None
     for hdir in hosts_map.values():
-        for mf in glob.glob(
-            f"{runs}/{hdir}/out/repeat-{REPEAT}/arm-*/run/run_metadata.json"
+        for mf in glob_under(
+            f"{runs}/{hdir}/out/repeat-{REPEAT}", "arm-*/run/run_metadata.json"
         ):
             try:
                 ended = json.load(open(mf)).get("ended_at")
@@ -1007,9 +1012,7 @@ def instance_count(runs, hosts_map):
     ids = set()
     for host in hosts_map:
         for a in ARMS:
-            for f in glob.glob(
-                f"{arm_dir(runs, hosts_map, host, a)}/run/results/*.json"
-            ):
+            for f in glob_under(arm_dir(runs, hosts_map, host, a), "run/results/*.json"):
                 try:
                     ids.add(json.load(open(f))["instance_id"])
                 except Exception:  # noqa: BLE001

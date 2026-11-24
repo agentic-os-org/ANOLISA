@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1420,6 +1421,71 @@ def test_report_runtime_facts_do_not_inherit_authored_defaults(tmp_path: Path) -
     assert facts["observed_by_host"]["host1"] == [
         {"workers": 1, "timeout_seconds": 30, "pull_registry": "registry.invalid"}
     ]
+
+
+@pytest.mark.parametrize("directory", ("runs", "configs", "host"))
+def test_run_report_treats_input_directories_as_literal_paths(
+    tmp_path: Path, directory: str
+) -> None:
+    runs = tmp_path / "runs"
+    repeat = runs / "host1" / "out" / "repeat-1"
+    repeat.mkdir(parents=True)
+    (repeat / "sweep-summary.txt").write_text(
+        "[sweep] sweep repeat=1 arms=a,b instances=1\n"
+        "[sweep] all arms produced evidence-backed results\n",
+        encoding="utf-8",
+    )
+    for arm, tokens in (("a", 100), ("b", 50)):
+        run = repeat / f"arm-{arm}" / "run"
+        (run / "results").mkdir(parents=True)
+        (run.parent / "report.json").write_text(
+            json.dumps({"instances": {"case": {"prompt_tokens": tokens, "requests": 1}}}),
+            encoding="utf-8",
+        )
+        (run / "results" / "case.json").write_text(
+            '{"instance_id":"case","success":true,"patch_produced":true}',
+            encoding="utf-8",
+        )
+        (run / "run_metadata.json").write_text(
+            '{"started_at":"2025-01-01T23:59:00Z","ended_at":"2025-01-02T00:00:00Z"}',
+            encoding="utf-8",
+        )
+    evidence = repeat / "arm-b" / "run" / "openclaw-tokenless-evidence"
+    evidence.mkdir()
+    (evidence / "case.json").write_text('{"strong":true}', encoding="utf-8")
+    configs = shutil.copytree(SCRIPTS.parent / "configs", tmp_path / "configs")
+
+    def report(run_dir: Path, config_dir: Path) -> dict:
+        out = tmp_path / "report.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "analyze_runs.py"),
+                "--runs",
+                str(run_dir),
+                "--configs-dir",
+                str(config_dir),
+                "--out",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    plain = report(runs, configs)
+    assert plain["arms_analysed"] == ["a", "b"]
+    assert plain["date"] == "2025-01-02"
+    assert plain["tokenless_activation_by_host"]["host1"] == {"instances": 1, "strong": 1}
+    assert plain["paired_prompt_tokens"]["guard_clean_pool"]["b"]["n"] == 1
+    if directory == "runs":
+        runs = runs.rename(tmp_path / "runs[copy]")
+    elif directory == "configs":
+        configs = configs.rename(tmp_path / "configs[copy]")
+    else:
+        (runs / "host1").rename(runs / "host1-[copy]")
+    assert report(runs, configs) == plain
 
 
 def test_collected_evaluation_keeps_completion_and_predictions(tmp_path: Path) -> None:
