@@ -510,6 +510,22 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   const requestVersion = useRef(0);
   const runTimerRef = useRef<number | null>(null);
 
+  const retireRun = () => {
+    requestVersion.current += 1;
+    if (runTimerRef.current !== null) {
+      window.clearInterval(runTimerRef.current);
+      runTimerRef.current = null;
+    }
+  };
+
+  const leaveRun = () => {
+    retireRun();
+    setLoading(false);
+    setError(null);
+    setStageIdx(0);
+    setElapsed(0);
+  };
+
   // Stage definitions with estimated durations (seconds)
   const stages = [
     { name: '验收标准 + 逐步评估', est: 60 },
@@ -523,15 +539,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // any in-flight run (bump the version) and clears the previous key's case:
   // leaving it up would render the old round's verdict under the new label.
   useEffect(() => {
-    if (runTimerRef.current !== null) {
-      window.clearInterval(runTimerRef.current);
-      runTimerRef.current = null;
-    }
-    requestVersion.current += 1;
-    setLoading(false);
-    setError(null);
-    setStageIdx(0);
-    setElapsed(0);
+    leaveRun();
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
     if (past.length > 0) {
@@ -545,13 +553,14 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       setComplaint('');
     }
     setSelectedAltIdx(null);
+    return retireRun;
   }, [sessionId, roundIndex, idKind]);
 
   const canRun = complaint.trim().length > 0 && !loading;
 
   const run = async (force: boolean) => {
     if (!canRun) return;
-    const version = requestVersion.current;
+    const version = ++requestVersion.current;
     setLoading(true);
     setError(null);
     setStageIdx(0);
@@ -623,6 +632,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   };
 
   const loadFromHistory = (entry: HistoryEntry) => {
+    leaveRun();
     setComplaint(entry.complaint);
     setCaseData(entry.caseData);
     setCached(true);
@@ -630,6 +640,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   };
 
   const clearHistory = () => {
+    leaveRun();
     try {
       if (typeof window !== 'undefined') {
         window.localStorage?.removeItem(historyKey(sessionId, roundIndex, idKind));
