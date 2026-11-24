@@ -907,7 +907,7 @@ impl Analyzer {
 
         if usage.is_none() {
             log::debug!(
-                "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                "[merge_continuation_usage] continuation buffer scan miss: len={} reassembled_events={}",
                 extra.len(),
                 reassembled.events.len(),
             );
