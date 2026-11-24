@@ -187,11 +187,10 @@ export const RiskEnforcementPage: React.FC = () => {
     ? violations.filter((v) => v.agent_id === agentIdFilter)
     : violations;
 
-  // The bindings table below shows `filteredBindings`, and `filteredBindings`
-  // is the full list when no agent filter is active, so both the summary card
-  // and the binding-limit check must derive from it to agree with the visible
-  // rows and the filter banner.
+  // The summary describes the visible agent filter. Backend capacity applies
+  // to every agent, so hiding a row must not free an enforcement slot.
   const activeBindings = filteredBindings.filter((binding) => binding.state === 'enforced');
+  const globalActiveBindings = bindings.filter((binding) => binding.state === 'enforced').length;
   // The table below shows `filteredViolations`; the summary card must count
   // the same set or it disagrees with the visible rows and the filter banner.
   const displayedViolations = enforcementViolationTotal(filteredViolations, health);
@@ -200,7 +199,7 @@ export const RiskEnforcementPage: React.FC = () => {
   );
   const maxActiveBindings = health?.capabilities.max_active_bindings;
   const bindingLimitReached = typeof maxActiveBindings === 'number'
-    && activeBindings.length >= maxActiveBindings;
+    && globalActiveBindings >= maxActiveBindings;
   const canCreate = Boolean(
     health?.ready === true
       && !submitting
