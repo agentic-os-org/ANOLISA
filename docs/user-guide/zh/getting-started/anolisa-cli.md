@@ -414,6 +414,10 @@ default_backend = "raw"
 base_url = "https://repo.example.com/anolisa/v1/"
 ```
 
+如果读取 `repo.toml` 时提示 `invalid base_url`，可根据错误中的后端名和原因
+定位并修正配置项。CLI 将配置文件和 `--repo` 覆盖中校验失败的 URL 显示为
+`<redacted>`。
+
 raw backend 每次执行都会重新拉取 distribution index。当前不会使用缓存的 index 作为回退，因此仓库不可达时命令会直接失败。
 旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常解析以保持向后兼容，但当前 raw backend 不会使用这些值。
 

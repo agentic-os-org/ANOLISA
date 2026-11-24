@@ -464,6 +464,10 @@ default_backend = "raw"
 base_url = "https://repo.example.com/anolisa/v1/"
 ```
 
+If loading `repo.toml` fails with `invalid base_url`, use the backend name
+and the reason given to locate and correct the entry. The CLI shows the
+rejected URL as `<redacted>` for both configuration and `--repo` overrides.
+
 The raw backend re-fetches the distribution index on every run: there is no
 index cache and no stale-index fallback, so an unreachable repository fails the
 command instead of resolving against older data. `cache_ttl_secs` and
