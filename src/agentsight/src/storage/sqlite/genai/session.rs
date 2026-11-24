@@ -140,13 +140,14 @@ impl GenAISqliteStore {
             )
         };
         let agent_expr = if include_auxiliary {
-            "COALESCE(MAX(agent_name), MAX(process_name))".to_string()
+            "COALESCE(MAX(NULLIF(TRIM(agent_name), '')), MAX(NULLIF(TRIM(process_name), '')))"
+                .to_string()
         } else {
             format!(
                 "CASE WHEN {has_main} \
-                 THEN COALESCE(MAX({text_aux_guard}agent_name{text_aux_end}), \
-                            MAX({text_aux_guard}process_name{text_aux_end})) \
-                 ELSE COALESCE(MAX(agent_name), MAX(process_name)) END"
+                 THEN COALESCE(MAX(NULLIF(TRIM({text_aux_guard}agent_name{text_aux_end}), '')), \
+                            MAX(NULLIF(TRIM({text_aux_guard}process_name{text_aux_end}), ''))) \
+                 ELSE COALESCE(MAX(NULLIF(TRIM(agent_name), '')), MAX(NULLIF(TRIM(process_name), ''))) END"
             )
         };
         // Same filter for the correlated user-query subqueries (g2-qualified).
@@ -238,8 +239,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT session_id,
-                    COALESCE(MAX(agent_name),
-                             MAX(process_name))       AS agent_name,
+                    COALESCE(MAX(NULLIF(TRIM(agent_name), '')),
+                             MAX(NULLIF(TRIM(process_name), '')))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -249,15 +250,15 @@ impl GenAISqliteStore {
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
+               AND COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE = ?3 COLLATE NOCASE
              GROUP BY session_id
              ORDER BY MAX(start_timestamp_ns) DESC"
             )
         } else {
             concat!(
                 "SELECT session_id,
-                    COALESCE(MAX(agent_name),
-                             MAX(process_name))       AS agent_name,
+                    COALESCE(MAX(NULLIF(TRIM(agent_name), '')),
+                             MAX(NULLIF(TRIM(process_name), '')))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -309,8 +310,8 @@ impl GenAISqliteStore {
 
         let sql = concat!(
             "SELECT session_id,
-                    COALESCE(MAX(agent_name),
-                             MAX(process_name))       AS agent_name,
+                    COALESCE(MAX(NULLIF(TRIM(agent_name), '')),
+                             MAX(NULLIF(TRIM(process_name), '')))       AS agent_name,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)   AS total_input,
@@ -658,13 +659,13 @@ impl GenAISqliteStore {
             // while the dashboard shows its sessions under that label.
             // The auxiliary guard is bound as a parameter rather than
             // concatenated into the statement.
-            "SELECT MIN(COALESCE(agent_name, process_name)) AS agent_name
+            "SELECT MIN(COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''))) AS agent_name
              FROM genai_events
              WHERE event_type = 'llm_call'
-               AND COALESCE(agent_name, process_name) IS NOT NULL
+               AND COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
                AND (?3 = 1 OR call_kind = 'main' OR call_kind IS NULL OR call_kind = 'recap')
-             GROUP BY COALESCE(agent_name, process_name) COLLATE NOCASE
+             GROUP BY COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE
              ORDER BY agent_name ASC",
         )?;
         let rows = stmt.query_map(params![start_ns, end_ns, include_auxiliary as i32], |row| {
