@@ -71,6 +71,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # Real stdout, captured before anything can print to it, and used only by
@@ -100,9 +101,23 @@ def _provenance(module: Any) -> tuple[str | None, bool | None, int | None]:
     src = getattr(module, "__file__", None)
     if not src:
         return None, None, None
-    root = src.rsplit("/", 2)[0]
-    base = ["git", "-c", f"safe.directory={root}", "-C", root]
+    source = Path(src).resolve()
+    root = next(
+        (candidate for candidate in source.parents if (candidate / ".git").exists()),
+        None,
+    )
+    if root is None:
+        return None, None, None
+    base = ["git", "--literal-pathspecs", "-c", f"safe.directory={root}", "-C", str(root)]
     try:
+        tracked = subprocess.run(
+            [*base, "ls-files", "--error-unmatch", "--", source.relative_to(root).as_posix()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        if tracked.returncode != 0:
+            return None, None, None
         rev = subprocess.run(
             [*base, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
         )

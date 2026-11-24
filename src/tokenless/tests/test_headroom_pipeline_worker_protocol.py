@@ -25,6 +25,7 @@ WORKER = (
     / "worker"
     / "headroom_pipeline_worker.py"
 )
+L2_WORKER = WORKER.parents[3] / "l2-module" / "assets" / "worker" / "headroom_worker.py"
 
 _CONFIG_STUB = """\
 class CacheAlignerConfig:
@@ -98,9 +99,11 @@ class WorkerProtocolTests(unittest.TestCase):
         (transforms / "pipeline.py").write_text(_PIPELINE_STUB, encoding="utf-8")
         self.env = dict(os.environ, PYTHONPATH=str(stub_root), PYTHONDONTWRITEBYTECODE="1")
 
-    def _run_lines(self, lines: list[str]) -> list[dict[str, Any]]:
+    def _run_lines(
+        self, lines: list[str], worker: Path = WORKER
+    ) -> list[dict[str, Any]]:
         result = subprocess.run(
-            [sys.executable, str(WORKER)],
+            [sys.executable, str(worker)],
             input="".join(line + "\n" for line in lines),
             capture_output=True,
             text=True,
@@ -133,6 +136,36 @@ class WorkerProtocolTests(unittest.TestCase):
         responses = self._run_lines([])
         self.assertIn("pure_stage", responses[0]["variants"])
         self.assertIn("router", responses[0]["variants"])
+
+    def test_workers_report_provenance_only_for_tracked_sources(self) -> None:
+        root = Path(self.temp.name)
+        (root / "README.md").write_text("# Fixture\n", encoding="utf-8")
+
+        def git(*args: str) -> str:
+            return subprocess.check_output(
+                [
+                    "git", "-C", str(root), "-c", "user.name=Fixture",
+                    "-c", "user.email=fixture@example.invalid", *args,
+                ],
+                text=True,
+            ).strip()
+
+        git("init", "-q")
+        git("add", "README.md")
+        git("commit", "-qm", "Initial repository")
+        fields = ("revision", "dirty", "untracked")
+        for worker in (L2_WORKER, WORKER):
+            with self.subTest(worker=worker.name, tracked=False):
+                handshake = self._run_lines([], worker)[0]
+                self.assertEqual(tuple(handshake[key] for key in fields), (None, None, None))
+
+        git("add", "headroom")
+        git("commit", "-qm", "Track source package")
+        revision = git("rev-parse", "HEAD")
+        for worker in (L2_WORKER, WORKER):
+            with self.subTest(worker=worker.name, tracked=True):
+                handshake = self._run_lines([], worker)[0]
+                self.assertEqual(tuple(handshake[key] for key in fields), (revision, False, 0))
 
     def test_unparseable_request_and_followup(self) -> None:
         responses = self._run_lines(["{not json", json.dumps(self._valid_request())])
