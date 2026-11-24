@@ -145,12 +145,14 @@ pub fn load_state(state_dir: &Path) -> Result<Option<DaemonStateFile>> {
 /// leave the file durably on disk while memory rejects the update, causing
 /// memory-vs-disk drift. We log it at `warn!` instead.
 ///
-/// `mode` is applied both via `OpenOptions::mode()` at create time AND via
-/// an explicit `fchmod` on the open handle. The fchmod is required because
-/// `create(true).truncate(true)` reuses the inode of a stale `<name>.tmp`
-/// left by a crashed prior write, inheriting its old (possibly 0o644)
-/// permissions — `OpenOptions::mode()` only fires on a fresh create.
-/// Ignored on non-Unix.
+/// Any stale `<name>.tmp` entry is removed first and reopened with
+/// `create_new(true)` (`O_EXCL`) so pre-existing symlinks or stale permissions
+/// are never reused. `mode` is passed via `OpenOptions::mode()` at create time
+/// AND enforced afterward with `fchmod` so the process `umask` cannot narrow
+/// the requested permissions. Ignored on non-Unix. Errors during write, sync,
+/// or rename leave `<name>.tmp` in place rather than unlinking by path (so a
+/// failing writer can never delete another concurrent writer's `.tmp`); the
+/// next call's unlink-first step reclaims it cleanly.
 pub fn atomic_write(
     dir: &Path,
     name: &str,
@@ -196,43 +198,80 @@ where
     sync_dir(dir)
 }
 
+fn write_and_sync_tmp(
+    tmp: &Path,
+    bytes: &[u8],
+    #[cfg_attr(not(unix), allow(unused_variables))] mode: Option<u32>,
+) -> Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(m);
+    }
+    let mut file = opts
+        .open(tmp)
+        .with_context(|| format!("Failed to create temp file: {}", tmp.display()))?;
+    // Apply fchmod after create_new so the process umask cannot narrow `mode`.
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(m))
+            .with_context(|| format!("Failed to chmod temp file: {}", tmp.display()))?;
+    }
+    file.write_all(bytes)
+        .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to fsync temp file: {}", tmp.display()))?;
+    Ok(())
+}
+
 fn atomic_write_and_rename(
     dir: &Path,
     name: &str,
     bytes: &[u8],
-    #[cfg_attr(not(unix), allow(unused_variables))] mode: Option<u32>,
+    mode: Option<u32>,
 ) -> Result<PathBuf> {
+    atomic_write_and_rename_with(dir, name, bytes, mode, |src, dst| fs::rename(src, dst))
+}
+
+fn atomic_write_and_rename_with<R>(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    mode: Option<u32>,
+    rename_fn: R,
+) -> Result<PathBuf>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
 
     let target = dir.join(name);
     let tmp = dir.join(format!("{}.tmp", name));
 
-    {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        if let Some(m) = mode {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(m);
+    // Unlink any pre-existing `.tmp` before opening with `O_EXCL`
+    // (`create_new`), so a stale symlink cannot redirect writes or chmods to
+    // its target and stale permissions are never reused. Only `NotFound` is
+    // benign here: non-unlinkable entries such as a pre-existing `.tmp`
+    // directory (`EISDIR` on Linux / `EPERM` on macOS) surface cleanly, while
+    // `create_new(true)` independently guards against concurrent `AlreadyExists`.
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to clear stale temp file: {}", tmp.display()));
         }
-        let mut file = opts
-            .open(&tmp)
-            .with_context(|| format!("Failed to create temp file: {}", tmp.display()))?;
-        // fchmod even if file pre-existed: OpenOptions::mode() only applies on create.
-        #[cfg(unix)]
-        if let Some(m) = mode {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(m))
-                .with_context(|| format!("Failed to chmod temp file: {}", tmp.display()))?;
-        }
-        file.write_all(bytes)
-            .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to fsync temp file: {}", tmp.display()))?;
     }
+    write_and_sync_tmp(&tmp, bytes, mode)?;
 
-    fs::rename(&tmp, &target).with_context(|| {
+    // Leave `.tmp` untouched if rename fails (reclaimed by the next call's
+    // unlink-first pass) so a failing writer never deletes a concurrent
+    // writer's freshly `create_new`'d `.tmp` entry by path.
+    rename_fn(&tmp, &target).with_context(|| {
         format!(
             "Failed to atomically rename: {} -> {}",
             tmp.display(),
@@ -411,7 +450,134 @@ mod tests {
             & 0o777;
         assert_eq!(
             final_mode, 0o600,
-            "stale-tmp inode reuse must not leak 0o644"
+            "stale .tmp must be replaced with the requested mode"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_write_through_stale_tmp_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let tmp = dir.path().join(format!("{}.tmp", STATE_FILE));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+
+        atomic_write(dir.path(), STATE_FILE, b"new", Some(0o600)).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let target = dir.path().join(STATE_FILE);
+        assert!(fs::symlink_metadata(&target).unwrap().file_type().is_file());
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(fs::symlink_metadata(&tmp).is_err(), "no tmp residue");
+
+        // Also ensure a dangling `.tmp` symlink is unlinked rather than
+        // creating its target file via O_CREAT.
+        let dangling_target = dir.path().join("missing-victim");
+        std::os::unix::fs::symlink(&dangling_target, &tmp).unwrap();
+        atomic_write(dir.path(), STATE_FILE, b"fresh", Some(0o600)).unwrap();
+        assert!(!dangling_target.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"fresh");
+
+        // A `.tmp` symlink pointing at a directory must also be unlinked
+        // without touching the target directory.
+        let dir_victim = dir.path().join("dir-victim");
+        fs::create_dir(&dir_victim).unwrap();
+        fs::write(dir_victim.join("inside"), b"untouched").unwrap();
+        std::os::unix::fs::symlink(&dir_victim, &tmp).unwrap();
+        atomic_write_strict(dir.path(), STATE_FILE, b"strict", Some(0o600)).unwrap();
+        assert!(fs::symlink_metadata(&target).unwrap().file_type().is_file());
+        assert_eq!(fs::read(&target).unwrap(), b"strict");
+        assert_eq!(fs::read(dir_victim.join("inside")).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&tmp).is_err());
+
+        // Also cover `atomic_write_strict` against a live `.tmp` symlink.
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        atomic_write_strict(dir.path(), STATE_FILE, b"strict2", Some(0o600)).unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(fs::read(&target).unwrap(), b"strict2");
+        assert!(fs::symlink_metadata(&tmp).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_replaces_readonly_tmp_and_rejects_tmp_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let name = "policy.toml";
+        let target = dir.path().join(name);
+        let tmp = dir.path().join(format!("{}.tmp", name));
+
+        // Pre-existing read-only `.tmp` file is unlinked and replaced with requested mode.
+        fs::write(&tmp, b"readonly-stale").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o444)).unwrap();
+        atomic_write(dir.path(), name, b"fresh-policy", Some(0o600)).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"fresh-policy");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fs::symlink_metadata(&tmp).is_err());
+
+        // Pre-existing directory at `.tmp` must fail cleanly without touching target.
+        fs::create_dir(&tmp).unwrap();
+        let err = atomic_write(dir.path(), name, b"overwrite", Some(0o600)).unwrap_err();
+        assert!(err.to_string().contains("Failed to clear stale temp file"));
+        let strict_err =
+            atomic_write_strict(dir.path(), name, b"overwrite", Some(0o600)).unwrap_err();
+        assert!(strict_err
+            .to_string()
+            .contains("Failed to clear stale temp file"));
+        assert!(tmp.is_dir());
+        assert_eq!(fs::read(&target).unwrap(), b"fresh-policy");
+    }
+
+    #[test]
+    fn rename_failure_preserves_tmp_until_next_unlink_first_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("occupied-dir");
+        fs::create_dir(&target_dir).unwrap();
+
+        let err = atomic_write(dir.path(), "occupied-dir", b"bytes", None).unwrap_err();
+        assert!(err.to_string().contains("Failed to atomically rename"));
+        assert!(target_dir.is_dir());
+
+        // Once the obstruction is removed, the next write reclaims `.tmp` cleanly.
+        fs::remove_dir(&target_dir).unwrap();
+        atomic_write(dir.path(), "occupied-dir", b"recovered", None).unwrap();
+        assert_eq!(fs::read(&target_dir).unwrap(), b"recovered");
+        assert!(fs::symlink_metadata(dir.path().join("occupied-dir.tmp")).is_err());
+    }
+
+    #[test]
+    fn rename_failure_does_not_unlink_concurrent_writers_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "state.json";
+        let tmp_path = dir.path().join(format!("{}.tmp", name));
+
+        // Simulate writer B replacing `.tmp` via `create_new` right as writer A's
+        // rename fails: writer A must never unlink writer B's live `.tmp`.
+        let err = atomic_write_and_rename_with(dir.path(), name, b"writer-a", None, |tmp, _| {
+            assert_eq!(fs::read(tmp).unwrap(), b"writer-a");
+            fs::remove_file(tmp).unwrap();
+            let mut file_b = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(tmp)
+                .unwrap();
+            file_b.write_all(b"writer-b-live").unwrap();
+            Err(std::io::Error::other("simulated rename failure"))
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Failed to atomically rename"));
+        assert_eq!(fs::read(&tmp_path).unwrap(), b"writer-b-live");
     }
 }
