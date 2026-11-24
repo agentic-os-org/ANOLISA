@@ -313,6 +313,9 @@ export const ReuseLabelsPage: React.FC = () => {
   const toggleAllPending = () => {
     const pending = new Set(rows.filter((row) => !row.human_backed).map((row) => row.session_id));
     setSelected((current) => (sameMembers(current, pending) ? new Set() : pending));
+    // The pending set is not one of the dropdown criteria, so the dropdown
+    // must stop claiming the selection matches one.
+    setSelectMode('');
   };
 
   /**

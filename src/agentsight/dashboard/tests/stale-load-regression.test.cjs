@@ -321,6 +321,19 @@ test('reuse-labels: toggling a criterion compares the selected rows', () => {
   assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
 });
 
+test('reuse-labels: the pending header checkbox resets the select dropdown', () => {
+  const source = readSource('src/pages/ReuseLabelsPage.tsx');
+  // toggleAllPending replaced the selection wholesale but left selectMode
+  // alone, so the controlled <select> kept showing a stale criterion.
+  const fnMatch = source.match(/const toggleAllPending = \(\) => \{([\s\S]*?)\n {2}\};/);
+  assert.ok(fnMatch, 'ReuseLabelsPage: must define toggleAllPending');
+  assert.match(
+    fnMatch[1],
+    /setSelectMode\(''\);/,
+    'ReuseLabelsPage.toggleAllPending: must clear selectMode like toggle()',
+  );
+});
+
 test('agent-sessions: a failed semantic search is not an empty result', () => {
   const source = readSource('src/pages/AgentSessionsPage.tsx');
   // The search catch used to clear the matches and nothing else, so the table
