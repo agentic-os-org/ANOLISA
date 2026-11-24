@@ -114,9 +114,12 @@ jobs:
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          # All three workspaces compile into one target; include independent Provider inputs in its key.
-          key: aw-checks-${{ hashFiles('providers/agent-sec-core/Cargo.*', 'providers/tokenless/Cargo.*', 'providers/*/rust-toolchain.toml', 'providers/*/.cargo/config*') }}
-          workspaces: src/aw -> target/cargo-contracts
+          key: aw-checks
+          # All three lockfiles contribute registry dependencies to the shared build.
+          workspaces: |
+            src/aw -> target/cargo-contracts
+            providers/agent-sec-core
+            providers/tokenless
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks

@@ -69,11 +69,14 @@ class DailyWorkflowTests(GateFixture):
 
     def test_contract_build_and_cache_share_a_single_target(self) -> None:
         checks = self.jobs["checks"]
-        workspace, target = re.search(r"^          workspaces: (\S+) -> (\S+)$",
-                                      checks, re.MULTILINE).groups()
-        self.assertIn(f"CARGO_TARGET_DIR: ${{{{ github.workspace }}}}/{workspace}/{target}", checks)
-        for provider in ("agent-sec-core", "tokenless"):
-            self.assertIn(f"'providers/{provider}/Cargo.*'", checks)
+        self.assertIn(
+            "          workspaces: |\n"
+            "            src/aw -> target/cargo-contracts\n"
+            "            providers/agent-sec-core\n"
+            "            providers/tokenless\n",
+            checks,
+        )
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/src/aw/target/cargo-contracts", checks)
 
     def test_only_cold_pr_and_queue_builds_override_the_tokenless_link_profile(self) -> None:
         tokenless = self.jobs["tokenless"]
