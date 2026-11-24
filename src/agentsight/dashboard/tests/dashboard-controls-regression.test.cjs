@@ -246,6 +246,64 @@ function collectElements(node, predicate, out = []) {
 
 // ─── Bug 3: model legend hides the series, it does not repaint it ────────────
 
+
+function protectionFixture(api) {
+  const driver = createHooksDriver();
+  const { AgentCard } = loadPageModule('src/pages/AgentHealthPage.tsx', {
+    '../utils/apiClient': api,
+    '../i18n': { useI18n: () => ({ t: key => key }), useLocaleTag: () => 'en-US', INTERRUPTION_TYPES: [] },
+    '../utils/datetime': { formatNs: String },
+    '../constants/policyIds': { CREDENTIAL_POLICY_ID: 'credential' },
+    '../components/CacheDiagnosisPanel': componentStub('CacheDiagnosisPanel'),
+  }, driver, '\nexports.AgentCard = AgentCard;');
+  const notices = [];
+  const props = { agent: { pid: 123, agent_name: 'fixture', role: 'gateway', status: 'healthy',
+    workspace_path: '/project', ports: [8080], last_seen: 0 }, related: [],
+    onDelete() {}, onRestart() {}, restarting: false, addToast: message => notices.push(message) };
+  const render = () => driver.render(AgentCard, props).element;
+  const button = label => collectElements(render(), node => node.type === 'button' && node.children.includes(label))[0];
+  const open = () => button('保护设置').props.onClick();
+  return { driver, render, button, open, notices };
+}
+
+for (const [draft, trusted] of [['', ['192.0.2.1:443']], ['198.51.100.1:443', []]]) {
+  test(`one-click protection uses preview targets instead of the draft (${draft || 'empty'})`, async () => {
+    const { calls, stubs } = deferredFetchStubs(['fetchAgentProtectionPreview', 'createCredentialBinding']);
+    const fixture = protectionFixture(stubs);
+    if (draft) {
+      fixture.open();
+      calls.fetchAgentProtectionPreview[0].resolve({ workspace_path: '/project', source_paths: ['/project/.env'], trusted_endpoints: [] });
+      await settle();
+      const target = collectElements(fixture.render(), node => node.type === 'input' && node.props.placeholder?.includes('10.0.0.8'))[0];
+      target.props.onChange({ target: { value: draft } });
+      fixture.button('取消').props.onClick();
+    }
+    collectElements(fixture.render(), node => node.props?.role === 'switch')[0].props.onClick();
+    const preview = calls.fetchAgentProtectionPreview.at(-1);
+    preview.resolve({ workspace_path: '/project', source_paths: ['/project/.env'], trusted_endpoints: trusted });
+    await settle();
+    assert.deepEqual(calls.createCredentialBinding[0].args[0].trusted_endpoints, trusted,
+      'one-click activation must use the preview returned for this activation');
+    assert.deepEqual(calls.createCredentialBinding[0].args[0].source_paths, ['/project/.env']);
+    calls.createCredentialBinding[0].resolve({ request: { binding_id: 'created' } });
+    await settle();
+  });
+}
+
+test('manual protection keeps the explicitly edited target', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchAgentProtectionPreview', 'createCredentialBinding']);
+  const fixture = protectionFixture(stubs);
+  fixture.open();
+  calls.fetchAgentProtectionPreview[0].resolve({ workspace_path: '/project', source_paths: ['/project/.env'], trusted_endpoints: ['192.0.2.1:443'] });
+  await settle();
+  collectElements(fixture.render(), node => node.type === 'input' && node.props.placeholder?.includes('10.0.0.8'))[0]
+    .props.onChange({ target: { value: '198.51.100.1:443' } });
+  fixture.button('开启审计保护').props.onClick();
+  assert.deepEqual(calls.createCredentialBinding[0].args[0].trusted_endpoints, ['198.51.100.1:443']);
+  calls.createCredentialBinding[0].resolve({ request: { binding_id: 'created' } });
+  await settle();
+});
+
 test('conversation-list: hiding a model series uses hide, not a transparent fill', () => {
   const source = readSource('src/pages/ConversationList.tsx');
   const barsStart = source.indexOf('{models.map((m, i) => (');
