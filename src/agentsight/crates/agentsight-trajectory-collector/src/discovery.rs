@@ -748,7 +748,7 @@ pub fn decode_project_dir(encoded: &str) -> String {
     ];
 
     let mut best_match: Option<usize> = None;
-    for (i, part) in parts.iter().enumerate() {
+    for (i, part) in parts[..parts.len().saturating_sub(1)].iter().enumerate() {
         if parent_markers.contains(&part.to_lowercase().as_str()) {
             best_match = Some(i);
         }
@@ -822,6 +822,11 @@ mod tests {
         assert_eq!(decode_project_dir("-Users-john-projects-myapp"), "myapp");
         assert_eq!(decode_project_dir("myproject"), "myproject");
         assert_eq!(decode_project_dir("-data-work-repos-foo"), "foo");
+        assert_eq!(decode_project_dir("-Users-alice-projects-dev"), "dev");
+        assert_eq!(decode_project_dir("-Users-alice-projects-my-dev"), "my-dev");
+        assert_eq!(decode_project_dir("-Users-alice-work-projects"), "projects");
+        assert_eq!(decode_project_dir("-Users-alice-src"), "Users-alice-src");
+        assert_eq!(decode_project_dir("-dev"), "dev");
     }
 
     #[test]
