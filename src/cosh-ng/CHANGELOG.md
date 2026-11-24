@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-11-24
+
+### Added
+
+- Shell approval cards now disclose that live terminal output is not redacted and may remain in scrollback. The disclosure appears for shell commands and provider shell aliases regardless of the command's risk or exposure classification — including `printenv` — and whole-turn consent (`Allow all this turn`) warns about the entire turn's terminal output, including when a non-shell first card grants it. Approval policy, read-only eligibility, trust keys, model-side redaction and PTY output are unchanged (#10518)
+
+### Fixed
+
+- On ECS, `cosh --ask 'question'` shows the existing OS Console activation QR code or link when the account has not completed authorization, instead of failing with an identity error before any guidance appears. Completing authorization continues the same question through the existing bounded wait, and cancellation still works. Other identity failures — generic internal errors, invalid proofs and permission denials — are not treated as activation, and model-service activation and credits stay separate checks. CLI syntax, saved provider priority and the default login shell are unchanged (#10532)
+- `git diff`, `git show` and related forms no longer appear as low or medium risk while they can execute repository-embedded programs (`diff.external`, `diff.<driver>.textconv`, `core.fsmonitor`, `gpg.program`, and partial-clone lazy fetch through `core.sshCommand` or credential helpers). The approval card now rates them high and adds a "may run repo-embedded scripts" warning, including in pipelines and wrapped forms; when a stronger reason is primary, such as `sudo git diff` showing privilege escalation, the warning still appears in the approval details (#10368)
+
 ## [0.30.1] - 2026-11-22
 
 ### Added
