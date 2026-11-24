@@ -39,7 +39,8 @@ pub const DEFAULT_MAX_AGENT_LEN: usize = 2_000;
 /// - `triage-4` no deterministic finding accuses at all; `bad` needs a model
 ///   review or a person. See `super::summarize`.
 /// - `triage-5` a single recorded step still counts its answer and tool work.
-const TRIAGE_RULES_VERSION: &str = "triage-5";
+/// - `triage-6` system-injected user steps no longer count as user turns.
+const TRIAGE_RULES_VERSION: &str = "triage-6";
 
 /// Thresholds for [`classify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +95,11 @@ impl TriageMetrics {
         };
         for step in &trajectory.steps {
             match step.source {
-                StepSource::User => metrics.n_user_turns += 1,
+                StepSource::User => {
+                    if agentsight_trajectory_collector::has_user_authored_text(&step.message) {
+                        metrics.n_user_turns += 1;
+                    }
+                }
                 StepSource::Agent => {
                     metrics.max_agent_len = metrics.max_agent_len.max(step.message.chars().count());
                 }
@@ -406,7 +411,64 @@ mod tests {
         let a = TriageConfig::default();
         let b = TriageConfig { max_agent_len: 900 };
         assert_ne!(a.version(), b.version());
-        assert!(a.version().starts_with("triage-5/"));
+        assert!(a.version().starts_with("triage-6/"));
+    }
+
+    #[test]
+    fn measure_ignores_system_injected_user_steps() {
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "test"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "1+1?"},
+                {"step_id": 2, "source": "agent", "message": "2"},
+                {"step_id": 3, "source": "user", "message": "<command-message>clear</command-message>"},
+                {"step_id": 4, "source": "user", "message": "<system-reminder>ctx</system-reminder>\n  "},
+                {"step_id": 5, "source": "user", "message": null}
+            ]
+        }"#;
+        let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
+        let measured = TriageMetrics::measure(&trajectory);
+        assert_eq!(measured.n_user_turns, 1);
+        assert_eq!(
+            triage(&trajectory, &clean(), &TriageConfig::default()).label,
+            TrajectoryLabel::Useless
+        );
+    }
+
+    #[test]
+    fn measure_keeps_genuine_followup_turns() {
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "test"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "1+1?"},
+                {"step_id": 2, "source": "agent", "message": "2"},
+                {"step_id": 3, "source": "user", "message": "<system-reminder>context</system-reminder>why?"}
+            ]
+        }"#;
+        let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
+        let measured = TriageMetrics::measure(&trajectory);
+        assert_eq!(measured.n_user_turns, 2);
+        assert_eq!(
+            triage(&trajectory, &clean(), &TriageConfig::default()).label,
+            TrajectoryLabel::Good
+        );
+    }
+
+    #[test]
+    fn measure_ignores_unterminated_system_tag_without_user_text() {
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "test"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "1+1?"},
+                {"step_id": 2, "source": "agent", "message": "2"},
+                {"step_id": 3, "source": "user", "message": "<system-reminder>unclosed"}
+            ]
+        }"#;
+        let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
+        assert_eq!(TriageMetrics::measure(&trajectory).n_user_turns, 1);
     }
 
     #[test]

@@ -20,9 +20,10 @@ pub mod qoder;
 pub mod store;
 
 pub use store::{
-    strip_system_context, StepContext, StepHit, StepScanFilter, StepScanOutcome, StepView,
-    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryMaintenancePolicy,
-    TrajectoryMaintenanceReport, TrajectoryRecord, TrajectoryStore, TrajectorySummary,
+    has_user_authored_text, strip_system_context, StepContext, StepHit, StepScanFilter,
+    StepScanOutcome, StepView, TrajectoryAgentActivitySummary, TrajectoryFilters,
+    TrajectoryMaintenancePolicy, TrajectoryMaintenanceReport, TrajectoryRecord, TrajectoryStore,
+    TrajectorySummary,
 };
 
 use std::path::PathBuf;
