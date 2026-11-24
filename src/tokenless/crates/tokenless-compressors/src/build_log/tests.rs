@@ -628,3 +628,463 @@ fn duplicate_payload_writes_remain_visible_to_the_runtime_ledger() {
     assert_eq!(second.stash_writes.len(), 1);
     assert!(!second.stash_writes[0].created);
 }
+
+#[test]
+fn claimed_cursor_skips_single_and_abutting_ranges_and_clamps_bounds() {
+    let mut empty = scope::ClaimedCursor::new(&[]);
+    assert_eq!(empty.skip_if_claimed(0), None);
+    assert_eq!(empty.unclaimed_end(0, 10), 10);
+    assert_eq!(empty.unclaimed_end(5, 10), 10);
+
+    let spans = [2..5, 5..8, 12..15];
+    let mut cursor = scope::ClaimedCursor::new(&spans);
+    assert_eq!(cursor.skip_if_claimed(0), None);
+    assert_eq!(cursor.unclaimed_end(0, 20), 2);
+    assert_eq!(cursor.skip_if_claimed(2), Some(8));
+    assert_eq!(cursor.unclaimed_end(8, 20), 12);
+    assert_eq!(cursor.skip_if_claimed(12), Some(15));
+    assert_eq!(cursor.unclaimed_end(15, 20), 20);
+    assert_eq!(cursor.skip_if_claimed(16), None);
+
+    let mut mid = scope::ClaimedCursor::new(&spans);
+    assert_eq!(mid.skip_if_claimed(4), Some(8));
+    assert_eq!(mid.unclaimed_end(8, 10), 10);
+
+    let clamp_range = 2..5;
+    let mut clamped = scope::ClaimedCursor::new(std::slice::from_ref(&clamp_range));
+    assert_eq!(clamped.unclaimed_end(0, 1), 1);
+    assert_eq!(clamped.unclaimed_end(3, 10), 3);
+    assert_eq!(clamped.unclaimed_end(5, 4), 4);
+}
+
+#[test]
+fn cmake_build_plan_skips_claimed_ranges_without_overlap() {
+    let input = (1..=14)
+        .map(|i| format!("[{i}/14] Building CXX object src/CMakeFiles/app.dir/unit_{i:02}.cpp.o\n"))
+        .collect::<String>();
+    let lines = input.split_inclusive('\n').collect::<Vec<_>>();
+    let claimed = 5..9;
+    let edits = cmake_build::plan(&lines, std::slice::from_ref(&claimed));
+    assert_eq!(edits.len(), 2);
+    assert_eq!((edits[0].start, edits[0].end), (0, 5));
+    assert_eq!((edits[1].start, edits[1].end), (9, 14));
+
+    let rendered = render_reduced(&lines, &[], &[], &RecoveryMethod::Shell, &edits);
+    for claimed_line in &lines[5..9] {
+        assert!(rendered.contains(claimed_line));
+    }
+    assert_eq!(rendered.matches("CMake/Ninja templates (").count(), 2);
+}
+
+#[test]
+fn compose_non_overlapping_passes_merges_disjoint_passes_and_respects_diagnostics() {
+    type TestStepPass<'a> = Box<dyn FnOnce(&[&str], &[Range<usize>]) -> Vec<LayoutEdit> + 'a>;
+
+    let mut input = String::new();
+    for i in 1..=4 {
+        input.push_str(&format!(
+            "[{i}/8] Building CXX object src/CMakeFiles/app.dir/front_{i:02}.cpp.o\n"
+        ));
+    }
+    input.push_str("Traceback (most recent call last):\n");
+    input.push_str("  File \"gen.py\", line 12, in <module>\n");
+    input.push_str("RuntimeError: boom\n");
+    for i in 5..=7 {
+        input.push_str(&format!(
+            "[{i}/8] Building CXX object src/CMakeFiles/app.dir/tail_{i:02}.cpp.o\n"
+        ));
+    }
+    let lines = input.split_inclusive('\n').collect::<Vec<_>>();
+    let stripped = lines
+        .iter()
+        .map(|line| line.trim_end_matches('\n').to_owned())
+        .collect::<Vec<_>>();
+    let mut diagnostic_mask = vec![false; lines.len()];
+    for region in trace_regions(&stripped) {
+        diagnostic_mask[region].fill(true);
+    }
+    assert!(diagnostic_mask[4..7].iter().all(|&flag| flag));
+
+    let mut pass2_claimed = Vec::new();
+    let pass1: TestStepPass<'_> = Box::new(|_, _| {
+        vec![
+            // Line 4 is inside the traceback, so this edit must be dropped and release line 3.
+            LayoutEdit {
+                start: 3,
+                end: 5,
+                replacement: "dropped\n".to_owned(),
+            },
+            LayoutEdit {
+                start: 7,
+                end: 10,
+                replacement: "tail_edit\n".to_owned(),
+            },
+        ]
+    });
+    let pass2: TestStepPass<'_> = Box::new(|lines, claimed| {
+        pass2_claimed = claimed.to_vec();
+        cmake_build::plan(lines, claimed)
+    });
+
+    let merged = compose_non_overlapping_passes(&lines, &diagnostic_mask, [pass1, pass2]);
+    assert_eq!(pass2_claimed, vec![7..10]);
+    assert_eq!(merged.layouts.len(), 2);
+    assert_eq!((merged.layouts[0].start, merged.layouts[0].end), (0, 4));
+    assert_eq!((merged.layouts[1].start, merged.layouts[1].end), (7, 10));
+    assert_eq!(merged.protected_ranges, vec![3..5, 7..10, 0..4]);
+
+    let dummy_lines = vec!["row\n"; scope::MAX_EDITS * 3];
+    let no_diag = vec![false; dummy_lines.len()];
+    let mut pass2_called = false;
+    let saturating: TestStepPass<'_> = Box::new(|_, _| {
+        (0..scope::MAX_EDITS)
+            .map(|i| LayoutEdit {
+                start: i * 2,
+                end: i * 2 + 1,
+                replacement: "x\n".to_owned(),
+            })
+            .collect()
+    });
+    let skipped: TestStepPass<'_> = Box::new(|_, _| {
+        pass2_called = true;
+        Vec::new()
+    });
+    let capped = compose_non_overlapping_passes(&dummy_lines, &no_diag, [saturating, skipped]);
+    assert_eq!(capped.layouts.len(), scope::MAX_EDITS);
+    assert!(!pass2_called);
+}
+
+#[test]
+fn scoped_compacted_header_guards_scored_routes_and_ignores_fences() {
+    let store = InMemoryStore::new();
+    let cmake_block = "\
+        CMake/Ninja templates (id<TAB>fields; interleave with literals): {\"literals\":[[\"[\",\"/2] Building CXX object \",\".cpp.o\"]],\"rows\":2}\n\
+        0\t1\ta\n\
+        0\t2\tb\n";
+    let gradle_block = "\
+        Gradle templates (id<TAB>fields; interleave with literals): {\"literals\":[[\"> Task :\",\" UP-TO-DATE\"]],\"rows\":2}\n\
+        0\tcompileJava\n\
+        0\tclasses\n";
+    let ctest_block = "\
+        CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): {\"rows\":2,\"total\":\"2\",\"start_indent\":6,\"idx_width\":1,\"id_width\":1,\"col\":40,\"prefixes\":[]}\n\
+        P\t1\t\ta\t0.01\n\
+        P\t2\t\tb\t0.01\n";
+
+    let mut unsampled_head = String::from("make: Entering directory '/work'\n");
+    for i in 0..105 {
+        unsampled_head.push_str(&format!("echo preamble step {i}\n"));
+    }
+    let mut unsampled_tail = String::new();
+    for i in 0..95 {
+        unsampled_tail.push_str(&format!("echo trailing step {i}\n"));
+    }
+    for i in 0..15 {
+        unsampled_tail.push_str(&format!(
+            "gcc -O2 -c src/file_{i:02}.c -o build/file_{i:02}.o\n"
+        ));
+    }
+    let unguarded_make = format!("{unsampled_head}{unsampled_tail}");
+    let unguarded_outcome = BuildLogCompressor.compress(&unguarded_make, Some(&store));
+    assert_eq!(
+        unguarded_outcome.recoverability,
+        crate::Recoverability::Retrievable
+    );
+    assert!(!unguarded_outcome.stash_writes.is_empty());
+
+    for block in [cmake_block, gradle_block, ctest_block] {
+        // Push the valid compacted block into the unsampled middle beyond both 100-line ends.
+        let input = format!("{unsampled_head}{block}{unsampled_tail}");
+        assert!(matches!(
+            detect_log(&input).route,
+            Some(DetectedRoute::Scored(BuildLogFormat::Make))
+        ));
+        let outcome = BuildLogCompressor.compress(&input, Some(&store));
+        assert_eq!(outcome.output, input);
+        assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+        assert!(outcome.stash_writes.is_empty());
+    }
+
+    let raw_ninja = (1..=6)
+        .map(|i| format!("[{i}/8] Building CXX object src/CMakeFiles/app.dir/unit_{i:02}.cpp.o\n"))
+        .collect::<String>();
+    let raw_outcome = BuildLogCompressor.compress(&raw_ninja, Some(&store));
+    assert_ne!(raw_outcome.output, raw_ninja);
+    assert!(raw_outcome.output.contains(cmake_build::HEADER));
+
+    let foreign_suffixes = [
+        format!("{}unavailable\n", gradle::HEADER),
+        format!("{}{{\"rows\":1}}\nordinary text\n", gradle::HEADER),
+        format!(
+            "{}{{\"literals\":[[\"> Task :\",\" FAILED\"]],\"rows\":2}}\n0\ta\n0\tb\n",
+            gradle::HEADER
+        ),
+        gradle_block.to_owned(),
+    ];
+    for foreign in foreign_suffixes {
+        let combined = format!("{raw_ninja}{foreign}");
+        assert!(matches!(
+            detect_log(&combined).route,
+            Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(_)))
+        ));
+        let outcome = BuildLogCompressor.compress(&combined, Some(&store));
+        assert_ne!(outcome.output, combined, "{foreign}");
+        assert!(outcome.output.contains(cmake_build::HEADER), "{foreign}");
+        assert!(outcome.output.contains(&foreign), "{foreign}");
+        assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+        assert!(outcome.stash_writes.is_empty());
+
+        let again = BuildLogCompressor.compress(&outcome.output, Some(&store));
+        assert_eq!(again.output, outcome.output, "{foreign}");
+        assert_eq!(again.recoverability, crate::Recoverability::Lossless);
+        assert!(again.stash_writes.is_empty());
+    }
+
+    let mut fenced_input = String::from(
+        "[1/8] Building CXX object src/CMakeFiles/app.dir/lead.cpp.o\n\
+         ```text\n",
+    );
+    fenced_input.push_str(cmake_block);
+    fenced_input.push_str("```\n");
+    for i in 2..=8 {
+        fenced_input.push_str(&format!(
+            "[{i}/8] Building CXX object src/CMakeFiles/app.dir/unit_{i:02}.cpp.o\n"
+        ));
+    }
+    let fenced_lines = fenced_input.split_inclusive('\n').collect::<Vec<_>>();
+    assert!(!has_scoped_compacted_header(&fenced_lines));
+    let outcome = BuildLogCompressor.compress(&fenced_input, Some(&store));
+    assert_ne!(outcome.output, fenced_input);
+    assert_eq!(outcome.output.matches(cmake_build::HEADER).count(), 2);
+
+    let fenced_gradle = format!("```text\n{gradle_block}```\n");
+    let mut fenced_make = String::from("make: Entering directory '/work'\n");
+    fenced_make.push_str(&fenced_gradle);
+    for i in 0..16 {
+        fenced_make.push_str(&format!(
+            "gcc -O2 -c src/file_{i:02}.c -o build/file_{i:02}.o\n"
+        ));
+    }
+    assert!(matches!(
+        detect_log(&fenced_make).route,
+        Some(DetectedRoute::Scored(BuildLogFormat::Make))
+    ));
+    let fenced_make_lines = fenced_make.split_inclusive('\n').collect::<Vec<_>>();
+    assert!(!has_scoped_compacted_header(&fenced_make_lines));
+    let make_outcome = BuildLogCompressor.compress(&fenced_make, Some(&store));
+    assert_eq!(
+        make_outcome.recoverability,
+        crate::Recoverability::Retrievable
+    );
+    assert!(!make_outcome.stash_writes.is_empty());
+    assert!(make_outcome.output.contains(&fenced_gradle));
+}
+
+#[test]
+fn trace_overlapping_cmake_layout_keeps_remaining_rows_out_of_stash() {
+    let store = InMemoryStore::new();
+    let mut input = String::from(
+        "$ ninja -C /work/build\n\
+         [1/13] cd /work/build && /usr/bin/cmake -E touch generated.h\n\
+         thread 'main' panicked at src/main.rs:1:1:\n",
+    );
+    for i in 2..=13 {
+        input.push_str(&format!(
+            "[{i}/13] Building C object CMakeFiles/review_target.dir/src/module_unit_file_{i:02}.c.o\n"
+        ));
+    }
+    input.push_str("exit code: 0\n");
+
+    let stripped = input
+        .split_inclusive('\n')
+        .map(|line| line.trim_end_matches('\n').to_owned())
+        .collect::<Vec<_>>();
+    // Line 3 is `[2/13] ...`, absorbed by `rust_trace` from the panic header on line 2.
+    assert!(
+        trace_regions(&stripped)
+            .iter()
+            .any(|region| region.contains(&3))
+    );
+
+    let outcome =
+        BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
+    assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+    assert!(outcome.stash_writes.is_empty());
+    assert_eq!(outcome.output, input);
+}
+
+#[test]
+fn pnpm_suffix_with_foreign_compacted_header_preserves_prefix_compaction() {
+    let store = InMemoryStore::new();
+    let input = "\
+Progress: resolved 1, reused 1, downloaded 0, added 0\n\
+Progress: resolved 5, reused 5, downloaded 0, added 0\n\
+Progress: resolved 5, reused 5, downloaded 0, added 5, done\n\
+Packages: +5\n\
++++++\n\
+Gradle templates (id<TAB>fields; interleave with literals): unavailable\n\
+Done in 1.2s using pnpm v9.0.0\n";
+
+    // Prove this input directly exercises the Stage 0 Pnpm exemption rather than failing header match.
+    assert!(matches!(
+        detect_log(input).route,
+        Some(DetectedRoute::Stage1(Stage1Selection::Pnpm))
+    ));
+    let lines = input.split_inclusive('\n').collect::<Vec<_>>();
+    assert!(has_scoped_compacted_header(&lines));
+
+    let outcome = BuildLogCompressor.compress(input, Some(&store));
+    assert!(!outcome.output.contains("+++++\n"));
+    assert!(
+        outcome
+            .output
+            .contains("Gradle templates (id<TAB>fields; interleave with literals): unavailable\n")
+    );
+    assert!(outcome.output.contains("Done in 1.2s using pnpm v9.0.0\n"));
+}
+
+#[test]
+fn clipped_compacted_logs_stay_out_of_stash_fallback() {
+    let store = InMemoryStore::new();
+    let generic_progress = (1..=16)
+        .map(|i| format!("progress: background step {i:02} completed cleanly during build\n"))
+        .collect::<String>();
+    let make_progress = (1..=16)
+        .map(|i| format!("cc -O2 -Wall -Iinclude -c src/item_{i:02}.c -o build/item_{i:02}.o\n"))
+        .collect::<String>();
+
+    let gradle_base = format!(
+        "$ ./gradlew build\n\
+         > Configure project :app\n\
+         > Task :app:compileJava UP-TO-DATE\n\
+         BUILD SUCCESSFUL in 1s\n\
+         1 actionable task: 1 executed\n\
+         {generic_progress}\
+         exit code: 0\n"
+    );
+    let gradle_clipped_block = format!(
+        "{}{{\
+            \"literals\":[[\"> Task :\",\" UP-TO-DATE\"]],\"rows\":20\
+         }}\n\
+         0\tcompileJava\n\
+         0\tclasses\n",
+        gradle::HEADER
+    );
+    let gradle_clipped = format!(
+        "$ ./gradlew build\n\
+         > Configure project :app\n\
+         {gradle_clipped_block}\
+         {generic_progress}\
+         exit code: 0\n"
+    );
+
+    let ctest_base = format!(
+        "$ ctest\n\
+         Test project /work/build\n\
+          1/1 Test  #1: solo .............................   Passed    0.00 sec\n\
+         {generic_progress}\
+         exit code: 0\n"
+    );
+    let ctest_clipped_block = format!(
+        "{}{{\
+            \"rows\":20,\"total\":\"20\",\"start_indent\":6,\"idx_width\":2,\"id_width\":2,\"col\":40,\"prefixes\":[]\
+         }}\n\
+         P\t1\t\ta\t0.01\n\
+         P\t2\t\tb\t0.01\n",
+        ctest::HEADER
+    );
+    let ctest_clipped = format!(
+        "$ ctest\n\
+         Test project /work/build\n\
+         {ctest_clipped_block}\
+         {generic_progress}\
+         exit code: 0\n"
+    );
+
+    let cmake_base = format!(
+        "$ ninja -C /work/build\n\
+         ninja: no work to do.\n\
+         {make_progress}\
+         exit code: 0\n"
+    );
+    let cmake_clipped_block = format!(
+        "{}{{\
+            \"literals\":[[\"[\",\"/20] Building CXX object \",\".cpp.o\"]],\"rows\":20\
+         }}\n\
+         0\t1\ta\n\
+         0\t2\tb\n",
+        cmake_build::HEADER
+    );
+    let cmake_clipped = format!(
+        "$ ninja -C /work/build\n\
+         ninja: no work to do.\n\
+         {make_progress}\
+         {cmake_clipped_block}"
+    );
+    let cmake_head_clipped = format!(
+        "$ ninja -C /work/build\n\
+         {cmake_clipped_block}\
+         {make_progress}"
+    );
+
+    for (base, clipped) in [
+        (gradle_base, gradle_clipped),
+        (ctest_base, ctest_clipped),
+        (cmake_base.clone(), cmake_clipped),
+        (cmake_base, cmake_head_clipped),
+    ] {
+        let base_out =
+            BuildLogCompressor.compress_with_recovery(&base, Some(&store), &RecoveryMethod::Shell);
+        assert_eq!(base_out.recoverability, crate::Recoverability::Retrievable);
+        assert!(!base_out.stash_writes.is_empty());
+
+        assert!(matches!(
+            detect_log(&clipped).route,
+            Some(DetectedRoute::Stage1(_))
+        ));
+        let clipped_out = BuildLogCompressor.compress_with_recovery(
+            &clipped,
+            Some(&store),
+            &RecoveryMethod::Shell,
+        );
+        assert_eq!(clipped_out.output, clipped);
+        assert_eq!(clipped_out.recoverability, crate::Recoverability::Lossless);
+        assert!(clipped_out.stash_writes.is_empty());
+    }
+
+    let make_only = format!(
+        "make: Entering directory '/work/make'\n\
+         {make_progress}\
+         make: Leaving directory '/work/make'\n"
+    );
+    let make_only_out =
+        BuildLogCompressor.compress_with_recovery(&make_only, Some(&store), &RecoveryMethod::Shell);
+    assert_eq!(
+        make_only_out.recoverability,
+        crate::Recoverability::Retrievable
+    );
+    assert!(!make_only_out.stash_writes.is_empty());
+
+    for clipped_block in [
+        gradle_clipped_block,
+        ctest_clipped_block,
+        cmake_clipped_block,
+    ] {
+        let scored_clipped = format!(
+            "make: Entering directory '/work/make'\n\
+             {make_progress}\
+             {clipped_block}"
+        );
+        assert!(matches!(
+            detect_log(&scored_clipped).route,
+            Some(DetectedRoute::Scored(BuildLogFormat::Make))
+        ));
+        let outcome = BuildLogCompressor.compress_with_recovery(
+            &scored_clipped,
+            Some(&store),
+            &RecoveryMethod::Shell,
+        );
+        assert_eq!(outcome.output, scored_clipped);
+        assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+        assert!(outcome.stash_writes.is_empty());
+    }
+}

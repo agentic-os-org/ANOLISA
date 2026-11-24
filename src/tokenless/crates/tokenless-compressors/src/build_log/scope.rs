@@ -3,6 +3,8 @@
 //! Each BuildLog splitter provides its own line grammar while delegating control-character limits,
 //! Markdown fence isolation, `\0` sampled detection, and shell/JVM preamble handling here.
 
+use std::ops::Range;
+
 // Lines exceeding MAX_LINE_BYTES close the active scope locally;
 // any single line exceeding MAX_BYTES disables edits for the whole result.
 pub(super) const MAX_LINE_BYTES: usize = 4096;
@@ -29,7 +31,7 @@ pub(super) fn complete_within(line: &str, max_bytes: usize) -> Option<&str> {
 }
 
 pub(super) fn is_compacted_header(line: &str, header: &str) -> bool {
-    line.len() <= MAX_BYTES && plain(line) && line.starts_with(header)
+    line.len() <= MAX_BYTES && line.starts_with(header) && plain(line)
 }
 
 /// Keeps already-compacted outputs terminal across repeated passes outside Markdown fences.
@@ -38,6 +40,18 @@ pub(super) fn is_compacted(lines: &[&str], header: &str) -> bool {
     lines.iter().any(|raw| {
         let line = raw.strip_suffix('\n').unwrap_or(raw);
         !step_fence(&mut open_fence, line) && is_compacted_header(line, header)
+    })
+}
+
+/// Checks whether `lines` contains any unfenced compacted header from `headers` in one scan.
+pub(super) fn is_any_compacted(lines: &[&str], headers: &[&str]) -> bool {
+    let mut open_fence = None;
+    lines.iter().any(|raw| {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        !step_fence(&mut open_fence, line)
+            && headers
+                .iter()
+                .any(|header| is_compacted_header(line, header))
     })
 }
 
@@ -292,4 +306,50 @@ fn is_env_assignment(token: &str) -> bool {
     !name.is_empty()
         && name.as_bytes()[0].is_ascii_alphabetic()
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Cursor over sorted, non-overlapping half-open line ranges already claimed by earlier passes.
+pub(super) struct ClaimedCursor<'a> {
+    ranges: &'a [Range<usize>],
+    pos: usize,
+}
+
+impl<'a> ClaimedCursor<'a> {
+    /// Creates a cursor over sorted, non-empty, non-overlapping half-open line ranges.
+    pub(super) fn new(ranges: &'a [Range<usize>]) -> Self {
+        // Invariant: callers supply merged sorted non-overlapping spans so one forward pass suffices.
+        debug_assert!(ranges.iter().all(|range| range.start < range.end));
+        debug_assert!(ranges.windows(2).all(|w| w[0].end <= w[1].start));
+        Self { ranges, pos: 0 }
+    }
+
+    /// Advances past ranges ending at or before `index`, returning `Some(new_index)` when `index`
+    /// falls inside one or more contiguous claimed spans.
+    pub(super) fn skip_if_claimed(&mut self, index: usize) -> Option<usize> {
+        while let Some(range) = self.ranges.get(self.pos)
+            && range.end <= index
+        {
+            self.pos += 1;
+        }
+        let mut cur = index;
+        while let Some(range) = self.ranges.get(self.pos)
+            && range.start <= cur
+        {
+            cur = range.end;
+            self.pos += 1;
+        }
+        (cur > index).then_some(cur)
+    }
+
+    /// Returns the exclusive upper bound from `index` before hitting the next claimed range.
+    pub(super) fn unclaimed_end(&mut self, index: usize, limit: usize) -> usize {
+        while let Some(range) = self.ranges.get(self.pos)
+            && range.end <= index
+        {
+            self.pos += 1;
+        }
+        self.ranges
+            .get(self.pos)
+            .map_or(limit, |range| range.start.max(index).min(limit))
+    }
 }

@@ -13,6 +13,7 @@ mod template;
 mod trace;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, compute_key, recovery_instruction};
 use tokenless_protocol::estimate_tokens;
@@ -89,7 +90,7 @@ impl BuildLogCompressor {
     /// Detects a supported build/test log using a bounded head-and-tail sample.
     #[must_use]
     pub fn detect(input: &str) -> bool {
-        detect_format(input).0.is_some()
+        detect_log(input).route.is_some()
     }
 
     /// Builds the smallest valid build-log candidate under the recovery policy.
@@ -113,169 +114,49 @@ impl BuildLogCompressor {
             .into_iter()
             .collect::<Vec<_>>();
         let store = stash.filter(|_| recovery.is_available());
-        let (Some(mut format), sample) = detect_format(&cleaned) else {
+        let detected = detect_log(&cleaned);
+        let Some(route) = detected.route else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if !matches!(
-            format,
-            BuildLogFormat::Pnpm
-                | BuildLogFormat::Maven
-                | BuildLogFormat::Gradle
-                | BuildLogFormat::Ctest
-                | BuildLogFormat::CmakeBuild
-        ) && store.is_none()
-        {
+        if matches!(route, DetectedRoute::Scored(_)) && store.is_none() {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
-        // Preserve already-compacted Gradle, CTest, and CMake/Ninja results as terminal even when an
-        // oversized preamble pushes the template header out of the sample window.
-        if !matches!(
-            format,
-            BuildLogFormat::Pnpm
-                | BuildLogFormat::Maven
-                | BuildLogFormat::Gradle
-                | BuildLogFormat::Ctest
-                | BuildLogFormat::CmakeBuild
-        ) {
-            if gradle::is_compacted(&lines) {
-                format = BuildLogFormat::Gradle;
-            } else if ctest::is_compacted(&lines) {
-                format = BuildLogFormat::Ctest;
-            } else if cmake_build::is_compacted(&lines) {
-                format = BuildLogFormat::CmakeBuild;
-            }
+        // Stage 0: preserve already-compacted scoped results as terminal on scored routes even
+        // when an oversized preamble pushes the template header out of the sample window.
+        // Stage 1 routes enforce their own same-dialect compacted guards without cross-dialect vetoes.
+        if matches!(route, DetectedRoute::Scored(_)) && has_scoped_compacted_header(&lines) {
+            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
-        let (maven_layouts, gradle_layouts, ctest_layouts, cmake_layouts) = match format {
-            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new(), Vec::new(), Vec::new()),
-            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines), Vec::new(), Vec::new()),
-            BuildLogFormat::Ctest => (Vec::new(), Vec::new(), ctest::plan(&lines), Vec::new()),
-            BuildLogFormat::CmakeBuild => (
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                cmake_build::plan(&lines),
-            ),
-            _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-        };
-        let mut maven_transfers = Vec::new();
-        if format == BuildLogFormat::Maven
-            && maven_layouts.is_empty()
-            && !maven::is_compacted(&lines)
-            && store.is_some()
-        {
-            // No-edit Maven results retain anchored Generic recovery, plus verified
-            // transfers that remain inside an active Maven scope.
-            if is_anchored(&sample) {
-                maven_transfers = maven::scoped_transfers(&lines);
-            }
-            if let Some(generic) = detect_generic(&sample) {
-                format = generic;
-            } else if maven_transfers.iter().filter(|&&ok| ok).count() >= GENERIC_TEMPLATE_MIN_LINES
-            {
-                format = BuildLogFormat::Generic;
-            }
-        } else if format == BuildLogFormat::Gradle
-            && gradle_layouts.is_empty()
-            && !gradle::is_compacted(&lines)
-            && store.is_some()
-            && let Some(generic) = detect_generic(&sample)
-        {
-            format = generic;
-        } else if format == BuildLogFormat::Ctest
-            && ctest_layouts.is_empty()
-            && !ctest::is_compacted(&lines)
-            && store.is_some()
-            && let Some(generic) = detect_generic(&sample)
-        {
-            format = generic;
-        }
+
         let stripped = lines
             .iter()
             .map(|line| line.trim_end_matches('\n').to_owned())
             .collect::<Vec<_>>();
-        let (mut roles, run_starts, mut layouts) = if format == BuildLogFormat::Pnpm {
-            let plan = pnpm::plan(&lines);
-            (plan.roles, plan.run_starts, plan.layouts)
-        } else if format == BuildLogFormat::Maven {
-            (
-                vec![LineRole::Summary; lines.len()],
-                HashSet::new(),
-                maven_layouts,
-            )
-        } else if format == BuildLogFormat::Gradle {
-            (
-                vec![LineRole::Summary; lines.len()],
-                HashSet::new(),
-                gradle_layouts,
-            )
-        } else if format == BuildLogFormat::Ctest {
-            (
-                vec![LineRole::Summary; lines.len()],
-                HashSet::new(),
-                ctest_layouts,
-            )
-        } else if format == BuildLogFormat::CmakeBuild {
-            let sub_format = if !cmake_build::is_compacted(&lines) && store.is_some() {
-                detect_scored_format(&sample).or_else(|| detect_generic(&sample))
-            } else {
-                None
-            };
-            let roles = if let Some(sub_format) = sub_format {
-                let templates = dominant_generic_templates(sub_format, &stripped);
-                let mut open_fence = None;
-                // Mirror scope::enter_line's fence and non-TAB control boundaries (including
-                // mixed-ending '\r') plus custom CMake/Ninja counter steps that parse_row
-                // cannot compact; legacy non-scoped routes continue classifying line-by-line.
-                let mut roles = stripped
-                    .iter()
-                    .map(|line| {
-                        if scope::step_fence(&mut open_fence, line)
-                            || line.chars().any(|ch| ch != '\t' && ch.is_control())
-                            || cmake_build::is_custom_counter_step(line)
-                        {
-                            LineRole::Summary
-                        } else {
-                            classify(line, sub_format, &templates)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                for edit in &cmake_layouts {
-                    roles[edit.start..edit.end].fill(LineRole::Summary);
-                }
-                roles
-            } else {
-                vec![LineRole::Summary; lines.len()]
-            };
-            (roles, HashSet::new(), cmake_layouts)
-        } else {
-            let templates = dominant_generic_templates(format, &stripped);
-            (
-                stripped
-                    .iter()
-                    .enumerate()
-                    .map(|(index, line)| {
-                        let role = classify(line, format, &templates);
-                        if role == LineRole::Unknown
-                            && maven_transfers.get(index).copied().unwrap_or(false)
-                        {
-                            LineRole::Routine(RoutineFamily::Generic)
-                        } else {
-                            role
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                HashSet::new(),
-                Vec::new(),
-            )
-        };
+        let mut diagnostic_mask = vec![false; lines.len()];
         for region in trace_regions(&stripped) {
-            for role in &mut roles[region] {
+            diagnostic_mask[region].fill(true);
+        }
+
+        // Stage 1: lossless structural layout planning (independent of Stash availability).
+        let stage1 = plan_stage1(route, &lines, &diagnostic_mask);
+        let mut layouts = stage1.layouts;
+
+        // Stage 2: residual line-role classification for optional Stash omission.
+        let (mut roles, run_starts) =
+            build_stage2_roles(stage1.residual, &detected.sample, &lines, &stripped, store);
+        for (role, &is_diag) in roles.iter_mut().zip(&diagnostic_mask) {
+            if is_diag {
                 *role = LineRole::Diagnostic;
             }
         }
-        layouts.retain(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic));
+        debug_assert!(
+            layouts
+                .iter()
+                .all(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic))
+        );
+
         let layout_output = render_reduced(&lines, &[], &[], recovery, &layouts);
         let lossless = if saves_both(&cleaned, &layout_output) {
             lossless_operations.push(BuildLogOperation::Reduction);
@@ -464,12 +345,326 @@ fn render_marker(
     )
 }
 
-fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
+#[derive(Debug, Clone, Copy)]
+struct BuildStepPasses {
+    cmake_build: bool,
+}
+
+impl BuildStepPasses {
+    fn any(self) -> bool {
+        self.cmake_build
+    }
+
+    fn has_compacted_header(self, lines: &[&str]) -> bool {
+        self.cmake_build && cmake_build::is_compacted(lines)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Stage1Selection {
+    Pnpm,
+    Maven,
+    Gradle,
+    Ctest,
+    BuildSteps(BuildStepPasses),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DetectedRoute {
+    Stage1(Stage1Selection),
+    Scored(BuildLogFormat),
+}
+
+struct DetectedLog {
+    route: Option<DetectedRoute>,
+    sample: Vec<String>,
+}
+
+enum ResidualPolicy {
+    Provided {
+        roles: Vec<LineRole>,
+        run_starts: HashSet<usize>,
+    },
+    KeepResidual,
+    MavenTransfersOrGeneric,
+    AnchoredGeneric,
+    ScopedMixed {
+        is_protected_step: fn(&str) -> bool,
+        protected_ranges: Vec<Range<usize>>,
+    },
+    Scored(BuildLogFormat),
+}
+
+struct Stage1Plan {
+    layouts: Vec<LayoutEdit>,
+    residual: ResidualPolicy,
+}
+
+struct ComposedLayouts {
+    layouts: Vec<LayoutEdit>,
+    // Retain every raw candidate span from Stage 1 (even edits later dropped due to
+    // `diagnostic_mask`) so Stage 2 fallback omission never stashes trace-adjacent build rows.
+    protected_ranges: Vec<Range<usize>>,
+}
+
+fn has_scoped_compacted_header(lines: &[&str]) -> bool {
+    scope::is_any_compacted(lines, &[gradle::HEADER, ctest::HEADER, cmake_build::HEADER])
+}
+
+fn overlaps_diagnostic(diagnostic_mask: &[bool], range: Range<usize>) -> bool {
+    diagnostic_mask[range].iter().any(|&is_diag| is_diag)
+}
+
+fn compose_non_overlapping_passes<F>(
+    lines: &[&str],
+    diagnostic_mask: &[bool],
+    passes: impl IntoIterator<Item = F>,
+) -> ComposedLayouts
+where
+    F: FnOnce(&[&str], &[Range<usize>]) -> Vec<LayoutEdit>,
+{
+    let mut all_edits: Vec<LayoutEdit> = Vec::new();
+    let mut protected_ranges: Vec<Range<usize>> = Vec::new();
+    let mut claimed: Vec<Range<usize>> = Vec::new();
+    for pass in passes {
+        if all_edits.len() >= scope::MAX_EDITS {
+            break;
+        }
+        let edits = pass(lines, &claimed);
+        let mut added = false;
+        for edit in edits {
+            if edit.start >= edit.end {
+                continue;
+            }
+            let range = edit.start..edit.end;
+            protected_ranges.push(range.clone());
+            if !overlaps_diagnostic(diagnostic_mask, range) && all_edits.len() < scope::MAX_EDITS {
+                all_edits.push(edit);
+                added = true;
+            }
+        }
+        if added {
+            all_edits.sort_by_key(|edit| edit.start);
+            debug_assert!(all_edits.windows(2).all(|w| w[0].end <= w[1].start));
+            claimed = all_edits.iter().map(|edit| edit.start..edit.end).collect();
+        }
+    }
+    ComposedLayouts {
+        layouts: all_edits,
+        protected_ranges,
+    }
+}
+
+fn plan_build_steps(
+    lines: &[&str],
+    diagnostic_mask: &[bool],
+    passes: BuildStepPasses,
+) -> ComposedLayouts {
+    type StepPlanner = fn(&[&str], &[Range<usize>]) -> Vec<LayoutEdit>;
+    let mut planners: Vec<StepPlanner> = Vec::new();
+    if passes.cmake_build {
+        planners.push(cmake_build::plan);
+    }
+    compose_non_overlapping_passes(lines, diagnostic_mask, planners)
+}
+
+fn plan_stage1(route: DetectedRoute, lines: &[&str], diagnostic_mask: &[bool]) -> Stage1Plan {
+    match route {
+        DetectedRoute::Stage1(Stage1Selection::Pnpm) => {
+            let plan = pnpm::plan(lines);
+            let mut layouts = plan.layouts;
+            layouts.retain(|edit| !overlaps_diagnostic(diagnostic_mask, edit.start..edit.end));
+            Stage1Plan {
+                layouts,
+                residual: ResidualPolicy::Provided {
+                    roles: plan.roles,
+                    run_starts: plan.run_starts,
+                },
+            }
+        }
+        DetectedRoute::Stage1(Stage1Selection::Maven) => {
+            let mut layouts = maven::plan(lines);
+            // Preserve pre-trace empty-fallback parity before filtering diagnostic overlaps.
+            let residual = if layouts.is_empty() {
+                ResidualPolicy::MavenTransfersOrGeneric
+            } else {
+                ResidualPolicy::KeepResidual
+            };
+            layouts.retain(|edit| !overlaps_diagnostic(diagnostic_mask, edit.start..edit.end));
+            Stage1Plan { layouts, residual }
+        }
+        DetectedRoute::Stage1(Stage1Selection::Gradle | Stage1Selection::Ctest) => {
+            let is_gradle = matches!(route, DetectedRoute::Stage1(Stage1Selection::Gradle));
+            let mut layouts = if is_gradle {
+                gradle::plan(lines)
+            } else {
+                ctest::plan(lines)
+            };
+            // Preserve pre-trace empty-fallback parity before filtering diagnostic overlaps,
+            // keeping same-dialect headers conservative so clipped blocks stay out of Stash.
+            let is_same_dialect_compacted = layouts.is_empty()
+                && if is_gradle {
+                    gradle::is_compacted(lines)
+                } else {
+                    ctest::is_compacted(lines)
+                };
+            let residual = if !layouts.is_empty() || is_same_dialect_compacted {
+                ResidualPolicy::KeepResidual
+            } else {
+                ResidualPolicy::AnchoredGeneric
+            };
+            layouts.retain(|edit| !overlaps_diagnostic(diagnostic_mask, edit.start..edit.end));
+            Stage1Plan { layouts, residual }
+        }
+        DetectedRoute::Stage1(Stage1Selection::BuildSteps(passes)) => {
+            let composed = plan_build_steps(lines, diagnostic_mask, passes);
+            let residual = if composed.layouts.is_empty() && passes.has_compacted_header(lines) {
+                ResidualPolicy::KeepResidual
+            } else {
+                ResidualPolicy::ScopedMixed {
+                    is_protected_step: cmake_build::is_custom_counter_step,
+                    protected_ranges: composed.protected_ranges,
+                }
+            };
+            Stage1Plan {
+                layouts: composed.layouts,
+                residual,
+            }
+        }
+        DetectedRoute::Scored(format) => Stage1Plan {
+            layouts: Vec::new(),
+            residual: ResidualPolicy::Scored(format),
+        },
+    }
+}
+
+fn classify_scored_lines(
+    format: BuildLogFormat,
+    stripped: &[String],
+    maven_transfers: &[bool],
+) -> Vec<LineRole> {
+    let templates = dominant_generic_templates(format, stripped);
+    stripped
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let role = classify(line, format, &templates);
+            if role == LineRole::Unknown && maven_transfers.get(index).copied().unwrap_or(false) {
+                LineRole::Routine(RoutineFamily::Generic)
+            } else {
+                role
+            }
+        })
+        .collect()
+}
+
+fn scoped_fallback_roles(
+    stripped: &[String],
+    sample: &[String],
+    protected_ranges: &[Range<usize>],
+    store: Option<&dyn StashStore>,
+    is_protected_step: fn(&str) -> bool,
+) -> Vec<LineRole> {
+    let sub_format = if store.is_some() {
+        detect_scored_format(sample).or_else(|| detect_generic(sample))
+    } else {
+        None
+    };
+    let Some(sub_format) = sub_format else {
+        return vec![LineRole::Summary; stripped.len()];
+    };
+    let templates = dominant_generic_templates(sub_format, stripped);
+    let mut open_fence = None;
+    // Mirror scope::enter_line's fence and non-TAB control boundaries (including
+    // mixed-ending '\r') plus protected counter steps that Stage 1 cannot compact.
+    let mut roles = stripped
+        .iter()
+        .map(|line| {
+            if scope::step_fence(&mut open_fence, line)
+                || line.chars().any(|ch| ch != '\t' && ch.is_control())
+                || is_protected_step(line)
+            {
+                LineRole::Summary
+            } else {
+                classify(line, sub_format, &templates)
+            }
+        })
+        .collect::<Vec<_>>();
+    for range in protected_ranges {
+        roles[range.clone()].fill(LineRole::Summary);
+    }
+    roles
+}
+
+fn build_stage2_roles(
+    residual: ResidualPolicy,
+    sample: &[String],
+    lines: &[&str],
+    stripped: &[String],
+    store: Option<&dyn StashStore>,
+) -> (Vec<LineRole>, HashSet<usize>) {
+    match residual {
+        ResidualPolicy::Provided { roles, run_starts } => (roles, run_starts),
+        ResidualPolicy::KeepResidual => (vec![LineRole::Summary; lines.len()], HashSet::new()),
+        ResidualPolicy::MavenTransfersOrGeneric => {
+            if maven::is_compacted(lines) || store.is_none() {
+                return (vec![LineRole::Summary; lines.len()], HashSet::new());
+            }
+            // No-edit Maven results retain anchored Generic recovery, plus verified
+            // transfers that remain inside an active Maven scope.
+            let maven_transfers = if is_anchored(sample) {
+                maven::scoped_transfers(lines)
+            } else {
+                Vec::new()
+            };
+            let generic = detect_generic(sample).or_else(|| {
+                (maven_transfers.iter().filter(|&&ok| ok).count() >= GENERIC_TEMPLATE_MIN_LINES)
+                    .then_some(BuildLogFormat::Generic)
+            });
+            let roles = match generic {
+                Some(format) => classify_scored_lines(format, stripped, &maven_transfers),
+                None => vec![LineRole::Summary; lines.len()],
+            };
+            (roles, HashSet::new())
+        }
+        ResidualPolicy::AnchoredGeneric => {
+            if store.is_some()
+                && let Some(generic) = detect_generic(sample)
+            {
+                return (
+                    classify_scored_lines(generic, stripped, &[]),
+                    HashSet::new(),
+                );
+            }
+            (vec![LineRole::Summary; lines.len()], HashSet::new())
+        }
+        ResidualPolicy::ScopedMixed {
+            is_protected_step,
+            protected_ranges,
+        } => (
+            scoped_fallback_roles(
+                stripped,
+                sample,
+                &protected_ranges,
+                store,
+                is_protected_step,
+            ),
+            HashSet::new(),
+        ),
+        ResidualPolicy::Scored(format) => {
+            (classify_scored_lines(format, stripped, &[]), HashSet::new())
+        }
+    }
+}
+
+fn detect_log(input: &str) -> DetectedLog {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
     let ctest = ctest::detect(&sample);
-    let cmake_build = cmake_build::detect(&sample);
+    let build_steps = BuildStepPasses {
+        cmake_build: cmake_build::detect(&sample),
+    };
     // Keep CR visible to Maven, Gradle, CTest, and CMakeBuild, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
@@ -477,23 +672,24 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
             line.pop();
         }
     }
-    if pnpm::detect(&sample) {
-        return (Some(BuildLogFormat::Pnpm), sample);
-    }
-    if maven {
-        return (Some(BuildLogFormat::Maven), sample);
-    }
-    if gradle {
-        return (Some(BuildLogFormat::Gradle), sample);
-    }
-    if ctest {
-        return (Some(BuildLogFormat::Ctest), sample);
-    }
-    if cmake_build {
-        return (Some(BuildLogFormat::CmakeBuild), sample);
-    }
-    let format = detect_scored_format(&sample).or_else(|| detect_generic(&sample));
-    (format, sample)
+    let route = if pnpm::detect(&sample) {
+        Some(DetectedRoute::Stage1(Stage1Selection::Pnpm))
+    } else if maven {
+        Some(DetectedRoute::Stage1(Stage1Selection::Maven))
+    } else if gradle {
+        Some(DetectedRoute::Stage1(Stage1Selection::Gradle))
+    } else if ctest {
+        Some(DetectedRoute::Stage1(Stage1Selection::Ctest))
+    } else if build_steps.any() {
+        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(
+            build_steps,
+        )))
+    } else {
+        detect_scored_format(&sample)
+            .or_else(|| detect_generic(&sample))
+            .map(DetectedRoute::Scored)
+    };
+    DetectedLog { route, sample }
 }
 
 fn detect_scored_format(sample: &[String]) -> Option<BuildLogFormat> {

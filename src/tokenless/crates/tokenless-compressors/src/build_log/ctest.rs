@@ -15,7 +15,7 @@ use super::scope::{self, MAX_BYTES, MAX_EDITS, MAX_ROWS, complete, plain, valid_
 use super::{LayoutEdit, saves_both};
 
 // MAX_BYTES caps compacted headers because `saves_both` keeps each replacement shorter than its slice.
-const HEADER: &str =
+pub(super) const HEADER: &str =
     "CTest templates (kind<TAB>fields; SP/SK/SD=start+result, P/K/D=result, s/S=start, B=blank): ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
