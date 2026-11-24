@@ -538,7 +538,7 @@ fn plan_distinguishes_unusable_responses_and_recovers_an_interrupted_body_once()
         ),
         (&[COMPLETE_BAD_JSON][..], "invalid_json", 1, false),
         (&[MissingText][..], "missing_text", 1, false),
-        (&[MissingUsage][..], "missing_usage", 1, false),
+        (&[MissingUsage][..], "missing_usage", 1, true),
     ] {
         let prefix = installation();
         let skill = prefix.0.join("skill");
@@ -563,6 +563,19 @@ fn plan_distinguishes_unusable_responses_and_recovers_an_interrupted_body_once()
             .map(|line| serde_json::from_str(line.split_once(" diagnostic=").unwrap().1).unwrap())
             .collect();
         assert_eq!(diagnostics.len(), calls - usize::from(success), "{stderr}");
+        if expected == "missing_usage" {
+            let warnings: Vec<Value> = stderr
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("[skill-score] Judge usage warning: diagnostic=")
+                })
+                .map(|fields| serde_json::from_str(fields).unwrap())
+                .collect();
+            assert_eq!(
+                warnings,
+                [json!({"stage":"audit", "reason":"missing_usage"})]
+            );
+        }
         for diagnostic in diagnostics {
             assert_eq!(diagnostic["stage"], "audit", "{stderr}");
             assert_eq!(diagnostic["reason"], expected, "{stderr}");
@@ -624,11 +637,26 @@ fn plan_retries_non_object_judge_outputs_and_reports_each_attempt() {
         (&[NonObject("[]"), Valid][..], 1, 0),
         (
             &[
+                NonObject("[]"),
+                NonObject("[]"),
+                NonObject("[]"),
+                NonObject("[]"),
+                NonObject("[]"),
+                Valid,
+            ][..],
+            5,
+            0,
+        ),
+        (
+            &[
                 NonObject("false"),
                 NonObject("null"),
                 NonObject(r#""private-fixture-text""#),
+                NonObject("[]"),
+                NonObject("[]"),
+                NonObject("[]"),
             ][..],
-            3,
+            6,
             1,
         ),
     ] {

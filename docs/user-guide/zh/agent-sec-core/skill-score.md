@@ -82,11 +82,11 @@ Judge 每次请求的输出上限按模型 ID 选择。`deepseek-v4.1-flash` 和
 
 ASC 通过已有 Anthropic 凭据通道原样传递引用的值，其中 Rust 请求使用 `x-api-key`。ASC 不生成或解析用户／任务身份，也不上报账单。调用平台负责授权代理地址并生成访问上下文，代理负责鉴权与计量。同一配置用于规划、判分和 Claude Code 动态执行。代理支持时应限制凭据的作用范围与有效期：被测 Agent 会获得该值，允许访问模型端点不构成数据防泄漏边界。
 
-Judge 经 `anthropic-compatible` 代理发送 `model`、`system`、`messages` 和 `max_tokens`，代理需返回 token 用量。直连百炼时额外发送温度、思考开关及推理强度。被测 Agent 还需要流式响应和工具调用。不兼容时明确失败，不静默删除参数或切换服务。离线兼容测试不能证明模型质量、网络可达性或计费正确性。
+Judge 经 `anthropic-compatible` 代理发送 `model`、`system`、`messages` 和 `max_tokens`，建议代理返回 token 用量以便核算。直连百炼时额外发送温度、思考开关及推理强度。被测 Agent 还需要流式响应和工具调用。不兼容时明确失败，不静默删除参数或切换服务。离线兼容测试不能证明模型质量、网络可达性或计费正确性。
 
 配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；该路径默认使用 `deepseek-v4.1-flash-1017`。两个旧变量都必须提供且保留百炼端点约束，自定义代理必须显式使用配置文件。回滚代理路由时恢复上面的百炼配置。
 
-Judge 失败日志保留原错误码，并在 `diagnostic=` 后追加有界 JSON。字段 `stage` 标识审计、探针修复、最终裁决或严重风险复核。字段 `reason` 区分传输中断（`body_truncated`）、缺少正文（`missing_text`）、用量缺失或格式错误（`missing_usage`、`invalid_usage`），以及裁决输出的 JSON 或契约错误（`output_json`、`output_contract`）。收到响应时可记录 HTTP 状态和已知字节数。每个模型请求在既有截止时间和三次传输尝试上限内，最多重放一次中断的传输。纠正提示后会发起新的请求。探针修复返回合法 JSON 但仍未通过校验时，会记录 `probe_repair/output_contract`。缺正文或用量会终止该次调用。重发请求可能产生额外模型费用。
+Judge 失败日志保留原错误码，并在 `diagnostic=` 后追加有界 JSON。字段 `stage` 标识审计、探针修复、最终裁决或严重风险复核。字段 `reason` 区分传输中断（`body_truncated`）、缺少正文（`missing_text`）、用量格式错误（`invalid_usage`），以及裁决输出的 JSON 或契约错误（`output_json`、`output_contract`）。收到响应时可记录 HTTP 状态和已知字节数。Judge 单次请求最多等待 600 秒，若任务剩余时间更短则以剩余时间为准。每个请求最多尝试传输三次，其中传输中断最多重放一次。审计、最终裁决和严重风险复核的输出不合约时，Judge 最多要求纠正五次，含首轮共六次。探针修复返回合法 JSON 但仍未通过校验时，会记录 `probe_repair/output_contract`。缺正文会终止该次调用。若响应省略 `usage` 或返回 `null`，Judge 记录 `missing_usage` 告警并继续校验正文。内部报告的 `judge_tokens` 仅汇总已上报用量，`judge_usage_complete` 标记为 false。重发请求可能产生额外模型费用。
 
 `plan` 或 `run` 因错误退出时，标准错误中的 `[skill-score] Command failed: diagnostic=` 行记录操作、原因和已知的系统错误号，运行时就绪检查失败时，操作字段可以区分清单解析、版本核验、镜像回执核验和本地镜像检查。文件名限于预定义名称。探针未完整执行时，`report.execution[]` 可包含失败类型 `failure_kind` 和采证原因列表 `collection_errors`。业务完成情况和评分仍由原有字段表示。
 
