@@ -8,11 +8,7 @@ use serde_json::Value;
 
 fn sse_continuation_bytes(result: &AggregatedResult) -> Option<&[u8]> {
     match result {
-        AggregatedResult::Abandoned { partial, .. } => sse_continuation_bytes(partial),
         AggregatedResult::SseComplete(pair) => pair.response.sse_continuation_bytes.as_deref(),
-        AggregatedResult::ResponseOnly { response, .. } => {
-            response.sse_continuation_bytes.as_deref()
-        }
         _ => None,
     }
 }
