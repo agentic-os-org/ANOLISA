@@ -1107,7 +1107,7 @@ def main():
             },
         },
     }
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or os.curdir, exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(doc, f, indent=2)
         f.write("\n")
