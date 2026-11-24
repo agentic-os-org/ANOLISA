@@ -27,7 +27,7 @@ impl HttpStore {
         Ok(self
             .conn
             .prepare_cached(&sql)?
-            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+            .execute(params![super::clamp_cutoff_ns(cutoff_ns)])?)
     }
 
     /// Delegate commit-time checkpoints to the registered maintenance worker.
@@ -190,14 +190,16 @@ impl HttpStore {
         Ok(count)
     }
 
-    /// Purge records older than the given timestamp
+    /// Purge records older than the given timestamp.
     ///
-    /// Returns the number of deleted rows.
+    /// Cutoffs above `i64::MAX` are clamped to `i64::MAX`, deleting all
+    /// representable rows (`timestamp_ns < i64::MAX`) rather than treating
+    /// `u64::MAX` as a no-op. Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
         let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
         let deleted = self
             .conn
-            .execute(&sql, params![cutoff_ns.min(i64::MAX as u64) as i64])?;
+            .execute(&sql, params![super::clamp_cutoff_ns(cutoff_ns)])?;
         Ok(deleted as u64)
     }
 
