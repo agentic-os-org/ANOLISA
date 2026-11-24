@@ -1,3 +1,4 @@
+mod agent_types;
 mod runtime_path;
 mod skill_sec;
 
@@ -153,6 +154,15 @@ async fn run(
     repository: Arc<SqlitePolicyRepository>,
     startup_started: Instant,
 ) -> (ExitCode, Option<sinks::ShutdownPlan>) {
+    let mapping_path = std::path::Path::new("/etc/agent-sec/agent-types.json");
+    let agent_types = agent_types::load(mapping_path).map_err(|error| {
+        let reason = format!(
+            "automatic deployment paused: {}: {error}",
+            mapping_path.display()
+        );
+        telemetry.report(&reason);
+        reason
+    });
     report_startup("socket_cleanup", startup_started);
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
@@ -313,7 +323,19 @@ async fn run(
     let discovery_registry = Arc::new(asc_daemon::ScopeDiscoveryRegistry::new(Arc::new(
         pap.clone(),
     )));
-    let pap = pap.with_scope_discovery(discovery_registry.clone());
+    let pap = pap
+        .with_scope_discovery(discovery_registry.clone())
+        .with_automatic_scopes(
+            agent_types,
+            &[
+                asc_policy_translator_agentsight::selection::SELECTOR,
+                asc_gateway_plan::selection::SELECTOR,
+            ],
+            {
+                let queue = policy_runtime.enqueuer();
+                move || queue.request_scope_cleanup()
+            },
+        );
     if let Err(error) = pap.recover_scopes() {
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;

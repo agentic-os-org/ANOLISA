@@ -533,7 +533,7 @@ mod tests {
             "request-1".into(),
             serde_json::from_value(json!({
                 "execution_id":"execution-1",
-                "agent":{"agent_type":"codex"},
+                "agent":{"agentType":"codex"},
                 "launch":{"program":"python3","resolved_program":"/usr/bin/python3",
                     "args":["agent.py"],"cwd":"/work"},
                 "requested_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(events[0].run_id.as_deref(), Some("execution-1"));
         assert_eq!(events[0].details["decision_id"], decision.decision_id);
         assert_eq!(events[0].details["policy_version"], "publication-1");
-        assert_eq!(events[0].details["principal"]["agent_type"], "codex");
+        assert_eq!(events[0].details["principal"]["agentType"], "codex");
         assert_eq!(events[0].details["warnings"], json!(["test warning"]));
     }
 

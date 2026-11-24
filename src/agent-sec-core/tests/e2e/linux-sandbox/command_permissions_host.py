@@ -291,7 +291,7 @@ class Harness:
         if not self.policies:
             self.publish(
                 "baseline",
-                'permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == "cosh" };',
+                'permit(principal is SecCore::Subject, action, resource) when { principal has agentType && principal.agentType == "cosh" };',
             )
             self.publish("task", self.task_text("allow"))
 
@@ -302,7 +302,7 @@ class Harness:
                 + json.dumps(str(self.marker))
                 + " };"
             )
-        rule = 'permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource) when { principal has agent_type && principal.agent_type == "cosh" };'
+        rule = 'permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource) when { principal has agentType && principal.agentType == "cosh" };'
         return (
             '@advice("{\\"verdict\\":\\"escalate\\"}")\n' if mode == "ask" else ""
         ) + rule

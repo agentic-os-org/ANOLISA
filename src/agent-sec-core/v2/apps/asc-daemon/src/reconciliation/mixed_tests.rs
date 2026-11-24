@@ -414,3 +414,54 @@ fn mixed_binding_preflights_both_targets_before_modifying_either() {
         );
     }
 }
+
+#[test]
+fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() {
+    use asc_policy_types::policy::{DeploymentBackend, DeploymentSelection};
+    let mut binding: PreparedBinding =
+        serde_json::from_value(fixture()["binding"].clone()).unwrap();
+    let asc_policy_types::authoring::PolicySource::Cedar(cedar) = &mut binding.policy.template
+    else {
+        panic!("fixture must contain Cedar");
+    };
+    cedar.schema = asc_policy_cedar::schema::principal_reference();
+    cedar.text = cedar.text.replace(
+        "when {",
+        r#"when { principal has agentType && principal.agentType == "qoder" &&"#,
+    );
+    cedar.text.push_str(
+        r#"
+        forbid(principal, action, resource is SecCore::HttpEndpoint)
+        when { principal has agentType && principal.agentType == "qoder" &&
+               resource.host == "private.example" };"#,
+    );
+    let selection = |backend, ids: &[&str]| {
+        Some(DeploymentSelection {
+            backend,
+            statement_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        })
+    };
+    binding.policy.deployment = selection(DeploymentBackend::ActPlane, &["policy1"]);
+    assert!(!binding.policy.uses_credentials());
+    let plans = target_plans(&binding).unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].0, "agentsight");
+    let file: asc_policy_translator_agentsight::AgentSightBindingPlan =
+        serde_json::from_slice(&plans[0].1.content).unwrap();
+    let protection: serde_json::Value = serde_json::from_str(&file.policy.content).unwrap();
+    assert_eq!(protection, fixture()["expectedFileProtection"]);
+
+    binding.policy.deployment = selection(DeploymentBackend::Gateway, &["policy0"]);
+    let plans = target_plans(&binding).unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].0, "gateway");
+    let network: asc_gateway_plan::GatewayBindingPlan =
+        serde_json::from_slice(&plans[0].1.content).unwrap();
+    assert_eq!(
+        serde_json::to_value(network.network).unwrap(),
+        fixture()["expectedGatewayNetwork"]
+    );
+
+    binding.policy.deployment = selection(DeploymentBackend::Gateway, &["policy0", "policy2"]);
+    assert!(target_plans(&binding).is_err());
+}

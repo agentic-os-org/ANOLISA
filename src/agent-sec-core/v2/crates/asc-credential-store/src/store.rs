@@ -96,7 +96,7 @@ impl Record {
     }
 }
 
-type Records = BTreeMap<CredentialId, Record>;
+pub(crate) type Records = BTreeMap<CredentialId, Record>;
 type Registrations = BTreeMap<String, Vec<CredentialId>>;
 
 /// Owner-only store backed by one atomically replaced file and one exclusive lock.
@@ -290,6 +290,16 @@ impl CredentialStore {
         &mut self,
         assignments: &[(ScopeId, Vec<CredentialId>)],
     ) -> Result<(), CredentialStoreError> {
+        if let Some(records) = self.project_scopes(assignments)? {
+            self.commit(records, self.registrations.clone())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn project_scopes(
+        &self,
+        assignments: &[(ScopeId, Vec<CredentialId>)],
+    ) -> Result<Option<Records>, CredentialStoreError> {
         let mut memberships: BTreeMap<CredentialId, BTreeSet<ScopeId>> = BTreeMap::new();
         let mut scopes = BTreeSet::new();
         for (scope, ids) in assignments {
@@ -324,10 +334,7 @@ impl CredentialStore {
             }
             changed = true;
         }
-        if changed {
-            self.commit(records, self.registrations.clone())?;
-        }
-        Ok(())
+        Ok(changed.then_some(records))
     }
 
     /// Returns a fake only for an active pair's current Scope membership.

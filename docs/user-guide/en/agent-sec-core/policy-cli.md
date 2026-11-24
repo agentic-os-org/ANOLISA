@@ -525,7 +525,7 @@ content does not. Only the current complete record is retained. Policy get/delet
 require its exact revision; an old revision returns `not_found`. File paths are
 resolved relative to the CLI working directory.
 
-Updating or deleting a Policy does not change existing Scopes or their Bindings.
+Manual Scopes and their Bindings retain the snapshots selected at creation.
 Delete the Scope to withdraw its assignments. A known deleted Policy ID retains its
 revision counter; updating it recreates content at the next revision. An unknown ID
 cannot be updated.
@@ -551,11 +551,59 @@ agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "
 
 The file must be UTF-8 and is stored verbatim. `--schema-id` defaults to
 `seccore.system` and `--schema-revision` to the revision of the schema embedded
-in the CLI; both apply only to `--language cedar`. The resolved reference is
-saved with the Policy, so a later upgrade does not change the schema of an
-existing Policy. `agent-sec-cli policy default` prints the built-in baseline as a
+in the CLI (1); both apply only to `--language cedar`. The resolved reference is
+saved with the Policy and selects its schema revision. `agent-sec-cli policy default` prints the built-in baseline as a
 Cedar file that these commands accept; `policy default --json` prints it as a
 JSON source envelope instead.
+
+Use `--schema-revision 3` to write a policy that the Sandbox PDP reads in full.
+Identify an agent family with `principal has agentType && principal.agentType == "qoder"`.
+Use `context.agent.agentType` in Sandbox or Hook requests.
+An optional `ownerUid` can narrow a process assignment. A Sandbox request supplies
+the available agent category and omits the process owner. Manual `scope create` accepts
+revisions 1 and 2. If you upgrade a Policy to revision 3, existing manual assignments
+retain their pinned snapshots.
+
+**Before upgrading**, use the old daemon to review current Policies and pinned
+Scope and Binding snapshots. Export affected Policies and replace the Cedar
+attribute `agent_type` with `agentType`, including in `has` conditions. In a
+maintenance window, withdraw the affected old assignments and records while
+the old daemon can still read them. Import the rewritten Policies with the
+upgraded daemon, recreate any required manual Scopes and update request
+clients before resuming affected workloads. The upgraded daemon rejects
+`agent_type` on import. If stored copies still use it, startup stops and
+reports the Policy IDs and revisions that require migration.
+
+PAP accepts up to 4096 current v3 policies and 16 MiB of serialized v3 snapshots. A write that exceeds either limit reports an error. If an existing database is over the limit, delete or shrink v3 policies to resume automatic deployment.
+
+The daemon's built-in `cosh` mapping matches the process name `cosh-core`.
+To deploy to Qoder, configure its installed entry point in the root-owned
+`/etc/agent-sec/agent-types.json` and restart the daemon. For example, if the
+Qoder executable is installed at `/opt/qoder/bin/qoder`, use this mapping.
+
+```json
+{"qoder": {"executable": "/opt/qoder/bin/qoder"}}
+```
+
+Each entry accepts one exact `processName`, absolute `executable`, or absolute
+`cmdlineArg`. Process names and arguments are discovery hints that another
+process under the same UID can match. Use a dedicated non-root UID for
+credential workloads that require isolation from other user processes. A
+missing category appears in policy diagnostics and can be configured after
+the Policy is saved. If the file is missing, the daemon uses its built-in
+mappings. An invalid or unreadable file suspends automatic deployment. New
+root processes receive no automatic file Binding and automatic credential
+routes stay offline. Fix the file and restart. Manual Scopes and Sandbox
+requests remain available.
+
+When `policy get` has automatic assignment results, it returns `automaticDiagnostics`
+with the source revision, status, reason and available `scopeId`. Use the Scope ID
+to find the Bindings and inspect installation results for individual processes.
+File rules with no exact `agentType` report an unassigned ActPlane result.
+After a credential Policy update, use `gateway status` to confirm the serving
+revision. If candidate admission fails, the old revision can still serve.
+To withdraw a grant independently of a failed update, delete its source Policy
+and verify withdrawal in Gateway.
 
 A JSON source envelope names the schema inside the file and is imported with
 `--language json`:
@@ -583,8 +631,7 @@ Policies describe file and network requirements through `file.*` and `network.*`
 actions. Network actions cover whole-network permissions and HTTP requests;
 credential injection is one network capability. Mixed deployment currently supports
 independent file-protection `forbid` rules and HTTP credential-injection `permit`
-rules. These HTTP rules require `--schema-revision 2`; credential administration
-requires root. Before downgrading to a version without mixed-policy support, delete
+rules. Use schema revision 2 for a manual assignment or revision 3 for principal-based targeting. Credential administration requires root. Before downgrading to a version without mixed-policy support, delete
 mixed Scopes, confirm cleanup and remove their mixed Policy records before restoring
 older policies and assignments.
 
@@ -595,22 +642,19 @@ AgentSight's `file_read_protection`, and directory-tree targets require
 `directory_tree_read_protection`. See [AgentSight's read-protection
 boundaries](../agentsight/integrations.md#deny-reads-below-a-directory-tree).
 Unsupported semantics reject the entire translation. Existing
-Scope/Binding snapshots retain their saved Policy revision and schema when a
+manual Scope/Binding snapshots retain their saved Policy revision and schema when a
 Policy is updated or deleted. Source can be reloaded into an in-memory PST;
 neither AST nor PST is stored in SQLite. An older binary cannot read new Cedar
 records, so preserve a pre-upgrade database backup when planning rollback.
 The known SDK stack-overflow limit for deeply nested source remains unresolved;
 use administrator-reviewed policies rather than untrusted generated input.
 
-Sandbox runtime authorization uses the same Policy objects with
-`schema: {schemaId: "seccore.system", revision: 1}`. The OS authorization PDP evaluates
+Sandbox runtime authorization uses the same Cedar Policy objects. The OS authorization PDP evaluates
 Agent subjects, `process.spawn` and supported permit advice. Authorization is enabled
 by default, without a separate permission-ceiling configuration. Decisions must be
 accepted within 60 seconds; accepted approval waits and execution may finish later.
 See the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
-PAP policies together and includes Cedar sources whose statements all have explicit
-principal headers; no Policy IDs are configured. Use `principal is SecCore::Subject`
-with the optional `agent_type` attribute to match requests. Updates and deletions
+PAP policies together. The PDP loads v3 sources in full. Existing v1/v2 principal routing still determines which legacy sources it loads. Use `principal is SecCore::Subject` with the optional `agentType` attribute to match requests. Updates and deletions
 affect subsequent requests; an empty set denies, and read or validation failures stop
 new authorization. Existing Scope/Binding
 snapshots and accepted decisions retain their own bound versions.

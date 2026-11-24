@@ -8,6 +8,7 @@ mod compile;
 mod credential;
 mod error;
 mod plan;
+pub mod selection;
 
 pub use binding::{
     GATEWAY_BINDING_FORMAT, GatewayBindingPlan, GatewayBindingSource, GatewayBindingView,

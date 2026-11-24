@@ -45,6 +45,14 @@ pub enum PapError {
     /// Cedar admission failed before any revision was saved.
     #[error("invalid Cedar policy: {0}")]
     InvalidCedar(String),
+    /// Cedar source requires migration to the current subject attribute.
+    #[error(
+        "Cedar statement {statement_id} uses the retired agent_type attribute. Use principal.agentType"
+    )]
+    LegacyAgentType {
+        /// Cedar statement to migrate.
+        statement_id: String,
+    },
     /// Scope authoring validation failed.
     #[error("invalid scope: {0}")]
     InvalidScope(ValidationError),
@@ -72,10 +80,24 @@ pub enum PapError {
     /// No further positive `u32` revision can be allocated.
     #[error("revision space exhausted")]
     RevisionExhausted,
+    /// Current v3 sources exceed the bounded automatic deployment snapshot.
+    #[error("current v3 policies exceed 4096 records or 16 MiB; delete or shrink a v3 policy")]
+    AutomaticPolicyCapacity,
     /// Reconciliation cannot accept requests before intent is saved.
     #[error("reconciliation runtime is unavailable")]
     Unavailable,
     /// Persistence failed without exposing implementation details.
     #[error("persistence failed")]
     Persistence,
+}
+
+impl From<asc_policy_cedar::CedarError> for PapError {
+    fn from(error: asc_policy_cedar::CedarError) -> Self {
+        match error {
+            asc_policy_cedar::CedarError::LegacyAgentType { statement_id } => {
+                Self::LegacyAgentType { statement_id }
+            }
+            error => Self::InvalidCedar(error.diagnostic()),
+        }
+    }
 }

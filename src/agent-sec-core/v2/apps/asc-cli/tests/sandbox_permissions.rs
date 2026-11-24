@@ -270,7 +270,7 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
         assert request['params']['action'] == {'type':'SecCore::Action','id':'process.spawn'}, request
         assert request['params']['resource'] == {
             'type':'SecCore::Process','id':request['params']['context']['launch']['program']}, request
-        assert request['params']['context']['agent'] == {'agent_type':'cosh'}, request
+        assert request['params']['context']['agent'] == {'agentType':'cosh'}, request
         assert 'policy' not in request['params'], request
         assert 'policy' not in request['params']['context'], request
     first, second, legacy = [item['params']['context']['requested_permissions'] for item in received[:3]]

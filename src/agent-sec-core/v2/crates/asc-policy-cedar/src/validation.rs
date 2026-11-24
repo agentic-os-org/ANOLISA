@@ -3,6 +3,7 @@
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::cedar::CedarPolicySource;
+use cedar_policy::pst::{Clause, Expr, Policy};
 use cedar_policy::{PolicySet, ValidationMode, ValidationWarning, Validator};
 
 use crate::{CedarError, advice::Advice, http, schema::load_schema};
@@ -136,6 +137,31 @@ fn check_subset(policies: &PolicySet) -> Result<(), CedarError> {
         ));
     }
     for policy in policies.policies() {
+        // Cedar can accept a guard on an absent attribute as an always-false condition.
+        let syntax = policy
+            .to_pst()
+            .map_err(|error| CedarError::Representation(Box::new(error.into())))?;
+        if let Policy::Static(statement) = syntax
+            && statement.body().clauses().iter().any(|clause| {
+                let (Clause::When(expr) | Clause::Unless(expr)) = clause;
+                expr.reduce(
+                    &|expr| match expr {
+                        Expr::GetAttr { attr, .. } => (attr == "agent_type").then_some(true),
+                        Expr::HasAttr { attrs, .. } => attrs
+                            .iter()
+                            .any(|attr| attr == "agent_type")
+                            .then_some(true),
+                        _ => None,
+                    },
+                    &|a, b| a || b,
+                    false,
+                )
+            })
+        {
+            return Err(CedarError::LegacyAgentType {
+                statement_id: policy.id().to_string(),
+            });
+        }
         for (name, value) in policy.annotations() {
             match name {
                 "id" if !value.is_empty() => {}

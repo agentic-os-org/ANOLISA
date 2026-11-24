@@ -6,7 +6,9 @@ use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView};
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::{PreparedPolicy, validate_policy_name};
-use asc_policy_types::scope::{PolicyReference, PreparedScope, ScopeDeletion, ScopeSelector};
+use asc_policy_types::scope::{
+    PolicyReference, PreparedScope, ScopeDeletion, ScopeSelector, ScopeStatus,
+};
 use uuid::Uuid;
 
 use crate::error::PapError;
@@ -26,6 +28,7 @@ enum WriteTarget<'a> {
 /// Policy Administration Point for templates, assignments and owned Binding intent.
 pub struct PapService<R> {
     scope_mutations: Arc<Mutex<()>>,
+    automatic: Option<Arc<AutomaticScopes>>,
     credential_scope_mutations: Arc<Mutex<()>>,
     repository: Arc<R>,
     discovery: Option<Arc<dyn crate::ScopeDiscovery>>,
@@ -34,10 +37,20 @@ pub struct PapService<R> {
     enqueuer: Option<Arc<dyn crate::BindingReconcileEnqueuer>>,
 }
 
+struct AutomaticScopes {
+    wake: Box<dyn Fn() + Send + Sync>,
+    selectors: &'static [asc_policy_cedar::deployment::DeploymentSelector],
+    matchers:
+        Result<std::collections::BTreeMap<String, asc_policy_types::scope::ProcessMatcher>, String>,
+    passes: Mutex<()>,
+    diagnostics: Mutex<crate::automatic::PlanningDiagnostics>,
+}
+
 impl<R> Clone for PapService<R> {
     fn clone(&self) -> Self {
         Self {
             scope_mutations: self.scope_mutations.clone(),
+            automatic: self.automatic.clone(),
             credential_scope_mutations: self.credential_scope_mutations.clone(),
             repository: Arc::clone(&self.repository),
             enqueuer: self.enqueuer.clone(),
@@ -56,12 +69,74 @@ where
     pub fn new(repository: Arc<R>) -> Self {
         Self {
             scope_mutations: Arc::new(Mutex::new(())),
+            automatic: None,
             credential_scope_mutations: Arc::new(Mutex::new(())),
             repository,
             enqueuer: None,
             discovery: None,
             execution: None,
             registration: None,
+        }
+    }
+
+    /// Enables automatic deployment using the daemon's startup integration configuration.
+    #[must_use]
+    pub fn with_automatic_scopes(
+        mut self,
+        matchers: Result<
+            std::collections::BTreeMap<String, asc_policy_types::scope::ProcessMatcher>,
+            String,
+        >,
+        selectors: &'static [asc_policy_cedar::deployment::DeploymentSelector],
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.automatic = Some(Arc::new(AutomaticScopes {
+            wake: Box::new(wake),
+            matchers,
+            selectors,
+            passes: Mutex::new(()),
+            diagnostics: Mutex::default(),
+        }));
+        self
+    }
+
+    /// Reads a Policy and the latest planning results for that exact revision.
+    ///
+    /// # Errors
+    /// Returns the normal Policy read errors or an unavailable diagnostic cache.
+    pub fn policy_details(
+        &self,
+        id: &ResourceId,
+        revision: Revision,
+    ) -> Result<asc_policy_types::policy::PolicyDetails, PapError> {
+        let policy = self.get_policy(id, revision)?;
+        let automatic_diagnostics = match &self.automatic {
+            Some(automatic)
+                if crate::is_automatic_source(&policy) && automatic.matchers.is_err() =>
+            {
+                crate::automatic::derive(
+                    std::slice::from_ref(&policy),
+                    automatic.matchers.as_ref(),
+                    automatic.selectors,
+                )?
+                .diagnostics
+            }
+            Some(automatic) if crate::is_automatic_source(&policy) => automatic
+                .diagnostics
+                .lock()
+                .map_err(|_| PapError::Unavailable)?
+                .for_policy(id, revision),
+            _ => Vec::new(),
+        };
+        Ok(asc_policy_types::policy::PolicyDetails {
+            policy,
+            automatic_diagnostics,
+        })
+    }
+
+    fn notify_policy_change(&self) {
+        if let Some(automatic) = &self.automatic {
+            (automatic.wake)();
         }
     }
 
@@ -236,20 +311,7 @@ where
     ) -> Result<PreparedPolicy, PapError> {
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
-        match template {
-            PolicySource::Cedar(cedar) => {
-                asc_policy_cedar::request_authorization_eligible(cedar)
-                    .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
-            }
-            PolicySource::SecCore(source) => {
-                source.validate().map_err(|error| {
-                    PapError::InvalidPolicy(ValidationError::new(
-                        format!("template.{}", error.path),
-                        error.message,
-                    ))
-                })?;
-            }
-        }
+        validate_authored_source(template)?;
         let uses_credentials = Self::source_uses_credentials(template)?;
         if matches!(target, WriteTarget::UpdateFile(_)) && uses_credentials {
             return Err(PapError::CredentialAuthorityRequired);
@@ -307,6 +369,7 @@ where
             let revision =
                 next_revision(state.as_ref().map(|value| value.last_allocated_revision))?;
             let candidate = PreparedPolicy {
+                deployment: None,
                 policy_id: selected_id.clone(),
                 policy_name: policy_name.to_owned(),
                 revision,
@@ -327,11 +390,15 @@ where
                         .as_ref()
                         == Ok(&candidate)
                     {
+                        self.notify_policy_change();
                         return Ok(candidate);
                     }
                     return Err(error);
                 }
-                Ok(policy) => return Ok(policy),
+                Ok(policy) => {
+                    self.notify_policy_change();
+                    return Ok(policy);
+                }
             }
         }
         Err(PapError::Conflict)
@@ -417,7 +484,42 @@ where
         id: &ResourceId,
         revision: Revision,
     ) -> Result<PreparedPolicy, PapError> {
-        self.repository.delete_policy_revision(id, revision)
+        let deleted = self.repository.delete_policy_revision(id, revision)?;
+        self.notify_policy_change();
+        Ok(deleted)
+    }
+
+    fn manual_scope_snapshots(
+        &self,
+        policies: &[PolicyReference],
+    ) -> Result<Vec<PreparedPolicy>, PapError> {
+        let snapshots = policies
+            .iter()
+            .map(|p| {
+                self.repository
+                    .get_policy(&p.policy_id, p.policy_revision)
+                    .map_err(|e| {
+                        if matches!(e, PapError::NotFound) {
+                            PapError::ReferencedPolicyRevisionNotFound
+                        } else {
+                            e
+                        }
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for policy in &snapshots {
+            if crate::is_automatic_source(policy) {
+                return Err(PapError::InvalidScope(ValidationError::new(
+                    "policyTemplates",
+                    format!(
+                        "policy {} revision {} uses schema v3 and is assigned automatically",
+                        policy.policy_id,
+                        policy.revision.get()
+                    ),
+                )));
+            }
+        }
+        Ok(snapshots)
     }
 
     /// Creates an immutable assignment with optional credential process owner attribution.
@@ -438,20 +540,7 @@ where
                 "cgroup assignments are not supported",
             )));
         }
-        let snapshots = policies
-            .iter()
-            .map(|p| {
-                self.repository
-                    .get_policy(&p.policy_id, p.policy_revision)
-                    .map_err(|e| {
-                        if matches!(e, PapError::NotFound) {
-                            PapError::ReferencedPolicyRevisionNotFound
-                        } else {
-                            e
-                        }
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let snapshots = self.manual_scope_snapshots(policies)?;
         let candidate = PreparedScope {
             scope_id: generated_resource_id()?,
             selector: selector.clone(),
@@ -554,20 +643,44 @@ where
     /// A successful response acknowledges intent, not remote completion.
     /// # Errors
     /// Returns not-found, discovery or storage failures, retaining admitted intent.
-    #[tracing::instrument(skip_all, name = "pap.delete_scope", fields(scope_id = %id))]
     pub fn delete_scope(&self, id: &ResourceId) -> Result<ScopeDeletion, PapError> {
-        let scope = match self.repository.get_scope(id) {
-            Ok(scope) => scope,
-            Err(PapError::NotFound) => {
-                return Ok(ScopeDeletion {
-                    scope_id: id.clone(),
-                    completed: true,
-                });
-            }
-            Err(error) => return Err(error),
+        match self.repository.get_scope(id) {
+            Ok(scope) => self.delete_scope_snapshot(&scope),
+            Err(PapError::NotFound) => Ok(ScopeDeletion {
+                scope_id: id.clone(),
+                completed: true,
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deletes the exact assignment observed by the caller's authority check.
+    /// # Errors
+    /// Reports scope ownership, concurrent changes and cleanup failures.
+    #[tracing::instrument(skip_all, name = "pap.delete_scope", fields(scope_id = %requested.scope_id))]
+    pub fn delete_scope_snapshot(
+        &self,
+        requested: &PreparedScope,
+    ) -> Result<ScopeDeletion, PapError> {
+        let id = &requested.scope_id;
+        if requested.automatic_backend().is_some() && requested.status == ScopeStatus::Active {
+            return Err(PapError::InvalidScope(ValidationError::new(
+                "scopeId",
+                "change or delete the source Policy to withdraw this automatic assignment",
+            )));
+        }
+        let _guard = self.scope_mutation_lock(requested)?;
+        let Some(current) = self.match_scope_snapshot(requested)? else {
+            return Ok(ScopeDeletion {
+                scope_id: id.clone(),
+                completed: true,
+            });
         };
-        let _guard = self.scope_mutation_lock(&scope)?;
-        let Some(scope) = self.repository.begin_scope_delete(id)? else {
+        let scope = if current.status == ScopeStatus::Deleting {
+            current
+        } else if let Some(deleting) = self.repository.begin_scope_delete(id)? {
+            deleting
+        } else {
             return Ok(ScopeDeletion {
                 scope_id: id.clone(),
                 completed: true,
@@ -595,16 +708,59 @@ where
         })
     }
 
+    /// Resolve the current candidate before checking retry authority. A rejected initial
+    /// publication has a deterministic Scope ID but no persisted serving snapshot.
+    /// # Errors
+    /// Returns not found for an absent current assignment or candidate.
+    pub fn scope_for_retry(&self, id: &ResourceId) -> Result<PreparedScope, PapError> {
+        match self.repository.get_scope(id) {
+            Err(PapError::NotFound)
+                if self.automatic.is_some() && id.as_str().starts_with("auto-") =>
+            {
+                let automatic = self.automatic.as_ref().ok_or(PapError::NotFound)?;
+                crate::automatic::derive(
+                    &self.repository.automatic_policies()?,
+                    automatic.matchers.as_ref(),
+                    automatic.selectors,
+                )?
+                .prepare(id)
+            }
+            other => other,
+        }
+    }
+
     /// Explicitly retries failed work owned by an assignment.
     /// # Errors
     /// Returns not-found, discovery, scheduling or storage failures.
     pub fn retry_scope(&self, id: &ResourceId) -> Result<PreparedScope, PapError> {
-        let scope = self.repository.get_scope(id)?;
-        let _guard = self.scope_mutation_lock(&scope)?;
-        // The first read selects a stable domain, not authority to restore Active.
-        let scope = self.repository.get_scope(id)?;
+        self.retry_scope_snapshot(&self.scope_for_retry(id)?)
+    }
+
+    /// Retries the assignment observed by the caller's authority check.
+    /// # Errors
+    /// Reports changed or missing assignments, discovery, scheduling or storage failures.
+    pub fn retry_scope_snapshot(
+        &self,
+        requested: &PreparedScope,
+    ) -> Result<PreparedScope, PapError> {
+        let id = &requested.scope_id;
+        if requested.automatic_backend().is_some() && requested.status == ScopeStatus::Active {
+            return self
+                .reconcile_automatic(Some(requested))?
+                .ok_or(PapError::Unavailable);
+        }
+        let _guard = self.scope_mutation_lock(requested)?;
+        let Some(scope) = self.match_scope_snapshot(requested)? else {
+            return if requested.automatic_backend().is_some()
+                && requested.status == ScopeStatus::Deleting
+            {
+                Ok(requested.clone())
+            } else {
+                Err(PapError::NotFound)
+            };
+        };
         let mut admission = None;
-        if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
+        if scope.status == ScopeStatus::Deleting {
             self.complete_scope_deletion(&scope, true)?;
         } else if scope.uses_credentials() {
             match self.restore_active_scope(&scope) {
@@ -620,13 +776,32 @@ where
         }
         match self.repository.retry_scope(id) {
             Ok(bindings) => self.notify_all(bindings)?,
-            Err(PapError::NotFound)
-                if scope.status == asc_policy_types::scope::ScopeStatus::Deleting => {}
+            Err(PapError::NotFound) if scope.status == ScopeStatus::Deleting => {}
             Err(error) => return Err(error),
         }
         match admission {
             Some(error) => Err(error),
             None => Ok(scope),
+        }
+    }
+
+    // Called with the Scope's mutation domain held. Manual assignments may advance from
+    // Active to Deleting while an authorized request waits; their contents stay pinned.
+    fn match_scope_snapshot(
+        &self,
+        requested: &PreparedScope,
+    ) -> Result<Option<PreparedScope>, PapError> {
+        let current = match self.repository.get_scope(&requested.scope_id) {
+            Err(PapError::NotFound) => return Ok(None),
+            result => result?,
+        };
+        if requested.automatic_backend().is_none() || &current == requested {
+            Ok(Some(current))
+        } else if requested.status == ScopeStatus::Deleting {
+            // Its replacement now owns the same ID. The original deletion is complete.
+            Ok(None)
+        } else {
+            Err(PapError::Conflict)
         }
     }
 
@@ -723,7 +898,246 @@ where
         self.recover_scope_work(true)
     }
 
+    /// Reconcile only after Policy persistence. Runtime storage and discovery failures are scoped
+    /// to their assignment and retried by the same periodic worker after restart.
+    fn reconcile_automatic(
+        &self,
+        requested: Option<&PreparedScope>,
+    ) -> Result<Option<PreparedScope>, PapError> {
+        let Some(automatic) = &self.automatic else {
+            return Ok(None);
+        };
+        // An unreadable mapping cannot authorize changes to persisted assignments.
+        // Gateway recovery keeps automatic traffic fenced until planning succeeds.
+        if let Err(reason) = &automatic.matchers {
+            return match requested {
+                Some(_) => Err(PapError::InvalidScope(ValidationError::new(
+                    "selector",
+                    reason.clone(),
+                ))),
+                None => Ok(None),
+            };
+        }
+        let _pass = automatic.passes.lock().map_err(|_| PapError::Persistence)?;
+        self.reconcile_automatic_scopes(automatic, requested)?;
+        let Some(expected) = requested else {
+            return Ok(None);
+        };
+        // Keep the planning pass until the selected revision's failed Bindings are queued.
+        let _guard = self.scope_mutation_lock(expected)?;
+        let scope = self.repository.get_scope(&expected.scope_id)?;
+        self.notify_all(self.repository.retry_scope(&scope.scope_id)?)?;
+        Ok(Some(scope))
+    }
+
+    fn reconcile_automatic_scopes(
+        &self,
+        automatic: &AutomaticScopes,
+        requested: Option<&PreparedScope>,
+    ) -> Result<(), PapError> {
+        let retry = requested.map(|scope| &scope.scope_id);
+        let policies = self.repository.automatic_policies()?;
+        let desired =
+            crate::automatic::derive(&policies, automatic.matchers.as_ref(), automatic.selectors)?;
+        let mut current = self.current_automatic_scopes()?;
+        if let Some(expected) = requested {
+            let id = &expected.scope_id;
+            // All automatic publication passes share this lock. For an unpublished
+            // assignment, compare the candidate computed from the current PAP sources.
+            let matches = match current.get(id) {
+                Some(saved) => saved == expected,
+                None => desired.prepare(id)? == *expected,
+            };
+            if !matches {
+                return Err(PapError::Conflict);
+            }
+        }
+        let publications = crate::automatic::publications(&current, &desired)?;
+        let mut outcomes = Vec::new();
+        let mut retry_error = None;
+        for ids in publications {
+            let mut updates = crate::automatic::take_publication(ids, &mut current);
+            if let Err(error) = desired.prepare_publication(&mut updates) {
+                let error = if let Some(serving) =
+                    updates.values().find_map(|update| update.expected.as_ref())
+                {
+                    let _guard = self.scope_mutation_lock(serving)?;
+                    self.withdraw_deleted_grants(&updates, &desired.sources)
+                        .err()
+                        .unwrap_or(error)
+                } else {
+                    error
+                };
+                for id in updates.keys() {
+                    outcomes.push((
+                        id.clone(),
+                        crate::automatic::ScopeOutcome::Failed(error.to_string()),
+                    ));
+                }
+                if retry.is_some_and(|id| updates.contains_key(id)) {
+                    retry_error = Some(error);
+                }
+                continue;
+            }
+            let Some(candidate) = updates
+                .values()
+                .find_map(|update| update.candidate.as_ref())
+            else {
+                continue;
+            };
+            // All members of one publication belong to the same mutation domain.
+            let _guard = self.scope_mutation_lock(candidate)?;
+            let publication_error = self
+                .apply_automatic(candidate, &updates, &desired.sources)
+                .err();
+            for (id, update) in &updates {
+                let Some(scope) = &update.candidate else {
+                    continue;
+                };
+                let discovery_error = if publication_error.is_none() {
+                    self.start_scope_discovery(scope).err()
+                } else {
+                    None
+                };
+                let error = publication_error.as_ref().or(discovery_error.as_ref());
+                outcomes.push((id.clone(), self.automatic_scope_outcome(id, error)));
+                if retry == Some(id) && discovery_error.is_some() {
+                    retry_error = discovery_error;
+                }
+            }
+            if retry.is_some_and(|id| updates.contains_key(id)) && publication_error.is_some() {
+                retry_error = publication_error;
+            }
+        }
+        for (id, scope) in current {
+            if scope.status == ScopeStatus::Deleting {
+                continue;
+            }
+            let _guard = self.scope_mutation_lock(&scope)?;
+            let deleting = self
+                .repository
+                .delete_automatic_scope(&scope, &desired.sources)?;
+            if let Err(error) = self.complete_scope_deletion(&deleting, true) {
+                tracing::warn!(target:"asc_process_diagnostic",scope_id=%id,%error,"automatic Scope cleanup remains pending");
+                if retry == Some(&id) {
+                    retry_error = Some(error);
+                }
+            }
+        }
+        *automatic
+            .diagnostics
+            .lock()
+            .map_err(|_| PapError::Persistence)? = desired.into_diagnostics(outcomes);
+        if let Some(error) = retry_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn current_automatic_scopes(
+        &self,
+    ) -> Result<std::collections::BTreeMap<ResourceId, PreparedScope>, PapError> {
+        let mut current = std::collections::BTreeMap::new();
+        let mut after = None;
+        loop {
+            let page = self.repository.scan_scopes(after.as_ref(), 128)?;
+            if page.is_empty() {
+                break;
+            }
+            for scope in page {
+                after = Some(scope.scope_id.clone());
+                if scope.automatic_backend().is_some() {
+                    current.insert(scope.scope_id.clone(), scope);
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    fn automatic_scope_outcome(
+        &self,
+        scope_id: &ResourceId,
+        error: Option<&PapError>,
+    ) -> crate::automatic::ScopeOutcome {
+        if let Some(error) = error {
+            tracing::warn!(target:"asc_process_diagnostic", %scope_id, %error, "automatic Scope could not be applied");
+            crate::automatic::ScopeOutcome::Failed(error.to_string())
+        } else {
+            match self.repository.scope_discovery_seed(scope_id) {
+                Ok(seed) if seed.instances.is_empty() => {
+                    crate::automatic::ScopeOutcome::WaitingForProcess
+                }
+                Ok(_) => crate::automatic::ScopeOutcome::Assigned,
+                Err(error) => crate::automatic::ScopeOutcome::Failed(format!(
+                    "cannot read automatic Scope discovery state: {error}"
+                )),
+            }
+        }
+    }
+
+    fn apply_automatic(
+        &self,
+        candidate: &PreparedScope,
+        updates: &crate::ScopePublication,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        use asc_policy_types::policy::DeploymentBackend;
+        if updates
+            .values()
+            .filter_map(|update| update.expected.as_ref())
+            .any(|scope| scope.status == asc_policy_types::scope::ScopeStatus::Deleting)
+        {
+            return Err(PapError::OperationInProgress);
+        }
+        if candidate.automatic_backend() == Some(DeploymentBackend::Gateway) {
+            let execution = self.execution.as_ref().ok_or(PapError::Unavailable)?;
+            if let Err(error) = execution.publish_automatic(updates, sources) {
+                self.withdraw_deleted_grants(updates, sources)?;
+                return Err(error);
+            }
+        } else if updates
+            .values()
+            .any(|update| update.expected != update.candidate)
+        {
+            self.repository.replace_automatic_scopes(updates, sources)?;
+        }
+        Ok(())
+    }
+
+    fn withdraw_deleted_grants(
+        &self,
+        updates: &crate::ScopePublication,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        // Explicit deletion also withdraws grants when the replacement cannot be admitted.
+        for serving in updates
+            .values()
+            .filter_map(|update| update.expected.as_ref())
+        {
+            if serving.uses_credentials()
+                && serving
+                    .policy_snapshots
+                    .iter()
+                    .any(|policy| !sources.iter().any(|(id, _)| id == &policy.policy_id))
+            {
+                self.execution
+                    .as_ref()
+                    .ok_or(PapError::Unavailable)?
+                    .revoke(serving)?;
+            }
+        }
+        Ok(())
+    }
+
     fn recover_scope_work(&self, restore_active: bool) -> Result<(), PapError> {
+        // A database from before the write limit may need administrative repair.
+        // Leave automatic work pending while serving manual Scopes and durable deletions.
+        match self.reconcile_automatic(None).map(|_| ()) {
+            Err(error @ PapError::AutomaticPolicyCapacity) => {
+                tracing::warn!(target: "asc_process_diagnostic", %error, "automatic planning deferred");
+            }
+            result => result?,
+        }
         let mut after = None;
         let mut failure = None;
         loop {
@@ -743,7 +1157,7 @@ where
                     };
                     if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
                         self.complete_scope_deletion(&scope, true)
-                    } else if restore_active {
+                    } else if restore_active && scope.automatic_backend().is_none() {
                         self.recover_active_scope(&scope)
                     } else {
                         Ok(())
@@ -799,6 +1213,33 @@ where
 }
 
 impl<R: PapRepository> crate::ScopeBindingSink for PapService<R> {
+    fn automatic_scope_generation(&self, id: &ResourceId) -> Result<Option<u64>, PapError> {
+        self.repository.automatic_scope_generation(id)
+    }
+    fn sync_observed_instances(
+        &self,
+        id: &ResourceId,
+        instances: &[asc_policy_types::process_discovery::ProcessIdentity],
+        uids: &std::collections::BTreeMap<
+            asc_policy_types::process_discovery::ProcessIdentity,
+            u32,
+        >,
+        generation: Option<u64>,
+    ) -> Result<(), PapError> {
+        let receipts = self
+            .repository
+            .sync_observed_scope_instances(id, instances, uids, generation)?;
+        let resume = (|| {
+            if let (Some(generation), Some(execution)) = (generation, &self.execution)
+                && self.repository.get_scope(id)?.automatic_backend()
+                    == Some(asc_policy_types::policy::DeploymentBackend::Gateway)
+            {
+                execution.resume_observed(id, generation, instances)?;
+            }
+            Ok(())
+        })();
+        resume.and(self.notify_all(receipts))
+    }
     fn sync_instances(
         &self,
         id: &ResourceId,
@@ -806,6 +1247,23 @@ impl<R: PapRepository> crate::ScopeBindingSink for PapService<R> {
     ) -> Result<(), PapError> {
         self.notify_all(self.repository.sync_scope_instances(id, instances)?)
     }
+}
+
+fn validate_authored_source(template: &PolicySource) -> Result<(), PapError> {
+    match template {
+        PolicySource::Cedar(cedar) => {
+            asc_policy_cedar::request_authorization_eligible(cedar)?;
+        }
+        PolicySource::SecCore(source) => {
+            source.validate().map_err(|error| {
+                PapError::InvalidPolicy(ValidationError::new(
+                    format!("template.{}", error.path),
+                    error.message,
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_limit(limit: u32) -> Result<(), PapError> {

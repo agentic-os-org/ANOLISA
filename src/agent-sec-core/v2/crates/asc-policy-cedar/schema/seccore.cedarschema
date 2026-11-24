@@ -1,6 +1,6 @@
 // Runtime authorization supports logical subjects independently of process binding.
 namespace SecCore {
-    entity Subject { agent_type?: String };
+    entity Subject { agentType?: String };
     entity Process { program: String, resolved_program: String };
 
     // Resource attributes describe concrete request targets, not policy patterns.

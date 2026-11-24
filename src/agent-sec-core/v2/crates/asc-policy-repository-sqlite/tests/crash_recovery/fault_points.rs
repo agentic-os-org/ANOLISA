@@ -106,6 +106,7 @@ fn scope(policy_count: usize) -> PreparedScope {
     let mut policies = vec![input.policy.clone()];
     if policy_count == 2 {
         policies.push(PreparedPolicy {
+            deployment: None,
             policy_id: ResourceId::new("00000000-0000-4000-8000-000000000003").unwrap(),
             policy_name: "second policy".into(),
             ..input.policy

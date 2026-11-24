@@ -427,7 +427,7 @@ Policy revision 仍为 current 时创建 Scope。create/update 均要求名称�
 记录；get/delete 要求精确的当前 revision，旧版本返回 `not_found`。文件相对路径按
 CLI 工作目录解析。
 
-更新或删除 Policy 不改变已有 Scope 和 Binding。撤销分配应删除 Scope。已删除的已知
+手工 Scope 和 Binding 保留创建时选定的快照。撤销手工分配应删除 Scope。已删除的已知
 Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容，未知 ID 不可 update。
 
 ## Cedar Policy 源码
@@ -450,10 +450,45 @@ agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "
 ```
 
 文件必须是 UTF-8，按原文保存。`--schema-id` 缺省为 `seccore.system`，`--schema-revision`
-缺省为 CLI 内置 schema 的 revision，两者仅用于 `--language cedar`。解析得到的引用随
-Policy 一起保存，之后升级不会改变已有 Policy 的 schema。`agent-sec-cli policy default`
+缺省为 1，两者仅用于 `--language cedar`。解析得到的引用随
+Policy 一起保存，用于选择 schema 修订。`agent-sec-cli policy default`
 以 Cedar 文件形式输出内置基线，可直接用上述命令导入；`policy default --json` 改为输出
 JSON 源码封装。
+
+指定 `--schema-revision 3` 时，Sandbox PDP 读取整份策略。
+使用 `principal has agentType && principal.agentType == "qoder"` 指定 Agent 类别，
+Sandbox 或 Hook 请求使用 `context.agent.agentType`。
+可用 `ownerUid` 限定进程分配。Sandbox 请求提供可用的 Agent 类别，省略进程 UID。
+手工 `scope create` 可引用 revision 1 或 2 的策略。将 Policy 升级到 revision 3 后，
+已有手工分配仍使用创建时选定的快照。
+
+**升级前**，用旧版 daemon 检查当前 Policy 以及 Scope 和 Binding 固定的快照。
+导出受影响的策略，将 Cedar 属性 `agent_type` 改为 `agentType`，包括 `has` 条件。
+在维护窗口用旧版 daemon 撤销受影响的分配和记录。在新版导入改写后的策略，
+重建所需的手工 Scope，并更新请求客户端，再恢复受影响的工作负载。
+新版拒绝导入 `agent_type`。存量快照仍使用旧属性时，daemon 启动会报出
+待迁移的 Policy ID 和修订号。
+
+PAP 最多保存 4096 份当前 v3 Policy，序列化后的快照合计最多 16 MiB。写入超过任一限额会报错。已有数据库超过限额时，删除或缩小 v3 Policy 即可恢复自动下发。
+
+daemon 内置的 `cosh` 对应进程名 `cosh-core`。要自动下发到 Qoder，由管理员在 root 拥有的 `/etc/agent-sec/agent-types.json` 中配置本机实际安装的入口，并重启 daemon。例如，Qoder 的可执行文件安装在 `/opt/qoder/bin/qoder` 时，可以这样配置。
+
+```json
+{"qoder": {"executable": "/opt/qoder/bin/qoder"}}
+```
+
+每项使用一种匹配条件，可选精确进程名 `processName`、绝对可执行路径 `executable`
+或绝对路径参数 `cmdlineArg`。进程名和命令行参数用于发现进程，同 UID 的其他进程也可能
+匹配。凭据工作负载若需要和其他用户进程隔离，请使用独立的非 root UID。类别尚未配置
+时，可先保存 Policy，查询分配原因后再补上映射。文件缺失时使用内置映射。
+文件格式错误或无法读取时，自动下发暂停，新启动的根进程无法获得自动文件 Binding，自动凭据路由保持
+停用。修复文件后重启 daemon。手工 Scope 和 Sandbox 请求仍可用。
+
+`policy get` 有自动分配结果时会返回 `automaticDiagnostics`，按策略修订列出规划状态、
+原因和可用的 `scopeId`。用 Scope ID 查询 Binding，可以查看每个进程的实际安装结果。
+文件规则缺少精确的 `agentType` 时，ActPlane 显示未分配。更新凭据策略后，
+用 `gateway status` 核对正在服务的修订。候选准入被拒时，旧修订仍可能提供凭据服务。
+需要在候选失败期间撤销授权时，删除它的来源 Policy，再到 Gateway 确认撤销结果。
 
 JSON 源码封装在文件内指定 schema，使用 `--language json` 导入：
 
@@ -477,7 +512,7 @@ Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公�
 
 策略通过 `file.*` 和 `network.*` 动作描述文件和网络要求。网络动作涵盖整体网络权限和
 HTTP 请求，凭据注入只是其中一项能力。当前混合部署支持独立文件防护 `forbid` 规则与
-HTTP 凭据注入 `permit` 规则；这些 HTTP 规则要求 `--schema-revision 2`，凭据管理要求
+HTTP 凭据注入 `permit` 规则。手工分配使用 schema revision 2，按主体分配使用 revision 3。凭据管理要求
 root。降级到不支持混合策略的版本前，先删除混合 Scope 并确认清理完成，再删除对应
 混合 Policy 记录，恢复旧策略及分配。
 
@@ -485,19 +520,17 @@ root。降级到不支持混合策略的版本前，先删除混合 Scope 并确
 Cedar `forbid` 子集。`file.read` 的精确文件目标要求 AgentSight 报告 `file_read_protection`，
 目录树目标要求 `directory_tree_read_protection`。参见 [AgentSight 禁读边界](../agentsight/integrations.md#禁止读取目录树)。
 不支持的语义使整个翻译失败。
-Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
+Policy 更新或删除后，已有手工 Scope/Binding 快照仍保留原
 Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保存 AST/PST。
 旧二进制不能读取新增 Cedar 记录，需要回滚时应保留升级前的数据库备份。
 深层嵌套源码导致 SDK 栈溢出的已知限制仍未解决，应使用管理员审阅的策略，避免不可信生成输入。
 
-Sandbox 运行时授权复用同一组 Policy 对象，使用
-`schema: {schemaId: "seccore.system", revision: 1}`。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
+Sandbox 运行时授权复用同一组 Cedar Policy。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
 授权默认启用，无独立权限上限配置。决定须在 60 秒内接收；接收后的审批等待和执行可稍后完成。
 操作方式见 [Sandbox 指南](sandbox.md#接入策略授权)。
-每次求值从 PAP 一起读取当前策略，纳入所有语句均有显式 principal header 的 Cedar 源码；
-无需配置 Policy ID。使用 `principal is SecCore::Subject` 并按可选的 `agent_type` 匹配请求。
+每次求值从 PAP 一起读取当前策略。PDP 完整装载 v3 原文，v1/v2 沿用已有的 principal 分流规则。使用 `principal is SecCore::Subject` 并按可选的 `agentType` 匹配请求。
 更新或删除影响后续请求；集合为空时拒绝，读取或校验失败时停止新授权。
-已有 Scope/Binding 快照和已经接收的决定继续保留各自绑定的版本。
+已有手工 Scope/Binding 快照和已经接收的决定继续保留各自绑定的版本。
 
 ## 管理 Scope
 

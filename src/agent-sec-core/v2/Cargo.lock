@@ -588,9 +588,11 @@ name = "asc-pap"
 version = "1.3.0"
 dependencies = [
  "asc-foundation-types",
+ "asc-gateway-plan",
  "asc-policy-cedar",
  "asc-policy-repository",
  "asc-policy-repository-sqlite",
+ "asc-policy-translator-agentsight",
  "asc-policy-types",
  "serde",
  "serde_json",

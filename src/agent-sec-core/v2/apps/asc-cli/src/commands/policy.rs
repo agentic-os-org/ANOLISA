@@ -69,7 +69,7 @@ pub(crate) struct PolicyInput {
     /// Cedar schema identity [default: the embedded system schema].
     #[arg(long, value_parser = resource_id)]
     schema_id: Option<ResourceId>,
-    /// Cedar schema revision [default: the embedded schema's revision].
+    /// Cedar schema revision (default 1, use 3 for principal-based targeting).
     #[arg(long, value_parser = revision)]
     schema_revision: Option<Revision>,
 }

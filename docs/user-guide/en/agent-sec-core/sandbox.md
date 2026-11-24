@@ -406,31 +406,28 @@ Mount-level noexec remains an explicit request restriction in `execution.deny_pa
 Cedar `file.exec` forbids constrain the initial invocation; they do not replace noexec
 mounts for later descendants. Preserve needed noexec restrictions in permission requests.
 
-Requests carry the optional Agent classification in `context.agent.agent_type`.
+Requests carry the optional Agent classification in `context.agent.agentType`.
 No Agent identity or UID registration is required. The type is caller-supplied,
 not authenticated; this stage does not isolate individual Agents by identity.
 
-PAP derives the request policy set from all current sources using exact
-`schema: {schemaId: "seccore.system", revision: 1}` references. Every statement in
-an included source must have an explicit principal header. For current requests,
-use `principal is SecCore::Subject` and match `agent_type` in the condition:
+For `seccore.system` revision 3, PAP supplies the full Cedar source to the PDP.
+The PDP evaluates each request with the optional `principal.agentType`. Sandbox
+requests omit `ownerUid`, so `principal has ownerUid` evaluates to false.
+For example, this rule permits Cosh to launch a process:
 
 ```cedar
 permit(principal is SecCore::Subject,
        action == SecCore::Action::"process.spawn", resource)
-when { principal has agent_type && principal.agent_type == "cosh" };
+when { principal has agentType && principal.agentType == "cosh" };
 ```
 
 This rule grants process launch only; add the required file/network policies for
 the application. A missing type does not match this condition.
-Native JSON and sources whose headers are all bare `principal` remain outside this
-route. A principal reference only inside `when` does not opt in. Mixed bare and
-constrained headers in one stored source are rejected. Every rule intended to
-jointly constrain requests, including permits and forbids, must have an explicit
-principal header. Splitting alone does not preserve those constraints: a separated
-bare-principal forbid stays outside the request policy set. Only split rules that
-are intended for different processing paths. This is an ANOLISA loading convention,
-not a Cedar enable flag.
+Revisions 1 and 2 retain their existing admission rules. Only a source with an
+explicit principal header on every statement enters request authorization.
+Mixing bare and constrained headers is rejected. Native JSON and all-bare legacy
+Cedar sources remain on the deployment path. Clients and Cedar policies using
+the old field spelling `agent_type` must switch to `agentType`.
 
 Each evaluate pulls one consistent current-policy snapshot. Its digest covers
 membership, revisions, schemas and source text. Unchanged sets reuse the compiled
@@ -535,7 +532,7 @@ invoke intent recognition in fixed mode or publish candidate policies to PAP.
 PDP still decides allow, deny, modification or native approval; effective permissions cannot
 exceed the request. Approving a command does not enable networking or grant host root.
 Unavailable privileges fail inside the sandbox without stripping `sudo`, expanding permissions
-or retrying outside isolation. Requests supply `principal.agent_type: "cosh"`; Cedar policies must allow this type
+or retrying outside isolation. Requests supply `principal.agentType: "cosh"`; Cedar policies must allow this type
 and the `/bin/bash -c` invocation. Session IDs do not establish authority. Existing PDP command transformations remain supported;
 the Hook itself does not rewrite the original command before authorization.
 

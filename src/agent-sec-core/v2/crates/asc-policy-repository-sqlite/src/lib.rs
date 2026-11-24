@@ -10,6 +10,7 @@ mod table;
 mod test_support;
 pub use path::{DatabaseLease, select_policy_database_path};
 
+use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::PapError;
 use asc_policy_repository::StoreError;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -28,6 +29,12 @@ pub enum RepositoryError {
     },
     #[error("Policy database already owned by another daemon")]
     AlreadyOpen,
+    /// Stored Policy revisions that need explicit migration before startup.
+    #[error(
+        "stored Cedar policies use the retired agent_type attribute: {}. Migrate to principal.agentType before starting the upgraded daemon",
+        .0.iter().map(|(id, revision)| format!("{id} revision {}", revision.get())).collect::<Vec<_>>().join(", ")
+    )]
+    LegacyAgentType(std::collections::BTreeSet<(ResourceId, Revision)>),
     #[error("Policy file operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -79,6 +86,13 @@ impl RepositoryError {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransactionMode {
+    Read,
+    Write,
+    Preview,
+}
+
 struct Storage {
     connection: Option<Connection>,
     failure: Option<StoreError>,
@@ -124,7 +138,23 @@ impl SqlitePolicyRepository {
         write: bool,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, RepositoryError>,
     ) -> Result<T, RepositoryError> {
+        self.transaction(
+            if write {
+                TransactionMode::Write
+            } else {
+                TransactionMode::Read
+            },
+            operation,
+        )
+    }
+
+    fn transaction<T>(
+        &self,
+        mode: TransactionMode,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, RepositoryError>,
+    ) -> Result<T, RepositoryError> {
         use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+        let write = mode != TransactionMode::Read;
         let mut storage = self.storage.lock().map_err(|_| StoreError::Unavailable)?;
         if let Some(error @ (StoreError::Corrupt | StoreError::Incompatible)) = storage.failure {
             return Err(error.into());
@@ -154,6 +184,10 @@ impl SqlitePolicyRepository {
                     return Err(error);
                 }
             };
+            if mode == TransactionMode::Preview {
+                transaction.rollback()?;
+                return Ok(value);
+            }
             #[cfg(feature = "test-support")]
             if write {
                 test_support::before_commit(&transaction);

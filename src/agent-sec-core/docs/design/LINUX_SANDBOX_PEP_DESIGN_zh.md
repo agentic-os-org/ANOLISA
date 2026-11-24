@@ -188,7 +188,7 @@ PDP 的请求转换按请求类型复用，不按每个 PEP 建立 adaptor；不
 
 Cedar 接入以 [#9298](https://github.com/agentic-os-org/ANOLISA/pull/9298) 的 `asc-policy-cedar`、`PolicySource::Cedar` 和精确 schema 引用为基础，复用其 PST（公共语法树），还原 `PolicySet` 后由进程内 `cedar-policy::Authorizer` 求值。策略快照固定版本，Request 表达本次主体、动作、资源引用和 context，Entities 提供所引用对象的属性。
 
-共享 schema revision 1 支持 `Subject.agent_type`、主体条件、`process.spawn` 和约定的 `@advice`。OS 授权 PDP 对请求主体求值；AgentSight 使用 Scope/Binding 选择进程，拒绝带主体条件或注解的策略。
+共享 schema revision 1 支持 `Subject.agentType`、主体条件、`process.spawn` 和约定的 `@advice`。OS 授权 PDP 对请求主体求值；AgentSight 使用 Scope/Binding 选择进程，拒绝带主体条件或注解的策略。
 
 ### 4.1 程序调用与文件执行
 
@@ -310,9 +310,9 @@ context 包含 execution_id、agent、launch 和 requested_permissions。
 OS 适配器要求 principal 为 `SecCore::Subject::"request"`、action 为
 `SecCore::Action::"process.spawn"`、resource 为与 launch.program 一致的 `SecCore::Process`。
 这表示一次 OS 启动授权；PDP 内部仍分别检查文件、进程与网络权限。
-context.agent 只含可选 agent_type；Cosh Hook 提供 cosh。当前不认证 Agent 身份或类型，
+context.agent 只含可选 agentType；Cosh Hook 提供 cosh。当前不认证 Agent 身份或类型，
 不要求 UID 登记或进程 Binding。策略通过 `principal is SecCore::Subject` 及
-`principal.agent_type` 条件匹配。个人主体 ID 的授权语义留待身份机制实现后细化。
+`principal.agentType` 条件匹配。个人主体 ID 的授权语义留待身份机制实现后细化。
 内核 peer UID 继续用于 claim/report 的凭据归属校验，不参与策略主体选择。
 命令与权限申请由 PEP 准备，获准结果绑定到完整请求摘要，执行前仍核验真实目标。
 通用信封可承载其它 consumer 的 context；当前 daemon 的求值、决定与执行链路仍只支持 OS，

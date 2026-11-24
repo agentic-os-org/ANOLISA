@@ -63,6 +63,37 @@ impl CredentialStore {
         credentials: &[CredentialId],
         generation: u64,
     ) -> Result<(), CredentialStoreError> {
+        self.materialize_records(&self.records, target, credentials, generation)
+    }
+
+    /// Writes the snapshot for a candidate assignment without committing or retiring pairs.
+    /// The publisher commits the same memberships only after the listener was accepted.
+    ///
+    /// # Errors
+    /// Validates the complete assignment and enforces the same target protections as `materialize`.
+    pub fn materialize_for_scopes(
+        &self,
+        target: &SecretsTarget,
+        credentials: &[CredentialId],
+        generation: u64,
+        assignments: &[(ScopeId, Vec<CredentialId>)],
+    ) -> Result<(), CredentialStoreError> {
+        let projected = self.project_scopes(assignments)?;
+        self.materialize_records(
+            projected.as_ref().unwrap_or(&self.records),
+            target,
+            credentials,
+            generation,
+        )
+    }
+
+    fn materialize_records(
+        &self,
+        records: &crate::store::Records,
+        target: &SecretsTarget,
+        credentials: &[CredentialId],
+        generation: u64,
+    ) -> Result<(), CredentialStoreError> {
         let valid_name = !target.file_name.is_empty()
             && !target.file_name.starts_with('.')
             && target
@@ -84,8 +115,7 @@ impl CredentialStore {
         }
         let mut entries = Vec::new();
         for id in credentials {
-            let record = self
-                .records
+            let record = records
                 .get(id)
                 .ok_or_else(|| CredentialStoreError::UnknownCredential(id.clone()))?;
             let real = record
@@ -101,8 +131,7 @@ impl CredentialStore {
                 });
             }
         }
-        let retired = self
-            .records
+        let retired = records
             .iter()
             .filter(|(_, record)| record.real.is_none())
             .map(|(id, record)| Tombstone {
@@ -110,8 +139,7 @@ impl CredentialStore {
                 credential: id,
             })
             .collect();
-        let unavailable = self
-            .records
+        let unavailable = records
             .iter()
             .filter(|(id, record)| {
                 record.real.is_some() && (record.scope_ids.is_empty() || !seen.contains(id))

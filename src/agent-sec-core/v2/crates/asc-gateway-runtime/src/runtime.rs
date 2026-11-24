@@ -98,21 +98,23 @@ impl RuntimeDirectory {
         credentials: &[CredentialId],
         scope_ids: &[PublishedScope<'_>],
         generation: u64,
+        assignments: Option<&[(ScopeId, Vec<CredentialId>)]>,
     ) -> Result<(), GatewayError> {
         let group = Owner {
             uid: rustix::process::geteuid().as_raw(),
             gid: self.gateway.gid,
         };
         let secrets = format!("secrets-{generation}.json");
-        store.materialize(
-            &SecretsTarget {
-                directory: self.root.clone(),
-                file_name: secrets.clone(),
-                group: Some(self.gateway.gid),
-            },
-            credentials,
-            generation,
-        )?;
+        let target = SecretsTarget {
+            directory: self.root.clone(),
+            file_name: secrets.clone(),
+            group: Some(self.gateway.gid),
+        };
+        if let Some(assignments) = assignments {
+            store.materialize_for_scopes(&target, credentials, generation, assignments)?;
+        } else {
+            store.materialize(&target, credentials, generation)?;
+        }
         let mut listeners = Vec::with_capacity(scope_ids.len());
         for published in scope_ids {
             let plan = format!("plan-{}-{generation}.json", published.scope_id);
@@ -144,6 +146,27 @@ impl RuntimeDirectory {
             SHARED_FILE_MODE,
             Some(group),
         )
+    }
+
+    pub(crate) fn published_plan(
+        &self,
+        id: &ScopeId,
+        generation: u64,
+    ) -> Result<Option<asc_gateway_plan::Plan>, GatewayError> {
+        // A generation is never reused. Only listeners included in that manifest
+        // have a plan under this name, which is constructed solely from typed IDs.
+        let path = self.root.join(format!("plan-{id}-{generation}.json"));
+        let Some(bytes) = read_limited(&path, 1024 * 1024)? else {
+            return Ok(None);
+        };
+        let plan: asc_gateway_plan::Plan = serde_json::from_slice(&bytes)
+            .map_err(|_| GatewayError::internal("cannot decode acknowledged listener plan"))?;
+        if &plan.scope_id != id {
+            return Err(GatewayError::internal(
+                "acknowledged plan belongs to a different Scope",
+            ));
+        }
+        Ok(Some(plan))
     }
 
     /// Reads the gateway's health report; absent or unreadable reports count as empty.

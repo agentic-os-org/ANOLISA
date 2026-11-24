@@ -763,7 +763,7 @@ fn unsupported_conditions_and_advice_are_not_discarded() {
     for text in [
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path like "/work/*.txt" };"#,
         r#"permit(principal, action == SecCore::Action::"file.write", resource) when { context.input has mode && context.input.mode == 420 };"#,
-        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { principal has agent_type && principal.agent_type == "cosh" };"#,
+        r#"permit(principal, action == SecCore::Action::"file.read", resource) when { principal has agentType && principal.agentType == "cosh" };"#,
         r#"@advice("{\"verdict\":\"escalate\"}") permit(principal, action == SecCore::Action::"file.read", resource);"#,
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path == "/work/../etc" };"#,
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path == "relative" };"#,

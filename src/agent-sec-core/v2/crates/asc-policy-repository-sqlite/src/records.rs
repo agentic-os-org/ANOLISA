@@ -1,4 +1,6 @@
 //! Version-one generic policy snapshots and projection checks for every SQL read path.
+use std::collections::BTreeSet;
+
 use crate::RepositoryError;
 use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::{Page, PapError};
@@ -29,9 +31,29 @@ pub(crate) fn receipt(snapshot: &BindingStateSnapshot) -> BindingIntentReceipt {
     snapshot.into()
 }
 
+fn validate_saved_policies(policies: &[PreparedPolicy]) -> Result<(), RepositoryError> {
+    let mut legacy = BTreeSet::new();
+    for policy in policies {
+        match asc_pap::validate_policy_snapshot(policy) {
+            Ok(()) => {}
+            Err(PapError::LegacyAgentType { .. }) => {
+                legacy.insert((policy.policy_id.clone(), policy.revision));
+            }
+            Err(_) => return Err(StoreError::Corrupt.into()),
+        }
+    }
+    if legacy.is_empty() {
+        Ok(())
+    } else {
+        Err(RepositoryError::LegacyAgentType(legacy))
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Assignment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
     selector: ScopeSelector,
     policy_snapshots: Vec<PreparedPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,6 +68,7 @@ pub(crate) struct ScopeRow {
     pub pin: Option<ProcessIdentity>,
     pub execution_pending: bool,
     pub discovery_stopped: bool,
+    pub generation: Option<u64>,
 }
 
 pub(crate) fn read_scope(
@@ -69,10 +92,13 @@ pub(crate) fn read_scope(
             owner_uid: assignment.owner_uid,
             status,
         };
-        scope.validate().map_err(|_| StoreError::Corrupt)?;
-        for policy in &scope.policy_snapshots {
-            asc_pap::validate_policy_snapshot(policy).map_err(|_| StoreError::Corrupt)?;
+        if scope.automatic_backend().is_some() != assignment.generation.is_some()
+            || assignment.generation == Some(0)
+        {
+            return Err(StoreError::Corrupt.into());
         }
+        scope.validate().map_err(|_| StoreError::Corrupt)?;
+        validate_saved_policies(&scope.policy_snapshots)?;
         let execution_pending = assignment
             .execution_pending
             .unwrap_or_else(|| scope.uses_credentials());
@@ -102,6 +128,7 @@ pub(crate) fn read_scope(
             pin,
             execution_pending,
             discovery_stopped: stopped,
+            generation: assignment.generation,
         })
     })
     .transpose()
@@ -112,6 +139,7 @@ pub(crate) fn insert_scope(
     scope: &PreparedScope,
 ) -> Result<(), RepositoryError> {
     let assignment = Assignment {
+        generation: scope.automatic_backend().map(|_| 1),
         selector: scope.selector.clone(),
         policy_snapshots: scope.policy_snapshots.clone(),
         owner_uid: scope.owner_uid,
@@ -119,6 +147,25 @@ pub(crate) fn insert_scope(
     };
     tx.execute(
         "INSERT INTO scopes(scope_id,assignment_json,phase) VALUES (?1,?2,'ACTIVE')",
+        params![scope.scope_id.as_str(), encode(&assignment)?],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn replace_scope_assignment(
+    tx: &Transaction<'_>,
+    scope: &PreparedScope,
+    generation: u64,
+) -> Result<(), RepositoryError> {
+    let assignment = Assignment {
+        generation: Some(generation),
+        selector: scope.selector.clone(),
+        policy_snapshots: scope.policy_snapshots.clone(),
+        owner_uid: scope.owner_uid,
+        execution_pending: scope.uses_credentials().then_some(true),
+    };
+    tx.execute(
+        "UPDATE scopes SET assignment_json=?2 WHERE scope_id=?1 AND phase='ACTIVE'",
         params![scope.scope_id.as_str(), encode(&assignment)?],
     )?;
     Ok(())
@@ -138,6 +185,7 @@ pub(crate) fn confirm_scope_execution(
         return Err(PapError::Conflict.into());
     }
     let assignment = Assignment {
+        generation: scope.generation,
         selector: scope.scope.selector,
         policy_snapshots: scope.scope.policy_snapshots,
         owner_uid: scope.scope.owner_uid,
@@ -180,10 +228,10 @@ pub(crate) fn read_policy(
         let last_allocated_revision = Revision::new(head).map_err(|_| StoreError::Corrupt)?;
         let current: Option<PreparedPolicy> = current.map(|v| decode(&v)).transpose()?;
         if let Some(policy) = &current {
-            asc_pap::validate_policy_snapshot(policy).map_err(|_| StoreError::Corrupt)?;
             if policy.policy_id != *key || policy.revision != last_allocated_revision {
                 return Err(StoreError::Corrupt.into());
             }
+            validate_saved_policies(std::slice::from_ref(policy))?;
         }
         Ok(asc_pap::PolicyRevisionState {
             last_allocated_revision,
@@ -224,7 +272,7 @@ pub(crate) fn read_binding(
         .validate()
         .map_err(|_| StoreError::Corrupt)?;
     let spec = &snapshot.binding.spec;
-    asc_pap::validate_policy_snapshot(&spec.policy).map_err(|_| StoreError::Corrupt)?;
+    validate_saved_policies(std::slice::from_ref(&spec.policy))?;
     let process = &spec.scope.process;
     if spec.binding_id != *key
         || snapshot.status_version < 1
@@ -339,6 +387,7 @@ pub(crate) fn page<T: Serialize>(
 }
 
 pub(crate) fn validate_records(tx: &Transaction<'_>) -> Result<(), RepositoryError> {
+    let mut legacy = BTreeSet::new();
     for (table, key) in [
         ("policies", "policy_id"),
         ("scopes", "scope_id"),
@@ -357,16 +406,14 @@ pub(crate) fn validate_records(tx: &Transaction<'_>) -> Result<(), RepositoryErr
             }
             for key in &keys {
                 let key = id(key.clone())?;
-                match table {
-                    "policies" => {
-                        read_policy(tx, &key)?;
-                    }
-                    "scopes" => {
-                        read_scope(tx, &key)?;
-                    }
-                    _ => {
-                        read_binding(tx, &key)?;
-                    }
+                let result = match table {
+                    "policies" => read_policy(tx, &key).map(|_| ()),
+                    "scopes" => read_scope(tx, &key).map(|_| ()),
+                    _ => read_binding(tx, &key).map(|_| ()),
+                };
+                match result {
+                    Err(RepositoryError::LegacyAgentType(policies)) => legacy.extend(policies),
+                    other => other?,
                 }
             }
             cursor = keys.last().cloned().ok_or(StoreError::Corrupt)?;
@@ -384,5 +431,9 @@ pub(crate) fn validate_records(tx: &Transaction<'_>) -> Result<(), RepositoryErr
             return Err(StoreError::Corrupt.into());
         }
     }
-    Ok(())
+    if legacy.is_empty() {
+        Ok(())
+    } else {
+        Err(RepositoryError::LegacyAgentType(legacy))
+    }
 }

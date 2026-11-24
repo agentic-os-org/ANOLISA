@@ -63,6 +63,17 @@ pub trait PapRepository: Send + Sync {
     /// Returns storage or capacity failures without a partial result.
     fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError>;
 
+    /// Snapshot current v3 source policies for process deployment.
+    /// # Errors
+    /// Returns storage or snapshot capacity errors.
+    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError>;
+
+    /// Returns only the ordered v3 identities and revisions used to fence publication.
+    ///
+    /// # Errors
+    /// Returns storage or snapshot capacity errors.
+    fn automatic_source_revisions(&self) -> Result<Vec<(ResourceId, Revision)>, PapError>;
+
     /// Lists current Policy records ordered by Policy identity ascending.
     ///
     /// # Errors
@@ -86,6 +97,39 @@ pub trait PapRepository: Send + Sync {
     /// # Errors
     /// Rejects reused IDs, stale snapshots, invalid assignments, and storage failures.
     fn put_scope(&self, scope: &PreparedScope) -> Result<PreparedScope, PapError>;
+
+    /// Check the entire assignment transition before publishing to the Gateway.
+    /// # Errors
+    /// Rejects stale sources, invalid assignments and exhausted storage limits.
+    fn validate_automatic_scopes(
+        &self,
+        _updates: &crate::ScopePublication,
+        _sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        Err(PapError::Unavailable)
+    }
+
+    /// Commit a derived Scope only if its old snapshot and all v3 sources still match.
+    /// # Errors
+    /// Rejects stale source revisions or a changed serving assignment.
+    fn replace_automatic_scopes(
+        &self,
+        _updates: &crate::ScopePublication,
+        _sources: &[(ResourceId, Revision)],
+    ) -> Result<(), PapError> {
+        Err(PapError::Unavailable)
+    }
+
+    /// Begin automatic cleanup only while the source set that removed the assignment remains current.
+    /// # Errors
+    /// Rejects a stale source set or changed assignment.
+    fn delete_automatic_scope(
+        &self,
+        _expected: &PreparedScope,
+        _sources: &[(ResourceId, Revision)],
+    ) -> Result<PreparedScope, PapError> {
+        Err(PapError::Unavailable)
+    }
 
     /// Reads an assignment, including deletion intent.
     /// # Errors
@@ -145,6 +189,29 @@ pub trait PapRepository: Send + Sync {
         id: &ResourceId,
         instances: &[asc_policy_types::process_discovery::ProcessIdentity],
     ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
+
+    /// Current assignment generation, read before a scan to fence stale observations.
+    /// # Errors
+    /// Returns storage errors or an absent Scope.
+    fn automatic_scope_generation(&self, _id: &ResourceId) -> Result<Option<u64>, PapError> {
+        Ok(None)
+    }
+
+    /// Admits new explicitly UID-scoped assignments only on a matching observation in this scan.
+    /// # Errors
+    /// Rejects stale observations, inactive Scopes, or storage failures.
+    fn sync_observed_scope_instances(
+        &self,
+        id: &ResourceId,
+        instances: &[asc_policy_types::process_discovery::ProcessIdentity],
+        _uids: &std::collections::BTreeMap<
+            asc_policy_types::process_discovery::ProcessIdentity,
+            u32,
+        >,
+        _generation: Option<u64>,
+    ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError> {
+        self.sync_scope_instances(id, instances)
+    }
 
     /// Explicitly retries failed owned Bindings, preserving nonterminal retry budgets.
     /// # Errors

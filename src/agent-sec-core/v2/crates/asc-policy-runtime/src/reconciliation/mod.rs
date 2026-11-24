@@ -226,8 +226,7 @@ impl ReconciliationRuntime {
         self.spawn("scope-cleanup-worker".into(), move || {
             while !queue.state.lock().unwrap().stopped {
                 cleanup();
-                // wait_tick ignores Binding notifications until timeout or stop.
-                if !queue.wait_tick(interval) {
+                if !queue.wait_scope_cleanup(interval) {
                     break;
                 }
             }

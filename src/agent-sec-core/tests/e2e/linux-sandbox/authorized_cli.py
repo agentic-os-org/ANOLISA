@@ -45,7 +45,7 @@ def rpc(endpoint: Path, method: str, params: dict | None = None) -> dict:
 
 def policy_source(requirement: str, excluded: Path | None = None) -> dict:
     """Use the same OS contract and Cedar schema as the running implementation."""
-    type_condition = 'when { principal has agent_type && ["codex", "cosh"].contains(principal.agent_type) };'
+    type_condition = 'when { principal has agentType && ["codex", "cosh"].contains(principal.agentType) };'
     command = (
         'permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource) '
         + type_condition
@@ -177,7 +177,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
         "PATH": "/usr/bin:/bin",
         "RUST_LOG": "info",
     }
-    example_principal = {"agent_type": "codex"}
+    example_principal = {"agentType": "codex"}
     command = [
         str(example),
         "--helper",
@@ -276,8 +276,8 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             current = created["result"]
             policy_id = current["policyId"]
             for principal, expected in [
-                ({"agent_type": "codex"}, "ALLOW"),
-                ({"agent_type": "qoder"}, "DENY"),
+                ({"agentType": "codex"}, "ALLOW"),
+                ({"agentType": "qoder"}, "DENY"),
                 ({}, "DENY"),
             ]:
                 type_request["context"]["agent"] = principal
@@ -627,7 +627,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 ]
                 assert len(matches) == 1, matches
                 details = matches[0]["details"]
-                assert details["principal"] == {"agent_type": "cosh"}, details
+                assert details["principal"] == {"agentType": "cosh"}, details
                 assert details["result"]["started"] is started, details
                 assert details["approval"] is approval, details
                 receipt(
@@ -640,7 +640,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                         "verdict": details["verdict"],
                         "result": details["result"],
                     },
-                    {"agent_type": "cosh"},
+                    {"agentType": "cosh"},
                 )
 
             publish("warn")
@@ -685,6 +685,75 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             check_hook_receipt(modified_hook, True, None)
 
             publish("allow")
+            # The two files and the shell are identical across both launches.
+            # Only the Cedar operator changes; this host never supplies ownerUid.
+            target = private / "key"
+            qoder_command = command.copy()
+            qoder_command[qoder_command.index("--agent-type") + 1] = "qoder"
+            for operator, expect_blocked in [("&&", False), ("||", True)]:
+                extra = {
+                    "language": "cedar",
+                    "content": {
+                        "schema": {"schemaId": "seccore.system", "revision": 3},
+                        "text": (
+                            'permit(principal, action == SecCore::Action::"process.spawn", resource);\n'
+                            'forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)\n'
+                            f"when {{ resource.path == {json.dumps(str(target))} }}\n"
+                            'when { (principal has agentType && principal.agentType == "qoder") '
+                            f"{operator} (principal has ownerUid && principal.ownerUid == 1000) }};\n"
+                            'forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)\n'
+                            f"when {{ resource.path == {json.dumps(str(target))} }}\n"
+                            'when { principal has agentType && principal.agentType == "cosh" };'
+                        ),
+                    },
+                }
+                created_v3 = rpc(
+                    endpoint,
+                    "policy.templates.create",
+                    {"policyName": "sandbox-subject", "template": extra},
+                )
+                assert "result" in created_v3, created_v3
+                v3 = created_v3["result"]
+                assert v3["template"] == extra, v3
+                prefix = "! " if expect_blocked else ""
+                read_files = f"read line < public && {prefix}(read line < private/key)"
+                completed = subprocess.run(
+                    qoder_command + ["--", "/bin/sh", "-c", read_files],
+                    cwd=work,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                assert completed.returncode == 0, (completed.stdout, completed.stderr)
+                outcome = json.loads(completed.stdout)
+                assert (
+                    outcome["result"]["started"] and outcome["result"]["exit_code"] == 0
+                )
+                assert outcome["verdict"] == ("MODIFY" if expect_blocked else "ALLOW")
+                receipt(data, outcome, {"agentType": "qoder"})
+                if expect_blocked:
+                    hook_read = fire_hook("PreToolUse", read_files)
+                    assert hook_read["decision"] == "allow", hook_read
+                    wrapped = hook_read["hookSpecificOutput"]["tool_input"]["command"]
+                    execute_hook(wrapped)
+                    check_hook_receipt(wrapped, True, None)
+                    run_host(
+                        "v3-subject",
+                        root,
+                        work,
+                        hook,
+                        hook_env,
+                        data / "security-events.jsonl",
+                        cli,
+                    )
+                deleted_v3 = rpc(
+                    endpoint,
+                    "policy.templates.delete",
+                    {"id": v3["policyId"], "revision": v3["revision"]},
+                )
+                assert "result" in deleted_v3, deleted_v3
             protected = root / "protected"
             protected.write_text("unchanged")
             output = fire_hook("PreToolUse", f"rm -f {shlex.quote(str(protected))}")

@@ -59,6 +59,7 @@ pub struct ScanResult {
 pub struct ScopeDiscoveryState {
     selector: ScopeSelector,
     owner_uid: Option<u32>,
+    strict_uid: bool,
     pinned_pid: Option<ProcessIdentity>,
     checked: BTreeMap<u32, CheckedProcess>,
     instances: BTreeMap<u32, ProcessIdentity>,
@@ -90,8 +91,8 @@ impl ScopeDiscoveryState {
             return Err("cgroup discovery is unsupported");
         }
         Ok(Self {
-            owner_uid: scope
-                .uses_credentials()
+            strict_uid: scope.uses_credentials(),
+            owner_uid: (scope.uses_credentials() || scope.automatic_backend().is_some())
                 .then_some(scope.owner_uid)
                 .flatten(),
             selector: scope.selector,
@@ -129,7 +130,7 @@ impl ScopeDiscoveryState {
         complete: bool,
     ) -> ScanResult {
         let mut result = ScanResult::default();
-        if self.owner_uid.is_some() {
+        if self.strict_uid {
             // Credentials are admitted only from this scan's verified owner facts.
             // File selections deliberately retain their historic unreadable-instance semantics.
             self.instances.retain(|_, identity| {
@@ -158,6 +159,7 @@ impl ScopeDiscoveryState {
             {
                 self.instances.remove(&identity.pid);
             }
+            let observation_uid = fingerprint.uid;
             let matches = if let Some(previous) =
                 self.checked.get(&identity.pid).filter(|previous| {
                     previous.identity == identity && previous.fingerprint == fingerprint
@@ -173,6 +175,8 @@ impl ScopeDiscoveryState {
                     ScopeSelector::Process {
                         matcher: ProcessMatcher::Executable { executable },
                     } => fingerprint.executable.as_os_str() == std::ffi::OsStr::new(executable),
+                    // Any argv entry can match, including a script path opened by an editor.
+                    // UID and cgroup checks cannot establish that the process runs the script.
                     ScopeSelector::Process {
                         matcher: ProcessMatcher::CmdlineArg { cmdline_arg },
                     } => fingerprint
@@ -189,10 +193,7 @@ impl ScopeDiscoveryState {
                     }
                     ScopeSelector::CgroupId { .. } => false,
                 };
-                let matches = matches
-                    && self
-                        .owner_uid
-                        .is_none_or(|uid| fingerprint.uid == Some(uid));
+
                 self.checked.insert(
                     identity.pid,
                     CheckedProcess {
@@ -203,6 +204,11 @@ impl ScopeDiscoveryState {
                 );
                 matches
             };
+            let uid_matches = self.owner_uid.is_none_or(|uid| match observation_uid {
+                Some(actual) => actual == uid,
+                None => !self.strict_uid && self.instances.get(&identity.pid) == Some(&identity),
+            });
+            let matches = matches && uid_matches;
             if !matches {
                 self.instances.remove(&identity.pid);
             }
@@ -333,6 +339,30 @@ when { resource.host == "api.github.com" && context.input.scheme == "https" };"#
         let mut observation = process(10, 1, "/bin/agent");
         observation.fingerprint.uid = Some(uid);
         observation
+    }
+
+    #[test]
+    fn automatic_file_owner_retains_only_previously_selected_instances_on_unknown_uid() {
+        use asc_policy_types::policy::{DeploymentBackend, DeploymentSelection};
+        let mut scope = scope();
+        scope.owner_uid = Some(1000);
+        scope.policy_snapshots[0].deployment = Some(DeploymentSelection {
+            backend: DeploymentBackend::ActPlane,
+            statement_ids: BTreeSet::from(["policy0".into()]),
+        });
+        let mut file = ScopeDiscoveryState::for_scope(scope).unwrap();
+        let present = BTreeSet::from([10]);
+        let unreadable = || process(10, 1, "/bin/agent");
+        file.reconcile(vec![unreadable()], &present, true);
+        assert_eq!(file.instances().count(), 0);
+        file.reconcile(vec![process_with_uid(1000)], &present, true);
+        assert_eq!(file.instances().count(), 1);
+        file.reconcile(vec![unreadable()], &present, true);
+        assert_eq!(file.instances().count(), 1);
+        file.reconcile(vec![process_with_uid(1001)], &present, true);
+        assert_eq!(file.instances().count(), 0);
+        file.reconcile(vec![unreadable()], &present, true);
+        assert_eq!(file.instances().count(), 0);
     }
 
     #[test]

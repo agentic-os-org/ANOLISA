@@ -531,8 +531,7 @@ transport 使用受控替身；这不等于 CLI/daemon 进程 E2E 或内核防�
 
 revision 1 schema 覆盖文件访问、程序调用和整体网络权限，保留 `SecCore::File` 与
 `file.read/write/exec` 命名。`file.exec` 继续表示程序调用，不是 Linux 文件系统 X 权限检查。
-`SecCore::Subject` 是由集成层提供的请求主体类型，带可选的 `agent_type` 属性，具体进程身份仍由 Scope/Binding
-管理。`SecCore::File.path` 表示具体文件或程序路径，不保存策略中的路径模式；
+schema 1、2 的 `SecCore::Subject` 声明可选属性 `agentType`。schema 3 使用 `agentType` 和 `ownerUid`。具体进程身份由 Scope/Binding 管理。`SecCore::File.path` 表示具体文件或程序路径，不保存策略中的路径模式；
 路径条件直接写在策略中。`SecCore::Network::"all"` 表示整体网络使用权限，
 尚未定义主机、IP、端口或协议过滤。
 
@@ -617,11 +616,10 @@ PAP 是创建/更新的直接消费者，CLI 进程测试覆盖 RPC 往返及拒
 SQLite contracts 覆盖三处快照、更新/删除后的修订固定及关闭重开后的 PST 加载。
 撤销 Cedar 支持前需处理已有 Cedar 源码快照；本次未增加 SQL 迁移。
 
-Sandbox PDP 对 `Subject.agent_type`、主体条件、`process.spawn` 和 permit 上通过校验的
+Sandbox PDP 将传入的类别映射到 `Subject.agentType`，对主体条件、`process.spawn` 和 permit 上通过校验的
 `warn`/`escalate`/`transform` advice 求值。它通过 `pst` 加载 PAP 推导的当前有效策略集，
-合并为一个 SDK `PolicySet` 后在进程内求值。每次一致读取全部当前策略，纳入所有语句均有
-显式 principal header 的 Cedar 源码；混用裸 header 与显式约束的源码整份拒绝。
-更新、删除和集合资格变化影响后续请求，Scope/Binding 快照仍保留原 revision。
+合并为一个 SDK `PolicySet` 后在进程内求值。PAP 纳入每份 v3 Policy 的完整原文。schema 1 和 2 继续要求所有语句都带显式 principal header，拒绝同一策略混用裸 header 与显式约束。
+更新、删除和集合资格变化影响后续请求，手工 Scope/Binding 快照仍保留原 revision。
 daemon 默认启用授权，无需独立配置文件；申请权限和 Cedar 共同确定有效权限，决定接收
 期限固定为 60 秒。升级时移除 `--authorization-config`，并将必要的环境约束迁移为 Cedar。
 旧 baseline/task 快照接口已删除。调整旧请求策略时须核对原来的交集语义：

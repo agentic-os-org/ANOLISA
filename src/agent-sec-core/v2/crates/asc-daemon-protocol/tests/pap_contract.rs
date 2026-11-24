@@ -6,7 +6,7 @@ use asc_daemon_protocol::{
     ListResult, RequestId, ResourceParams, RevisionParams, UpdatePolicyParams, error_code,
 };
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
-use asc_policy_types::policy::PreparedPolicy;
+use asc_policy_types::policy::{PolicyDetails, PreparedPolicy};
 use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
 use serde_json::{Value, json};
 
@@ -412,8 +412,8 @@ fn decode_result(method_name: &str, result: &Value) {
     match method_name {
         method::POLICY_TEMPLATES_CREATE
         | method::POLICY_TEMPLATES_UPDATE
-        | method::POLICY_TEMPLATES_GET
         | method::POLICY_TEMPLATES_DELETE => assert_canonical_value::<PreparedPolicy>(result),
+        method::POLICY_TEMPLATES_GET => assert_canonical_value::<PolicyDetails>(result),
         method::POLICY_SCOPES_CREATE | method::POLICY_SCOPES_RETRY | method::POLICY_SCOPES_GET => {
             assert_canonical_value::<PreparedScope>(result);
         }

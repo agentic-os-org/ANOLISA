@@ -7,6 +7,7 @@
 
 pub mod advice;
 pub mod default_policy;
+pub mod deployment;
 pub mod http;
 mod rewrite;
 pub mod schema;
@@ -14,7 +15,7 @@ mod validation;
 
 pub use rewrite::rewrite_token_files;
 
-use asc_policy_types::cedar::CedarPolicySource;
+use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
 use cedar_policy::ValidationWarning;
 
 /// Validates source for policy creation and returns non-blocking SDK warnings.
@@ -30,15 +31,43 @@ pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, Ce
     Ok(warnings)
 }
 
-/// Checks the temporary explicit-principal opt-in for request authorization.
-/// Bare headers stay on the deployment path, even when conditions mention principal.
+/// Selects full-source v3 policies and eligible legacy policies for request authorization.
 ///
 /// # Errors
-/// Rejects invalid source, mixed bare/constrained headers or HTTP execution annotations
-/// on an explicit-principal request policy.
+/// Rejects invalid source and incompatible headers or credential annotations.
 pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool, CedarError> {
     let (policies, _) = validation::parse_and_validate(source)?;
-    request_policy_headers(&policies)
+    request_policy_headers_for_schema(&policies, &source.schema)
+}
+
+/// Checks a parsed policy set against the request-selection contract for its schema.
+///
+/// # Errors
+/// Rejects incompatible headers or a credential operation that could grant OS permissions.
+pub fn request_policy_headers_for_schema(
+    policies: &cedar_policy::PolicySet,
+    schema: &CedarSchemaReference,
+) -> Result<bool, CedarError> {
+    if !schema::uses_principal_targeting(schema) {
+        return request_policy_headers(policies);
+    }
+    for policy in policies.policies().filter(|policy| {
+        policy
+            .annotations()
+            .any(|(name, _)| http::is_annotation(name))
+    }) {
+        let http_action = matches!(policy.action_constraint(), cedar_policy::ActionConstraint::Eq(action)
+            if action.type_name().to_string() == "SecCore::Action" && action.id().unescaped() == "network.send");
+        let endpoint = matches!(policy.resource_constraint(), cedar_policy::ResourceConstraint::Is(ty)
+            if ty.to_string() == "SecCore::HttpEndpoint");
+        if policy.effect() != cedar_policy::Effect::Permit || !http_action || !endpoint {
+            return Err(CedarError::Unsupported {
+                policy_id: policy.id().to_string(),
+                reason: "credential annotations require an HTTP permit with exact network.send and resource is SecCore::HttpEndpoint",
+            });
+        }
+    }
+    Ok(true)
 }
 
 /// Checks request-authorization eligibility for a parsed policy set using the PAP header rules.
@@ -168,6 +197,14 @@ pub enum CedarError {
         errors: Vec<cedar_policy::ValidationError>,
         /// Action applicability warnings rejected to preserve admission checks.
         warnings: Vec<cedar_policy::ValidationWarning>,
+    },
+    /// The former subject attribute is no longer supported.
+    #[error(
+        "Cedar statement {statement_id} uses the retired agent_type attribute. Use principal.agentType"
+    )]
+    LegacyAgentType {
+        /// Statement that must be migrated.
+        statement_id: String,
     },
     /// Valid Cedar outside the common `SecCore` frontend subset.
     #[error("unsupported Cedar construct in {policy_id}: {reason}")]

@@ -10,10 +10,11 @@ use asc_credential_store::{
     CredentialId, CredentialState, CredentialStore, PairInput, ScopeId, read_token_file,
 };
 use asc_gateway_plan::{Plan, compile_scope};
-use asc_pap::PapRepository;
+use asc_pap::{PapRepository, ScopePublication as Publication};
+use asc_policy_types::Validate as _;
 use asc_policy_types::binding::BindingStatus;
-use asc_policy_types::identifiers::ResourceId;
-use asc_policy_types::scope::{PreparedScope, ScopeStatus};
+use asc_policy_types::identifiers::{ResourceId, Revision};
+use asc_policy_types::scope::{PolicyReference, PreparedScope, ScopeStatus};
 use serde::Serialize;
 
 use crate::binding::RouteFault;
@@ -85,6 +86,27 @@ pub struct ScopeStatusView {
     pub scope_id: ScopeId,
     /// Attached Binding responsibilities.
     pub bindings: Vec<ResourceId>,
+    /// Effective publication of an automatic assignment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automatic: Option<AutomaticPublication>,
+}
+
+/// Source revisions loaded by the serving proxy, or a Scope awaiting publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum AutomaticPublication {
+    /// No verified listener is serving this automatic assignment.
+    Unavailable,
+    /// The proxy has acknowledged the complete host publication containing this Scope.
+    Serving {
+        /// Host-wide manifest publication counter.
+        generation: u64,
+        /// The published listener has at least one usable credential rule.
+        #[serde(rename = "canInject")]
+        can_inject: bool,
+        /// Source revisions that define this listener.
+        policies: Vec<PolicyReference>,
+    },
 }
 /// Credential mutation result without values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,6 +131,9 @@ pub struct CaBundle {
 }
 
 pub(crate) struct Inner {
+    publishing: Publication,
+    pub(crate) waiting_for_validation: BTreeSet<ScopeId>,
+    pub(crate) waiting_for_scan: BTreeSet<ScopeId>,
     pub(crate) state: State,
     store: Option<CredentialStore>,
     /// Execution pins are rebuilt from canonical Bindings on recovery, never from PID alone.
@@ -133,7 +158,7 @@ impl GatewayService {
         repository: Arc<dyn PapRepository>,
     ) -> Result<Self, GatewayError> {
         let state = State::load(&config.state_dir, &config.ports)
-            .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error))?;
+            .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error).0)?;
         if !config
             .state_dir
             .join(crate::state::STATE_FILE_NAME)
@@ -142,7 +167,7 @@ impl GatewayService {
                 || host.unit_active(&config.unit)
                 || host
                     .routing_active()
-                    .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error))?)
+                    .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error).0)?)
         {
             return Err(withdraw_on_failure(
                 &config,
@@ -150,13 +175,23 @@ impl GatewayService {
                 GatewayError::internal(
                     "gateway projection is missing while an old data plane remains",
                 ),
-            ));
+            )
+            .0);
         }
+        let automatic: BTreeSet<_> = state
+            .scopes
+            .iter()
+            .filter(|(_, domain)| domain.automatic)
+            .map(|(id, _)| id.clone())
+            .collect();
         Ok(Self {
             config,
             host,
             repository,
             inner: Mutex::new(Inner {
+                waiting_for_scan: automatic.clone(),
+                waiting_for_validation: automatic,
+                publishing: Publication::new(),
                 state,
                 store: None,
                 pins: BTreeMap::new(),
@@ -173,6 +208,34 @@ impl GatewayService {
         }
         Ok(())
     }
+    fn expected_scope(
+        &self,
+        id: &ResourceId,
+        expected: Option<&PreparedScope>,
+    ) -> Result<(), GatewayError> {
+        match self.repository.get_scope(id) {
+            Ok(current) if Some(&current) == expected && current.status == ScopeStatus::Active => {
+                Ok(())
+            }
+            Err(asc_pap::PapError::NotFound) if expected.is_none() => Ok(()),
+            Ok(_) | Err(asc_pap::PapError::NotFound) => Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "serving Scope changed during publication",
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn check_publication(&self, inner: &Inner, scope: &PreparedScope) -> Result<(), GatewayError> {
+        if let Some(update) = inner.publishing.get(&scope.scope_id)
+            && update.candidate.as_ref() == Some(scope)
+        {
+            self.expected_scope(&scope.scope_id, update.expected.as_ref())
+        } else {
+            self.canonical(scope)
+        }
+    }
+
     /// Compiles the pinned assignment and validates its nonroot owner without PID discovery.
     /// # Errors
     /// Rejects unsupported policy semantics, absent owners and sensitive groups.
@@ -185,7 +248,7 @@ impl GatewayService {
         Ok(plan)
     }
     pub(crate) fn validate_scope_pairs(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
-        let mut plan = self.check_scope(scope)?;
+        let plan = self.check_scope(scope)?;
         let existing = match self.repository.get_scope(&scope.scope_id) {
             Ok(current) if current == *scope && current.status == ScopeStatus::Active => true,
             Ok(_) => {
@@ -197,26 +260,54 @@ impl GatewayService {
             Err(asc_pap::PapError::NotFound) => false,
             Err(error) => return Err(error.into()),
         };
-        let mut inner = self.lock();
-        let store = self.store(&mut inner, false)?;
+        self.validate_pairs(&mut self.lock(), &plan, existing.then_some(&plan))
+    }
+    fn validate_pairs(
+        &self,
+        inner: &mut Inner,
+        plan: &Plan,
+        admitted: Option<&Plan>,
+    ) -> Result<(), GatewayError> {
+        let store = self.store(inner, false)?;
         let summaries = store.list();
-        if existing {
-            let retired: BTreeSet<_> = summaries
-                .iter()
-                .filter(|record| record.state == CredentialState::Retired)
-                .map(|record| &record.id)
-                .collect();
-            plan.credentials.retain(|id| !retired.contains(id));
+        let retired: BTreeSet<_> = summaries
+            .iter()
+            .filter(|record| record.state == CredentialState::Retired)
+            .map(|record| &record.id)
+            .collect();
+        let mut required = plan.credentials.clone();
+        if let Some(previous) = admitted {
+            // A tombstone can stay in the source snapshot while unrelated grants change.
+            // Require regular admission if even one use of that key is new for this Scope.
+            required.retain(|key| {
+                !retired.contains(key)
+                    || plan
+                        .rules
+                        .iter()
+                        .filter(|rule| &rule.matcher.credential_id == key)
+                        .any(|rule| {
+                            !previous.rules.iter().any(|old| {
+                                old.source.policy_id == rule.source.policy_id
+                                    && old.matcher == rule.matcher
+                                    && old.header == rule.header
+                                    && old.format == rule.format
+                                    && old.response_rewrite == rule.response_rewrite
+                            })
+                        })
+            });
         }
-        store.validate_scope_pairs(&plan.credentials)?;
-        if !existing {
+        store.validate_scope_pairs(&required)?;
+        if required
+            .iter()
+            .any(|key| !admitted.is_some_and(|plan| plan.credentials.contains(key)))
+        {
             let active: BTreeSet<_> = self
-                .canonical_assignments()?
+                .canonical_assignments(None)?
                 .into_iter()
                 .flat_map(|(_, ids)| ids)
                 .collect();
             if summaries.iter().any(|record| {
-                plan.credentials.contains(&record.id)
+                required.contains(&record.id)
                     && !record.fakes.is_empty()
                     && !active.contains(&record.id)
             }) {
@@ -227,6 +318,159 @@ impl GatewayService {
             }
         }
         Ok(())
+    }
+
+    fn check_source_revisions(
+        &self,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), GatewayError> {
+        if self.repository.automatic_source_revisions()? != sources {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "source policies changed before publication",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_publication(
+        &self,
+        inner: &mut Inner,
+        updates: &Publication,
+    ) -> Result<(), GatewayError> {
+        // Check every affected target before modifying any credentials, listeners or routes.
+        let mut new_listeners = 0;
+        for (id, update) in updates {
+            self.expected_scope(id, update.expected.as_ref())?;
+            if let Some(next) = &update.candidate {
+                next.validate()
+                    .map_err(|error| GatewayError::invalid(error.to_string()))?;
+                if &next.scope_id != id
+                    || next.automatic_backend()
+                        != Some(asc_policy_types::policy::DeploymentBackend::Gateway)
+                    || update.expected.as_ref().is_some_and(|old| {
+                        old.selector != next.selector || old.owner_uid != next.owner_uid
+                    })
+                {
+                    return Err(GatewayError::invalid(
+                        "automatic publication requires the same Scope target",
+                    ));
+                }
+                let previous = update.expected.as_ref().map(compile_scope).transpose()?;
+                self.validate_pairs(inner, &self.check_scope(next)?, previous.as_ref())?;
+                let id = ScopeId::new(id.as_str())?;
+                if !inner.state.scopes.contains_key(&id) {
+                    new_listeners += 1;
+                }
+            }
+        }
+        if new_listeners
+            > self
+                .config
+                .ports
+                .clone()
+                .count()
+                .saturating_sub(inner.state.scopes.len())
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::ResourceExhausted,
+                "gateway listener capacity exhausted",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_candidate(
+        &self,
+        updates: &Publication,
+        sources: &[(ResourceId, Revision)],
+    ) -> Result<(), GatewayError> {
+        let mut inner = self.lock();
+        if updates.len() == 1
+            && let Some((resource, update)) = updates.first_key_value()
+        {
+            self.expected_scope(resource, update.expected.as_ref())?;
+            let id = ScopeId::new(resource.as_str())?;
+            if update.candidate.is_some()
+                && update.expected == update.candidate
+                && !inner.waiting_for_validation.contains(&id)
+                && inner.state.scopes.contains_key(&id)
+            {
+                return Ok(());
+            }
+        }
+        self.validate_publication(&mut inner, updates)?;
+        // A deterministic PAP rejection must leave the currently serving host untouched.
+        // This preview releases the DB transaction before any proxy or routing work.
+        self.repository
+            .validate_automatic_scopes(updates, sources)
+            .map_err(|error| match error {
+                asc_pap::PapError::InvalidScope(reason) => {
+                    GatewayError::invalid(reason.to_string())
+                }
+                other => other.into(),
+            })?;
+        inner.publishing = updates.clone();
+        let result = (|| {
+            for next in updates
+                .values()
+                .filter_map(|update| update.candidate.as_ref())
+            {
+                self.prepare_locked(&mut inner, next)?;
+            }
+            if inner.state.enabled {
+                self.apply(&mut inner, Some(sources))?;
+            }
+            self.repository.replace_automatic_scopes(updates, sources)?;
+            self.sync_credential_scopes(&mut inner)
+        })();
+        inner.publishing.clear();
+        for resource in updates.keys() {
+            let id = ScopeId::new(resource.as_str())?;
+            if result.is_ok() {
+                inner.waiting_for_validation.remove(&id);
+            } else {
+                inner.waiting_for_validation.insert(id);
+            }
+        }
+        result.map_err(|error| {
+            let (error, withdrawn) = withdraw_on_failure(&self.config, self.host.as_ref(), error);
+            if withdrawn {
+                // A listener reserved for a failed first publication has no PAP cleanup owner.
+                let mut cleaned = inner.state.clone();
+                let mut orphans = Vec::new();
+                for (resource, update) in updates {
+                    let Ok(id) = ScopeId::new(resource.as_str()) else {
+                        continue;
+                    };
+                    if update.expected.is_none()
+                        && cleaned
+                            .scopes
+                            .get(&id)
+                            .is_some_and(|domain| domain.automatic && domain.bindings.is_empty())
+                        && matches!(
+                            self.repository.get_scope(resource),
+                            Err(asc_pap::PapError::NotFound)
+                        )
+                    {
+                        cleaned.scopes.remove(&id);
+                        orphans.push(id);
+                    }
+                }
+                if !orphans.is_empty() {
+                    if let Err(failure) = cleaned.save(&self.config.state_dir) {
+                        return error
+                            .context(&format!("failed to release unused listeners: {failure}"));
+                    }
+                    inner.state = cleaned;
+                    for id in orphans {
+                        inner.waiting_for_validation.remove(&id);
+                        inner.waiting_for_scan.remove(&id);
+                    }
+                }
+            }
+            error
+        })
     }
 
     /// Durably projects an active assignment using its registered fakes without starting agents.
@@ -268,7 +512,8 @@ impl GatewayService {
         scope: &PreparedScope,
     ) -> Result<(), GatewayError> {
         if inner.state.enabled {
-            self.apply(inner).map_err(|error| self.fail_closed(error))?;
+            self.apply(inner, None)
+                .map_err(|error| self.fail_closed(error))?;
         }
         self.canonical(scope)
             .map_err(|error| self.fail_closed(error))
@@ -303,7 +548,7 @@ impl GatewayService {
         inner: &mut Inner,
         scope: &PreparedScope,
     ) -> Result<Plan, GatewayError> {
-        self.canonical(scope)?;
+        self.check_publication(inner, scope)?;
         let plan = self.check_scope(scope)?;
         let id = ScopeId::new(scope.scope_id.as_str())?;
         let uid = scope
@@ -328,11 +573,17 @@ impl GatewayService {
                 Domain {
                     uid,
                     port,
+                    automatic: scope.automatic_backend().is_some(),
                     revoked: false,
                     bindings: BTreeMap::new(),
                 },
             );
             inner.state.save(&self.config.state_dir)?;
+        }
+        if inner.publishing.contains_key(&scope.scope_id) {
+            // The candidate's registered pairs passed admission. Its memberships are
+            // rendered into the candidate generation, then committed with the Scope.
+            return Ok(plan);
         }
         let store = self.store(inner, false)?;
         let retired: BTreeSet<_> = store
@@ -346,7 +597,7 @@ impl GatewayService {
                 return Err(GatewayError::unavailable("Scope pair has no active fake"));
             }
         }
-        self.canonical(scope)
+        self.check_publication(inner, scope)
             .map_err(|error| self.fail_closed(error))?;
         Ok(plan)
     }
@@ -356,13 +607,28 @@ impl GatewayService {
     /// Failures stop the proxy and withdraw traffic, retaining responsibility for retry.
     pub fn revoke_scope(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
         let mut inner = self.lock();
+        if scope.automatic_backend().is_some() && scope.status == ScopeStatus::Active {
+            // An explicit grant deletion must withdraw the old listener even if
+            // an unrelated unsupported rule prevents publishing its replacement.
+            let result = (|| {
+                self.canonical(scope)?;
+                inner
+                    .waiting_for_validation
+                    .insert(ScopeId::new(scope.scope_id.as_str())?);
+                if inner.state.enabled {
+                    self.apply(&mut inner, None)?;
+                }
+                Ok(())
+            })();
+            return result.map_err(|error| self.fail_closed(error));
+        }
         // Deletion admission is already closed: even the first canonical read failure
         // must withdraw the previously published authorization.
         let result = (|| {
             self.revoke_locked(&mut inner, scope)?;
             self.sync_credential_scopes(&mut inner)?;
             if inner.state.enabled {
-                self.apply(&mut inner)?;
+                self.apply(&mut inner, None)?;
             }
             Ok(())
         })();
@@ -431,6 +697,8 @@ impl GatewayService {
                 "Scope cleanup is incomplete",
             ));
         }
+        inner.waiting_for_validation.remove(&scope_id);
+        inner.waiting_for_scan.remove(&scope_id);
         inner.state.scopes.remove(&scope_id);
         inner.state.save(&self.config.state_dir)
     }
@@ -440,10 +708,20 @@ impl GatewayService {
     /// Any unsafe or unavailable recovery stops the proxy and removes traffic.
     pub fn recover(&self) -> Result<(), GatewayError> {
         let mut inner = self.lock();
-        let result = self.recover_locked(&mut inner);
+        let result = (|| {
+            if !inner.waiting_for_validation.is_empty() {
+                // A previous proxy and its nft rules can outlive the daemon.
+                self.host.apply_nft(&nft::render_delete())?;
+                self.host.stop_unit(&self.config.unit)?;
+            }
+            self.recover_locked(&mut inner)
+        })();
         result.map_err(|error| self.fail_closed(error))
     }
-    fn canonical_assignments(&self) -> Result<Vec<(ScopeId, Vec<CredentialId>)>, GatewayError> {
+    fn canonical_assignments(
+        &self,
+        publication: Option<&Publication>,
+    ) -> Result<Vec<(ScopeId, Vec<CredentialId>)>, GatewayError> {
         let mut after = None;
         let mut assignments = Vec::new();
         loop {
@@ -452,6 +730,9 @@ impl GatewayService {
                 break;
             }
             for scope in &scopes {
+                if publication.is_some_and(|updates| updates.contains_key(&scope.scope_id)) {
+                    continue;
+                }
                 if scope.status == ScopeStatus::Active && scope.uses_credentials() {
                     assignments.push((
                         ScopeId::new(scope.scope_id.as_str())?,
@@ -461,10 +742,31 @@ impl GatewayService {
             }
             after = scopes.last().map(|scope| scope.scope_id.clone());
         }
+        for scope in publication
+            .into_iter()
+            .flat_map(|updates| updates.values())
+            .filter_map(|update| update.candidate.as_ref())
+        {
+            assignments.push((
+                ScopeId::new(scope.scope_id.as_str())?,
+                compile_scope(scope)?.credentials,
+            ));
+        }
         Ok(assignments)
     }
 
     fn sync_credential_scopes(&self, inner: &mut Inner) -> Result<(), GatewayError> {
+        let assignments = self.credential_assignments(inner)?;
+        if !assignments.is_empty() || self.config.store_dir.exists() {
+            self.store(inner, false)?.sync_scopes(&assignments)?;
+        }
+        Ok(())
+    }
+
+    fn credential_assignments(
+        &self,
+        inner: &mut Inner,
+    ) -> Result<Vec<(ScopeId, Vec<CredentialId>)>, GatewayError> {
         let retired: BTreeSet<_> = if self.config.store_dir.exists() {
             self.store(inner, false)?
                 .list()
@@ -475,15 +777,12 @@ impl GatewayService {
         } else {
             BTreeSet::new()
         };
-        let mut assignments = self.canonical_assignments()?;
+        let mut assignments = self.canonical_assignments(Some(&inner.publishing))?;
         for (_, ids) in &mut assignments {
             // Canonical snapshots outlive global key retirement; tombstones grant nothing.
             ids.retain(|id| !retired.contains(id));
         }
-        if !assignments.is_empty() || self.config.store_dir.exists() {
-            self.store(inner, false)?.sync_scopes(&assignments)?;
-        }
-        Ok(())
+        Ok(assignments)
     }
 
     fn recover_locked(&self, inner: &mut Inner) -> Result<(), GatewayError> {
@@ -508,25 +807,35 @@ impl GatewayService {
                     // Recovery keeps the tolerant path so one retired assignment cannot
                     // stop the gateway for every other Scope.
                     ScopeStatus::Active => {
-                        self.prepare_locked(inner, scope)?;
+                        if !inner
+                            .waiting_for_validation
+                            .contains(&ScopeId::new(scope.scope_id.as_str())?)
+                        {
+                            self.prepare_locked(inner, scope)?;
+                        }
                     }
                     ScopeStatus::Deleting => self.revoke_locked(inner, scope)?,
                 }
             }
             after = scopes.last().map(|scope| scope.scope_id.clone());
         }
+        // An uncommitted initial publication owns no admitted process. Its listener
+        // was fenced before recovery and can be reallocated on the next attempt.
+        inner.state.scopes.retain(|id, domain| {
+            canonical_ids.contains(id) || !domain.automatic || !domain.bindings.is_empty()
+        });
         for (id, domain) in &mut inner.state.scopes {
             if !canonical_ids.contains(id) {
                 domain.revoked = true;
             }
         }
-        self.recover_attachments(inner)?;
+        self.recover_attachments(inner, None)?;
         // An untouched, disabled installation has no gateway projection to persist.
         if inner.state != State::default() || self.config.state_dir.exists() {
             inner.state.save(&self.config.state_dir)?;
         }
         if inner.state.enabled {
-            self.apply(inner)?;
+            self.apply(inner, None)?;
         }
         Ok(())
     }
@@ -582,8 +891,54 @@ impl GatewayService {
         status.scopes.retain(|scope| {
             caller_uid == 0 || inner.state.scopes[&scope.scope_id].uid == caller_uid
         });
+        for scope in &mut status.scopes {
+            let domain = &inner.state.scopes[&scope.scope_id];
+            if domain.automatic {
+                let serving = status.ready
+                    && !domain.revoked
+                    && !inner.waiting_for_validation.contains(&scope.scope_id);
+                scope.automatic = Some(self.automatic_publication(
+                    &scope.scope_id,
+                    serving,
+                    inner.state.generation,
+                ));
+            }
+        }
         status
     }
+
+    fn automatic_publication(
+        &self,
+        id: &ScopeId,
+        serving: bool,
+        generation: u64,
+    ) -> AutomaticPublication {
+        if serving {
+            match self.runtime(None).published_plan(id, generation) {
+                Ok(Some(plan)) => {
+                    return AutomaticPublication::Serving {
+                        generation,
+                        can_inject: !plan.credentials.is_empty() && !plan.rules.is_empty(),
+                        policies: plan
+                            .policies
+                            .into_iter()
+                            .map(|source| PolicyReference {
+                                policy_id: source.id,
+                                policy_revision: source.revision,
+                            })
+                            .collect(),
+                    };
+                }
+                Err(error) => diagnose(
+                    "cannot read acknowledged listener plan",
+                    format_args!("scope={id} error={error}"),
+                ),
+                Ok(None) => {}
+            }
+        }
+        AutomaticPublication::Unavailable
+    }
+
     /// Globally retires a credential, preserving every other credential grant.
     /// The principal boundary must restrict this administrator operation to root.
     /// # Errors
@@ -595,7 +950,7 @@ impl GatewayService {
             .remove(&credential)
             .map_err(|error| self.fail_closed(error.into()))?;
         if inner.state.enabled {
-            self.apply(&mut inner)
+            self.apply(&mut inner, None)
                 .map_err(|error| self.fail_closed(error))?;
         }
         Ok(KeyOutcome { credential })
@@ -722,10 +1077,20 @@ impl GatewayService {
             }
             let resource = ResourceId::new(id.as_str())
                 .map_err(|_| GatewayError::internal("invalid projected Scope"))?;
-            let scope = match self.repository.get_scope(&resource) {
-                Ok(scope) if scope.status == ScopeStatus::Active => scope,
-                Ok(_) | Err(asc_pap::PapError::NotFound) => continue,
-                Err(error) => return Err(error.into()),
+            let scope = if let Some(update) = inner.publishing.get(&resource) {
+                let Some(next) = &update.candidate else {
+                    continue;
+                };
+                next.clone()
+            } else {
+                if inner.waiting_for_validation.contains(id) {
+                    continue;
+                }
+                match self.repository.get_scope(&resource) {
+                    Ok(scope) if scope.status == ScopeStatus::Active => scope,
+                    Ok(_) | Err(asc_pap::PapError::NotFound) => continue,
+                    Err(error) => return Err(error.into()),
+                }
             };
             let mut plan = self.check_scope(&scope)?;
             if scope.owner_uid != Some(domain.uid) {
@@ -738,10 +1103,11 @@ impl GatewayService {
                 .iter()
                 .filter(|record| {
                     record.state == CredentialState::Active
-                        && record
-                            .fakes
-                            .iter()
-                            .any(|fake| fake.scope_id == *id && !fake.retired)
+                        && (inner.publishing.contains_key(&resource)
+                            || record
+                                .fakes
+                                .iter()
+                                .any(|fake| fake.scope_id == *id && !fake.retired))
                 })
                 .map(|record| record.id.clone())
                 .collect();
@@ -754,7 +1120,11 @@ impl GatewayService {
         }
         Ok(plans)
     }
-    pub(crate) fn apply(&self, inner: &mut Inner) -> Result<(), GatewayError> {
+    fn apply(
+        &self,
+        inner: &mut Inner,
+        sources: Option<&[(ResourceId, Revision)]>,
+    ) -> Result<(), GatewayError> {
         self.host.check_cgroup_v2()?;
         let account = self
             .account()?
@@ -782,22 +1152,34 @@ impl GatewayService {
             })
             .collect();
         for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+            self.check_publication(inner, scope)?;
         }
+        if let Some(sources) = sources {
+            self.check_source_revisions(sources)?;
+        }
+        let memberships = if sources.is_some() {
+            Some(self.credential_assignments(inner)?)
+        } else {
+            None
+        };
         runtime.publish(
             self.store(inner, true)?,
             &credentials.into_iter().collect::<Vec<_>>(),
             &published,
             generation,
+            memberships.as_deref(),
         )?;
         for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+            self.check_publication(inner, scope)?;
         }
         self.host.start_unit(&self.config.unit)?;
         runtime.await_generation(generation, self.config.load_timeout)?;
         for (scope, _) in plans.values() {
-            self.canonical(scope)
+            self.check_publication(inner, scope)
                 .map_err(|error| self.fail_closed(error))?;
+        }
+        if let Some(sources) = sources {
+            self.check_source_revisions(sources)?;
         }
         runtime.publish_ca_bundle(&self.config.system_ca_bundles)?;
         self.route(inner, &plans)?;
@@ -879,7 +1261,7 @@ impl GatewayService {
             }
         }
         for (scope, _) in plans.values() {
-            self.canonical(scope)?;
+            self.check_publication(inner, scope)?;
         }
         let redirects: Vec<_> = routes
             .iter()
@@ -891,13 +1273,13 @@ impl GatewayService {
             .collect();
         self.host.apply_nft(&nft::render(&redirects))?;
         for (scope, _) in plans.values() {
-            self.canonical(scope)
+            self.check_publication(inner, scope)
                 .map_err(|error| self.fail_closed(error))?;
         }
         Ok(withheld)
     }
     pub(crate) fn fail_closed(&self, error: GatewayError) -> GatewayError {
-        withdraw_on_failure(&self.config, self.host.as_ref(), error)
+        withdraw_on_failure(&self.config, self.host.as_ref(), error).0
     }
     fn status_of(&self, state: &State) -> GatewayStatus {
         let ready = state.enabled
@@ -921,6 +1303,7 @@ impl GatewayService {
             .map(|(id, domain)| ScopeStatusView {
                 scope_id: id.clone(),
                 bindings: domain.bindings.keys().cloned().collect(),
+                automatic: None,
             })
             .collect()
     }
@@ -935,7 +1318,7 @@ fn withdraw_on_failure(
     config: &GatewayConfig,
     host: &dyn Host,
     error: GatewayError,
-) -> GatewayError {
+) -> (GatewayError, bool) {
     diagnose(
         "gateway failing closed: stopping proxy and withdrawing traffic",
         format_args!("error={error}"),
@@ -956,17 +1339,20 @@ fn withdraw_on_failure(
         .filter_map(|(operation, result)| result.err().map(|error| format!("{operation}: {error}")))
         .collect();
     if failures.is_empty() {
-        error.context("gateway stopped and traffic withdrawn; cleanup responsibility retained")
+        (
+            error.context("gateway stopped and traffic withdrawn; cleanup responsibility retained"),
+            true,
+        )
     } else {
         tracing::error!(
             target: "asc_process_diagnostic",
             failures = %failures.join("; "),
             "gateway fail-closed cleanup failed; operator must stop proxy and withdraw traffic"
         );
-        error.context(&format!(
+        (error.context(&format!(
             "gateway fail-closed cleanup failed ({}); operator must stop proxy and withdraw traffic; cleanup responsibility retained",
             failures.join("; ")
-        ))
+        )), false)
     }
 }
 
@@ -1028,7 +1414,7 @@ impl asc_pap::CredentialRegistration for GatewayService {
                 .map_err(|error| registration_failure(&error))?
         };
         if inner.state.enabled {
-            self.apply(&mut inner).map_err(|error| {
+            self.apply(&mut inner, None).map_err(|error| {
                 self.fail_closed(error);
                 asc_pap::PapError::Unavailable
             })?;

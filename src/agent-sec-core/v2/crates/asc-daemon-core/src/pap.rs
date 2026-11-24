@@ -4,7 +4,7 @@ use asc_pap::{Page, PapError, PapRepository, PapService};
 use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::BindingView;
 use asc_policy_types::error::ValidationError;
-use asc_policy_types::policy::PreparedPolicy;
+use asc_policy_types::policy::{PolicyDetails, PreparedPolicy};
 use asc_policy_types::scope::{PolicyReference, PreparedScope, ScopeDeletion, ScopeSelector};
 
 use crate::{Principal, PrincipalRole};
@@ -107,9 +107,19 @@ fn project_pap_error(
         ),
         PapError::InvalidScope(error) => project_validation_error(
             &error,
-            &["selector", "pid", "cgroupId", "policyTemplates", "ownerUid"],
+            &[
+                "selector",
+                "pid",
+                "cgroupId",
+                "policyTemplates",
+                "ownerUid",
+                "scopeId",
+            ],
             "invalid scope",
         ),
+        PapError::AutomaticPolicyCapacity | PapError::LegacyAgentType { .. } => {
+            PolicyAdministrationError::InvalidArgument(PolicyInputError::new(error.to_string()))
+        }
         PapError::InvalidPagination => PolicyAdministrationError::InvalidArgument(
             PolicyInputError::new("invalid pagination: limit must be between 1 and 1000"),
         ),
@@ -210,7 +220,7 @@ pub trait PolicyAdministration: Send + Sync {
         principal: &Principal,
         id: &ResourceId,
         revision: Revision,
-    ) -> Result<PreparedPolicy, PolicyAdministrationError>;
+    ) -> Result<PolicyDetails, PolicyAdministrationError>;
 
     /// Lists current Policies.
     ///
@@ -354,9 +364,9 @@ where
         principal: &Principal,
         id: &ResourceId,
         revision: Revision,
-    ) -> Result<PreparedPolicy, PolicyAdministrationError> {
+    ) -> Result<PolicyDetails, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        PapService::get_policy(self, id, revision)
+        PapService::policy_details(self, id, revision)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::PolicyRevision)))
     }
 
@@ -434,12 +444,18 @@ where
         id: &ResourceId,
     ) -> Result<ScopeDeletion, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        match PapService::get_scope(self, id) {
-            Ok(scope) => require_credential_authority(principal, scope.uses_credentials())?,
-            Err(PapError::NotFound) => {}
+        let scope = match PapService::get_scope(self, id) {
+            Ok(scope) => scope,
+            Err(PapError::NotFound) => {
+                return Ok(ScopeDeletion {
+                    scope_id: id.clone(),
+                    completed: true,
+                });
+            }
             Err(error) => return Err(project_pap_error(error, Some(NotFoundResource::Scope))),
-        }
-        PapService::delete_scope(self, id)
+        };
+        require_credential_authority(principal, scope.uses_credentials())?;
+        PapService::delete_scope_snapshot(self, &scope)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
     }
 
@@ -471,10 +487,10 @@ where
         id: &ResourceId,
     ) -> Result<PreparedScope, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        let scope = PapService::get_scope(self, id)
+        let scope = PapService::scope_for_retry(self, id)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))?;
         require_credential_authority(principal, scope.uses_credentials())?;
-        PapService::retry_scope(self, id)
+        PapService::retry_scope_snapshot(self, &scope)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
     }
 }

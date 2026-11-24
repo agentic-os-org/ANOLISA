@@ -30,6 +30,7 @@ fn github_policy() -> PreparedPolicy {
         })
         .collect();
     PreparedPolicy {
+        deployment: None,
         policy_id: ResourceId::new("policy:github").unwrap(),
         policy_name: "GitHub".into(),
         revision: Revision::new(7).unwrap(),
@@ -168,6 +169,7 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
     }
     second.credential_bindings.reverse();
     let file = PreparedPolicy {
+        deployment: None,
         policy_id: ResourceId::new("policy:file").unwrap(), policy_name: "Files".into(), revision: Revision::new(1).unwrap(),
         template: serde_json::from_value(json!({"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };"}})).unwrap(),
         credential_bindings: vec![],
@@ -610,4 +612,29 @@ fn plan_level_constraints_are_enforced() {
         mutated(|p| p["policies"][0]["revision"] = 0.into()),
         Err(PlanDecodeError::Decode(_))
     ));
+}
+
+#[test]
+fn automatic_scope_compiles_only_selected_rules_and_requires_their_registered_pairs() {
+    use asc_policy_types::policy::{DeploymentBackend, DeploymentSelection};
+    let mut policy = github_policy();
+    let AuthoredPolicySource::Cedar(cedar) = &mut policy.template else {
+        panic!("fixture must contain Cedar");
+    };
+    cedar.schema = asc_policy_cedar::schema::principal_reference();
+    cedar.text = cedar.text.replace(
+        "when {",
+        r#"when { principal has agentType && principal.agentType == "qoder" &&"#,
+    );
+    policy.deployment = Some(DeploymentSelection {
+        backend: DeploymentBackend::Gateway,
+        statement_ids: ["policy0".to_owned()].into_iter().collect(),
+    });
+    let plan = compile_scope(&scope(std::slice::from_ref(&policy))).unwrap();
+    assert_eq!(plan.rules.len(), 1);
+    assert_eq!(plan.rules[0].matcher.host, "api.github.com");
+    policy
+        .credential_bindings
+        .retain(|binding| binding.rule_id != "github-rest-auto");
+    assert!(compile_scope(&scope(&[policy])).is_err());
 }

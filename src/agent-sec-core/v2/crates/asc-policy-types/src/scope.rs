@@ -40,7 +40,7 @@ impl Validate for ScopeSelector {
 }
 
 /// Exactly one process selection criterion; combinations and unknown fields reject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ProcessMatcher {
     /// Exact kernel process name (`/proc/PID/comm`).
@@ -145,6 +145,15 @@ pub struct PreparedScope {
 }
 
 impl PreparedScope {
+    /// Backend for a derived assignment; legacy and manual assignments have no selection.
+    pub fn automatic_backend(&self) -> Option<crate::policy::DeploymentBackend> {
+        self.policy_snapshots
+            .first()?
+            .deployment
+            .as_ref()
+            .map(|selection| selection.backend)
+    }
+
     /// Whether pinned policies require credential execution and durable release.
     pub fn uses_credentials(&self) -> bool {
         self.policy_snapshots
@@ -161,7 +170,23 @@ impl Validate for PreparedScope {
                 "requires 1..32 policies",
             ));
         }
+        let backend = self.automatic_backend();
         for (index, policy) in self.policy_snapshots.iter().enumerate() {
+            if policy
+                .deployment
+                .as_ref()
+                .map(|selection| selection.backend)
+                != backend
+                || policy
+                    .deployment
+                    .as_ref()
+                    .is_some_and(|selection| selection.statement_ids.is_empty())
+            {
+                return Err(ValidationError::new(
+                    "policyTemplates",
+                    "requires consistent deployment selections",
+                ));
+            }
             policy.validate()?;
             if self.policy_snapshots[..index]
                 .iter()

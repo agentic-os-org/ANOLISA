@@ -1,6 +1,7 @@
 use asc_policy_cedar::http::compile as credential_rules;
 use asc_policy_cedar::schema::{
-    HTTP_SCHEMA_REVISION, HTTP_SCHEMA_TEXT, SCHEMA_ID, SCHEMA_REVISION, SCHEMA_TEXT,
+    HTTP_SCHEMA_REVISION, HTTP_SCHEMA_TEXT, PRINCIPAL_SCHEMA_REVISION, SCHEMA_ID, SCHEMA_REVISION,
+    SCHEMA_TEXT,
 };
 use asc_policy_cedar::{CedarError, PolicyDomain, project_pst, pst, validate};
 use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
@@ -42,6 +43,38 @@ when {
     ])
 };
 "#;
+
+#[test]
+fn retired_agent_type_is_rejected_before_cedar_can_treat_it_as_always_false() {
+    for revision in [
+        SCHEMA_REVISION,
+        HTTP_SCHEMA_REVISION,
+        PRINCIPAL_SCHEMA_REVISION,
+    ] {
+        for condition in [
+            "principal has agent_type",
+            r#"principal has "agent_type" && principal["agent_type"] == "cosh""#,
+            r#"principal.agent_type == "cosh""#,
+        ] {
+            let mut input = source(&format!(
+                r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
+                   when {{ {condition} }};"#
+            ));
+            input.schema.revision = Revision::new(revision).unwrap();
+            assert!(matches!(
+                validate(&input),
+                Err(CedarError::LegacyAgentType { statement_id }) if statement_id == "policy0"
+            ));
+        }
+        let mut supported = source(
+            r#"// Legacy agent_type may be mentioned in a comment.
+            forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
+            when { principal has agentType && principal.agentType == "agent_type" };"#,
+        );
+        supported.schema.revision = Revision::new(revision).unwrap();
+        assert!(validate(&supported).is_ok());
+    }
+}
 
 #[test]
 fn file_policy_round_trips_through_official_pst_without_rewriting() {
@@ -106,7 +139,7 @@ fn validate_returns_non_blocking_warnings_with_policy_identity() {
 #[test]
 fn validate_and_pst_enforce_the_same_admission_contract() {
     let mut unknown_schema = source(DELETE_POLICY);
-    unknown_schema.schema.revision = Revision::new(HTTP_SCHEMA_REVISION + 1).unwrap();
+    unknown_schema.schema.revision = Revision::new(PRINCIPAL_SCHEMA_REVISION + 1).unwrap();
     for input in [
         source(DELETE_POLICY),
         source(""),
@@ -143,7 +176,7 @@ fn unknown_schema_versions_never_fall_back_to_the_builtin() {
         Err(CedarError::UnsupportedSchema { .. })
     ));
     input.schema.schema_id = ResourceId::new(SCHEMA_ID).unwrap();
-    input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION + 1).unwrap();
+    input.schema.revision = Revision::new(PRINCIPAL_SCHEMA_REVISION + 1).unwrap();
     assert!(matches!(
         validate(&input),
         Err(CedarError::UnsupportedSchema { .. })
@@ -664,7 +697,7 @@ fn credentials_reject_overlapping_rules_principals_and_every_unconsumed_conditio
     for extra in [
         "true",
         "false",
-        "principal has agent_type",
+        "principal has agentType",
         r#"principal == SecCore::Subject::"worker""#,
         r#"context.input.path != "/secret""#,
         r#"context.input.path like "relative*""#,
@@ -1025,4 +1058,51 @@ fn shared_gateway_path_matrix_agrees_with_sdk_authorization() {
             "{case}"
         );
     }
+}
+
+#[test]
+fn v3_registers_only_credential_annotations_and_preserves_subjects_for_runtime() {
+    let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
+    let mut input = CedarPolicySource {
+        schema: asc_policy_cedar::schema::principal_reference(),
+        text: format!(
+            "{fixture}\nforbid(principal, action, resource is SecCore::HttpEndpoint) when {{ resource.host == \"api.github.com\" }};"
+        ),
+    };
+    let rules = credential_rules(&input).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].rule_id, "qoder-github");
+    assert_eq!(rules[0].real_token_file, "/secure/github-real");
+    assert!(asc_policy_cedar::request_authorization_eligible(&input).unwrap());
+    let syntax = pst(&input).unwrap();
+    assert_eq!(
+        syntax,
+        input.text.parse::<PolicySet>().unwrap().to_pst().unwrap()
+    );
+    // A process selector is still present, and the unannotated network forbid still applies.
+    let network = project_pst(&syntax, PolicyDomain::Network).unwrap();
+    assert_eq!(network.policies.len(), 2);
+    assert!(asc_policy_cedar::http::lower(&network, &input.schema).is_err());
+    input.text = fixture.replace(r#"action == SecCore::Action::"network.send""#, "action");
+    assert!(credential_rules(&input).is_err());
+    assert!(asc_policy_cedar::request_authorization_eligible(&input).is_err());
+}
+
+#[test]
+fn credential_registration_accepts_a_subject_alternative_without_authorizing_its_residual() {
+    let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
+    let mut source = CedarPolicySource {
+        schema: asc_policy_cedar::schema::principal_reference(),
+        text: fixture.replace(
+            "principal.agentType == \"qoder\" &&",
+            "(principal.agentType == \"qoder\" || principal.agentType == \"cosh\") &&",
+        ),
+    };
+    assert_eq!(credential_rules(&source).unwrap().len(), 1);
+    let network = project_pst(&pst(&source).unwrap(), PolicyDomain::Network).unwrap();
+    let statement = network.policies.values().next().unwrap();
+    assert!(asc_policy_cedar::deployment::split_subject(statement).is_err());
+    assert!(asc_policy_cedar::http::lower(&network, &source.schema).is_err());
+    source.text=fixture.replace("resource.host == \"api.github.com\"", "(resource.host == \"api.github.com\" || (principal has agentType && principal.agentType == \"cosh\"))");
+    assert!(credential_rules(&source).is_err());
 }

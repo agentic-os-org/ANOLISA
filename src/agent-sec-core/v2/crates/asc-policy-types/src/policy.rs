@@ -22,9 +22,64 @@ pub struct PreparedPolicy {
     /// Cedar schema and syntax checks belong to frontend admission/loading.
     #[serde(with = "source_serde")]
     pub template: PolicySource,
+    /// Present only on a daemon-derived assignment. PAP retains the unmodified source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentSelection>,
     /// Server-resolved pair identities, pinned independently of mutable source files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_bindings: Vec<CredentialBinding>,
+}
+
+/// Policy read response with deployment outcomes observed for this source revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyDetails {
+    /// Original PAP source and its revision.
+    #[serde(flatten)]
+    pub policy: PreparedPolicy,
+    /// Current automatic planning outcomes; actual process enforcement is reported by Bindings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automatic_diagnostics: Vec<AutomaticDiagnostic>,
+}
+
+/// An automatic assignment or the reason a backend could not plan its statements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomaticDiagnostic {
+    /// Policy that owns the statements.
+    pub policy_id: ResourceId,
+    /// Revision for which the planner produced this result.
+    pub revision: Revision,
+    /// Statements affected by this planning decision.
+    pub statement_ids: BTreeSet<String>,
+    /// Deployment backend that evaluated the candidate.
+    pub backend: DeploymentBackend,
+    /// Scope to inspect for process Bindings, when a candidate exists.
+    pub scope_id: Option<ResourceId>,
+    /// Assignment state, independent of each process's actual installation state.
+    pub state: String,
+    /// Planner or admission detail, when available.
+    pub reason: Option<String>,
+}
+
+/// Statements from this exact source revision assigned to a single process Scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeploymentSelection {
+    /// Adapter whose supported rules were selected.
+    pub backend: DeploymentBackend,
+    /// Cedar parser IDs within the original source, independently of credential annotations.
+    pub statement_ids: BTreeSet<String>,
+}
+
+/// Backends that install rules on discovered processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeploymentBackend {
+    /// File enforcement on the process tree.
+    ActPlane,
+    /// HTTP credential injection.
+    Gateway,
 }
 
 /// A validated source rule's server-owned credential association.
@@ -41,7 +96,10 @@ impl PreparedPolicy {
     /// Whether this snapshot requires credential execution and root administration.
     #[must_use]
     pub fn uses_credentials(&self) -> bool {
-        !self.credential_bindings.is_empty() || self.template.uses_credentials()
+        match &self.deployment {
+            Some(selection) => selection.backend == DeploymentBackend::Gateway,
+            None => !self.credential_bindings.is_empty() || self.template.uses_credentials(),
+        }
     }
 }
 

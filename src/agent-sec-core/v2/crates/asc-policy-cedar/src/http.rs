@@ -1,6 +1,7 @@
 //! Pure, bounded lowering of credential-annotated Cedar into HTTP request rules.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use asc_policy_types::authoring::HttpMethod;
 use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
@@ -64,23 +65,36 @@ pub(crate) fn is_annotation(name: &str) -> bool {
 
 /// Compiles credential instructions for registration and HTTP-specific source utilities.
 ///
-/// Non-credential sources return no instructions. Once execution annotations occur,
-/// the complete network view must lower, including unannotated network restrictions.
+/// Legacy sources compile the whole network view. In v3 only annotated statements
+/// contribute registrations. Gateway independently checks the selected network plan at
+/// publication. Registration by itself grants no route or process attachment.
 ///
 /// # Errors
 /// Rejects invalid source, misplaced annotations and unsupported network semantics.
 pub fn compile(source: &CedarPolicySource) -> Result<Vec<CredentialRule>, CedarError> {
-    let syntax = crate::pst(source)?;
+    let mut syntax = crate::pst(source)?;
+    let has_annotations = |policy: &cedar_policy::pst::StaticPolicy| {
+        policy
+            .body()
+            .annotations
+            .keys()
+            .any(|name| is_annotation(name))
+    };
+    if crate::schema::uses_principal_targeting(&source.schema) {
+        // Registration needs credential references before any process exists. Gateway
+        // still verifies the subject and compiles the entire network view at deployment.
+        syntax.policies = syntax
+            .policies
+            .into_iter()
+            .filter(|(_, policy)| has_annotations(policy))
+            .map(|(id, policy)| Ok((id, registration_statement(&policy)?)))
+            .collect::<Result<_, CedarError>>()?;
+        return lower(&syntax, &source.schema);
+    }
     let annotated: Vec<_> = syntax
         .policies
         .iter()
-        .filter(|(_, policy)| {
-            policy
-                .body()
-                .annotations
-                .keys()
-                .any(|name| is_annotation(name.as_str()))
-        })
+        .filter(|(_, policy)| has_annotations(policy))
         .map(|(id, _)| id.clone())
         .collect();
     if annotated.is_empty() {
@@ -101,6 +115,63 @@ pub fn compile(source: &CedarPolicySource) -> Result<Vec<CredentialRule>, CedarE
     lower(&network, &source.schema)
 }
 
+// This copy is used only to register the credential pair. A selector need not be
+// deployable for PAP to save it; Gateway later compiles the verified Scope selection.
+fn registration_statement(
+    policy: &cedar_policy::pst::StaticPolicy,
+) -> Result<cedar_policy::pst::StaticPolicy, CedarError> {
+    let mut body = policy.body().clone();
+    body.principal = PrincipalConstraint::Any;
+    let clauses = body
+        .clauses()
+        .iter()
+        .filter_map(|clause| match clause {
+            Clause::When(expr) => registration_predicate(expr).map(Clause::When),
+            Clause::Unless(expr) if principal_only(expr) => None,
+            clause @ Clause::Unless(_) => Some(clause.clone()),
+        })
+        .collect::<Vec<_>>();
+    body.try_with_clauses(clauses)
+        .and_then(|body| cedar_policy::pst::StaticPolicy::try_from(body).map_err(Into::into))
+        .map_err(|_| CedarError::Unsupported {
+            policy_id: policy.id().to_string(),
+            reason: "invalid credential registration statement",
+        })
+}
+
+fn principal_only(expr: &Expr) -> bool {
+    // A constant expression has no subject dependency. Keep it for HTTP validation.
+    let vars = expr.reduce(
+        &|node| match node {
+            Expr::Var(Var::Principal) => Some((true, false)),
+            Expr::Var(_) => Some((false, true)),
+            _ => None,
+        },
+        &|(p, other), (q, rest)| (p || q, other || rest),
+        (false, false),
+    );
+    vars == (true, false)
+}
+
+fn registration_predicate(expr: &Arc<Expr>) -> Option<Arc<Expr>> {
+    if let Expr::BinaryOp {
+        op: BinaryOp::And,
+        left,
+        right,
+    } = expr.as_ref()
+    {
+        return match (registration_predicate(left), registration_predicate(right)) {
+            (Some(left), Some(right)) => Some(Arc::new(Expr::BinaryOp {
+                op: BinaryOp::And,
+                left,
+                right,
+            })),
+            (left, right) => left.or(right),
+        };
+    }
+    (!principal_only(expr)).then(|| Arc::clone(expr))
+}
+
 /// Lowers a complete network PST view to the supported HTTP credential instructions.
 ///
 /// Consumes validated PST from [`crate::project_pst`] without repeating common admission.
@@ -117,10 +188,15 @@ pub fn lower(
         policy_id: id.into(),
         reason,
     };
-    if schema.schema_id.as_str() != crate::schema::SCHEMA_ID || schema.revision.get() != 2 {
+    if schema.schema_id.as_str() != crate::schema::SCHEMA_ID
+        || !matches!(
+            schema.revision.get(),
+            crate::schema::HTTP_SCHEMA_REVISION | crate::schema::PRINCIPAL_SCHEMA_REVISION
+        )
+    {
         return Err(reject(
             "policy-set",
-            "credential HTTP policies require schema revision 2",
+            "credential HTTP policies require schema revision 2 or 3",
         ));
     }
     if syntax.policies.len() > MAX_RULES {

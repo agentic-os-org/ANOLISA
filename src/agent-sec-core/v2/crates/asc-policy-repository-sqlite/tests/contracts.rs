@@ -1089,10 +1089,10 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
         unreachable!()
     };
     assert!(pst(&invalid).is_ok());
-    invalid.schema.revision = Revision::new(3).unwrap();
+    invalid.schema.revision = Revision::new(4).unwrap();
     assert!(matches!(
         pst(&invalid),
-        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 3, .. })
+        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 4, .. })
     ));
 }
 
@@ -1153,6 +1153,63 @@ fn legacy_policy_payloads_are_rejected_without_discarding_saved_responsibility()
 }
 
 #[test]
+fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
+    use asc_policy_repository_sqlite::RepositoryError;
+
+    let directory = private_dir();
+    let path = directory.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let initial = seed(&repo);
+    let old = &initial.binding.spec.policy;
+    let current_revision = old.revision.checked_next().unwrap();
+    drop(repo);
+
+    let legacy = serde_json::json!({
+        "language": "cedar",
+        "content": {
+            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "text": r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+            when { principal has agent_type && principal.agent_type == "cosh" };"#,
+        },
+    })
+    .to_string();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE policies SET last_allocated_revision=?2,
+         current_json=json_set(current_json, '$.revision', ?2, '$.template', json(?1))",
+        rusqlite::params![&legacy, current_revision.get()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE scopes SET assignment_json=json_set(assignment_json, '$.policySnapshots[0].template', json(?1))",
+        [&legacy],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE bindings SET spec_json=json_set(spec_json, '$.policy.template', json(?1))",
+        [&legacy],
+    )
+    .unwrap();
+    drop(db);
+    let Err(error @ RepositoryError::LegacyAgentType(_)) = SqlitePolicyRepository::open(&path)
+    else {
+        panic!("startup must report all stored revisions that require migration");
+    };
+    let RepositoryError::LegacyAgentType(revisions) = &error else {
+        unreachable!()
+    };
+    assert_eq!(
+        *revisions,
+        [
+            (old.policy_id.clone(), old.revision),
+            (old.policy_id.clone(), current_revision),
+        ]
+        .into()
+    );
+    assert!(error.to_string().contains("Migrate to principal.agentType"));
+}
+
+#[test]
 fn selected_current_policies_preserve_cedar_and_legacy_sources_across_reopen() {
     let dir = private_dir();
     let path = dir.path().join("policy-state.db");
@@ -1209,4 +1266,166 @@ fn selected_current_policies_preserve_cedar_and_legacy_sources_across_reopen() {
         repository.current_policies(&[native.policy_id, cedar.policy_id]),
         Err(PapError::NotFound)
     );
+}
+
+fn principal_policy(id: &str) -> asc_policy_types::policy::PreparedPolicy {
+    serde_json::from_value(serde_json::json!({
+        "policyId":id, "revision":1, "policyName":"source",
+        "template":{"language":"cedar","content":{
+            "schema":{"schemaId":"seccore.system","revision":3},
+            "text":r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource is SecCore::File) when {resource.path == "/secret"};"#
+        }}
+    })).unwrap()
+}
+
+// Seed policy state that was valid before aggregate write admission. A single SQL statement
+// keeps the fixture independent of the new write gate and avoids parsing thousands of policies.
+fn insert_historical_sources(
+    path: &std::path::Path,
+    policy: &asc_policy_types::policy::PreparedPolicy,
+    count: usize,
+) {
+    rusqlite::Connection::open(path).unwrap().execute(
+        "WITH RECURSIVE numbers(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM numbers WHERE i < ?1),
+         keys(id) AS (SELECT printf('%s-%04d',?2,i) FROM numbers)
+         INSERT INTO policies(policy_id,last_allocated_revision,current_json)
+         SELECT id,1,json_set(?3,'$.policyId',id) FROM keys",
+        rusqlite::params![count,policy.policy_id.as_str(),serde_json::to_string(policy).unwrap()],
+    ).unwrap();
+}
+
+#[test]
+fn v3_record_limit_is_transactional_and_source_revisions_ignore_legacy_policies() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let native: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    drop(SqlitePolicyRepository::open(&path).unwrap());
+    insert_historical_sources(&path, &native.policy, 4097);
+    insert_historical_sources(&path, &principal_policy("historical"), 4095);
+    let repo = std::sync::Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+    let results = std::thread::scope(|scope| {
+        ["first", "second"]
+            .map(|key| {
+                scope.spawn({
+                    let repo = &repo;
+                    move || repo.put_policy(&principal_policy(key))
+                })
+            })
+            .map(|thread| thread.join().unwrap())
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results.contains(&Err(PapError::AutomaticPolicyCapacity)));
+    let revisions = repo.automatic_source_revisions().unwrap();
+    assert_eq!(revisions.len(), 4096);
+    let winner = results.into_iter().find_map(Result::ok).unwrap();
+    assert!(revisions.contains(&(winner.policy_id.clone(), winner.revision)));
+    repo.delete_policy_revision(&winner.policy_id, winner.revision)
+        .unwrap();
+    repo.put_policy(&principal_policy("replacement")).unwrap();
+}
+
+#[test]
+fn over_limit_v3_database_recovers_manual_work_and_can_be_shrunk() {
+    struct Discovery;
+    impl asc_pap::ScopeDiscovery for Discovery {
+        fn start(&self, _: &asc_pap::ScopeDiscoverySeed) -> Result<(), PapError> {
+            Ok(())
+        }
+        fn stop(&self, _: &ResourceId) -> Result<(), PapError> {
+            Ok(())
+        }
+    }
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let binding: PreparedBinding = serde_json::from_str(include_str!(
+        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
+    ))
+    .unwrap();
+    repo.put_policy(&binding.policy).unwrap();
+    let scope = PreparedScope {
+        scope_id: binding.scope.scope_id,
+        selector: binding.scope.selector,
+        policy_snapshots: vec![binding.policy],
+        owner_uid: None,
+        status: ScopeStatus::Active,
+    };
+    repo.put_scope(&scope).unwrap();
+    repo.begin_scope_delete(&scope.scope_id).unwrap();
+    drop(repo);
+
+    let mut large = principal_policy("stored");
+    let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut large.template else {
+        unreachable!()
+    };
+    // Multibyte UTF-8 makes an accidental count of characters fall below the 16 MiB limit.
+    source.text.push_str("\n//");
+    source.text.push_str(&"文".repeat(65_536));
+    insert_historical_sources(&path, &large, 87);
+    let repo = std::sync::Arc::new(SqlitePolicyRepository::open(&path).unwrap());
+    assert_eq!(
+        repo.automatic_policies(),
+        Err(PapError::AutomaticPolicyCapacity)
+    );
+    let service = asc_pap::PapService::new(repo.clone())
+        .with_scope_discovery(std::sync::Arc::new(Discovery))
+        .with_automatic_scopes(Ok(std::collections::BTreeMap::new()), &[], || {});
+    service.recover_scopes().unwrap();
+    assert_eq!(repo.get_scope(&scope.scope_id), Err(PapError::NotFound));
+    service.sweep_deleting_scopes().unwrap();
+    assert_eq!(
+        repo.put_policy(&principal_policy("new")),
+        Err(PapError::AutomaticPolicyCapacity)
+    );
+    let mut smaller = principal_policy("stored-0001");
+    smaller.revision = Revision::new(2).unwrap();
+    repo.put_policy(&smaller).unwrap();
+    assert_eq!(
+        repo.automatic_policies(),
+        Err(PapError::AutomaticPolicyCapacity)
+    );
+    repo.delete_policy_revision(
+        &ResourceId::new("stored-0002").unwrap(),
+        Revision::new(1).unwrap(),
+    )
+    .unwrap();
+    repo.put_policy(&principal_policy("new")).unwrap();
+    large.policy_id = smaller.policy_id.clone();
+    large.revision = Revision::new(3).unwrap();
+    assert_eq!(
+        repo.put_policy(&large),
+        Err(PapError::AutomaticPolicyCapacity)
+    );
+    assert_eq!(
+        repo.get_policy(&smaller.policy_id, smaller.revision)
+            .unwrap(),
+        smaller
+    );
+}
+
+#[test]
+fn automatic_recovery_reports_corrupt_storage() {
+    let repo = SqlitePolicyRepository::temporary().unwrap();
+    // Opening validates every retained record. Inject the fault after a valid open
+    // to exercise the PAP recovery paths themselves, including the periodic sweep.
+    SqlitePolicyRepository::before_next_commit_for_test(|tx| {
+        let updated = tx
+            .execute(
+                "UPDATE policies SET last_allocated_revision=2 WHERE policy_id='bad-head'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+    });
+    repo.put_policy(&principal_policy("bad-head")).unwrap();
+    let service = asc_pap::PapService::new(std::sync::Arc::new(repo)).with_automatic_scopes(
+        Ok(std::collections::BTreeMap::new()),
+        &[],
+        || {},
+    );
+    assert_eq!(service.recover_scopes(), Err(PapError::Persistence));
+    assert_eq!(service.sweep_deleting_scopes(), Err(PapError::Persistence));
 }
