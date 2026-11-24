@@ -146,6 +146,45 @@ sockets, reading files or invoking `Core::prepare/execute`:
   and SDK deployment profiles while leaving the active runtime admission path
   unchanged.
 
+## Instrumentation profiles (contract only)
+
+`aw_contracts::instrumentation::InstrumentationProfile`
+(`instrumentation-profile-v1alpha1`, version
+`aw-instrumentation-profile/v1alpha1`) is a declarative, side-effect-free
+contract describing which Python or JS SDK functions or methods to wrap, which
+semantic Hooks they serve, and how Hook fields map from call arguments,
+receivers, constants, or return values. Calling
+`InstrumentationProfile::source_capability(adapter, entrypoint)` compiles a
+validated profile purely into a `python` or `js` `SourceCapability` so the
+offline resolver can reason about candidate language-instrumentation Sources:
+
+- **Contract only (not wired into runtime dispatch)**: configuration schemas,
+  `aw-service`, `aw-adapter`, `aw-cli`, and Python/JS SDK runtimes do not
+  consume `instrumentation-profile-v1alpha1` yet. Declaring or validating a
+  profile grants no executable support, activates no runtime wrapper, and
+  changes no capability grid.
+- **Conservative multi-target merge**: when multiple targets in one profile
+  declare the same semantic Hook event, `source_capability` intersects their
+  `effects` and `failure_actions` and retains `HookAuthority::Control` only if
+  every target for that event is `control`; otherwise the merged event
+  downgrades to `HookAuthority::Observe` and drops control effects and control
+  failure actions. A Source claims an effect only when every wrapped path for
+  that event can enforce it.
+- **Custom seam fingerprint requirement**: builtin profiles may omit
+  `code_sha256`, whereas `origin: "custom"` profiles must carry a 64-character
+  lowercase SHA-256 `code_sha256` fingerprint on every target.
+- **Versioned JS package binding**: a JS target's `module` must equal the
+  declared `package.name` or a subpath within that package, so the version range
+  describes the target's package.
+- **Final-result candidate mapping**: a target declaring `security.violation`
+  must provide an `output` field binding for the candidate output to be checked.
+- **Honest streaming and event boundaries**: AW-produced events
+  (`runtime.observed`, `runtime.exited`, `coverage.changed`) are rejected as
+  non-instrumentable, and iterator targets (`sync_iter` / `async_iter`) that
+  declare `tool.after` `replace_result` or `withhold_result`, or a
+  `security.violation` control gate whose `output` reads `result` or a result
+  subpath, must declare a bounded `stream` configuration with `buffer: true`.
+
 ## Immutable Scope route compilation
 
 `aw_core::routes` compiles `AdmittedStep` slices and exact `u64` millisecond

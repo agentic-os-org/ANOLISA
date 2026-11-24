@@ -15,6 +15,10 @@ pub const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../schemas/source-capability-v1alpha1.schema.json"),
     ),
     (
+        "instrumentation-profile-v1alpha1",
+        include_str!("../schemas/instrumentation-profile-v1alpha1.schema.json"),
+    ),
+    (
         "resolved-hook-plan-v1alpha1",
         include_str!("../schemas/resolved-hook-plan-v1alpha1.schema.json"),
     ),

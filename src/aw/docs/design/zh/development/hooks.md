@@ -45,6 +45,10 @@ Scope 的映射，并在改变任一绑定前提供迁移方案和回归覆盖�
 `aw_contracts::hook_plan::ResolvedHookPlan`（`resolved-hook-plan-v1alpha1`）以及
 无副作用纯求解器 `aw_core::resolver` 已定义并完成契约与离线 Shadow Plan 等价测试
 （见 [Core 准入](../core-admission.md#多源-hook-求解与-shadow-plan-等价核对)）。
+声明式插桩合同 `aw_contracts::instrumentation::InstrumentationProfile`
+（`instrumentation-profile-v1alpha1`）同样已完成离线契约测试并可编译为
+`SourceCapability`，但尚未接入运行期派发
+（见 [插桩 Profile](../core-admission.md#插桩-profile仅合同层)）。
 当前 Adapter 提供准备后的能力和原生接线；引入共享抽象时保留现有可执行合同。未接入运行期主路径的
 SPI、wire 字段和 CLI 不得写成已激活的运行期功能。
 
