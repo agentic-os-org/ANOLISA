@@ -409,8 +409,10 @@ pub struct SslSniff {
     /// to the learned cache only after verification, so a mis-resolved offset is
     /// never cached into silent zero collection (#10080).
     pending_verify: HashMap<FileKey, PendingVerify>,
-    /// Whether startup warm-up (proactive attach of known agent binaries) has run.
-    warmed_up: bool,
+    /// 仅保留当前预热启动器的文件身份，不随短进程数量增长。
+    warm_up_targets: HashMap<FileKey, (String, self_verify::FileRevision)>,
+    /// 周期复查启动器，回收自更新留下的旧 inode 并重试失败的预挂载。
+    last_warm_up: Option<Instant>,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -481,7 +483,8 @@ impl SslSniff {
             plaintext_signals: Arc::new(Mutex::new(PlaintextSignals::default())),
             signal_backlog: SignalBacklog::default(),
             pending_verify: HashMap::default(),
-            warmed_up: false,
+            warm_up_targets: HashMap::default(),
+            last_warm_up: None,
             tx,
             rx,
         })
@@ -1545,15 +1548,9 @@ impl SslSniff {
         finish_ssl_attach(pid, path, result)
     }
 
-    /// Detach SSL probes for a process and clean up traced files.
+    /// 清理退出进程的关联；当前预热启动器的全局探针跨进程保留。
     ///
-    /// When a process exits, its `(device, inode)` keys are removed from
-    /// `traced_files` (and their `attachments` entries dropped, detaching the
-    /// global uprobes) **only if no other traced pid still references the same
-    /// file**. Uprobes are attached globally (`pid=-1`), so the link remains
-    /// valid for other processes using the same library; removing the entry
-    /// prematurely would cause the scanner to re-attach on the next sweep,
-    /// producing duplicate uprobe fds.
+    /// 普通库在最后一个使用者退出后回收，预热目标在路径或修订改变后回收。
     pub fn detach_process(&mut self, pid: u32) {
         self.signal_backlog.forget(pid);
         if let Ok(mut signals) = self.plaintext_signals.lock() {
@@ -1572,12 +1569,17 @@ impl SslSniff {
                     .flatten()
                     .any(|other_file| other_file == file);
                 if !still_used {
+                    if let Some((path, revision)) = self.warm_up_targets.get(file) {
+                        if open_rotation_target(path, *file, Some(*revision)).is_ok() {
+                            // pid=-1 的探针覆盖下一次映射；卸载会重新打开首调竞态。
+                            log::debug!("Keeping warm-up SSL inode {file:?} across process exit");
+                            continue;
+                        }
+                        self.warm_up_targets.remove(file);
+                        self.last_warm_up = None;
+                    }
                     self.traced_files.remove(file);
                     self.scan_retry_after.remove(file);
-                    // Drop the attachment too: releasing the Links detaches the
-                    // (now unneeded) global uprobes and keeps `attachments`
-                    // consistent with `traced_files`. A later process mapping
-                    // this file re-attaches through the fresh-attach path.
                     self.attachments.remove(file);
                     self.static_attach_offsets.remove(file);
                     self.pending_verify.remove(file);
@@ -1600,22 +1602,49 @@ impl SslSniff {
         Arc::clone(&self.plaintext_signals)
     }
 
-    /// Proactively attach known agent binaries once, at startup, so the first
-    /// process is covered before it issues its first TLS call.
-    ///
-    /// A short-lived `claude -p` sends its opening request before a reactive
-    /// discovery + whole-binary scan can attach, losing that first utterance
-    /// (the first-call race). Warm-up resolves the common agent launchers via
-    /// PATH and attaches their inodes globally (pid=-1) ahead of any process: a
-    /// known version re-attaches instantly from the learned/shipped table, an
-    /// unknown one queues a budgeted scan the poll loop installs.
+    /// 预挂载当前 Agent 启动器，并有界复查路径以覆盖连续短进程和自更新。
     pub(crate) fn warm_up_once(&mut self) {
-        if self.warmed_up {
+        let now = Instant::now();
+        if self
+            .last_warm_up
+            .is_some_and(|last| now.duration_since(last) < STALE_REATTACH_TTL)
+        {
             return;
         }
-        self.warmed_up = true;
+        self.last_warm_up = Some(now);
         let path_env = std::env::var("PATH").unwrap_or_default();
-        for path in resolve_warm_up_paths(WARM_UP_NAMES, &path_env) {
+        let paths = resolve_warm_up_paths(WARM_UP_NAMES, &path_env);
+        let current: HashMap<_, _> = paths
+            .iter()
+            .filter_map(|path| {
+                use std::os::unix::fs::MetadataExt;
+                let meta = fs::metadata(path).ok()?;
+                Some((
+                    (stat_dev_to_key(meta.dev()), meta.ino()),
+                    (path.clone(), (meta.len(), meta.mtime(), meta.mtime_nsec())),
+                ))
+            })
+            .collect();
+        let retired: Vec<_> = self
+            .warm_up_targets
+            .iter()
+            .filter(|(file, target)| current.get(file) != Some(target))
+            .map(|(file, _)| *file)
+            .collect();
+        self.warm_up_targets = current;
+        for file in retired {
+            // 同 inode 修订变化时旧偏移不再可信；替换 inode 则保留仍在用的旧探针。
+            if self.warm_up_targets.contains_key(&file)
+                || !self.pid_inodes.values().any(|files| files.contains(&file))
+            {
+                self.traced_files.remove(&file);
+                self.scan_retry_after.remove(&file);
+                self.attachments.remove(&file);
+                self.static_attach_offsets.remove(&file);
+                self.pending_verify.remove(&file);
+            }
+        }
+        for path in paths {
             self.warm_up_attach(&path);
         }
     }
@@ -1628,6 +1657,13 @@ impl SslSniff {
             return;
         };
         let file = (stat_dev_to_key(meta.dev()), meta.ino());
+        self.warm_up_targets.insert(
+            file,
+            (
+                path.to_string(),
+                (meta.len(), meta.mtime(), meta.mtime_nsec()),
+            ),
+        );
         if self.traced_files.contains(&file)
             || self.attachments.contains_key(&file)
             || self.scans.is_pending(file)
@@ -3525,6 +3561,53 @@ mod tests {
     ) -> SslSniff {
         crate::config::set_ssl_offsets_learned_path(dir.path().join("learned.json"));
         SslSniff::new().expect("sslsniff BPF should load on this kernel")
+    }
+
+    #[test]
+    #[ignore = "requires CAP_BPF and CAP_PERFMON on an isolated test host"]
+    fn warm_up_lifecycle_keeps_links_across_eight_exits() {
+        let guard = LEARNED_PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let learned_dir = tempfile::tempdir().unwrap();
+        let mut sniffer = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+        let image = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), image).unwrap();
+        let key = fixture_file_key(file.path());
+        sniffer.warm_up_attach(file.path().to_str().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !sniffer.attachments.contains_key(&key) && Instant::now() < deadline {
+            sniffer.poll_pending_scan_admissions();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(sniffer.attachments.contains_key(&key));
+        let attached_at = sniffer.attachments[&key].attached_at;
+        let owner = std::process::id();
+        for _ in 0..8 {
+            sniffer.pid_inodes.insert(owner, vec![key]);
+            sniffer.detach_process(owner);
+            assert!(!sniffer.pid_inodes.contains_key(&owner));
+            assert!(sniffer.traced_files.contains(&key));
+            assert_eq!(sniffer.attachments[&key].attached_at, attached_at);
+            assert!(sniffer.static_attach_offsets.contains_key(&key));
+            assert!(sniffer.pending_verify.contains_key(&key));
+        }
+        assert_eq!(sniffer.traced_inode_count(), 1);
+        let ordinary = (key.0, key.1 + 1);
+        sniffer.traced_files.insert(ordinary);
+        sniffer.record_attach(ordinary, Vec::new());
+        sniffer.pid_inodes.insert(owner, vec![ordinary]);
+        sniffer.detach_process(owner);
+        assert!(!sniffer.attachments.contains_key(&ordinary));
+        assert!(!sniffer.traced_files.contains(&ordinary));
+        // 同一 inode 被原位改写，也不能继续信任旧偏移。
+        fs::write(file.path(), b"changed binary").unwrap();
+        sniffer.pid_inodes.insert(owner, vec![key]);
+        sniffer.detach_process(owner);
+        assert!(!sniffer.attachments.contains_key(&key));
+        assert!(!sniffer.static_attach_offsets.contains_key(&key));
+        assert!(!sniffer.pending_verify.contains_key(&key));
+        assert!(!sniffer.warm_up_targets.contains_key(&key));
+        assert!(sniffer.last_warm_up.is_none());
     }
 
     /// Regression for #9762: one drain tick must install every completed scan,
