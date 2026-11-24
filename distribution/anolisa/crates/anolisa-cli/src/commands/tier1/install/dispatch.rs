@@ -2831,7 +2831,13 @@ scope = "@anolisa"
         let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(tmp.path().to_path_buf())))
             .expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
-        assert!(err.reason().contains("ftp"), "got: {}", err.reason());
+        assert_eq!(
+            err.reason(),
+            concat!(
+                "backend '<cli-override>': invalid base_url '<redacted>': ",
+                "unsupported scheme (supported: file, https, http with insecure = true)"
+            )
+        );
     }
 
     #[test]

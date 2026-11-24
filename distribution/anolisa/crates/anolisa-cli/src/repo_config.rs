@@ -137,12 +137,11 @@ pub enum RepoConfigError {
     #[error("backend '{name}' is not configured — add a [backends.{name}] table to repo.toml")]
     BackendNotConfigured { name: String },
 
-    /// `base_url` violated the scheme/shape rules.
-    #[error("backend '{backend}': invalid base_url '{url}': {reason}")]
+    /// `base_url` violated the scheme/shape rules. The rejected URL may contain credentials.
+    #[error("backend '{backend}': invalid base_url '<redacted>': {reason}")]
     InvalidBaseUrl {
         backend: String,
-        url: String,
-        reason: String,
+        reason: &'static str,
     },
 
     /// `base_url` referenced a `$variable` outside the supported set.
@@ -614,8 +613,7 @@ pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
     if url.contains('$') {
         return Err(RepoConfigError::InvalidBaseUrl {
             backend: "<cli-override>".to_string(),
-            url: url.to_string(),
-            reason: "variable references ('$') are not substituted in --repo overrides; pass the resolved URL instead".to_string(),
+            reason: "variable references ('$') are not substituted in --repo overrides; pass the resolved URL instead",
         });
     }
     Ok(url.trim_end_matches('/').to_string())
@@ -630,10 +628,9 @@ pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
 /// the whole base_url, and local paths keep whatever characters the
 /// filesystem allows (a directory named `repo dir` works).
 fn validate_base_url(backend: &str, url: &str, insecure: bool) -> Result<(), RepoConfigError> {
-    let invalid = |reason: &str| RepoConfigError::InvalidBaseUrl {
+    let invalid = |reason| RepoConfigError::InvalidBaseUrl {
         backend: backend.to_string(),
-        url: url.to_string(),
-        reason: reason.to_string(),
+        reason,
     };
     let Some((scheme, rest)) = url.split_once("://") else {
         return Err(invalid("missing scheme separator '://'"));
@@ -647,10 +644,10 @@ fn validate_base_url(backend: &str, url: &str, insecure: bool) -> Result<(), Rep
                 ));
             }
         }
-        other => {
-            return Err(invalid(&format!(
-                "unsupported scheme '{other}' (supported: file, https, http with insecure = true)"
-            )));
+        _ => {
+            return Err(invalid(
+                "unsupported scheme (supported: file, https, http with insecure = true)",
+            ));
         }
     }
     if rest.is_empty() {
@@ -1464,7 +1461,7 @@ agentsight = "anolis-agentsight"
                 r#"schema_version = 1
 default_backend = "raw"
 [backends.raw]
-base_url = "http://10.0.0.8/anolisa"
+base_url = "http://test-user:test-password@example.com/anolisa"
 {insecure}
 "#
             )
@@ -1473,6 +1470,10 @@ base_url = "http://10.0.0.8/anolisa"
         assert!(
             matches!(err, RepoConfigError::InvalidBaseUrl { .. }),
             "got: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "backend 'raw': invalid base_url '<redacted>': plaintext http requires `insecure = true` on the backend entry"
         );
         RepoConfig::from_toml_str(&body("insecure = true")).expect("insecure http must load");
     }
@@ -1483,11 +1484,15 @@ base_url = "http://10.0.0.8/anolisa"
             r#"schema_version = 1
 default_backend = "raw"
 [backends.raw]
-base_url = "https://example.com/repo?token=x"
+base_url = "https://test-user:test-password@example.com/repo?token=test-token"
 "#,
         )
         .expect_err("must reject");
         assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
+        assert_eq!(
+            err.to_string(),
+            "backend 'raw': invalid base_url '<redacted>': query strings and fragments are not allowed"
+        );
     }
 
     #[test]
@@ -1638,16 +1643,21 @@ base_url = "file:///tmp/repo $channel/v1/"
         for url in [
             "file:///tmp/repo/$arch",
             "http://example.com/anolisa/$arch/v1/",
-            "https://example.com/anolisa/$arch/v1/",
+            "https://test-user:test-password@example.com/anolisa/$arch/v1/",
             "https://example.com/${arch}/",
             "https://example.com/$typo/",
             "file:///tmp/repo/$",
         ] {
             let err = normalize_override_url(url).expect_err("override must reject '$'");
             assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
-            let reason = err.to_string();
-            assert!(reason.contains("not substituted"), "{reason}");
-            assert!(reason.contains("pass the resolved URL"), "{reason}");
+            assert_eq!(
+                err.to_string(),
+                concat!(
+                    "backend '<cli-override>': invalid base_url '<redacted>': ",
+                    "variable references ('$') are not substituted in --repo overrides; ",
+                    "pass the resolved URL instead"
+                )
+            );
         }
         for url in [
             "file:///tmp/repo/",
