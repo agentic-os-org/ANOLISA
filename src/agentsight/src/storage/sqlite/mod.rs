@@ -46,3 +46,11 @@ pub use interruption::{
 
 // Re-export tokenless stats storage
 pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};
+
+/// Clamp an unsigned nanosecond cutoff to the maximum signed 64-bit integer SQLite binds.
+///
+/// Cutoffs above `i64::MAX` preserve monotonic "purge everything older" semantics rather than
+/// wrapping negative.
+pub(super) fn clamp_cutoff_ns(cutoff_ns: u64) -> i64 {
+    cutoff_ns.min(i64::MAX as u64) as i64
+}
