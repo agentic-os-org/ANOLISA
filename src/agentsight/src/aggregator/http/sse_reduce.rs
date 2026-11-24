@@ -330,6 +330,11 @@ fn merge(
             }
             delta
         }
+        (Value::Array(_), Value::Array(items))
+            if native && field == "tool_calls" && items.is_empty() =>
+        {
+            0
+        }
         (previous, incoming @ Value::Array(_)) if native && field == "tool_calls" => {
             let delta = json_bytes(&incoming) as isize - json_bytes(previous) as isize;
             *previous = incoming;
@@ -649,5 +654,27 @@ mod provider_compatibility_tests {
             custom.last().and_then(|event| event.get("delta")),
             Some(&Value::String("*** Begin Patch\n*** End Patch".to_string()))
         );
+    }
+
+    #[test]
+    fn native_empty_tool_calls_chunk_preserves_accumulated_tool_calls() {
+        let reduced_events = reduced(concat!(
+            r#"data: {"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]}}]}}"#,
+            "\n\n",
+            r#"data: {"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[]}}]},"usage":{"input_tokens":10,"output_tokens":5}}"#,
+            "\n\n",
+        ));
+
+        assert_eq!(reduced_events.len(), 1);
+        let msg = &reduced_events[0]["output"]["choices"][0]["message"];
+        let calls = msg["tool_calls"].as_array().expect("tool_calls array");
+        assert_eq!(
+            calls.len(),
+            1,
+            "trailing empty tool_calls: [] must not wipe accumulated native tool calls: {reduced_events:?}"
+        );
+        assert_eq!(calls[0]["id"], "call_1");
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        assert_eq!(reduced_events[0]["usage"]["output_tokens"], 5);
     }
 }
