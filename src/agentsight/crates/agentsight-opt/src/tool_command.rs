@@ -20,6 +20,19 @@ pub(crate) fn from_arguments(arguments: &serde_json::Value) -> Option<String> {
     })
 }
 
+fn is_legacy_plain_command(text: &str) -> bool {
+    if text.is_empty() || text.starts_with('{') {
+        return false;
+    }
+    if text.starts_with('[') {
+        return text.starts_with("[ ")
+            || text.starts_with("[\t")
+            || text.starts_with("[[ ")
+            || text.starts_with("[[\t");
+    }
+    true
+}
+
 impl ToolCallRecord {
     pub(crate) fn execution_command(&self) -> Option<String> {
         if let Some(command) = &self.command {
@@ -28,12 +41,18 @@ impl ToolCallRecord {
         // Older records carry no dedicated field. Complete argument objects
         // and legacy plain commands remain readable; broken JSON previews do
         // not become executable evidence just because parsing failed.
-        if let Ok(arguments) = serde_json::from_str(&self.cmd) {
-            return from_arguments(&arguments);
+        match serde_json::from_str::<serde_json::Value>(&self.cmd) {
+            Ok(ref arguments @ serde_json::Value::Object(_)) => return from_arguments(arguments),
+            Ok(
+                serde_json::Value::String(_)
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Null
+                | serde_json::Value::Number(_),
+            ) => return None,
+            Ok(serde_json::Value::Bool(_)) | Err(_) => {}
         }
         let text = self.cmd.trim_start();
-        (self.target.is_none() && !text.is_empty() && !text.starts_with(['{', '[']))
-            .then(|| self.cmd.clone())
+        (self.target.is_none() && is_legacy_plain_command(text)).then(|| self.cmd.clone())
     }
 }
 
@@ -86,6 +105,33 @@ mod tests {
             make(r#"{"todos":[{"content":"run tests..."#).execution_command(),
             None
         );
+        assert_eq!(make("true").execution_command().as_deref(), Some("true"));
+        assert_eq!(make("false").execution_command().as_deref(), Some("false"));
+        assert_eq!(
+            make("[ -f Cargo.toml ] && cargo test")
+                .execution_command()
+                .as_deref(),
+            Some("[ -f Cargo.toml ] && cargo test")
+        );
+        assert_eq!(
+            make("[[ -d src ]] && echo ok")
+                .execution_command()
+                .as_deref(),
+            Some("[[ -d src ]] && echo ok")
+        );
+        for non_command in [
+            r#"[{"content":"run tests..."#,
+            r#"["cargo","test"]"#,
+            r#""cargo test""#,
+            "null",
+            "42",
+        ] {
+            assert_eq!(
+                make(non_command).execution_command(),
+                None,
+                "unexpected command extraction for {non_command}"
+            );
+        }
         let mut record = make("truncated preview");
         record.command = Some("cargo test --workspace".into());
         assert_eq!(
