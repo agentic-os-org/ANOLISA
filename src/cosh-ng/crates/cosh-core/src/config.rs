@@ -84,6 +84,8 @@ pub struct CoreConfig {
     // System-layer AI state is used to expose provider ownership without persisting it.
     #[serde(skip)]
     pub(crate) system_ai: AiConfig,
+    #[serde(skip)]
+    pub(crate) session_providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
@@ -1175,6 +1177,9 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
 mod guarded;
 pub(crate) use guarded::{lock as lock_user_config, replace as replace_user_config};
 
+mod auth_persistence;
+pub(crate) use auth_persistence::{persist_auth_provider, persist_auth_update};
+
 /// Wizard-initiated persistence: ownership-checked, no-follow, and never
 /// treating an unreadable document as an empty one.
 pub fn persist_config_guarded(config: &CoreConfig) -> Result<(), String> {
@@ -1194,11 +1199,19 @@ pub fn persist_config_guarded_to_dir(
     persist_config_inner(config, dir, true)
 }
 
-/// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
+/// Matches `[ai]` table and array-table headers and their dotted children,
 /// not lookalike sections such as `[aider]` or `[ai_drivers]`.
 /// Trailing whitespace or an inline comment after the closing bracket is accepted.
 fn is_ai_section_header(line: &str) -> bool {
     let t = line.trim();
+    if let Some(array_header) = t.strip_prefix("[[") {
+        let Some((header, rest)) = array_header.split_once("]]") else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        return (header == "ai" || header.starts_with("ai."))
+            && (rest.is_empty() || rest.starts_with('#'));
+    }
     let Some(end) = t.find(']') else {
         return false;
     };
@@ -1239,23 +1252,7 @@ fn persist_config_inner(
         }
     };
 
-    let mut preserved = String::new();
-    let mut in_ai_section = false;
-    for line in existing.lines() {
-        if is_ai_section_header(line) {
-            in_ai_section = true;
-            continue;
-        }
-        if in_ai_section && line.trim().starts_with('[') && !is_ai_section_header(line) {
-            in_ai_section = false;
-        }
-        if !in_ai_section {
-            preserved.push_str(line);
-            preserved.push('\n');
-        }
-    }
-
-    preserved.push_str("[ai]\n");
+    let mut preserved = String::from("[ai]\n");
     if let Some(ref active) = config.user_ai.active_provider {
         preserved.push_str(&format!(
             "active_provider = \"{}\"\n",
@@ -1323,7 +1320,75 @@ fn persist_config_inner(
         preserved.push('\n');
     }
 
-    guarded::replace(dir, &config_path, &preserved, guard)
+    replace_ai_section(&existing, &preserved, dir, guard)
+}
+
+fn replace_ai_section(existing: &str, ai: &str, dir: &Path, guard: bool) -> Result<(), String> {
+    let mut content = String::new();
+    let mut in_ai_section = false;
+    let mut multiline_quote = None;
+    for line in existing.lines() {
+        if multiline_quote.is_none() && is_ai_section_header(line) {
+            in_ai_section = true;
+            continue;
+        }
+        if multiline_quote.is_none() && in_ai_section && line.trim().starts_with('[') {
+            in_ai_section = false;
+        }
+        if !in_ai_section {
+            content.push_str(line);
+            content.push('\n');
+        }
+        scan_toml_multiline_string(line, &mut multiline_quote);
+    }
+    content.push_str(ai);
+    guarded::replace(dir, &dir.join("config.toml"), &content, guard)
+}
+
+fn scan_toml_multiline_string(line: &str, multiline_quote: &mut Option<u8>) {
+    let bytes = line.as_bytes();
+    let mut offset = 0;
+    let mut inline_quote = None;
+    while offset < bytes.len() {
+        let current = bytes[offset];
+        if let Some(quote) = *multiline_quote {
+            if quote == b'"' && current == b'\\' {
+                offset += 2;
+                continue;
+            }
+            let run = bytes[offset..]
+                .iter()
+                .take_while(|byte| **byte == quote)
+                .count();
+            if run >= 3 {
+                *multiline_quote = None;
+                offset += run;
+            } else {
+                offset += 1;
+            }
+        } else if let Some(quote) = inline_quote {
+            if quote == b'"' && current == b'\\' {
+                offset += 2;
+            } else {
+                if current == quote {
+                    inline_quote = None;
+                }
+                offset += 1;
+            }
+        } else if current == b'#' {
+            break;
+        } else if current == b'"' || current == b'\'' {
+            if bytes[offset..].starts_with(&[current; 3]) {
+                *multiline_quote = Some(current);
+                offset += 3;
+            } else {
+                inline_quote = Some(current);
+                offset += 1;
+            }
+        } else {
+            offset += 1;
+        }
+    }
 }
 
 fn escape_toml_value(s: &str) -> String {

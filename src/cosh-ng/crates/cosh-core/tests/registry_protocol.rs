@@ -1,6 +1,12 @@
 #[path = "registry_protocol/trial_preferences.rs"]
 mod trial_preferences;
 
+#[path = "registry_protocol/concurrent_auth.rs"]
+mod concurrent_auth;
+
+#[path = "registry_protocol/live_auth.rs"]
+mod live_auth;
+
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;

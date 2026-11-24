@@ -68,13 +68,6 @@ pub(super) async fn handle_auth(
     config: &mut CoreConfig,
 ) -> OutputMessage {
     let guarded = params.get("guarded_writes").and_then(Value::as_bool) == Some(true);
-    let persist_candidate = |candidate: &crate::config::CoreConfig| {
-        if guarded {
-            crate::config::persist_config_guarded(candidate)
-        } else {
-            crate::config::persist_config(candidate)
-        }
-    };
     match action {
         "state" => {
             let (trial_preferences, probe) = tokio::join!(
@@ -226,20 +219,25 @@ pub(super) async fn handle_auth(
             {
                 return ecs_trial::activate(request_id, config, Some(provider_id), guarded).await;
             }
-            let mut candidate = config.clone();
-            candidate.ai.active_provider = Some(provider_id.to_string());
-            candidate.user_ai.active_provider = Some(provider_id.to_string());
-            let model = candidate
-                .ai
-                .providers
-                .get(provider_id)
-                .and_then(|provider| provider.model.clone());
-            candidate.ai.active_model.clone_from(&model);
-            candidate.user_ai.active_model = model;
-            if let Err(e) = persist_candidate(&candidate) {
+            let persisted = crate::config::persist_auth_update(config, guarded, |latest| {
+                let provider = latest
+                    .ai
+                    .providers
+                    .get(provider_id)
+                    .ok_or("provider not found")?;
+                if provider.is_ecs_identity() {
+                    return Err("provider changed to ECS identity; reload authentication state and activate again".into());
+                }
+                let model = provider.model.clone();
+                latest.ai.active_provider = Some(provider_id.to_string());
+                latest.user_ai.active_provider = Some(provider_id.to_string());
+                latest.ai.active_model.clone_from(&model);
+                latest.user_ai.active_model = model;
+                Ok(None)
+            });
+            if let Err(e) = persisted {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
-            *config = candidate;
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
@@ -255,21 +253,20 @@ pub(super) async fn handle_auth(
             if provider_id.is_empty() {
                 return registry_error(request_id, "missing provider_id");
             }
-            let mut candidate = config.clone();
-            let removed = match crate::auth::remove_auth_provider(&mut candidate, provider_id) {
-                Ok(removed) => removed,
-                Err(error) => return registry_error(request_id, &error.to_string()),
-            };
-            if let Err(error) = persist_candidate(&candidate) {
+            let persisted = crate::config::persist_auth_update(config, guarded, |latest| {
+                crate::auth::remove_auth_provider(latest, provider_id)
+                    .map_err(|error| error.to_string())?;
+                Ok(Some(provider_id.to_string()))
+            });
+            if let Err(error) = persisted {
                 return registry_error(request_id, &format!("failed to persist config: {error}"));
             }
-            *config = candidate;
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
                 data: Some(serde_json::json!({
                     "deleted_provider": provider_id,
-                    "active_provider": removed.active_provider,
+                    "active_provider": config.ai.active_provider,
                 })),
                 error: None,
             }
@@ -370,11 +367,7 @@ pub(super) async fn handle_auth(
             let candidate = match crate::auth::prepare_and_persist_auth_candidate(
                 config,
                 &response,
-                if guarded {
-                    crate::config::persist_config_guarded
-                } else {
-                    crate::config::persist_config
-                },
+                |candidate| crate::config::persist_auth_provider(candidate, provider_id, guarded),
             )
             .await
             {

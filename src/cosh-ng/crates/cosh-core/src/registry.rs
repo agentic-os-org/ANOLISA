@@ -1068,35 +1068,56 @@ mod tests {
         assert!(!config.user_ai.providers.contains_key("system-provider"));
     }
 
-    #[tokio::test]
-    async fn auth_delete_rejects_system_provider() {
-        let mut config = CoreConfig::default();
-        config.ai.providers.insert(
-            "system-provider".to_string(),
-            ProviderConfig {
-                provider_type: Some("dashscope".to_string()),
-                api_key: Some("sk-system".to_string()),
-                ..Default::default()
-            },
-        );
-        config.system_ai = AiConfig {
-            providers: config.ai.providers.clone(),
-            ..Default::default()
-        };
+    #[test]
+    fn auth_delete_rejects_system_provider() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-        let response = handle_auth(
-            "test-1",
-            "delete",
-            &serde_json::json!({ "provider_id": "system-provider" }),
-            &mut config,
-        )
-        .await;
+        let _lock = crate::sls::tests::ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".copilot-shell");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "[ai]\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _home = crate::sls::tests::EnvVarGuard::set("HOME", home.path().to_str().unwrap());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut config = CoreConfig::default();
+                config.ai.providers.insert(
+                    "system-provider".to_string(),
+                    ProviderConfig {
+                        provider_type: Some("dashscope".to_string()),
+                        api_key: Some("sk-system".to_string()),
+                        ..Default::default()
+                    },
+                );
+                config.system_ai = AiConfig {
+                    providers: config.ai.providers.clone(),
+                    ..Default::default()
+                };
 
-        let OutputMessage::RegistryResponse { success, error, .. } = response else {
-            panic!("unexpected response: {response:?}");
-        };
-        assert!(!success);
-        assert!(error.unwrap().contains("not removable"));
-        assert!(config.ai.providers.contains_key("system-provider"));
+                let response = handle_auth(
+                    "test-1",
+                    "delete",
+                    &serde_json::json!({ "provider_id": "system-provider" }),
+                    &mut config,
+                )
+                .await;
+
+                let OutputMessage::RegistryResponse { success, error, .. } = response else {
+                    panic!("unexpected response: {response:?}");
+                };
+                assert!(!success);
+                assert!(error.unwrap().contains("not removable"));
+                assert!(config.ai.providers.contains_key("system-provider"));
+            });
     }
 }

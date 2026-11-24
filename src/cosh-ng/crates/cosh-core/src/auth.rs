@@ -361,6 +361,11 @@ pub(crate) fn apply_auth_credentials(
             .user_ai
             .providers
             .insert(response.provider_id.clone(), provider);
+        config.session_providers.remove(&response.provider_id);
+    } else {
+        config
+            .session_providers
+            .insert(response.provider_id.clone(), provider);
     }
     Ok(())
 }
@@ -442,11 +447,11 @@ pub(crate) async fn prepare_and_persist_auth_candidate<F>(
     persist: F,
 ) -> Result<CoreConfig, AuthConfigureError>
 where
-    F: FnOnce(&CoreConfig) -> Result<(), String>,
+    F: FnOnce(&mut CoreConfig) -> Result<(), String>,
 {
-    let candidate = prepare_auth_candidate(current, response).await?;
+    let mut candidate = prepare_auth_candidate(current, response).await?;
     if response.persist {
-        persist(&candidate).map_err(|_| AuthConfigureError::Persistence)?;
+        persist(&mut candidate).map_err(|_| AuthConfigureError::Persistence)?;
     }
     Ok(candidate)
 }
@@ -485,6 +490,7 @@ pub(crate) fn remove_auth_provider(
 
     let was_active = config.ai.active_provider.as_deref() == Some(provider_id);
     config.user_ai.providers.remove(provider_id);
+    config.session_providers.remove(provider_id);
     if config.user_ai.active_provider.as_deref() == Some(provider_id) {
         config.user_ai.active_provider = None;
         config.user_ai.active_model = None;
