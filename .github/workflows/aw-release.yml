@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aw-release-${{ github.ref }}
+  group: aw-release-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -21,11 +21,22 @@ jobs:
     outputs:
       sha: ${{ steps.version.outputs.sha }}
       version: ${{ steps.version.outputs.version }}
+      artifact_id: ${{ steps.accepted.outputs.artifact_id }}
+      digest: ${{ steps.accepted.outputs.digest }}
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Require the tagged candidate to belong to main
+        if: github.event_name == 'push'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
       - name: Match the source package versions to the release tag
         id: version
         run: |
@@ -35,13 +46,20 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Find an accepted release candidate
+        if: github.event_name == 'push' && github.repository == 'agentic-os-org/ANOLISA'
+        id: accepted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B src/aw/scripts/release_candidate.py
 
   contracts:
     needs: candidate
+    if: needs.candidate.outputs.artifact_id == ''
     uses: ./.github/workflows/aw-ci.yml
 
   integration:
-    needs: candidate
+    needs: [candidate, contracts]
     uses: ./.github/workflows/aw-integration.yml
     with:
       candidate_sha: ${{ needs.candidate.outputs.sha }}
@@ -52,49 +70,70 @@ jobs:
 
   assets:
     needs: [candidate, contracts, integration]
+    if: >-
+      !cancelled() && needs.candidate.result == 'success' &&
+      (needs.candidate.outputs.artifact_id != '' ||
+       (needs.contracts.result == 'success' && needs.integration.result == 'success'))
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       CANDIDATE: ${{ needs.candidate.outputs.sha }}
       VERSION: ${{ needs.candidate.outputs.version }}
+      ARTIFACT_ID: ${{ needs.candidate.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.CANDIDATE }}
           persist-credentials: false
+      - name: Download the accepted candidate by immutable ID and digest
+        if: env.ARTIFACT_ID != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          archive="$RUNNER_TEMP/aw-release-candidate.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$archive" || {
+            echo "::error::Candidate unavailable. Re-run all jobs to select or build current evidence."
+            exit 1
+          }
+          echo "${DIGEST#sha256:}  $archive" | sha256sum --strict -c -
+          unzip -q "$archive" -d assets
       - uses: actions/setup-node@v4
+        if: env.ARTIFACT_ID == ''
         with:
           node-version: '24.15.0'
       - uses: actions/setup-python@v5
+        if: env.ARTIFACT_ID == ''
         with:
           python-version: '3.12.3'
-      - run: python3 -m pip install setuptools==68.1.2 wheel==0.42.0
+      - if: env.ARTIFACT_ID == ''
+        run: python3 -m pip install setuptools==68.1.2 wheel==0.42.0
       - uses: actions/download-artifact@v4
+        if: env.ARTIFACT_ID == ''
         with:
-          name: aw-integration-linux-x86_64-${{ env.CANDIDATE }}
+          # An empty ID would select every artifact in the run.
+          artifact-ids: ${{ needs.integration.outputs.archive_id || 'missing-archive-id' }}
+          merge-multiple: true
           path: native-archives
-      - name: Verify installed archives and assemble the matching SDKs
+      - name: Assemble the accepted native archives and matching SDKs
+        if: env.ARTIFACT_ID == ''
         run: |
           sdk=distribution/packaging/aw/sdk_candidate.py
           python3 -B "$sdk" build --repo . --candidate "$CANDIDATE" --output assets
           python3 -B "$sdk" verify --repo . --candidate "$CANDIDATE" --receipt assets/sdk-candidate.json
-          cd native-archives
-          for component in aw-core aw-provider-sec-core aw-provider-tokenless; do
-            archive="$component-$VERSION-linux-x86_64"
-            receipt=package.json
-            if [[ "$component" == aw-core ]]; then receipt=share/doc/aw/source.json; fi
-            tar -xOf "$archive.tar.gz" "$archive/$receipt" |
-              jq -e --arg id "$component" --arg version "$VERSION" --arg sha "$CANDIDATE" \
-                '.package_id == $id and .version == $version and .source_commit == $sha'
-            sha256sum "$archive.tar.gz" >> ../assets/SHA256SUMS
-            mv "$archive.tar.gz" ../assets/
-          done
-          diff -u SHA256SUMS ../assets/SHA256SUMS
-          cd ../assets
+          mv native-archives/*.tar.gz native-archives/SHA256SUMS assets/
+          cd assets
           sha256sum *.tgz *.whl sdk-candidate.json >> SHA256SUMS
+      - name: Verify the exact release receipts and checksums
+        run: python3 -B distribution/packaging/aw/verify_release_assets.py assets "$CANDIDATE" "$VERSION"
       - uses: actions/upload-artifact@v4
         with:
-          name: aw-release-${{ env.CANDIDATE }}
+          # Candidate attempts have separate receipts. Publish consumes the tag run's own artifact.
+          name: ${{ github.event_name == 'workflow_dispatch' && format('aw-release-{0}-{1}', env.CANDIDATE, github.run_attempt) || format('aw-release-{0}', env.CANDIDATE) }}
+          overwrite: ${{ github.event_name == 'push' }}
           path: assets/
           if-no-files-found: error
           retention-days: 28
