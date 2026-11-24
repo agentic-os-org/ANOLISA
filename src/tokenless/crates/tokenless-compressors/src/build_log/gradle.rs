@@ -12,7 +12,7 @@ use regex::Regex;
 use super::scope::{self, MAX_BYTES, MAX_EDITS, MAX_ROWS, complete, plain, valid_line};
 use super::{LayoutEdit, saves_both};
 
-const HEADER: &str = "Gradle templates (id<TAB>fields; interleave with literals): ";
+pub(super) const HEADER: &str = "Gradle templates (id<TAB>fields; interleave with literals): ";
 
 static BUILD_STATUS: LazyLock<Result<Regex, regex::Error>> =
     LazyLock::new(|| Regex::new(r"^BUILD (?:SUCCESSFUL|FAILED) in [0-9]+"));

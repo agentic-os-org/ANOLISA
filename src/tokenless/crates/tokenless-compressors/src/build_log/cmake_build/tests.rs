@@ -266,13 +266,13 @@ fn limits_idempotence_fences_and_anchored_generic_fallback_hold() {
     let huge_line = format!("diagnostic payload: {}\n", "x".repeat(MAX_BYTES + 1));
     let huge_input = format!("{before}{huge_line}{after}");
     let huge_lines: Vec<&str> = huge_input.split_inclusive('\n').collect();
-    assert!(plan(&huge_lines).is_empty());
+    assert!(plan(&huge_lines, &[]).is_empty());
 
     let large_input = (1..=300)
         .map(|i| format!("[{i}/300] Building CXX object src/CMakeFiles/a.dir/file_{i:03}.cpp.o\n"))
         .collect::<String>();
     let large_lines: Vec<&str> = large_input.split_inclusive('\n').collect();
-    let large_edits = plan(&large_lines);
+    let large_edits = plan(&large_lines, &[]);
     assert!(large_edits.len() >= 2);
     for edit in &large_edits {
         assert!(edit.end - edit.start <= MAX_ROWS);
@@ -291,7 +291,7 @@ fn limits_idempotence_fences_and_anchored_generic_fallback_hold() {
         })
         .collect::<String>();
     let wide_lines: Vec<&str> = wide_input.split_inclusive('\n').collect();
-    let wide_edits = plan(&wide_lines);
+    let wide_edits = plan(&wide_lines, &[]);
     assert!(wide_edits.len() >= 2);
     for edit in &wide_edits {
         let orig: String = wide_lines[edit.start..edit.end].concat();
@@ -309,7 +309,7 @@ fn limits_idempotence_fences_and_anchored_generic_fallback_hold() {
         many_blocks.push_str(&format!("step marker {block}\n"));
     }
     let many_lines: Vec<&str> = many_blocks.split_inclusive('\n').collect();
-    let many_edits = plan(&many_lines);
+    let many_edits = plan(&many_lines, &[]);
     assert_eq!(many_edits.len(), MAX_EDITS);
 
     // >4 KiB template headers stay idempotent across sample gaps, while fenced headers do not veto real runs.

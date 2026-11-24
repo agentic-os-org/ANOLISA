@@ -6,14 +6,16 @@
 //! output verbatim in place.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use super::scope::{
-    self, MAX_BYTES, MAX_EDITS, MAX_LINE_BYTES, MAX_ROWS, complete, plain, valid_line,
+    self, ClaimedCursor, MAX_BYTES, MAX_EDITS, MAX_LINE_BYTES, MAX_ROWS, complete, plain,
+    valid_line,
 };
 use super::{LayoutEdit, saves_both};
 
 // MAX_BYTES caps compacted headers because `saves_both` keeps each replacement shorter than its slice.
-const HEADER: &str = "CMake/Ninja templates (id<TAB>fields; interleave with literals): ";
+pub(super) const HEADER: &str = "CMake/Ninja templates (id<TAB>fields; interleave with literals): ";
 
 const OBJECT_SUFFIXES: &[&str] = &[".o", ".obj", ".lo", ".pch", ".gch", ".pcm", ".ifc", ".res"];
 
@@ -82,8 +84,9 @@ pub(super) fn is_compacted(lines: &[&str]) -> bool {
     scope::is_compacted(lines, HEADER)
 }
 
-/// Plans atomic lossless template edits across contiguous CMake and Ninja build progress blocks.
-pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
+/// Plans atomic lossless template edits across contiguous CMake and Ninja build progress blocks,
+/// skipping line ranges already claimed by earlier Stage 1 passes.
+pub(super) fn plan(lines: &[&str], claimed: &[Range<usize>]) -> Vec<LayoutEdit> {
     if is_compacted(lines) || lines.iter().any(|line| line.len() > MAX_BYTES) {
         return Vec::new();
     }
@@ -91,9 +94,16 @@ pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
     let mut edits = Vec::new();
     let mut active = true;
     let mut open_fence = None;
+    let mut claimed = ClaimedCursor::new(claimed);
     let mut index = scope::leading_preamble_len(lines, is_static_preamble);
 
     while index < lines.len() {
+        // Invariant: claimed spans come from verified unfenced lossless blocks, so skipping them
+        // keeps `open_fence` and `active` state intact.
+        if let Some(next_index) = claimed.skip_if_claimed(index) {
+            index = next_index;
+            continue;
+        }
         let Some(line) = scope::enter_line(lines, index, &mut active, &mut open_fence, |row| {
             parse_row(row).is_some()
         }) else {
@@ -114,7 +124,8 @@ pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
         let mut bytes = 0usize;
         let mut row_count = 0usize;
         let mut parsed_chunk = Vec::new();
-        while scan_end < lines.len() && scan_end - start < MAX_ROWS {
+        let chunk_limit = claimed.unclaimed_end(start, lines.len());
+        while scan_end < chunk_limit && scan_end - start < MAX_ROWS {
             let Some(next) = complete(lines[scan_end]) else {
                 break;
             };
