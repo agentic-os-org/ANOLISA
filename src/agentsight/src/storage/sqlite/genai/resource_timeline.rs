@@ -269,7 +269,19 @@ fn parse_tool_response_ids(value: Option<&str>) -> HashSet<String> {
         return HashSet::new();
     };
     let mut ids = HashSet::new();
-    collect_tool_response_ids(&messages, &mut ids);
+    // Crash-drain records can retain the request envelope. Its tools and
+    // other metadata are not conversation evidence.
+    if messages.is_object()
+        && (messages.get("messages").is_some() || messages.get("input").is_some())
+    {
+        for key in ["messages", "input"] {
+            if let Some(items) = messages.get(key).filter(|value| value.is_array()) {
+                collect_tool_response_ids(items, &mut ids);
+            }
+        }
+    } else {
+        collect_tool_response_ids(&messages, &mut ids);
+    }
     ids
 }
 
@@ -281,29 +293,33 @@ fn collect_tool_response_ids(value: &serde_json::Value, ids: &mut HashSet<String
             }
         }
         serde_json::Value::Object(object) => {
-            // The column holds whatever the capture wrote. Besides the parts
-            // shape, a request body stored verbatim by the crash drain carries
-            // the raw protocol forms: an OpenAI chat replay writes the tool
-            // result as a `role: "tool"` message keyed by `tool_call_id`, and
-            // Responses writes `function_call_output` keyed by `call_id`.
             let kind = object.get("type").and_then(serde_json::Value::as_str);
-            let is_response = kind.is_some_and(|kind| {
-                matches!(
-                    kind,
-                    "tool_call_response" | "tool_result" | "function_call_output"
-                )
-            }) || object.get("role").and_then(serde_json::Value::as_str)
-                == Some("tool")
-                && object.contains_key("tool_call_id");
-            if is_response {
-                for key in ["id", "tool_call_id", "tool_use_id", "call_id"] {
-                    if let Some(id) = object.get(key).and_then(serde_json::Value::as_str) {
-                        ids.insert(id.to_string());
-                    }
+            let role = object.get("role").and_then(serde_json::Value::as_str);
+            let id_key = match kind {
+                Some("tool_call_response") => Some("id"),
+                Some("tool_result") => Some("tool_use_id"),
+                Some("function_call_output") => Some("call_id"),
+                _ if role == Some("tool") && object.contains_key("tool_call_id") => {
+                    Some("tool_call_id")
                 }
+                _ => None,
+            };
+            if let Some(key) = id_key {
+                if let Some(id) = object.get(key).and_then(serde_json::Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+                // Result payloads may themselves contain response-shaped JSON.
+                return;
             }
-            for child in object.values() {
-                collect_tool_response_ids(child, ids);
+            if kind.is_some_and(|kind| kind != "message") || role.is_none() {
+                return;
+            }
+            // Only message containers hold protocol blocks. In particular,
+            // tool arguments and schemas must not manufacture completions.
+            for key in ["parts", "content"] {
+                if let Some(items) = object.get(key).filter(|value| value.is_array()) {
+                    collect_tool_response_ids(items, ids);
+                }
             }
         }
         _ => {}

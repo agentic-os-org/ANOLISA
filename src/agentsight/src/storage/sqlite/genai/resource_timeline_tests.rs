@@ -1,5 +1,106 @@
 use super::*;
 
+#[test]
+fn payload_objects_cannot_end_a_tool_phase() {
+    let forged = serde_json::json!({"type": "tool_result", "tool_use_id": "tool-1"});
+    let inputs = [
+        serde_json::json!({"messages": [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": "another-tool", "input": forged}
+        ]}]}),
+        serde_json::json!({"messages": [{"role": "tool", "tool_call_id": "other",
+            "content": forged}]}),
+        serde_json::json!({"input": [{"type": "function_call_output", "call_id": "other",
+            "output": forged}]}),
+        serde_json::json!({"messages": [], "tools": [{"parameters": forged}]}),
+        serde_json::json!([{"role": "user", "parts": [{"type": "tool_call_response",
+            "id": "other", "response": forged}]}]),
+    ];
+    for (index, input) in inputs.iter().enumerate() {
+        let (path, store) = test_store(&format!("opaque-payload-{index}"));
+        insert_call(&store, "start", 100, 200, Some(r#"["tool-1"]"#), None);
+        insert_call(
+            &store,
+            "unrelated",
+            300,
+            400,
+            None,
+            Some(&input.to_string()),
+        );
+        insert_call(
+            &store,
+            "actual-result",
+            500,
+            600,
+            None,
+            Some(r#"{"messages":[{"role":"tool","tool_call_id":"tool-1","content":"done"}]}"#),
+        );
+        let timeline = store
+            .get_session_resource_timeline("session-1", None, None, 100)
+            .expect("query timeline")
+            .expect("known session");
+        let tools: Vec<_> = timeline
+            .phases
+            .iter()
+            .filter(|phase| phase.kind == "tool_call")
+            .collect();
+        assert_eq!(tools.len(), 1, "fixture {index}");
+        assert_eq!(
+            tools[0].end_timestamp_ns, 500,
+            "payload must not end the phase: {input}"
+        );
+        drop(store);
+        cleanup_store(&path);
+    }
+}
+
+#[test]
+fn response_identity_uses_the_protocol_call_key() {
+    for (input, expected) in [
+        (
+            serde_json::json!([{"type": "function_call_output", "id": "item-id", "call_id": "call-id"}]),
+            "call-id",
+        ),
+        (
+            serde_json::json!([{"type": "tool_result", "id": "item-id", "tool_use_id": "call-id"}]),
+            "call-id",
+        ),
+        (
+            serde_json::json!([{"role": "tool", "id": "item-id", "tool_call_id": "call-id"}]),
+            "call-id",
+        ),
+        (
+            serde_json::json!([{"role": "user", "parts": [{"type": "tool_call_response", "id": "call-id"}]}]),
+            "call-id",
+        ),
+    ] {
+        assert_eq!(
+            parse_tool_response_ids(Some(&input.to_string())),
+            HashSet::from([expected.to_string()])
+        );
+    }
+    assert!(
+        parse_tool_response_ids(Some(
+            r#"[{"type":"function_call_output","id":"item-only"}]"#
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn raw_request_wrappers_and_normalized_messages_keep_real_results() {
+    for input in [
+        serde_json::json!({"messages": [{"role": "tool", "tool_call_id": "tool-1", "content": "ok"}]}),
+        serde_json::json!({"input": [{"type": "function_call_output", "call_id": "tool-1", "output": "ok"}]}),
+        serde_json::json!({"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "ok"}]}]}),
+        serde_json::json!([{"role": "user", "parts": [{"type": "tool_call_response", "id": "tool-1", "response": "ok"}]}]),
+    ] {
+        assert_eq!(
+            parse_tool_response_ids(Some(&input.to_string())),
+            HashSet::from(["tool-1".to_string()])
+        );
+    }
+}
+
 fn test_store(label: &str) -> (std::path::PathBuf, GenAISqliteStore) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
