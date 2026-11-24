@@ -166,6 +166,13 @@ and advertises `diff_json: true` when the CLI supports `diff --format json`.
 The check works before any snapshots exist. A missing or false field leaves
 the workspace snapshot controls unavailable.
 
+Identity-phase failures carry the daemon's structured rejection: the failure
+JSON reproduces the `GuardedCheckpointV2Rejected` code and message verbatim
+(for example `WorkspaceNotFound` for an unregistered or non-exact path), and
+execute mode reports `known_no_effect` because identity discovery is read-only
+and precedes the rollback request. Genuine protocol anomalies and IPC failures
+keep the generic `PreflightFailed` code.
+
 Guarded execution and result lookup accept at most 4096 bytes of confirmation
 JSON on stdin. AgentSight checks the same limit before launching the CLI.
 Exceeding the limit is a pre-execution rejection.

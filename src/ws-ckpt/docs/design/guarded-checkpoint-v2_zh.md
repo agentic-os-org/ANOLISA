@@ -127,6 +127,11 @@ AgentSight 只接受 schema 标识 `ws-ckpt.rollback.v1`。`rollback --guarded -
 确认工作区身份，并通过 `diff_json: true` 声明 CLI 支持 `diff --format json`。
 工作区没有快照时也可以检查。字段缺失或为 false 时，工作区快照入口不可用。
 
+身份阶段的失败透传 daemon 的结构化拒绝：failure JSON 原样携带
+`GuardedCheckpointV2Rejected` 的拒绝码与消息（例如未注册或非精确路径对应
+`WorkspaceNotFound`）；执行模式报告 `known_no_effect`，因为身份发现只读且先于
+回滚请求。真正的协议异常与 IPC 失败仍使用通用的 `PreflightFailed` 码。
+
 Guarded 执行和结果查询通过 stdin 接收确认 JSON，上限为 4096 字节。AgentSight 在启动
 CLI 前检查同一上限。超限属于执行前拒绝。
 

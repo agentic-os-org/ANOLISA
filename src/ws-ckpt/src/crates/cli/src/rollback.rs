@@ -118,7 +118,24 @@ async fn ordinary_json(
     Ok(output)
 }
 
-async fn workspace_identity(path: &str, uid: u32) -> Result<(String, WorkspaceGenerationTokenV2)> {
+/// Resolves the exact registered workspace identity.
+///
+/// Failures are returned as ready-made JSON so the daemon's structured
+/// rejection code and message reach the caller verbatim instead of being
+/// masked by `run_json`'s generic `PreflightFailed` wrapper.
+async fn workspace_identity(
+    path: &str,
+    uid: u32,
+    mode: Mode,
+) -> std::result::Result<(String, WorkspaceGenerationTokenV2), Value> {
+    // Identity discovery is read-only and precedes any rollback request, so a
+    // failure in Execute mode is known to have had no effect.
+    let status = if matches!(mode, Mode::Execute) {
+        "known_no_effect"
+    } else {
+        "error"
+    };
+    let preflight = |message: String| failure(status, "PreflightFailed", &message);
     match send_request(
         &Request::WorkspaceIdentityV2 {
             registration_path: path.to_owned(),
@@ -126,23 +143,31 @@ async fn workspace_identity(path: &str, uid: u32) -> Result<(String, WorkspaceGe
         Some(uid),
     )
     .await
-    .map_err(IpcFailure::into_error)?
     {
-        Response::WorkspaceIdentityV2Ok {
+        Ok(Response::WorkspaceIdentityV2Ok {
             protocol_version,
             ws_id,
             registered_path,
             generation,
-        } => {
-            anyhow::ensure!(
-                protocol_version == GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
-                "unsupported guarded rollback protocol version {protocol_version}"
-            );
-            anyhow::ensure!(registered_path == path, "workspace registration mismatch");
+        }) => {
+            if protocol_version != GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2 {
+                return Err(preflight(format!(
+                    "unsupported guarded rollback protocol version {protocol_version}"
+                )));
+            }
+            if registered_path != path {
+                return Err(preflight("workspace registration mismatch".to_owned()));
+            }
             Ok((ws_id, generation))
         }
-        Response::Error { code, message } => anyhow::bail!("{code:?}: {message}"),
-        _ => anyhow::bail!("unexpected response while checking guarded rollback protocol"),
+        Ok(Response::GuardedCheckpointV2Rejected { code, message }) => {
+            Err(failure(status, &format!("{code:?}"), &message))
+        }
+        Ok(Response::Error { code, message }) => Err(preflight(format!("{code:?}: {message}"))),
+        Ok(_) => Err(preflight(
+            "unexpected response while checking guarded rollback protocol".to_owned(),
+        )),
+        Err(error) => Err(preflight(format!("{:#}", error.into_error()))),
     }
 }
 
@@ -150,12 +175,18 @@ async fn guarded_json(path: String, snapshot: Option<String>, mode: Mode) -> Res
     let uid = effective_uid()?;
     Ok(match mode {
         Mode::Check => {
-            let (ws_id, _) = workspace_identity(&path, uid).await?;
+            let (ws_id, _) = match workspace_identity(&path, uid, mode).await {
+                Ok(identity) => identity,
+                Err(failure_json) => return Ok(failure_json),
+            };
             json!({"status": "compatible", "ws_id": ws_id, "registered_path": path, "diff_json": true})
         }
         Mode::Preview => {
             let snapshot = snapshot.context("guarded preview requires --snapshot/-s")?;
-            let (ws_id, generation) = workspace_identity(&path, uid).await?;
+            let (ws_id, generation) = match workspace_identity(&path, uid, mode).await {
+                Ok(identity) => identity,
+                Err(failure_json) => return Ok(failure_json),
+            };
             let request = Request::GuardedRollbackPreviewV2 {
                 registered_path: path.clone(),
                 ws_id: ws_id.clone(),
@@ -191,7 +222,10 @@ async fn guarded_json(path: String, snapshot: Option<String>, mode: Mode) -> Res
         Mode::Execute => {
             let snapshot = snapshot.context("guarded rollback requires --snapshot/-s")?;
             let confirmation = Confirmation::from_stdin()?;
-            let (ws_id, _) = workspace_identity(&path, uid).await?;
+            let (ws_id, _) = match workspace_identity(&path, uid, mode).await {
+                Ok(identity) => identity,
+                Err(failure_json) => return Ok(failure_json),
+            };
             anyhow::ensure!(ws_id == confirmation.ws_id, "workspace ID mismatch");
             let request = Request::GuardedRollbackV2 {
                 registered_path: path.clone(),
