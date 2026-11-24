@@ -144,12 +144,12 @@ impl AnthropicParser {
     /// - `ContentBlockStop` → finalize and push current block to content list
     /// - `MessageDelta` → extract stop_reason and final usage
     fn aggregate_sse_events(events: &[serde_json::Value]) -> Option<AnthropicResponse> {
-        let mut content_blocks: Vec<AnthropicContentBlock> = Vec::new();
+        let mut finished_blocks: Vec<(u32, AnthropicContentBlock)> = Vec::new();
         let mut stop_reason: Option<String> = None;
         let mut usage: Option<AnthropicUsage> = None;
         let mut message_start: Option<AnthropicSseEvent> = None;
 
-        // State for the current content block being streamed
+        // State for active content blocks keyed by their stream block index
         enum CurrentBlock {
             Text {
                 text: String,
@@ -165,46 +165,56 @@ impl AnthropicParser {
             },
             ToolResult(AnthropicContentBlock),
         }
-        let mut current_block: Option<CurrentBlock> = None;
-        // Finish a streamed block, pushing it when it carries content. Called
-        // by `content_block_stop`, by the next `content_block_start` (a stop
-        // lost to a split read must not swallow the block it ended), and once
-        // after the stream.
-        let finish_block = |block: CurrentBlock, out: &mut Vec<AnthropicContentBlock>| match block {
-            CurrentBlock::Text { text } => {
-                if !text.is_empty() {
-                    out.push(AnthropicContentBlock::Text {
-                        text,
-                        cache_control: None,
-                    });
-                }
-            }
-            CurrentBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                if !thinking.is_empty() {
-                    out.push(AnthropicContentBlock::Thinking {
+        let mut active_blocks: std::collections::BTreeMap<u32, CurrentBlock> =
+            std::collections::BTreeMap::new();
+        // Finish a streamed block, recording it alongside its index when it carries content.
+        // Called by `content_block_stop`, by another `content_block_start` at the same index
+        // (a stop lost to a split read must not swallow the block it ended), and once after
+        // the stream.
+        let finish_block =
+            |index: u32, block: CurrentBlock, out: &mut Vec<(u32, AnthropicContentBlock)>| {
+                match block {
+                    CurrentBlock::Text { text } => {
+                        if !text.is_empty() {
+                            out.push((
+                                index,
+                                AnthropicContentBlock::Text {
+                                    text,
+                                    cache_control: None,
+                                },
+                            ));
+                        }
+                    }
+                    CurrentBlock::Thinking {
                         thinking,
-                        signature: if signature.is_empty() {
-                            None
-                        } else {
-                            Some(signature)
-                        },
-                    });
+                        signature,
+                    } => {
+                        if !thinking.is_empty() {
+                            out.push((
+                                index,
+                                AnthropicContentBlock::Thinking {
+                                    thinking,
+                                    signature: if signature.is_empty() {
+                                        None
+                                    } else {
+                                        Some(signature)
+                                    },
+                                },
+                            ));
+                        }
+                    }
+                    CurrentBlock::ToolUse {
+                        id,
+                        name,
+                        input_json,
+                    } => {
+                        let input = serde_json::from_str::<serde_json::Value>(&input_json)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        out.push((index, AnthropicContentBlock::ToolUse { id, name, input }));
+                    }
+                    CurrentBlock::ToolResult(block) => out.push((index, block)),
                 }
-            }
-            CurrentBlock::ToolUse {
-                id,
-                name,
-                input_json,
-            } => {
-                let input = serde_json::from_str::<serde_json::Value>(&input_json)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                out.push(AnthropicContentBlock::ToolUse { id, name, input });
-            }
-            CurrentBlock::ToolResult(block) => out.push(block),
-        };
+            };
 
         for event_value in events {
             // Try to parse as AnthropicSseEvent
@@ -215,11 +225,14 @@ impl AnthropicParser {
                         message_start = Some(sse_event.clone());
                         usage = Some(message.usage.clone());
                     }
-                    AnthropicSseEvent::ContentBlockStart { content_block, .. } => {
-                        // A new block ends the previous one even when its stop
-                        // event never arrived.
-                        if let Some(block) = current_block.take() {
-                            finish_block(block, &mut content_blocks);
+                    AnthropicSseEvent::ContentBlockStart {
+                        index,
+                        content_block,
+                    } => {
+                        // A new block at the same index ends any previous active block there even
+                        // when its stop event never arrived.
+                        if let Some(prev) = active_blocks.remove(index) {
+                            finish_block(*index, prev, &mut finished_blocks);
                         }
                         // A compatible gateway may send the block's complete
                         // payload on `content_block_start` and no deltas at
@@ -229,9 +242,9 @@ impl AnthropicParser {
                         // is a no-op there. A tool_use's empty `input` object
                         // is the placeholder the deltas replace, so it must
                         // not be serialized into the buffer.
-                        current_block = match content_block {
+                        let block = match content_block {
                             AnthropicContentBlock::ToolUse { id, name, input } => {
-                                Some(CurrentBlock::ToolUse {
+                                CurrentBlock::ToolUse {
                                     id: id.clone(),
                                     name: name.clone(),
                                     input_json: match input {
@@ -241,79 +254,95 @@ impl AnthropicParser {
                                         }
                                         value => value.to_string(),
                                     },
-                                })
+                                }
                             }
                             AnthropicContentBlock::Thinking {
                                 thinking,
                                 signature,
-                            } => Some(CurrentBlock::Thinking {
+                            } => CurrentBlock::Thinking {
                                 thinking: thinking.clone(),
                                 signature: signature.clone().unwrap_or_default(),
-                            }),
+                            },
                             AnthropicContentBlock::Text { text, .. } => {
-                                Some(CurrentBlock::Text { text: text.clone() })
+                                CurrentBlock::Text { text: text.clone() }
                             }
                             AnthropicContentBlock::ToolResult { .. } => {
-                                Some(CurrentBlock::ToolResult(content_block.clone()))
+                                CurrentBlock::ToolResult(content_block.clone())
                             }
                             _ => {
                                 // Any other block type
-                                Some(CurrentBlock::Text {
+                                CurrentBlock::Text {
                                     text: String::new(),
-                                })
+                                }
                             }
                         };
+                        active_blocks.insert(*index, block);
                     }
-                    AnthropicSseEvent::ContentBlockDelta { delta, .. } => {
+                    AnthropicSseEvent::ContentBlockDelta { index, delta } => {
                         use super::types::AnthropicSseDelta;
                         match delta {
                             AnthropicSseDelta::TextDelta { text } => {
-                                if let Some(CurrentBlock::Text { text: ref mut buf }) =
-                                    current_block
-                                {
-                                    buf.push_str(text);
-                                } else if current_block.is_none() {
-                                    // Fallback: no ContentBlockStart seen, create text block
-                                    current_block = Some(CurrentBlock::Text { text: text.clone() });
+                                match active_blocks.get_mut(index) {
+                                    Some(CurrentBlock::Text { text: buf }) => buf.push_str(text),
+                                    None => {
+                                        // Fallback: no ContentBlockStart seen at this index
+                                        active_blocks.insert(
+                                            *index,
+                                            CurrentBlock::Text { text: text.clone() },
+                                        );
+                                    }
+                                    _ => {}
                                 }
                             }
                             AnthropicSseDelta::ThinkingDelta { thinking } => {
-                                if let Some(CurrentBlock::Thinking {
-                                    thinking: ref mut buf,
-                                    ..
-                                }) = current_block
-                                {
-                                    buf.push_str(thinking);
-                                } else if current_block.is_none() {
-                                    current_block = Some(CurrentBlock::Thinking {
-                                        thinking: thinking.clone(),
-                                        signature: String::new(),
-                                    });
+                                match active_blocks.get_mut(index) {
+                                    Some(CurrentBlock::Thinking { thinking: buf, .. }) => {
+                                        buf.push_str(thinking);
+                                    }
+                                    None => {
+                                        active_blocks.insert(
+                                            *index,
+                                            CurrentBlock::Thinking {
+                                                thinking: thinking.clone(),
+                                                signature: String::new(),
+                                            },
+                                        );
+                                    }
+                                    _ => {}
                                 }
                             }
                             AnthropicSseDelta::SignatureDelta { signature } => {
-                                if let Some(CurrentBlock::Thinking {
-                                    signature: ref mut sig,
-                                    ..
-                                }) = current_block
+                                if let Some(CurrentBlock::Thinking { signature: sig, .. }) =
+                                    active_blocks.get_mut(index)
                                 {
                                     sig.push_str(signature);
                                 }
                             }
                             AnthropicSseDelta::InputJsonDelta { partial_json } => {
-                                if let Some(CurrentBlock::ToolUse {
-                                    ref mut input_json, ..
-                                }) = current_block
-                                {
-                                    input_json.push_str(partial_json);
+                                match active_blocks.get_mut(index) {
+                                    Some(CurrentBlock::ToolUse { input_json, .. }) => {
+                                        input_json.push_str(partial_json);
+                                    }
+                                    None => {
+                                        // Fallback: recover tool_use arguments when
+                                        // content_block_start was not captured
+                                        active_blocks.insert(
+                                            *index,
+                                            CurrentBlock::ToolUse {
+                                                id: String::new(),
+                                                name: String::new(),
+                                                input_json: partial_json.clone(),
+                                            },
+                                        );
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
-                    AnthropicSseEvent::ContentBlockStop { .. } => {
-                        // Finalize and push the current block
-                        if let Some(block) = current_block.take() {
-                            finish_block(block, &mut content_blocks);
+                    AnthropicSseEvent::ContentBlockStop { index } => {
+                        if let Some(block) = active_blocks.remove(index) {
+                            finish_block(*index, block, &mut finished_blocks);
                         }
                     }
                     AnthropicSseEvent::MessageDelta {
@@ -359,10 +388,15 @@ impl AnthropicParser {
             }
         }
 
-        // Flush any remaining block that didn't get a ContentBlockStop
-        if let Some(block) = current_block.take() {
-            finish_block(block, &mut content_blocks);
+        // Flush any remaining blocks that didn't get a ContentBlockStop
+        for (index, block) in active_blocks {
+            finish_block(index, block, &mut finished_blocks);
         }
+        finished_blocks.sort_by_key(|(index, _)| *index);
+        let content_blocks: Vec<AnthropicContentBlock> = finished_blocks
+            .into_iter()
+            .map(|(_, block)| block)
+            .collect();
 
         // Build aggregated response
         // If message_start is available, use its metadata; otherwise use defaults.
@@ -1450,6 +1484,99 @@ mod tests {
                 assert_eq!(input["content"], "hello");
             }
             other => panic!("Expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_sse_interleaved_content_blocks_by_index() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_interleaved",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 20, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "Start "}
+            },
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Lookup", "input": {}}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "end."}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":\"rust\"}"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 12}
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("parsed response");
+        assert_eq!(
+            resp.content.len(),
+            2,
+            "expected 2 blocks, got {:?}",
+            resp.content
+        );
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text, .. } => assert_eq!(text, "Start end."),
+            other => panic!("Expected Text at index 0, got {other:?}"),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "Lookup");
+                assert_eq!(input["q"], "rust");
+            }
+            other => panic!("Expected ToolUse at index 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_sse_orphan_input_json_delta_recovers_tool_use() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_orphan_tool",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 10, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"cmd\":\"pwd\"}"}
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 8}
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("parsed response");
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicContentBlock::ToolUse { input, .. } => {
+                assert_eq!(input["cmd"], "pwd");
+            }
+            other => panic!("Expected ToolUse from orphan delta, got {other:?}"),
         }
     }
 }
