@@ -54,6 +54,32 @@ Binding 受理不等于流量保护生效。`--wait-seconds N` 等待已有匹�
 ready 条件、响应改写限制及部分失败恢复见
 [网关契约](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)。
 
+### HTTPS 检查边界
+
+对已 Binding 的 Agent 新建连接，Gateway 仅在可见 SNI 精确命中本 Scope 固定 Policy
+快照中的 host 时解包 TLS。比较忽略大小写和一个末尾点；子域、后缀、IP 和通配名称不算
+命中。其它目标保留原站证书和端到端 TLS，即使另一 Scope 声明了该域名也如此。
+无 SNI、未知 listener、缺快照或 selector 异常同样原样透传，并记录固定且无敏感值的诊断。
+在 hook 前被拒绝的畸形 ClientHello 保持 mitmproxy 原有失败行为。
+
+命中只选择检查，不授予凭据权限。HTTP 每请求仍检查最新加载的规则、fake 归属、退役、
+Host/SNI、method 和 path；没有 fake 仍是不注入，而非一律拒绝。上游证书校验保持开启，
+命中后的 MITM 失败不会降级为透传。命中 host 的 Agent 必须信任共享 Gateway CA；
+此处 pinning 或 mTLS 可能失败。CA 本身不限制为单个 Scope 或域名。
+
+全局退役 pair 仅移除注入权限；Active Scope 的 Binding 仍有效时，继续引流并解包原声明
+host，以拒绝旧 fake。删除 Scope 或 Binding 失效才撤流。host 集合变化只影响新 TLS
+连接，既有透传不能追溯解密；已解包 HTTP/2 连接的 Host 切换保留 421 边界。
+
+透传 TLS 不解密、不扫描、不改写。Agent 只配置 fake，且不能读取 real；选择层故障时
+因此只会把已配置的 fake 原样送到上游，不会注入 real。注入后的既有响应改写限制仍适用。
+ECH 可能隐藏真实目标：选择只使用可见外层 SNI，未命中的隐藏目标没有注入保证。
+IPv4 TCP 80/443 引流范围不变；IPv6、QUIC 和其它端口不在保护范围内。
+
+部署或回滚须成套更新 daemon 与 addon：`active.json` 仍为 version 1，但每个 listener
+必须含排序唯一的 `hosts`；Plan 和 secrets 格式不变。替换组件前先 disable 并确认撤流，
+再由匹配 daemon 重新发布并 enable；不手工编辑 manifest，也不混装版本。
+
 ## Policy 数据库位置
 
 未设置非空 `AGENT_SEC_DATA_DIR` 时，daemon 检查两处 Policy 数据库：

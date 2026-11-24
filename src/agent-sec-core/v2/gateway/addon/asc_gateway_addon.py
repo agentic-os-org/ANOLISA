@@ -3,9 +3,9 @@
 Each listener port belongs to one canonical Scope. The addon serves the
 generation named by `<runtime>/active.json`, replaces a domain's fake with the
 real credential only on requests its plan allows, and reports what it loaded in
-`<runtime>/status/health.json`. Without a loaded generation every request is
-rejected, and any failure inside a hook rejects or kills the flow: the gateway
-never degrades to passthrough.
+`<runtime>/status/health.json`. Only exact SNI targets declared by that Scope
+are intercepted; uncertain TLS selection relays unchanged. Intercepted HTTP
+requests still require a loaded generation and fail closed on authorization errors.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import time
 from collections.abc import Iterator
 
 import asc_gateway_policy as policy
-from mitmproxy import ctx, exceptions, http
+from mitmproxy import ctx, exceptions, http, tls
 from mitmproxy.addons.termlog import TermLogHandler
 from mitmproxy.log import LegacyLogEvents
 from mitmproxy.net.http.http1 import expected_http_body_size
@@ -60,6 +60,9 @@ _SAFE_DIAGNOSTICS = frozenset(
         "agent-sec-gateway response hook failed",
         "agent-sec-gateway downstream HTTP/2 queue limit exceeded",
         "agent-sec-gateway upstream error; injected flow killed",
+        "agent-sec-gateway TLS relayed without snapshot",
+        "agent-sec-gateway TLS relayed on unknown listener",
+        "agent-sec-gateway TLS selector failed; relayed",
     }
 )
 
@@ -247,6 +250,7 @@ class SecretGateway:
         self._health: bytes | None = None
         self._watcher: asyncio.Task[None] | None = None
         self._log_filter = _SafeDiagnostics()
+        self._last_tls_diagnostic: float | None = None
 
     def load(self, loader: object) -> None:
         loader.add_option(  # type: ignore[attr-defined]
@@ -395,6 +399,45 @@ class SecretGateway:
         with open(os.path.join(confdir, "mitmproxy-ca-cert.pem"), "rb") as handle:
             certificate = handle.read()
         _write_atomic(os.path.join(self._runtime, STATUS_DIR), CA_NAME, certificate)
+
+    def tls_clienthello(self, data: tls.ClientHelloData) -> None:
+        """Intercept only a confirmed target of the listener's canonical Scope."""
+        # Only a confirmed own-Scope target may terminate TLS.
+        data.ignore_connection = True
+        try:
+            snapshot = self.snapshot
+            if snapshot is None:
+                self._tls_diagnostic("agent-sec-gateway TLS relayed without snapshot")
+                return
+            client, server = data.context.client, data.context.server
+            port = client.proxy_mode.listen_port()
+            if port not in snapshot.listeners:
+                self._tls_diagnostic(
+                    "agent-sec-gateway TLS relayed on unknown listener"
+                )
+                return
+            host = policy.select_tls_host(snapshot, port, data.client_hello.sni)
+            if host is None:
+                return
+            # mitmproxy assigned client.sni before this hook. tlsconfig derives
+            # server.sni afterwards; canonicalize only names selected for interception.
+            server_sni = server.sni
+            client.sni = host
+            if server_sni is not None:
+                server.sni = host
+            data.ignore_connection = False
+        except Exception:  # noqa: BLE001 - selector failure must preserve TLS relay
+            self._tls_diagnostic("agent-sec-gateway TLS selector failed; relayed")
+
+    def _tls_diagnostic(self, message: str) -> None:
+        # One shared clock bounds all selection faults without retaining host values.
+        now = time.monotonic()
+        if (
+            self._last_tls_diagnostic is None
+            or now - self._last_tls_diagnostic >= RETRY_SECONDS
+        ):
+            self._last_tls_diagnostic = now
+            logger.warning(message)
 
     def requestheaders(self, flow: http.HTTPFlow) -> None:
         if flow.response is not None:

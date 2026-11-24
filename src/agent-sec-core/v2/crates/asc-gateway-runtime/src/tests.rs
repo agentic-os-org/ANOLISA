@@ -2664,6 +2664,162 @@ fn conflicting_pair_registration_and_global_removal_preserve_permanent_tombstone
     assert_eq!(fixture.secrets()["retired"], retired);
 }
 
+#[test]
+fn manifest_budget_preserves_maximum_dns_targets_and_rejects_oversized_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CredentialStore::create(&root.path().join("credentials")).unwrap();
+    let runtime = crate::runtime::RuntimeDirectory {
+        root: root.path().join("run"),
+        gateway: crate::files::Owner {
+            uid: rustix::process::geteuid().as_raw(),
+            gid: rustix::process::getegid().as_raw(),
+        },
+    };
+    runtime.prepare().unwrap();
+    let hosts: Vec<_> = (0..256)
+        .map(|index| {
+            format!(
+                "h{index:03}{}.{}.{}.{}",
+                "a".repeat(59),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61)
+            )
+        })
+        .collect();
+    let scopes: Vec<_> = (0..9)
+        .map(|index| ScopeId::new(format!("scope-{index}")).unwrap())
+        .collect();
+    let published: Vec<_> = scopes
+        .iter()
+        .enumerate()
+        .map(|(index, scope_id)| crate::runtime::PublishedScope {
+            scope_id,
+            port: 15001 + u16::try_from(index).unwrap(),
+            hosts: &hosts,
+            plan: serde_json::to_vec(&serde_json::json!({
+                "format": "agent-sec-gateway-plan/v2", "scopeId": scope_id,
+                "policies": [{"id": "policy:test", "revision": 1}],
+                "credentials": [], "rules": []
+            }))
+            .unwrap(),
+        })
+        .collect();
+    runtime.publish(&store, &[], &published[..8], 1).unwrap();
+    let active = fs::read(runtime.root.join("active.json")).unwrap();
+    let expected: Vec<_> = scopes[..8]
+        .iter()
+        .enumerate()
+        .map(|(index, scope)| {
+            serde_json::json!({
+                "scopeId": scope, "port": 15001 + index,
+                "hosts": hosts, "plan": format!("plan-{scope}-1.json")
+            })
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&active).unwrap(),
+        serde_json::json!({
+            "version": 1, "generation": 1, "secrets": "secrets-1.json",
+            "listeners": expected
+        })
+    );
+    let error = runtime.publish(&store, &[], &published, 2).unwrap_err();
+    assert_eq!(error.to_string(), "gateway manifest exceeds its size limit");
+    assert_eq!(fs::read(runtime.root.join("active.json")).unwrap(), active);
+}
+
+#[test]
+fn retired_credentials_keep_declared_hosts_and_only_verified_binding_routes() {
+    for fault in ["none", "root", "member", "binding", "scope"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let scope = fixture.scope("retired-routing", 2);
+        let service = fixture.service();
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        let binding = fixture.instance(&scope, 10, &[]).remove(0);
+        let client = GatewayBindingClient::new(service.clone());
+        let prepared = Fixture::prepared(&client, &binding);
+        assert!(client.create(&prepared).error.is_none());
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+        let read_manifest = || -> serde_json::Value {
+            serde_json::from_slice(
+                &fs::read(fixture.config.runtime_dir.join("active.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        let before = read_manifest();
+        let listener = &before["listeners"][0];
+        assert_eq!(
+            listener["hosts"],
+            serde_json::json!(["api.github.com", "github.com"])
+        );
+        service.remove_key(fixture.pair_id().as_str()).unwrap();
+        let after = read_manifest();
+        assert_eq!(after["version"], 1);
+        assert_eq!(after["listeners"][0]["hosts"], listener["hosts"]);
+        assert_eq!(after["listeners"][0]["port"], listener["port"]);
+        let plan: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .config
+                    .runtime_dir
+                    .join(after["listeners"][0]["plan"].as_str().unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plan["credentials"], serde_json::json!([]));
+        assert_eq!(plan["rules"], serde_json::json!([]));
+        assert_eq!(plan["format"], "agent-sec-gateway-plan/v2");
+        assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
+        assert_eq!(
+            fixture.secrets()["retired"],
+            serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}])
+        );
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+        match fault {
+            "none" => {}
+            "root" => {
+                fixture.host.log().processes.get_mut(&10).unwrap().cgroup = "/user.slice".into();
+            }
+            "member" => {
+                let mut log = fixture.host.log();
+                let mut foreign = TestProcess::new(10);
+                foreign.uid = 4002;
+                foreign.cgroup = log.processes[&10].cgroup.clone();
+                log.processes.insert(11, foreign);
+            }
+            "binding" => fixture.transition(&binding, BindingStatus::Deleting),
+            "scope" => {
+                fixture
+                    .repository
+                    .begin_scope_delete(&scope.scope_id)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        service.recover().unwrap();
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            usize::from(fault == "none"),
+            "{fault}"
+        );
+        if fault == "none" {
+            drop(client);
+            drop(service);
+            let restarted = fixture.service();
+            restarted.recover().unwrap();
+            assert_eq!(read_manifest()["listeners"][0]["hosts"], listener["hosts"]);
+            assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+            let client = GatewayBindingClient::new(restarted);
+            assert!(client.delete(&[prepared.target]).error.is_none());
+            assert_eq!(fixture.rules().matches("counter redirect").count(), 0);
+        }
+    }
+}
+
 #[derive(Default)]
 struct DiscoveryRecorder(Mutex<Vec<ResourceId>>);
 

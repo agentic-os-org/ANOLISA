@@ -10,8 +10,10 @@ from __future__ import annotations
 import base64
 import gzip
 import http.client
+import io
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -24,6 +26,7 @@ import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -705,10 +708,12 @@ class GatewayCase(unittest.TestCase):
             {
                 "port": cls.ports["00000000-0000-4000-8000-000000000001"],
                 "scopeId": "00000000-0000-4000-8000-000000000001",
+                "hosts": ["api.github.com", "github.com"],
             },
             {
                 "port": cls.ports["00000000-0000-4000-8000-000000000002"],
                 "scopeId": "00000000-0000-4000-8000-000000000002",
+                "hosts": ["api.github.com", "github.com"],
             },
         ]
         write_generation(runtime, 1, listeners, DECISIONS["secrets"])
@@ -809,7 +814,7 @@ class GatewayCase(unittest.TestCase):
         path: str,
         *,
         host: str = "api.github.com",
-        sni: str = "",
+        sni: str | None = "",
         connect: str | None = None,
         headers: list[tuple[str, str]] = (),  # type: ignore[assignment]
         body: bytes = b"",
@@ -827,10 +832,11 @@ class GatewayCase(unittest.TestCase):
         agent: str,
         *,
         host: str = "api.github.com",
-        sni: str = "",
+        sni: str | None = "",
         connect: str | None = None,
         tls: bool = True,
         alpn: str = "http/1.1",
+        context: ssl.SSLContext | None = None,
     ) -> Iterator[socket.socket]:
         sock = socket.create_connection(("127.0.0.1", self.ports[agent]), timeout=20)
         with sock:
@@ -847,7 +853,7 @@ class GatewayCase(unittest.TestCase):
                     reply += chunk
                 self.assertIn(b" 200 ", reply.split(b"\r\n")[0])
                 server_name = host if sni == "" else sni
-                context = self.client_context()
+                context = context or self.client_context()
                 context.set_alpn_protocols([alpn])
                 stream = context.wrap_socket(sock, server_hostname=server_name)
             else:
@@ -882,7 +888,7 @@ class GatewayCase(unittest.TestCase):
     def disabled_rewrite(self) -> Iterator[None]:
         """Publish an explicit false switch, then restore this class's true plans."""
         listeners = [
-            {"scopeId": scope, "port": port}
+            {"scopeId": scope, "port": port, "hosts": ["api.github.com", "github.com"]}
             for scope, port in self.ports.items()
             if scope != "unconfigured"
         ]
@@ -1265,6 +1271,198 @@ class InjectionTest(GatewayCase):
                 self.assertEqual(self.recorded(path)[0]["authorization"], authorization)
 
 
+class SniSelectionTest(GatewayCase):
+    def assert_origin_relay(self, scope: str, path: str, sni: str | None = "") -> None:
+        # Trust only the origin CA and pin the leaf, not the Gateway CA.
+        context = ssl.create_default_context(cafile=str(self.workdir / "ca.pem"))
+        if sni != "":
+            context.check_hostname = False
+        origin = ssl.PEM_cert_to_DER_cert((self.workdir / "leaf.pem").read_text())
+        with self.connection(scope, context=context, sni=sni) as stream:
+            self.assertEqual(stream.getpeercert(binary_form=True), origin)
+            response = self._exchange(
+                stream,
+                "GET",
+                path,
+                "api.github.com",
+                [("Authorization", f"Bearer {FAKE}")],
+                b"",
+            )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.json()["auth"], f"Bearer {FAKE}")
+        self.assertEqual(self.recorded(path)[0]["authorization"], f"Bearer {FAKE}")
+
+    def test_own_scope_selection_and_retirement_preserve_tls_and_http_boundaries(
+        self,
+    ) -> None:
+        runtime = self.workdir / "runtime"
+        scopes = list(self.ports)[:2]
+        listeners = [
+            {
+                "scopeId": scopes[0],
+                "port": self.ports[scopes[0]],
+                "hosts": ["github.com"],
+            },
+            {
+                "scopeId": scopes[1],
+                "port": self.ports[scopes[1]],
+                "hosts": ["api.github.com"],
+            },
+        ]
+        plans = {}
+        for listener in listeners:
+            plan = plan_for(listener["scopeId"])
+            plan["rules"] = [
+                rule
+                for rule in plan["rules"]
+                if rule["match"]["host"] in listener["hosts"]
+            ]
+            plans[listener["scopeId"]] = plan
+        secrets = json.loads(json.dumps(DECISIONS["secrets"]))
+        generation = self.health()["loadedGeneration"] + 1
+        secrets["generation"] = generation
+        write_generation(runtime, generation, listeners, secrets, plans)
+        self.wait_health(lambda health: health["loadedGeneration"] == generation)
+        try:
+            # Scope A relays a host declared only by B, even carrying A's fake.
+            self.assert_origin_relay(scopes[0], "/relay-own-scope")
+            for label, sni in (
+                ("unmatched", "other.example"),
+                ("suffix", "api.github.com.evil.example"),
+                ("no-sni", None),
+                ("ip", "127.0.0.1"),
+            ):
+                self.assert_origin_relay(scopes[1], f"/relay-{label}", sni)
+            # Python's hostname verifier expects the DNS name without the terminal dot.
+            response = self.send(
+                scopes[1],
+                "GET",
+                "/matched-dot",
+                host="API.GitHub.COM.",
+                sni="API.GitHub.COM",
+                headers=[("Authorization", f"Bearer {OTHER_FAKE}")],
+            )
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                self.recorded("/matched-dot")[0]["authorization"], f"Bearer {REAL}"
+            )
+            # Send a genuinely dotted ClientHello while verifying the canonical hostname.
+            trace = self.workdir / "dotted-clienthello.txt"
+            result = subprocess.run(
+                [
+                    "openssl",
+                    "s_client",
+                    "-proxy",
+                    f"127.0.0.1:{self.ports[scopes[1]]}",
+                    "-connect",
+                    "api.github.com:443",
+                    "-servername",
+                    "API.GitHub.COM.",
+                    "-verify_hostname",
+                    "api.github.com",
+                    "-verify",
+                    "5",
+                    "-verify_return_error",
+                    "-CAfile",
+                    str(self.workdir / "conf" / "mitmproxy-ca-cert.pem"),
+                    "-alpn",
+                    "http/1.1",
+                    "-quiet",
+                    "-ign_eof",
+                    "-ignore_unexpected_eof",
+                    "-msg",
+                    "-msgfile",
+                    str(trace),
+                ],
+                input=(
+                    "GET /matched-dotted-sni HTTP/1.1\r\n"
+                    "Host: API.GitHub.COM.\r\n"
+                    f"Authorization: Bearer {OTHER_FAKE}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode(),
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode, 0, result.stderr.decode(errors="replace")
+            )
+            hello = re.search(
+                r">>>[^\n]*ClientHello\n((?:[ \t]+[0-9a-f ]+\n)+)",
+                trace.read_text(),
+                re.IGNORECASE,
+            )
+            self.assertIsNotNone(hello, "outbound ClientHello trace is required")
+            self.assertIn(b"API.GitHub.COM.", bytes.fromhex(hello.group(1)))
+            wire = http.client.HTTPResponse(
+                SimpleNamespace(makefile=lambda mode: io.BytesIO(result.stdout))
+            )
+            wire.begin()
+            with wire:
+                self.assertEqual(wire.status, 200)
+                self.assertEqual(
+                    json.loads(wire.read())["auth"], f"Bearer {OTHER_FAKE}"
+                )
+            self.assertEqual(
+                self.recorded("/matched-dotted-sni")[0]["authorization"],
+                f"Bearer {REAL}",
+            )
+            # Retiring every usable rule/credential retains the declared TLS hosts.
+            generation += 1
+            secrets["generation"] = generation
+            entry = secrets["entries"].pop(1)
+            secrets["retired"].append(
+                {"fake": entry["fake"], "credential": entry["credential"]}
+            )
+            plans[scopes[1]].update(credentials=[], rules=[])
+            write_generation(runtime, generation, listeners, secrets, plans)
+            self.wait_health(lambda health: health["loadedGeneration"] == generation)
+            response = self.send(
+                scopes[1],
+                "GET",
+                "/retired-host",
+                headers=[("Authorization", f"Bearer {OTHER_FAKE}")],
+            )
+            self.assertEqual(
+                (response.status, response.json()["error"]), (403, "retired_credential")
+            )
+            self.assertEqual(self.recorded("/retired-host"), [])
+            self.assertEqual(
+                self.send(scopes[1], "GET", "/no-fake-retired").status, 200
+            )
+        finally:
+            generation += 1
+            secrets = json.loads(json.dumps(DECISIONS["secrets"]))
+            secrets["generation"] = generation
+            listeners = [
+                {
+                    "scopeId": scope,
+                    "port": self.ports[scope],
+                    "hosts": ["api.github.com", "github.com"],
+                }
+                for scope in scopes
+            ]
+            write_generation(runtime, generation, listeners, secrets)
+            self.wait_health(lambda health: health["loadedGeneration"] == generation)
+
+    def test_unknown_listener_and_missing_snapshot_relay_original_certificate(
+        self,
+    ) -> None:
+        runtime = self.workdir / "runtime"
+        original = (runtime / "active.json").read_bytes()
+        generation = json.loads(original)["generation"]
+        try:
+            for missing in (False, True):
+                if missing:
+                    (runtime / "active.json").unlink()
+                    self.wait_health(lambda health: health["loadedGeneration"] is None)
+                scope = list(self.ports)[0] if missing else "unconfigured"
+                self.assert_origin_relay(scope, f"/relay-unready-{missing}")
+        finally:
+            (runtime / "active.json").write_bytes(original)
+            self.wait_health(lambda health: health["loadedGeneration"] == generation)
+
+
 class CustomHeaderInjectionTest(GatewayCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1272,7 +1470,7 @@ class CustomHeaderInjectionTest(GatewayCase):
         secrets = json.loads(json.dumps(DECISIONS["secrets"]))
         secrets["generation"] = 2
         listeners = [
-            {"scopeId": scope, "port": port}
+            {"scopeId": scope, "port": port, "hosts": ["api.github.com", "github.com"]}
             for scope, port in cls.ports.items()
             if scope != "unconfigured"
         ]
@@ -1446,9 +1644,11 @@ class RejectionTest(GatewayCase):
         )
         self.assert_rejected(response, "sni_host_mismatch", "/x6", 421)
 
-    def test_unconfigured_listener_fails_closed(self) -> None:
+    def test_unconfigured_plaintext_listener_fails_closed(self) -> None:
         self.assert_rejected(
-            self.send("unconfigured", "GET", "/x7"), "gateway_not_ready", "/x7"
+            self.send("unconfigured", "GET", "/x7", tls=False),
+            "gateway_not_ready",
+            "/x7",
         )
 
     def test_forged_destination_fails_upstream_verification(self) -> None:
@@ -1955,6 +2155,7 @@ class ReloadTest(GatewayCase):
                 {
                     "port": self.ports["00000000-0000-4000-8000-000000000002"],
                     "scopeId": "00000000-0000-4000-8000-000000000002",
+                    "hosts": ["api.github.com", "github.com"],
                 }
             ],
             secrets,
@@ -1965,6 +2166,7 @@ class ReloadTest(GatewayCase):
             "GET",
             "/r1",
             headers=[("Authorization", f"Bearer {FAKE}")],
+            tls=False,
         )
         self.assertEqual(
             (response.status, response.json()["error"]), (403, "gateway_not_ready")
@@ -1987,6 +2189,7 @@ class ReloadTest(GatewayCase):
                 {
                     "port": self.ports["00000000-0000-4000-8000-000000000002"],
                     "scopeId": "00000000-0000-4000-8000-000000000002",
+                    "hosts": ["api.github.com", "github.com"],
                 }
             ],
             broken,
@@ -2006,7 +2209,9 @@ class ReloadTest(GatewayCase):
 
         (runtime / "active.json").unlink()
         self.wait_health(lambda health: health["loadedGeneration"] is None)
-        response = self.send("00000000-0000-4000-8000-000000000002", "GET", "/r4")
+        response = self.send(
+            "00000000-0000-4000-8000-000000000002", "GET", "/r4", tls=False
+        )
         self.assertEqual(
             (response.status, response.json()["error"]), (403, "gateway_not_ready")
         )

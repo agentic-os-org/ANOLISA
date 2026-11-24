@@ -52,7 +52,10 @@ def runtime_files(
         name = f"plan-{listener['scopeId']}.json"
         plan = (plans or {}).get(listener["scopeId"], plan_for(listener["scopeId"]))
         files[name] = json.dumps(plan).encode()
-        listeners.append({**listener, "plan": name})
+        declared = sorted({rule["match"]["host"] for rule in plan["rules"]})
+        listeners.append(
+            {**listener, "hosts": declared or listener["hosts"], "plan": name}
+        )
     manifest = {
         "version": 1,
         "generation": generation,
@@ -407,12 +410,12 @@ class GenericDecisionTest(unittest.TestCase):
                 self.assertEqual((decision.action, decision.code), ("reject", expected))
 
     def test_basic_has_no_implicit_default_or_auto_fallback(self) -> None:
-        for presented in (
-            "Basic not*base64",
-            "Basic " + base64.b64encode(f"user:{VALUES['fake']}".encode()).decode(),
-        ):
-            self.request["headers"] = [["X-Api-Key", presented]]
-            self.assertEqual(self.decide().action, "forward")
+        for password, action in (("unmanaged", "forward"), (VALUES["fake"], "reject")):
+            encoded = base64.b64encode(f"user:{password}".encode()).decode()
+            self.request["headers"] = [["X-Api-Key", f"Basic {encoded}"]]
+            self.assertEqual(self.decide().action, action)
+        self.request["headers"] = [["X-Api-Key", "Basic not*base64"]]
+        self.assertEqual(self.decide().action, "forward")
         self.rule["format"] = "basic"
         automatic = copy.deepcopy(self.rule)
         automatic["format"] = "auto"
@@ -560,6 +563,93 @@ class GenericDecisionTest(unittest.TestCase):
         self.assertEqual(self.decide().code, "upgrade_not_allowed")
 
 
+class TlsSelectionTest(unittest.TestCase):
+    def test_scopes_select_independent_hosts_even_after_all_rules_are_removed(
+        self,
+    ) -> None:
+        files = runtime_files()
+        manifest = json.loads(files["active.json"])
+        for index, listener in enumerate(manifest["listeners"]):
+            listener["hosts"] = [f"scope-{index}.example", "shared.example"]
+            plan = json.loads(files[listener["plan"]])
+            plan.update(credentials=[], rules=[])
+            files[listener["plan"]] = json.dumps(plan).encode()
+        files["active.json"] = json.dumps(manifest).encode()
+        snapshot = load(files)
+        for index, listener in enumerate(manifest["listeners"]):
+            port = listener["port"]
+            own = f"scope-{index}.example"
+            self.assertEqual(
+                policy.select_tls_host(snapshot, port, own.upper() + "."), own
+            )
+            self.assertEqual(
+                policy.select_tls_host(snapshot, port, "shared.example"),
+                "shared.example",
+            )
+            self.assertIsNone(
+                policy.select_tls_host(snapshot, port, f"scope-{1-index}.example")
+            )
+            self.assertIsNone(policy.select_tls_host(snapshot, port, "api.github.com"))
+        for snapshot_value, port in ((None, 15001), (snapshot, 1), (snapshot, True)):
+            self.assertIsNone(
+                policy.select_tls_host(snapshot_value, port, "shared.example")
+            )
+        # Declared hosts select decryption, not injection permission or blanket denial.
+        request = copy.deepcopy(API_FACTS)
+        request.update(sni="scope-0.example", authority="scope-0.example", headers=[])
+        self.assertEqual(
+            policy.decide_request(snapshot, facts(request)).action, "forward"
+        )
+        request["headers"] = [["Authorization", VALUES["retiredFake"]]]
+        self.assertEqual(
+            policy.decide_request(snapshot, facts(request)).code, "retired_credential"
+        )
+        request["headers"] = [["Authorization", VALUES["fake"]]]
+        self.assertEqual(
+            policy.decide_request(snapshot, facts(request)).code,
+            "credential_not_allowed",
+        )
+        self.assertEqual(snapshot.listeners[15001].plan.credentials, frozenset())
+        for port, listener in snapshot.listeners.items():
+            own_fake = next(
+                fake
+                for fake, entry in snapshot.live.items()
+                if listener.plan.scope_id in entry.scope_ids
+            )
+            for header in ("Authorization", "X-Unconfigured"):
+                for password, action, code in (
+                    (VALUES["retiredFake"], "reject", "retired_credential"),
+                    (own_fake, "reject", "credential_not_allowed"),
+                    (VALUES["unavailableFake"], "reject", "credential_not_allowed"),
+                    ("unmanaged", "forward", "no_credential"),
+                ):
+                    with self.subTest(port=port, header=header, code=code):
+                        encoded = base64.b64encode(f"user:{password}".encode()).decode()
+                        request.update(
+                            port=port, headers=[[header, f"Basic {encoded}"]]
+                        )
+                        decision = policy.decide_request(snapshot, facts(request))
+                        self.assertEqual(
+                            (decision.action, decision.code), (action, code)
+                        )
+                        self.assertIsNone(decision.header_value)
+                        self.assertEqual(decision.replacements, ())
+
+    def test_empty_declared_hosts_never_select_another_listener(self) -> None:
+        files = runtime_files()
+        manifest = json.loads(files["active.json"])
+        listener = manifest["listeners"][0]
+        listener["hosts"] = []
+        plan = json.loads(files[listener["plan"]])
+        plan.update(credentials=[], rules=[])
+        files[listener["plan"]] = json.dumps(plan).encode()
+        files["active.json"] = json.dumps(manifest).encode()
+        snapshot = load(files)
+        self.assertIsNone(
+            policy.select_tls_host(snapshot, listener["port"], "api.github.com")
+        )
+
+
 class LoadTest(unittest.TestCase):
     def assert_load_error(self, files: dict[str, bytes]) -> str:
         with self.assertRaises(policy.LoadError) as raised:
@@ -571,6 +661,77 @@ class LoadTest(unittest.TestCase):
 
     def test_generation_mismatch(self) -> None:
         self.assert_load_error(runtime_files(generation=2))
+
+    def test_listener_hosts_are_required_canonical_bounded_and_cover_live_rules(
+        self,
+    ) -> None:
+        for declared in (
+            None,
+            "api.github.com",
+            {},
+            [None],
+            ["API.github.com"],
+            ["api.github.com."],
+            ["*.github.com"],
+            ["127.0.0.1"],
+            ["::1"],
+            ["api.github.com", "api.github.com"],
+            ["github.com", "api.github.com"],
+            ["a" * 254 + ".example"],
+            ["bad\n.example"],
+            ["\ud800.example"],
+            [f"h{index:03}.example" for index in range(policy.MAX_RULES + 1)],
+            [],
+            ["other.example"],
+        ):
+            with self.subTest(declared=declared):
+                files = runtime_files()
+                manifest = json.loads(files["active.json"])
+                manifest["listeners"][0]["hosts"] = declared
+                files["active.json"] = json.dumps(manifest).encode()
+                self.assert_load_error(files)
+        files = runtime_files()
+        manifest = json.loads(files["active.json"])
+        del manifest["listeners"][0]["hosts"]
+        files["active.json"] = json.dumps(manifest).encode()
+        self.assert_load_error(files)
+
+    def test_maximum_listener_hosts_load_without_truncation(self) -> None:
+        files = runtime_files()
+        manifest = json.loads(files["active.json"])
+        hosts = [
+            ".".join((f"h{index:03}" + "a" * 59, "b" * 63, "c" * 63, "d" * 61))
+            for index in range(256)
+        ]
+        listeners = []
+        for index in range(8):
+            scope = f"scope-{index}"
+            name = f"plan-{scope}.json"
+            plan = plan_for(PLAN["scopeId"])
+            plan.update(scopeId=scope, credentials=[], rules=[])
+            files[name] = json.dumps(plan).encode()
+            listeners.append(
+                dict(scopeId=scope, port=15001 + index, hosts=hosts, plan=name)
+            )
+        manifest["listeners"] = listeners
+        files["active.json"] = json.dumps(manifest).encode()
+        snapshot = load(files)
+        self.assertEqual(
+            {port: listener.hosts for port, listener in snapshot.listeners.items()},
+            {15001 + i: frozenset(hosts) for i in range(8)},
+        )
+        for port in snapshot.listeners:
+            self.assertEqual(
+                policy.select_tls_host(snapshot, port, hosts[-1]), hosts[-1]
+            )
+        files["active.json"] += b" " * (
+            policy.MAX_MANIFEST_BYTES - len(files["active.json"])
+        )
+        self.assertEqual(load(files), snapshot)
+        files["active.json"] += b" "
+        self.assertEqual(
+            self.assert_load_error(files), "manifest exceeds its size limit"
+        )
 
     def test_pair_ids_are_unique_across_live_retired_and_unavailable(self) -> None:
         for source in ("entries", "retired", "unavailable"):

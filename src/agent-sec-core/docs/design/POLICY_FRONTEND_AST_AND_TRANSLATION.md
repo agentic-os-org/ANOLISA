@@ -818,8 +818,30 @@ Cedar `*` spans `/`; it is not native segmented glob. Actual path ambiguity,
 HTTPS, Host/SNI/authority and retirement checks remain independent of the permit.
 Same effective pair/header/format/response candidates deduplicate; different
 instructions conflict, with no first-rule precedence or recursive rewriting.
-No managed credential means safe unchanged forwarding; an unauthorized managed
-fake is rejected even on an unmatched host/header/format. No fake means no injection.
+Within intercepted HTTP, no managed credential means safe unchanged forwarding;
+an unauthorized managed fake is rejected even on an unmatched host/header/format.
+No fake means no injection, not blanket denial for a registered host.
+
+For new TLS connections, Gateway selects only exact visible SNI from the current
+listener's declared hosts, not the union of Scopes or latest Policy contents.
+`active.json` version 1 requires sorted unique `hosts`, extracted from the complete
+validated pinned Plan before filtering unavailable credentials/rules; each retained
+rule host must belong to that listener. An Active Scope with valid Bindings keeps
+routing and inspection at those hosts after all pairs retire. Scope deletion or
+Binding invalidation still withdraws routes through the original ownership checks.
+Case and one terminal dot normalize only on a match, including connection SNI used
+for upstream verification; relays retain original TLS bytes and destination IP/port.
+Missing snapshots, unknown listeners, absent/IP/unmatched SNI and selector exceptions
+relay with bounded value-free diagnostics. Pre-hook ClientHello parse failures retain
+the dependency's failure behavior. Interception still enforces latest per-request
+HTTP authorization, Host/SNI and HTTP/2 421 boundaries; upstream verification remains
+on with no post-match downgrade. Changes affect new TLS connections only. Relays
+are not decrypted or scanned, even for hosts declared only by another Scope; ECH
+selection sees only outer SNI. Fake-only Agent configuration is a prerequisite,
+not a guarantee against the documented response-rewrite leaks. Matched pinning/mTLS
+and the shared CA's lack of Scope/domain constraints remain limitations. Deploy or
+roll back producer and addon together, after disable/withdrawal and complete
+republishing; Plan and secrets formats are unchanged, with no legacy-field defaults.
 
 Validation is pure. Both file annotations must contain normalized absolute paths
 on the daemon host; reject relative paths, `~`, environment expansion, NUL and
