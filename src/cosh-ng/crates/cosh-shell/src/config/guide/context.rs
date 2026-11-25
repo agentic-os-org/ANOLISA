@@ -54,13 +54,18 @@ impl GuideStore {
                 entries: Vec::new(),
             });
         };
-        let records: Contexts = serde_json::from_slice(&bytes).map_err(|_| Error::Corrupt)?;
-        if records.version != 1
-            || records.entries.len() > MAX_RECORDS
-            || records.entries.iter().any(|record| {
-                !valid_context_id(&record.id) || guidance::failure_kind(&record.event).is_none()
-            })
-        {
+        let mut records: Contexts = serde_json::from_slice(&bytes).map_err(|_| Error::Corrupt)?;
+        if records.version != 1 {
+            return Err(Error::Corrupt);
+        }
+        // Only structural damage invalidates the whole file. A record that became
+        // unsafe or unclassifiable (version drift, leftovers, tampering) is dropped
+        // on its own so clean siblings stay usable and the store can heal; a later
+        // save rewrites the file without it.
+        records.entries.retain(|record| {
+            valid_context_id(&record.id) && guidance::failure_kind(&record.event).is_some()
+        });
+        if records.entries.len() > MAX_RECORDS {
             return Err(Error::Corrupt);
         }
         Ok(records)
