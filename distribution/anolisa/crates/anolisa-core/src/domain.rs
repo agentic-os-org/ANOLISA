@@ -211,7 +211,8 @@ pub enum LifecycleStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Installation {
     /// Object vocabulary shared with the legacy state (component, adapter,
-    /// osbase). `Capability` never reaches the domain — migration drops it.
+    /// and legacy osbase). `Capability` never reaches the domain — migration
+    /// drops it.
     pub kind: ObjectKind,
     /// Stable object name from the manifest/catalog.
     pub name: String,

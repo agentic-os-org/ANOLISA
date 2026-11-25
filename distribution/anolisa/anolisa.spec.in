@@ -39,9 +39,8 @@ Conflicts:      agent-sec-cli < 1.1.2
 
 %description
 ANOLISA - Agentic Nexus Operating Layer & Interface System Architecture.
-Command-line tool that manages capabilities, runtime components, and OS-base
-layers (kernel / sandbox / security) for AI-agent workloads on Anolis OS and
-Alibaba Cloud Linux.
+Command-line tool that manages runtime components and framework adapters for
+AI-agent workloads on Anolis OS and Alibaba Cloud Linux.
 
 #%package doc
 #Summary:   Documentation and license files for %%{name}

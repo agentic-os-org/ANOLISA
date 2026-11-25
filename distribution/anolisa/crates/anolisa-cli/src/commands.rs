@@ -2,8 +2,8 @@
 //!
 //! Two-tier structure (see design doc):
 //! - **Tier 1** — component lifecycle verbs for everyday use (`tier1/`).
-//! - **Tier 2** — independent management surfaces (register / adapter / self
-//!   / runtime / osbase). Each surface uses its own appropriate vocabulary.
+//! - **Tier 2** — independent management surfaces (register / adapter /
+//!   telemetry). Each surface uses its own appropriate vocabulary.
 
 pub mod common;
 pub(crate) mod state_view;
@@ -11,9 +11,7 @@ pub mod tier1;
 
 // Tier 2 surfaces
 pub mod adapter;
-pub mod osbase;
 pub mod register;
-pub mod system;
 pub mod telemetry;
 
 use std::fmt::Write as _;
@@ -124,10 +122,6 @@ pub enum ManagementCommands {
     Env(tier1::env::EnvArgs),
     /// Generate a bug report
     Bug(tier1::bug::BugArgs),
-    /// Manage OS base layer (kernel / sandbox / security)
-    Osbase(osbase::OsbaseArgs),
-    /// System helper daemon management
-    System(system::SystemArgs),
     /// Manage telemetry collection and reporting
     Telemetry(telemetry::TelemetryArgs),
 }
@@ -251,8 +245,6 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ManagementCommands::Unregister(args) => register::handle_unregister_cmd(args, ctx),
             ManagementCommands::Env(args) => tier1::env::handle(args, ctx),
             ManagementCommands::Bug(args) => tier1::bug::handle(args, ctx),
-            ManagementCommands::Osbase(args) => osbase::handle(args, ctx),
-            ManagementCommands::System(args) => system::handle(args, ctx),
             ManagementCommands::Telemetry(args) => telemetry::handle(args, ctx),
         },
     }
@@ -280,16 +272,15 @@ enum CommandScope {
     ReadOnly,
     ModeScopedMutation { dry_run: DryRunPolicy },
     SystemOnlyMutation { dry_run: DryRunPolicy },
-    HelperGatedSystemOperation { dry_run: DryRunPolicy },
 }
 
 impl CommandScope {
     const fn dry_run_policy(self) -> Option<DryRunPolicy> {
         match self {
             Self::ReadOnly => None,
-            Self::ModeScopedMutation { dry_run }
-            | Self::SystemOnlyMutation { dry_run }
-            | Self::HelperGatedSystemOperation { dry_run } => Some(dry_run),
+            Self::ModeScopedMutation { dry_run } | Self::SystemOnlyMutation { dry_run } => {
+                Some(dry_run)
+            }
         }
     }
 }
@@ -316,7 +307,7 @@ fn validate_command_args(
         policy,
         anolisa_platform::privilege::effective_uid(),
         cli.install_mode.is_some(),
-        ctx.dry_run || command_local_dry_run(&cli.command),
+        ctx.dry_run,
     )
 }
 
@@ -355,16 +346,10 @@ fn validate_command_args_with_euid(
         });
     }
 
-    match policy.scope {
-        CommandScope::SystemOnlyMutation { .. } if ctx.install_mode != InstallMode::System => {
-            return Err(system_scope_error(policy.label, install_mode_explicit));
-        }
-        CommandScope::HelperGatedSystemOperation { .. }
-            if install_mode_explicit && ctx.install_mode != InstallMode::System =>
-        {
-            return Err(system_scope_error(policy.label, true));
-        }
-        _ => {}
+    if matches!(policy.scope, CommandScope::SystemOnlyMutation { .. })
+        && ctx.install_mode != InstallMode::System
+    {
+        return Err(system_scope_error(policy.label, install_mode_explicit));
     }
 
     if dry_run_requested
@@ -390,7 +375,6 @@ fn validate_command_args_with_euid(
                 return Err(system_permission_error(ctx, policy.label, false));
             }
         }
-        CommandScope::HelperGatedSystemOperation { .. } => {}
     }
 
     if ctx.install_mode == InstallMode::User && effective_uid == 0 {
@@ -400,32 +384,7 @@ fn validate_command_args_with_euid(
     Ok(())
 }
 
-fn command_local_dry_run(command: &Commands) -> bool {
-    let Commands::Management(ManagementCommands::Osbase(args)) = command else {
-        return false;
-    };
-
-    match &args.command {
-        osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
-            osbase::KernelCommands::Install { dry_run } => *dry_run,
-            osbase::KernelCommands::Remove | osbase::KernelCommands::Status => false,
-        },
-        osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
-            osbase::SandboxCommands::Install { dry_run, .. }
-            | osbase::SandboxCommands::Uninstall { dry_run, .. }
-            | osbase::SandboxCommands::Remove { dry_run, .. } => *dry_run,
-            osbase::SandboxCommands::List { .. } | osbase::SandboxCommands::Status { .. } => false,
-        },
-        osbase::OsbaseCommands::Security(security) => match &security.command {
-            osbase::SecurityCommands::Install { dry_run, .. } => *dry_run,
-            osbase::SecurityCommands::Remove { .. } | osbase::SecurityCommands::Status { .. } => {
-                false
-            }
-        },
-    }
-}
-
-pub(crate) fn unsupported_dry_run_error(command: &str) -> CliError {
+fn unsupported_dry_run_error(command: &str) -> CliError {
     CliError::InvalidArgument {
         command: command.to_string(),
         reason: format!("command '{command}' does not support --dry-run; no action was taken"),
@@ -544,24 +503,6 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             }
             ManagementCommands::Env(_) => CommandPolicy::new("env", CommandScope::ReadOnly),
             ManagementCommands::Bug(_) => CommandPolicy::new("bug", CommandScope::ReadOnly),
-            ManagementCommands::Osbase(args) => {
-                let label = match &args.command {
-                    osbase::OsbaseCommands::Kernel(osbase::KernelArgs {
-                        command: osbase::KernelCommands::Install { .. },
-                    }) => "osbase kernel install",
-                    osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
-                        command: osbase::SandboxCommands::Remove { .. },
-                    }) => "osbase sandbox remove",
-                    osbase::OsbaseCommands::Security(osbase::SecurityArgs {
-                        command: osbase::SecurityCommands::Install { .. },
-                    }) => "osbase security install",
-                    _ => "osbase",
-                };
-                CommandPolicy::new(label, osbase_command_scope(args))
-            }
-            ManagementCommands::System(args) => {
-                CommandPolicy::new("system", system_command_scope(args))
-            }
             ManagementCommands::Telemetry(args) => {
                 CommandPolicy::new("telemetry", telemetry_command_scope(args))
             }
@@ -609,49 +550,8 @@ fn register_command_scope(args: &register::RegisterArgs) -> CommandScope {
     }
 }
 
-fn system_command_scope(args: &system::SystemArgs) -> CommandScope {
-    match &args.command {
-        system::SystemCommands::Status { .. } => CommandScope::ReadOnly,
-        system::SystemCommands::Serve { .. }
-        | system::SystemCommands::Setup { .. }
-        | system::SystemCommands::Teardown => system_only_scope(DryRunPolicy::Unsupported),
-    }
-}
-
-fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
-    match &args.command {
-        osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
-            osbase::KernelCommands::Status => CommandScope::ReadOnly,
-            osbase::KernelCommands::Install { .. } | osbase::KernelCommands::Remove => {
-                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
-            }
-        },
-        osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
-            osbase::SandboxCommands::List { .. } | osbase::SandboxCommands::Status { .. } => {
-                CommandScope::ReadOnly
-            }
-            osbase::SandboxCommands::Install { .. } | osbase::SandboxCommands::Uninstall { .. } => {
-                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview)
-            }
-            osbase::SandboxCommands::Remove { .. } => {
-                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
-            }
-        },
-        osbase::OsbaseCommands::Security(security) => match &security.command {
-            osbase::SecurityCommands::Status { .. } => CommandScope::ReadOnly,
-            osbase::SecurityCommands::Install { .. } | osbase::SecurityCommands::Remove { .. } => {
-                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
-            }
-        },
-    }
-}
-
 const fn system_only_scope(dry_run: DryRunPolicy) -> CommandScope {
     CommandScope::SystemOnlyMutation { dry_run }
-}
-
-const fn helper_gated_system_operation_scope(dry_run: DryRunPolicy) -> CommandScope {
-    CommandScope::HelperGatedSystemOperation { dry_run }
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -694,92 +594,6 @@ mod tests {
                 ..Default::default()
             },
         )
-    }
-
-    #[test]
-    fn command_local_dry_run_covers_every_local_osbase_flag() {
-        let commands: &[&[&str]] = &[
-            &["anolisa", "osbase", "kernel", "install"],
-            &["anolisa", "osbase", "sandbox", "install", "gvisor"],
-            &["anolisa", "osbase", "sandbox", "uninstall", "gvisor"],
-            &["anolisa", "osbase", "sandbox", "remove", "gvisor"],
-            &["anolisa", "osbase", "security", "install", "loongshield"],
-        ];
-
-        for arguments in commands {
-            let cli = Cli::try_parse_from(*arguments).expect("command without local dry-run");
-            assert!(!command_local_dry_run(&cli.command));
-
-            let mut with_dry_run = arguments.to_vec();
-            with_dry_run.push("--dry-run");
-            let cli = Cli::try_parse_from(with_dry_run).expect("command with local dry-run");
-            assert!(command_local_dry_run(&cli.command));
-        }
-
-        let cli = Cli::try_parse_from(["anolisa", "osbase", "kernel", "status"])
-            .expect("read-only command");
-        assert!(!command_local_dry_run(&cli.command));
-    }
-
-    #[test]
-    fn unsupported_osbase_install_dry_runs_match_for_local_global_root_and_non_root() {
-        let cases: &[(&str, &[&str])] = &[
-            (
-                "osbase kernel install",
-                &["anolisa", "osbase", "kernel", "install", "--dry-run"],
-            ),
-            (
-                "osbase kernel install",
-                &["anolisa", "--dry-run", "osbase", "kernel", "install"],
-            ),
-            (
-                "osbase security install",
-                &[
-                    "anolisa",
-                    "osbase",
-                    "security",
-                    "install",
-                    "loongshield",
-                    "--dry-run",
-                ],
-            ),
-            (
-                "osbase security install",
-                &[
-                    "anolisa",
-                    "--dry-run",
-                    "osbase",
-                    "security",
-                    "install",
-                    "loongshield",
-                ],
-            ),
-        ];
-
-        for (label, arguments) in cases {
-            let cli = Cli::try_parse_from(*arguments).expect("valid dry-run command");
-            let mut ctx = ctx_with_prefix(PathBuf::from("/"));
-            ctx.dry_run = cli.dry_run;
-            let dry_run_requested = ctx.dry_run || command_local_dry_run(&cli.command);
-
-            for effective_uid in [0, 1000] {
-                let err = validate_command_args_with_euid(
-                    &ctx,
-                    command_policy(&cli.command),
-                    effective_uid,
-                    true,
-                    dry_run_requested,
-                )
-                .expect_err("unsupported local and global dry-run must fail closed");
-
-                assert_eq!(err.code(), "INVALID_ARGUMENT");
-                assert_eq!(err.command(), *label);
-                assert_eq!(
-                    err.reason(),
-                    format!("command '{label}' does not support --dry-run; no action was taken")
-                );
-            }
-        }
     }
 
     #[test]
@@ -994,12 +808,6 @@ mod tests {
             Commands::Management(ManagementCommands::Unregister(register::UnregisterArgs {
                 force: true,
             })),
-            Commands::Management(ManagementCommands::System(system::SystemArgs {
-                command: system::SystemCommands::Setup {
-                    helper_path: None,
-                    upgrade: false,
-                },
-            })),
         ];
         let mut ctx = ctx_with_prefix(PathBuf::from("/"));
         ctx.dry_run = true;
@@ -1011,55 +819,6 @@ mod tests {
             assert_eq!(err.code(), "INVALID_ARGUMENT");
             assert!(err.reason().contains("does not support --dry-run"));
         }
-    }
-
-    #[test]
-    fn sandbox_install_and_uninstall_support_global_dry_run_but_remove_does_not() {
-        let supported = [
-            osbase::SandboxCommands::Install {
-                target: "kata-containers".to_string(),
-                dry_run: false,
-                force: false,
-                no_verify: false,
-            },
-            osbase::SandboxCommands::Uninstall {
-                scenario: "kata-containers".to_string(),
-                dry_run: false,
-            },
-        ];
-        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
-        ctx.dry_run = true;
-
-        for sandbox_command in supported {
-            let command = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
-                command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
-                    command: sandbox_command,
-                }),
-            }));
-            let policy = command_policy(&command);
-
-            assert_eq!(
-                policy.scope.dry_run_policy(),
-                Some(DryRunPolicy::UnprivilegedPreview)
-            );
-            validate_global_args_with_euid(&ctx, policy, 1000, true)
-                .expect("sandbox install and uninstall forward dry-run to the helper request");
-        }
-
-        let remove = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
-            command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
-                command: osbase::SandboxCommands::Remove {
-                    target: "kata-containers".to_string(),
-                    purge: false,
-                    dry_run: false,
-                },
-            }),
-        }));
-        let err = validate_global_args_with_euid(&ctx, command_policy(&remove), 0, true)
-            .expect_err("sandbox remove does not yet propagate dry-run");
-
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
-        assert!(err.reason().contains("does not support --dry-run"));
     }
 
     #[test]
@@ -1092,55 +851,6 @@ mod tests {
         assert_eq!(err.code(), "PERMISSION_DENIED");
         validate_global_args_with_euid(&ctx, policy, 0, true)
             .expect("root should reach a privileged preview handler");
-    }
-
-    #[test]
-    fn helper_gated_system_operation_reaches_handler_without_root_in_explicit_system_mode() {
-        validate_global_args_with_euid(
-            &ctx_with_prefix(PathBuf::from("/")),
-            CommandPolicy::new(
-                "osbase",
-                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview),
-            ),
-            1000,
-            true,
-        )
-        .expect("helper-gated system operations should reach their handler preflight");
-    }
-
-    #[test]
-    fn helper_gated_system_operation_reaches_handler_when_mode_is_omitted() {
-        let command = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
-            command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
-                command: osbase::SandboxCommands::Install {
-                    target: "kata-containers".to_string(),
-                    dry_run: false,
-                    force: false,
-                    no_verify: false,
-                },
-            }),
-        }));
-
-        validate_global_args_with_euid(&user_ctx(), command_policy(&command), 1000, false)
-            .expect("omitted install mode should not block helper-gated system operations");
-    }
-
-    #[test]
-    fn helper_gated_system_operation_rejects_explicit_user_mode() {
-        let err = validate_global_args_with_euid(
-            &user_ctx(),
-            CommandPolicy::new(
-                "osbase",
-                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview),
-            ),
-            1000,
-            true,
-        )
-        .expect_err("explicit user mode is invalid for helper-gated system operations");
-
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
-        assert!(err.reason().contains("system scope"));
-        assert!(err.hint().is_none());
     }
 
     #[test]
@@ -1196,21 +906,9 @@ mod tests {
                 yes: false,
             },
         )));
-        assert_read_only(Commands::Management(ManagementCommands::System(
-            system::SystemArgs {
-                command: system::SystemCommands::Status { json: false },
-            },
-        )));
         assert_read_only(Commands::Management(ManagementCommands::Telemetry(
             telemetry::TelemetryArgs {
                 command: telemetry::TelemetryCommands::Status { json: false },
-            },
-        )));
-        assert_read_only(Commands::Management(ManagementCommands::Osbase(
-            osbase::OsbaseArgs {
-                command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
-                    command: osbase::SandboxCommands::List { json: false },
-                }),
             },
         )));
     }

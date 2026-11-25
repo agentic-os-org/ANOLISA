@@ -118,7 +118,10 @@ anolisa update --check
 ```
 
 `update all` 不更新 CLI 本身。delegated 成员会在可行时合并成一次 native
-transaction，但每个组件仍保留独立的 recovery journal 和 record。
+transaction，但每个组件仍保留独立的 recovery journal 和 record。若正在升级曾
+运行过 `anolisa system setup` 的 Linux 主机，请按
+[安装指南](installation.md#清理旧版-anolisa-system-helper)清理旧版
+`anolisa-system-helper.service`。
 
 ### list 与 status
 

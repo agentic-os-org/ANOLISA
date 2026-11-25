@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-ANOLISA 统一 CLI 网关——管理组件生命周期、框架适配器、OS 基础层和系统服务。anolisa 是 [ANOLISA](../../README_zh.md) 项目的主用户入口，通过一条命令完成所有组件的安装、更新、诊断和编排。
+ANOLISA 统一 CLI 网关——管理组件生命周期、框架适配器与遥测配置。anolisa 是 [ANOLISA](../../README_zh.md) 项目的主用户入口，通过一条命令完成所有组件的安装、更新、诊断和编排。
 
 ## 快速开始
 
@@ -50,13 +50,10 @@ anolisa update all
 | 命令 | 说明 |
 |------|------|
 | `adapter` | 管理组件到框架的适配器 |
-| `osbase kernel` | 内核模块与 eBPF 管理 |
-| `osbase sandbox` | 沙箱运行时管理（runc、gvisor、firecracker 等） |
-| `osbase security` | 安全覆盖层管理 |
-| `system` | 系统辅助守护进程生命周期 |
 | `register` | 加入/离开 Agentic OS Co-Build Program |
 | `env` | 显示环境检测结果 |
 | `bug` | 生成 bug 报告（`--component cosh-ng` 时附加 cosh-shell 诊断包摘要；`COSH_SHELL_BIN` 可覆盖二进制路径） |
+| `telemetry` | 管理遥测采集与上报 |
 
 默认情况下，`anolisa adapter enable <component> openclaw` 会在宿主的各条命令
 支持 capability consent 时同意插件声明的能力。添加 `--no-accept-capabilities`
@@ -118,10 +115,10 @@ RPM 后端不支持此选项，会明确报错。
 | Crate | 职责 |
 |-------|------|
 | `anolisa-cli` | 命令解析、分发、终端 UI |
-| `anolisa-core` | 组件解析、适配器管理、osbase 安装逻辑 |
+| `anolisa-core` | 组件解析、生命周期规划、适配器管理 |
 | `anolisa-env` | 环境检测（发行版、架构、能力） |
 | `anolisa-build` | 构建时代码生成与资源嵌入 |
-| `anolisa-platform` | 文件系统布局、原生包查询与事务、systemd、IPC、权限辅助 |
+| `anolisa-platform` | 文件系统布局、原生包查询与事务、systemd、权限辅助 |
 
 支持双后端：**raw**（OSS tar.gz）和 **RPM**（yum/dnf 事务）。生命周期
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前

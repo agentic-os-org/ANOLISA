@@ -6,9 +6,8 @@ publisher = "anolisa"
 #
 # `index.toml` remains the raw artifact version/hash index. This file is only
 # for resolving stable ANOLISA component names to backend-native package names.
-# Scope: runtime components only. The ANOLISA CLI package itself and osbase
-# package lists are intentionally excluded because they are not component
-# identities.
+# Scope: runtime components only. The ANOLISA CLI package itself is
+# intentionally excluded because it is not a runtime component identity.
 
 [[components]]
 name = "cosh"

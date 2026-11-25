@@ -129,7 +129,10 @@ anolisa update --check
 
 `update all` does not update the CLI binary. Delegated members are merged into
 one native transaction where possible; each component keeps its own recovery
-journal and record.
+journal and record. If you are upgrading a Linux host that previously ran
+`anolisa system setup`, follow the
+[upgrade guide](installation.md#retiring-anolisa-system-helper) to retire
+`anolisa-system-helper.service`.
 
 ### list and status
 

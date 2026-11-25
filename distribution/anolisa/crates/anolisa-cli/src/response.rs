@@ -213,13 +213,6 @@ impl CliError {
         }
     }
 
-    pub fn not_implemented(command: impl Into<String>) -> Self {
-        Self::NotImplemented {
-            command: command.into(),
-            hint: None,
-        }
-    }
-
     pub fn not_implemented_with_hint(command: impl Into<String>, hint: impl Into<String>) -> Self {
         Self::NotImplemented {
             command: command.into(),

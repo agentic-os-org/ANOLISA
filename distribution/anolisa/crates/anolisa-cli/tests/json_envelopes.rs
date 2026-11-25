@@ -29,18 +29,6 @@ fn assert_success_envelope<'a>(value: &'a Value, command: &str) -> &'a Value {
 }
 
 #[test]
-fn osbase_sandbox_list_json_uses_standard_envelope() {
-    let value = run_json(&["--json", "osbase", "sandbox", "list"]);
-    let data = assert_success_envelope(&value, "osbase sandbox list");
-
-    assert!(data.get("scenarios").is_some_and(Value::is_array));
-    assert!(
-        value.get("scenarios").is_none(),
-        "sandbox payload must be nested under data"
-    );
-}
-
-#[test]
 fn register_status_json_uses_standard_envelope() {
     let value = run_json(&["--json", "register", "status"]);
     let data = assert_success_envelope(&value, "register status");

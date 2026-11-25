@@ -299,6 +299,40 @@ anolisa update all
 `update all` 只更新已记录的组件，不更新 CLI。脚本安装的 CLI 使用
 `anolisa update self`，RPM 管理的 CLI 使用 `sudo anolisa update self`。
 
+### 清理旧版 anolisa-system-helper
+
+早期版本提供的 `anolisa system setup` 会将 CLI 二进制复制为独立的 root helper
+可执行文件，并启用 `anolisa-system-helper.service`。升级 CLI 不会自动移除该
+helper 及其 systemd unit，且新版已移除 `anolisa system teardown`。
+
+在曾启用过 `anolisa-system-helper.service` 的 Linux 主机上，请先查询已安装的
+unit，确认 unit 文件路径（`FragmentPath`）以及 `ExecStart` 中的 helper 二进制
+路径（旧版 `anolisa system setup --helper-path` 允许自定义路径；默认路径为
+`/usr/local/libexec/anolisa/anolisa-system-helper`）：
+
+```bash
+systemctl show -p FragmentPath -p ExecStart anolisa-system-helper.service
+```
+
+停止并禁用服务，删除 `FragmentPath` 指向的 unit 文件（默认
+`/usr/local/lib/systemd/system/anolisa-system-helper.service`），重载
+systemd，再删除 `ExecStart` 指向的 helper 二进制以及已废弃的
+`/etc/anolisa/sandbox.toml` 和 `/run/anolisa/system-helper.sock`（请保留
+`/run/anolisa` 目录本身，`agent-memory` 等组件仍会使用该目录）：
+
+```bash
+sudo systemctl disable --now anolisa-system-helper.service
+sudo rm -f /usr/local/lib/systemd/system/anolisa-system-helper.service
+sudo systemctl daemon-reload
+sudo rm -f /usr/local/libexec/anolisa/anolisa-system-helper \
+  /etc/anolisa/sandbox.toml \
+  /run/anolisa/system-helper.sock
+```
+
+如果主机曾使用自定义 `--prefix` 或 `--helper-path`，请将上述命令中的 unit 与
+helper 路径替换为 `systemctl show` 输出的实际路径。最后运行
+`systemctl status anolisa-system-helper.service` 验证，应提示找不到该 unit。
+
 ---
 
 ## 下一步

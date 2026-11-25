@@ -15,7 +15,6 @@ json5.workspace = true
 plist.workspace = true
 serde_yaml_ng.workspace = true
 toml.workspace = true
-toml_edit.workspace = true
 thiserror.workspace = true
 semver.workspace = true
 chrono.workspace = true

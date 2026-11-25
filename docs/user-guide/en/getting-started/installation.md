@@ -309,6 +309,43 @@ anolisa update all
 `anolisa update self` for a script-installed CLI or `sudo anolisa update self`
 for an RPM-owned CLI.
 
+### Retiring anolisa-system-helper
+
+Older releases provided `anolisa system setup`, which copied the CLI binary to
+a separate root helper executable and enabled `anolisa-system-helper.service`.
+Upgrading the CLI does not remove that helper or its systemd unit, and
+`anolisa system teardown` has been removed.
+
+On Linux hosts where `anolisa-system-helper.service` was previously set up,
+inspect the installed unit first to find both the unit file (`FragmentPath`)
+and the helper binary path in `ExecStart` (setup allowed `--helper-path` to
+override the default `/usr/local/libexec/anolisa/anolisa-system-helper`):
+
+```bash
+systemctl show -p FragmentPath -p ExecStart anolisa-system-helper.service
+```
+
+Stop and disable the service, remove the unit file reported by `FragmentPath`
+(default `/usr/local/lib/systemd/system/anolisa-system-helper.service`),
+reload systemd, and remove the helper binary from `ExecStart` along with the
+retired `/etc/anolisa/sandbox.toml` config and `/run/anolisa/system-helper.sock`
+socket file if present (leave `/run/anolisa` itself intact because other
+components such as `agent-memory` use it):
+
+```bash
+sudo systemctl disable --now anolisa-system-helper.service
+sudo rm -f /usr/local/lib/systemd/system/anolisa-system-helper.service
+sudo systemctl daemon-reload
+sudo rm -f /usr/local/libexec/anolisa/anolisa-system-helper \
+  /etc/anolisa/sandbox.toml \
+  /run/anolisa/system-helper.sock
+```
+
+Replace the unit and helper paths above with the paths reported by
+`systemctl show` if your host used a custom `--prefix` or `--helper-path`.
+Verify cleanup with `systemctl status anolisa-system-helper.service`, which
+should report that the unit could not be found.
+
 ---
 
 ## Next Steps
