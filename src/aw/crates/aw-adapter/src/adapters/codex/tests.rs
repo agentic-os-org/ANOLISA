@@ -3,6 +3,118 @@
 use super::*;
 
 #[test]
+fn inventory_probe_reaps_its_child_on_sigint_and_sigterm() {
+    use std::{
+        fs,
+        io::Read,
+        os::unix::{fs::PermissionsExt, process::CommandExt},
+        path::Path,
+        process::{Child, Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct Probe(Child);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if thread::panicking() {
+                // The fixture owns a private process group for failure cleanup.
+                unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("native/codex/probe.py");
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("fake-codex");
+        fs::write(
+            &fixture,
+            r#"#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+assert sys.argv[1:] == ["app-server"]
+assert json.loads(sys.stdin.readline())["method"] == "initialize"
+pid = os.getpid()
+started = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
+temporary = Path("probe-child.pid.tmp")
+temporary.write_text(f"{pid} {started}")
+temporary.replace("probe-child.pid")
+time.sleep(30)
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut probe = Probe(
+            Command::new("python3")
+                .arg("-B")
+                .arg(&script)
+                .arg(&fixture)
+                .arg("{}")
+                .arg(root.path().join("result.json"))
+                .current_dir(root.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+
+        let marker = root.path().join("probe-child.pid");
+        let startup = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            assert!(probe.0.try_wait().unwrap().is_none(), "probe exited early");
+            assert!(Instant::now() < startup, "app-server never initialized");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let identity = fs::read_to_string(&marker).unwrap();
+        let (child_pid, started) = identity.split_once(' ').unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            unsafe { libc::kill(probe.0.id() as libc::pid_t, signal) },
+            0
+        );
+        let status = loop {
+            assert!(Instant::now() < deadline, "probe ignored signal {signal}");
+            if let Some(status) = probe.0.try_wait().unwrap() {
+                break status;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(!status.success(), "probe succeeded after signal {signal}");
+        let mut stderr = String::new();
+        probe
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(
+            stderr.contains("ProbeCancelled"),
+            "signal {signal}: {stderr}"
+        );
+        match fs::read_to_string(format!("/proc/{child_pid}/stat")) {
+            Ok(stat) => {
+                let (_, fields) = stat.rsplit_once(')').unwrap();
+                assert_ne!(
+                    fields.split_whitespace().nth(19).unwrap(),
+                    started,
+                    "app-server {child_pid} remains after signal {signal}"
+                );
+            }
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+    }
+}
+
+#[test]
 fn normalizes_native_identity_and_preserves_failed_tool_results() {
     let context = NativeContext {
         target: "coding".into(),
