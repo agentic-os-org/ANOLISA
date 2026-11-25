@@ -342,6 +342,25 @@ case "$(detect_flat "$detect_out")" in
     *) fail "detect dropped the installed field: $detect_out" ;;
 esac
 
+# An explicit CODEX_BIN is authoritative: a pin that does not resolve must not
+# be reported as installable, because install.sh would then print "skipping
+# plugin registration" and exit 0 having registered nothing.
+detect_out="$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex \
+    CODEX_BIN="$SANDBOX/absent-codex" bash "$DETECT_SH" 2>/dev/null)"
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ]; then
+    pass "detect stays fail-open when no codex CLI can be resolved"
+else
+    fail "detect exited $detect_rc when no codex CLI could be resolved"
+fi
+if [ "$(detect_status "$detect_out")" = missing_prereqs ]; then
+    pass "detect publishes missing_prereqs for an unusable CODEX_BIN pin"
+else
+    fail "detect published '$(detect_status "$detect_out")' for an unusable CODEX_BIN pin"
+fi
+
 rm -f "$TOKENLESS_BIN"
 if [ -n "$HOST_BIN" ]; then
     skip "no-binary detect status ($HOST_BIN answers the absolute fallback)"

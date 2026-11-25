@@ -72,10 +72,19 @@ Or install from the marketplace (once published).
 ```
 
 `installed` describes the tokenless binary. `status` describes this adapter and
-is what `tokenless init` reads: `detect.sh` never asks Codex whether the plugin
-is registered, so it always reports `installable` rather than let a binary on
-`PATH` read as a registered adapter. `install.sh` is idempotent, so re-running
-it against an already registered host is safe.
+is what `tokenless init` reads:
+
+- `installable` — a Codex CLI can be resolved, so `install.sh` will register the
+  plugin. `detect.sh` never asks Codex whether the plugin is *already*
+  registered, so this is the most it can claim; `install.sh` is idempotent, so
+  re-running it against an already registered host is safe.
+- `missing_prereqs` — no Codex CLI can be resolved (`CODEX_BIN` pinned to
+  something unusable, or no `codex` on `PATH`). `install.sh` would print
+  "skipping plugin registration" and exit 0 having changed nothing, so the
+  adapter is not offered for installation.
+
+The exit code stays 0 in both cases: plugin activation is controlled by
+capabilities, not by this probe.
 
 ## Hook Output Format
 

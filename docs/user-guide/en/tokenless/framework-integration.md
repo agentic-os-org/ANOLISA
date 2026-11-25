@@ -505,6 +505,10 @@ tokenless init
 
 A JSON object carrying `installed` but no `status` predates this contract; `installed: false` still downgrades exit `0` to installable, so an availability-only probe is never read as a registered adapter.
 
+The tri-state exit code is trusted only when the adapter directory declares the contract, that is, when its manifest carries `"detectContract": "status-v1"`. A tree without that marker predates the contract, and such trees are reachable: an npm install preserves a shared adapter directory that another installation owns, and `ANOLISA_ADAPTER_DIR` accepts any directory. There, exit `0` is capped at `installable` and the reason is printed next to the status table, so a stale tree re-registers an adapter instead of claiming one is already registered. Refresh it by reinstalling tokenless.
+
+**Bash is required.** `tokenless init` runs every target's `detect.sh` and `install.sh` with Bash. When Bash cannot be launched, the affected frameworks are listed as `unavailable` and the command exits `1` with the reason instead of reporting a status it never established. Windows setups that do not use Git Bash can drive the QwenWork adapter through its native PowerShell lifecycle, described in the `QwenWork (Windows x64 local mode)` section above.
+
 **Where the adapter directory is looked for.** The first location below that contains `manifest.json` (or the `manifest.json.in` template) wins:
 
 1. `$ANOLISA_ADAPTER_DIR`, when set — use it for a custom install prefix.

@@ -63,12 +63,30 @@ struct Fixture {
 impl Fixture {
     /// Build an adapter directory holding `manifest.json` and the stub scripts.
     fn new(targets: &[Target]) -> Self {
+        Self::with_contract(targets, true)
+    }
+
+    /// A tree that predates the detector contract: no `detectContract` marker,
+    /// so exit 0 may only mean the host is usable. This is what a newer CLI
+    /// meets when npm preserves a shared adapter directory another installation
+    /// put there, or when `ANOLISA_ADAPTER_DIR` points at one.
+    fn legacy(targets: &[Target]) -> Self {
+        Self::with_contract(targets, false)
+    }
+
+    fn with_contract(targets: &[Target], declare_contract: bool) -> Self {
         let root = TempDir::new().expect("create fixture root");
         let adapter_dir = root.path().join("data/anolisa/adapters/tokenless");
         fs::create_dir_all(&adapter_dir).expect("create adapter directory");
 
-        let mut manifest =
-            String::from("{\"component\":\"tokenless\",\"version\":\"0.0.0-test\",\"targets\":{");
+        let contract = if declare_contract {
+            "\"detectContract\":\"status-v1\","
+        } else {
+            ""
+        };
+        let mut manifest = format!(
+            "{{\"component\":\"tokenless\",\"version\":\"0.0.0-test\",{contract}\"targets\":{{"
+        );
         for (index, target) in targets.iter().enumerate() {
             let scripts = Path::new(target.name).join("scripts");
             fs::create_dir_all(adapter_dir.join(&scripts)).expect("create script directory");
@@ -125,6 +143,21 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command
+    }
+
+    /// A command whose `PATH` holds nothing, so a child the CLI spawns by name
+    /// cannot be found.
+    fn command_without_bash(&self, empty_bin: &Path) -> Command {
+        let mut command = self.command();
+        command.env("PATH", empty_bin);
+        command
+    }
+
+    /// A directory holding nothing, for runs that must not find an interpreter.
+    fn empty_bin(&self) -> PathBuf {
+        let dir = self._root.path().join("empty-bin");
+        fs::create_dir_all(&dir).expect("create empty bin");
+        dir
     }
 
     /// Targets the installers recorded, in the order they ran.
@@ -712,4 +745,293 @@ fn missing_adapter_directory_explains_the_override() {
         "error did not name the override:\n{}",
         run.combined()
     );
+}
+
+// ---------------------------------------------------------------------------
+// P1-02 (round 2) — a newer CLI meeting older adapter resources
+// ---------------------------------------------------------------------------
+
+/// Detector bodies the previous adapter tree shipped: Codex probed the tokenless
+/// binary and Qoder probed host-CLI capability, and both exited 0 without ever
+/// asking the host whether the adapter was registered.
+const LEGACY_CODEX_DETECT: &str = "#!/usr/bin/env bash\necho '{\"installed\": true, \"version\": \"9.9.9\", \"path\": \"/usr/bin/tokenless\"}'\nexit 0\n";
+const LEGACY_QODER_DETECT: &str =
+    "#!/usr/bin/env bash\necho '[tokenless] qoder: detected compatible qodercli'\nexit 0\n";
+
+#[test]
+fn undeclared_adapter_tree_never_reports_ready() {
+    let fixture = Fixture::legacy(&[
+        Target::new("legacycodex", LEGACY_CODEX_DETECT),
+        Target::new("legacyqoder", LEGACY_QODER_DETECT),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "legacycodex"), "installable");
+    assert_eq!(status_of(&list.stdout, "legacyqoder"), "installable");
+    assert!(
+        list.stdout.contains("predate the detector status contract"),
+        "the stale tree was not explained:\n{}",
+        list.stdout
+    );
+
+    // The named install has to reach the host rather than claim it is done.
+    let named = run(&fixture, &["init", "--framework", "legacycodex"]);
+    named.assert_code(0);
+    assert_eq!(fixture.installed(), vec!["legacycodex".to_string()]);
+}
+
+#[test]
+fn the_contract_marker_is_what_unlocks_exit_zero_as_ready() {
+    // Identical detectors and identical exit codes: only the manifest marker
+    // differs, so this pins the marker as the thing that decides.
+    let fixture = Fixture::new(&[
+        Target::new("legacycodex", LEGACY_CODEX_DETECT),
+        Target::new("legacyqoder", LEGACY_QODER_DETECT),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "legacycodex"), "ready");
+    assert_eq!(status_of(&list.stdout, "legacyqoder"), "ready");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "a declaring tree was reported as stale:\n{}",
+        list.stdout
+    );
+
+    let named = run(&fixture, &["init", "--framework", "legacycodex"]);
+    named.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "a ready target was reinstalled: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn a_legacy_tree_still_honours_a_published_status() {
+    // A detector that describes itself is trusted whatever the tree declares,
+    // so a partially refreshed tree is not forced back to installable.
+    let fixture = Fixture::legacy(&[Target::new(
+        "one",
+        "#!/usr/bin/env bash\necho '{\"status\": \"ready\"}'\nexit 0\n",
+    )]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "ready");
+}
+
+// ---------------------------------------------------------------------------
+// P2-04 — the shipped Codex detector against an unusable host
+// ---------------------------------------------------------------------------
+
+/// Source directory of the adapters this crate ships with.
+fn bundled_adapters() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/tokenless")
+        .canonicalize()
+        .expect("bundled adapter directory")
+}
+
+/// An adapter tree holding only the *shipped* Codex detector, so the contract
+/// under test is the real script rather than a stub of it.
+struct CodexFixture {
+    _root: TempDir,
+    adapter_dir: PathBuf,
+    home: PathBuf,
+    data_root: PathBuf,
+    /// Put on PATH ahead of the system directories.
+    bin: PathBuf,
+}
+
+impl CodexFixture {
+    fn new() -> Self {
+        let root = TempDir::new().expect("create codex fixture root");
+        let adapter_dir = root.path().join("data/anolisa/adapters/tokenless");
+        let scripts = adapter_dir.join("codex/scripts");
+        fs::create_dir_all(&scripts).expect("create codex script directory");
+        let bundled = bundled_adapters().join("codex/scripts");
+        for name in ["detect.sh", "_common.sh"] {
+            fs::copy(bundled.join(name), scripts.join(name)).expect("copy shipped detector");
+        }
+        fs::write(
+            adapter_dir.join("manifest.json"),
+            concat!(
+                r#"{"component":"tokenless","version":"0.0.0-test","#,
+                r#""detectContract":"status-v1","#,
+                r#""targets":{"codex":{"compatibleVersions":"*","#,
+                r#""actions":{"detect":"codex/scripts/detect.sh"}}}}"#
+            ),
+        )
+        .expect("write manifest");
+        let home = root.path().join("home");
+        let data_root = root.path().join("data");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&home).expect("create fixture home");
+        fs::create_dir_all(&bin).expect("create fixture bin");
+        Self {
+            _root: root,
+            adapter_dir,
+            home,
+            data_root,
+            bin,
+        }
+    }
+
+    /// A `codex` the shipped resolver can find.
+    fn with_codex_stub(&self) -> &Self {
+        write_script(&self.bin.join("codex"), "#!/bin/sh\nexit 0\n");
+        self
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tokenless"));
+        command
+            .args(args)
+            .env("ANOLISA_ADAPTER_DIR", &self.adapter_dir)
+            .env("HOME", &self.home)
+            .env("XDG_DATA_HOME", &self.data_root)
+            // System directories stay reachable so Bash itself is found; the
+            // fixture bin comes first so a stub host wins over any real one.
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env_remove("CODEX_BIN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn marketplace(&self) -> PathBuf {
+        self.data_root.join("anolisa/codex-marketplace")
+    }
+}
+
+#[test]
+fn shipped_codex_detector_refuses_an_unusable_host_pin() {
+    let fixture = CodexFixture::new();
+
+    // Bundled resources, a tokenless binary the detector can resolve, and
+    // CODEX_BIN pointing at a file that does not exist. An explicit pin is
+    // authoritative, so the resolver must not substitute another codex.
+    let run = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    run.assert_code(1);
+    assert!(
+        run.combined()
+            .contains("codex is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        run.combined()
+    );
+    assert!(
+        !run.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        run.combined()
+    );
+    assert!(
+        !run.combined().contains("skipping plugin registration"),
+        "install.sh ran although registration was impossible:\n{}",
+        run.combined()
+    );
+    assert!(
+        !fixture.marketplace().exists(),
+        "a marketplace tree was created for an unusable host"
+    );
+}
+
+#[test]
+fn shipped_codex_detector_is_installable_with_a_resolvable_host() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "the bundled tree was reported as stale:\n{}",
+        list.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-05 — the Bash prerequisite is an error, not an adapter status
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_interpreter_is_reported_instead_of_an_adapter_status() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+    let empty_bin = fixture.empty_bin();
+
+    let batch = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--all"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(1);
+    assert_eq!(status_of(&batch.stdout, "one"), "unavailable");
+    assert!(
+        batch.combined().contains("Bash"),
+        "the missing prerequisite was not named:\n{}",
+        batch.combined()
+    );
+    assert!(
+        !batch
+            .combined()
+            .contains("No frameworks are waiting for installation"),
+        "a host that cannot run detectors reported nothing to install:\n{}",
+        batch.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "something was installed without an interpreter: {:?}",
+        fixture.installed()
+    );
+
+    let list = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--list"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(1);
+    assert!(list.combined().contains("Bash"), "{}", list.combined());
+
+    let named = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--framework", "one"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn a_detector_that_runs_is_not_reported_as_unavailable() {
+    // Guard against the launcher check firing on a host that does have Bash.
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = run(&fixture, &["init", "--list"]);
+
+    run.assert_code(0);
+    assert_eq!(status_of(&run.stdout, "one"), "installable");
+    assert!(!run.combined().contains("unavailable"), "{}", run.stdout);
 }

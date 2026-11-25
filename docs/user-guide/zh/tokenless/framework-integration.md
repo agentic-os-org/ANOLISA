@@ -449,6 +449,10 @@ tokenless init
 
 只带 `installed` 而没有 `status` 的 JSON 属于该约定之前的旧格式；`installed: false` 仍会把退出码 `0` 降级为可安装，因此仅探测可用性的脚本不会被当作适配器已注册。
 
+三态退出码只在适配器目录声明了该约定时才被信任，即其 manifest 带有 `"detectContract": "status-v1"`。没有该标记的目录早于本约定，而这种目录确实会出现：npm 安装会保留属于其他安装的共享适配器目录，`ANOLISA_ADAPTER_DIR` 也接受任意目录。对这类目录，退出码 `0` 会被限制为「可安装」，并在状态表旁说明原因，因此陈旧资源会重新注册适配器，而不是声称它已经注册。重新安装 tokenless 即可刷新。
+
+**本命令需要 Bash。**`tokenless init` 用 Bash 运行每个目标的 `detect.sh` 与 `install.sh`。无法启动 Bash 时，受影响的框架会列为 `unavailable`，命令带原因以退出码 `1` 结束，而不是报出一个它从未确立过的状态。不使用 Git Bash 的 Windows 环境可以改用 QwenWork 适配器的原生 PowerShell lifecycle，做法见上文「千问办公（Windows x64 本地模式）」一节。
+
 **适配器目录的查找顺序。** 以下位置中第一个包含 `manifest.json`（或模板 `manifest.json.in`）的目录生效：
 
 1. `$ANOLISA_ADAPTER_DIR`（若已设置）—— 自定义安装前缀时使用。

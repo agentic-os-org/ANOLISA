@@ -3,17 +3,40 @@
 #
 # Output:
 #   JSON on stdout:  {"installed": true, "status": "installable", "version": "0.1.0", "path": "/usr/bin/tokenless"}
-#                    or {"installed": false, "status": "installable"}
+#                    or {"installed": false, "status": "missing_prereqs"}
 #
 #   "installed" describes the tokenless *binary*. "status" describes the codex
-#   adapter and is what `tokenless init` reads: this script never asks codex
-#   whether the plugin is registered, so it reports "installable" instead of
-#   letting a binary on PATH read as a registered adapter. install.sh is
-#   idempotent, so re-running it against an already registered host is safe.
+#   adapter and is what `tokenless init` reads:
+#     installable      a codex CLI can be resolved, so install.sh will register
+#     missing_prereqs  no codex CLI can be resolved, so install.sh would print
+#                      "skipping plugin registration" and exit 0 having changed
+#                      nothing - offering that as installable reads as success
+#   This script never asks codex whether the plugin is registered, so
+#   "installable" is the most it can claim; install.sh is idempotent, so
+#   re-running it against an already registered host is safe.
 #
 # Exit code: 0 either way (fail-open — plugin activation is controlled by capabilities)
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_common.sh
+source "$SCRIPT_DIR/_common.sh"
+
+# The same resolution install.sh uses, so "installable" cannot promise a CLI the
+# installer would then fail to find. An explicit CODEX_BIN is authoritative and
+# an unusable pin resolves to "not found" rather than to some other codex.
+# Resolved in a subshell with HOME defaulted: resolve_codex probes
+# "$HOME/.local/bin", and a host without HOME must still get an answer instead
+# of dying on an unbound variable.
+CODEX_BIN="${CODEX_BIN:-}"
+CODEX_CLI="$(HOME="${HOME:-}"; resolve_codex)"
+
+STATUS="installable"
+if [[ -z "$CODEX_CLI" ]]; then
+    STATUS="missing_prereqs"
+    echo "[tokenless] codex: no codex CLI resolved; the adapter cannot be registered" >&2
+fi
 
 TOKENLESS_BIN=""
 
@@ -38,14 +61,14 @@ if [[ -z "$TOKENLESS_BIN" ]]; then
 fi
 
 if [[ -z "$TOKENLESS_BIN" ]]; then
-    echo '{"installed": false, "status": "installable"}'
+    echo "{\"installed\": false, \"status\": \"${STATUS}\"}"
     exit 0
 fi
 
 # Verify it actually runs
 VERSION="$("$TOKENLESS_BIN" --version 2>/dev/null || true)"
 if [[ -z "$VERSION" ]]; then
-    echo '{"installed": false, "status": "installable"}'
+    echo "{\"installed\": false, \"status\": \"${STATUS}\"}"
     exit 0
 fi
 
@@ -55,13 +78,13 @@ VERSION_CLEAN="$(echo "$VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 |
 # Use jq --arg to safely embed variables into JSON — avoids broken output
 # when paths contain characters that need JSON escaping.
 if command -v jq &>/dev/null; then
-  jq -n --arg ver "$VERSION_CLEAN" --arg p "$TOKENLESS_BIN" \
-    '{installed: true, status: "installable", version: $ver, path: $p}'
+  jq -n --arg ver "$VERSION_CLEAN" --arg p "$TOKENLESS_BIN" --arg st "$STATUS" \
+    '{installed: true, status: $st, version: $ver, path: $p}'
 else
   cat <<EOF
 {
   "installed": true,
-  "status": "installable",
+  "status": "$STATUS",
   "version": "$VERSION_CLEAN",
   "path": "$TOKENLESS_BIN"
 }

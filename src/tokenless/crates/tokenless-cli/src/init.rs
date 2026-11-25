@@ -22,6 +22,20 @@
 //! A JSON object carrying `installed` but no `status` predates this contract.
 //! `installed: false` still downgrades exit 0 to installable, so an
 //! availability-only probe is never read as a registered adapter.
+//!
+//! The tri-state exit code is only trusted when the adapter tree declares the
+//! contract, i.e. its manifest carries `"detectContract": "status-v1"`. A tree
+//! without it predates the contract, and such trees are reachable: npm preserves
+//! a shared adapter directory owned by another installation, and
+//! `ANOLISA_ADAPTER_DIR` accepts any directory. Its detectors may use exit 0 to
+//! mean "the host binary works" (`codex`) or "the host CLI is compatible"
+//! (`qoder`), so exit 0 is capped at installable there — a stale resource
+//! re-registers an adapter rather than claim one is already registered.
+//!
+//! Every lifecycle script is Bash, so a host without it cannot report any
+//! status. A detector that cannot be launched is an error rather than an
+//! adapter state: folding it into `missing prereqs` let `--all` exit 0 with
+//! "No frameworks are waiting for installation" having installed nothing.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -41,9 +55,27 @@ const ADAPTER_SUBPATH: &str = "anolisa/adapters/tokenless";
 /// System-wide data roots, in the order the packager writes them.
 const SYSTEM_DATA_ROOTS: [&str; 2] = ["/usr/share", "/usr/local/share"];
 
+/// Manifest marker for the detector contract documented in the module header.
+///
+/// Only an exact match unlocks the tri-state exit code. An unknown value — a
+/// contract from a newer adapter tree — is treated as undeclared, so an older
+/// CLI stays pessimistic instead of guessing at semantics it does not know.
+const DETECT_CONTRACT: &str = "status-v1";
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
+    /// Detector contract the adapter tree declares, if any.
+    #[serde(default, rename = "detectContract")]
+    detect_contract: Option<String>,
     targets: BTreeMap<String, ManifestTarget>,
+}
+
+impl Manifest {
+    /// True when the tree states its detectors follow [`DETECT_CONTRACT`], so
+    /// exit 0 may be read as "adapter registered".
+    fn declares_detect_contract(&self) -> bool {
+        self.detect_contract.as_deref() == Some(DETECT_CONTRACT)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +98,9 @@ enum DetectStatus {
     Installable,
     MissingPrereqs,
     NotChecked,
+    /// The detector could not be launched, so nothing is known about the
+    /// adapter. Reported as an error, not as a status a caller can act on.
+    Unavailable,
 }
 
 impl DetectStatus {
@@ -75,6 +110,7 @@ impl DetectStatus {
             Self::Installable => "installable",
             Self::MissingPrereqs => "missing prereqs",
             Self::NotChecked => "n/a",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -186,10 +222,20 @@ fn extract_hooks(cap: &Option<serde_json::Value>) -> Vec<String> {
 }
 
 /// Run `detect.sh` for a framework and map the result to an adapter status.
-fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStatus {
+///
+/// `Err` carries the launch failure: the interpreter every lifecycle script
+/// needs is unusable, which is a property of this command's host requirement
+/// and not a state of the adapter. `tri_state` says whether the adapter tree
+/// declares [`DETECT_CONTRACT`], i.e. whether exit 0 may be read as ready.
+fn run_detect(
+    adapter_dir: &Path,
+    name: &str,
+    detect_script: &str,
+    tri_state: bool,
+) -> Result<DetectStatus, String> {
     let script = adapter_dir.join(detect_script);
     if !script.exists() {
-        return DetectStatus::NotChecked;
+        return Ok(DetectStatus::NotChecked);
     }
     match Command::new("bash")
         .arg(&script)
@@ -198,9 +244,12 @@ fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStat
         .env("ANOLISA_ADAPTER_DIR", adapter_dir)
         .output()
     {
-        Ok(out) => interpret_detect(out.status.code(), &String::from_utf8_lossy(&out.stdout)),
-        // A detector that cannot be spawned has an unusable host toolchain.
-        Err(_) => DetectStatus::MissingPrereqs,
+        Ok(out) => Ok(interpret_detect(
+            out.status.code(),
+            &String::from_utf8_lossy(&out.stdout),
+            tri_state,
+        )),
+        Err(e) => Err(format!("{}: {}", script.display(), e)),
     }
 }
 
@@ -208,9 +257,12 @@ fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStat
 ///
 /// Split out from `run_detect` so both detector contracts can be exercised
 /// without spawning a script. `exit_code` is `None` when the detector was
-/// terminated by a signal.
-fn interpret_detect(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+/// terminated by a signal, and `tri_state` is true only for an adapter tree
+/// that declares [`DETECT_CONTRACT`].
+fn interpret_detect(exit_code: Option<i32>, stdout: &str, tri_state: bool) -> DetectStatus {
     let published = json_objects(stdout);
+    // A detector that publishes its status is self-describing whatever the tree
+    // around it declares, so that answer is taken as-is.
     let explicit = published
         .iter()
         .find_map(|object| object.get("status").and_then(DetectStatus::from_published));
@@ -219,13 +271,15 @@ fn interpret_detect(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
     }
     match exit_code {
         Some(0) => {
-            // Legacy availability-only JSON. `installed` describes a
-            // prerequisite such as the tokenless binary, so `installed: false`
-            // may not read as a registered adapter.
+            // Two reasons exit 0 may not mean "registered":
+            //   * legacy availability-only JSON, where `installed` describes a
+            //     prerequisite such as the tokenless binary;
+            //   * a tree that does not declare the contract, whose detectors
+            //     used exit 0 for host availability or host-CLI capability.
             let uninstalled = published
                 .iter()
                 .any(|object| object.get("installed") == Some(&serde_json::Value::Bool(false)));
-            if uninstalled {
+            if uninstalled || !tri_state {
                 DetectStatus::Installable
             } else {
                 DetectStatus::Ready
@@ -305,7 +359,15 @@ fn install_selected(adapter_dir: &Path, fw: &FrameworkInfo) -> Result<(), Instal
 }
 
 /// Detect every target the manifest declares, sorted by name.
-fn collect_frameworks(adapter_dir: &Path, manifest: &Manifest) -> Vec<FrameworkInfo> {
+///
+/// The second element is the first detector that could not be launched, which
+/// the caller reports instead of acting on statuses it could not establish.
+fn collect_frameworks(
+    adapter_dir: &Path,
+    manifest: &Manifest,
+) -> (Vec<FrameworkInfo>, Option<String>) {
+    let tri_state = manifest.declares_detect_contract();
+    let mut launch_failure: Option<String> = None;
     let mut frameworks: Vec<FrameworkInfo> = manifest
         .targets
         .iter()
@@ -320,7 +382,15 @@ fn collect_frameworks(adapter_dir: &Path, manifest: &Manifest) -> Vec<FrameworkI
                 };
             };
             let status = match &actions.detect {
-                Some(detect) => run_detect(adapter_dir, name, detect),
+                Some(detect) => match run_detect(adapter_dir, name, detect, tri_state) {
+                    Ok(status) => status,
+                    Err(reason) => {
+                        if launch_failure.is_none() {
+                            launch_failure = Some(reason);
+                        }
+                        DetectStatus::Unavailable
+                    }
+                },
                 None => DetectStatus::NotChecked,
             };
             FrameworkInfo {
@@ -332,11 +402,33 @@ fn collect_frameworks(adapter_dir: &Path, manifest: &Manifest) -> Vec<FrameworkI
         })
         .collect();
     frameworks.sort_by(|a, b| a.name.cmp(&b.name));
-    frameworks
+    (frameworks, launch_failure)
 }
 
-/// Print the status table, then flag targets that cannot be installed.
-fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
+/// Explain the Bash prerequisite when a detector could not be launched.
+///
+/// Every shipped lifecycle script is Bash, so a host without it can determine
+/// nothing and install nothing. `windows` selects the pointer to the native
+/// PowerShell lifecycle, which is the documented Windows path that needs no
+/// Git Bash.
+fn interpreter_missing_error(reason: &str, windows: bool) -> String {
+    let mut message = format!(
+        "cannot run the adapter lifecycle scripts ({reason}).\n\
+         `tokenless init` runs every target's detect.sh and install.sh with Bash, which was not found, \
+         so no framework status could be determined and nothing was installed.\n\
+         Install Bash and run this command again."
+    );
+    if windows {
+        message.push_str(
+            "\nOn Windows the QwenWork adapter has a native lifecycle that needs no Git Bash:\n  \
+             powershell -File <adapter-dir>/qwenwork/scripts/lifecycle.ps1 -Action detect|install|uninstall",
+        );
+    }
+    message
+}
+
+/// Print the status table, then flag what the caller cannot act on.
+fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path, contract: bool) {
     println!("\nTokenless Adapter Status\n");
     println!("{:<14} {:<16} Hooks", "Framework", "Status");
     println!("{:-<14} {:-<16} {:-<40}", "", "", "");
@@ -349,6 +441,18 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
         println!("{:<14} {:<16} {}", fw.name, fw.status.label(), caps);
     }
     println!("\nAdapter directory: {}", adapter_dir.display());
+
+    // Statuses from a tree that does not declare the contract are capped at
+    // installable, which reads as "this adapter is broken" unless the reason is
+    // stated next to the table.
+    if !contract {
+        println!(
+            "\nwarning: the adapter resources at {} predate the detector status contract, \
+             so no framework is reported ready. Reinstall tokenless to refresh them, or point \
+             ANOLISA_ADAPTER_DIR at a current adapter directory.",
+            adapter_dir.display()
+        );
+    }
 
     // A detector can report installable for a target whose manifest declares no
     // install action. Selecting such a target fails, so say so up front.
@@ -428,8 +532,19 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
 
     let manifest = load_manifest(&adapter_dir).map_err(|e| (e, 1))?;
 
-    let frameworks = collect_frameworks(&adapter_dir, &manifest);
-    print_status(&frameworks, &adapter_dir);
+    let (frameworks, launch_failure) = collect_frameworks(&adapter_dir, &manifest);
+    print_status(
+        &frameworks,
+        &adapter_dir,
+        manifest.declares_detect_contract(),
+    );
+
+    // The table above is printed first so the user sees which targets could not
+    // be probed, then the run stops: acting on statuses that were never
+    // established is how `--all` came to exit 0 having installed nothing.
+    if let Some(reason) = launch_failure {
+        return Err((interpreter_missing_error(&reason, cfg!(windows)), 1));
+    }
 
     // A named operation ends with its own result. Falling through to the
     // generic selection below would reuse the statuses collected *before* the
@@ -515,36 +630,41 @@ fn print_install_hints() {
 mod tests {
     use super::*;
 
+    /// `interpret_detect` for a tree that declares the detector contract.
+    fn declared(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+        interpret_detect(exit_code, stdout, true)
+    }
+
+    /// `interpret_detect` for a tree that predates it, e.g. an adapter
+    /// directory another installation left behind.
+    fn undeclared(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+        interpret_detect(exit_code, stdout, false)
+    }
+
     #[test]
     fn tri_state_exit_codes_map_to_adapter_status() {
-        assert_eq!(interpret_detect(Some(0), ""), DetectStatus::Ready);
-        assert_eq!(interpret_detect(Some(1), ""), DetectStatus::Installable);
-        assert_eq!(interpret_detect(Some(2), ""), DetectStatus::MissingPrereqs);
-        assert_eq!(interpret_detect(None, ""), DetectStatus::MissingPrereqs);
+        assert_eq!(declared(Some(0), ""), DetectStatus::Ready);
+        assert_eq!(declared(Some(1), ""), DetectStatus::Installable);
+        assert_eq!(declared(Some(2), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(declared(None, ""), DetectStatus::MissingPrereqs);
     }
 
     #[test]
     fn human_readable_detector_output_uses_the_exit_code() {
         let stdout = "[tokenless] opencode: ready (1.2.3)\n";
-        assert_eq!(interpret_detect(Some(0), stdout), DetectStatus::Ready);
+        assert_eq!(declared(Some(0), stdout), DetectStatus::Ready);
         let stdout = "[tokenless] opencode: detected (1.2.3), plugin not installed\n";
-        assert_eq!(interpret_detect(Some(1), stdout), DetectStatus::Installable);
+        assert_eq!(declared(Some(1), stdout), DetectStatus::Installable);
     }
 
     #[test]
     fn published_status_wins_over_the_exit_code() {
         let compact = r#"{"status":"installable"}"#;
-        assert_eq!(
-            interpret_detect(Some(0), compact),
-            DetectStatus::Installable
-        );
+        assert_eq!(declared(Some(0), compact), DetectStatus::Installable);
         let pretty = "{\n  \"status\": \"missing_prereqs\"\n}\n";
+        assert_eq!(declared(Some(0), pretty), DetectStatus::MissingPrereqs);
         assert_eq!(
-            interpret_detect(Some(0), pretty),
-            DetectStatus::MissingPrereqs
-        );
-        assert_eq!(
-            interpret_detect(Some(1), r#"{"status":"ready"}"#),
+            declared(Some(1), r#"{"status":"ready"}"#),
             DetectStatus::Ready
         );
     }
@@ -553,17 +673,17 @@ mod tests {
     fn published_status_is_found_beside_log_lines() {
         let stdout = "[tokenless] qoder: detected compatible qodercli at /usr/bin/qodercli\n\
                       {\"status\":\"installable\"}\n";
-        assert_eq!(interpret_detect(Some(0), stdout), DetectStatus::Installable);
+        assert_eq!(declared(Some(0), stdout), DetectStatus::Installable);
     }
 
     #[test]
     fn unknown_published_status_falls_back_to_the_exit_code() {
         assert_eq!(
-            interpret_detect(Some(0), r#"{"status":"banana"}"#),
+            declared(Some(0), r#"{"status":"banana"}"#),
             DetectStatus::Ready
         );
         assert_eq!(
-            interpret_detect(Some(1), r#"{"status":42}"#),
+            declared(Some(1), r#"{"status":42}"#),
             DetectStatus::Installable
         );
     }
@@ -571,21 +691,21 @@ mod tests {
     #[test]
     fn legacy_installed_false_is_not_ready() {
         assert_eq!(
-            interpret_detect(Some(0), r#"{"installed": false}"#),
+            declared(Some(0), r#"{"installed": false}"#),
             DetectStatus::Installable
         );
         let pretty = "{\n  \"installed\": false\n}\n";
-        assert_eq!(interpret_detect(Some(0), pretty), DetectStatus::Installable);
+        assert_eq!(declared(Some(0), pretty), DetectStatus::Installable);
     }
 
     #[test]
     fn legacy_installed_does_not_override_a_failing_exit_code() {
         assert_eq!(
-            interpret_detect(Some(1), r#"{"installed": true}"#),
+            declared(Some(1), r#"{"installed": true}"#),
             DetectStatus::Installable
         );
         assert_eq!(
-            interpret_detect(Some(2), r#"{"installed": true}"#),
+            declared(Some(2), r#"{"installed": true}"#),
             DetectStatus::MissingPrereqs
         );
     }
@@ -614,5 +734,70 @@ mod tests {
         );
         assert_eq!(DetectStatus::from_published(&value("\"Ready\"")), None);
         assert_eq!(DetectStatus::from_published(&value("true")), None);
+    }
+
+    #[test]
+    fn undeclared_tree_never_reads_exit_zero_as_ready() {
+        // The shapes the previous adapter tree shipped: codex probed the
+        // tokenless binary, qoder probed host-CLI capability, and both exited 0.
+        assert_eq!(
+            undeclared(Some(0), r#"{"installed": true, "version": "9.9.9"}"#),
+            DetectStatus::Installable
+        );
+        assert_eq!(
+            undeclared(Some(0), "[tokenless] qoder: detected compatible qodercli\n"),
+            DetectStatus::Installable
+        );
+        assert_eq!(undeclared(Some(0), ""), DetectStatus::Installable);
+        // The pessimism stops at readiness: the other states stay readable.
+        assert_eq!(undeclared(Some(1), ""), DetectStatus::Installable);
+        assert_eq!(undeclared(Some(2), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(undeclared(None, ""), DetectStatus::MissingPrereqs);
+    }
+
+    #[test]
+    fn published_status_survives_an_undeclared_tree() {
+        assert_eq!(
+            undeclared(Some(0), r#"{"status":"ready"}"#),
+            DetectStatus::Ready
+        );
+        assert_eq!(
+            undeclared(Some(0), r#"{"status":"missing_prereqs"}"#),
+            DetectStatus::MissingPrereqs
+        );
+    }
+
+    #[test]
+    fn manifest_contract_marker_is_exact() {
+        let parse = |text: &str| serde_json::from_str::<Manifest>(text).unwrap();
+        let targets = r#","targets":{}"#;
+        assert!(
+            parse(&format!(r#"{{"detectContract":"status-v1"{targets}}}"#))
+                .declares_detect_contract()
+        );
+        assert!(
+            !parse(&format!(r#"{{"detectContract":"status-v2"{targets}}}"#))
+                .declares_detect_contract()
+        );
+        assert!(
+            !parse(&format!(r#"{{"component":"tokenless"{targets}}}"#)).declares_detect_contract()
+        );
+    }
+
+    #[test]
+    fn interpreter_error_is_actionable() {
+        let reason = "bash: program not found";
+        let unix = interpreter_missing_error(reason, false);
+        assert!(unix.contains(reason), "{unix}");
+        assert!(unix.contains("Bash"), "{unix}");
+        assert!(!unix.contains("PowerShell"), "{unix}");
+        assert!(!unix.contains("lifecycle.ps1"), "{unix}");
+
+        let windows = interpreter_missing_error(reason, true);
+        assert!(windows.contains(reason), "{windows}");
+        assert!(
+            windows.contains("qwenwork/scripts/lifecycle.ps1"),
+            "{windows}"
+        );
     }
 }
