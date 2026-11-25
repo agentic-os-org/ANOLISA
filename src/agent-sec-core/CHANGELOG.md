@@ -1,5 +1,72 @@
 # Changelog
 
+## 1.3.1
+
+**Breaking Changes**
+
+- Limited AW stack builds to component cores, bundled skills and matching Providers;
+  select a component without `aw` to build and stage its full standalone adapters, and
+  inventory and retire overlapping native Hooks on installed hosts before enabling
+  AW. (#9736)
+
+**Skill Score**
+
+- Added optional Skill Score assessment: `agent-sec-cli skillsec score plan/run` binds
+  the Skill source to a plan, evaluates evidence and reports a score, while the probe
+  runtime installs explicitly through `install-runtime` from a versioned recipe
+  archive. (#9430)
+- Reported the failing operation, error category and runtime artifact in Skill Score
+  diagnostics, classified Judge response and output-validation errors, and retried a
+  confirmed incomplete transfer once within the existing budget. (#10505)
+- Accepted valid Judge replies with absent or null usage, allowed a Judge request up to
+  600 seconds with validation-error corrections, and applied model-specific output
+  limits with an optional `remote.judgeMaxTokens` override. (#10604)
+
+**Cedar Policy Engine**
+
+- Emitted recursive read targets with scoped exclusions for Cedar `file.read` policies,
+  so a forbid can protect a directory tree including files added after Apply. (#10523)
+- Generated task policies by requirement with rule-by-rule review text, checked
+  sandbox-launch and AgentSight compatibility, and derived file requests for common
+  `cat` glob and `tar` creation operands. (#10529)
+- Requested name-scoped `process.spawn` for recognized PATH utilities in command
+  proposals and returned a clarifying reason instead of a partial policy when a file
+  target depends on shell parameter expansion. (#10614)
+
+**Sandbox & Hook Security**
+
+- Quoted the hook-provided sandbox policy cwd with single-quote escaping, so
+  metacharacter workspace paths reach `--sandbox-policy-cwd` literally instead of being
+  expanded by the outer shell. (#9211)
+- Enforced explicit read-only subtrees inside writable workspaces by applying each
+  recursive read-only bind after its writable parent, and reported unenforceable paths
+  before the command starts. (#10306)
+- Added `agent-sec-cli sandbox run --landlock off|auto|required` to install an ABI 3
+  filesystem write ruleset derived from the writable mounts, with `auto` falling back
+  to the strict sandbox when Landlock is unavailable. (#10391)
+- Derived read and process-start grants from the prepared launch spec, so Cosh command
+  mode runs without a host-specific runtime preset and the launch contract gains an
+  optional directory-only cwd entry. (#10588)
+
+**Runtime Stability**
+
+- Counted only repairs recorded after the latest usable compliance scan in
+  `agent-sec-cli events --summary`, so rescans no longer inflate the repaired rule
+  count. (#10229)
+
+**Scanner & Policy Engine**
+
+- Started `target_regexes` matching after the start of the main pattern match, so
+  sensitive targets that also appear before the operator are no longer missed. (#10473)
+
+**Testing & CI**
+
+- Added an unattended intent-policy-enforcement E2E suite covering the intent, sandbox,
+  AgentSight and Gateway entrypoints, and stopped `events --event-type
+  authorization_receipt` from warning about an unknown event type. (#10524)
+- Replaced the time-budget-dependent PII finding-limit test with a test-local clock and
+  untimed matching. (#10528)
+
 ## 1.3.0
 
 **Breaking Changes**
