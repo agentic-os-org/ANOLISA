@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.4.3] - 2026-11-25
+
+### 新增
+
+- 注册可选的 `sec-core-skill-score` raw 包，支持在 Linux x86_64 上以系统级方式安装和卸载
+  ([#9430](https://github.com/agentic-os-org/ANOLISA/pull/9430))。
+
+### 变更
+
+- 将组件目录更新到 AgentSight `0.17.0`、cosh-ng `0.30.2`、OS Skills `0.8.0`、
+  agent-sec-core `1.3.1` 和 Tokenless `0.9.7`。
+
+### 修复
+
+- `anolisa list` 和 `anolisa install <component> --repo <URL>` 的诊断信息会隐藏校验失败的仓库 URL，
+  保留校验原因，避免错误输出泄露凭据
+  ([#10587](https://github.com/agentic-os-org/ANOLISA/pull/10587))。
+
 ## [0.4.2] - 2026-11-20
 
 ### 变更
