@@ -1,8 +1,9 @@
 //! A private, locked service endpoint removes only the socket inode it created.
 
+use aw_exec::PackageLock;
 use std::{
     ffi::CString,
-    fs::{self, DirBuilder, File, Metadata, OpenOptions},
+    fs::{self, DirBuilder, Metadata, OpenOptions},
     io,
     os::{
         fd::AsRawFd,
@@ -19,8 +20,8 @@ pub(crate) struct Endpoint {
     listener: UnixListener,
     socket: PathBuf,
     identity: (u64, u64),
-    // Retained until socket cleanup finishes, preventing a second service owner.
-    _lock: File,
+    // Endpoint::drop removes the socket before PackageLock releases the flock.
+    _lock: PackageLock,
 }
 
 impl Endpoint {
@@ -48,6 +49,7 @@ impl Endpoint {
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        let lock = PackageLock::from_locked(lock);
         let socket = state_dir.join("aw.sock");
         // The socket must be private from the instant it is observable at its
         // final path: launch_service rejects broader modes without retrying,
@@ -282,7 +284,10 @@ mod tests {
     use super::*;
     use crate::ipc;
     use std::{
-        os::unix::fs::symlink,
+        os::{
+            fd::{FromRawFd, OwnedFd},
+            unix::fs::symlink,
+        },
         sync::atomic::{AtomicU64, Ordering},
         time::{Duration, Instant},
     };
@@ -443,6 +448,69 @@ mod tests {
         assert!(!socket.exists());
         assert!(state.join("service.lock").exists());
         assert!(Endpoint::bind(&state).is_ok());
+    }
+
+    struct ForkChild(libc::pid_t);
+
+    impl ForkChild {
+        fn wait(&mut self) -> io::Result<libc::c_int> {
+            let mut status = 0;
+            loop {
+                // SAFETY: the guard owns this child and status is writable.
+                if unsafe { libc::waitpid(self.0, &mut status, 0) } == self.0 {
+                    self.0 = 0;
+                    return Ok(status);
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    impl Drop for ForkChild {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                // SAFETY: this PID belongs to the guard's unreaped child.
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+                let _ = self.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_endpoint_unlocks_even_with_inherited_descriptor() {
+        let fixture = Fixture::new();
+        let state = fixture.state();
+        let endpoint = Endpoint::bind(&state).unwrap();
+        let mut pipe = [-1; 2];
+        // SAFETY: pipe has room for both descriptors, owned here on success.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let [read, write] = pipe.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        let [read_fd, write_fd] = pipe;
+        // SAFETY: the child uses only async-signal-safe calls and exits directly.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let mut byte = 0_u8;
+            unsafe {
+                libc::close(write_fd);
+                let received = libc::read(read_fd, (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(if received == 0 { 0 } else { 1 });
+            }
+        }
+        assert!(pid > 0, "{}", io::Error::last_os_error());
+        let mut child = ForkChild(pid);
+        drop(read);
+        drop(endpoint);
+        drop(Endpoint::bind(&state).expect("rebind while child still holds the lock descriptor"));
+        drop(write);
+        let status = child.wait().unwrap();
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
     }
 
     #[test]
