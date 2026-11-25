@@ -508,6 +508,139 @@ fn compatibility_accessors_can_drain_and_analyze_retained_responses() {
     assert!(analysis.iter().any(|result| matches!(result, crate::analyzer::AnalysisResult::HttpContext(context) if context.http.status_code == 500)));
 }
 
+#[test]
+fn dns_discovered_agent_crash_records_exit_and_interruption() {
+    let pid = std::process::id();
+    let mut fixture = pending_runtime(pid, b"");
+    let istore = Arc::new(
+        crate::storage::sqlite::interruption::InterruptionStore::new_with_path(
+            &fixture.directory.join("interruption_events.db"),
+        )
+        .unwrap(),
+    );
+    fixture.interruption_store = Some(Arc::clone(&istore));
+    fixture.scanner = crate::discovery::AgentScanner::from_rules(
+        &[],
+        &[crate::config::HttpsRule {
+            pattern: "*.example.com".to_string(),
+        }],
+    );
+
+    fixture.process_event(Event::UdpDns(crate::probes::udpdns::UdpDnsEvent {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 0,
+        comm: "definitely-not-a-known-agent".to_string(),
+        domain: "api.example.com".to_string(),
+    }));
+    assert!(!fixture.scanner.is_tracked(pid));
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 2_000_000_000,
+        comm: "definitely-not-a-known-agent".into(),
+        exit_code: 9,
+    });
+
+    assert_eq!(istore.get_process_exit_recent(pid as i32, 60), Some(9));
+    let idb = rusqlite::Connection::open(fixture.directory.join("interruption_events.db")).unwrap();
+    let crash_count: i64 = idb
+        .query_row(
+            "SELECT COUNT(*) FROM interruption_events WHERE interruption_type='agent_crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(crash_count, 1);
+    assert!(
+        fixture
+            .genai_sqlite_store
+            .as_ref()
+            .unwrap()
+            .list_pending_for_pids(&[pid as i32])
+            .unwrap()
+            .is_empty(),
+        "crash exit must not leave stuck pending calls"
+    );
+}
+
+#[test]
+fn resource_target_clean_exit_completes_partial_response_and_records_exit() {
+    let pid = std::process::id();
+    let mut fixture = pending_runtime(
+        pid,
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
+    );
+    let istore = Arc::new(
+        crate::storage::sqlite::interruption::InterruptionStore::new_with_path(
+            &fixture.directory.join("interruption_events.db"),
+        )
+        .unwrap(),
+    );
+    fixture.interruption_store = Some(Arc::clone(&istore));
+    fixture
+        .resource_targets
+        .write()
+        .unwrap()
+        .insert(pid, "QwenCode".to_string());
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 2_000_000_000,
+        comm: "node".into(),
+        exit_code: 0,
+    });
+    fixture.flush_completions();
+
+    assert_eq!(istore.get_process_exit_recent(pid as i32, 60), Some(0));
+    let gdb = rusqlite::Connection::open(fixture.directory.join("genai_events.db")).unwrap();
+    let (status, http_status): (String, i64) = gdb
+        .query_row("SELECT status, status_code FROM genai_events", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(status, "complete");
+    assert_eq!(http_status, 500);
+}
+
+#[test]
+fn unclassified_process_exit_skips_agent_crash_detection() {
+    let pid = std::process::id();
+    let mut fixture = pending_runtime(pid, b"");
+    let istore = Arc::new(
+        crate::storage::sqlite::interruption::InterruptionStore::new_with_path(
+            &fixture.directory.join("interruption_events.db"),
+        )
+        .unwrap(),
+    );
+    fixture.interruption_store = Some(Arc::clone(&istore));
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 2_000_000_000,
+        comm: "curl".into(),
+        exit_code: 9,
+    });
+
+    assert_eq!(istore.get_process_exit_recent(pid as i32, 60), None);
+    let idb = rusqlite::Connection::open(fixture.directory.join("interruption_events.db")).unwrap();
+    let crash_count: i64 = idb
+        .query_row(
+            "SELECT COUNT(*) FROM interruption_events WHERE interruption_type='agent_crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(crash_count, 0);
+}
+
 fn pending_runtime(pid: u32, response: &[u8]) -> RuntimeFixture {
     let mut fixture = RuntimeFixture::new(0);
     let mut config = AgentsightConfig::default();
