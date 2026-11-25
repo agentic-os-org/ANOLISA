@@ -1,0 +1,17 @@
+//! Agent-independent judgment contracts, deterministic checking and model evaluation.
+
+pub mod check;
+pub mod composition;
+pub mod config;
+pub mod contract;
+pub mod deadline;
+pub mod evaluation;
+pub mod evidence;
+pub mod executor;
+pub mod judgment;
+pub mod local_policy;
+pub mod model;
+pub mod outcome;
+pub mod protocol;
+mod validation;
+mod wire;

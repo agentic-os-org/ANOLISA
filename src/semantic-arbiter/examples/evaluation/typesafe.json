@@ -1,0 +1,13 @@
+{
+  "config_revision": "policy-v1",
+  "backend": {
+    "kind": "typesafe",
+    "base_url": "https://api.typesafe.ai",
+    "model": "jev-latest",
+    "key_env": "TYPESAFE_API_KEY"
+  },
+  "timeout_ms": 30000,
+  "max_response_bytes": 65536,
+  "thresholds": {"preservation_ppm": 900000, "task_scope_ppm": 900000},
+  "transport": "https"
+}
