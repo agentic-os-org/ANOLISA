@@ -246,9 +246,20 @@ impl TokenParser {
             return extract_usage_object(usage, LLMProvider::Gemini, json);
         }
 
-        // 5. Check for usage object directly (OpenAI and compatible APIs)
+        // 5. Check for usage object directly (OpenAI and compatible APIs).
+        // Non-streaming OpenAI Responses API envelopes carry `"object": "response"`
+        // with an `"output"` array and top-level `"usage"` whose field names
+        // match Anthropic's; without checking the envelope, responses lacking
+        // `*_details` would be mislabeled Anthropic.
         if let Some(usage) = json.get("usage") {
-            let provider = detect_provider_from_usage(usage);
+            let is_responses_envelope = json.get("object").and_then(|v| v.as_str())
+                == Some("response")
+                && json.get("output").is_some_and(|o| o.is_array());
+            let provider = if is_responses_envelope {
+                LLMProvider::OpenAI
+            } else {
+                detect_provider_from_usage(usage)
+            };
             return extract_usage_object(usage, provider, json);
         }
 
@@ -1041,5 +1052,23 @@ data:{"sequence_number":10,"type":"response.completed","response":{"usage":{"tot
         let data = r#"{"input_tokens": "not a number"}"#;
         let parser = TokenParser::new();
         assert!(parser.parse_data(data).is_none());
+    }
+
+    #[test]
+    fn test_parse_nonstream_responses_usage_without_details_is_openai() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "resp_123",
+            "object": "response",
+            "model": "gpt-4.1",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}],
+            "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}
+        }"#;
+        let usage = parser.parse_data(data).expect("responses usage");
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+        assert_eq!(usage.model.as_deref(), Some("gpt-4.1"));
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.total_tokens(), 110);
     }
 }
