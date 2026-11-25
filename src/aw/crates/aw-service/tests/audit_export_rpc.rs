@@ -269,6 +269,10 @@ fn codex_posttool_projection_agrees_with_manual_completion() {
 
     let mcp = |flag: &str, value: Value| json!({"content":[{"type":"text","text":"tool output"}],flag:value});
     for (index, (result, status)) in [
+        (
+            json!({"content":[{"type":"text","text":"tool output"}]}),
+            ResultStatus::Success,
+        ),
         (mcp("isError", json!(false)), ResultStatus::Success),
         (mcp("isError", json!(true)), ResultStatus::Error),
         (mcp("is_error", json!(true)), ResultStatus::Error),

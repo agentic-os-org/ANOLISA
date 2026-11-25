@@ -85,12 +85,14 @@ def assert_after_audit(aw, state, mode, callbacks, workspace, environment, evide
 
     inventory = query({"type": "enumerate", "cursor": None, "limit": 64})["result"]
     assert inventory["next_cursor"] is None, inventory
-    structured = mode in ("replace-mcp", "replace-media")
+    structured = mode in ("replace-mcp", "replace-mcp-default", "replace-media")
     calls = 2 if mode == "replace-parallel" else 1
     assert len(callbacks) == calls, callbacks
     for callback in callbacks:
         response = callback["event"]["native"]["tool_response"]
-        if structured:
+        if mode == "replace-mcp-default":
+            assert "isError" not in response and isinstance(response["content"], list), response
+        elif structured:
             assert response["isError"] is False, response
         else:
             assert isinstance(response, str), response
@@ -147,12 +149,14 @@ def case(args, mode):
                   '[model_providers.fixture]\nname="fixture"\nwire_api="responses"\n'
                   f'base_url="http://127.0.0.1:{port}/v1"\nrequires_openai_auth=false\nsupports_websockets=false\n'
                   f'[features]\ncode_mode={str(mode == "replace-code-mode").lower()}\n')
-        if mode in ("replace-mcp", "replace-mcp-large", "replace-media"):
+        if mode in ("replace-mcp", "replace-mcp-default", "replace-mcp-large", "replace-media"):
             mcp_args = [str(Path(__file__).with_name("codex_mcp.py"))]
             if mode == "replace-media":
                 mcp_args.append("media")
             if mode == "replace-mcp-large":
                 mcp_args.append("large")
+            if mode == "replace-mcp-default":
+                mcp_args.append("default-success")
             native += ('[mcp_servers.fixture]\n'
                        f'command={json.dumps(sys.executable)}\n'
                        f'args={json.dumps(mcp_args)}\n')
@@ -228,19 +232,19 @@ def case(args, mode):
                     assert "AW_NATIVE_OUTPUT" in outputs and "AW_NATIVE_ERROR" in outputs, outputs
                     assert "Process exited with code 7" in outputs, outputs
                     assert len(after) == 1
-                if mode in ("replace", "replace-apply", "replace-mcp", "replace-long"):
+                if mode in ("replace", "replace-apply", "replace-mcp", "replace-mcp-default", "replace-long"):
                     assert model.outputs[-1:] == ["AW_REDACTED_RESULT"], model.outputs
                     sent = [item["output"] for request in model.requests[1:]
                             for item in request["input"] if item.get("type") in ("function_call_output", "custom_tool_call_output")]
                     assert sent[-len(model.outputs):] == model.outputs, sent
-                    if mode in ("replace", "replace-apply", "replace-mcp"):
+                    if mode in ("replace", "replace-apply", "replace-mcp", "replace-mcp-default"):
                         assert sent == ["AW_REDACTED_RESULT"], sent
                     if mode == "replace-long":
                         assert "AW_LONG_DONE" not in json.dumps(sent), sent
                     assert len(after) == 1
                 if mode == "replace-apply":
                     assert (workspace / "AW_PATCHED").read_text() == "created\n"
-                if mode == "replace-mcp":
+                if mode in ("replace-mcp", "replace-mcp-default"):
                     assert after[0]["event"]["tool"]["name"] == "mcp__fixture__echo"
                     assert "AW_MCP_ORIGINAL" not in json.dumps(model.requests)
                 if mode == "replace-mcp-large":
@@ -290,7 +294,7 @@ def case(args, mode):
                 assert status["bindings"] == 0 and status["events"] == 0, status
                 assert not list(state.glob("launch-*"))
                 if mode in ("allow", "after-failure", "replace", "replace-failure", "long", "replace-parallel",
-                            "replace-mcp", "replace-media"):
+                            "replace-mcp", "replace-mcp-default", "replace-media"):
                     assert_after_audit(args.aw, state, mode, after, workspace, environment, evidence)
         finally:
             try:
@@ -320,7 +324,7 @@ def main():
     version = subprocess.check_output([args.codex, "--version"], text=True, timeout=5).strip()
     assert version == f"codex-cli {args.expected_version}", version
     results = []
-    for mode in ("untrusted", "disabled", "prompt-deny", "allow", "deny", "offline", "retry", "native-deny", "native-rewrite", "native-rewrite-deny", "native-rewrite-required", "after-failure", "long", "replace", "replace-failure", "replace-peer", "replace-code-mode", "replace-apply", "replace-mcp", "replace-mcp-large", "replace-media", "replace-long", "replace-parallel"):
+    for mode in ("untrusted", "disabled", "prompt-deny", "allow", "deny", "offline", "retry", "native-deny", "native-rewrite", "native-rewrite-deny", "native-rewrite-required", "after-failure", "long", "replace", "replace-failure", "replace-peer", "replace-code-mode", "replace-apply", "replace-mcp", "replace-mcp-default", "replace-mcp-large", "replace-media", "replace-long", "replace-parallel"):
         results.append(case(args, mode))
         print(f"Codex native {mode}: passed", flush=True)
     (args.output / "result.json").write_text(json.dumps({"version": version, "results": results}, indent=2))

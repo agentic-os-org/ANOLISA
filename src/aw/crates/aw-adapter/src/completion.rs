@@ -128,11 +128,26 @@ pub(crate) fn codex_result_status(result: &Value, native: &Value) -> Option<&'st
         || source["is_error"] == false
         || exit_code == Some(0)
         || camel_exit_code == Some(0)
+        || codex_mcp_default_success(source, native)
     {
         Some("success")
     } else {
         None
     }
+}
+
+fn codex_mcp_default_success(source: &Value, native: &Value) -> bool {
+    native["tool_name"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("mcp__"))
+        && source["content"]
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().all(Value::is_object))
+        && source.get("isError").is_none()
+        && source.get("is_error").is_none()
+        && source.get("exit_code").is_none()
+        && source.get("exitCode").is_none()
+        && source.get("interrupted").is_none()
 }
 
 /// Outcome to compare with a manual completion report when a native callback is present.
@@ -450,6 +465,75 @@ mod tests {
         assert_eq!(result_status("codex", &event), None);
         event["name"] = json!("security.violation");
         assert_eq!(result_status("codex", &event), Some("success"));
+    }
+
+    #[test]
+    fn codex_mcp_envelope_defaults_omitted_is_error_to_success() {
+        for (tool_name, response, expected) in [
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"ok"}]}),
+                Some("success"),
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[],"structuredContent":{"ok":true}}),
+                Some("success"),
+            ),
+            (
+                "mcp__fixture__image",
+                json!({"content":[{"type":"image","data":"c2VjcmV0","mimeType":"image/png"}]}),
+                Some("success"),
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"isError":true}),
+                Some("error"),
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"isError":"false"}),
+                None,
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"isError":null}),
+                None,
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"is_error":0}),
+                None,
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"exit_code":"0"}),
+                None,
+            ),
+            (
+                "mcp__fixture__echo",
+                json!({"content":[{"type":"text","text":"bad"}],"interrupted":"true"}),
+                None,
+            ),
+            ("mcp__fixture__echo", json!({"content":"plain"}), None),
+            ("mcp__fixture__echo", json!({"content":["plain"]}), None),
+            ("mcp__fixture__echo", json!({}), None),
+            ("mcp__fixture__echo", json!("plain"), None),
+            (
+                "Bash",
+                json!({"content":[{"type":"text","text":"ok"}]}),
+                None,
+            ),
+        ] {
+            let mut event = json!({
+                "name":"tool.after",
+                "tool":{"name":tool_name,"result":response},
+                "native":{"hook_event_name":"PostToolUse","tool_name":tool_name,"tool_response":response}
+            });
+            assert_eq!(result_status("codex", &event), expected, "{event}");
+            event["native"]["tool_response"] = Value::Null;
+            assert_eq!(result_status("codex", &event), expected, "{event}");
+        }
     }
 
     #[test]

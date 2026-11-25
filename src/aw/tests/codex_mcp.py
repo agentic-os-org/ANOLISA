@@ -23,6 +23,9 @@ for line in sys.stdin:
         elif sys.argv[1:] == ["large"]:
             result = {"content": [{"type": "text", "text": "AW_MCP_ORIGINAL" * 150000}],
                       "isError": False}
+        elif sys.argv[1:] == ["default-success"]:
+            result = {"content": [{"type": "text", "text": "AW_MCP_ORIGINAL"}],
+                      "structuredContent": {"private": "AW_MCP_ORIGINAL"}}
         else:
             result = {"content": [{"type": "text", "text": "AW_MCP_ORIGINAL"}],
                       "structuredContent": {"private": "AW_MCP_ORIGINAL"}, "isError": False}

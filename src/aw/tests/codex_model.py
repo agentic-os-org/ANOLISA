@@ -62,7 +62,7 @@ class Model:
             item = {"type": "custom_tool_call", "id": "fc_1", "call_id": "call_1",
                     "name": "apply_patch", "input":
                         "*** Begin Patch\n*** Add File: AW_PATCHED\n+created\n*** End Patch"}
-        elif self.mode in ("replace-mcp", "replace-mcp-large", "replace-media") and self.calls == 0:
+        elif self.mode in ("replace-mcp", "replace-mcp-default", "replace-mcp-large", "replace-media") and self.calls == 0:
             self.calls += 1
             item = {"type": "function_call", "id": "fc_1", "call_id": "call_1",
                     "namespace": "mcp__fixture", "name": "echo",
