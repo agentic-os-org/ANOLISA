@@ -61,10 +61,16 @@ def test_epoch_and_ns_helpers_emit_utc_iso() -> None:
 def test_ns_to_utc_iso_preserves_sub_second_precision() -> None:
     # Integer nanoseconds close to the next second must not round forward
     # through the float divide used previously.
-    assert ns_to_utc_iso(1_700_000_000_999_999_999) == "2023-11-14T22:13:20.999999+00:00"
-    assert ns_to_utc_iso(1_699_999_999_999_999_999) == "2023-11-14T22:13:19.999999+00:00"
+    assert (
+        ns_to_utc_iso(1_700_000_000_999_999_999) == "2023-11-14T22:13:20.999999+00:00"
+    )
+    assert (
+        ns_to_utc_iso(1_699_999_999_999_999_999) == "2023-11-14T22:13:19.999999+00:00"
+    )
     # Microsecond values must not drift by one through float rounding.
-    assert ns_to_utc_iso(1_700_000_000_123_456_789) == "2023-11-14T22:13:20.123456+00:00"
+    assert (
+        ns_to_utc_iso(1_700_000_000_123_456_789) == "2023-11-14T22:13:20.123456+00:00"
+    )
     # Sub-microsecond nanoseconds are truncated, not rounded.
     assert ns_to_utc_iso(1_700_000_000_000_000_999) == "2023-11-14T22:13:20+00:00"
 
