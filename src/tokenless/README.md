@@ -60,6 +60,13 @@ while preserving compiler diagnostics, failures, and record order. See
 [CMake and Ninja build output](../../docs/user-guide/en/tokenless/index.md#cmake-and-ninja-build-output)
 for scope boundaries, output reconstruction, and validation limits.
 
+C/C++ compiler invocation streams from CMake (`VERBOSE=1`), Ninja (`-v`), and native GNU Make
+(`V=1`) across GCC and Clang reaching PostTool can also share repeated command flags,
+directory prefixes, and target suffixes without Stash while preserving diagnostics, failures,
+and handwritten short `Makefile` routing. See
+[C/C++ compiler invocation output](../../docs/user-guide/en/tokenless/index.md#cc-compiler-invocation-output)
+for scope boundaries, output reconstruction, and validation limits.
+
 ## Features
 
 | Capability | Savings indicator | Details |

@@ -24,6 +24,8 @@ Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输�
 
 进入 PostTool 的 Ninja（`[k/N]`）与非冗长 CMake Unix Makefiles（`[PPP%]`）构建进度输出可在保留编译诊断、失败输出与记录顺序的同时共享重复动作词、目录前缀与目标后缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [CMake 与 Ninja 构建输出](../../docs/user-guide/zh/tokenless/index.md#cmake-与-ninja-构建输出)。
 
+进入 PostTool 的 CMake（`VERBOSE=1`）、Ninja（`-v`）与原生 GNU Make（`V=1`）下的 GCC/Clang C/C++ 编译命令行输出也可在保留编译诊断、失败输出、记录顺序及手写短 `Makefile` 路由的同时共享重复编译选项、目录前缀与目标后缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [C/C++ 编译命令行输出](../../docs/user-guide/zh/tokenless/index.md#cc-编译命令行输出)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
