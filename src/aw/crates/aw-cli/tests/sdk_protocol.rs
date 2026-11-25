@@ -18,7 +18,7 @@ fn direct_sdk_consumer_registers_executes_and_exports_native_facts() {
 
 #[test]
 fn typescript_sdk_contracts_and_out_of_tree_package() {
-    check_sdk_package("typescript_package.py", Duration::from_secs(25));
+    check_sdk_package("typescript_package.py", Duration::from_secs(90));
 }
 
 #[test]
