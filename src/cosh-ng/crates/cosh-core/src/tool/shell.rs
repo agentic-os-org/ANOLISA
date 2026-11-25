@@ -4,11 +4,114 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::process::{output_with_timeout, OutputError, MAX_PIPE_OUTPUT_BYTES};
+use crate::process::{
+    output_with_timeout, output_with_timeout_session, OutputError, MAX_PIPE_OUTPUT_BYTES,
+};
 
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
 pub struct ShellTool;
+
+/// Executes exact argv as the calling account without providing a Cosh sandbox.
+pub struct RunCommandTool;
+
+#[async_trait]
+impl Tool for RunCommandTool {
+    fn name(&self) -> &str {
+        "run_command"
+    }
+
+    fn description(&self) -> &str {
+        "Run a program with an explicit argv array as the calling user. The host command is not sandboxed by Cosh."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "program": {"type": "string", "description": "Executable path or program name"},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "timeout_ms": {"type": "integer", "description": "Optional timeout in milliseconds (default: 30000)"}
+            },
+            "required": ["program"]
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::ShellExec
+    }
+
+    async fn invoke(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, String> {
+        let program = params
+            .get("program")
+            .and_then(Value::as_str)
+            .filter(|program| !program.is_empty())
+            .ok_or("run_command requires a non-empty 'program'")?;
+        let args = params
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let args = serde_json::from_value::<Vec<String>>(args)
+            .map_err(|_| "run_command 'args' must be an array of strings".to_string())?;
+        let timeout_ms = params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(30_000);
+        let mut command = Command::new(program);
+        command.args(args).current_dir(&ctx.cwd);
+        for name in [
+            "DASHSCOPE_API_KEY",
+            "OPENAI_API_KEY",
+            "ALIBABA_CLOUD_ACCESS_KEY_ID",
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+            "ALIBABA_CLOUD_SECURITY_TOKEN",
+        ] {
+            command.env_remove(name);
+        }
+        let output = output_with_timeout_session(
+            command,
+            std::time::Duration::from_millis(timeout_ms),
+            ctx.cleanup_failure(),
+        )
+        .await;
+        match output {
+            Ok(output) => {
+                let stdout = decode_within_limit(&output.stdout, MAX_PIPE_OUTPUT_BYTES);
+                let stderr = decode_within_limit(&output.stderr, MAX_PIPE_OUTPUT_BYTES);
+                let mut text = String::new();
+                if output.stdout_truncated || output.stderr_truncated {
+                    text.push_str(
+                        "command output exceeded the 32 MiB pipe limit; the session was killed\n",
+                    );
+                }
+                if !stdout.is_empty() {
+                    text.push_str(&stdout);
+                }
+                if !stderr.is_empty() {
+                    text.push_str("\n[stderr]\n");
+                    text.push_str(&stderr);
+                }
+                text.push_str(&format!(
+                    "\n[exit code: {}]\n",
+                    output.status.code().unwrap_or(-1)
+                ));
+                Ok(ToolResult {
+                    output: text,
+                    is_error: !output.status.success()
+                        || output.stdout_truncated
+                        || output.stderr_truncated,
+                })
+            }
+            Err(OutputError::Timeout) => Ok(ToolResult::error(format!(
+                "Command timed out after {timeout_ms}ms"
+            ))),
+            Err(OutputError::Cleanup(error)) => Err(format!(
+                "cleanup_failed: process group cleanup failed: {error}"
+            )),
+            Err(error) => Err(format!("failed to execute command: {error}")),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for ShellTool {

@@ -10,6 +10,8 @@
 //! exhaust memory before the deadline fires.
 
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -50,6 +52,8 @@ pub enum OutputError {
     Io(std::io::Error),
     /// The deadline expired; the process group was killed and reaped.
     Timeout,
+    /// The supervised process group could not be cleaned up reliably.
+    Cleanup(std::io::Error),
 }
 
 impl std::fmt::Display for OutputError {
@@ -58,6 +62,7 @@ impl std::fmt::Display for OutputError {
             Self::Spawn(e) => write!(f, "failed to spawn process: {e}"),
             Self::Io(e) => write!(f, "process I/O failed: {e}"),
             Self::Timeout => write!(f, "process timed out"),
+            Self::Cleanup(e) => write!(f, "process-group cleanup failed: {e}"),
         }
     }
 }
@@ -68,22 +73,42 @@ impl std::fmt::Display for OutputError {
 /// tokio's orphan reaper collects the killed child afterwards.
 struct ProcessGroupGuard {
     pgid: Option<u32>,
+    cleanup_failure: Option<Arc<AtomicBool>>,
+    kill: fn(u32) -> Result<(), nix::errno::Errno>,
 }
 
 impl ProcessGroupGuard {
-    fn new(pgid: Option<u32>) -> Self {
-        Self { pgid }
+    fn new(
+        pgid: Option<u32>,
+        cleanup_failure: Option<Arc<AtomicBool>>,
+        kill: fn(u32) -> Result<(), nix::errno::Errno>,
+    ) -> Self {
+        Self {
+            pgid,
+            cleanup_failure,
+            kill,
+        }
     }
 
     fn disarm(&mut self) {
         self.pgid = None;
     }
 
-    /// Kills the group now and disarms; logs failures other than ESRCH.
-    fn kill_now(&mut self) {
-        if let Some(pgid) = self.pgid.take() {
-            if let Err(e) = cosh_platform::process::kill_process_group(pgid) {
-                tracing::warn!(target: "cosh_process", pgid, "failed to kill process group: {e}");
+    fn kill_now(&mut self) -> Result<(), nix::errno::Errno> {
+        let Some(pgid) = self.pgid else {
+            return Ok(());
+        };
+        match (self.kill)(pgid) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {
+                self.pgid = None;
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(failure) = &self.cleanup_failure {
+                    failure.store(true, Ordering::SeqCst);
+                }
+                tracing::warn!(target: "cosh_process", pgid, "failed to kill process group: {error}");
+                Err(error)
             }
         }
     }
@@ -91,7 +116,7 @@ impl ProcessGroupGuard {
 
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
-        self.kill_now();
+        let _ = self.kill_now();
     }
 }
 
@@ -134,15 +159,58 @@ pub async fn output_with_timeout(
     output_with_limit(cmd, stdin_data, timeout, MAX_PIPE_OUTPUT_BYTES).await
 }
 
+/// Runs a command in a new session and kills any remaining group on exit.
+pub async fn output_with_timeout_session(
+    cmd: Command,
+    timeout: Duration,
+    cleanup_failure: Option<Arc<AtomicBool>>,
+) -> Result<BoundedOutput, OutputError> {
+    output_with_limit_mode(
+        cmd,
+        None,
+        timeout,
+        MAX_PIPE_OUTPUT_BYTES,
+        true,
+        cleanup_failure,
+        cosh_platform::process::kill_process_group,
+    )
+    .await
+}
+
 /// [`output_with_timeout`] with a caller-chosen per-pipe cap, so tests can
 /// exercise the limit logic without materializing 32 MB of output.
 async fn output_with_limit(
-    mut cmd: Command,
+    cmd: Command,
     stdin_data: Option<Vec<u8>>,
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<BoundedOutput, OutputError> {
-    cosh_platform::process::isolate_process_group(cmd.as_std_mut());
+    output_with_limit_mode(
+        cmd,
+        stdin_data,
+        timeout,
+        max_output_bytes,
+        false,
+        None,
+        cosh_platform::process::kill_process_group,
+    )
+    .await
+}
+
+async fn output_with_limit_mode(
+    mut cmd: Command,
+    stdin_data: Option<Vec<u8>>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    new_session: bool,
+    cleanup_failure: Option<Arc<AtomicBool>>,
+    kill: fn(u32) -> Result<(), nix::errno::Errno>,
+) -> Result<BoundedOutput, OutputError> {
+    if new_session {
+        cosh_platform::process::isolate_process_session(cmd.as_std_mut());
+    } else {
+        cosh_platform::process::isolate_process_group(cmd.as_std_mut());
+    }
     cmd.stdin(if stdin_data.is_some() {
         std::process::Stdio::piped()
     } else {
@@ -155,7 +223,7 @@ async fn output_with_limit(
     .kill_on_drop(true);
 
     let mut child = cmd.spawn().map_err(OutputError::Spawn)?;
-    let mut guard = ProcessGroupGuard::new(child.id());
+    let mut guard = ProcessGroupGuard::new(child.id(), cleanup_failure, kill);
 
     let stdin = child.stdin.take();
     let mut stdout_task = spawn_reader(child.stdout.take(), max_output_bytes);
@@ -227,6 +295,11 @@ async fn output_with_limit(
             stdout,
             stderr,
         })) => {
+            if new_session {
+                guard.kill_now().map_err(|error| {
+                    OutputError::Cleanup(std::io::Error::from_raw_os_error(error as i32))
+                })?;
+            }
             guard.disarm();
             Ok(BoundedOutput {
                 status,
@@ -240,9 +313,15 @@ async fn output_with_limit(
             stdout: stdout_done,
             stderr: stderr_done,
         })) => {
-            let status = kill_and_reap(&mut guard, &mut child)
+            let status = kill_and_reap(&mut guard, &mut child, new_session)
                 .await
-                .map_err(OutputError::Io)?;
+                .map_err(|error| {
+                    if new_session {
+                        OutputError::Cleanup(error)
+                    } else {
+                        OutputError::Io(error)
+                    }
+                })?;
             // The overflowed pipe already reported; the other one may still
             // be reading. Bound the drain so a descendant that escapes the
             // process group (e.g. via setsid) and keeps the pipe open cannot
@@ -261,14 +340,16 @@ async fn output_with_limit(
                 stderr_truncated: stderr.truncated,
             })
         }
-        Ok(Err(e)) => {
-            let _ = kill_and_reap(&mut guard, &mut child).await;
-            Err(OutputError::Io(e))
-        }
-        Err(_) => {
-            let _ = kill_and_reap(&mut guard, &mut child).await;
-            Err(OutputError::Timeout)
-        }
+        Ok(Err(e)) => match kill_and_reap(&mut guard, &mut child, new_session).await {
+            Ok(_) => Err(OutputError::Io(e)),
+            Err(error) if new_session => Err(OutputError::Cleanup(error)),
+            Err(_) => Err(OutputError::Io(e)),
+        },
+        Err(_) => match kill_and_reap(&mut guard, &mut child, new_session).await {
+            Ok(_) => Err(OutputError::Timeout),
+            Err(error) if new_session => Err(OutputError::Cleanup(error)),
+            Err(_) => Err(OutputError::Timeout),
+        },
     }
     // Reader tasks are aborted by their drop guards on every exit path.
 }
@@ -296,11 +377,18 @@ enum RunOutcome {
 async fn kill_and_reap(
     guard: &mut ProcessGroupGuard,
     child: &mut Child,
+    require_group_cleanup: bool,
 ) -> std::io::Result<ExitStatus> {
-    guard.kill_now();
+    let group_result = guard
+        .kill_now()
+        .map_err(|error| std::io::Error::from_raw_os_error(error as i32));
     // Fallback for the direct child; harmless if the group kill landed.
     let _ = child.start_kill();
-    child.wait().await
+    let status = child.wait().await;
+    if require_group_cleanup {
+        group_result?;
+    }
+    status
 }
 
 /// Reader task handle that aborts on drop, so neither cancellation nor an
@@ -572,6 +660,74 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
         cmd
+    }
+
+    fn fail_kill(_: u32) -> Result<(), nix::errno::Errno> {
+        Err(nix::errno::Errno::EPERM)
+    }
+
+    #[tokio::test]
+    async fn group_cleanup_failure_still_reaps_the_direct_child() {
+        let mut command = sh("exec sleep 30");
+        cosh_platform::process::isolate_process_group(command.as_std_mut());
+        command.kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn direct child");
+        let mut guard = ProcessGroupGuard::new(child.id(), None, fail_kill);
+
+        let result = kill_and_reap(&mut guard, &mut child, true).await;
+
+        assert!(result.is_err());
+        assert!(child.try_wait().expect("inspect child").is_some());
+    }
+
+    #[tokio::test]
+    async fn legacy_group_cleanup_failure_preserves_timeout_and_truncated_output() {
+        let timeout = output_with_limit_mode(
+            sh("exec sleep 30"),
+            None,
+            Duration::from_millis(100),
+            1024,
+            false,
+            None,
+            fail_kill,
+        )
+        .await;
+        assert!(matches!(timeout, Err(OutputError::Timeout)), "{timeout:?}");
+
+        let output = output_with_limit_mode(
+            sh("head -c 4096 /dev/zero; exec sleep 30"),
+            None,
+            Duration::from_secs(3),
+            1024,
+            false,
+            None,
+            fail_kill,
+        )
+        .await
+        .expect("legacy truncated output");
+        assert!(output.stdout_truncated);
+        assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn cancellation_records_process_group_cleanup_failure() {
+        let cleanup_failure = Arc::new(AtomicBool::new(false));
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            output_with_limit_mode(
+                sh("sleep 30"),
+                None,
+                Duration::from_secs(5),
+                MAX_PIPE_OUTPUT_BYTES,
+                true,
+                Some(Arc::clone(&cleanup_failure)),
+                fail_kill,
+            ),
+        )
+        .await;
+
+        assert!(result.is_err(), "fixture should cancel the command");
+        assert!(cleanup_failure.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

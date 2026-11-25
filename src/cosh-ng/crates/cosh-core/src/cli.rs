@@ -14,6 +14,8 @@ pub(crate) enum ExecutionProfile {
     GatewayBrokeredCheckpointV1,
     /// Core owns one approval-gated workspace write through private protocol v5.
     GatewayBrokeredWorkspaceWriteV1,
+    /// Public one-shot non-interactive CLI with a closed tool runtime.
+    PublicHeadlessV1,
 }
 
 impl ExecutionProfile {
@@ -27,6 +29,7 @@ impl ExecutionProfile {
             Self::GatewayBrokeredWorkspaceWriteV1 => {
                 crate::protocol::GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE
             }
+            Self::PublicHeadlessV1 => "public-headless-v1",
         }
     }
 
@@ -39,6 +42,10 @@ impl ExecutionProfile {
         )
     }
 
+    pub(crate) const fn is_public_headless(self) -> bool {
+        matches!(self, Self::PublicHeadlessV1)
+    }
+
     pub(crate) const fn hosts_checkpoint(self) -> bool {
         matches!(self, Self::GatewayBrokeredCheckpointV1)
     }
@@ -46,6 +53,26 @@ impl ExecutionProfile {
     pub(crate) const fn writes_workspace(self) -> bool {
         matches!(self, Self::GatewayBrokeredWorkspaceWriteV1)
     }
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PublicOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PublicFileTools {
+    #[default]
+    None,
+    Read,
+    Write,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicExec {
+    Host,
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,6 +159,26 @@ pub struct CliArgs {
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]
     pub headless: bool,
+
+    /// Public headless result format.
+    #[arg(long, value_enum)]
+    pub output: Option<PublicOutput>,
+
+    /// Public headless workspace file-tool grant.
+    #[arg(long, value_enum)]
+    pub file_tools: Option<PublicFileTools>,
+
+    /// Explicitly authorize model-selected host commands for this task.
+    #[arg(long, value_enum)]
+    pub exec: Option<PublicExec>,
+
+    /// Public headless provider-generation limit.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=50))]
+    pub max_turns: Option<u32>,
+
+    /// Public headless wall-clock limit in seconds or minutes.
+    #[arg(long, value_name = "DURATION")]
+    pub timeout: Option<String>,
 
     /// Select the trusted runtime execution boundary.
     ///
@@ -245,6 +292,14 @@ pub struct CliArgs {
 }
 
 impl CliArgs {
+    pub(crate) fn has_public_headless_options(&self) -> bool {
+        self.output.is_some()
+            || self.file_tools.is_some()
+            || self.exec.is_some()
+            || self.max_turns.is_some()
+            || self.timeout.is_some()
+    }
+
     pub fn is_headless(&self) -> bool {
         self.headless || !atty::is(atty::Stream::Stdin)
     }

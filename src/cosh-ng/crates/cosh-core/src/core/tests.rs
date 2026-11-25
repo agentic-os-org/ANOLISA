@@ -1021,6 +1021,92 @@ impl Tool for CountingShellTool {
     }
 }
 
+#[tokio::test]
+async fn public_approval_is_fatal_and_skips_the_rest_of_the_batch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let provider = MockProvider::new(vec![vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: "approval-first".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: "{}".to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::ToolCallStart {
+            index: 1,
+            id: "approval-second".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 1,
+            arguments_delta: "{}".to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 1 },
+        GenerateEvent::MessageEnd,
+    ]]);
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(provider),
+        tools,
+        crate::cli::ExecutionProfile::PublicHeadlessV1,
+    );
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    let error = core
+        .handle_user_message("run both", &mut reader, &mut output)
+        .await
+        .expect_err("public approval must end the task");
+
+    assert!(error.contains("approval"), "{error}");
+    assert_eq!(core.public_failure_code(), Some("approval_required"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let protocol = String::from_utf8(output).unwrap();
+    assert!(!protocol.contains("control_request"), "{protocol}");
+    assert!(protocol.contains("approval-second"), "{protocol}");
+}
+
+#[test]
+fn public_cleanup_failure_is_shared_with_command_tools() {
+    let core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(MockProvider::text_only("done")),
+        ToolRegistry::new(),
+        crate::cli::ExecutionProfile::PublicHeadlessV1,
+    );
+    let cleanup_failure = core
+        .tool_runtime_context()
+        .cleanup_failure
+        .expect("public cleanup status");
+
+    assert!(!core.public_cleanup_failed());
+    cleanup_failure.store(true, Ordering::SeqCst);
+    assert!(core.public_cleanup_failed());
+}
+
+#[test]
+fn legacy_and_gateway_do_not_allocate_public_runtime() {
+    for profile in [
+        crate::cli::ExecutionProfile::Legacy,
+        crate::cli::ExecutionProfile::GatewayBrokeredV1,
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1,
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1,
+    ] {
+        let core = make_core_with_profile(MockProvider::text_only("unused"), profile);
+        assert!(core.public.is_none());
+        assert!(core.tool_runtime_context().cleanup_failure.is_none());
+        assert_eq!(core.public_failure_code(), None);
+    }
+}
+
 struct TestMcpTool;
 
 #[async_trait]

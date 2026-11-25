@@ -12,6 +12,20 @@ fn classify(argv0: &str, args: &[&str], tty: (bool, bool, bool)) -> Invocation {
 }
 
 #[test]
+fn public_headless_never_falls_through_to_the_inner_shell() {
+    for tty in [ALL_TTY, (false, false, false)] {
+        let invocation = classify("cosh", &["--headless", "hello"], tty);
+        assert!(
+            !matches!(invocation, Invocation::ExecShell(_)),
+            "public mode was forwarded to a shell: {invocation:?}"
+        );
+    }
+
+    let legacy = classify("cosh-shell", &["--headless", "hello"], ALL_TTY);
+    assert!(matches!(legacy, Invocation::ExecShell(_)));
+}
+
+#[test]
 fn private_compatibility_worker_is_an_exact_early_dispatch_leaf() {
     assert!(matches!(
         classify(
@@ -64,6 +78,7 @@ fn exec_args(invocation: Invocation) -> Vec<OsString> {
         Invocation::LoginGuideWorker(path) => panic!("unexpected login guide worker: {path}"),
         Invocation::LoginLifecycle(args) => panic!("unexpected lifecycle: {args:?}"),
         Invocation::Health(args) => panic!("unexpected health command: {args:?}"),
+        Invocation::PublicHeadless(plan) => panic!("unexpected public headless: {plan:?}"),
         Invocation::Login(args) => panic!("unexpected login command: {args:?}"),
         Invocation::ShellIntegration(operation) => {
             panic!("unexpected shell integration: {operation}")

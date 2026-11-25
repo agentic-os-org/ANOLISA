@@ -80,6 +80,8 @@ mod prompt_replay;
 mod provider_handoff;
 #[path = "raw_cli/provider_tools.rs"]
 mod provider_tools;
+#[path = "raw_cli/public_headless.rs"]
+mod public_headless;
 #[path = "raw_cli/question.rs"]
 mod question;
 #[path = "raw_cli/recommendation.rs"]

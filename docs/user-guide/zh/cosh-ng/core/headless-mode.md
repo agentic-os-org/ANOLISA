@@ -2,9 +2,70 @@
 
 [English](../../../en/cosh-ng/core/headless-mode.md)
 
-Headless 模式通过 stdin/stdout 提供逐行 JSON 协议。脚本使用一次性形式，前端适配器使用长驻形式。
+安装后的 `cosh` 可以运行一次有界、非交互 Core 任务。独立的
+`cosh-core --headless` 继续保留面向现有客户端和前端适配器的 JSONL 协议。
 
-## 一次性 prompt
+## 公开单次任务
+
+```bash
+cosh --headless '解释 Linux load average'
+cosh --headless --output json - < prompt.txt
+cosh --headless --workspace "$PWD" --file-tools=read '查找启动入口'
+cosh --headless --workspace "$PWD" --file-tools=write --exec=host \
+  '复现失败测试，修复并重跑'
+```
+
+完整参数可用 `cosh --headless --help` 离线查看。任务输入是一个非空
+UTF-8 参数；传 `-` 时从非 TTY stdin 读到 EOF，上限 1 MiB。直接传问题
+不会消费 stdin。
+
+文件工具默认 `none`。`read` 开启读取、grep、glob 和目录列表，`write`
+额外开启编辑和写入。两种授权都要求已存在的 `--workspace`；Core 文件
+操作固定在该工作区内，并拒绝路径和符号链接逃逸。公开模式不会隐式加载
+全局或项目的 `.copilot-shell/CONTEXT.md`。
+
+`--exec=host` 独立开启接受程序名和 argv 数组的 `run_command` 工具，
+同样要求 `--workspace`，并从该目录、以调用 UID 启动。**这不是 Cosh
+沙箱。** 命令仍可按该账号权限修改文件、访问工作区外路径和联网。命令
+在无控制终端的新会话中运行，stdin 关闭，输出有界，并受进程组回收
+监督。
+
+命令非零退出会作为工具结果交回模型，允许修复和重试。`cosh` 的终态
+描述整次 Agent 运行，不证明调用方自己的验收命令已通过；CI 应独立运行
+该检查。
+
+stdout 默认只写最终文本。`--output json` 输出一个含 `schema_version`、
+`status`、`error_code` 和 `answer` 的对象。退出码 `0` 表示 `completed`；
+`1` 覆盖 Provider、授权、策略、预算、超时和清理失败；`2` 表示输入错误。
+缺凭据返回 `auth_required`，必须补充输入返回 `user_input_required`，
+需要人审的工具返回 `approval_required`，不发送控制请求，也不派发同批
+后续调用。
+任务取消信号处理器安装失败时，返回 `runtime_unavailable` 和退出码 `1`，
+不会联系 Provider；这与策略文件加载失败不同。
+
+文本和只读任务默认超时 2 分钟，写入或宿主执行默认 5 分钟。
+`--timeout` 接受秒或分钟，上限 30m，并覆盖结果输出。输出管道阻塞或断开
+时非零退出，调用方须将缺失或不完整结果视为未知。SIGINT、SIGTERM 会取消
+任务并清理受监督命令组；输出通道可用时 JSON 返回 `cancelled`。
+SIGKILL 和主动脱离受监督组的进程不在此保证内。
+`--max-turns` 接受 1–50，默认 12。每次任务另有固定的累计 30 次工具调用预算。
+
+公开模式不发现或启动项目运行配置、Skills、Hooks、MCP 和 Extensions，
+也不写可恢复 transcript。它使用受信用户／系统 Provider 配置，不进入
+交互登录。管理员可在受保护的 `/etc/copilot-shell/config.toml` 设置
+`[headless] allow_host_exec = false`。环境声明
+`AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 或 `true` 也会在联系 Provider 前
+拒绝 `--exec=host`。强制系统配置不可读、非法或来源不可信时返回
+`policy_unavailable`。
+公开任务会同时落实适用的系统、用户和显式选择的审计策略；新增策略
+只能收窄上述授权。非空 `COSH_AUDIT_POLICY` 必须指向可读的普通策略文件，
+缺失或悬空链接返回 `policy_unavailable`。宿主命令同时按 `cosh/run_command`
+和既有 `shell` 规则检查精确 argv，程序按传入形式及 basename 匹配。
+这些检查不分析已授权解释器内部执行的命令，也不提供沙箱隔离。
+审计记录策略决策版本，不记录原始 argv。Shell 入口还会在启动任务前核对
+同目录 Core 的包版本，拒绝不匹配的安装。
+
+## Core JSONL 一次性 prompt
 
 ```bash
 cosh-core --headless "Check disk usage; do not modify anything"

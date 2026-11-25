@@ -58,8 +58,8 @@ mod upgrade;
 
 use runtime::cli_args::configured_raw_invocation;
 use runtime::invocation::{
-    classify_invocation, exec_gateway, exec_shell, gateway_plan, is_cosh_entry, Invocation,
-    TuiEntry,
+    classify_invocation, exec_gateway, exec_public_headless, exec_shell, gateway_plan,
+    is_cosh_entry, Invocation, TuiEntry,
 };
 use runtime::startup::{exec_direct_command, print_usage_help};
 
@@ -180,6 +180,7 @@ fn main() {
             Invocation::LoginGuideWorker(path) => runtime::login::guide_protocol::run_worker(&path),
             Invocation::LoginLifecycle(args) => runtime::login::lifecycle::run_cli(&args),
             Invocation::Health(args) => runtime::health_banner::run_cli(&args),
+            Invocation::PublicHeadless(plan) => exec_public_headless(plan),
             Invocation::UsageError(error) => {
                 eprintln!("cosh: {error}");
                 2

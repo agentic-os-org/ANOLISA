@@ -70,6 +70,43 @@ impl ContextBuilder {
         output_language: Option<&str>,
         extension_context: Option<&str>,
     ) -> String {
+        Self::render_system_prompt(
+            cwd,
+            tool_names,
+            skill_summaries,
+            approval_mode,
+            output_language,
+            extension_context,
+            Self::load_context(cwd).as_deref(),
+        )
+    }
+
+    pub(crate) fn build_system_prompt_without_context(
+        cwd: &Path,
+        tool_names: &[String],
+        approval_mode: &str,
+        output_language: Option<&str>,
+    ) -> String {
+        Self::render_system_prompt(
+            cwd,
+            tool_names,
+            &[],
+            approval_mode,
+            output_language,
+            None,
+            None,
+        )
+    }
+
+    fn render_system_prompt(
+        cwd: &Path,
+        tool_names: &[String],
+        skill_summaries: &[(String, String)],
+        approval_mode: &str,
+        output_language: Option<&str>,
+        extension_context: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
         let mut parts = Vec::new();
 
         parts.push(format!(
@@ -79,7 +116,7 @@ impl ContextBuilder {
             cwd.display(),
         ));
 
-        if let Some(ctx) = Self::load_context(cwd) {
+        if let Some(ctx) = context {
             parts.push(format!("# Context\n{ctx}"));
         }
 

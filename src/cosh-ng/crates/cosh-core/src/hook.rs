@@ -1089,7 +1089,7 @@ impl HookSystem {
                     failure: Some(HookFailureKind::Spawn),
                 };
             }
-            Err(OutputError::Io(e)) => {
+            Err(OutputError::Io(e)) | Err(OutputError::Cleanup(e)) => {
                 tracing::error!(target: "cosh_hook", "Hook '{safe_command}' execution failed: {e}");
                 return HookExecution {
                     output: HookOutput::default(),

@@ -66,19 +66,69 @@ impl CoshCore {
         workspace: SessionWorkspace,
         execution_profile: ExecutionProfile,
     ) -> Self {
-        let model = config.resolve_provider().model;
         let (loaded_policy, warning) = LoadedPolicy::load();
         if let Some(w) = warning {
             tracing::warn!("{w}");
         }
+        Self::new_with_snapshot_and_public_runtime(
+            config,
+            provider,
+            snapshot,
+            session_id,
+            project_root,
+            workspace,
+            execution_profile,
+            execution_profile
+                .is_public_headless()
+                .then(|| PublicHeadlessRuntime::new(vec![loaded_policy])),
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_public_headless(
+        config: CoreConfig,
+        provider: Box<dyn ContentGenerator>,
+        snapshot: RuntimeSnapshot,
+        session_id: String,
+        project_root: PathBuf,
+        workspace: SessionWorkspace,
+        public_runtime: PublicHeadlessRuntime,
+    ) -> Self {
+        Self::new_with_snapshot_and_public_runtime(
+            config,
+            provider,
+            snapshot,
+            session_id,
+            project_root,
+            workspace,
+            ExecutionProfile::PublicHeadlessV1,
+            Some(public_runtime),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_snapshot_and_public_runtime(
+        config: CoreConfig,
+        provider: Box<dyn ContentGenerator>,
+        snapshot: RuntimeSnapshot,
+        session_id: String,
+        project_root: PathBuf,
+        workspace: SessionWorkspace,
+        execution_profile: ExecutionProfile,
+        public_runtime: Option<PublicHeadlessRuntime>,
+    ) -> Self {
+        let model = config.resolve_provider().model;
         let mut hook_system = HookSystem::from_config(&config.hooks);
         hook_system.register_extension_hooks(&snapshot.hooks);
         let extension_context = snapshot.context.rendered().map(str::to_string);
         let tools = Arc::clone(&snapshot.tools);
         let bound_extension_generation = snapshot.generation.id;
         let extension_generation = GenerationController::new(snapshot);
-        let audit_workspace = std::env::current_dir().ok();
+        let audit_workspace = if execution_profile == ExecutionProfile::PublicHeadlessV1 {
+            None
+        } else {
+            std::env::current_dir().ok()
+        };
         let audit = CoreAuditRecorder::initialize(&session_id, audit_workspace.as_deref());
         let mut core = Self {
             config,
@@ -99,7 +149,7 @@ impl CoshCore {
             audit,
             extension_generation,
             bound_extension_generation,
-            loaded_policy,
+            public: public_runtime,
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
