@@ -40,7 +40,8 @@ starts the reconciliation service. Its `reconciliation.rs`
 composition module registers `AgentSightClientFactory::default()` without reading
 credentials or contacting the PEP. Each due attempt opens its own Client and reuses
 it through preparation and create/update, or through deletion for a saved route.
-`AGENT_SEC_FILE_BACKEND=lua-lsm` opts into the Lua-LSM direct kernel backend.
+Only Linux test builds with the `lua-lsm-testing` feature accept
+`AGENT_SEC_FILE_BACKEND=lua-lsm`. The packaged daemon rejects that setting at startup.
 The default remains AgentSight and saved deployment routes remain stable.
 See the [Lua-LSM implementation and validation boundaries](crates/asc-lua-lsm/README.md).
 Its production crates separate `asc-policy-translator-lua-lsm`,

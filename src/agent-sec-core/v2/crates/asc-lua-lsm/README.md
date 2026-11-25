@@ -8,17 +8,20 @@ AgentSight requests. The kernel baseline is Lua-LSM
 `92a8552ad51490433034423ef33c3f61fcb3cdb9`, ABI version 1. Native Client tests for the earlier inode-label template passed on Alibaba Cloud Linux 4, kernel
 `6.6.102-008.0.2.ali6000.pro.alnx4.x86_64`. On the same host, an isolated daemon
 deployed ten Bindings and confirmed their protection after an orderly restart.
-The runtime path template and packaged systemd deployment still need native verification. A later full daemon test
+The runtime path template and systemd deployment of the test daemon still need native verification. A later full daemon test
 on the host ended in a kernel crash during module removal. The Lua-LSM owner
 identified a known kernel issue and is backporting the fix. Verification on a
 kernel with the backport is pending.
 
 ## Configuration and lifetime
 
-Set `AGENT_SEC_FILE_BACKEND=lua-lsm` in the daemon environment. The default remains
-`agentsight`; other values reject startup. Existing deployments retain their saved
-route. Gateway credential delivery is unchanged. The current system unit needs an
-administrator-managed drop-in, validated on the target distribution:
+The packaged daemon rejects `AGENT_SEC_FILE_BACKEND=lua-lsm` at startup and has
+no native client to update or remove saved Lua-LSM deployments. Clean up those
+deployments with the test daemon before switching back to the packaged daemon.
+For an isolated Linux test, run `cargo build --locked -p asc-daemon --features lua-lsm-testing`
+from `src/agent-sec-core/v2`, then set `AGENT_SEC_FILE_BACKEND=lua-lsm` for that binary.
+AgentSight remains the default. When running the test binary under systemd, validate
+this drop-in on the target distribution.
 
 ```ini
 [Service]

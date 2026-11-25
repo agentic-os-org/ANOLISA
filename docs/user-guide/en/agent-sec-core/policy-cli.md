@@ -25,16 +25,17 @@ agent-sec-cli --socket "$SOCKET" policy list
 
 ## Lua-LSM file backend
 
-An administrator can select `AGENT_SEC_FILE_BACKEND=lua-lsm` for newly deployed
-file Bindings. Lua-LSM accepts only Cedar policies. The default remains `agentsight`; saved deployments keep their
-route. This backend requires a compatible Lua-LSM kernel and effective
+The packaged daemon rejects `AGENT_SEC_FILE_BACKEND=lua-lsm` at startup.
+Only a Linux daemon built with the `lua-lsm-testing` feature accepts this setting
+for new file Bindings. Lua-LSM accepts only Cedar policies. AgentSight remains
+the default. Saved deployments keep their route. This backend requires a compatible Lua-LSM kernel and effective
 `CAP_MAC_ADMIN` in the initial user
 namespace and writable securityfs. Native Translator/Client enforcement tests for the earlier inode-label template
 passed on Alibaba Cloud Linux 4. A later full
 daemon test on that host encountered a known Lua-LSM kernel crash during module
 removal. The Lua-LSM owner is backporting the fix. Verification of the backport
-and packaged systemd deployment is pending. Clean up Lua-LSM Scopes and confirm
-module removal before downgrading the daemon. See
+and systemd deployment is pending. Use the test daemon to clean up Lua-LSM Scopes
+and confirm module removal before switching back to the packaged daemon. See
 the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README.md).
 
 Lua-LSM matches the path used for each operation. A rule can cover files created after deployment. Existing hard links do not block deployment. Access through a hard-link name outside the protected paths is currently outside the guarantee.

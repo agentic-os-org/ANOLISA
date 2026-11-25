@@ -22,12 +22,13 @@ agent-sec-cli --socket "$SOCKET" policy list
 
 ## Lua-LSM 文件后端
 
-管理员可设置 `AGENT_SEC_FILE_BACKEND=lua-lsm`，为新部署的文件 Binding 选择后端。
+正式包中的 daemon 遇到 `AGENT_SEC_FILE_BACKEND=lua-lsm` 会拒绝启动。
+只有启用了 `lua-lsm-testing` feature 的 Linux 测试构建接受此设置，供新建文件 Binding 使用。
 Lua-LSM 只接受 Cedar 策略。默认仍为 `agentsight`，已有部署保留原 route。该后端需要兼容的 Lua-LSM 内核、
 初始 user namespace 中实际生效的 `CAP_MAC_ADMIN` 和可写的 securityfs，
 旧版 inode 标签模板的 Translator/Client 直连内核用例已在 Alibaba Cloud Linux 4 上通过。随后在同机执行的
 完整 daemon 测试在卸载模块时触发 Lua-LSM 已知内核问题。负责人正在回移修复，
-修复版本和安装包的 systemd 部署待验证。降级 daemon 前先清理 Lua-LSM Scope 并确认
+修复版本和 systemd 部署待验证。切回正式包前，先用测试 daemon 清理 Lua-LSM Scope 并确认
 模块已卸载。操作步骤见[后端说明](../../../../src/agent-sec-core/v2/crates/asc-lua-lsm/README_zh.md)。
 
 Lua-LSM 在每次操作时匹配路径，也能保护下发后才创建的文件。已有硬链接不影响下发；通过保护范围外的硬链接名称访问，暂时不在防护保证内。
