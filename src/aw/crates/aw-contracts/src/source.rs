@@ -524,7 +524,19 @@ impl CapabilityCell {
                     effects: self.effects.clone(),
                     failure_actions: self.failure_actions.clone(),
                 }
-                .validate_for_event(self.sources[0], &self.event)
+                // The per-kind Sight restriction inside validate_for_event
+                // must not depend on the order of `self.sources`: a mixed
+                // cell claims control authority through its non-Sight
+                // sources, so validate with a non-Sight kind when one is
+                // present and only fall back to Sight for a Sight-only cell.
+                .validate_for_event(
+                    self.sources
+                        .iter()
+                        .copied()
+                        .find(|&kind| kind != SourceKind::Sight)
+                        .unwrap_or(SourceKind::Sight),
+                    &self.event,
+                )
             }
         }
     }
