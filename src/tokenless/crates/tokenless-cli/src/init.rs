@@ -23,14 +23,16 @@
 //! `installed: false` still downgrades exit 0 to installable, so an
 //! availability-only probe is never read as a registered adapter.
 //!
-//! The tri-state exit code is only trusted when the adapter tree declares the
-//! contract, i.e. its manifest carries `"detectContract": "status-v1"`. A tree
-//! without it predates the contract, and such trees are reachable: npm preserves
-//! a shared adapter directory owned by another installation, and
-//! `ANOLISA_ADAPTER_DIR` accepts any directory. Its detectors may use exit 0 to
-//! mean "the host binary works" (`codex`) or "the host CLI is compatible"
-//! (`qoder`), so exit 0 is capped at installable there — a stale resource
-//! re-registers an adapter rather than claim one is already registered.
+//! An adapter tree that predates the contract is reachable — npm preserves a
+//! shared adapter directory owned by another installation, and
+//! `ANOLISA_ADAPTER_DIR` accepts any directory — so its manifest may lack the
+//! `"detectContract": "status-v1"` marker. Such a tree is *not* treated as
+//! uniformly unknown: most of its detectors already reported adapter state
+//! through the tri-state exit code, and discarding that would turn a verified
+//! `ready` into an offer to reinstall. Only the three whose detectors reported
+//! the host instead ([`PRE_CONTRACT_HOST_ONLY_DETECTORS`]) are refused, because
+//! nothing about their adapter state can be established and their installers
+//! exit successfully without registering anything.
 //!
 //! Every lifecycle script is Bash, so a host without it cannot report any
 //! status. A detector that cannot be launched is an error rather than an
@@ -57,10 +59,54 @@ const SYSTEM_DATA_ROOTS: [&str; 2] = ["/usr/share", "/usr/local/share"];
 
 /// Manifest marker for the detector contract documented in the module header.
 ///
-/// Only an exact match unlocks the tri-state exit code. An unknown value — a
-/// contract from a newer adapter tree — is treated as undeclared, so an older
-/// CLI stays pessimistic instead of guessing at semantics it does not know.
+/// Only an exact match declares the contract. An unknown value — a contract
+/// from a newer adapter tree — counts as undeclared, so an older CLI falls back
+/// to the frozen inventory below instead of guessing at semantics it lacks.
 const DETECT_CONTRACT: &str = "status-v1";
+
+/// Targets whose detectors predated [`DETECT_CONTRACT`] and reported the *host*
+/// rather than the adapter.
+///
+/// A frozen inventory: it cannot grow, because every adapter added from here on
+/// ships in a tree that declares the contract. It is consulted only for a tree
+/// that does not declare it, so a current tree is never second-guessed.
+///
+/// * `codex` probed the tokenless binary and exited 0 either way, so a working
+///   binary read as a registered adapter and its installer exits 0 after
+///   printing "skipping plugin registration" when no Codex CLI resolves.
+/// * `qoder` probed host-CLI capability: 0 = a compatible `qodercli`, 1 = none.
+/// * `qwenwork` returned 0 whether or not its plugin was sideloaded.
+///
+/// Every other pre-contract detector already used the tri-state exit code, so
+/// its semantics are known and stay in force.
+const PRE_CONTRACT_HOST_ONLY_DETECTORS: [&str; 3] = ["codex", "qoder", "qwenwork"];
+
+/// What an adapter tree establishes about one target's detector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectorContract {
+    /// The tree declares [`DETECT_CONTRACT`]: exit 0 means "registered".
+    Declared,
+    /// The tree predates it, but this detector already reported adapter state
+    /// through the tri-state exit code, so its answer is still readable.
+    LegacyTriState,
+    /// The tree predates it and this detector reported host availability, so its
+    /// answer says nothing about the adapter.
+    LegacyHostOnly,
+}
+
+impl DetectorContract {
+    /// The contract one target's detector runs under in one adapter tree.
+    fn for_target(tree_declares_contract: bool, name: &str) -> Self {
+        if tree_declares_contract {
+            return Self::Declared;
+        }
+        if PRE_CONTRACT_HOST_ONLY_DETECTORS.contains(&name) {
+            Self::LegacyHostOnly
+        } else {
+            Self::LegacyTriState
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -101,6 +147,10 @@ enum DetectStatus {
     /// The detector could not be launched, so nothing is known about the
     /// adapter. Reported as an error, not as a status a caller can act on.
     Unavailable,
+    /// The detector ran, but it belongs to an adapter tree that predates the
+    /// contract and only ever reported the host, so its answer cannot be
+    /// mapped to an adapter state. Never offered for installation.
+    Unverifiable,
 }
 
 impl DetectStatus {
@@ -111,6 +161,7 @@ impl DetectStatus {
             Self::MissingPrereqs => "missing prereqs",
             Self::NotChecked => "n/a",
             Self::Unavailable => "unavailable",
+            Self::Unverifiable => "unverified",
         }
     }
 
@@ -225,13 +276,12 @@ fn extract_hooks(cap: &Option<serde_json::Value>) -> Vec<String> {
 ///
 /// `Err` carries the launch failure: the interpreter every lifecycle script
 /// needs is unusable, which is a property of this command's host requirement
-/// and not a state of the adapter. `tri_state` says whether the adapter tree
-/// declares [`DETECT_CONTRACT`], i.e. whether exit 0 may be read as ready.
+/// and not a state of the adapter.
 fn run_detect(
     adapter_dir: &Path,
     name: &str,
     detect_script: &str,
-    tri_state: bool,
+    contract: DetectorContract,
 ) -> Result<DetectStatus, String> {
     let script = adapter_dir.join(detect_script);
     if !script.exists() {
@@ -247,7 +297,7 @@ fn run_detect(
         Ok(out) => Ok(interpret_detect(
             out.status.code(),
             &String::from_utf8_lossy(&out.stdout),
-            tri_state,
+            contract,
         )),
         Err(e) => Err(format!("{}: {}", script.display(), e)),
     }
@@ -255,36 +305,46 @@ fn run_detect(
 
 /// Map one detector run to the status of *its adapter*.
 ///
-/// Split out from `run_detect` so both detector contracts can be exercised
+/// Split out from `run_detect` so every detector contract can be exercised
 /// without spawning a script. `exit_code` is `None` when the detector was
-/// terminated by a signal, and `tri_state` is true only for an adapter tree
-/// that declares [`DETECT_CONTRACT`].
-fn interpret_detect(exit_code: Option<i32>, stdout: &str, tri_state: bool) -> DetectStatus {
+/// terminated by a signal.
+fn interpret_detect(
+    exit_code: Option<i32>,
+    stdout: &str,
+    contract: DetectorContract,
+) -> DetectStatus {
     let published = json_objects(stdout);
     // A detector that publishes its status is self-describing whatever the tree
-    // around it declares, so that answer is taken as-is.
+    // around it declares, so that answer is taken as-is. It also lets a
+    // partially refreshed tree work before its manifest is regenerated.
     let explicit = published
         .iter()
         .find_map(|object| object.get("status").and_then(DetectStatus::from_published));
     if let Some(status) = explicit {
         return status;
     }
+    // `installed` describes a prerequisite such as the tokenless binary, never
+    // a registered adapter, so `installed: false` cannot read as ready.
+    let uninstalled = published
+        .iter()
+        .any(|object| object.get("installed") == Some(&serde_json::Value::Bool(false)));
+
+    if contract == DetectorContract::LegacyHostOnly {
+        // This detector reported the host, so no exit code it returned says
+        // anything about the adapter: claiming ready would repeat the original
+        // false positive, and offering the installer would report success for a
+        // registration that never happened. The one assertion it does make is
+        // that a prerequisite is absent, so keep that.
+        return if exit_code == Some(0) && !uninstalled {
+            DetectStatus::Unverifiable
+        } else {
+            DetectStatus::MissingPrereqs
+        };
+    }
+
     match exit_code {
-        Some(0) => {
-            // Two reasons exit 0 may not mean "registered":
-            //   * legacy availability-only JSON, where `installed` describes a
-            //     prerequisite such as the tokenless binary;
-            //   * a tree that does not declare the contract, whose detectors
-            //     used exit 0 for host availability or host-CLI capability.
-            let uninstalled = published
-                .iter()
-                .any(|object| object.get("installed") == Some(&serde_json::Value::Bool(false)));
-            if uninstalled || !tri_state {
-                DetectStatus::Installable
-            } else {
-                DetectStatus::Ready
-            }
-        }
+        Some(0) if uninstalled => DetectStatus::Installable,
+        Some(0) => DetectStatus::Ready,
         Some(1) => DetectStatus::Installable,
         _ => DetectStatus::MissingPrereqs,
     }
@@ -366,7 +426,7 @@ fn collect_frameworks(
     adapter_dir: &Path,
     manifest: &Manifest,
 ) -> (Vec<FrameworkInfo>, Option<String>) {
-    let tri_state = manifest.declares_detect_contract();
+    let declared = manifest.declares_detect_contract();
     let mut launch_failure: Option<String> = None;
     let mut frameworks: Vec<FrameworkInfo> = manifest
         .targets
@@ -382,15 +442,18 @@ fn collect_frameworks(
                 };
             };
             let status = match &actions.detect {
-                Some(detect) => match run_detect(adapter_dir, name, detect, tri_state) {
-                    Ok(status) => status,
-                    Err(reason) => {
-                        if launch_failure.is_none() {
-                            launch_failure = Some(reason);
+                Some(detect) => {
+                    let contract = DetectorContract::for_target(declared, name);
+                    match run_detect(adapter_dir, name, detect, contract) {
+                        Ok(status) => status,
+                        Err(reason) => {
+                            if launch_failure.is_none() {
+                                launch_failure = Some(reason);
+                            }
+                            DetectStatus::Unavailable
                         }
-                        DetectStatus::Unavailable
                     }
-                },
+                }
                 None => DetectStatus::NotChecked,
             };
             FrameworkInfo {
@@ -428,7 +491,7 @@ fn interpreter_missing_error(reason: &str, windows: bool) -> String {
 }
 
 /// Print the status table, then flag what the caller cannot act on.
-fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path, contract: bool) {
+fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
     println!("\nTokenless Adapter Status\n");
     println!("{:<14} {:<16} Hooks", "Framework", "Status");
     println!("{:-<14} {:-<16} {:-<40}", "", "", "");
@@ -442,15 +505,26 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path, contract: bool
     }
     println!("\nAdapter directory: {}", adapter_dir.display());
 
-    // Statuses from a tree that does not declare the contract are capped at
-    // installable, which reads as "this adapter is broken" unless the reason is
-    // stated next to the table.
-    if !contract {
+    // A pre-contract tree can hold targets whose detectors reported the host
+    // rather than the adapter. Their state cannot be established and their
+    // installers exit successfully without registering anything, so say why
+    // they are not offered instead of leaving an unexplained row behind.
+    let unverified: Vec<&str> = frameworks
+        .iter()
+        .filter(|fw| fw.status == DetectStatus::Unverifiable)
+        .map(|fw| fw.name.as_str())
+        .collect();
+    if !unverified.is_empty() {
+        println!();
+        for name in &unverified {
+            println!(
+                "warning: {name} cannot be verified from these adapter resources, \
+                 so it is not offered for installation."
+            );
+        }
         println!(
-            "\nwarning: the adapter resources at {} predate the detector status contract, \
-             so no framework is reported ready. Reinstall tokenless to refresh them, or point \
-             ANOLISA_ADAPTER_DIR at a current adapter directory.",
-            adapter_dir.display()
+            "         {}",
+            incompatible_resources_error(&unverified.join(", "), adapter_dir)
         );
     }
 
@@ -470,6 +544,23 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path, contract: bool
             );
         }
     }
+}
+
+/// Explain why targets from an adapter tree that predates the detector contract
+/// are neither reported ready nor offered for installation.
+///
+/// `names` may be one target or the whole affected list: the table footnote
+/// explains every unavailable target at once, while a named operation reports
+/// just the target the caller asked for.
+fn incompatible_resources_error(names: &str, adapter_dir: &Path) -> String {
+    format!(
+        "{names} cannot be installed from the adapter resources at {dir}: they predate the \
+         detector status contract, so those detectors report the host rather than the adapter \
+         and their installers exit successfully without registering anything. Reinstall \
+         tokenless to refresh them, or point ANOLISA_ADAPTER_DIR at a current adapter \
+         directory.",
+        dir = adapter_dir.display()
+    )
 }
 
 /// Run one named `--framework` operation and end with its result.
@@ -495,6 +586,7 @@ fn run_named(
                 Err((format!("{} adapter installation failed: {}", fw.name, e), 1))
             }
         },
+        DetectStatus::Unverifiable => Err((incompatible_resources_error(&fw.name, adapter_dir), 1)),
         other => Err((
             format!("{} is not installable (status: {})", fw.name, other.label()),
             1,
@@ -533,11 +625,7 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
     let manifest = load_manifest(&adapter_dir).map_err(|e| (e, 1))?;
 
     let (frameworks, launch_failure) = collect_frameworks(&adapter_dir, &manifest);
-    print_status(
-        &frameworks,
-        &adapter_dir,
-        manifest.declares_detect_contract(),
-    );
+    print_status(&frameworks, &adapter_dir);
 
     // The table above is printed first so the user sees which targets could not
     // be probed, then the run stops: acting on statuses that were never
@@ -632,13 +720,19 @@ mod tests {
 
     /// `interpret_detect` for a tree that declares the detector contract.
     fn declared(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
-        interpret_detect(exit_code, stdout, true)
+        interpret_detect(exit_code, stdout, DetectorContract::Declared)
     }
 
-    /// `interpret_detect` for a tree that predates it, e.g. an adapter
-    /// directory another installation left behind.
-    fn undeclared(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
-        interpret_detect(exit_code, stdout, false)
+    /// `interpret_detect` for a pre-contract target whose detector already
+    /// reported adapter state through the tri-state exit code.
+    fn legacy_tri_state(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+        interpret_detect(exit_code, stdout, DetectorContract::LegacyTriState)
+    }
+
+    /// `interpret_detect` for a pre-contract target whose detector reported the
+    /// host rather than the adapter.
+    fn legacy_host_only(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+        interpret_detect(exit_code, stdout, DetectorContract::LegacyHostOnly)
     }
 
     #[test]
@@ -737,34 +831,87 @@ mod tests {
     }
 
     #[test]
-    fn undeclared_tree_never_reads_exit_zero_as_ready() {
-        // The shapes the previous adapter tree shipped: codex probed the
-        // tokenless binary, qoder probed host-CLI capability, and both exited 0.
+    fn pre_contract_tri_state_detector_keeps_its_verified_readiness() {
+        // Discarding the tri-state contract for a whole tree would turn an
+        // already registered OpenCode plugin into an offer to reinstall it.
         assert_eq!(
-            undeclared(Some(0), r#"{"installed": true, "version": "9.9.9"}"#),
-            DetectStatus::Installable
+            legacy_tri_state(Some(0), "[tokenless] opencode: ready (1.2.3)\n"),
+            DetectStatus::Ready
         );
-        assert_eq!(
-            undeclared(Some(0), "[tokenless] qoder: detected compatible qodercli\n"),
-            DetectStatus::Installable
-        );
-        assert_eq!(undeclared(Some(0), ""), DetectStatus::Installable);
-        // The pessimism stops at readiness: the other states stay readable.
-        assert_eq!(undeclared(Some(1), ""), DetectStatus::Installable);
-        assert_eq!(undeclared(Some(2), ""), DetectStatus::MissingPrereqs);
-        assert_eq!(undeclared(None, ""), DetectStatus::MissingPrereqs);
+        assert_eq!(legacy_tri_state(Some(1), ""), DetectStatus::Installable);
+        assert_eq!(legacy_tri_state(Some(2), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(legacy_tri_state(None, ""), DetectStatus::MissingPrereqs);
     }
 
     #[test]
-    fn published_status_survives_an_undeclared_tree() {
+    fn pre_contract_host_only_detector_establishes_nothing() {
+        // The shapes the previous adapter tree shipped: codex probed the
+        // tokenless binary, qoder probed host-CLI capability, qwenwork returned
+        // 0 either way — and all three exited 0.
         assert_eq!(
-            undeclared(Some(0), r#"{"status":"ready"}"#),
+            legacy_host_only(Some(0), r#"{"installed": true, "version": "9.9.9"}"#),
+            DetectStatus::Unverifiable
+        );
+        assert_eq!(
+            legacy_host_only(Some(0), "[tokenless] qoder: detected compatible qodercli\n"),
+            DetectStatus::Unverifiable
+        );
+        assert_eq!(legacy_host_only(Some(0), ""), DetectStatus::Unverifiable);
+    }
+
+    #[test]
+    fn pre_contract_host_only_detector_keeps_its_negative_answers() {
+        // A failed probe or an absent prerequisite is still information.
+        assert_eq!(
+            legacy_host_only(Some(0), r#"{"installed": false}"#),
+            DetectStatus::MissingPrereqs
+        );
+        assert_eq!(legacy_host_only(Some(1), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(legacy_host_only(Some(2), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(legacy_host_only(None, ""), DetectStatus::MissingPrereqs);
+    }
+
+    #[test]
+    fn published_status_survives_a_pre_contract_tree() {
+        assert_eq!(
+            legacy_host_only(Some(0), r#"{"status":"ready"}"#),
             DetectStatus::Ready
         );
         assert_eq!(
-            undeclared(Some(0), r#"{"status":"missing_prereqs"}"#),
+            legacy_tri_state(Some(0), r#"{"status":"missing_prereqs"}"#),
             DetectStatus::MissingPrereqs
         );
+    }
+
+    #[test]
+    fn the_host_only_inventory_is_frozen_and_only_for_pre_contract_trees() {
+        for name in ["codex", "qoder", "qwenwork"] {
+            assert_eq!(
+                DetectorContract::for_target(false, name),
+                DetectorContract::LegacyHostOnly,
+                "{name}"
+            );
+            // A declaring tree is never second-guessed.
+            assert_eq!(
+                DetectorContract::for_target(true, name),
+                DetectorContract::Declared,
+                "{name}"
+            );
+        }
+        for name in [
+            "opencode",
+            "openclaw",
+            "hermes",
+            "claude-code",
+            "qwencode",
+            "qwenpaw",
+        ] {
+            assert_eq!(
+                DetectorContract::for_target(false, name),
+                DetectorContract::LegacyTriState,
+                "{name}"
+            );
+        }
     }
 
     #[test]

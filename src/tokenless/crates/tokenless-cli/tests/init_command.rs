@@ -153,6 +153,14 @@ impl Fixture {
         command
     }
 
+    /// A directory for host CLI stubs, off the fixture PATH until a test asks
+    /// for it through the environment.
+    fn stub_bin(&self) -> PathBuf {
+        let dir = self._root.path().join("stub-bin");
+        fs::create_dir_all(&dir).expect("create stub bin");
+        dir
+    }
+
     /// A directory holding nothing, for runs that must not find an interpreter.
     fn empty_bin(&self) -> PathBuf {
         let dir = self._root.path().join("empty-bin");
@@ -751,34 +759,166 @@ fn missing_adapter_directory_explains_the_override() {
 // P1-02 (round 2) — a newer CLI meeting older adapter resources
 // ---------------------------------------------------------------------------
 
-/// Detector bodies the previous adapter tree shipped: Codex probed the tokenless
-/// binary and Qoder probed host-CLI capability, and both exited 0 without ever
-/// asking the host whether the adapter was registered.
-const LEGACY_CODEX_DETECT: &str = "#!/usr/bin/env bash\necho '{\"installed\": true, \"version\": \"9.9.9\", \"path\": \"/usr/bin/tokenless\"}'\nexit 0\n";
-const LEGACY_QODER_DETECT: &str =
+/// Detector bodies the pre-contract adapter tree shipped. Codex probed the
+/// tokenless binary and Qoder probed host-CLI capability; both exited 0 without
+/// ever asking the host whether the adapter was registered.
+const PRE_CONTRACT_CODEX_DETECT: &str = "#!/usr/bin/env bash\necho '{\"installed\": true, \"version\": \"9.9.9\", \"path\": \"/usr/bin/tokenless\"}'\nexit 0\n";
+const PRE_CONTRACT_QODER_DETECT: &str =
     "#!/usr/bin/env bash\necho '[tokenless] qoder: detected compatible qodercli'\nexit 0\n";
 
 #[test]
-fn undeclared_adapter_tree_never_reports_ready() {
+fn pre_contract_tree_refuses_targets_whose_detector_only_probed_the_host() {
     let fixture = Fixture::legacy(&[
-        Target::new("legacycodex", LEGACY_CODEX_DETECT),
-        Target::new("legacyqoder", LEGACY_QODER_DETECT),
+        Target::new("codex", PRE_CONTRACT_CODEX_DETECT),
+        Target::new("qoder", PRE_CONTRACT_QODER_DETECT),
     ]);
 
     let list = run(&fixture, &["init", "--list"]);
     list.assert_code(0);
-    assert_eq!(status_of(&list.stdout, "legacycodex"), "installable");
-    assert_eq!(status_of(&list.stdout, "legacyqoder"), "installable");
+    assert_eq!(status_of(&list.stdout, "codex"), "unverified");
+    assert_eq!(status_of(&list.stdout, "qoder"), "unverified");
     assert!(
         list.stdout.contains("predate the detector status contract"),
-        "the stale tree was not explained:\n{}",
+        "the stale resources were not explained:\n{}",
         list.stdout
     );
 
-    // The named install has to reach the host rather than claim it is done.
-    let named = run(&fixture, &["init", "--framework", "legacycodex"]);
+    // The named command has to fail *before* invoking an installer whose exit 0
+    // would not mean the adapter was registered.
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("cannot be installed from the adapter resources"),
+        "unexpected reason:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a registration that never happened was reported as success:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "an installer ran: {:?}",
+        fixture.installed()
+    );
+
+    // Batch mode skips them, which is what the current tree does for a target
+    // whose prerequisites are missing.
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        batch
+            .stdout
+            .contains("No frameworks are waiting for installation.")
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn pre_contract_codex_with_an_unusable_host_pin_never_reports_success() {
+    // The reported repro: a pre-contract tree plus CODEX_BIN pointing at a file
+    // that does not exist. The old detector only checked the tokenless binary,
+    // so it exited 0, the installer printed "skipping plugin registration" and
+    // the CLI reported a successful install that registered nothing.
+    let fixture = Fixture::legacy(&[Target::new("codex", PRE_CONTRACT_CODEX_DETECT)]);
+    let unusable_pin = fixture.stub_bin().join("absent-codex");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "codex"])
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "the named command reported success:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command ran the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert!(
+        !batch.combined().contains("installed successfully"),
+        "batch mode reported success:\n{}",
+        batch.combined()
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+/// The shipped OpenCode detector already used the tri-state contract before the
+/// manifest marker existed, so a pre-contract tree must keep trusting it.
+#[test]
+#[cfg(unix)]
+fn pre_contract_tree_keeps_a_verified_opencode_registration_ready() {
+    let fixture = Fixture::legacy(&[Target::new("opencode", DETECT_INSTALLABLE)]);
+    // Replace the stub with the shipped detector and give it what it probes: a
+    // plugin source, a host CLI that reports a version, and the symlink that
+    // registers the plugin.
+    fs::copy(
+        bundled_adapters().join("opencode/scripts/detect.sh"),
+        fixture.adapter_dir.join("opencode/scripts/detect.sh"),
+    )
+    .expect("copy shipped detector");
+    let plugin = fixture.adapter_dir.join("opencode/plugin.js");
+    fs::write(&plugin, "// tokenless opencode plugin\n").expect("write plugin source");
+
+    let host = fixture.stub_bin().join("opencode");
+    write_script(&host, "#!/bin/sh\necho '1.2.3'\n");
+    let config = fixture._root.path().join("opencode-config");
+    fs::create_dir_all(config.join("plugins")).expect("create opencode config");
+    std::os::unix::fs::symlink(&plugin, config.join("plugins/tokenless.js"))
+        .expect("register the plugin");
+
+    let mut list = fixture.command();
+    list.args(["init", "--list"])
+        .env("OPENCODE_BIN", &host)
+        .env("TOKENLESS_OPENCODE_CONFIG_DIR", &config);
+    let list = finish(list.output().expect("run tokenless init"));
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "opencode"), "ready");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "a readable pre-contract detector was reported as stale:\n{}",
+        list.stdout
+    );
+
+    let mut named = fixture.command();
+    named
+        .args(["init", "--framework", "opencode"])
+        .env("OPENCODE_BIN", &host)
+        .env("TOKENLESS_OPENCODE_CONFIG_DIR", &config);
+    let named = finish(named.output().expect("run tokenless init"));
     named.assert_code(0);
-    assert_eq!(fixture.installed(), vec!["legacycodex".to_string()]);
+    assert!(
+        named
+            .stdout
+            .contains("opencode is already installed and ready."),
+        "a verified registration was not reported ready:\n{}",
+        named.stdout
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "a ready adapter was reinstalled: {:?}",
+        fixture.installed()
+    );
 }
 
 #[test]
@@ -786,21 +926,21 @@ fn the_contract_marker_is_what_unlocks_exit_zero_as_ready() {
     // Identical detectors and identical exit codes: only the manifest marker
     // differs, so this pins the marker as the thing that decides.
     let fixture = Fixture::new(&[
-        Target::new("legacycodex", LEGACY_CODEX_DETECT),
-        Target::new("legacyqoder", LEGACY_QODER_DETECT),
+        Target::new("probejson", PRE_CONTRACT_CODEX_DETECT),
+        Target::new("probetext", PRE_CONTRACT_QODER_DETECT),
     ]);
 
     let list = run(&fixture, &["init", "--list"]);
     list.assert_code(0);
-    assert_eq!(status_of(&list.stdout, "legacycodex"), "ready");
-    assert_eq!(status_of(&list.stdout, "legacyqoder"), "ready");
+    assert_eq!(status_of(&list.stdout, "probejson"), "ready");
+    assert_eq!(status_of(&list.stdout, "probetext"), "ready");
     assert!(
         !list.stdout.contains("predate the detector status contract"),
         "a declaring tree was reported as stale:\n{}",
         list.stdout
     );
 
-    let named = run(&fixture, &["init", "--framework", "legacycodex"]);
+    let named = run(&fixture, &["init", "--framework", "probejson"]);
     named.assert_code(0);
     assert!(
         fixture.installed().is_empty(),
@@ -810,17 +950,21 @@ fn the_contract_marker_is_what_unlocks_exit_zero_as_ready() {
 }
 
 #[test]
-fn a_legacy_tree_still_honours_a_published_status() {
-    // A detector that describes itself is trusted whatever the tree declares,
-    // so a partially refreshed tree is not forced back to installable.
-    let fixture = Fixture::legacy(&[Target::new(
-        "one",
-        "#!/usr/bin/env bash\necho '{\"status\": \"ready\"}'\nexit 0\n",
-    )]);
+fn a_pre_contract_tree_still_honours_a_published_status() {
+    // A detector that describes itself is trusted whatever the tree declares, so
+    // a partially refreshed tree — new scripts, manifest not yet regenerated —
+    // is neither forced back to installable nor refused.
+    let publishing = "#!/usr/bin/env bash\necho '{\"status\": \"ready\"}'\nexit 0\n";
+    let fixture = Fixture::legacy(&[
+        Target::new("one", publishing),
+        Target::new("codex", publishing),
+    ]);
 
     let list = run(&fixture, &["init", "--list"]);
     list.assert_code(0);
     assert_eq!(status_of(&list.stdout, "one"), "ready");
+    assert_eq!(status_of(&list.stdout, "codex"), "ready");
+    assert!(!list.stdout.contains("predate the detector status contract"));
 }
 
 // ---------------------------------------------------------------------------
