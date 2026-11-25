@@ -54,3 +54,17 @@ pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};
 pub(super) fn clamp_cutoff_ns(cutoff_ns: u64) -> i64 {
     cutoff_ns.min(i64::MAX as u64) as i64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_cutoff_ns;
+
+    #[test]
+    fn clamp_cutoff_ns_preserves_representable_and_clamps_overflow() {
+        assert_eq!(clamp_cutoff_ns(0), 0);
+        assert_eq!(clamp_cutoff_ns(1_000_000), 1_000_000);
+        assert_eq!(clamp_cutoff_ns(i64::MAX as u64), i64::MAX);
+        assert_eq!(clamp_cutoff_ns((i64::MAX as u64) + 1), i64::MAX);
+        assert_eq!(clamp_cutoff_ns(u64::MAX), i64::MAX);
+    }
+}
