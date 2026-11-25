@@ -624,7 +624,7 @@ fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() 
     };
     binding.policy.deployment = selection(DeploymentBackend::ActPlane, &["policy1"]);
     assert!(!binding.policy.uses_credentials());
-    let plans = target_plans(&binding).unwrap();
+    let plans = target_plans(&binding, FilePolicyBackend::AgentSight).unwrap();
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].0, "agentsight");
     let file: asc_policy_translator_agentsight::AgentSightBindingPlan =
@@ -633,7 +633,7 @@ fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() 
     assert_eq!(protection, fixture()["expectedFileProtection"]);
 
     binding.policy.deployment = selection(DeploymentBackend::Gateway, &["policy0"]);
-    let plans = target_plans(&binding).unwrap();
+    let plans = target_plans(&binding, FilePolicyBackend::AgentSight).unwrap();
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].0, "gateway");
     let network: asc_gateway_plan::GatewayBindingPlan =
@@ -644,5 +644,5 @@ fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() 
     );
 
     binding.policy.deployment = selection(DeploymentBackend::Gateway, &["policy0", "policy2"]);
-    assert!(target_plans(&binding).is_err());
+    assert!(target_plans(&binding, FilePolicyBackend::AgentSight).is_err());
 }
