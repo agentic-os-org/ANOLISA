@@ -182,6 +182,61 @@ class TestDangerousPatterns:
             ("rm -fr /tmp/data", "递归/强制删除"),
             ("rm --recursive --force build/", "递归/强制删除"),
             ("rm -r -f old_dir", "递归/强制删除"),
+            ("rm -R old_dir", "递归/强制删除"),
+            ("rm -r old_dir", "递归/强制删除"),
+            ("rm -f old_file", "递归/强制删除"),
+            ("rm -ivf old_file", "递归/强制删除"),
+            ("rm --recursive build/", "递归/强制删除"),
+            ("rm --force build/", "递归/强制删除"),
+            ("rm build/ -rf", "递归/强制删除"),
+            ("rm -rf -- foo-bar.txt", "递归/强制删除"),
+            ("/bin/rm -rf /tmp/data", "递归/强制删除"),
+            ("/usr/bin/rm -f /tmp/data", "递归/强制删除"),
+            ("\\rm -rf /tmp/data", "递归/强制删除"),
+            ('rm "-rf" /tmp/data', "递归/强制删除"),
+            ('rm -r""f /tmp/data', "递归/强制删除"),
+            ("rm -rf>/dev/null /tmp/data", "递归/强制删除"),
+            ("echo ok && rm -rf /tmp/data", "递归/强制删除"),
+            ("echo ok; rm -f /tmp/data", "递归/强制删除"),
+            ("ls | rm -rf /tmp/data", "递归/强制删除"),
+            ("rm foo-bar.txt\nrm -rf /tmp/data", "递归/强制删除"),
+            ("cd /tmp && sudo -n rm -rf build", "递归/强制删除"),
+            ("LC_ALL=C rm -rf /tmp/data", "递归/强制删除"),
+            ("env FOO=1 rm -rf /tmp/data", "递归/强制删除"),
+            ("command rm -rf /tmp/data", "递归/强制删除"),
+            ("echo a | xargs -I {} rm -rf {}", "递归/强制删除"),
+            ("find . -name '*.tmp' -exec rm -rf {} +", "递归/强制删除"),
+            ('bash -c "rm -rf /tmp/data"', "递归/强制删除"),
+            ("echo $(rm -rf /tmp/data)", "递归/强制删除"),
+            ('echo "$(rm -rf /tmp/data)"', "递归/强制删除"),
+            ("echo `rm -rf /tmp/data`", "递归/强制删除"),
+            ('rm -rf "unterminated quote', "递归/强制删除"),
+            ("rm file#1 -rf /tmp/data", "递归/强制删除"),
+            ('rm ";" -rf /tmp/data', "递归/强制删除"),
+            ('rm "&&" -rf /tmp/data', "递归/强制删除"),
+            ("2>/dev/null rm -rf /tmp/data", "递归/强制删除"),
+            ("1>/dev/null 2>&1 rm -rf /tmp/data", "递归/强制删除"),
+            ("&>/dev/null rm -rf /tmp/data", "递归/强制删除"),
+            ("if rm -rf /tmp/data; then echo ok; fi", "递归/强制删除"),
+            ("while rm -rf /tmp/data; do break; done", "递归/强制删除"),
+            ("until rm -rf /tmp/data; do break; done", "递归/强制删除"),
+            ("eval rm -rf /tmp/data", "递归/强制删除"),
+            ('eval "rm -rf /tmp/data"', "递归/强制删除"),
+            ("time -p rm -rf /tmp/data", "递归/强制删除"),
+            ('bash -c -- "rm -rf /tmp/data"', "递归/强制删除"),
+            ('bash -o pipefail -c "rm -rf /tmp/data"', "递归/强制删除"),
+            ('bash -O extglob -c "rm -rf /tmp/data"', "递归/强制删除"),
+            ("su -c 'rm -rf /tmp/data'", "递归/强制删除"),
+            ("su - root --command='rm -rf /tmp/data'", "递归/强制删除"),
+            ("echo a | xargs -i rm -rf {}", "递归/强制删除"),
+            ("echo a | xargs -l rm -rf", "递归/强制删除"),
+            ("echo a | xargs -e rm -rf", "递归/强制删除"),
+            ('env -S "rm -rf /tmp/data"', "递归/强制删除"),
+            ("env --unset FOO rm -rf /tmp/data", "递归/强制删除"),
+            ("env --chdir /tmp rm -rf .", "递归/强制删除"),
+            ("sudo --user root rm -rf /tmp/data", "递归/强制删除"),
+            ("busybox rm -rf /tmp/data", "递归/强制删除"),
+            ("rm \\\n-rf /tmp/data", "递归/强制删除"),
             ("chmod 777 /etc/shadow", "修改系统路径权限"),
             ("chmod 0644 /usr/bin/test", "修改系统路径权限"),
             ("chown root:root file.txt", "修改文件所有者"),
@@ -205,6 +260,30 @@ class TestDangerousPatterns:
         [
             "rm file.txt",  # 单文件删除不触发
             "rm -i important.log",  # 交互式删除不触发
+            "rm -v foo-bar.txt",  # 非危险选项 + 连字符文件名不触发
+            "rm -d empty-dir-rf",  # -d 仅删空目录 + 连字符目录名不触发
+            "rm foo-bar.txt",  # 连字符文件名不触发 (#4895)
+            "rm notes-form.txt",  # 连字符文件名不触发 (#4895)
+            "rm draft-final.md",  # 连字符文件名不触发 (#4895)
+            "rm my-file-rf.log",  # 文件名包含 -rf 不触发 (#4895)
+            "rm -- -rf",  # `--` 结束选项解析，-rf 为文件名 (#4895)
+            "rm -- --recursive",  # `--` 后的 --recursive 为文件名
+            "rm -- --force",  # `--` 后的 --force 为文件名
+            "rm -i -- -rf",  # 安全选项 + `--` + -rf 文件名
+            "rm ./-rf",  # 相对路径前缀删除 -rf 文件
+            'rm "file with -rf in name.txt"',  # 带空格和 -rf 的引号文件名
+            "rm foo-bar.txt && grep -r pattern .",  # 后续命令的 -r 不串扰 rm
+            "rm foo.txt > -rf",  # 重定向目标不误判为 rm 标志
+            'bash -c "rm foo-bar.txt"',  # 子 shell 内良性 rm 不触发
+            "find . -name 'a-r.txt' -exec rm {} +",  # find -exec 良性 rm 不触发
+            "echo a | xargs -I {} rm {}",  # xargs 良性 rm 不触发
+            'eval "rm foo-bar.txt"',  # eval 内良性 rm 不触发
+            "su -c 'rm foo-bar.txt'",  # su -c 内良性 rm 不触发
+            'env -S "rm foo-bar.txt"',  # env -S 内良性 rm 不触发
+            "busybox rm foo-bar.txt",  # busybox 良性 rm 不触发
+            "2>/dev/null rm foo-bar.txt",  # 前导重定向 + 良性 rm 不触发
+            'rm foo-bar.txt "unterminated',  # 非法引号但无危险标志不误报
+            "",  # 空命令不触发
             "chmod 644 ./local_file",  # 相对路径不触发
             "cp a.txt b.txt",  # 不涉及系统目录
             "mv old.py new.py",  # 本地重命名
@@ -282,6 +361,8 @@ class TestStripSudo:
             ("sudo -n yum install nginx", "yum install nginx", True),
             ("sudo -u root systemctl restart nginx", "systemctl restart nginx", True),
             ("sudo -E -n pip install flask", "pip install flask", True),
+            ("sudo --user root rm -rf /tmp/x", "rm -rf /tmp/x", True),
+            ("sudo --user=root rm -rf /tmp/x", "rm -rf /tmp/x", True),
             ("sudo -- ls /root", "ls /root", True),
             # 不剥离的情况
             ("ls -la", "ls -la", False),
@@ -376,6 +457,19 @@ class TestMainDecision:
 
     def test_safe_command_allowed(self, monkeypatch):
         result = self._run_main("ls -la", monkeypatch)
+        assert result["decision"] == "allow"
+        assert "hookSpecificOutput" not in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm foo-bar.txt",
+            "rm my-file-rf.log",
+            "rm -- -rf",
+        ],
+    )
+    def test_benign_hyphenated_rm_allowed_without_sandbox(self, command, monkeypatch):
+        result = self._run_main(command, monkeypatch)
         assert result["decision"] == "allow"
         assert "hookSpecificOutput" not in result
 

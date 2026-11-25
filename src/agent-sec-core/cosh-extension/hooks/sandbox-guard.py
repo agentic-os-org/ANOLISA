@@ -15,9 +15,11 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from sandbox_authorization import (
@@ -123,11 +125,440 @@ BLOCK_PATTERNS = [
     (r":\(\)\s*\{", "fork bomb"),
 ]
 
+_SHELL_SEPARATOR_CHARS = frozenset(";&|()\n`")
+_SHELL_REDIRECT_CHARS = frozenset("<>")
+_SHELL_LEADING_KEYWORDS = frozenset(
+    {
+        "{",
+        "}",
+        "!",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "while",
+        "until",
+        "do",
+        "nohup",
+        "exec",
+        "builtin",
+    }
+)
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_FALLBACK_SPLIT_RE = re.compile(r"(?:&&|\|\||\|&|[;&|()\n`])")
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+_SUDO_ARG_OPTS = frozenset(
+    {
+        "-u",
+        "-U",
+        "-g",
+        "-c",
+        "-C",
+        "-T",
+        "-t",
+        "-h",
+        "-p",
+        "-r",
+        "--user",
+        "--group",
+        "--host",
+        "--prompt",
+        "--chroot",
+        "--chdir",
+    }
+)
+_SU_ARG_OPTS = frozenset({"-s", "--shell", "-g", "--group", "-G", "--supp-group"})
+_ENV_ARG_OPTS = frozenset({"-u", "-C", "--unset", "--chdir"})
+_IONICE_ARG_OPTS = frozenset({"-c", "-n", "-p", "-P", "-u"})
+_TIMEOUT_ARG_OPTS = frozenset({"-s", "-k", "--signal", "--kill-after"})
+_XARGS_ARG_OPTS = frozenset(
+    {
+        "-a",
+        "-d",
+        "-E",
+        "-I",
+        "-L",
+        "-n",
+        "-P",
+        "-s",
+        "--arg-file",
+        "--delimiter",
+        "--max-lines",
+        "--max-args",
+        "--max-procs",
+        "--max-chars",
+    }
+)
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_SHELL_INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_MAX_RM_PARSE_DEPTH = 8
+
+
+def _is_redirect_token(token: str) -> bool:
+    """判断 token 是否为 shell 重定向操作符（如 >, >>, >&, &>, <）。"""
+    return (
+        bool(token)
+        and any(ch in _SHELL_REDIRECT_CHARS for ch in token)
+        and all(ch in "<>&|" for ch in token)
+    )
+
+
+def _rm_args_have_dangerous_flag(args: list[str]) -> bool:
+    """判断 rm 参数列表中是否包含递归/强制删除选项（遵循 `--` 结束选项解析规则）。"""
+    skip_redirect_target = False
+    for arg in args:
+        if skip_redirect_target:
+            skip_redirect_target = False
+            continue
+        if _is_redirect_token(arg):
+            skip_redirect_target = True
+            continue
+        if arg == "--":
+            return False
+        if arg in ("--recursive", "--force"):
+            return True
+        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            flags = arg[1:]
+            if flags.isalpha() and any(flag in "rRf" for flag in flags):
+                return True
+    return False
+
+
+def _extract_command_substitutions(text: str) -> list[str]:
+    """提取 token 内部的 $(...) 与 `...` 命令替换片段。"""
+    subs: list[str] = []
+    idx = 0
+    length = len(text)
+    while idx < length:
+        pos = text.find("$(", idx)
+        if pos == -1:
+            break
+        depth = 1
+        cur = pos + 2
+        while cur < length and depth > 0:
+            if text[cur] == "(":
+                depth += 1
+            elif text[cur] == ")":
+                depth -= 1
+            cur += 1
+        if depth == 0:
+            inner = text[pos + 2 : cur - 1].strip()
+            if inner:
+                subs.append(inner)
+            idx = cur
+        else:
+            # 未闭合的 $(... 按保守策略检查剩余片段
+            inner = text[pos + 2 :].strip()
+            if inner:
+                subs.append(inner)
+            break
+    for match in _BACKTICK_RE.finditer(text):
+        inner = match.group(1).strip()
+        if inner:
+            subs.append(inner)
+    return subs
+
+
+def _split_unquoted_segments(command: str) -> list[str]:
+    """按未引用的 shell 控制分隔符拆分命令，保留引号内与反斜杠转义字符的字面含义。"""
+    segments: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+    idx = 0
+    length = len(command)
+
+    while idx < length:
+        ch = command[idx]
+        if escaped:
+            if ch == "\n":
+                # POSIX 行续接（\<newline>）：非单引号状态下直接删除续行符
+                if buf and buf[-1] == "\\":
+                    buf.pop()
+            else:
+                buf.append(ch)
+            escaped = False
+            idx += 1
+            continue
+        if in_single:
+            buf.append(ch)
+            if ch == "'":
+                in_single = False
+            idx += 1
+            continue
+        if in_double:
+            buf.append(ch)
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            idx += 1
+            continue
+
+        if ch == "\\":
+            buf.append(ch)
+            escaped = True
+            idx += 1
+            continue
+        if ch == "'":
+            buf.append(ch)
+            in_single = True
+            idx += 1
+            continue
+        if ch == '"':
+            buf.append(ch)
+            in_double = True
+            idx += 1
+            continue
+
+        # 保留重定向组合 >&, <&, &>, &>> 属于同一子命令，不作命令切分
+        if ch == "&" and idx + 1 < length and command[idx + 1] == ">":
+            buf.append("&>")
+            idx += 2
+            continue
+        if ch in "<>" and idx + 1 < length and command[idx + 1] == "&":
+            buf.append(ch + "&")
+            idx += 2
+            continue
+
+        if ch in _SHELL_SEPARATOR_CHARS:
+            seg = "".join(buf).strip()
+            if seg:
+                segments.append(seg)
+            buf = []
+            idx += 1
+            continue
+
+        buf.append(ch)
+        idx += 1
+
+    seg = "".join(buf).strip()
+    if seg:
+        segments.append(seg)
+    return segments
+
+
+def _tokenize_shell_segments(command: str) -> list[list[str]]:
+    """按 shell 操作符拆分命令为独立子命令 token 列表；引号异常时降级保守拆分。"""
+    segments: list[list[str]] = []
+    for raw_segment in _split_unquoted_segments(command):
+        try:
+            lexer = shlex.shlex(raw_segment, posix=True, punctuation_chars="<>")
+            lexer.whitespace = " \t\r\n"
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            parts = list(lexer)
+        except ValueError:
+            parts = [
+                part.strip("\"'")
+                for part in _FALLBACK_SPLIT_RE.sub(" ", raw_segment).split()
+                if part.strip("\"'")
+            ]
+        if parts:
+            segments.append(parts)
+    return segments
+
+
+def _skip_wrapper_options(
+    tokens: list[str],
+    start: int,
+    arg_opts: frozenset[str],
+    skip_env_assign: bool = False,
+) -> int:
+    """跳过命令包装器自身的选项及带参选项值，返回被包装命令的起始下标。"""
+    idx = start
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok == "--":
+            idx += 1
+            break
+        if skip_env_assign and _ENV_ASSIGN_RE.match(tok):
+            idx += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            idx += 2 if tok in arg_opts else 1
+            continue
+        break
+    return idx
+
+
+def _segment_has_dangerous_rm(tokens: list[str], depth: int) -> bool:
+    """分析单个子命令 token 列表，识别直接或经常见包装器调用的危险 rm。"""
+    if not tokens or depth > _MAX_RM_PARSE_DEPTH:
+        return False
+
+    # 先递归检查 token 内部嵌套的 $(...) / `...` 命令替换
+    for tok in tokens:
+        if "$(" in tok or "`" in tok:
+            for sub_cmd in _extract_command_substitutions(tok):
+                if _is_dangerous_rm_command(sub_cmd, _depth=depth + 1):
+                    return True
+
+    idx = 0
+    while idx < len(tokens):
+        # 跳过前置 shell 关键字、环境变量赋值及前导重定向（含 2>/dev/null、&>/dev/null）
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in _SHELL_LEADING_KEYWORDS or _ENV_ASSIGN_RE.match(tok):
+                idx += 1
+                continue
+            if (
+                (tok.isdigit() or tok == "&")
+                and idx + 1 < len(tokens)
+                and _is_redirect_token(tokens[idx + 1])
+            ):
+                idx += 3
+                continue
+            if _is_redirect_token(tok):
+                idx += 2
+                continue
+            break
+
+        if idx >= len(tokens):
+            return False
+
+        cmd = tokens[idx].rsplit("/", 1)[-1]
+        if cmd == "rm":
+            return _rm_args_have_dangerous_flag(tokens[idx + 1 :])
+
+        if cmd == "sudo":
+            idx = _skip_wrapper_options(tokens, idx + 1, _SUDO_ARG_OPTS)
+            continue
+        if cmd == "time":
+            idx = _skip_wrapper_options(tokens, idx + 1, frozenset())
+            continue
+        if cmd == "busybox":
+            idx += 1
+            continue
+        if cmd == "eval":
+            eval_start = idx + 1
+            if eval_start < len(tokens) and tokens[eval_start] == "--":
+                eval_start += 1
+            eval_script = " ".join(tokens[eval_start:])
+            return _is_dangerous_rm_command(eval_script, _depth=depth + 1)
+        if cmd == "env":
+            scan = idx + 1
+            while scan < len(tokens):
+                tok = tokens[scan]
+                if tok == "--":
+                    scan += 1
+                    break
+                if tok in ("-S", "--split-string") and scan + 1 < len(tokens):
+                    if _is_dangerous_rm_command(tokens[scan + 1], _depth=depth + 1):
+                        return True
+                    scan += 2
+                    continue
+                if tok.startswith("--split-string="):
+                    if _is_dangerous_rm_command(tok.split("=", 1)[1], _depth=depth + 1):
+                        return True
+                    scan += 1
+                    continue
+                if _ENV_ASSIGN_RE.match(tok):
+                    scan += 1
+                    continue
+                if tok.startswith("-") and len(tok) > 1:
+                    scan += 2 if tok in _ENV_ARG_OPTS else 1
+                    continue
+                break
+            idx = scan
+            continue
+        if cmd == "su":
+            scan = idx + 1
+            while scan < len(tokens):
+                tok = tokens[scan]
+                if tok == "--":
+                    break
+                if tok in ("-c", "--command") and scan + 1 < len(tokens):
+                    return _is_dangerous_rm_command(tokens[scan + 1], _depth=depth + 1)
+                if tok.startswith("--command="):
+                    return _is_dangerous_rm_command(
+                        tok.split("=", 1)[1], _depth=depth + 1
+                    )
+                if tok in _SU_ARG_OPTS:
+                    scan += 2
+                    continue
+                scan += 1
+            return False
+        if cmd == "command":
+            idx = _skip_wrapper_options(tokens, idx + 1, frozenset())
+            continue
+        if cmd == "nice":
+            idx = _skip_wrapper_options(tokens, idx + 1, frozenset({"-n"}))
+            continue
+        if cmd == "ionice":
+            idx = _skip_wrapper_options(tokens, idx + 1, _IONICE_ARG_OPTS)
+            continue
+        if cmd == "timeout":
+            idx = _skip_wrapper_options(tokens, idx + 1, _TIMEOUT_ARG_OPTS)
+            # 跳过 timeout 的 duration 位置参数
+            idx += 1
+            continue
+        if cmd == "xargs":
+            idx = _skip_wrapper_options(tokens, idx + 1, _XARGS_ARG_OPTS)
+            continue
+        if cmd == "find":
+            scan = idx + 1
+            while scan < len(tokens):
+                if tokens[scan] in _FIND_EXEC_FLAGS:
+                    sub_start = scan + 1
+                    sub_end = sub_start
+                    while sub_end < len(tokens) and tokens[sub_end] not in (";", "+"):
+                        sub_end += 1
+                    if _segment_has_dangerous_rm(tokens[sub_start:sub_end], depth + 1):
+                        return True
+                    scan = sub_end + 1
+                else:
+                    scan += 1
+            return False
+        if cmd in _SHELL_INTERPRETERS:
+            scan = idx + 1
+            has_c = False
+            while scan < len(tokens):
+                tok = tokens[scan]
+                if tok == "--":
+                    scan += 1
+                    break
+                if tok in ("-o", "+o", "-O", "+O"):
+                    scan += 2
+                    continue
+                if tok.startswith("--"):
+                    scan += 1
+                    continue
+                if tok.startswith(("-", "+")) and len(tok) > 1:
+                    if tok.startswith("-") and "c" in tok[1:]:
+                        has_c = True
+                    scan += 1
+                    continue
+                break
+            if has_c and scan < len(tokens):
+                return _is_dangerous_rm_command(tokens[scan], _depth=depth + 1)
+            return False
+        return False
+
+    return False
+
+
+def _is_dangerous_rm_command(command: str, _depth: int = 0) -> bool:
+    """检测命令中是否包含带递归/强制标志的 rm 调用。
+
+    按 shell token 拆分并解析独立选项，避免将带连字符的普通文件名
+    （如 `rm foo-bar.txt`、`rm my-file-rf.log`）或 `--` 之后的参数误判为危险选项。
+    """
+    if _depth > _MAX_RM_PARSE_DEPTH or not command.strip():
+        return False
+    for segment in _tokenize_shell_segments(command):
+        if _segment_has_dangerous_rm(segment, _depth):
+            return True
+    return False
+
+
 # 替换为沙箱执行的命令（文件系统/权限/服务类）- 网络隔离
 # 注意：sudo 不在此列表，由 strip_sudo() 预处理后对底层命令评估
-DANGEROUS_PATTERNS = [
-    # rm 危险操作：-rf、-fr、-r -f、--recursive、--force 各种写法
-    (r"\brm\b.*(-[a-zA-Z]*[rf]|-[a-zA-Z]*[fr]|--recursive|--force)", "递归/强制删除"),
+DANGEROUS_PATTERNS: list[tuple[str | Callable[[str], bool], str]] = [
+    # rm 危险操作：按 shell token 解析 -r/-R/-f/--recursive/--force，
+    # 避免将带连字符的文件名或 `--` 后的文件名误判为删除标志
+    (_is_dangerous_rm_command, "递归/强制删除"),
     (r"\bchmod\s+[0-7]{3,4}\s+/", "修改系统路径权限"),
     (r"\bchown\b", "修改文件所有者"),
     (r"\b(cp|mv)\s+.*\s+/etc/", "cp/mv 操作 /etc"),
@@ -237,9 +668,12 @@ SANDBOX_FS_POLICY = json.dumps(
 # 不尝试覆盖 -i/-s（交互式 shell），这类保留原始命令不处理。
 _SUDO_PREFIX_RE = re.compile(
     r"^sudo\s+"
-    r"(?:(?:-[nEbkKHPvA]+|--(?:non-interactive|preserve-env|reset-timestamp))\s+)*"  # 无参选项
-    r"(?:(?:-[uUgcCTt])\s+\S+\s+)*"  # 带参选项（-u user 等）
-    r"(?:--\s+)?"  # 分隔符 --
+    r"(?:"
+    r"(?:-[nEbkKHPvA]+|--(?:non-interactive|preserve-env|reset-timestamp))\s+"
+    r"|(?:--(?:user|group|host|prompt|chroot|chdir)=\S+)\s+"
+    r"|(?:(?:-[uUgcCTthpr]|--(?:user|group|host|prompt|chroot|chdir))\s+\S+\s+)"
+    r")*"
+    r"(?:--\s+)?"
 )
 
 
@@ -296,11 +730,16 @@ def build_sandbox_command(
     )
 
 
-def detect_patterns(command: str, patterns: list) -> list:
+def detect_patterns(command: str, patterns: list[tuple[Any, str]]) -> list[str]:
     """检测命令中的危险模式，返回匹配的原因列表"""
-    reasons = []
+    reasons: list[str] = []
     for pattern, reason in patterns:
-        if re.search(pattern, command, re.IGNORECASE):
+        matched = (
+            pattern(command)
+            if callable(pattern)
+            else bool(re.search(pattern, command, re.IGNORECASE))
+        )
+        if matched:
             reasons.append(reason)
     return reasons
 
