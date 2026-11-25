@@ -930,7 +930,11 @@ impl GenAIBuilder {
             }
             crate::analyzer::message::AnthropicContentBlock::ToolUse { id, name, input } => {
                 Some(MessagePart::ToolCall {
-                    id: Some(id.clone()),
+                    id: if id.is_empty() {
+                        None
+                    } else {
+                        Some(id.clone())
+                    },
                     name: name.clone(),
                     arguments: Some(input.clone()),
                 })
@@ -1013,7 +1017,11 @@ impl GenAIBuilder {
                                 } => {
                                     // Anthropic tool_use: convert to MessagePart::ToolCall
                                     parts.push(MessagePart::ToolCall {
-                                        id: Some(id.clone()),
+                                        id: if id.is_empty() {
+                                            None
+                                        } else {
+                                            Some(id.clone())
+                                        },
                                         name: name.clone(),
                                         arguments: Some(input.clone()),
                                     });
@@ -3541,5 +3549,25 @@ mod tests {
             .expect("LLMCall should be built");
 
         assert_eq!(call.request.messages.len(), 1);
+    }
+
+    #[test]
+    fn empty_anthropic_tool_use_id_maps_to_none() {
+        let block = crate::analyzer::message::AnthropicContentBlock::ToolUse {
+            id: String::new(),
+            name: String::new(),
+            input: serde_json::json!({"cmd": "pwd"}),
+        };
+        let Some(MessagePart::ToolCall {
+            id,
+            name,
+            arguments,
+        }) = GenAIBuilder::anthropic_content_block_to_part(&block)
+        else {
+            panic!("expected MessagePart::ToolCall");
+        };
+        assert_eq!(id, None);
+        assert_eq!(name, "");
+        assert_eq!(arguments, Some(serde_json::json!({"cmd": "pwd"})));
     }
 }
