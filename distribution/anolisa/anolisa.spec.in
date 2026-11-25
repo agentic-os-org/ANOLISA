@@ -149,7 +149,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Fri Nov 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Nov 25 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Redact rejected repository URLs in CLI diagnostics.
+- Register the optional Linux x86_64 Skill Score package and refresh component versions.
+
+* Fri Nov 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.4.2-1
 - Point sec-core and Tokenless status users to AW and show adapter enable times.
 - Use HTTPS for the shipped RPM repository.
 - Refresh component catalog versions and drop the cosh-switch payload entry.
