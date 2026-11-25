@@ -4,6 +4,7 @@ import fcntl
 import os
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS = 24 * 60 * 60
@@ -82,12 +83,15 @@ def _read_last_maintenance(marker_path: Path) -> float | None:
 
 def _mark_maintenance_complete(marker_path: Path, now: float) -> None:
     tmp_path = marker_path.with_name(f"{marker_path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(f"{now:.6f}\n", encoding="utf-8")
     try:
-        tmp_path.chmod(0o600)
-    except OSError:
-        pass
-    tmp_path.replace(marker_path)
+        tmp_path.write_text(f"{now:.6f}\n", encoding="utf-8")
+        with suppress(OSError):
+            tmp_path.chmod(0o600)
+        tmp_path.replace(marker_path)
+    except BaseException:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _try_acquire_lock(lock_path: Path) -> int | None:

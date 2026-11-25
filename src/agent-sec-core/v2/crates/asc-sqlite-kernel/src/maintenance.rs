@@ -140,6 +140,17 @@ fn read_last_maintenance(marker_path: &Path) -> Option<f64> {
         .ok()
 }
 
+/// Removes a staged marker temp file unless disarmed after a successful rename.
+struct TempMarkerCleanup<'a>(Option<&'a Path>);
+
+impl Drop for TempMarkerCleanup<'_> {
+    fn drop(&mut self) {
+        if let Some(path) = self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Writes the marker atomically via a pid-suffixed temp file, as v1 does.
 fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
     let file_name = marker_path
@@ -147,11 +158,13 @@ fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp_path = marker_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
+    let mut temp_cleanup = TempMarkerCleanup(Some(&tmp_path));
 
     fs::write(&tmp_path, format!("{now:.6}\n"))
         .map_err(|err| KernelError::io("write", &tmp_path, err))?;
     let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
     fs::rename(&tmp_path, marker_path).map_err(|err| KernelError::io("rename", &tmp_path, err))?;
+    temp_cleanup.0 = None;
     Ok(())
 }
 
@@ -445,6 +458,39 @@ mod tests {
     fn the_default_interval_is_one_day() {
         assert!(
             (DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS - 24.0 * 60.0 * 60.0).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn a_failed_marker_write_leaves_no_temporary_behind() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        fs::create_dir(maintenance_marker_path(&db)).expect("block the marker path");
+
+        let outcome = run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok);
+        assert!(matches!(outcome, MaintenanceOutcome::Failed(_)));
+
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name.starts_with("events.db.maintenance.")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+            })
+            .collect();
+        assert_eq!(
+            leftovers,
+            Vec::<String>::new(),
+            "a failed marker write must not strand its temporary"
+        );
+
+        fs::remove_dir(maintenance_marker_path(&db)).expect("unblock the marker path");
+        assert_eq!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Ran
         );
     }
 }
