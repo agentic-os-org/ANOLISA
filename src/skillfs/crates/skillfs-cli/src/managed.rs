@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+pub(super) mod live;
+
 /// Schema version for the on-disk managed state file.
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -150,6 +152,7 @@ fn create_staging_file(
     path: &Path,
     counter: &AtomicU64,
 ) -> std::io::Result<(PathBuf, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -172,6 +175,8 @@ fn create_staging_file(
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            // FUSE workers clear their umask; managed records belong to the mounting user.
+            .mode(0o600)
             .open(&candidate)
         {
             Ok(file) => return Ok((candidate, file)),
@@ -245,8 +250,15 @@ pub struct ManagedPaths {
 }
 
 impl ManagedPaths {
+    fn listing(&self) -> PathBuf {
+        self.state.with_extension("runtime.json")
+    }
+
     fn new(instance_id: &str) -> Self {
-        let dir = runtime_dir();
+        Self::in_directory(&runtime_dir(), instance_id)
+    }
+
+    fn in_directory(dir: &Path, instance_id: &str) -> Self {
         ManagedPaths {
             state: dir.join(format!("{instance_id}.state.json")),
             supervisor_pid: dir.join(format!("{instance_id}.supervisor.pid")),
@@ -977,6 +989,7 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
         let mut child = std::process::Command::new(&state.worker_program)
             .args(&state.worker_args)
+            .env(live::INSTANCE_ENV, instance_id)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(worker_out))
             .stderr(std::process::Stdio::from(worker_err))
@@ -1204,6 +1217,7 @@ fn remove_instance_files(
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
     let _ = std::fs::remove_file(&paths.mount_config);
+    let _ = std::fs::remove_file(paths.listing());
     Ok(())
 }
 

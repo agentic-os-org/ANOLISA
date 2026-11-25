@@ -260,8 +260,8 @@ skillfs explain --config /path/to/skillfs-mount.toml --skill demo --format json
 省略时报告所有已发现的 skills。默认输出文本；`--format json` 在 stdout 输出一个
 JSON 对象。日志默认写入 stderr，显式指定 `--log-file` 时写入对应文件。
 
-命令读取当前文件，不读取运行中 worker 的冻结输入或已加载 views。结果不能证明挂载
-存在或 Agent 已加载某个 skill，也不是并发修改期间的原子快照。不支持 `--mountpoint`。
+`--config` 读取当前文件。运行中的 worker 可能已加载不同的来源或视图。
+并发修改期间的配置读取不构成原子快照。
 诊断不会创建挂载点、修改配置/source/managed state、写入 SLS operation records，
 也不会启动 supervisor、watcher 或 FUSE session。显式请求的日志文件仍遵循现有的
 创建/追加规则。诊断结束后无需执行 stop 或回退操作。
@@ -277,9 +277,9 @@ JSON 对象。日志默认写入 stderr，显式指定 `--log-file` 时写入对
 | --- | --- |
 | `0` | 完整诊断，包括扫描完成但没有精确名称匹配 |
 | `1` | 诊断不完整，或输出失败 |
-| `2` | CLI 用法错误，包括传入 `--mountpoint` |
+| `2` | CLI 用法错误，例如同时指定两种诊断目标 |
 
-JSON schema version 1 使用以下字段。参数解析后的诊断错误仍会输出报告，前提是
+配置报告的 JSON schema version 1 使用以下字段。参数解析后的诊断错误仍会输出报告，前提是
 stdout 可写。
 
 | 字段 | 含义 |
@@ -318,6 +318,40 @@ Views 阶段执行前的状态为 `unknown`，执行后为 `absent`、`loaded` �
 成员关系不互斥：同一 skill 可以同时属于有效默认 view 和多个 secondary views。
 后续标记 `default = true` 的 views 仍是 secondary。没有默认 view 时，显式分配的
 secondary skills 保持 secondary，未分配的 skills 仍纳入有效默认视图。
+
+#### 查询运行中的挂载
+
+对于至少有两个不同配置来源的 Linux `--managed` 挂载，使用挂载者的用户身份、
+挂载命名空间和运行目录，按精确技能名查询：
+
+```bash
+skillfs explain --mountpoint /mnt/skillfs --skill demo
+skillfs explain --mountpoint /mnt/skillfs --skill demo --format json
+```
+
+请传入挂载根目录或指向它的符号链接。即使工作进程暂时没有响应，命令也能读取它
+先前保存的选源结果。如果传入挂载内的子路径，查找该路径时仍可能等待工作进程。
+
+如果 A 和 B 都提供 `demo`，调整 TOML 优先级后，`--config` 可能选中 B，
+而已有挂载仍提供 A。运行报告使用只读工作进程实际观察到的选源结果，以及 FUSE
+启动时根据已加载视图生成的默认 `/skills` 目录列表。次级技能仍可能通过已知路径读取。
+如果挂载后移走赢家的 `SKILL.md`，报告仍可显示 `selected`，技能名也可能仍在目录中，
+而读取正文会返回 `ENOENT`。排查内容可读性时，请从挂载路径读取该文件。
+
+JSON 报告包含 `schema_version: 1`、`target: "runtime"`、`mountpoint`、
+`instance_id` 和 `requested_skill`。状态为 `available` 时退出码为 0，并返回
+`worker.pid`、Linux 进程启动时钟计数 `worker.start_ticks`、内核挂载标识
+`worker.mount_id` 和默认目录成员标记 `effective_default`。当 `selection_status`
+为 `selected` 时，`selected` 和按优先级排列的 `shadowed` 各项给出来源根目录及清单路径。
+自动生成的 `skill-discover` 状态为 `virtual`，找不到的名称为 `not_discovered`，
+两者的 `selected` 字段均为 null。
+
+同一路径的实例 ID 保持稳定。监督进程恢复工作进程或重新挂载时，可通过工作进程代次区分。
+内核可以复用挂载标识，比较代次时应一起使用 `pid`、`start_ticks` 和 `mount_id`。
+如果挂载期间给它的父目录改名，挂载可继续提供文件，但用新路径查询会返回 `unavailable`。
+挂载已停止、旧版工作进程缺少运行记录，或当前代次无法核验时，命令返回
+`status: "unavailable"`、原因和退出码 1。工作进程切换完成后可以重试。
+对于旧版挂载，使用 `explain --help` 中包含此选项的二进制重新挂载，即可启用运行诊断。
 
 ### validate
 

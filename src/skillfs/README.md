@@ -172,9 +172,11 @@ then start again with `--config ... --managed`.
 See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
 
-`explain` inspects current configuration without mounting; it does not query a
-running managed worker. See the [diagnostic reference](../../docs/user-guide/en/skillfs/index.md#explain)
-for options, JSON fields, exit codes, and incomplete-result semantics.
+`explain --config` inspects the current files. For a running Linux managed
+multi-source mount, use `skillfs explain --mountpoint /mnt/skillfs --skill demo`
+to see the worker's selected source and default directory membership.
+See the [diagnostic reference](../../docs/user-guide/en/skillfs/index.md#explain)
+for output and exit codes.
 
 ### Managed Mount Mode
 

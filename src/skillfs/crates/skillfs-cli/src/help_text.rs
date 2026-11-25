@@ -76,17 +76,21 @@ Security notes:
   Same-skill relative symlinks and same-skill hardlinks are allowed; cross-skill
   and absolute symlink targets are rejected by policy."#;
 
-pub const EXPLAIN_LONG_ABOUT: &str = r#"Explain the current ordered-source mount configuration without mounting.
+pub const EXPLAIN_LONG_ABOUT: &str = r#"Explain a skill's source and default visibility.
 
-Reads the configuration, validates all sources, loads skills in source order,
+--config reads the configuration, validates all sources, loads skills in source order,
 then reads only the first source's skillfs-views.toml. Earlier sources win whole
 skills. --skill matches the directory name exactly and cannot hide a blocking
 error elsewhere.
 
-This is configuration diagnosis, not runtime inspection: it does not prove a
-mount exists or an agent has loaded a skill. A running managed instance may use
-an older frozen configuration. Concurrent source edits are not an atomic
-snapshot. Runtime --mountpoint diagnosis is not supported.
+--mountpoint PATH --skill EXACT_NAME reports one running Linux managed
+multi-source mount's selected and shadowed copies and default /skills listing.
+The caller must share the mounting user's runtime directory and mount namespace.
+The worker generation is verified before its observation is reported. A
+stopped mount or a worker without a verified observation reports unavailable.
+
+Configuration is read from current files; concurrent edits are not an atomic
+snapshot. A running worker may have loaded an earlier source order or view.
 
 The command does not create a mountpoint, modify source or managed state, or
 start a supervisor, watcher, or FUSE session. Existing logging options apply."#;
@@ -101,11 +105,12 @@ pub const EXPLAIN_AFTER_HELP: &str = r#"Examples:
   skillfs explain --config mount.toml --skill demo --format json
       Emit one schema-versioned configuration report on stdout; logs use stderr.
 
+  skillfs explain --mountpoint /mnt/skillfs --skill demo --format json
+      Report the active worker's source selection and default directory membership.
+
 Exit status:
   0  Complete diagnosis, including an exact name that was not discovered.
-  1  Incomplete diagnosis; the report identifies the first blocking phase and
-     leaves unconfirmed conclusions unknown. Invalid or unreadable views are
-     not treated as absent.
+  1  Incomplete configuration diagnosis, unavailable worker, or output error.
   2  Invalid command-line usage.
 
 View membership is not exclusive: a skill can belong to the effective default

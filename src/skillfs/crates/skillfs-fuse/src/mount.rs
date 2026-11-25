@@ -76,7 +76,27 @@ pub fn mount_configured(
     in_place: bool,
     config: MountConfig,
 ) -> Result<(), FuseError> {
-    mount_inner(
+    mount_configured_observed(mountpoint, source, store, options, in_place, config, None)
+}
+
+/// Called once at Linux FUSE_INIT with the kernel mount ID and the names in
+/// the flat default skills directory. An observer must not access the mount
+/// from the callback, since the kernel is waiting for INIT to complete.
+pub type MountedListingObserver = Box<dyn FnOnce(u64, Vec<String>) + Send + Sync>;
+
+/// Mount with an optional observer of the initial served listing. Observation
+/// is available for explicitly flat, read-only, non-in-place Linux mounts.
+/// The ordinary mount entry points do not collect a diagnostic listing.
+pub fn mount_configured_observed(
+    mountpoint: &Path,
+    source: &Path,
+    store: SharedSkillStore,
+    options: MountOptions,
+    in_place: bool,
+    config: MountConfig,
+    observer: Option<MountedListingObserver>,
+) -> Result<(), FuseError> {
+    mount_inner_with_outcome(
         mountpoint,
         source,
         store,
@@ -99,6 +119,8 @@ pub fn mount_configured(
         config.directive_enabled,
         config.skill_discover_root,
         config.max_skill_size,
+        None,
+        observer,
     )
 }
 
@@ -577,6 +599,7 @@ fn spawn_background_mount(
             config.skill_discover_root,
             config.max_skill_size,
             Some(Arc::clone(&thread_outcome)),
+            None,
         ) {
             error!(error = %e, "background mount failed");
             thread_outcome.record_failure(e);
@@ -635,6 +658,7 @@ fn mount_inner(
         skill_discover_root,
         max_skill_size,
         None,
+        None,
     )
 }
 
@@ -673,6 +697,7 @@ fn mount_inner_with_outcome(
     skill_discover_root: Option<PathBuf>,
     max_skill_size: Option<usize>,
     outcome: Option<Arc<BackgroundMountOutcome>>,
+    observer: Option<MountedListingObserver>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -763,6 +788,8 @@ fn mount_inner_with_outcome(
     // This session's readiness signal: FUSE_INIT sets it, the background
     // entry's wait loop polls it, and the lifecycle lock is released on it.
     fs = fs.with_session_signal(outcome.session_signal());
+    fs.mounted_listing_observer = observer
+        .filter(|_| options.read_only && !in_place && skill_layout == Some(SkillLayout::Flat));
     if let Some(root) = skill_discover_root {
         fs = fs.with_skill_discover_root(root);
     }

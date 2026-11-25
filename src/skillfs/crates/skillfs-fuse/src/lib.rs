@@ -28,7 +28,10 @@ mod sys;
 mod xattr;
 
 pub use fs::SkillFs;
-pub use mount::{MountConfig, mount_background_configured, mount_configured};
+pub use mount::{
+    MountConfig, MountedListingObserver, mount_background_configured, mount_configured,
+    mount_configured_observed,
+};
 pub use path::{SkillLayout, detect_skill_layout};
 
 #[allow(deprecated)]
