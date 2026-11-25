@@ -2,6 +2,8 @@
 
 mod profile;
 mod python;
+#[cfg(test)]
+mod tests;
 
 use super::super::{read_file, Result};
 use aw_exec::CommandSpec;
@@ -11,7 +13,10 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::Read,
-    os::unix::{ffi::OsStringExt, fs::MetadataExt},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{ffi::OsStringExt, fs::MetadataExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -25,8 +30,8 @@ pub(in crate::cli) struct NativeProcess {
     adapter: String,
 }
 
-fn environment(pid: u32) -> Result<BTreeMap<OsString, OsString>> {
-    read_file(format!("/proc/{pid}/environ"), 1024 * 1024)?
+fn environment(task: &Path) -> Result<BTreeMap<OsString, OsString>> {
+    read_file(task.join("environ"), 1024 * 1024)?
         .split(|byte| *byte == 0)
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
@@ -42,8 +47,106 @@ fn environment(pid: u32) -> Result<BTreeMap<OsString, OsString>> {
         .collect()
 }
 
-fn arguments(pid: u32) -> Result<Vec<OsString>> {
-    Ok(read_file(format!("/proc/{pid}/cmdline"), 1024 * 1024)?
+fn peer_exited(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // A pidfd opened without PIDFD_THREAD reports exit of the entire group.
+    // SAFETY: pidfd_open takes only a numeric PID and flags.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    // SAFETY: pidfd_open returned a new owned descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let mut exit = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: the descriptor and pollfd remain live through the nonblocking call.
+    let ready = unsafe { libc::poll(&mut exit, 1, 0) };
+    ready == 1 && exit.revents & libc::POLLIN != 0
+}
+
+fn peer_executable(entry: &Path, pid: u32) -> Option<(PathBuf, PathBuf)> {
+    match fs::read_link(entry.join("exe")) {
+        Ok(exe) => Some((entry.to_owned(), exe)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let leader_exited = fs::read(entry.join("stat")).is_ok_and(|stat| {
+                let Some(comm_end) = stat.iter().rposition(|byte| *byte == b')') else {
+                    return false;
+                };
+                stat[comm_end + 1..]
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .is_some_and(|state| matches!(state, b'Z' | b'X'))
+            });
+            if !leader_exited || peer_exited(pid) {
+                return None;
+            }
+            // procfs hides the leader's executable after its exit. Identify
+            // the peer via a surviving thread before inspecting its scope.
+            // If no thread still exposes an executable, the process has torn
+            // down its address space (e.g. mid-exit_group) and is not a live peer.
+            if let Ok(threads) = fs::read_dir(entry.join("task")) {
+                for thread in threads.flatten() {
+                    let path = thread.path();
+                    if let Ok(exe) = fs::read_link(path.join("exe")) {
+                        return Some((path, exe));
+                    }
+                }
+            }
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+// After leader exit, Qoder threads can retain distinct project directories.
+fn any_peer_cwd(
+    process: &Path,
+    task: &Path,
+    inspect_siblings: bool,
+    matches: impl Fn(&Path) -> Result<bool>,
+) -> Result<bool> {
+    if matches(&fs::read_link(task.join("cwd"))?)? {
+        return Ok(true);
+    }
+    if task == process || !inspect_siblings {
+        return Ok(false);
+    }
+    for sibling in fs::read_dir(process.join("task"))? {
+        let sibling = sibling?.path();
+        if sibling == task || sibling.file_name() == process.file_name() {
+            continue;
+        }
+        let cwd = match fs::read_link(sibling.join("cwd")) {
+            Ok(cwd) => cwd,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && !sibling.try_exists()? =>
+            {
+                continue
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if matches(&cwd)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn peer_environment(pid: u32, task: &Path) -> Result<Option<BTreeMap<OsString, OsString>>> {
+    match environment(task) {
+        Ok(env) => Ok(Some(env)),
+        Err(_) if peer_exited(pid) => Ok(None),
+        Err(error) => Err(format!("read native peer {pid} environment: {error}").into()),
+    }
+}
+
+fn arguments(path: &Path) -> Result<Vec<OsString>> {
+    Ok(read_file(path.join("cmdline"), 1024 * 1024)?
         .split(|byte| *byte == 0)
         .filter(|arg| !arg.is_empty())
         .map(|arg| OsString::from_vec(arg.to_vec()))
@@ -121,13 +224,10 @@ impl NativeProcess {
             return Err("external attachment supports Qoder TUI and QwenPaw App only".into());
         }
         let identity = ProcessIdentity::read(pid)?;
-        namespaces(
-            &PathBuf::from(format!("/proc/{pid}/ns")),
-            Path::new("/proc/self/ns"),
-            adapter,
-        )?;
-        let cwd = fs::read_link(format!("/proc/{pid}/cwd"))?.canonicalize()?;
-        let environment = environment(pid)?;
+        let task = PathBuf::from(format!("/proc/{pid}"));
+        namespaces(&task.join("ns"), Path::new("/proc/self/ns"), adapter)?;
+        let cwd = fs::read_link(task.join("cwd"))?.canonicalize()?;
+        let environment = environment(&task)?;
         let configured = Path::new(configured_program);
         let program = if configured.is_absolute() {
             configured.canonicalize()?
@@ -143,8 +243,8 @@ impl NativeProcess {
             .find(|path| executable(path))
             .ok_or("configured native executable not found")?
         };
-        let executable = fs::read_link(format!("/proc/{pid}/exe"))?;
-        let argv = arguments(pid)?;
+        let executable = fs::read_link(task.join("exe"))?;
+        let argv = arguments(&task)?;
         let script = if executable != program {
             let script = argv
                 .get(1)
@@ -204,6 +304,7 @@ impl NativeProcess {
 
     pub fn exclusive(&self) -> Result<()> {
         self.identity.check()?;
+        let qoder = self.adapter == "qoder";
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
             let Some(pid) = entry
@@ -222,14 +323,15 @@ impl NativeProcess {
             if metadata.uid() != unsafe { libc::geteuid() } {
                 continue;
             }
-            let Ok(exe) = fs::read_link(entry.path().join("exe")) else {
+            let path = entry.path();
+            let Some((task, exe)) = peer_executable(&path, pid) else {
                 continue;
             };
             // Inspect only native peers. Unrelated processes may expose an exe
             // link while restricting access to their environment (for example CI).
             let candidate = (|| -> Result<bool> {
                 Ok(if let Some(script) = &self.script {
-                    let argv = arguments(pid)?;
+                    let argv = arguments(&task)?;
                     let arg = if self.adapter == "qwenpaw" {
                         match python::entrypoint(&argv) {
                             Some(python::Entrypoint::Module(module)) => {
@@ -247,50 +349,51 @@ impl NativeProcess {
                         return Ok(false);
                     }
                     let peer_script = PathBuf::from(arg);
-                    let peer_script = if peer_script.is_absolute() {
-                        peer_script
-                    } else {
-                        fs::read_link(entry.path().join("cwd"))?.join(peer_script)
+                    let matches = |path: &Path| -> Result<bool> {
+                        Ok(path.is_file() && same_entrypoint(script, path)?)
                     };
-                    peer_script.is_file() && same_entrypoint(script, &peer_script)?
+                    if peer_script.is_absolute() {
+                        matches(&peer_script)?
+                    } else {
+                        any_peer_cwd(&path, &task, qoder, |cwd| matches(&cwd.join(&peer_script)))?
+                    }
                 } else {
                     self.executable.file_name() == exe.file_name()
-                        || same_entrypoint(&self.executable, &entry.path().join("exe"))?
+                        || same_entrypoint(&self.executable, &task.join("exe"))?
                 })
             })();
             let candidate = match candidate {
                 Ok(candidate) => candidate,
-                Err(_) if fs::read_link(entry.path().join("exe")).is_err() => continue,
+                // An entry that disappears during identification may be
+                // unrelated. Recheck surviving threads before discarding it.
+                Err(_) if peer_executable(&path, pid).is_none() => continue,
                 Err(error) => return Err(format!("inspect native peer {pid}: {error}").into()),
             };
             if !candidate {
                 continue;
             }
-            let peer_cwd = match fs::read_link(entry.path().join("cwd")) {
-                Ok(cwd) => cwd,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
+            let Some(env) = peer_environment(pid, &task)? else {
+                continue;
             };
-            let env = match environment(pid) {
-                Ok(env) => env,
-                Err(_) if !entry.path().exists() => continue,
-                Err(error) => {
-                    return Err(format!("read native peer {pid} environment: {error}").into())
+            let shared = any_peer_cwd(&path, &task, qoder, |cwd| {
+                if qoder && cwd == self.command.cwd {
+                    return Ok(true);
                 }
+                let scope = if qoder {
+                    env.get(OsStr::new("HOME"))
+                        .map(|home| cwd.join(home).join(".qoder"))
+                } else {
+                    Some(profile::qwenpaw(&env, cwd)?)
+                };
+                Ok(scope
+                    .and_then(|scope| scope.canonicalize().ok())
+                    .is_some_and(|scope| scope == self.scope))
+            });
+            let shared = match shared {
+                Ok(shared) => shared,
+                Err(_) if peer_exited(pid) => continue,
+                Err(error) => return Err(format!("inspect native peer {pid}: {error}").into()),
             };
-            let peer_scope = if self.adapter == "qoder" {
-                env.get(OsStr::new("HOME"))
-                    .map(|home| peer_cwd.join(home).join(".qoder"))
-            } else {
-                Some(
-                    profile::qwenpaw(&env, &peer_cwd)
-                        .map_err(|error| format!("inspect native peer {pid}: {error}"))?,
-                )
-            };
-            let shared = peer_scope
-                .and_then(|scope| scope.canonicalize().ok())
-                .is_some_and(|scope| scope == self.scope)
-                || (self.adapter == "qoder" && peer_cwd == self.command.cwd);
             if !shared {
                 continue;
             }
@@ -335,328 +438,5 @@ impl NativeProcess {
             return Err("QwenPaw endpoint is not owned by the selected process".into());
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-
-    static PROCESSES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct Child(std::process::Child);
-    impl Child {
-        fn spawn(command: &mut std::process::Command) -> Self {
-            let token = fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap();
-            command.env("AW_DISCOVERY_FIXTURE", &token);
-            let mut child = Self(command.spawn().unwrap());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            // Command::spawn alone does not confirm that procfs exposes the
-            // executed process's environment. Attach requires a prewarmed host.
-            loop {
-                if environment(child.0.id()).is_ok_and(|environment| {
-                    environment.get(OsStr::new("AW_DISCOVERY_FIXTURE"))
-                        == Some(&OsString::from(&token))
-                }) {
-                    return child;
-                }
-                assert!(
-                    child.0.try_wait().unwrap().is_none(),
-                    "native fixture exited during startup"
-                );
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "native fixture environment did not become ready"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-    impl Drop for Child {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            self.0.wait().unwrap();
-        }
-    }
-
-    #[test]
-    fn copied_native_binary_with_a_different_name_cannot_share_profile() {
-        let _processes = PROCESSES.lock().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let scope = root.path().join(".qoder");
-        fs::create_dir(&scope).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&scope, fs::Permissions::from_mode(0o700)).unwrap();
-        let original = root.path().join("qodercli");
-        let copied = root.path().join("renamed-copy");
-        // Write copies in a separate process so parallel test forks cannot
-        // inherit a writer and transiently prevent exec with ETXTBSY.
-        for path in [&original, &copied] {
-            assert!(std::process::Command::new("/bin/cp")
-                .arg("/bin/sleep")
-                .arg(path)
-                .status()
-                .unwrap()
-                .success());
-        }
-        let spawn = |path: &Path| {
-            Child::spawn(
-                std::process::Command::new(path)
-                    .arg("20")
-                    .env("HOME", root.path())
-                    .current_dir(root.path()),
-            )
-        };
-        let target = spawn(&original);
-        let _other = spawn(&copied);
-        let result = NativeProcess::read(target.0.id(), "qoder", original.to_str().unwrap());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("scope is shared"));
-        assert!(!scope.join(".aw-attachment.json").exists());
-    }
-
-    #[test]
-    fn peer_profile_aliases_are_shared_for_both_adapters() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for adapter in ["qoder", "qwenpaw"] {
-            let root = tempfile::tempdir().unwrap();
-            let home = root.path().join("home");
-            let other = root.path().join("other");
-            fs::create_dir(&home).unwrap();
-            fs::create_dir(&other).unwrap();
-            let profile = home.join(".qoder");
-            fs::create_dir(&profile).unwrap();
-            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
-            let alias = other.join("alias");
-            symlink(&home, &alias).unwrap();
-            let program = root.path().join(adapter);
-            // Distinct bytes exclude unrelated sleep jobs from copied-binary matching.
-            // Write in a child so concurrent forks cannot inherit an executable writer.
-            assert!(std::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "cp /bin/sleep \"$1\" && printf '%s' \"$1\" >> \"$1\"",
-                    "fixture"
-                ])
-                .arg(&program)
-                .status()
-                .unwrap()
-                .success());
-            let spawn = |home: &Path, cwd: &Path| {
-                Child::spawn(
-                    std::process::Command::new(&program)
-                        .arg("20")
-                        .env("HOME", home)
-                        .env("QWENPAW_WORKING_DIR", home.join(".qoder"))
-                        .current_dir(cwd),
-                )
-            };
-            let target = spawn(&home, root.path());
-            for peer_home in [&alias, &home.join("../home")] {
-                let peer = spawn(peer_home, &other);
-                let result = NativeProcess::read(target.0.id(), adapter, program.to_str().unwrap());
-                let error = result.err().unwrap();
-                assert!(
-                    error.to_string().contains("scope is shared"),
-                    "{adapter}: {error}"
-                );
-                drop(peer);
-            }
-        }
-    }
-
-    #[test]
-    fn relative_and_empty_path_entries_use_the_native_working_directory() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for entry in ["bin", ""] {
-            let root = tempfile::tempdir().unwrap();
-            fs::create_dir(root.path().join("bin")).unwrap();
-            let scope = root.path().join(".qoder");
-            fs::create_dir(&scope).unwrap();
-            fs::set_permissions(&scope, fs::Permissions::from_mode(0o700)).unwrap();
-            let program = root.path().join(entry).join("qodercli");
-            symlink("/bin/sleep", &program).unwrap();
-            let target = Child::spawn(
-                std::process::Command::new(&program)
-                    .arg("20")
-                    .env("HOME", root.path())
-                    .env("PATH", format!("{entry}:/usr/bin"))
-                    .current_dir(root.path()),
-            );
-            let native = NativeProcess::read(target.0.id(), "qoder", "qodercli").unwrap();
-            assert_eq!(native.command.program, program.canonicalize().unwrap());
-            native.identity.check().unwrap();
-        }
-    }
-
-    #[test]
-    fn path_lookup_skips_regular_files_without_execute_permission() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        for directory in ["bad", "good", ".qoder"] {
-            fs::create_dir(root.path().join(directory)).unwrap();
-            fs::set_permissions(
-                root.path().join(directory),
-                fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
-        }
-        fs::write(root.path().join("bad/qodercli"), "not executable").unwrap();
-        fs::set_permissions(
-            root.path().join("bad/qodercli"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let program = root.path().join("good/qodercli");
-        symlink("/bin/sleep", &program).unwrap();
-        let child = Child::spawn(
-            std::process::Command::new(&program)
-                .arg("20")
-                .env("HOME", root.path())
-                .env("PATH", "bad:good:/usr/bin")
-                .current_dir(root.path()),
-        );
-        let native = NativeProcess::read(child.0.id(), "qoder", "qodercli").unwrap();
-        assert_eq!(native.command.program, program.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn relative_interpreted_entrypoint_uses_the_selected_process_working_directory() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        for directory in ["bin", ".qoder"] {
-            fs::create_dir(root.path().join(directory)).unwrap();
-            fs::set_permissions(
-                root.path().join(directory),
-                fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
-        }
-        let script = root.path().join("bin/qodercli");
-        fs::write(&script, "import time; time.sleep(20)\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        let child = Child::spawn(
-            std::process::Command::new("/usr/bin/python3")
-                .arg("bin/qodercli")
-                .env("HOME", root.path())
-                .env("PATH", "bin:/usr/bin")
-                .current_dir(root.path()),
-        );
-        let native = NativeProcess::read(child.0.id(), "qoder", "qodercli").unwrap();
-        assert_eq!(native.command.program, script.canonicalize().unwrap());
-        native.identity.check().unwrap();
-    }
-
-    #[test]
-    fn renamed_interpreted_peer_cannot_share_native_configuration() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join(".qoder")).unwrap();
-        fs::set_permissions(
-            root.path().join(".qoder"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        let first = root.path().join("qodercli.py");
-        let second = root.path().join("copied.py");
-        fs::write(&first, "import time; time.sleep(20)\n").unwrap();
-        fs::copy(&first, &second).unwrap();
-        let spawn = |script: &Path| {
-            Child::spawn(
-                std::process::Command::new("python3")
-                    .arg(script)
-                    .env("HOME", root.path())
-                    .current_dir(root.path()),
-            )
-        };
-        let target = spawn(&first);
-        let _peer = spawn(&second);
-        let error = NativeProcess::read(target.0.id(), "qoder", first.to_str().unwrap())
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("scope is shared"), "{error}");
-    }
-
-    #[test]
-    fn qwenpaw_python_options_preserve_profile_isolation_and_command_boundaries() {
-        let _processes = PROCESSES.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let profile = root.path().join("profile");
-        let other = root.path().join("other");
-        for path in [&profile, &other] {
-            fs::create_dir(path).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let script = root.path().join("qwenpaw.py");
-        fs::write(&script, "import time; time.sleep(20)\n").unwrap();
-        let spawn = |args: &[&str], profile: &Path| {
-            Child::spawn(
-                std::process::Command::new("python3")
-                    .args(args)
-                    .env("QWENPAW_WORKING_DIR", profile)
-                    .current_dir(root.path()),
-            )
-        };
-        let target = spawn(&["qwenpaw.py"], &profile);
-        let read = || NativeProcess::read(target.0.id(), "qwenpaw", script.to_str().unwrap());
-        let peer = spawn(&["-u", "qwenpaw.py"], &other);
-        read().unwrap();
-        drop(peer);
-        let peer = spawn(
-            &["-c", "import time; time.sleep(20)", "-m", "qwenpaw"],
-            &profile,
-        );
-        read().unwrap();
-        drop(peer);
-        let _peer = spawn(&["-W", "ignore", "-u", "qwenpaw.py"], &profile);
-        assert!(read()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("scope is shared"));
-    }
-
-    #[test]
-    fn unrelated_execute_only_file_does_not_require_read_permission() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let unrelated = root.path().join("unrelated");
-        fs::write(&unrelated, "different size").unwrap();
-        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o100)).unwrap();
-        assert!(!same_entrypoint(Path::new("/bin/sleep"), &unrelated).unwrap());
-    }
-
-    #[test]
-    fn qwenpaw_requires_the_callers_network_namespace() {
-        let root = tempfile::tempdir().unwrap();
-        let caller = root.path().join("caller");
-        let target = root.path().join("target");
-        fs::create_dir(&caller).unwrap();
-        fs::create_dir(&target).unwrap();
-        for namespace in ["pid", "mnt", "net"] {
-            let identity = format!("{namespace}:[1]");
-            symlink(&identity, caller.join(namespace)).unwrap();
-            symlink(&identity, target.join(namespace)).unwrap();
-        }
-        namespaces(&target, &caller, "qwenpaw").unwrap();
-        fs::remove_file(target.join("net")).unwrap();
-        symlink("net:[2]", target.join("net")).unwrap();
-        assert!(namespaces(&target, &caller, "qwenpaw")
-            .unwrap_err()
-            .to_string()
-            .contains("same net namespace"));
-        namespaces(&target, &caller, "qoder").unwrap();
-        fs::remove_file(target.join("net")).unwrap();
-        assert!(namespaces(&target, &caller, "qwenpaw").is_err());
     }
 }
