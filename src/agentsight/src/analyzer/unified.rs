@@ -916,20 +916,6 @@ impl Analyzer {
         state.usage
     }
 
-    pub(super) fn merge_continuation_usage(
-        &self,
-        usage: Option<TokenUsage>,
-        continuation_bytes: Option<&[u8]>,
-    ) -> Option<TokenUsage> {
-        self.merge_continuation_usage_with_state(
-            super::token::UsageFoldState {
-                usage,
-                ..Default::default()
-            },
-            continuation_bytes,
-        )
-    }
-
     fn extract_token_from_json_body(
         &self,
         json: Option<&serde_json::Value>,
