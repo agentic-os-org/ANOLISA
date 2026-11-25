@@ -78,8 +78,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
+          # Do not re-add `cache: npm`: self-hosted k8s runner pods egress at
+          # ~0.2 MB/s, so restoring the 333MB npm cache always times out
+          # (10+ min wasted, then discarded) and the post-job save re-uploads it.
+          # npm ci from the registry takes ~1-2 min instead.
 
       - name: Install plugin dependencies
         run: npm ci --prefer-offline --no-audit --no-fund
@@ -157,8 +159,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.openclaw.node-version || '22' }}
-          cache: npm
-          cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
+          # See the note on the build-openclaw-plugin job: `cache: npm` restore
+          # times out on self-hosted runners and wastes 10+ min per matrix job.
 
       - name: Set up Python
         uses: actions/setup-python@v5
