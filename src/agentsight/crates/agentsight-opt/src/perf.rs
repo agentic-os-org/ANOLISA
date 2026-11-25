@@ -149,10 +149,11 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
             user_intervened = false;
         } else if step.is_user() {
             user_intervened = true;
+            prev_tool_end = None;
         }
-        if let Some(e) = step_end {
-            prev_ts = Some(e);
-        }
+        // Clear prev_ts across steps without a timestamp so an unmeasured user
+        // or intermediate gap is never attributed to the next model turn.
+        prev_ts = step_end;
     }
 
     let total = busy_window_secs(windows);
