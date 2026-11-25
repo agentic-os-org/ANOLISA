@@ -170,7 +170,7 @@ pub(super) fn is_compacted(lines: &[&str]) -> bool {
 /// Mark verified transfer and redraw records that remain inside an active scope.
 pub(super) fn scoped_transfers(lines: &[&str]) -> Vec<bool> {
     let mut eligible = vec![false; lines.len()];
-    if is_compacted(lines) || lines.iter().any(|line| line.len() > MAX_BYTES) {
+    if is_compacted(lines) {
         return eligible;
     }
     let mut active = true;
@@ -227,7 +227,7 @@ fn leading_preamble_len(lines: &[&str]) -> usize {
 fn plan_with_downloads(lines: &[&str], include_downloads: bool) -> Vec<LayoutEdit> {
     // Already encoded results are terminal representations. This also avoids
     // promoting previously opaque text after the surrounding layout shrinks.
-    if is_compacted(lines) || lines.iter().any(|line| line.len() > MAX_BYTES) {
+    if is_compacted(lines) {
         return Vec::new();
     }
     let mut edits = Vec::new();

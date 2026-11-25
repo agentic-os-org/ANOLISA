@@ -127,7 +127,7 @@ Operations:
   a missing or modified command retains the bypass. Core restores the original command before routing. Changed or unconfirmed
   output retains the bypass; a tied token estimate does not authorize fallback. Receipt-state
   failures warn and retain the bypass without failing the PostTool operation.
-- Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
+- Tool errors pass through unchanged as `tool_error` when `exit_code` is omitted (preserving prior behavior for unmodified hosts) and may include bounded `additional_context` diagnostics from `content` or `stderr`. When a caller supplies `exit_code`, hard execution/signal exits (`126`, `127`, `< 0`, `>= 128`) or outputs shorter than `error_min_input_chars` (default `400` chars) enter Level E1 passthrough, while longer failures enter Level E2 compression across `BuildLogCompressor` (`DiagnosticFailure`), Diff, JSON, and lossless Search path sharing (excluding HTML, Browser Snapshot, Tabular, and Mixed domains) and require `FactInvariantGuard` verification before commit (rolling back to `tool_error` if any fact disappears or any anchor category exceeds `256`). Opt-in hosts supplying `exit_code` must also consume `additional_context` when `disposition` is `"applied"`.
 - Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
 - Recognized successful build/test/package-install output uses `BuildLogCompressor`.
   `terminal_cleanup` removes SGR colors. The existing `build_log_reduction` label covers
@@ -150,7 +150,7 @@ transformations instead of a configured compressor list.
 `{"kind":"shell"}`, or `{"kind":"tool","name":"tokenless_retrieve"}`. Tool names contain
 1–64 ASCII letters, digits, underscores, or hyphens. Unknown fields, missing recovery, and the former
 `retrieval_available` boolean are rejected. The wire version remains 2; BuildLog uses
-existing operation labels and adds no SDK enum. Only a static Tool enables recoverable
+existing operation labels and adds no SDK enum. Optional v2 fields (`PreToolCapabilities.post_tool_replacement` and `PostToolRequest.exit_code`, `stderr`, `original_command`, `cwd`) default to backward-compatible behavior when omitted; because Protocol v2 request payloads enforce `#[serde(deny_unknown_fields)]`, Core must be upgraded before or alongside callers that send them. Only a static Tool enables recoverable
 BeforeModel schema truncation; shell recovery applies to PostTool and does not add
 or change Agent tools.
 
@@ -176,12 +176,10 @@ and exits `1` without running RTK.
 The `pre_tool` operation rewrites commands with the RTK library linked into Tokenless; it does not
 search `PATH` for a separate `rtk` executable. Rewritten commands call the running `tokenless`
 executable by its absolute path as `tokenless rtk`, so they always run the same RTK version.
-Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so their output has
-a single PostTool owner. Entire commands containing a recognized native `find`, `head`, `tail`, `grep`, or `rg`
-invocation also stay native. The protection covers direct calls and RTK's built-in prefixes:
-`env`, `command`, `exec`,
+Under the default `capabilities.post_tool_replacement: "full_retrievable"`, recognized Cargo, pytest,
+npm/Jest, Go, and Make build/test commands (direct or wrapped) stay native so their output has a single PostTool owner, and entire commands containing a recognized native `find`, `head`, `tail`, `grep`, or `rg` invocation also stay native. `"lossless_only"` restricts native preservation to `head`/`tail` previews and `find`/`grep`/`rg` searches while letting RTK rewrite build/test calls, and `"none"` disables both exemptions so RTK rewriting applies. Wrapper protection covers direct calls and RTK's built-in prefixes: `env` (including `-u`/`--unset`, `-C`/`--chdir`, `-P`, `--`, clustered short flags such as `-vS`/`-iS`/`-vC`, and bounded GNU `-S`/`--split-string` operands), `command`, `exec`,
 `noglob`, `nocorrect`, `builtin`, `timeout`, `time`, `nice`, `nohup`, and `uv run`, including nesting
-and shell backslash-newline continuations. Process-wrapper options follow the bundled RTK grammar;
+and shell backslash-newline continuations. `post_tool` shares the same wrapper stripping to recognize shell-invoked `tokenless retrieve` calls and pass their output through unchanged. Process-wrapper options follow the bundled RTK grammar;
 unknown options stop recognition. This remains true when `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`.
 Custom `hooks.transparent_prefixes` are not inspected and may still let RTK rewrite wrapped calls;
 other supported commands may also be rewritten.

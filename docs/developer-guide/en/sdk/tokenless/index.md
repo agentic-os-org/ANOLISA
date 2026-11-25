@@ -232,13 +232,20 @@ call = await sdk.pre_tool(
         capabilities=PreToolCapabilities(
             replace_arguments=True,
             block_and_suggest=False,
+            # Default: PostToolReplacementCapability.FULL_RETRIEVABLE (omitted on wire).
+            # Set LOSSLESS_ONLY or NONE when PostTool cannot store/replace stash-backed output.
         ),
         attribution=Attribution("my-agent", "session-42", "tool-8"),
     )
 )
 ```
 
-Core considers only the explicitly named `command_field`. If RTK has a rewrite, the response uses
+Core considers only the explicitly named `command_field`. Hosts that do not replace PostTool
+output should set `post_tool_replacement=PostToolReplacementCapability.NONE` (or `LOSSLESS_ONLY`
+when only lossless transformations are supported) so PreTool stops bypassing RTK for those domains;
+omitting it preserves the default `FULL_RETRIEVABLE` behavior. Because Protocol v2 request structs
+reject unknown fields (`deny_unknown_fields`), upgrade Core before or together with any SDK/adapter
+that passes non-default capabilities. If RTK has a rewrite, the response uses
 `replace_arguments`, runs through the packaged `tokenless` path as `tokenless rtk`, and reports
 `output_optimization=rtk`. Execute
 the returned arguments and carry that optimization value into PostTool. A disabled RTK is an
@@ -265,6 +272,10 @@ result = await sdk.post_tool(
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
         command=None,  # the executed command line for a shell tool
+        exit_code=None,  # process exit status; opts ERROR results into Level E1/E2 error pipeline
+        stderr=None,  # separate stderr text for [tokenless:env] diagnosis fallback
+        original_command=None,  # pre-rewrite command, when tracked by the host
+        cwd=None,  # working directory, when tracked by the host
     )
 )
 ```
@@ -273,7 +284,12 @@ Set `content_origin` from the tool's registered contract; do not infer it from r
 shell tool, pass the command line that actually ran (the PreTool result when RTK rewrote it) as
 `command`: Core reports a plain print of local files as `file_read`, so a printed HTML page, and
 HTML inside printed JSON values, stays verbatim while data in that output still compresses. Leave
-`command` unset for other tools. Core routes Retrieve output, errors, interrupted or denied calls,
+`command` unset for other tools. Optional error metadata (`exit_code`, `stderr`, `original_command`,
+`cwd`) are omitted on the wire when `None`; passing `exit_code` on `ToolResultStatus.ERROR` opts
+the call into Level E1/E2 error-log handling (with fact-guard verification) instead of unconditional
+`tool_error` passthrough. Because Protocol v2 denies unknown fields, upgrade Core before or
+together with callers that populate these fields. Core routes Retrieve output, errors, interrupted
+or denied calls,
 RTK-optimized output, and ordinary successful output. It returns the final output plus
 disposition, operations, recoverability, token counts, Stash keys, and optional diagnostic
 context. Adapters should pass intermediate streaming chunks through and call PostTool only for

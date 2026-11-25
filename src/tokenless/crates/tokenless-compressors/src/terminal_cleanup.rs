@@ -33,7 +33,7 @@
 /// Matches `ESC [` followed by parameter bytes and a final `m`. An
 /// unterminated or non-SGR sequence is left in place — this function removes
 /// only what it positively recognizes.
-pub(crate) fn clean_terminal(text: &str) -> String {
+pub fn clean_terminal(text: &str) -> String {
     if !text.contains('\x1b') {
         return text.to_string();
     }

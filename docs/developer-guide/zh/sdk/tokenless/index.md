@@ -223,13 +223,15 @@ call = await sdk.pre_tool(
         capabilities=PreToolCapabilities(
             replace_arguments=True,
             block_and_suggest=False,
+            # 默认 PostToolReplacementCapability.FULL_RETRIEVABLE（缺省时不序列化该字段）。
+            # 无法在 PostTool 替换输出或仅支持无损压缩时传入 NONE / LOSSLESS_ONLY。
         ),
         attribution=Attribution("my-agent", "session-42", "tool-8"),
     )
 )
 ```
 
-Core 只处理显式指定的 `command_field`。如果 RTK 产生改写，Response 的 Action 为
+Core 只处理显式指定的 `command_field`。不能在 PostTool 替换工具输出或仅支持无损压缩的宿主，应将 `post_tool_replacement` 设为 `PostToolReplacementCapability.NONE` 或 `LOSSLESS_ONLY`，避免 PreTool 为这些域跳过 RTK；缺省时沿用 `FULL_RETRIEVABLE` 行为。由于 Protocol v2 请求体禁止未知字段（`deny_unknown_fields`），发送非默认能力字段前请先升级 Core 或随 Core 同步升级 SDK。如果 RTK 产生改写，Response 的 Action 为
 `replace_arguments`，参数通过 Wheel 内置的 `tokenless` 路径以 `tokenless rtk` 形式执行，并返回
 `output_optimization=rtk`。
 应执行返回参数，并把该优化状态传给 PostTool。关闭 RTK 是 Adapter 的选择：
@@ -254,6 +256,10 @@ result = await sdk.post_tool(
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
         command=None,  # shell 工具填实际执行的命令行
+        exit_code=None,  # 进程退出码；传值时对 ERROR 状态启用 Level E1/E2 错误压缩流水线
+        stderr=None,  # 宿主分离捕获的 stderr，用于 [tokenless:env] 环境诊断兜底
+        original_command=None,  # 宿主记录的改写前原始命令（可选）
+        cwd=None,  # 命令执行工作目录（可选）
     )
 )
 ```
@@ -261,7 +267,7 @@ result = await sdk.post_tool(
 `content_origin` 必须来自工具注册契约，不得从结果文本推断。Shell 工具应把实际执行的命令行
 （RTK 改写时为 PreTool 返回的那条）作为 `command` 传入：Core 会把只打印本地文件的结果报告为
 `file_read`，打印出的 HTML 页面以及打印出的 JSON 值中的 HTML 保持原样，输出中的数据仍照常
-压缩；其他工具不要设置 `command`。Core 统一路由 Retrieve 输出、
+压缩；其他工具不要设置 `command`。`exit_code`、`stderr`、`original_command`、`cwd` 在为 `None` 时不会写入 Wire 载荷；在 `ToolResultStatus.ERROR` 时显式传入 `exit_code` 即启用 Level E1/E2 错误分级压缩（含事实现象守卫校验），否则保持原有 `tool_error` 直通。由于 Protocol v2 拒绝未知字段，请确保 Core 已先行或同步升级至支持这些字段的版本。Core 统一路由 Retrieve 输出、
 错误、中断或拒绝、RTK 已优化输出和普通成功输出，并返回最终内容、Disposition、操作轨迹、
 可恢复性、Token 数量、Stash Key 与可选诊断上下文。Adapter 应透传中间 Streaming Chunk，
 只对最终模型可见文本调用 PostTool。

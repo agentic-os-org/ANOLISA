@@ -6965,3 +6965,316 @@ fn cc_compile_post_tool_preserves_v2_lossless_contract_without_stash() {
         mixed_ninja
     );
 }
+
+#[test]
+fn compress_post_tool_retrieve_wrapped_by_env_chdir_passes_through_byte_exact() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut build_log = String::from("$ cargo build\n");
+    for i in 0..30 {
+        build_log.push_str(&format!(
+            "   Compiling worker-crate-{i:02} v0.1.{i} (/workspace/crates/worker-crate-{i:02})\n"
+        ));
+    }
+    build_log.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+
+    let initial = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &build_log_request(&build_log, "success", "env-chdir-retrieve"),
+    );
+    assert!(initial.status.success());
+    let initial_json: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let hash = initial_json["result"]["stash_keys"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let retrieved = fixture
+        .command()
+        .args(["retrieve", &hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success());
+    let payload = String::from_utf8(retrieved.stdout).unwrap();
+
+    for command in [
+        format!("tokenless retrieve {hash}"),
+        format!("env -C /tmp/work tokenless retrieve {hash}"),
+        format!("env -S 'tokenless retrieve {hash}'"),
+        format!("env -S 'tokenless\\_retrieve\\_{hash}'"),
+        format!("env -vS 'tokenless retrieve {hash}'"),
+        format!("env --split-string='tokenless retrieve {hash}'"),
+    ] {
+        let req = serde_json::json!({
+            "protocol_version": 2,
+            "operation": "post_tool",
+            "attribution": {
+                "agent_id": "integration-agent",
+                "session_id": "env-chdir-retrieve",
+                "tool_use_id": "call-retrieve"
+            },
+            "input": {
+                "result_kind": "tool",
+                "tool_name": "Bash",
+                "content": payload,
+                "status": "success",
+                "content_origin": "command_output",
+                "command": command,
+                "output_optimization": "none",
+                "capabilities": {
+                    "replace_output": true,
+                    "recovery": {"kind": "shell"},
+                    "replace_with_text": true
+                }
+            }
+        });
+        let post = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &req.to_string(),
+        );
+        assert!(post.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&post.stdout).unwrap();
+        assert_eq!(json["result"]["disposition"], "passthrough", "{command}");
+        assert_eq!(json["result"]["output"], payload, "{command}");
+        assert_eq!(
+            json["result"]["applied_operations"],
+            serde_json::json!([]),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn compress_post_tool_error_with_exit_code_routes_level_e1_and_e2() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut content = "$ cargo build\n".to_owned();
+    for index in 0..35 {
+        content.push_str(&format!(
+            "   Compiling package-{index:03} v0.1.{index} with extended telemetry output\n"
+        ));
+    }
+    content.push_str("error[E0308]: mismatched types\n  --> src/main.rs:12:5\n");
+    content.push_str("error: linker command not found\n");
+
+    let e2_req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": "error-exit-code",
+            "tool_use_id": "call-e2"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": content,
+            "status": "error",
+            "exit_code": 101,
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": true
+            }
+        }
+    });
+    let e2_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &e2_req.to_string(),
+    );
+    assert!(e2_out.status.success());
+    let e2_json: serde_json::Value = serde_json::from_slice(&e2_out.stdout).unwrap();
+    assert_eq!(e2_json["result"]["disposition"], "applied");
+    assert_eq!(
+        e2_json["result"]["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert!(
+        e2_json["result"]["additional_context"]
+            .as_str()
+            .unwrap()
+            .contains("ENV_DEPENDENCY_MISSING")
+    );
+    let compressed = e2_json["result"]["output"].as_str().unwrap();
+    assert!(compressed.contains("error[E0308]"));
+    assert!(compressed.contains("src/main.rs:12"));
+    let hash = e2_json["result"]["stash_keys"][0].as_str().unwrap();
+    let recovered = fixture.command().args(["retrieve", hash]).output().unwrap();
+    assert!(recovered.status.success());
+    assert!(
+        String::from_utf8(recovered.stdout)
+            .unwrap()
+            .contains("Compiling package-015")
+    );
+
+    let e1_req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": "error-exit-code",
+            "tool_use_id": "call-e1"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": content,
+            "status": "error",
+            "exit_code": 127,
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": true
+            }
+        }
+    });
+    let e1_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &e1_req.to_string(),
+    );
+    assert!(e1_out.status.success());
+    let e1_json: serde_json::Value = serde_json::from_slice(&e1_out.stdout).unwrap();
+    assert_eq!(e1_json["result"]["disposition"], "tool_error");
+    assert_eq!(e1_json["result"]["output"], content);
+    assert_eq!(e1_json["result"]["stash_keys"], serde_json::json!([]));
+}
+
+#[test]
+fn compress_post_tool_error_structured_json_preserves_failing_test_and_assertion() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut records = (0..182)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "status": "ok",
+                "msg": format!("routine step {i:03} completed cleanly")
+            })
+        })
+        .collect::<Vec<_>>();
+    let test_fact = "test api::rejects_bad_input ... FAILED";
+    let assertion_fact = "AssertionError: expected 400, received 200 for malformed request";
+    records[90] = serde_json::json!({"id": 90, "status": "ok", "msg": test_fact});
+    records[91] = serde_json::json!({"id": 91, "status": "ok", "msg": assertion_fact});
+    let content = serde_json::to_string(&records).unwrap();
+
+    let req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": "error-json-guard",
+            "tool_use_id": "call-json"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": content,
+            "status": "error",
+            "exit_code": 1,
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": true
+            }
+        }
+    });
+    let out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &req.to_string(),
+    );
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rendered = json["result"]["output"].as_str().unwrap();
+    assert!(
+        rendered.contains(test_fact),
+        "missing `{test_fact}` in:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(assertion_fact),
+        "missing `{assertion_fact}` in:\n{rendered}"
+    );
+
+    let mut sgr_records = (0..180)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "status": "ok",
+                "msg": format!("routine step {i:03} completed cleanly")
+            })
+        })
+        .collect::<Vec<_>>();
+    let sgr_err = "RuntimeError: failed to load configuration";
+    sgr_records[90] = serde_json::json!({
+        "id": 90,
+        "status": "ok",
+        "msg": format!("\u{1b}[31m{sgr_err}\u{1b}[0m")
+    });
+    let sgr_req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": "error-json-sgr-guard",
+            "tool_use_id": "call-json-sgr"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": serde_json::to_string(&sgr_records).unwrap(),
+            "status": "error",
+            "exit_code": 1,
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": true
+            }
+        }
+    });
+    let sgr_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &sgr_req.to_string(),
+    );
+    assert!(sgr_out.status.success());
+    let sgr_json: serde_json::Value = serde_json::from_slice(&sgr_out.stdout).unwrap();
+    let sgr_rendered = sgr_json["result"]["output"].as_str().unwrap();
+    assert!(
+        sgr_rendered.contains(sgr_err),
+        "missing `{sgr_err}` in:\n{sgr_rendered}"
+    );
+}

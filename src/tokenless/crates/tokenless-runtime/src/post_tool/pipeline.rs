@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
-    BrowserSnapshotCompressor, BuildLogCompressor, BuildLogOperation, HtmlExtractor,
+    BrowserSnapshotCompressor, BuildLogCompressor, BuildLogMode, BuildLogOperation, HtmlExtractor,
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonOperation,
     SearchResultsCompressor, TabularCompressor, TabularOperation,
 };
@@ -21,12 +21,20 @@ use super::content::detect;
 use super::mixed;
 use super::stash_ledger::StashLedger;
 
+/// Default minimum character threshold before error outputs enter Level E2 compression.
+pub(crate) const DEFAULT_ERROR_MIN_CHARS: usize = 400;
+
+fn is_hard_execution_exit(code: i32) -> bool {
+    matches!(code, 126 | 127) || !(0..128).contains(&code)
+}
+
 /// Policy resolved by Runtime for one PostTool call.
 #[derive(Debug, Clone)]
 pub(crate) struct PostToolPipelineConfig {
     pub(crate) timeout: Duration,
     pub(crate) max_input_bytes: usize,
     pub(crate) min_input_chars: usize,
+    pub(crate) error_min_input_chars: usize,
     pub(crate) compression_enabled: bool,
     pub(crate) search_path_sharing_enabled: bool,
     pub(crate) diff_compression_enabled: bool,
@@ -50,6 +58,7 @@ pub(crate) struct PostToolRun {
     pub(crate) stash_errors: Option<usize>,
     pub(crate) stash_size: Option<usize>,
     pub(crate) unrecoverable_truncations: Option<usize>,
+    pub(crate) fact_guard_violation: Option<super::fact_guard::FactViolation>,
 }
 
 /// Runtime-owned PostTool pipeline for statically dispatched content domains.
@@ -83,12 +92,21 @@ impl PostToolPipeline {
             } else {
                 detected
             };
-        if request.status == ToolResultStatus::Error {
+        let is_error = request.status == ToolResultStatus::Error;
+        if is_error && request.exit_code.is_none() {
             return passthrough(request, before_tokens, content_type);
         }
+        if is_error && request.exit_code.is_some_and(is_hard_execution_exit) {
+            return passthrough(request, before_tokens, content_type);
+        }
+        let min_chars = if is_error {
+            config.min_input_chars.max(config.error_min_input_chars)
+        } else {
+            config.min_input_chars
+        };
         if !request.capabilities.replace_output
             || request.content_origin == ContentOrigin::FileContent
-            || request.content.chars().count() < config.min_input_chars
+            || request.content.chars().count() < min_chars
         {
             return passthrough(request, before_tokens, content_type);
         }
@@ -111,17 +129,24 @@ impl PostToolPipeline {
             request.content_origin,
             ContentOrigin::CommandOutput | ContentOrigin::FileRead
         );
+        // On error status (`is_error`), restrict compression to domains whose
+        // transforms are lossless (`Diff`, `Search` path sharing) or error-aware
+        // (`BuildLog` in `DiagnosticFailure` mode, `JSON`); `HTML`, `BrowserSnapshot`,
+        // `Tabular`, and `Mixed` stay excluded via `!is_error`, with
+        // `FactInvariantGuard` at arbitration serving as the universal backstop.
         let diff_candidate = config.diff_compression_enabled
             && !protect_search_output
             && content_type == ContentType::Diff
             && shell_output
             && request.capabilities.replace_with_text;
         let html_candidate = config.html_extraction_enabled
+            && !is_error
             && !protect_search_output
             && content_type == ContentType::Html
             && request.content_origin != ContentOrigin::FileRead
             && request.capabilities.replace_with_text;
         let browser_snapshot_candidate = config.browser_snapshot_enabled
+            && !is_error
             && !protect_search_output
             && content_type == ContentType::BrowserSnapshot
             && request.content_origin != ContentOrigin::FileRead
@@ -132,7 +157,8 @@ impl PostToolPipeline {
                 || is_wrapped_structured_json(&request.content));
         let build_log_candidate =
             !protect_search_output && content_type == ContentType::BuildLog && shell_output;
-        let tabular_candidate = !protect_search_output
+        let tabular_candidate = !is_error
+            && !protect_search_output
             && content_type == ContentType::Tabular
             && request.capabilities.replace_with_text;
         let search_candidate = config.search_path_sharing_enabled
@@ -151,6 +177,7 @@ impl PostToolPipeline {
         // Search output stays out even when the search route itself is
         // switched off: path-sharing off means do-not-touch, not free rein.
         let mixed_candidate = config.mixed_content_enabled
+            && !is_error
             && !protect_search_output
             && !diff_candidate
             && !html_candidate
@@ -354,10 +381,16 @@ impl PostToolPipeline {
                     .then_some(outcome.metrics.unrecoverable_truncations),
             }
         } else if build_log_candidate {
-            let outcome = BuildLogCompressor.compress_with_recovery(
+            let mode = if is_error {
+                BuildLogMode::DiagnosticFailure
+            } else {
+                BuildLogMode::Success
+            };
+            let outcome = BuildLogCompressor.compress_with_options(
                 &request.content,
                 attached_store,
                 &request.capabilities.recovery,
+                mode,
             );
             DomainCandidate {
                 output: outcome.output,
@@ -431,21 +464,31 @@ impl PostToolPipeline {
         for write in candidate.stash_writes {
             ledger.record(write);
         }
-        let verdict = decide(&ArbitrationInput {
-            original: &request.content,
-            candidate: &candidate.output,
-            has_operations: !candidate.operations.is_empty(),
-            // Reject marginal Diff, HTML, and snapshot estimates after including wrapper and recovery text.
-            min_token_savings: if diff_candidate || html_candidate || browser_snapshot_candidate {
-                16
-            } else {
-                1
-            },
-            recoverability: candidate.recoverability,
-            require_reversibility: config.require_reversibility && config.compression_enabled,
-            dry_run: !config.compression_enabled,
-            timed_out: started.elapsed() > config.timeout,
-        });
+        let fact_guard_violation = if is_error && !candidate.operations.is_empty() {
+            super::fact_guard::verify(&request.content, &candidate.output).err()
+        } else {
+            None
+        };
+        let verdict = if fact_guard_violation.is_some() {
+            Verdict::Reject(Disposition::NoSavings)
+        } else {
+            decide(&ArbitrationInput {
+                original: &request.content,
+                candidate: &candidate.output,
+                has_operations: !candidate.operations.is_empty(),
+                // Reject marginal Diff, HTML, and snapshot estimates after including wrapper and recovery text.
+                min_token_savings: if diff_candidate || html_candidate || browser_snapshot_candidate
+                {
+                    16
+                } else {
+                    1
+                },
+                recoverability: candidate.recoverability,
+                require_reversibility: config.require_reversibility && config.compression_enabled,
+                dry_run: !config.compression_enabled,
+                timed_out: started.elapsed() > config.timeout,
+            })
+        };
 
         let store = attached_store;
         let (output, disposition, stash_keys) = match verdict {
@@ -514,6 +557,7 @@ impl PostToolPipeline {
                 None
             },
             unrecoverable_truncations,
+            fact_guard_violation,
         }
     }
 }
@@ -552,6 +596,7 @@ fn passthrough(
         stash_errors: None,
         stash_size: None,
         unrecoverable_truncations: None,
+        fact_guard_violation: None,
     }
 }
 

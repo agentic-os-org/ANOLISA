@@ -23,7 +23,7 @@ struct Span {
 
 /// Plans atomic lossless template edits across contiguous CMake/Ninja and C/C++ compile blocks.
 pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
-    if super::is_compacted(lines) || lines.iter().any(|line| line.len() > MAX_BYTES) {
+    if super::is_compacted(lines) {
         return Vec::new();
     }
 

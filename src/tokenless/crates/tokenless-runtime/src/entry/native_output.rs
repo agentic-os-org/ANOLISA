@@ -2,6 +2,8 @@
 //!
 //! Custom `hooks.transparent_prefixes` are deliberately not read or inferred.
 
+use std::borrow::Cow;
+
 use super::{command_basename, is_environment_assignment};
 
 struct ProcessWrapper {
@@ -58,20 +60,47 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
     },
 ];
 
-/// Recognizes the inner executable without changing build/test wrapper policy.
-pub(super) fn owns_command(words: &[String]) -> bool {
-    inner_command(words)
-        .is_some_and(|command| matches!(command, "find" | "head" | "tail" | "grep" | "rg"))
+const MAX_ENV_SPLIT_DEPTH: usize = 4;
+
+/// Borrowed or `-S`-expanded command view with the executable at `index`.
+pub(super) struct UnwrappedCommand<'a> {
+    words: Cow<'a, [String]>,
+    index: usize,
+}
+
+impl<'a> UnwrappedCommand<'a> {
+    pub(super) fn executable(&self) -> &str {
+        command_basename(&self.words[self.index])
+    }
+
+    pub(super) fn args(&self) -> &[String] {
+        &self.words[(self.index + 1).min(self.words.len())..]
+    }
+}
+
+enum EnvShortCluster<'a> {
+    FlagOnly,
+    ConsumesNextWord,
+    SplitInline(&'a str),
+    SplitNextWord,
+}
+
+enum EnvStep<'a> {
+    Advance(usize),
+    Expand { raw: &'a str, tail_start: usize },
 }
 
 /// Identifies native search executables through the same transparent wrappers.
 pub(super) fn is_search(words: &[String]) -> bool {
-    inner_command(words).is_some_and(|command| matches!(command, "grep" | "rg"))
+    unwrap_transparent_prefix(words).is_some_and(|cmd| matches!(cmd.executable(), "grep" | "rg"))
 }
 
-fn inner_command(words: &[String]) -> Option<&str> {
+/// Strips transparent wrappers and returns the resolved executable and trailing arguments.
+pub(super) fn unwrap_transparent_prefix(words: &[String]) -> Option<UnwrappedCommand<'_>> {
+    let mut current = Cow::Borrowed(words);
     let mut index = 0;
-    while let Some(word) = words.get(index) {
+    let mut split_depth = 0;
+    while let Some(word) = current.get(index) {
         if is_environment_assignment(word)
             || matches!(
                 command_basename(word),
@@ -81,28 +110,180 @@ fn inner_command(words: &[String]) -> Option<&str> {
             index += 1;
         } else if command_basename(word) == "env" {
             index += 1;
-            while let Some(word) = words.get(index) {
-                if is_environment_assignment(word) {
-                    index += 1;
-                } else if word.starts_with('-') && word.as_str() != "-" {
-                    index += 1 + usize::from(matches!(word.as_str(), "-u" | "--unset"));
-                } else {
-                    break;
+            while index < current.len() {
+                let step = {
+                    let word = current[index].as_str();
+                    if is_environment_assignment(word) {
+                        EnvStep::Advance(1)
+                    } else if word == "--" {
+                        index += 1;
+                        break;
+                    } else if word == "--split-string" {
+                        EnvStep::Expand {
+                            raw: current.get(index + 1)?.as_str(),
+                            tail_start: index + 2,
+                        }
+                    } else if let Some(raw) = word.strip_prefix("--split-string=") {
+                        EnvStep::Expand {
+                            raw,
+                            tail_start: index + 1,
+                        }
+                    } else if word.starts_with("--") {
+                        EnvStep::Advance(1 + usize::from(matches!(word, "--unset" | "--chdir")))
+                    } else if let Some(cluster) = word.strip_prefix('-').filter(|r| !r.is_empty()) {
+                        match parse_env_short_cluster(cluster) {
+                            EnvShortCluster::FlagOnly => EnvStep::Advance(1),
+                            EnvShortCluster::ConsumesNextWord => EnvStep::Advance(2),
+                            EnvShortCluster::SplitInline(raw) => EnvStep::Expand {
+                                raw,
+                                tail_start: index + 1,
+                            },
+                            EnvShortCluster::SplitNextWord => EnvStep::Expand {
+                                raw: current.get(index + 1)?.as_str(),
+                                tail_start: index + 2,
+                            },
+                        }
+                    } else {
+                        break;
+                    }
+                };
+                match step {
+                    EnvStep::Advance(delta) => index += delta,
+                    EnvStep::Expand { raw, tail_start } => {
+                        if split_depth >= MAX_ENV_SPLIT_DEPTH {
+                            return None;
+                        }
+                        let mut expanded = split_env_s_words(raw)?;
+                        expanded.extend_from_slice(&current[tail_start..]);
+                        current = Cow::Owned(expanded);
+                        index = 0;
+                        split_depth += 1;
+                    }
                 }
             }
-        } else if word == "uv" && words.get(index + 1).is_some_and(|arg| arg == "run") {
+        } else if command_basename(word) == "uv"
+            && current.get(index + 1).is_some_and(|arg| arg == "run")
+        {
             index += 2;
         } else if let Some(wrapper) = PROCESS_WRAPPERS
             .iter()
             .find(|wrapper| wrapper.name == command_basename(word))
         {
-            let inner = wrapper_inner_index(wrapper, &words[index..])?;
+            let inner = wrapper_inner_index(wrapper, &current[index..])?;
             index += inner;
         } else {
             break;
         }
     }
-    words.get(index).map(|word| command_basename(word))
+    current.get(index)?;
+    Some(UnwrappedCommand {
+        words: current,
+        index,
+    })
+}
+
+fn parse_env_short_cluster(cluster: &str) -> EnvShortCluster<'_> {
+    for (offset, ch) in cluster.char_indices() {
+        match ch {
+            // Value-less GNU/BSD `env` short flags that may precede `S`, `u`, `C`, or `P`.
+            'i' | '0' | 'v' => continue,
+            'S' => {
+                let rest = &cluster[offset + ch.len_utf8()..];
+                return if rest.is_empty() {
+                    EnvShortCluster::SplitNextWord
+                } else {
+                    EnvShortCluster::SplitInline(rest)
+                };
+            }
+            'u' | 'C' | 'P' => {
+                let rest = &cluster[offset + ch.len_utf8()..];
+                return if rest.is_empty() {
+                    EnvShortCluster::ConsumesNextWord
+                } else {
+                    EnvShortCluster::FlagOnly
+                };
+            }
+            _ => return EnvShortCluster::FlagOnly,
+        }
+    }
+    EnvShortCluster::FlagOnly
+}
+
+/// Tokenizes GNU `env -S` / `--split-string` operands (unquoted space/tab and `\_` separators,
+/// quotes, backslash escapes including `\c` stop, and `#` comments).
+///
+/// `${VARNAME}` variable expansion and bare-`$` rejection are deliberately not mirrored because
+/// static command recognition inspects wrapper prefixes without host env state.
+fn split_env_s_words(raw: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '#' if !in_word => break,
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        ch => word.push(ch),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => word.push(decode_env_s_escape(chars.next()?)),
+                        ch => word.push(ch),
+                    }
+                }
+            }
+            '\\' => match chars.next()? {
+                // Outside quotes, GNU `env -S` treats `\_` as an argument separator and `\c`
+                // as end-of-input; inside double quotes both pass through `decode_env_s_escape`.
+                '_' => {
+                    if in_word {
+                        words.push(std::mem::take(&mut word));
+                        in_word = false;
+                    }
+                }
+                'c' => break,
+                ch => {
+                    in_word = true;
+                    word.push(decode_env_s_escape(ch));
+                }
+            },
+            ch => {
+                in_word = true;
+                word.push(ch);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
+fn decode_env_s_escape(ch: char) -> char {
+    match ch {
+        '_' => ' ',
+        't' => '\t',
+        'n' => '\n',
+        'r' => '\r',
+        'f' => '\x0c',
+        'v' => '\x0b',
+        other => other,
+    }
 }
 
 fn wrapper_inner_index(wrapper: &ProcessWrapper, words: &[String]) -> Option<usize> {

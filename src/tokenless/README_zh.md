@@ -240,13 +240,9 @@ dsh --profile <profile>
 
 ### `compress` 压缩入口
 
-共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
-PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
-旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
+共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；成功且未旁路的（以及显式携带 `exit_code` 的失败）PostTool JSON、符合条件的命令输出 Build Log 和 Diff 会进入 Runtime 内部 Pipeline，纯成功路径还会处理 CSV/TSV 表格、HTML、浏览器快照与混合区域。省略 `exit_code` 的 Tool Error 与 Level E1 硬退出/短错误会旁路压缩、保留原始输出，并由 Core 追加 `[tokenless:env]` 环境诊断（支持回退读取 `stderr`）；携带 `exit_code` 且满足阈值（默认 `400` 字符）的失败进入受 `FactInvariantGuard` 守卫的 Level E2 压缩，Opt-in 宿主在 `tool_error` 与 `applied` 两种响应中都必须消费 `additional_context`。
 
-PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
-输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写；只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
-成功结果才继续进入 PostTool，并保留原命令对应的文件来源保护。
+在默认的 `post_tool_replacement: "full_retrievable"` 能力下，PreTool 会跨直接调用和内置 Wrapper（含 `env -C`/`-S`、`timeout`、`time`、`nice`、`nohup`、`uv run` 等）保持已识别的 Cargo、pytest、npm/Jest、Go、Make 构建/测试命令以及原生预览/搜索调用（`find`、`head`、`tail`、`grep`、`rg`）不变，使其输出只由 PostTool 处理。声明 `lossless_only` 的宿主仅对预览/搜索保留原生形式，声明 `none` 则关闭豁免并恢复 RTK 改写。其他受支持命令仍可由 RTK 改写；只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，成功结果才继续进入 PostTool，并保留原命令对应的文件来源保护。
 
 Claude Code 2.1.121 及以上版本、Qoder CLI、
 OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其

@@ -36,7 +36,7 @@ pub(super) fn detect(sample: &[String]) -> bool {
 
 /// Plans atomic lossless template edits across contiguous Gradle task blocks.
 pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
-    if is_compacted(lines) || lines.iter().any(|line| line.len() > MAX_BYTES) {
+    if is_compacted(lines) {
         return Vec::new();
     }
 

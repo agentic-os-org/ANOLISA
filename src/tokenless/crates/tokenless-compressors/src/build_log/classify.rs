@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use super::BuildLogMode;
 use super::template::generic_progress_template;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,10 +147,13 @@ pub(crate) fn classify(
     line: &str,
     format: BuildLogFormat,
     generic_templates: &HashSet<String>,
+    mode: BuildLogMode,
 ) -> LineRole {
     let trimmed = line.trim();
     let lower = trimmed.to_ascii_lowercase();
-    if is_diagnostic(trimmed, &lower, format) {
+    if is_diagnostic(trimmed, &lower, format)
+        || (mode == BuildLogMode::DiagnosticFailure && is_failure_mode_anchor(trimmed))
+    {
         return LineRole::Diagnostic;
     }
     if is_summary(trimmed, &lower, format) {
@@ -158,10 +162,39 @@ pub(crate) fn classify(
     if is_phase(trimmed, format) {
         return LineRole::Phase;
     }
-    if let Some(family) = routine_family(trimmed, format, generic_templates) {
+    if let Some(family) = routine_family(trimmed, format, generic_templates)
+        && !(mode == BuildLogMode::DiagnosticFailure && family == RoutineFamily::Generic)
+    {
         return LineRole::Routine(family);
     }
     LineRole::Unknown
+}
+
+pub(crate) fn is_failure_mode_anchor(trimmed: &str) -> bool {
+    trimmed.starts_with('^')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with('|')
+        || trimmed.starts_with("-->")
+        || trimmed.starts_with("= note:")
+        || trimmed.starts_with("= help:")
+        || trimmed.starts_with("E   ")
+        || trimmed.starts_with(">   ")
+        || (trimmed.starts_with("--- ") && !trimmed.starts_with("--- PASS:"))
+        || trimmed.starts_with("+++ ")
+        || trimmed.starts_with('●')
+        || trimmed.contains("panicked at ")
+        || trimmed.contains("AssertionError")
+        || trimmed.starts_with("Expected:")
+        || trimmed.starts_with("Received:")
+        || trimmed.starts_with("Actual:")
+        || trimmed.starts_with("left:")
+        || trimmed.starts_with("right:")
+        || trimmed.starts_with("BUILD FAILED")
+        || trimmed.starts_with("BUILD FAILURE")
+        || trimmed.starts_with("FAILED:")
+        || trimmed.starts_with("ninja: build stopped:")
+        || trimmed.starts_with("make: ***")
+        || (trimmed.starts_with("===") && trimmed.contains("short test summary info"))
 }
 
 fn is_diagnostic(trimmed: &str, lower: &str, format: BuildLogFormat) -> bool {

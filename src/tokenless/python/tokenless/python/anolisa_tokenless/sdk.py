@@ -38,6 +38,14 @@ class PreToolAction(StrEnum):
     BLOCK_AND_SUGGEST = "block_and_suggest"
 
 
+class PostToolReplacementCapability(StrEnum):
+    """Level of PostTool output replacement supported by the calling host."""
+
+    FULL_RETRIEVABLE = "full_retrievable"
+    LOSSLESS_ONLY = "lossless_only"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class RecoveryMethod:
     """Declared model recovery entry point, not a compression policy switch."""
@@ -257,6 +265,12 @@ class PreToolCapabilities:
 
     replace_arguments: bool
     block_and_suggest: bool
+    #: PostTool output replacement capability advertised by the host.
+    #: Defaults to ``FULL_RETRIEVABLE`` and is omitted on the wire when default;
+    #: sending non-default values requires a Core that supports this v2 field.
+    post_tool_replacement: PostToolReplacementCapability = (
+        PostToolReplacementCapability.FULL_RETRIEVABLE
+    )
 
 
 @dataclass(frozen=True)
@@ -319,6 +333,21 @@ class PostToolRequest:
     #: it. Core reports a plain print of local files such as ``cat page.html``
     #: as ``FILE_READ``; ignored for every other origin.
     command: str | None = None
+    #: Process exit status for a failed or completed command. Omitted on the wire
+    #: when ``None``; passing it on ``ToolResultStatus.ERROR`` opts the result into
+    #: Level E1/E2 error compression and requires a Core supporting Protocol v2
+    #: optional error fields.
+    exit_code: int | None = None
+    #: Separate diagnostic stream captured alongside ``content``, when the host
+    #: keeps ``stderr`` out of band. Used as fallback for ``ENV_*`` diagnosis;
+    #: omitted on the wire when ``None``.
+    stderr: str | None = None
+    #: Unmodified user/agent shell command prior to PreTool rewriting, if tracked
+    #: by the host adapter; omitted on the wire when ``None``.
+    original_command: str | None = None
+    #: Working directory in which the command executed, if known by the host;
+    #: omitted on the wire when ``None``.
+    cwd: str | None = None
 
     def __post_init__(self) -> None:
         if not self.tool_name:
@@ -414,6 +443,17 @@ class TokenlessSdk:
         """
         if self._rtk_launcher is None:
             raise RuntimeError("Tokenless RTK is disabled")
+        capabilities_payload: dict[str, Any] = {
+            "replace_arguments": request.capabilities.replace_arguments,
+            "block_and_suggest": request.capabilities.block_and_suggest,
+        }
+        if (
+            request.capabilities.post_tool_replacement
+            != PostToolReplacementCapability.FULL_RETRIEVABLE
+        ):
+            capabilities_payload["post_tool_replacement"] = (
+                request.capabilities.post_tool_replacement
+            )
         envelope = _json_dumps(
             {
                 "protocol_version": 2,
@@ -423,10 +463,7 @@ class TokenlessSdk:
                     "tool_name": request.tool_name,
                     "arguments": request.arguments,
                     "command_field": request.command_field,
-                    "capabilities": {
-                        "replace_arguments": request.capabilities.replace_arguments,
-                        "block_and_suggest": request.capabilities.block_and_suggest,
-                    },
+                    "capabilities": capabilities_payload,
                 },
             }
         ).encode("utf-8")
@@ -460,6 +497,14 @@ class TokenlessSdk:
         }
         if request.command is not None:
             payload["command"] = request.command
+        if request.exit_code is not None:
+            payload["exit_code"] = request.exit_code
+        if request.stderr is not None:
+            payload["stderr"] = request.stderr
+        if request.original_command is not None:
+            payload["original_command"] = request.original_command
+        if request.cwd is not None:
+            payload["cwd"] = request.cwd
         response = await asyncio.to_thread(
             self.runtime._post_tool_json,
             _json_dumps(payload),

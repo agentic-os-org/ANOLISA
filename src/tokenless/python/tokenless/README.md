@@ -65,6 +65,13 @@ the output then instructs the model to call that Tool with `hash_or_marker=HASH`
 the static Tool method. Historical angle-bracket markers remain readable, but new output uses
 optional `If needed` instructions.
 
+`PreToolCapabilities.post_tool_replacement` (`PostToolReplacementCapability`) defaults to
+`FULL_RETRIEVABLE` and `PostToolRequest` optional error metadata (`exit_code`, `stderr`,
+`original_command`, `cwd`) default to `None` (omitted on the wire when default). Passing
+`exit_code` on `ToolResultStatus.ERROR` opts into Level E1/E2 error-log compression; upgrade
+Core before or together with callers that populate non-default v2 fields, as Core rejects
+unknown request fields.
+
 The public `TokenlessStats` client provides typed, read-only status, summary, recent-record,
 record-detail, structured-diff, and session-comparison queries over the Runtime's `stats.db`.
 Token counts are estimates and only operations with positive savings are recorded. Record details

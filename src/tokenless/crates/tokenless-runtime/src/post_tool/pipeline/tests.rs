@@ -233,7 +233,10 @@ fn search_path_sharing_respects_lifecycle_gates() {
         let mut config = build_log_config();
         match mode {
             0 => req.content_origin = ContentOrigin::FileContent,
-            1 => req.status = ToolResultStatus::Error,
+            1 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             2 => req.capabilities.replace_output = false,
             3 => req.capabilities.replace_with_text = false,
             4 => config.max_input_bytes = input.len() - 1,
@@ -362,6 +365,10 @@ fn request(content: &str) -> PostToolRequest {
             recovery: tokenless_protocol::RecoveryMethod::Shell,
             replace_with_text: true,
         },
+        exit_code: None,
+        stderr: None,
+        original_command: None,
+        cwd: None,
     }
 }
 
@@ -370,6 +377,7 @@ fn config(timeout: Duration, truncate_arrays_at: usize) -> PostToolPipelineConfi
         timeout,
         max_input_bytes: 1024 * 1024,
         min_input_chars: 0,
+        error_min_input_chars: DEFAULT_ERROR_MIN_CHARS,
         compression_enabled: true,
         search_path_sharing_enabled: true,
         diff_compression_enabled: false,
@@ -659,7 +667,10 @@ fn diff_respects_disable_and_requires_recovery_and_command_text() {
             5 => req.content_origin = ContentOrigin::FileContent,
             6 => req.content_origin = ContentOrigin::ApiResponse,
             7 => req.tool_name = "Grep".into(),
-            8 => req.status = ToolResultStatus::Error,
+            8 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             9 => config.max_input_bytes = input.len() - 1,
             10 => {}
             _ => unreachable!(),
@@ -817,7 +828,10 @@ fn maven_obeys_existing_source_status_replacement_and_acceptance_guards() {
         let mut req = request(MAVEN_LOG);
         let mut config = build_log_config();
         match mode {
-            0 => req.status = ToolResultStatus::Error,
+            0 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             1 => req.capabilities.replace_output = false,
             2 => req.content_origin = ContentOrigin::FileContent,
             3 => req.content_origin = ContentOrigin::ApiResponse,
@@ -894,7 +908,10 @@ fn cmake_build_obeys_existing_source_status_replacement_and_acceptance_guards() 
         let mut req = request(CMAKE_BUILD_LOG);
         let mut config = build_log_config();
         match mode {
-            0 => req.status = ToolResultStatus::Error,
+            0 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             1 => req.capabilities.replace_output = false,
             2 => req.content_origin = ContentOrigin::FileContent,
             3 => req.content_origin = ContentOrigin::ApiResponse,
@@ -1027,7 +1044,10 @@ fn ctest_obeys_existing_source_status_replacement_and_acceptance_guards() {
         let mut req = request(CTEST_LOG);
         let mut config = build_log_config();
         match mode {
-            0 => req.status = ToolResultStatus::Error,
+            0 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             1 => req.capabilities.replace_output = false,
             2 => req.content_origin = ContentOrigin::FileContent,
             3 => req.content_origin = ContentOrigin::ApiResponse,
@@ -1088,7 +1108,10 @@ fn gradle_obeys_existing_source_status_replacement_and_acceptance_guards() {
         let mut req = request(GRADLE_LOG);
         let mut config = build_log_config();
         match mode {
-            0 => req.status = ToolResultStatus::Error,
+            0 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             1 => req.capabilities.replace_output = false,
             2 => req.content_origin = ContentOrigin::FileContent,
             3 => req.content_origin = ContentOrigin::ApiResponse,
@@ -1444,4 +1467,343 @@ fn oversized_passthrough_identifies_the_byte_estimator() {
     assert_eq!(run.response.after_tokens, 3);
     assert_ne!(run.response.before_tokens, estimate_tokens(&input) as u64);
     assert_eq!(run.response.tokenizer_id, BYTE_ESTIMATOR_ID);
+}
+
+#[test]
+fn error_ci_gate_and_level_e1_pass_through() {
+    let input = build_log_with_midway_diagnostic();
+    for recovery in [
+        tokenless_protocol::RecoveryMethod::None,
+        tokenless_protocol::RecoveryMethod::Shell,
+    ] {
+        let mut gate_req = request(&input);
+        gate_req.status = ToolResultStatus::Error;
+        gate_req.exit_code = None;
+        gate_req.capabilities.recovery = recovery;
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let gated = PostToolPipeline::run(&gate_req, &build_log_config(), Some(&store));
+        assert_eq!(gated.response.disposition, Disposition::Passthrough);
+        assert_eq!(gated.response.output, input);
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+    }
+
+    for exit_code in [126, 127, 137] {
+        let mut req = request(&input);
+        req.status = ToolResultStatus::Error;
+        req.exit_code = Some(exit_code);
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+        assert_eq!(
+            run.response.disposition,
+            Disposition::Passthrough,
+            "exit_code={exit_code}"
+        );
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+    }
+
+    let mut custom_floor = build_log_config();
+    custom_floor.error_min_input_chars = input.chars().count() + 1;
+    let mut floored_req = request(&input);
+    floored_req.status = ToolResultStatus::Error;
+    floored_req.exit_code = Some(1);
+    let floored_run = PostToolPipeline::run(&floored_req, &custom_floor, None);
+    assert_eq!(floored_run.response.disposition, Disposition::Passthrough);
+    assert_eq!(floored_run.response.output, input);
+
+    let short_error =
+        "error[E0308]: mismatched types\n  --> src/main.rs:3:4\ntest result: FAILED.\n";
+    let mut short_req = request(short_error);
+    short_req.status = ToolResultStatus::Error;
+    short_req.exit_code = Some(101);
+    let short_run = PostToolPipeline::run(&short_req, &build_log_config(), None);
+    assert_eq!(short_run.response.disposition, Disposition::Passthrough);
+    assert_eq!(short_run.response.output, short_error);
+}
+
+#[test]
+fn level_e2_failing_cargo_pytest_and_jest_save_at_least_fifty_five_percent_and_preserve_facts() {
+    let mut cargo_fail = String::from("$ cargo test\n");
+    for i in 0..40 {
+        cargo_fail.push_str(&format!(
+            "   Compiling worker-crate-{i:02} v0.1.{i} (/workspace/packages/worker-crate-{i:02}) with extended telemetry output\n"
+        ));
+    }
+    for i in 0..45 {
+        cargo_fail.push_str(&format!(
+            "test module_{i:02}::validates_extended_protocol_invariant_case_{i:02} ... ok\n"
+        ));
+    }
+    cargo_fail.push_str(
+        "test parser::rejects_invalid_token ... FAILED\n\
+         failures:\n\
+         ---- parser::rejects_invalid_token stdout ----\n\
+         thread 'parser::rejects_invalid_token' panicked at src/parser.rs:88:13:\n\
+         assertion `left == right` failed\n\
+         error[E0308]: mismatched types\n\
+         --> src/parser.rs:88:13\n\
+         test result: FAILED. 45 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+    );
+
+    let mut pytest_fail = String::from(
+        "$ pytest\n============================= test session starts ==============================\n",
+    );
+    for i in 0..50 {
+        pytest_fail.push_str(&format!(
+            "tests/suite_{i:02}/test_pipeline_contract_{i:02}.py::test_validates_stream_record PASSED [ {:>2}%]\n",
+            (i * 2).min(99)
+        ));
+    }
+    pytest_fail.push_str(
+        "tests/suite_99/test_error_mode.py::test_keeps_failure FAILED [100%]\n\
+         =================================== FAILURES ===================================\n\
+         _____________________________ test_keeps_failure _______________________________\n\
+         File \"tests/suite_99/test_error_mode.py\", line 42, in test_keeps_failure\n\
+         E   AssertionError: expected compressed log to keep diagnostics\n\
+         =========================== short test summary info ============================\n\
+         FAILED tests/suite_99/test_error_mode.py::test_keeps_failure - AssertionError\n\
+         ====== 1 failed, 50 passed in 0.84s ======\n",
+    );
+
+    let mut jest_fail = String::from("$ jest\n");
+    for i in 0..45 {
+        jest_fail.push_str(&format!(
+            "PASS src/components/widget_{i:02}/render_and_validate_state.test.ts\n"
+        ));
+    }
+    jest_fail.push_str(
+        "FAIL src/components/critical/auth.test.ts\n\
+         ● auth guard › rejects expired token\n\
+           Expected: 401\n\
+           Received: 200\n\
+             at Object.<anonymous> (src/components/critical/auth.test.ts:19:5)\n\
+         Test Suites: 1 failed, 45 passed, 46 total\n\
+         Tests:       1 failed, 91 passed, 92 total\n",
+    );
+
+    for (name, input, exit_code, required) in [
+        (
+            "cargo_fail",
+            cargo_fail,
+            101,
+            vec![
+                "parser::rejects_invalid_token",
+                "error[E0308]",
+                "src/parser.rs:88",
+                "test result: FAILED. 45 passed; 1 failed",
+            ],
+        ),
+        (
+            "pytest_fail",
+            pytest_fail,
+            1,
+            vec![
+                "tests/suite_99/test_error_mode.py::test_keeps_failure",
+                "AssertionError",
+                "File \"tests/suite_99/test_error_mode.py\", line 42",
+                "====== 1 failed, 50 passed in 0.84s ======",
+            ],
+        ),
+        (
+            "jest_fail",
+            jest_fail,
+            1,
+            vec![
+                "auth guard › rejects expired token",
+                "src/components/critical/auth.test.ts:19",
+                "Test Suites: 1 failed, 45 passed, 46 total",
+                "Tests:       1 failed, 91 passed, 92 total",
+            ],
+        ),
+    ] {
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut req = request(&input);
+        req.status = ToolResultStatus::Error;
+        req.exit_code = Some(exit_code);
+        let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+        assert_eq!(run.response.disposition, Disposition::Applied, "{name}");
+        assert_eq!(
+            run.response.content_type,
+            Some(ContentType::BuildLog),
+            "{name}"
+        );
+        let savings_pct = (run.response.before_tokens - run.response.after_tokens) * 100
+            / run.response.before_tokens;
+        assert!(
+            savings_pct >= 55,
+            "{name}: expected >= 55% savings, got {savings_pct}% ({} -> {})",
+            run.response.before_tokens,
+            run.response.after_tokens
+        );
+        assert!(!run.response.stash_keys.is_empty(), "{name}");
+        for marker in required {
+            assert!(
+                run.response.output.contains(marker),
+                "{name}: missing marker `{marker}` in:\n{}",
+                run.response.output
+            );
+        }
+    }
+}
+
+#[test]
+fn error_fact_guard_rolls_back_stash_when_truncation_drops_diagnostic_code() {
+    let input = serde_json::to_string(&serde_json::json!([
+        {"msg": format!("padding-0-{}", "x".repeat(200))},
+        {"msg": format!("padding-1-{}", "x".repeat(200))},
+        {"msg": format!("error[E0308] dropped tail-{}", "x".repeat(200))}
+    ]))
+    .unwrap();
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let mut cfg = config(Duration::from_secs(1), 1);
+    cfg.min_input_chars = 0;
+    let mut req = request(&input);
+    req.status = ToolResultStatus::Error;
+    req.exit_code = Some(1);
+    let run = PostToolPipeline::run(&req, &cfg, Some(&store));
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert_eq!(
+        run.fact_guard_violation,
+        Some(super::super::FactViolation::DiagnosticCode)
+    );
+    assert_eq!(run.response.output, input);
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(concrete.len(), 0);
+    assert_eq!(
+        concrete.stash_calls.load(Ordering::Relaxed),
+        concrete.delete_calls.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn error_fact_guard_blocks_json_record_reduction_when_failing_test_or_assertion_drops() {
+    let mut records = (0..182)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "status": "ok",
+                "msg": format!("routine step {i:03} completed cleanly")
+            })
+        })
+        .collect::<Vec<_>>();
+    let test_fact = "test api::rejects_bad_input ... FAILED";
+    let assertion_fact = "AssertionError: expected 400, received 200 for malformed request";
+    records[90] = serde_json::json!({"id": 90, "status": "ok", "msg": test_fact});
+    records[91] = serde_json::json!({"id": 91, "status": "ok", "msg": assertion_fact});
+    let input = serde_json::to_string(&records).unwrap();
+
+    // Even when TOON is enabled (and selected for large arrays), facts never disappear.
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let mut cfg = build_log_config();
+    cfg.allow_toon = true;
+    cfg.min_toon_chars = 0;
+    let mut req = request(&input);
+    req.status = ToolResultStatus::Error;
+    req.exit_code = Some(1);
+    let toon_run = PostToolPipeline::run(&req, &cfg, Some(&store));
+    if toon_run.response.disposition == Disposition::Applied {
+        assert!(toon_run.response.output.contains(test_fact));
+        assert!(toon_run.response.output.contains(assertion_fact));
+    } else {
+        assert_eq!(toon_run.response.disposition, Disposition::NoSavings);
+        assert!(toon_run.fact_guard_violation.is_some());
+        assert_eq!(toon_run.response.output, input);
+        assert_eq!(concrete.len(), 0);
+    }
+
+    // Without TOON, compact JSON offers zero savings so RecordReduction attempts to sample
+    // the array; missing either middle diagnostic triggers fail-safe stash rollback.
+    let concrete_no_toon = Arc::new(CountingStore::default());
+    let store_no_toon: Arc<dyn StashStore> = concrete_no_toon.clone();
+    cfg.allow_toon = false;
+    let run = PostToolPipeline::run(&req, &cfg, Some(&store_no_toon));
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert!(matches!(
+        run.fact_guard_violation,
+        Some(
+            super::super::FactViolation::FailingTest
+                | super::super::FactViolation::DiagnosticSignal
+        )
+    ));
+    assert_eq!(run.response.output, input);
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(concrete_no_toon.len(), 0);
+    assert_eq!(
+        concrete_no_toon.stash_calls.load(Ordering::Relaxed),
+        concrete_no_toon.delete_calls.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn error_fact_guard_strips_sgr_inside_json_leaves_before_record_reduction() {
+    let mut records = (0..180)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "status": "ok",
+                "msg": format!("routine step {i:03} completed cleanly")
+            })
+        })
+        .collect::<Vec<_>>();
+    let plain_err = "RuntimeError: failed to load configuration";
+    records[90] = serde_json::json!({
+        "id": 90,
+        "status": "ok",
+        "msg": format!("\u{1b}[31m{plain_err}\u{1b}[0m")
+    });
+    let input = serde_json::to_string(&records).unwrap();
+
+    for allow_toon in [true, false] {
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut cfg = build_log_config();
+        cfg.allow_toon = allow_toon;
+        cfg.min_toon_chars = 0;
+        let mut req = request(&input);
+        req.status = ToolResultStatus::Error;
+        req.exit_code = Some(1);
+        let run = PostToolPipeline::run(&req, &cfg, Some(&store));
+        if run.response.disposition == Disposition::Applied {
+            assert!(
+                run.response.output.contains(plain_err),
+                "allow_toon={allow_toon}: missing `{plain_err}`"
+            );
+        } else {
+            assert_eq!(run.response.disposition, Disposition::NoSavings);
+            assert_eq!(
+                run.fact_guard_violation,
+                Some(super::super::FactViolation::DiagnosticSignal)
+            );
+            assert_eq!(run.response.output, input);
+            assert_eq!(concrete.len(), 0);
+            assert_eq!(
+                concrete.stash_calls.load(Ordering::Relaxed),
+                concrete.delete_calls.load(Ordering::Relaxed)
+            );
+        }
+    }
+}
+
+#[test]
+fn triple_arbitration_rejects_utf8_byte_expansion_even_when_chars_and_tokens_drop() {
+    let original = "abcd".repeat(4); // 16 ASCII bytes, 16 chars
+    let candidate = "界".repeat(10); // 30 UTF-8 bytes, 10 chars, fewer chars/tokens
+    let verdict = super::super::arbitration::decide(&super::super::arbitration::ArbitrationInput {
+        original: &original,
+        candidate: &candidate,
+        has_operations: true,
+        min_token_savings: 1,
+        recoverability: tokenless_compressors::Recoverability::Lossless,
+        require_reversibility: false,
+        dry_run: false,
+        timed_out: false,
+    });
+    assert_eq!(
+        verdict,
+        super::super::arbitration::Verdict::Reject(Disposition::NoSavings)
+    );
 }

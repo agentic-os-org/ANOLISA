@@ -12,7 +12,9 @@ mod tabular;
 mod terminal_cleanup;
 
 pub use browser_snapshot::{BrowserSnapshotCompressor, is_cdt_listing};
-pub use build_log::{BuildLogCompressor, BuildLogMetrics, BuildLogOperation, BuildLogOutcome};
+pub use build_log::{
+    BuildLogCompressor, BuildLogMetrics, BuildLogMode, BuildLogOperation, BuildLogOutcome,
+};
 pub use html::{HtmlExtractor, HtmlView};
 pub use json::{
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonMetrics,
@@ -20,4 +22,5 @@ pub use json::{
 };
 pub use search_results::SearchResultsCompressor;
 pub use tabular::{TabularCompressor, TabularMetrics, TabularOperation, TabularOutcome};
+pub use terminal_cleanup::clean_terminal;
 pub use tokenless_protocol::RecoveryMethod;
