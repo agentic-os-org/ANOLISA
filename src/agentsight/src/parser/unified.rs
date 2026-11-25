@@ -65,11 +65,13 @@ impl Parser {
 
         let _comm = ssl_event.comm.trim_end_matches('\0');
 
-        // 0. Connections already being reassembled as HTTP/2 route by state
-        // before any stateless heuristic: a read that continues a frame split
-        // across TLS records starts inside a payload and can look like
-        // anything, so it would never match the frame detection below.
-        if self.http2_parser.is_tracking(&ssl_event) {
+        // 0. Connections actively reassembling a split HTTP/2 frame route here
+        // unconditionally because a mid-payload continuation can start with
+        // arbitrary bytes. Connections sitting on a clean frame boundary only
+        // route here when the buffer does not look like an HTTP/1.x start, so
+        // an SSL* pointer reused for HTTP/1.x is not buffered or hijacked.
+        let h2_mid_frame = self.http2_parser.has_pending_bytes(&ssl_event);
+        if h2_mid_frame || (self.http2_parser.is_tracking(&ssl_event) && !ssl_event.is_http()) {
             let frames = self.http2_parser.parse(ssl_event.clone());
             if !frames.is_empty() {
                 return ParseResult {
@@ -80,6 +82,9 @@ impl Parser {
 
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {
+            if !h2_mid_frame {
+                self.http2_parser.clear_tracking(&ssl_event);
+            }
             match self.http_parser.parse(ssl_event.clone()) {
                 Ok(msg) => {
                     let message = match msg {
@@ -518,5 +523,64 @@ mod tests {
         assert!(frames[0].is_data());
         assert_eq!(frames[0].stream_id, 3);
         assert_eq!(frames[0].payload(), payload);
+    }
+
+    #[test]
+    fn test_reused_ssl_ptr_from_http2_to_http1_is_not_hijacked() {
+        let parser = Parser::new();
+        // 1. Prior HTTP/2 connection on (pid=1234, ssl_ptr=0x1000, rw=1) ends on a frame boundary.
+        let h2 = h2_frame(4, 0x00, 0, &[]);
+        let h2_res = parser.parse_ssl_event(make_ssl_event_with_rw(h2, 1));
+        assert!(matches!(
+            h2_res.messages.as_slice(),
+            [ParsedMessage::Http2Frames(_)]
+        ));
+
+        // 2. Reused ssl_ptr starts an HTTP/1.1 POST request whose first 4 bytes ("POST")
+        //    look like a 5,263,187-byte (0x504f53) HTTP/2 frame length if misrouted.
+        let header = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 5263200\r\n\r\n";
+        let req_res = parser.parse_ssl_event(make_ssl_event_with_rw(header.to_vec(), 1));
+        assert!(matches!(
+            req_res.messages.as_slice(),
+            [ParsedMessage::Request(_)]
+        ));
+
+        // 3. Subsequent HTTP/1.1 RawData body reaching > 5,263,196 cumulative bytes and ending
+        //    with bytes matching an HTTP/2 DATA frame header must remain RawData, not Http2Frames.
+        let mut body = vec![b'a'; 5_263_196 - header.len()];
+        body.extend_from_slice(&h2_frame(0, 0x01, 1, b"test"));
+        let body_res = parser.parse_ssl_event(make_ssl_event_with_rw(body, 1));
+        assert!(
+            matches!(body_res.messages.as_slice(), [ParsedMessage::RawData(_)]),
+            "reused HTTP/1.1 connection must not be hijacked as HTTP/2, got {:?}",
+            body_res.messages
+        );
+    }
+
+    #[test]
+    fn test_split_http2_frame_payload_with_http1_prefix_stays_http2() {
+        let parser = Parser::new();
+        let mut payload = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n".to_vec();
+        payload.extend_from_slice(b"{\"ok\":true}");
+        let frame = h2_frame(0, 0x01, 5, &payload);
+        // Split right before "POST ..." inside the HTTP/2 DATA payload, after an initial SETTINGS frame.
+        let split = 9;
+        let mut first_buf = h2_frame(4, 0x00, 0, &[]);
+        first_buf.extend_from_slice(&frame[..split]);
+        let first = parser.parse_ssl_event(make_ssl_event_with_rw(first_buf, 1));
+        assert!(matches!(
+            first.messages.as_slice(),
+            [ParsedMessage::Http2Frames(frames)] if frames.len() == 1 && frames[0].is_settings()
+        ));
+
+        let second = parser.parse_ssl_event(make_ssl_event_with_rw(frame[split..].to_vec(), 1));
+        let [ParsedMessage::Http2Frames(frames)] = second.messages.as_slice() else {
+            panic!(
+                "mid-frame HTTP/2 payload starting with POST must stay HTTP/2, got {:?}",
+                second.messages
+            );
+        };
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload(), payload.as_slice());
     }
 }
