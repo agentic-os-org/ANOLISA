@@ -144,6 +144,7 @@ impl AnthropicParser {
     /// - `ContentBlockStop` → finalize and push current block to content list
     /// - `MessageDelta` → extract stop_reason and final usage
     fn aggregate_sse_events(events: &[serde_json::Value]) -> Option<AnthropicResponse> {
+        const MAX_CONTENT_BLOCK_SLOTS: u32 = 256;
         let mut finished_blocks: Vec<(u32, AnthropicContentBlock)> = Vec::new();
         let mut stop_reason: Option<String> = None;
         let mut usage: Option<AnthropicUsage> = None;
@@ -229,6 +230,9 @@ impl AnthropicParser {
                         index,
                         content_block,
                     } => {
+                        if *index >= MAX_CONTENT_BLOCK_SLOTS {
+                            continue;
+                        }
                         // A new block at the same index ends any previous active block there even
                         // when its stop event never arrived.
                         if let Some(prev) = active_blocks.remove(index) {
@@ -279,6 +283,9 @@ impl AnthropicParser {
                         active_blocks.insert(*index, block);
                     }
                     AnthropicSseEvent::ContentBlockDelta { index, delta } => {
+                        if *index >= MAX_CONTENT_BLOCK_SLOTS {
+                            continue;
+                        }
                         use super::types::AnthropicSseDelta;
                         match delta {
                             AnthropicSseDelta::TextDelta { text } => {
@@ -291,7 +298,11 @@ impl AnthropicParser {
                                             CurrentBlock::Text { text: text.clone() },
                                         );
                                     }
-                                    _ => {}
+                                    Some(_) => {
+                                        log::debug!(
+                                            "aggregate_sse_events: ignoring mismatched text_delta at block index {index}"
+                                        );
+                                    }
                                 }
                             }
                             AnthropicSseDelta::ThinkingDelta { thinking } => {
@@ -308,14 +319,23 @@ impl AnthropicParser {
                                             },
                                         );
                                     }
-                                    _ => {}
+                                    Some(_) => {
+                                        log::debug!(
+                                            "aggregate_sse_events: ignoring mismatched thinking_delta at block index {index}"
+                                        );
+                                    }
                                 }
                             }
                             AnthropicSseDelta::SignatureDelta { signature } => {
-                                if let Some(CurrentBlock::Thinking { signature: sig, .. }) =
-                                    active_blocks.get_mut(index)
-                                {
-                                    sig.push_str(signature);
+                                match active_blocks.get_mut(index) {
+                                    Some(CurrentBlock::Thinking { signature: sig, .. }) => {
+                                        sig.push_str(signature);
+                                    }
+                                    _ => {
+                                        log::debug!(
+                                            "aggregate_sse_events: ignoring mismatched signature_delta at block index {index}"
+                                        );
+                                    }
                                 }
                             }
                             AnthropicSseDelta::InputJsonDelta { partial_json } => {
@@ -335,12 +355,19 @@ impl AnthropicParser {
                                             },
                                         );
                                     }
-                                    _ => {}
+                                    Some(_) => {
+                                        log::debug!(
+                                            "aggregate_sse_events: ignoring mismatched input_json_delta at block index {index}"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                     AnthropicSseEvent::ContentBlockStop { index } => {
+                        if *index >= MAX_CONTENT_BLOCK_SLOTS {
+                            continue;
+                        }
                         if let Some(block) = active_blocks.remove(index) {
                             finish_block(*index, block, &mut finished_blocks);
                         }
@@ -1577,6 +1604,93 @@ mod tests {
                 assert_eq!(input["cmd"], "pwd");
             }
             other => panic!("Expected ToolUse from orphan delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_sse_same_index_reuse_without_stop_flushes_previous() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_reuse",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 12, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "First "}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "block"}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_reused", "name": "Read", "input": {}}
+            },
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"file\":\"lib.rs\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 6}
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("parsed response");
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text, .. } => assert_eq!(text, "First block"),
+            other => panic!("Expected first flushed Text block, got {other:?}"),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_reused");
+                assert_eq!(name, "Read");
+                assert_eq!(input["file"], "lib.rs");
+            }
+            other => panic!("Expected replacement ToolUse block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_sse_ignores_indices_above_slot_cap() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_cap",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [],
+                    "usage": {"input_tokens": 5, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "kept"}
+            },
+            {
+                "type": "content_block_start",
+                "index": 256,
+                "content_block": {"type": "text", "text": "dropped"}
+            },
+            {"type": "content_block_delta", "index": 256, "delta": {"type": "text_delta", "text": " delta"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_stop", "index": 256}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("parsed response");
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text, .. } => assert_eq!(text, "kept"),
+            other => panic!("Expected kept Text block only, got {other:?}"),
         }
     }
 }
