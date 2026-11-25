@@ -64,7 +64,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
             continue;
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
+            _ = sleep_interval(Duration::from_secs(interval)) => {
                 auto_cleanup(&state).await;
             }
             _ = notified.as_mut() => {
@@ -75,7 +75,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
 }
 
 /// Sleeps until the interval ends; an unrepresentable deadline waits for reload.
-async fn sleep_health_interval(duration: Duration) {
+async fn sleep_interval(duration: Duration) {
     match tokio::time::Instant::now().checked_add(duration) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
@@ -94,7 +94,7 @@ async fn health_advisory_loop(state: &DaemonState) {
     let mut delay = Duration::ZERO;
     let mut retrying = false;
     loop {
-        let wait = sleep_health_interval(delay);
+        let wait = sleep_interval(delay);
         tokio::pin!(wait);
         if retrying {
             // Changes during backoff coalesce into the next attempt. They must not
@@ -162,7 +162,7 @@ async fn health_diagnostics_loop(state: &DaemonState) {
         tokio::select! {
             biased;
             _ = notified.as_mut() => {}
-            _ = sleep_health_interval(Duration::from_secs(interval)) => {
+            _ = sleep_interval(Duration::from_secs(interval)) => {
                 if tokio::time::timeout(
                     HEALTH_CHECK_TIMEOUT,
                     crate::health_probe::scope(health_check(state)),
@@ -970,6 +970,68 @@ mod tests {
         assert!(!scheduler.is_finished());
         scheduler.abort();
         let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn huge_auto_cleanup_interval_waits_without_panicking_and_can_be_woken() {
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.auto_cleanup = true;
+            cfg.auto_cleanup_keep = CleanupRetention::Count(1);
+            cfg.auto_cleanup_interval_secs = u64::MAX;
+        }
+        let ws_id = "ws-health-loop";
+        for id in ["snap-old", "snap-new"] {
+            std::fs::create_dir_all(backend.snapshots_root.join(ws_id).join(id)).unwrap();
+        }
+        {
+            let ws_arc = state.get_by_wsid(ws_id).unwrap();
+            let mut ws = ws_arc.write().await;
+            let now = chrono::Utc::now();
+            for (id, age_secs) in [("snap-old", 20), ("snap-new", 10)] {
+                ws.insert_snapshot(
+                    id.into(),
+                    ws_ckpt_common::SnapshotMeta {
+                        message: None,
+                        metadata: None,
+                        pinned: false,
+                        created_at: now - chrono::Duration::seconds(age_secs),
+                        missing: false,
+                        parent_id: None,
+                        child_ids: vec![],
+                    },
+                );
+            }
+        }
+
+        let cleanup_task = tokio::spawn(super::auto_cleanup_loop(state.clone()));
+        // Yield once so the task registers `config_notify` and enters the sleep arm,
+        // then advance past Tokio's 30-year `Instant::far_future()` clamp.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(86400 * 365 * 30 + 1)).await;
+        assert!(
+            !cleanup_task.is_finished(),
+            "an unrepresentable auto-cleanup interval must not panic"
+        );
+        assert!(
+            backend.snapshots_root.join(ws_id).join("snap-old").exists(),
+            "an unrepresentable auto-cleanup interval must wait for reload instead of firing at Instant::far_future()"
+        );
+
+        state.config.write().unwrap().auto_cleanup_interval_secs = 1;
+        state.config_notify.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.snapshots_root.join(ws_id).join("snap-old").exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("reloading a valid interval must wake and run auto-cleanup");
+        assert!(backend.snapshots_root.join(ws_id).join("snap-new").exists());
+        assert!(!cleanup_task.is_finished());
+        cleanup_task.abort();
+        let _ = cleanup_task.await;
     }
 
     #[tokio::test(start_paused = true)]
