@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/aw-sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Application-owned AW Service client with explicit native fallback",
   "license": "Apache-2.0",
   "type": "module",

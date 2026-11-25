@@ -1,6 +1,6 @@
 [package]
 name = "aw-adapter"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Internal native Agent dialects and bridge assets for AW"

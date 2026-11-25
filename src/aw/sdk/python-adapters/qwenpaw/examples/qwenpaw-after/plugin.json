@@ -1,7 +1,7 @@
 {
   "id": "aw-after",
   "name": "AW after-only middleware",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "general",
   "entry": {"backend": "plugin.py"},
   "dependencies": []

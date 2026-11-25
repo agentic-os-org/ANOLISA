@@ -2,6 +2,30 @@
 
 [English](CHANGELOG.md)
 
+## [0.2.2] - 2026-11-25
+
+### 新增
+
+- **AW**：更新至 v0.2.2，在本地记录实例观测、退出和观测源覆盖状态变迁。Hook 计划和公开执行审计可查看
+  AgentSight 等可选观测源的覆盖缺口，原生分发归属保持不变
+  （[#10402](https://github.com/agentic-os-org/ANOLISA/pull/10402)）。
+
+### 修复
+
+- **AW**：更新至 v0.2.2，使用私有 `0600` FIFO 隔离 Claude SDK、AgentScope、QwenPaw、Hermes
+  和 Codex Hook 清单的 Python 预检探针结果。Claude SDK 与 AgentScope 的版本探测采用相同的
+  15 秒预算。临时运行时发现设置 `OTEL_SDK_DISABLED=true`，并从 `PYTHONPATH` 过滤标准
+  `opentelemetry/instrumentation/auto_instrumentation` 路径，避免启动横幅和自动埋点干扰预检，
+  同时保留业务进程原有环境
+  （[#10641](https://github.com/agentic-os-org/ANOLISA/pull/10641)）。
+- **AW**：更新至 v0.2.2，为携带显式结构化完成字段或标准 MCP `CallToolResult` 的 Codex
+  `tool.after` 恢复公开审计投影（省略 `isError` 时按 `success` 处理）。
+  `aw audit-export read` 导出含 `resultDigest` 和 `resultStatus` 的 `ExecutionEvent` 及对应
+  `AuditRecord`。未携带退出码的纯字符串 Codex Shell `tool_response` 仍为
+  `projection_unavailable`（`aw.native_metadata_unavailable`），不会推定
+  `resultStatus: "success"`。这类 Shell 回调的原生 Hook 拦截与模型可见结果替换保持不变
+  （[#10610](https://github.com/agentic-os-org/ANOLISA/pull/10610)）。
+
 ## [0.2.1] - 2026-11-24
 
 ### 新增
