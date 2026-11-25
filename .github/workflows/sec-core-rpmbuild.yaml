@@ -25,14 +25,14 @@ jobs:
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
-      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+      image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
     steps:
       - name: Configure mirrors and install dependencies
         run: |
-          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git rpm-build systemd-rpm-macros gcc glibc-static make clang llvm \
-                         openssl-devel libseccomp-devel bubblewrap \
-                         python3-pip
+          # The image configures the mirrors and provides these packages.
+          # Add job-specific dnf install commands here.
+          rpm -q tar git rpm-build systemd-rpm-macros gcc glibc-static make clang llvm \
+                 openssl-devel libseccomp-devel bubblewrap python3-pip
 
       - uses: actions/checkout@v4
 
@@ -76,8 +76,7 @@ jobs:
 
       - name: Test RPM installation
         run: |
-          dnf makecache
-          dnf install -y scripts/rpmbuild/RPMS/**/*.rpm
+          dnf --cacheonly install -y scripts/rpmbuild/RPMS/**/*.rpm
           echo "=== Verify CLI ==="
           agent-sec-cli --help
           echo "=== Verify daemon ==="
@@ -255,17 +254,14 @@ jobs:
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
-      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+      image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
     steps:
-      # Alinux4 does not include tar, which actions/checkout needs to extract
-      # the repository when Git is unavailable in the base image.
       - name: Configure mirrors and install build and test prerequisites
         run: |
-          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          # The spec guards %systemd_* at parse time, so dnf builddep cannot read
-          # it until systemd-rpm-macros is installed.
-          dnf install -y rpm-build rpmdevtools dnf-plugins-core systemd-rpm-macros \
-                         tar gzip findutils sed git make bubblewrap python3 python3-pip
+          # The image configures the mirrors and provides these packages.
+          # Add job-specific dnf install commands here.
+          rpm -q rpm-build rpmdevtools dnf-plugins-core systemd-rpm-macros \
+                 tar gzip findutils sed git make bubblewrap python3 python3-pip
 
       - uses: actions/checkout@v4
 
@@ -317,7 +313,7 @@ jobs:
           # Read the spec from Source0 so rpmbuild uses only packaged inputs.
           tar -xzOf "$source0" "agent-sec-core-${VERSION}/packaging/rpm/agent-sec-core.spec.v2.in" \
             | sed "s/@VERSION@/${VERSION}/g" > "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
-          dnf builddep -y --spec "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
+          dnf --cacheonly builddep -y --spec "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
           rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
             "$HOME/rpmbuild/SPECS/agent-sec-core.spec"
           mkdir -p /tmp/rpms
@@ -334,7 +330,7 @@ jobs:
 
       - name: Test RPM installation
         run: |
-          dnf install -y /tmp/rpms/*.rpm
+          dnf --cacheonly install -y /tmp/rpms/*.rpm
           echo "=== Verify CLI (Rust) ==="
           agent-sec-cli --help
           echo "=== Verify daemon (Rust) ==="
