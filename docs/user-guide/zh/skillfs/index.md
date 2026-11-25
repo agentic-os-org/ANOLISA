@@ -348,8 +348,8 @@ load failure 和 parse failure 都计入 `failed`，也都列在 JSON 输出的 
 
 | `status` | 含义 |
 | --- | --- |
-| `load_error` | 文件无法加载，例如 YAML 格式损坏或内容不是合法 UTF-8。该条目不带 `name`，因为 skill 从未注册。 |
-| `error` | skill 已加载，但其 `SKILL.md` 解析失败。该条目带有 skill `name`。 |
+| `load_error` | 文件无法加载，例如文件不可读、内容不是合法 UTF-8，或文件超过大小限制。该条目不带 `name`，因为 skill 从未注册。 |
+| `error` | skill 已加载，但其 `SKILL.md` 解析失败，例如 YAML frontmatter 格式损坏。该条目带有 skill `name`（frontmatter 缺失时回退为目录名）。 |
 
 degraded skill 出现在 `warnings` 下，`status` 为 `"degraded"`，不计入 `failed`。
 
