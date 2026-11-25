@@ -3,7 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { Instance } from "@anolisa/aw-sdk";
 import net from "node:net";
 
-const [endpoint, root] = process.argv.slice(2);
+const [endpoint, root, rounds] = process.argv.slice(2);
 // Read-only probes share the same wire contract as the Python consumer.
 async function probe(operation) {
   const identity = client.connection.identity;
@@ -26,7 +26,7 @@ async function probe(operation) {
     socket.on("data", (chunk) => {
       data = Buffer.concat([data, chunk]);
     });
-    // The control probe occupies the fixture's only connection until the server closes it.
+    // Wait for the server to close the control connection after its reply.
     socket.on("end", () => {
       if (data.length < 4 || data.length !== 4 + data.readUInt32BE(0)) {
         reject(Error("incomplete AW probe response"));
@@ -102,10 +102,9 @@ try {
     assert.ok(performance.now() < retiredBy, "completed event retirement");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  for (const [call, explicit] of [
-    ["cancelled", true],
-    ["aborted", false],
-  ]) {
+  for (let attempt = 0; attempt < 2 * Number(rounds); attempt++) {
+    const explicit = attempt % 2 === 0;
+    const call = `${explicit ? "cancelled" : "aborted"}-${Math.floor(attempt / 2)}`;
     await rm(`${root}/event-pid`, { force: true });
     const abort = new AbortController();
     const pending = task.invoke(
@@ -137,8 +136,8 @@ try {
       (await probe({ method: "status" })).resources.usage.event_slots,
       0,
     );
+    await task.emit("tool.before", native(`fresh-${call}`));
   }
-  await task.emit("tool.before", native("fresh"));
   await rm(`${root}/event-pid`, { force: true });
   const pending = task
     .invoke(first, native("scope-close", { slow: true }))

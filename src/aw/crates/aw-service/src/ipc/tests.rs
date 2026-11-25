@@ -150,7 +150,7 @@ fn shares_deadline_between_prefix_and_payload() {
 #[test]
 fn initial_reads_reset_the_stall_budget_on_progress() {
     let payload = br#"{"a":1}"#;
-    let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
     let writer = thread::spawn(move || {
         sender
             .write_all(&(payload.len() as u32).to_be_bytes())
@@ -161,7 +161,7 @@ fn initial_reads_reset_the_stall_budget_on_progress() {
         }
     });
     let value = read_initial::<Value>(
-        &mut receiver,
+        &receiver,
         Duration::from_secs(1),
         Instant::now() + Duration::from_secs(60),
     )
@@ -172,11 +172,11 @@ fn initial_reads_reset_the_stall_budget_on_progress() {
 
 #[test]
 fn initial_reads_shed_idle_senders_and_reject_out_of_range_budgets() {
-    let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
     sender.write_all(&4_u32.to_be_bytes()).unwrap();
     let start = Instant::now();
     let error = read_initial::<Value>(
-        &mut receiver,
+        &receiver,
         Duration::from_millis(100),
         Instant::now() + Duration::from_secs(60),
     )
@@ -184,16 +184,12 @@ fn initial_reads_shed_idle_senders_and_reject_out_of_range_budgets() {
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(start.elapsed() < Duration::from_secs(1));
     for stall in [Duration::ZERO, Duration::from_secs(61)] {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
         sender.write_all(&4_u32.to_be_bytes()).unwrap();
         assert_eq!(
-            read_initial::<Value>(
-                &mut receiver,
-                stall,
-                Instant::now() + Duration::from_secs(60)
-            )
-            .unwrap_err()
-            .kind(),
+            read_initial::<Value>(&receiver, stall, Instant::now() + Duration::from_secs(60))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidData
         );
     }
@@ -203,7 +199,7 @@ fn initial_reads_shed_idle_senders_and_reject_out_of_range_budgets() {
 fn initial_reads_bound_never_idle_senders_at_the_absolute_limit() {
     // However active a sender is, the whole window stays bounded by the
     // absolute limit: the protocol's maximum remaining call deadline.
-    let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
     let writer = thread::spawn(move || {
         sender.write_all(&1000_u32.to_be_bytes()).unwrap();
         for _ in 0..20 {
@@ -213,7 +209,7 @@ fn initial_reads_bound_never_idle_senders_at_the_absolute_limit() {
     });
     let start = Instant::now();
     let error = read_initial::<Value>(
-        &mut receiver,
+        &receiver,
         Duration::from_millis(500),
         Instant::now() + Duration::from_millis(1200),
     )
@@ -265,7 +261,7 @@ fn rejects_expired_deadlines_and_invalid_connect_paths() {
 #[test]
 fn reply_fits_send_queue_without_waiting_for_reader() {
     for size in [64 * 1024, 128_000] {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let (sender, mut receiver) = UnixStream::pair().unwrap();
         let send_buffer: libc::c_int = 64 * 1024;
         // Linux doubles SO_SNDBUF. This frame fits but crosses the POLLOUT threshold.
         // SAFETY: the sender and option value are live during setsockopt.
@@ -283,7 +279,10 @@ fn reply_fits_send_queue_without_waiting_for_reader() {
         );
         let payload = "x".repeat(size - 2);
         let deadline = || Instant::now() + Duration::from_secs(1);
-        write_releasing(&mut sender, &payload, deadline(), try_send).unwrap();
+        write_releasing(&sender, &payload, deadline(), |bytes| {
+            try_send(&sender, bytes)
+        })
+        .unwrap();
         // The queued body can clear POLLOUT even though the whole reply fit.
         let mut poll = libc::pollfd {
             fd: sender.as_raw_fd(),

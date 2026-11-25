@@ -4,7 +4,11 @@ use crate::{
     deadline,
     endpoint::{self, Endpoint},
     ipc, rejected,
-    runtime::{process::Process, Runtime},
+    runtime::{
+        limits::{Admission, Connection},
+        process::Process,
+        Runtime,
+    },
     Operation, Request, Response, Result, VERSION,
 };
 use std::{
@@ -129,12 +133,11 @@ impl Server {
                         // Pin the connecting process before reading a potentially slow frame.
                         let process = Process::read(peer.pid as u32).ok();
                         let runtime = Arc::clone(&self.runtime);
-                        runtime.resources.connections.fetch_add(1, Ordering::AcqRel);
-                        workers.push(
-                            thread::Builder::new()
-                                .name("aw-rpc".into())
-                                .spawn(move || connection(stream, runtime, peer, process))?,
-                        );
+                        let connection = runtime.resources.connections.track(stream)?;
+                        let worker = thread::Builder::new()
+                            .name("aw-rpc".into())
+                            .spawn(move || serve_connection(connection, runtime, peer, process))?;
+                        workers.push(worker);
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         wait::idle(self.endpoint.listener().as_raw_fd(), &self.runtime)?;
@@ -166,25 +169,19 @@ impl Server {
     }
 }
 
-fn connection(
-    mut stream: UnixStream,
+fn serve_connection(
+    connection: Connection,
     runtime: Arc<Runtime>,
     peer: libc::ucred,
     process: Option<Process>,
 ) {
-    struct Connection(Arc<Runtime>);
-    impl Drop for Connection {
-        fn drop(&mut self) {
-            self.0.resources.connections.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-    let mut connection = Some(Connection(Arc::clone(&runtime)));
+    let stream = connection.stream();
     // A legal request may fill the whole eight MiB frame; every received byte
     // resets the initial stall budget so only idle connections are shed,
     // while the total window still matches the protocol's call deadline cap.
     let stall = Duration::from_secs(1);
     let limit = Instant::now() + deadline::MAX_BUDGET;
-    let Ok(request) = ipc::read_initial::<Request>(&mut stream, stall, limit) else {
+    let Ok(request) = ipc::read_initial::<Request>(stream, stall, limit) else {
         return;
     };
     let deadline = deadline::decode(request.deadline_ns);
@@ -203,40 +200,36 @@ fn connection(
             }
     );
     let result = (|| {
-        if !matches!(
-            &request.operation,
+        let kind = match &request.operation {
+            Operation::SdkCallback { close: false, .. } => Admission::SdkCallback,
             Operation::Status
-                | Operation::SdkControl { .. }
-                | Operation::SdkCallback { close: true, .. }
-                | Operation::Stop
-                | Operation::ReleaseInstance { .. }
-                | Operation::Unbind { .. }
-                | Operation::CloseEvent { .. }
-                | Operation::CloseHookEvent { .. }
-                | Operation::CloseInputEvent { .. }
-                | Operation::FinishInvocation { .. }
-                | Operation::CheckScope { .. }
-                | Operation::Registration {
-                    command: crate::RegistrationCommand::Query { .. }
-                        | crate::RegistrationCommand::Release { .. }
-                }
-        ) {
-            let _admission = runtime
-                .resources
-                .connection_admission
-                .lock()
-                .map_err(|_| rejected("state_poisoned"))?;
-            if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections {
-                return Err(runtime.overload("connection_limit"));
-            }
+            | Operation::SdkControl { .. }
+            | Operation::SdkCallback { close: true, .. }
+            | Operation::Stop
+            | Operation::ReleaseInstance { .. }
+            | Operation::Unbind { .. }
+            | Operation::CloseEvent { .. }
+            | Operation::CloseHookEvent { .. }
+            | Operation::CloseInputEvent { .. }
+            | Operation::FinishInvocation { .. }
+            | Operation::CheckScope { .. }
+            | Operation::Registration {
+                command:
+                    crate::RegistrationCommand::Query { .. }
+                    | crate::RegistrationCommand::Release { .. },
+            } => Admission::Control,
+            _ => Admission::Ordinary,
+        };
+        if !connection.admit(kind, runtime.limits.connections)? {
+            return Err(runtime.overload("connection_limit"));
         }
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
-            return prepare_connected(&stream, &runtime, request, expires, peer, process.as_ref());
+            return prepare_connected(stream, &runtime, request, expires, peer, process.as_ref());
         }
         let deadline = request.admit(&runtime.identity)?;
         runtime.authorize_registration_peer(&request.operation, process.as_ref())?;
         if binding {
-            prepare_connected(&stream, &runtime, request, deadline, peer, process.as_ref())
+            prepare_connected(stream, &runtime, request, deadline, peer, process.as_ref())
         } else if let Operation::SdkControl { command } = request.operation {
             runtime.sdk_control(
                 command,
@@ -255,7 +248,12 @@ fn connection(
                 &runtime.stopped,
             )
         } else {
-            runtime.handle(request.operation, deadline, &runtime.stopped)
+            runtime.handle_connected(
+                request.operation,
+                deadline,
+                &runtime.stopped,
+                Some(&connection),
+            )
         }
     })();
     let (result, error, audit_key) = match result {
@@ -271,20 +269,13 @@ fn connection(
         error,
         audit_key,
     };
-    let write = ipc::write_releasing(&mut stream, &response, expires, |stream, pending| {
-        // The reader may submit another request as soon as the final byte
-        // arrives. Serialize that admission check with sending and releasing.
-        let _admission = runtime
-            .resources
-            .connection_admission
-            .lock()
-            .map_err(|_| io::Error::other("connection admission poisoned"))?;
-        let sent = ipc::try_send(stream, pending)?;
-        if sent == pending.len() {
-            drop(connection.take());
-        }
-        Ok(sent)
+    let write = connection.begin_reply().and_then(|()| {
+        ipc::write_releasing(stream, &response, expires, |pending| {
+            connection.send_reply(pending)
+        })
     });
+    // Failed or expired writes also return their slot before binding cleanup.
+    drop(connection);
     if write.is_err() && binding {
         if let Some(instance_id) = response
             .result

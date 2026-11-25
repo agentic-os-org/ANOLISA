@@ -10,7 +10,7 @@ from aw_sdk.transport import rpc
 
 
 async def main() -> None:
-    endpoint, root = sys.argv[1:]
+    endpoint, root, rounds = sys.argv[1:]
     client = Instance(
         endpoint=endpoint,
         target="app",
@@ -55,7 +55,9 @@ async def main() -> None:
         async with asyncio.timeout(2):
             while (await probe({"method": "status"}))["resources"]["usage"]["event_slots"]:
                 await asyncio.sleep(0.01)
-        for call, explicit in (("cancelled", True), ("aborted", False)):
+        for attempt in range(2 * int(rounds)):
+            explicit = attempt % 2 == 0
+            call = f"{'cancelled' if explicit else 'aborted'}-{attempt // 2}"
             (Path(root) / "event-pid").unlink(missing_ok=True)
             pending = asyncio.create_task(task.invoke_native(first, native(call, slow=True)))
             async with asyncio.timeout(5):
@@ -83,7 +85,7 @@ async def main() -> None:
             except ProcessLookupError:
                 pass
             assert (await probe({"method": "status"}))["resources"]["usage"]["event_slots"] == 0
-        await task.emit("tool.before", native("fresh"))
+            await task.emit("tool.before", native(f"fresh-{call}"))
         (Path(root) / "event-pid").unlink(missing_ok=True)
         pending = asyncio.create_task(task.invoke_native(first, native("scope-close", slow=True)))
         async with asyncio.timeout(5):

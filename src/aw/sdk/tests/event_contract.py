@@ -92,8 +92,9 @@ print(json.dumps(out))
                 if service.poll() is not None or time.monotonic() > expires:
                     raise RuntimeError((root / "events.log").read_text())
                 time.sleep(0.01)
+            rounds = 12
             result = subprocess.run(
-                [*command, str(endpoint), str(root)],
+                [*command, str(endpoint), str(root), str(rounds)],
                 cwd=root,
                 env=environment,
                 capture_output=True,
@@ -101,19 +102,16 @@ print(json.dumps(out))
                 timeout=30,
             )
             assert result.returncode == 0, result.stdout + result.stderr
-            assert exchange(endpoint, None, {"method": "status"})["result"]["bindings"] == 0
-            assert (root / "event-calls").read_text().splitlines() == [
-                "partial",
-                "complete",
-                "complete",
-                "cancelled",
-                "aborted",
-                "fresh",
-                "fresh",
-                "scope-close",
-                "next-task",
-                "next-task",
-            ]
+            status = exchange(endpoint, None, {"method": "status"})["result"]
+            assert status["bindings"] == 0
+            assert status["resources"]["rejection_reasons"].get("connection_limit", 0) == 0
+            expected = ["partial", "complete", "complete"]
+            for attempt in range(rounds):
+                for outcome in ("cancelled", "aborted"):
+                    call = f"{outcome}-{attempt}"
+                    expected.extend([call, f"fresh-{call}", f"fresh-{call}"])
+            expected.extend(["scope-close", "next-task", "next-task"])
+            assert (root / "event-calls").read_text().splitlines() == expected
         finally:
             service.terminate()
             try:

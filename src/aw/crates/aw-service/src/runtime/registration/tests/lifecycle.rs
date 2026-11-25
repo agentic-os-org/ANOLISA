@@ -159,6 +159,7 @@ fn a_long_lived_scope_retires_more_than_one_thousand_stops_and_fences_replays() 
             native,
             close,
             Instant::now() + Duration::from_secs(5),
+            None,
         )
     };
     assert_eq!(call(0, true).unwrap()["code"], 0);
