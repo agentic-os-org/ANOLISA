@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 # detect.sh — Inspect Trae presence and the tokenless hook state.
-# Read-only. Tri-state exit aligns with claude-code/qwencode/openclaw/hermes
-# detect.sh — the contract every adapter in this component implements:
-#   0 = installed and ready
-#   1 = not installed but installable (prereqs OK)
-#   2 = missing prerequisites
 #
-# This is deliberately not the hooks' fail-open contract. Fail-open lives in the
-# runtime dispatcher (common/hooks/run-hook.sh): a hook that cannot run emits
-# `{}` and exits 0 so the host is never blocked. detect.sh is a read-only
-# installer probe whose exit status *is* its answer — `make trae-install` and
-# the sibling adapters gate on it — so collapsing it to a constant 0 would make
-# the readiness report meaningless without making anything safer.
+# Read-only, and fail-open: it always exits 0 and reports on stdout, which is
+# the detector contract #2525 asks this adapter for. Nothing gates on the exit
+# status — `make trae-install` runs it with `|| true`, purely to print the report
+# before installing, and no ANOLISA driver claims the trae framework yet (see
+# packaging/anolisa/component.toml.in) — so a non-zero status would only ever be
+# noise. The verdict therefore lives in the report, not in the exit code:
+#   "<agent>: ready"                               installed and usable
+#   "<agent>: not installed (ready to install)"     prereqs OK, hooks not merged
+#   "<agent>: missing prerequisites (...)"          something has to be fixed
+#
+# This differs from the tri-state detect.sh of claude-code/qwencode/openclaw/
+# hermes. `make openclaw-install` really does gate on its detector's exit
+# status, so that convention cannot simply be dropped there; unifying the two
+# across the component is a separate change.
+#
+# Hook registration is decided by lifecycle.py — the same ownership check
+# install.sh and uninstall.sh use — so a user hook that merely mentions the
+# marker does not make the adapter look registered.
 set -euo pipefail
 
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-trae}"
-ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SCRIPT_DIR="$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
+ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 ADAPTER_SRC="$ADAPTER_DIR/trae"
-MARKER="TOKENLESS_AGENT_ID=trae"
+LIFECYCLE="$SCRIPT_DIR/lifecycle.py"
 
 TRAE_BIN="${TRAE_BIN:-}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
@@ -59,13 +67,36 @@ if [ ${#TRAE_HOMES[@]} -eq 0 ]; then
     note_prereq_missing "Trae (no ~/.trae-cn or ~/.trae)"
 fi
 
-# Report tokenless hook registration per detected edition.
+# Report tokenless hook registration per detected edition. Registration means
+# adapter-owned entries, judged by lifecycle.py's ownership check on the parsed
+# hook entries — not by a marker substring, which a user's own hook can contain.
+owned_entries() {
+    if [ ! -f "$LIFECYCLE" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'unknown\n'
+        return 0
+    fi
+    python3 -B "$LIFECYCLE" owned-count --hooks-file "$1" 2>/dev/null || printf 'unknown\n'
+}
+
 for home in ${TRAE_HOMES[@]+"${TRAE_HOMES[@]}"}; do
     hooks_file="$home/hooks.json"
-    if [ -f "$hooks_file" ] && grep -qF "$MARKER" "$hooks_file" 2>/dev/null; then
-        field "hooks ($home)"     "installed"
-    else
+    if [ ! -f "$hooks_file" ]; then
         field "hooks ($home)"     "not installed"
+        note_install_missing "hooks for $home"
+        continue
+    fi
+    owned="$(owned_entries "$hooks_file")"
+    if [ "$owned" = "unknown" ]; then
+        field "hooks ($home)"     "unknown (lifecycle.py or python3 unavailable)"
+        note_install_missing "hooks for $home"
+    elif [ "$owned" -gt 0 ]; then
+        field "hooks ($home)"     "installed ($owned adapter-owned entries)"
+    else
+        field "hooks ($home)"     "not installed (no adapter-owned entries)"
         note_install_missing "hooks for $home"
     fi
 done
@@ -151,11 +182,10 @@ fi
 
 if [ ${#PREREQ_MISSING[@]} -gt 0 ]; then
     line "${AGENT}: missing prerequisites (${PREREQ_MISSING[*]})"
-    exit 2
-fi
-if [ ${#INSTALL_MISSING[@]} -gt 0 ]; then
+elif [ ${#INSTALL_MISSING[@]} -gt 0 ]; then
     line "${AGENT}: not installed (ready to install)"
-    exit 1
+else
+    line "${AGENT}: ready"
 fi
-line "${AGENT}: ready"
+# Fail-open: the report above is the result, so the exit status is always 0.
 exit 0

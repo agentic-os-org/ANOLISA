@@ -163,6 +163,8 @@ chmod 0755 \
 ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/claude-code/hooks/run-hook.sh"
 ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/qwencode/hooks/run-hook.sh"
 ln -s ../../common/hooks/run-hook.sh "$ADAPTERS/trae/hooks/run-hook.sh"
+mkdir -p "$ADAPTERS/trae/scripts"
+printf '# Lifecycle fixture\n' > "$ADAPTERS/trae/scripts/lifecycle.py"
 
 make_binaries() {
     local os="$1"

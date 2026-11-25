@@ -925,11 +925,14 @@ counts as ours only when its whole command matches the shape install writes, so
 a user hook that merely mentions `TOKENLESS_AGENT_ID=trae` survives both the
 merge and the removal.
 
-Hooks require Trae **3.3.66** or newer in the CN edition and **3.5.66** or newer
-in the international edition — the releases that introduced the hook
-configuration surface. `manifest.json` carries a single range per target, so it
-declares the earlier of the two floors (`>=3.3.66`); check the edition you
-actually run against the pair above.
+Hook support was introduced in Trae CN **3.3.66** and in the international
+edition **3.5.66**. `manifest.json` carries a single range per target and the two
+editions are numbered independently, so no range can express both floors
+exactly; it therefore declares the conservative shared bound `>=3.5.66`, which
+never claims a release that lacks hooks in either edition. CN users on
+3.3.66–3.5.65 do have hook support — the manifest simply under-claims rather
+than over-claims. These are published changelog floors, not in-IDE smoke results;
+verification inside a running IDE is tracked separately.
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|

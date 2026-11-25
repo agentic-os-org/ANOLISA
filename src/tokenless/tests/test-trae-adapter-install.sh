@@ -228,16 +228,16 @@ else
     fi
 fi
 
-# --- Test 9: detect.sh tri-state --------------------------------------------
+# --- Test 9: detect.sh is fail-open and still reports ------------------------
 export HOME="$SANDBOX/home-detect"
 mkdir -p "$HOME"
 ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >/dev/null 2>&1
+    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >"$SANDBOX/out9" 2>&1
 detect_rc=$?
-if [ "$detect_rc" -eq 2 ]; then
-    pass "detect.sh exits 2 (missing prereqs) without Trae"
+if [ "$detect_rc" -eq 0 ] && grep -qF "trae: missing prerequisites" "$SANDBOX/out9"; then
+    pass "detect.sh exits 0 without Trae and names the missing prerequisites"
 else
-    fail "detect.sh unexpected exit code: $detect_rc"
+    fail "detect.sh without Trae: rc=$detect_rc, output: $(tail -3 "$SANDBOX/out9")"
 fi
 
 # --- Test 10: install preserves the access mode of an existing config --------
@@ -433,7 +433,10 @@ fi
 export HOME="$SANDBOX/home-detect-ready"
 mkdir -p "$HOME/.trae-cn" "$HOME/.local/bin" \
     "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"
-cat > "$HOME/.local/bin/tokenless" <<'FAKE'
+write_fake_tokenless() {
+    # $1 = 0 to answer `rtk --version`, 1 to fail everything
+    if [ "$1" = "0" ]; then
+        cat > "$HOME/.local/bin/tokenless" <<'FAKE'
 #!/usr/bin/env bash
 if [ "${1:-}" = "rtk" ] && [ "${2:-}" = "--version" ]; then
     echo "0.49.0"
@@ -441,75 +444,164 @@ if [ "${1:-}" = "rtk" ] && [ "${2:-}" = "--version" ]; then
 fi
 exit 1
 FAKE
-chmod 0755 "$HOME/.local/bin/tokenless"
-run_install >/dev/null 2>&1
-
-ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >"$SANDBOX/out19" 2>&1
-detect_rc=$?
-if [ "$detect_rc" -eq 0 ] && grep -qF "bundled: tokenless rtk 0.49.0" "$SANDBOX/out19"; then
-    pass "detect.sh exits 0 with the bundled rtk runtime and no standalone rtk"
-else
-    fail "detect.sh with bundled rtk exited $detect_rc: $(cat "$SANDBOX/out19")"
-fi
-
-# --- Test 20: detect.sh still reports a broken rtk runtime -------------------
-cat > "$HOME/.local/bin/tokenless" <<'FAKE'
+    else
+        cat > "$HOME/.local/bin/tokenless" <<'FAKE'
 #!/usr/bin/env bash
 exit 1
 FAKE
-chmod 0755 "$HOME/.local/bin/tokenless"
-ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >"$SANDBOX/out20" 2>&1
+    fi
+    chmod 0755 "$HOME/.local/bin/tokenless"
+}
+run_detect() {
+    ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        bash "$ADAPTER_DIR/trae/scripts/detect.sh"
+}
+
+write_fake_tokenless 0
+run_install >/dev/null 2>&1
+run_detect >"$SANDBOX/out19" 2>&1
 detect_rc=$?
-if [ "$detect_rc" -eq 2 ] && grep -qF "rtk runtime (tokenless rtk)" "$SANDBOX/out20"; then
-    pass "detect.sh exits 2 and names the rtk runtime when tokenless rtk fails"
+if [ "$detect_rc" -eq 0 ] \
+    && grep -qF "bundled: tokenless rtk 0.49.0" "$SANDBOX/out19" \
+    && grep -qF "trae: ready" "$SANDBOX/out19"; then
+    pass "detect.sh reports ready with the bundled rtk runtime and no standalone rtk"
 else
-    fail "detect.sh with a broken rtk runtime exited $detect_rc: $(cat "$SANDBOX/out20")"
+    fail "detect.sh with bundled rtk exited $detect_rc: $(tail -4 "$SANDBOX/out19")"
 fi
 
-# --- Test 21: template and scripts agree on what the adapter owns ------------
+# --- Test 20: a broken rtk runtime is reported, still fail-open --------------
+write_fake_tokenless 1
+run_detect >"$SANDBOX/out20" 2>&1
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ] \
+    && grep -qF "rtk runtime (tokenless rtk)" "$SANDBOX/out20" \
+    && grep -qF "trae: missing prerequisites" "$SANDBOX/out20"; then
+    pass "detect.sh names the rtk runtime when tokenless rtk fails, and still exits 0"
+else
+    fail "detect.sh with a broken rtk runtime exited $detect_rc: $(tail -4 "$SANDBOX/out20")"
+fi
+
+# --- Test 21: install rejects a dangling hooks.json symlink ------------------
+# A stale dotfiles link whose target is missing must not be adopted: creating the
+# target would silently make the adapter own a file the user never chose.
+export HOME="$SANDBOX/home-dangling"
+mkdir -p "$HOME/.trae-cn" "$SANDBOX/dotfiles-dangling"
+DANGLING_TARGET="$SANDBOX/dotfiles-dangling/missing.json"
+ln -s "$DANGLING_TARGET" "$HOME/.trae-cn/hooks.json"
+
+if run_install >"$SANDBOX/out21" 2>&1; then
+    fail "install accepted a dangling hooks.json symlink"
+elif [ -L "$HOME/.trae-cn/hooks.json" ] \
+    && [ "$(readlink "$HOME/.trae-cn/hooks.json")" = "$DANGLING_TARGET" ] \
+    && [ ! -e "$DANGLING_TARGET" ] \
+    && [ -z "$(ls -A "$SANDBOX/dotfiles-dangling")" ]; then
+    pass "install rejects a dangling hooks.json symlink, leaving link and missing target untouched"
+else
+    fail "install created the missing target, replaced the link, or left a temporary behind"
+fi
+
+# uninstall must be equally inert: nothing is registered, nothing is written.
+if run_uninstall >"$SANDBOX/out21b" 2>&1 \
+    && [ -L "$HOME/.trae-cn/hooks.json" ] \
+    && [ "$(readlink "$HOME/.trae-cn/hooks.json")" = "$DANGLING_TARGET" ] \
+    && [ ! -e "$DANGLING_TARGET" ] \
+    && [ -z "$(ls -A "$SANDBOX/dotfiles-dangling")" ]; then
+    pass "uninstall leaves a dangling hooks.json symlink and its missing target untouched"
+else
+    fail "uninstall touched a dangling hooks.json symlink: $(tail -3 "$SANDBOX/out21b" 2>/dev/null)"
+fi
+
+# --- Test 22: readiness is ownership-based, not marker-based -----------------
+# A user hook that merely mentions the marker must not make the adapter look
+# registered. Same supported layout as Test 19, but nothing adapter-owned.
+export HOME="$SANDBOX/home-marker-detect"
+mkdir -p "$HOME/.trae-cn" "$HOME/.local/bin" \
+    "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"
+write_fake_tokenless 0
+cat > "$HOME/.trae-cn/hooks.json" <<'USERJSON'
+{
+  "version": 1,
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "echo TOKENLESS_AGENT_ID=trae" } ] }
+    ]
+  }
+}
+USERJSON
+
+run_detect >"$SANDBOX/out22" 2>&1
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ] \
+    && grep -qF "not installed (no adapter-owned entries)" "$SANDBOX/out22" \
+    && grep -qF "trae: not installed (ready to install)" "$SANDBOX/out22"; then
+    pass "detect.sh does not count a marker-bearing user hook as registered"
+else
+    fail "detect.sh mis-read a marker-bearing user hook: rc=$detect_rc $(tail -4 "$SANDBOX/out22")"
+fi
+
+# --- Test 23: the same edition reads as ready once really installed ----------
+if run_install >"$SANDBOX/out23" 2>&1; then
+    run_detect >"$SANDBOX/out23d" 2>&1
+    detect_rc=$?
+    if [ "$detect_rc" -eq 0 ] \
+        && grep -qF "installed (3 adapter-owned entries)" "$SANDBOX/out23d" \
+        && grep -qF "trae: ready" "$SANDBOX/out23d" \
+        && grep -qF "echo TOKENLESS_AGENT_ID=trae" "$HOME/.trae-cn/hooks.json"; then
+        pass "detect.sh reports ready after a real install and the user Stop hook survives it"
+    else
+        fail "detect.sh after install: rc=$detect_rc $(tail -4 "$SANDBOX/out23d")"
+    fi
+else
+    fail "install for the readiness test failed: $(tail -3 "$SANDBOX/out23")"
+fi
+
+# --- Test 24: template and lifecycle stay in agreement -----------------------
 python3 - "$ADAPTER_DIR/trae/hooks/hooks.json" \
+    "$ADAPTER_DIR/trae/scripts/lifecycle.py" \
     "$ADAPTER_DIR/trae/scripts/install.sh" \
-    "$ADAPTER_DIR/trae/scripts/uninstall.sh" <<'PYEOF' && pass "template events and scripts stay inside what install/uninstall claim to own" || fail "template drifted from the install/uninstall ownership sets"
+    "$ADAPTER_DIR/trae/scripts/uninstall.sh" \
+    "$ADAPTER_DIR/trae/scripts/detect.sh" <<'PYEOF' && pass "template stays inside what lifecycle.py owns, and all three scripts delegate to it" || fail "template or scripts drifted from lifecycle.py"
 import ast
 import json
 import re
 import shlex
 import sys
 
-template_path, install_path, uninstall_path = sys.argv[1:4]
-with open(template_path, encoding="utf-8") as handle:
-    events = set(json.load(handle).get("hooks", {}))
+template_path, lifecycle_path, install_path, uninstall_path, detect_path = sys.argv[1:6]
 
-scripts = set()
 with open(template_path, encoding="utf-8") as handle:
     template = json.load(handle)
-for groups in template["hooks"].values():
-    for group in groups:
-        for hook in group.get("hooks", []):
-            scripts.add(shlex.split(hook["command"])[-1])
+events = set(template.get("hooks", {}))
+scripts = {
+    shlex.split(hook["command"])[-1]
+    for groups in template["hooks"].values()
+    for group in groups
+    for hook in group.get("hooks", [])
+}
+
+with open(lifecycle_path, encoding="utf-8") as handle:
+    source = handle.read()
 
 
-def owned_scripts(source_path):
-    with open(source_path, encoding="utf-8") as handle:
-        source = handle.read()
-    match = re.search(r"OWNED_SCRIPTS = frozenset\(\s*(\{[^}]*\})\s*\)", source)
-    assert match, f"OWNED_SCRIPTS not found in {source_path}"
-    return set(ast.literal_eval(match.group(1)))
+def literal(pattern, name):
+    match = re.search(pattern, source, re.DOTALL)
+    assert match, f"{name} not found in lifecycle.py"
+    return ast.literal_eval(match.group(1))
 
 
-def managed_events(source_path):
-    with open(source_path, encoding="utf-8") as handle:
-        source = handle.read()
-    match = re.search(r"MANAGED_EVENTS = \(([^)]*)\)", source)
-    assert match, f"MANAGED_EVENTS not found in {source_path}"
-    return set(ast.literal_eval("(" + match.group(1) + ")"))
+owned = literal(r"OWNED_SCRIPTS = frozenset\(\s*(\{.*?\})\s*\)", "OWNED_SCRIPTS")
+managed = literal(r"MANAGED_EVENTS = (\(.*?\))\n", "MANAGED_EVENTS")
 
+assert scripts == set(owned), (sorted(scripts), sorted(owned))
+assert events <= set(managed), (sorted(events), sorted(managed))
 
-assert scripts == owned_scripts(install_path), (scripts, owned_scripts(install_path))
-assert scripts == owned_scripts(uninstall_path), (scripts, owned_scripts(uninstall_path))
-assert events <= managed_events(uninstall_path), (events, managed_events(uninstall_path))
+# The ownership predicate and the atomic writer must live in exactly one place.
+for path in (install_path, uninstall_path, detect_path):
+    with open(path, encoding="utf-8") as handle:
+        script = handle.read()
+    assert "lifecycle.py" in script, f"{path} no longer delegates to lifecycle.py"
+    assert "TOKENLESS_AGENT_ID=trae" not in script, f"{path} re-implements marker matching"
+    assert "os.replace" not in script, f"{path} re-implements the config writer"
 PYEOF
 
 echo ""

@@ -219,8 +219,11 @@ install -m 0755 adapters/tokenless/qwencode/hooks/run-hook.sh "$adapters/qwencod
 
 # Trae ships no plugin manifest: the hooks template is merged into the
 # edition's global hooks.json by trae/scripts/install.sh at registration time.
+# lifecycle.py holds the merge/remove/readiness logic the three trae scripts
+# share, so it must ship alongside them.
 install -m 0644 adapters/tokenless/trae/hooks/hooks.json "$adapters/trae/hooks/"
 install -m 0755 adapters/tokenless/trae/hooks/run-hook.sh "$adapters/trae/hooks/"
+install -m 0755 adapters/tokenless/trae/scripts/lifecycle.py "$adapters/trae/scripts/"
 
 install -d -m 0755 "$extension/hooks" "$extension/commands"
 install -m 0644 adapters/tokenless/common/cosh-extension.json \
