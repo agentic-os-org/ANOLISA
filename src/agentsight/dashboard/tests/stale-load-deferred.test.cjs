@@ -237,6 +237,154 @@ test('a reuse decision still matching the filters preserves order and selection'
   assert.deepEqual([...driver.slots[3].value], ['target']);
 });
 
+test('reuse confirm supersedes a pending pre-commit list read under the active filter', async () => {
+  const { driver, page, calls, original, button } = await renderReuseReview('unknown');
+  const decidePromise = button('reuse.confirm').props.onClick();
+
+  driver.slots[1].setter('');
+  const staleLoadPromise = driver.render(page).effects[0]();
+  const staleRead = calls.fetchReuseSessions[1];
+  assert.equal(driver.slots[4].value, true);
+
+  const confirmed = { ...original, confirm_state: 'confirmed', human_backed: true };
+  calls.decideReuseLabel[0].resolve(confirmed);
+  await settle();
+
+  assert.equal(calls.fetchReuseSessions.length, 3, 'pending pre-commit read must trigger fresh load');
+  assert.deepEqual(calls.fetchReuseSessions[2].args[0], {
+    label: undefined,
+    confirmState: undefined,
+    limit: 200,
+  });
+
+  const postCommitOther = {
+    session_id: 'other',
+    effective_label: 'good',
+    confirm_state: 'unconfirmed',
+    human_backed: false,
+    auto_rules: [],
+  };
+  calls.fetchReuseSessions[2].resolve({ sessions: [confirmed, postCommitOther] });
+  await decidePromise;
+
+  // Older pre-commit read resolves LAST and must be dropped.
+  staleRead.resolve({ sessions: [original] });
+  await staleLoadPromise;
+
+  assert.equal(driver.slots[0].value[0].confirm_state, 'confirmed');
+  assert.equal(driver.slots[0].value.length, 2);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[7].value, null);
+});
+
+test('reuse confirm suppresses an error from a superseded pre-commit list read', async () => {
+  const { driver, page, calls, original, button } = await renderReuseReview('unknown');
+  const decidePromise = button('reuse.confirm').props.onClick();
+
+  driver.slots[1].setter('good');
+  const staleLoadPromise = driver.render(page).effects[0]();
+  const staleRead = calls.fetchReuseSessions[1];
+
+  const confirmed = { ...original, confirm_state: 'confirmed', human_backed: true };
+  calls.decideReuseLabel[0].resolve(confirmed);
+  await settle();
+
+  assert.equal(calls.fetchReuseSessions.length, 3);
+  calls.fetchReuseSessions[2].resolve({ sessions: [confirmed] });
+  await decidePromise;
+
+  // Older pre-commit read rejects LAST; error must stay cleared.
+  staleRead.reject(new Error('stale list failed'));
+  await staleLoadPromise;
+
+  assert.deepEqual(driver.slots[0].value, [confirmed]);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[7].value, null);
+});
+
+test('reuse rejudge retires an in-flight pre-rejudge list read and honours current filters', async () => {
+  const { driver, page, calls, original, button } = await renderReuseReview('unknown');
+  const rejudgePromise = button('reuse.rejudge').props.onClick();
+
+  driver.slots[1].setter('good');
+  const staleLoadPromise = driver.render(page).effects[0]();
+  const staleRead = calls.fetchReuseSessions[1];
+
+  calls.runReuseJudgements[0].resolve({ examined: 1, judged: 1 });
+  await settle();
+
+  assert.equal(calls.fetchReuseSessions.length, 3);
+  assert.deepEqual(calls.fetchReuseSessions[2].args[0], {
+    label: 'good',
+    confirmState: undefined,
+    limit: 200,
+  });
+
+  const rejudged = { ...original, effective_label: 'good', llm_label: 'good' };
+  calls.fetchReuseSessions[2].resolve({ sessions: [rejudged] });
+  await rejudgePromise;
+
+  // Older pre-rejudge read settles LAST and must not restore the old label.
+  staleRead.resolve({ sessions: [original] });
+  await staleLoadPromise;
+
+  assert.deepEqual(driver.slots[0].value, [rejudged]);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[7].value, null);
+});
+
+test('reuse rejudge suppresses an error from a superseded pre-rejudge list read', async () => {
+  const { driver, page, calls, original, button } = await renderReuseReview('unknown');
+  const rejudgePromise = button('reuse.rejudge').props.onClick();
+
+  driver.slots[1].setter('');
+  const staleLoadPromise = driver.render(page).effects[0]();
+  const staleRead = calls.fetchReuseSessions[1];
+
+  calls.runReuseJudgements[0].resolve({ examined: 1, judged: 1 });
+  await settle();
+
+  assert.equal(calls.fetchReuseSessions.length, 3);
+  const rejudged = { ...original, effective_label: 'good', llm_label: 'good' };
+  calls.fetchReuseSessions[2].resolve({ sessions: [rejudged] });
+  await rejudgePromise;
+
+  staleRead.reject(new Error('stale rejudge list failed'));
+  await staleLoadPromise;
+
+  assert.deepEqual(driver.slots[0].value, [rejudged]);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[7].value, null);
+});
+
+test('failed reuse decision leaves an in-flight list read intact without issuing another load', async () => {
+  const { driver, page, calls, button } = await renderReuseReview('unknown');
+  const decidePromise = button('reuse.confirm').props.onClick();
+
+  driver.slots[1].setter('');
+  const activeLoadPromise = driver.render(page).effects[0]();
+  const activeRead = calls.fetchReuseSessions[1];
+
+  calls.decideReuseLabel[0].reject(new Error('decision failed'));
+  await decidePromise;
+  assert.equal(calls.fetchReuseSessions.length, 2, 'failed mutation must not start a replacement load');
+  assert.equal(driver.slots[7].value, 'decision failed');
+
+  const fresh = {
+    session_id: 'fresh',
+    effective_label: 'good',
+    confirm_state: 'unconfirmed',
+    human_backed: false,
+    auto_rules: [],
+  };
+  activeRead.resolve({ sessions: [fresh] });
+  await activeLoadPromise;
+
+  assert.deepEqual(driver.slots[0].value, [fresh]);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[7].value, 'decision failed');
+});
+
 // Mirrors the shared helper's contract: the evidence link may only name a case
 // belonging to a visible (agent-filtered) violation row. The real derivation is
 // covered against the compiled module in apiClient-regression.
