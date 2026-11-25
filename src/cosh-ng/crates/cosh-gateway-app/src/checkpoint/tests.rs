@@ -19,8 +19,12 @@ use cosh_types::checkpoint::{
 
 use super::*;
 
+#[path = "tests/task_snapshot.rs"]
+mod task_snapshot;
+
 enum DaemonReply {
     Response(Box<WsCkptResponse>),
+    CloseWithoutReply,
     Identity,
     CreatedFromRequest,
     SkippedFromRequest(String),
@@ -139,6 +143,11 @@ fn spawn_daemon(
             let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
             stream.read_exact(&mut payload).unwrap();
             let request: WsCkptRequest = bincode::deserialize(&payload).unwrap();
+            if matches!(reply, DaemonReply::CloseWithoutReply) {
+                // An outdated daemon drops the connection on unknown requests.
+                requests.push(request);
+                continue;
+            }
             let response = daemon_response(reply, &request);
             requests.push(request);
             let payload = bincode::serialize(&response).unwrap();
@@ -158,6 +167,10 @@ fn spawn_daemon(
 
 fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptResponse {
     match reply {
+        // The connection loop drains this variant before asking for a reply.
+        DaemonReply::CloseWithoutReply => {
+            unreachable!("close-without-reply requests never reach the reply builder")
+        }
         DaemonReply::ReplaceWorkspace(workspace, recreate) => {
             let old = workspace.with_extension("rollback-tmp");
             std::fs::rename(&workspace, &old).unwrap();
@@ -1083,8 +1096,8 @@ fn task_snapshot_rejection_preserves_binding_but_uncertain_switch_invalidates_it
     for rejected in [true, false] {
         let response = if rejected {
             WsCkptResponse::GuardedRollbackV2Rejected {
-                code: cosh_types::checkpoint::GuardedRollbackRejectionCodeV2::GenerationMismatch,
-                message: "generation changed".to_owned(),
+                code: cosh_types::checkpoint::GuardedRollbackRejectionCodeV2::DiffMismatch,
+                message: "diff changed".to_owned(),
             }
         } else {
             // A reply without matching rollback evidence cannot prove the outcome.
@@ -1128,7 +1141,8 @@ fn task_snapshot_rejection_preserves_binding_but_uncertain_switch_invalidates_it
         if rejected {
             assert!(matches!(
                 result,
-                TaskSnapshotProviderSwitchResult::Rejected { .. }
+                TaskSnapshotProviderSwitchResult::Rejected { error }
+                if error.code.as_str() == "checkpoint_switch_rejected_diff_mismatch"
             ));
             assert_eq!(
                 workspaces.resolve(&target).unwrap().identity(),
