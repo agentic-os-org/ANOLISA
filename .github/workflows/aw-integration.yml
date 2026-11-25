@@ -30,6 +30,10 @@ on:
       credential_free:
         type: boolean
         default: false
+      packages_only:
+        description: Build and test installable packages for release
+        type: boolean
+        default: false
     secrets:
       QODER_PERSONAL_ACCESS_TOKEN:
         description: Qoder account token for native hosted-model security acceptance
@@ -39,8 +43,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Coalesce stale nightlies and serialize explicit acceptance of the same commit.
-  group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}
+  # Full acceptance queues independently of the package release gate.
+  group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}${{ inputs.packages_only && '-packages' || '' }}
   queue: ${{ github.event_name == 'schedule' && 'single' || 'max' }}
   cancel-in-progress: false
 
@@ -96,6 +100,7 @@ jobs:
             git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
           fi
       - name: Validate native coverage and select pinned runtimes
+        if: ${{ !inputs.packages_only }}
         id: matrix
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
@@ -163,7 +168,9 @@ jobs:
           make -C distribution aw-packages ${RELEASE_VERSION:+"VERSION=$RELEASE_VERSION"} \
             OUTPUT="$AW_PACKAGE_DIR/packages" COMPONENTS="core sec-core tokenless"
           make -C distribution aw-integration-backends BACKENDS="sec-core tokenless"
+          cp src/aw/target/rtk-provenance.json "$AW_PACKAGE_DIR/test-evidence/"
       - name: Stage the same build for native acceptance
+        if: ${{ !inputs.packages_only }}
         shell: bash
         env:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
@@ -175,7 +182,6 @@ jobs:
           cp src/aw/target/release/aw providers/agent-sec-core/target/release/aw-provider-sec-core providers/tokenless/target/release/aw-provider-tokenless "$AW_PACKAGE_DIR/native/"
           cp src/aw/target/release/examples/policy src/tokenless/target/release/tokenless "$AW_PACKAGE_DIR/native/"
           cp src/agent-sec-core/v2/target/release/{agent-sec-cli,agent-sec-daemon} "$AW_PACKAGE_DIR/native/"
-          cp src/aw/target/rtk-provenance.json "$AW_PACKAGE_DIR/test-evidence/"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/aw/Cargo.toml > "$AW_PACKAGE_DIR/native/aw-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/agent-sec-core/Cargo.toml > "$AW_PACKAGE_DIR/native/sec-core-provider-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/tokenless/Cargo.toml > "$AW_PACKAGE_DIR/native/tokenless-provider-packages.json"
@@ -188,6 +194,7 @@ jobs:
           tar -czf "$AW_PACKAGE_DIR/native.tar.gz" .
       - uses: actions/upload-artifact@v4
         id: upload-native
+        if: ${{ !inputs.packages_only }}
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
           path: ${{ env.AW_PACKAGE_DIR }}/native.tar.gz
@@ -300,7 +307,7 @@ jobs:
 
   native:
     needs: [plan, packages]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
+    if: ${{ !cancelled() && !inputs.packages_only && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
     name: AW / Native (${{ matrix.agent }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
@@ -367,7 +374,7 @@ jobs:
 
   resident-image:
     needs: [plan, packages]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
+    if: ${{ !cancelled() && !inputs.packages_only && needs.plan.result == 'success' && needs.packages.outputs.native_artifact != '' }}
     outputs:
       image_artifact: ${{ steps.upload-image.outputs.artifact-id }}
     name: AW / Resident image
@@ -415,7 +422,7 @@ jobs:
 
   resident-container:
     needs: [plan, resident-image]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.resident-image.result == 'success' && needs.resident-image.outputs.image_artifact != '' }}
+    if: ${{ !cancelled() && !inputs.packages_only && needs.plan.result == 'success' && needs.resident-image.result == 'success' && needs.resident-image.outputs.image_artifact != '' }}
     name: AW / Resident (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
@@ -461,7 +468,16 @@ jobs:
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
         run: test "$PLAN_RESULT" = success
+      - name: Require tested release archives
+        if: inputs.packages_only
+        env:
+          PACKAGE_RESULT: ${{ needs.packages.result }}
+          ARCHIVE_ID: ${{ needs.packages.outputs.archive_id }}
+        run: |
+          test "$PACKAGE_RESULT" = success
+          test -n "$ARCHIVE_ID"
       - uses: actions/checkout@v4
+        if: ${{ !inputs.packages_only }}
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
@@ -469,20 +485,22 @@ jobs:
             src/aw
             docs/developer-guide/en/aw
       - uses: actions/download-artifact@v4
+        if: ${{ !inputs.packages_only }}
         with:
           pattern: aw-native-evidence-*-${{ needs.plan.outputs.sha }}
           path: src/aw/target/native-results
       - uses: actions/download-artifact@v4
+        if: ${{ !inputs.packages_only }}
         with:
           pattern: aw-resident-evidence-*-${{ needs.plan.outputs.sha }}
           path: src/aw/target/resident-results
       - uses: actions/download-artifact@v4
-        if: always() && needs.plan.result == 'success'
+        if: always() && needs.plan.result == 'success' && !inputs.packages_only
         with:
           name: aw-resident-build-evidence-${{ needs.plan.outputs.sha }}
           path: src/aw/target/resident-results/image
       - name: Require all native suites and report acceptance boundaries
-        if: always() && needs.plan.result == 'success'
+        if: always() && needs.plan.result == 'success' && !inputs.packages_only
         env:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
           PLAN_RESULT: ${{ needs.plan.result }}

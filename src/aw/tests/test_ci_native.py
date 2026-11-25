@@ -164,7 +164,7 @@ class NativeTests(GateFixture):
             result_job.index("Require a trusted integration plan"),
             result_job.index("uses: actions/checkout@v4"),
         )
-        self.assertIn("if: always() && needs.plan.result == 'success'", result_job)
+        self.assertIn("if: always() && needs.plan.result == 'success' && !inputs.packages_only", result_job)
         script = result_job.split("        run: ", 1)[1].splitlines()[0]
         for outcome in ("success", "failure", "cancelled", "skipped"):
             result = subprocess.run(
@@ -181,7 +181,7 @@ class NativeTests(GateFixture):
         for name in ("native", "resident-image"):
             job = jobs.split(f"\n  {name}:\n", 1)[1].split("    name:", 1)[0]
             self.assertIn("needs: [plan, packages]", job)
-            self.assertIn("!cancelled() && needs.plan.result == 'success' && "
+            self.assertIn("!cancelled() && !inputs.packages_only && needs.plan.result == 'success' && "
                           "needs.packages.outputs.native_artifact != ''", job)
         self.assertIn("PACKAGE_RESULT: ${{ needs.packages.result }}", jobs)
 
@@ -194,6 +194,7 @@ class NativeTests(GateFixture):
             ("resident-container", "resident-image.outputs.image_artifact"),
         ):
             job = jobs.split(f"\n  {name}:\n", 1)[1].split("\n\n  ", 1)[0]
+            self.assertIn("!inputs.packages_only", job)
             self.assertIn("needs." + producer + " != ''", job)
             self.assertIn("artifact-ids: ${{ needs." + producer + " }}", job)
             self.assertIn("merge-multiple: true", job)
@@ -205,7 +206,8 @@ class NativeTests(GateFixture):
         workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         concurrency = workflow.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
         self.assertIn(
-            "group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}",
+            "group: aw-integration-${{ github.event_name == 'schedule' && github.ref || inputs.candidate_sha }}"
+            "${{ inputs.packages_only && '-packages' || '' }}",
             concurrency,
         )
         self.assertIn("queue: ${{ github.event_name == 'schedule' && 'single' || 'max' }}", concurrency)

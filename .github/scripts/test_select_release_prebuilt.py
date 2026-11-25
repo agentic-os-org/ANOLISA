@@ -107,7 +107,8 @@ class ReleaseScopeTests(unittest.TestCase):
         jobs = yaml.load(RELEASE, Loader=yaml.BaseLoader)["jobs"]
         self.assertEqual(jobs["aw_assets"]["uses"], "./.github/workflows/aw-release.yml")
         self.assertEqual(jobs["aw_assets"]["if"], "needs.package.outputs.component == 'aw'")
-        self.assertEqual(jobs["aw_assets"]["permissions"], {"actions": "read", "contents": "read"})
+        self.assertEqual(jobs["aw_assets"]["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets", jobs["aw_assets"])
         self.assertIn("aw_assets", jobs["publish"]["needs"])
         self.assertIn("needs.aw_assets.result == 'success'", jobs["publish"]["if"])
 
