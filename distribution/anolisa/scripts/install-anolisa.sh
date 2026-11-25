@@ -52,7 +52,6 @@
 # Lays out a self-contained ANOLISA install under ${ANOLISA_PREFIX}:
 #
 #   ${ANOLISA_PREFIX}/bin/anolisa                       (binary)
-#   ${ANOLISA_PREFIX}/share/anolisa/manifests/          (osbase)
 #   ${ANOLISA_PREFIX}/share/anolisa/components/         (integration contracts)
 #
 # The distribution index is NOT staged: the CLI downloads and caches it from
@@ -312,7 +311,6 @@ fi
 # ---- Final install targets (where step 6 promotion lands) ------------------
 FINAL_BIN_DIR="$ANOLISA_PREFIX/bin"
 FINAL_DATADIR="$ANOLISA_PREFIX/share/anolisa"
-FINAL_MANIFESTS_DIR="$FINAL_DATADIR/manifests"
 FINAL_BIN_DEST="$FINAL_BIN_DIR/anolisa"
 COMPONENT_CONTRACTS=(cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory)
 
@@ -346,7 +344,6 @@ if [ "$MODE" = "url-fetch" ] && [ "$DRY_RUN" -eq 1 ]; then
   log "would stage under   : <mktemp staging dir> (auto-removed on exit)"
   log "would write to prefix:"
   log "  $FINAL_BIN_DEST"
-  log "  $FINAL_MANIFESTS_DIR/osbase/"
   log "  $FINAL_DATADIR/components/"
   exit 0
 fi
@@ -377,7 +374,7 @@ BIN_DEST="$BIN_DIR/anolisa"
 # Download workspace lives under the staging root so cleanup is unified.
 DOWNLOAD_DIR="$STAGING_ROOT/.download"
 
-mkdir -p "$BIN_DIR" "$MANIFESTS_DIR" "$DOWNLOAD_DIR"
+mkdir -p "$BIN_DIR" "$DATADIR" "$DOWNLOAD_DIR"
 
 # ---- sha256 verification helper --------------------------------------------
 #
@@ -631,26 +628,12 @@ preflight_component_contract_owners() {
 
 stage_from_local() {
   stage_component_contracts "$FROM_LOCAL/manifests/components"
-  for subdir in osbase; do
-    local src="$FROM_LOCAL/manifests/$subdir"
-    if [ ! -d "$src" ]; then
-      warn "$src missing; skipping"
-      continue
-    fi
-    local dest="$MANIFESTS_DIR/$subdir"
-    log "stage manifests/$subdir → $dest"
-    rm -rf "$dest"
-    mkdir -p "$dest"
-    # `cp -R src/. dest` copies contents (incl. dotfiles) without nesting.
-    cp -R "$src/." "$dest/"
-    find "$dest" -type d -exec chmod 0755 {} \;
-    find "$dest" -type f -exec chmod 0644 {} \;
-  done
 
   # Optional SPEC.md doc — informational, mirrors what a packaged distro
   # would ship next to the manifests.
   if [ -f "$FROM_LOCAL/manifests/SPEC.md" ]; then
     log "stage manifests/SPEC.md"
+    mkdir -p "$MANIFESTS_DIR"
     cp "$FROM_LOCAL/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
     chmod 0644 "$MANIFESTS_DIR/SPEC.md"
   fi
@@ -781,21 +764,8 @@ stage_from_url() {
 
   stage_component_contracts "$bundle_stage/manifests/components"
 
-  # Copy OS-base manifests verbatim from the extracted bundle.
-  for subdir in osbase; do
-    local src="$bundle_stage/manifests/$subdir"
-    if [ ! -d "$src" ]; then
-      warn "$src missing in manifest bundle; skipping"
-      continue
-    fi
-    local dest="$MANIFESTS_DIR/$subdir"
-    log "stage manifests/$subdir → $dest"
-    rm -rf "$dest"
-    mkdir -p "$dest"
-    cp -R "$src/." "$dest/"
-  done
-
   if [ -f "$bundle_stage/manifests/SPEC.md" ]; then
+    mkdir -p "$MANIFESTS_DIR"
     cp "$bundle_stage/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
   fi
 }

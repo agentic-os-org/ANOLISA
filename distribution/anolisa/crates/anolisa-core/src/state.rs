@@ -66,11 +66,14 @@ pub enum ObjectKind {
     /// this kind; queries are limited to legacy-migration paths (see
     /// [`crate::state_migration::migrate_object`]).
     Capability,
-    /// Runtime/osbase component.
+    /// Runtime component.
     Component,
     /// Agent-framework adapter object.
     Adapter,
-    /// OS base-layer object.
+    /// Legacy OS base-layer object. The `osbase` command surface has been
+    /// removed; the variant survives only so `installed.toml` files written
+    /// by older releases still deserialize. New code must never create
+    /// objects of this kind.
     Osbase,
 }
 
@@ -273,7 +276,8 @@ pub struct HealthEntry {
     pub reason: Option<String>,
 }
 
-/// A single installed object (component, adapter, or osbase).
+/// A single installed object (component or adapter; legacy capability/osbase
+/// records may still deserialize from older state files).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledObject {
     /// Object vocabulary used by commands and state lookup.

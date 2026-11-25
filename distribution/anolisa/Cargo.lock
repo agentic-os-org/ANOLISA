@@ -89,7 +89,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
- "toml_edit",
  "ureq",
  "uuid",
  "xattr",

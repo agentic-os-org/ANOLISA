@@ -10,7 +10,7 @@ prefix = "~/.local"
 anolisa_version = "0.1.0"
 
 [[objects]]
-kind = "component" # component | adapter | osbase ("capability" parses as legacy only)
+kind = "component" # component | adapter ("capability" and "osbase" parse as legacy only)
 name = "agentsight"
 version = "0.2.0"
 status = "installed" # installed | partial | disabled | failed | adopted

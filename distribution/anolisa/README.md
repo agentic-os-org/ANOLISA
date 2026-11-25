@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-Unified CLI gateway for ANOLISA — manages component lifecycle, framework adapters, OS base layer, and system services. anolisa is the primary user entry point of the [ANOLISA](../../README.md) project, providing a single command to install, update, diagnose, and orchestrate all components.
+Unified CLI gateway for ANOLISA — manages component lifecycle, framework adapters, and telemetry. anolisa is the primary user entry point of the [ANOLISA](../../README.md) project, providing a single command to install, update, diagnose, and orchestrate all components.
 
 ## Quick Start
 
@@ -51,13 +51,10 @@ only when `--since` is set.
 | Command | Description |
 |---------|-------------|
 | `adapter` | Manage component-to-framework adapters (scan / enable / disable / status) |
-| `osbase kernel` | Kernel modules and eBPF management |
-| `osbase sandbox` | Sandbox runtime management (runc, gvisor, firecracker, etc.) |
-| `osbase security` | Security overlay management (loongshield, seccomp-profiles) |
-| `system` | System helper daemon lifecycle (setup / serve / teardown / status) |
 | `register` | Join / leave Agentic OS Co-Build Program |
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report (`--component cosh-ng` also summarizes the cosh-shell diagnostic bundle; `COSH_SHELL_BIN` overrides the binary) |
+| `telemetry` | Manage telemetry collection and reporting |
 
 By default, `anolisa adapter enable <component> openclaw` accepts the plugin's
 declared capabilities when each host command supports capability consent.
@@ -123,10 +120,10 @@ Five-crate Cargo workspace:
 | Crate | Responsibility |
 |-------|---------------|
 | `anolisa-cli` | Command parsing, dispatch, terminal UI |
-| `anolisa-core` | Component resolution, adapter management, osbase install logic |
+| `anolisa-core` | Component resolution, lifecycle planning, adapter management |
 | `anolisa-env` | Environment detection (distro, arch, capabilities) |
 | `anolisa-build` | Build-time codegen and asset embedding |
-| `anolisa-platform` | Filesystem layout, native package queries/transactions, systemd, IPC, privilege helpers |
+| `anolisa-platform` | Filesystem layout, native package queries/transactions, systemd, privilege helpers |
 
 Supports dual backends: **raw** (OSS tar.gz) and **RPM** (yum/dnf transactions).
 The lifecycle planner separates ANOLISA-owned files from native-package

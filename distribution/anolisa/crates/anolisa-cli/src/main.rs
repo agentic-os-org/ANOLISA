@@ -4,7 +4,6 @@ mod output;
 mod color;
 mod commands;
 mod context;
-mod helper_client;
 mod packaged;
 mod progress;
 mod repo_config;

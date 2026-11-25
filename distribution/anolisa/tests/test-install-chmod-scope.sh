@@ -54,13 +54,12 @@ chmod 0600 "$PREFIX/share/other-pkg/data.txt"
 chmod 0711 "$PREFIX"
 
 # Stub anolisa source tree: an executable release binary (so the installer
-# does not invoke cargo) plus one osbase manifest to stage. The empty
+# does not invoke cargo) plus component contracts to stage. The empty
 # templates/ directory only satisfies the checkout-layout validation.
-install -d "$SRC/target/release" "$SRC/manifests/osbase" "$SRC/templates"
+install -d "$SRC/target/release" "$SRC/manifests" "$SRC/templates"
 cp -R "$ROOT/manifests/components" "$SRC/manifests/"
 printf '#!/usr/bin/env sh\nexit 0\n' > "$SRC/target/release/anolisa"
 chmod 0755 "$SRC/target/release/anolisa"
-printf 'version = "0.0.0-test"\n' > "$SRC/manifests/osbase/base.toml"
 
 ANOLISA_PREFIX="$PREFIX" bash "$INSTALLER" --from-local "$SRC" > "$TEMPORARY/install.log"
 
@@ -75,9 +74,8 @@ assert_mode "$PREFIX/share/anolisa/adapters/other-component/hook.sh" 0755
 
 # Staged paths still get the intended modes.
 assert_mode "$PREFIX/bin/anolisa" 0755
-assert_mode "$PREFIX/share/anolisa/manifests/osbase/base.toml" 0644
-assert_mode "$PREFIX/share/anolisa/manifests/osbase" 0755
-assert_mode "$PREFIX/share/anolisa/manifests" 0755
+assert_mode "$PREFIX/share/anolisa/components" 0755
+assert_mode "$PREFIX/share/anolisa/components/tokenless" 0755
 assert_mode "$PREFIX/share/anolisa/components/tokenless/component.toml" 0644
 
 # A fresh prefix installed under a restrictive umask must still yield
@@ -92,7 +90,7 @@ assert_mode "$PREFIX2" 0755
 assert_mode "$PREFIX2/bin" 0755
 assert_mode "$PREFIX2/share" 0755
 assert_mode "$PREFIX2/bin/anolisa" 0755
-assert_mode "$PREFIX2/share/anolisa/manifests/osbase" 0755
+assert_mode "$PREFIX2/share/anolisa/components/tokenless" 0755
 
 # A prefix nested below a directory that is missing too: `mkdir -p` creates
 # both levels, so both must come out traversable.

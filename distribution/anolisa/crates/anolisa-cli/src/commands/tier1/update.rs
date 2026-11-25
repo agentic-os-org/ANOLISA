@@ -3,7 +3,7 @@
 //! Three forms:
 //! - `update <component>` - update one ANOLISA-managed component.
 //! - `update self` - update the `anolisa` CLI binary only.
-//! - `update all` - update every ANOLISA-managed runtime, osbase, and
+//! - `update all` - update every ANOLISA-managed runtime component and
 //!   adapter object.
 //!
 //! The component is a positional argument; `self` / `all` are subcommands

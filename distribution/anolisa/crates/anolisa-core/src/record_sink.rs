@@ -30,7 +30,7 @@ pub struct DelegatedIdentity {
 /// Assembled by the command layer next to the plan; the sink never guesses.
 #[derive(Debug, Clone)]
 pub struct RecordContext {
-    /// Object vocabulary (component, adapter, osbase).
+    /// Object vocabulary (component, adapter).
     pub kind: ObjectKind,
     /// Object name.
     pub name: String,

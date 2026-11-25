@@ -21,8 +21,6 @@ pub struct ComponentMeta {
 /// Architecture layer a component belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layer {
-    /// OS base layer component.
-    Osbase,
     /// Runtime layer component.
     Runtime,
     /// Adapter/encapsulation component.

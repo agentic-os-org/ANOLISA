@@ -2,7 +2,7 @@
 //!
 //! This module hosts the canonical typed representation of the TOML manifests
 //! shipped under `distribution/anolisa/manifests/`. The single top-level shape is
-//! `ComponentManifest` — a concrete component (runtime or osbase substrate).
+//! `ComponentManifest` — a concrete runtime component.
 //!
 //! All deserialization is *tolerant*: missing optional fields default and we
 //! accept both the new canonical TOML layout (per `templates/*.toml`) and the
@@ -54,7 +54,7 @@ pub fn is_distribution_discovery_contract(
 // ComponentManifest
 // ---------------------------------------------------------------------------
 
-/// Canonical runtime / osbase component manifest.
+/// Canonical runtime component manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "ComponentManifestRaw")]
 pub struct ComponentManifest {
@@ -173,7 +173,7 @@ pub struct ComponentMeta {
     pub name: String,
     /// Component version expected by planners.
     pub version: String,
-    /// Architecture layer label (`runtime`, `osbase`, ...).
+    /// Architecture layer label (e.g. `runtime`).
     pub layer: String,
     /// Optional domain label for catalog grouping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
