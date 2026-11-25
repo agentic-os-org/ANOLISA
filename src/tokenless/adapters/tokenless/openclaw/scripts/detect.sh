@@ -18,11 +18,29 @@ ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # under /.
 HOME_DIR="${HOME:-}"
 USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+
+# `${dir%/}` collapses a bare "/" to "", so trimming an explicitly configured
+# root state dir that way would make it indistinguishable from an unresolved
+# one: its /bin PATH entry and its /extensions probe would disappear, and the
+# report below would claim "HOME is unset" on a host that does have HOME. Strip
+# trailing slashes only while at least one character is left to strip.
+strip_trailing_slashes() {
+    local dir="$1"
+    while [ "${#dir}" -gt 1 ] && [ "${dir%/}" != "$dir" ]; do
+        dir="${dir%/}"
+    done
+    printf '%s' "$dir"
+}
+
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME_DIR:+$HOME_DIR/.openclaw}}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
-OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
-OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+OPENCLAW_HOME="$(strip_trailing_slashes "$OPENCLAW_HOME")"
+OPENCLAW_STATE_DIR="$(strip_trailing_slashes "$OPENCLAW_STATE_DIR")"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
+# `${OPENCLAW_STATE_DIR%/}/bin` joins a plain directory ("/opt/x" -> "/opt/x/bin")
+# and a bare root ("/" -> "/bin") alike, which is what this PATH looked like
+# before HOME became optional; the guard keeps an *unresolved* state dir out of
+# PATH rather than smuggling "/bin" in for a host that configured nothing.
 export PATH="${USER_LOCAL_BIN}${OPENCLAW_STATE_DIR:+${OPENCLAW_STATE_DIR%/}/bin:}/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless"

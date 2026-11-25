@@ -16,15 +16,31 @@
 #   1. HOME set to an empty directory -- the control verdict;
 #   2. HOME unset -- must land on the same status as (1), because an absent HOME
 #      carries exactly the same information as an empty one (no user-scope path
-#      exists), and must not print bash's unbound-variable diagnostic;
+#      exists), must not print bash's unbound-variable diagnostic, and must say
+#      "HOME is unset" in the report rather than leaving the caller to guess why
+#      no user-scope path was probed;
 #   3. HOME set to a directory holding the agent's own state dir -- must still
 #      report that directory present, which is what keeps the fix honest: the
 #      user-scope probes have to follow HOME, not be switched off by it.
 #
+# A fourth block covers the state dir a caller configures explicitly. That value
+# is a decision of its own, not a HOME fallback, so it must be probed exactly as
+# given: a trailing slash is trimmed, and a bare "/" stays "/" instead of being
+# mistaken for "no state dir at all".
+#
+# Every run is isolated from the adapter overrides a developer shell may already
+# carry (HERMES_HOME, OPENCLAW_HOME, OPENCLAW_STATE_DIR). Cases 1-3 measure the
+# documented default paths; an inherited override pointing at an existing
+# directory makes the detector report that directory present -- correctly, but
+# as a failure of the "no user scope exists" assertion, i.e. for a reason that
+# has nothing to do with HOME.
+#
 # Plain bash over the checked-out adapter tree: no cargo build output, node, jq,
 # rtk, python3 or network, and no agent CLI has to be installed -- each
 # detector's own CLI variable is pinned to a path that does not exist, so the
-# suite never executes a host agent and never depends on what is installed.
+# suite never executes a host agent and never depends on what is installed. The
+# one executable the suite puts on PATH is a stub it writes itself, and that stub
+# is only ever resolved with `command -v`, never run.
 
 set -euo pipefail
 
@@ -65,14 +81,40 @@ user_scope_field() {
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# expect_report <report> <needle> <why> and refuse_report <report> <needle> <why>
+# -- plain substring checks, so the assertions neither depend on the padding
+# `printf '%-26s'` applies to a field label nor need a pipeline that grep -q
+# could close early.
+expect_report() {
+    case "$1" in
+        *"$2"*) return 0 ;;
+    esac
+    fail "$3 (report has no '$2')"
+}
+
+refuse_report() {
+    case "$1" in
+        *"$2"*) fail "$3 (report claims '$2')" ;;
+    esac
+    return 0
+}
+
 # detect <adapter> [env(1) args...] -- sets status, stdout and stderr.
+# The three unsets isolate the run from adapter state-dir overrides inherited
+# from the caller's shell (see the header). They come first because env(1)
+# applies its arguments left to right, so a case that wants to pin one of them
+# passes it in "$@" and still wins.
 # claude-code's detector settles transient first-run misses by sleeping; that
 # budget is not what this suite measures, so it is turned down to zero.
 detect() {
     local adapter="$1"
     shift
     status=0
-    stdout=$(env "$@" \
+    stdout=$(env \
+        -u HERMES_HOME \
+        -u OPENCLAW_HOME \
+        -u OPENCLAW_STATE_DIR \
+        "$@" \
         ANOLISA_ADAPTER_DIR="$ADAPTERS" \
         CLAUDE_BIN="$NO_CLI" \
         HERMES_BIN="$NO_CLI" \
@@ -110,6 +152,8 @@ for adapter in "${ADAPTERS_UNDER_TEST[@]}"; do
             fail "$adapter aborted on an unbound variable without HOME: $stderr" ;;
     esac
     [ -n "$stdout" ] || fail "$adapter without HOME printed no report"
+    expect_report "$stdout" "HOME is unset" \
+        "$adapter without HOME did not say why no user-scope path was probed"
     [ "$status" = "$control_status" ] || fail "$adapter without HOME exited $status but exited $control_status with an empty HOME"
     field="$(user_scope_field "$adapter")"
     if printf '%s\n' "$stdout" | grep -q "$field.*present"; then
@@ -126,5 +170,59 @@ for adapter in "${ADAPTERS_UNDER_TEST[@]}"; do
 
     echo "  $adapter: home-less exit $status matches the empty-HOME control, user scope still probed with HOME set"
 done
+
+# 4. An explicitly configured state dir must be probed exactly as given. Only
+# hermes and openclaw accept one; openclaw takes it from two variables
+# (OPENCLAW_STATE_DIR, falling back to OPENCLAW_HOME).
+EXPLICIT_STATE="$TEST_DIR/explicit-state"
+mkdir -p "$EXPLICIT_STATE/bin" "$EXPLICIT_STATE/extensions/tokenless"
+# `command -v tokenless` resolves this stub, and the detector never runs it: it
+# shows that "<state dir>/bin" survives normalization and still precedes
+# /usr/local/bin.
+printf '#!/bin/sh\nexit 0\n' >"$EXPLICIT_STATE/bin/tokenless"
+chmod +x "$EXPLICIT_STATE/bin/tokenless"
+
+detect openclaw HOME="$EMPTY_HOME" OPENCLAW_STATE_DIR="$EXPLICIT_STATE/"
+expect_report "$stdout" "present ($EXPLICIT_STATE)" \
+    "openclaw did not trim the trailing slash of an explicit OPENCLAW_STATE_DIR"
+expect_report "$stdout" "installed ($EXPLICIT_STATE/extensions/tokenless)" \
+    "openclaw did not probe <state dir>/extensions/tokenless for an explicit OPENCLAW_STATE_DIR"
+expect_report "$stdout" "present ($EXPLICIT_STATE/bin/tokenless)" \
+    "openclaw did not put <state dir>/bin on PATH ahead of /usr/local/bin for an explicit OPENCLAW_STATE_DIR"
+refuse_report "$stdout" "HOME is unset" \
+    "openclaw fell back to the HOME story although OPENCLAW_STATE_DIR was set"
+
+# The same state dir with a doubled separator, which a caller that concatenates
+# "$dir/" onto an already terminated path produces: the trim has to repeat, or
+# the report carries the untrimmed value and the field stops being comparable
+# with the one every other probe prints.
+detect openclaw HOME="$EMPTY_HOME" OPENCLAW_STATE_DIR="$EXPLICIT_STATE//"
+expect_report "$stdout" "present ($EXPLICIT_STATE)" \
+    "openclaw trimmed only one of the trailing slashes of an explicit OPENCLAW_STATE_DIR"
+
+# A bare "/" is a real, if unusual, state dir. `${dir%/}` collapses it to "", and
+# an empty state dir is exactly how "HOME is unset" is reported, so an unguarded
+# trim turns the explicit root into a missing one: "/bin" leaves PATH,
+# "/extensions/tokenless" is never probed, and the report blames HOME -- which
+# these three runs do have.
+detect openclaw HOME="$EMPTY_HOME" OPENCLAW_STATE_DIR=/
+expect_report "$stdout" "present (/)" \
+    "openclaw treated an explicit OPENCLAW_STATE_DIR=/ as missing"
+refuse_report "$stdout" "HOME is unset" \
+    "openclaw blamed an unset HOME for an explicit OPENCLAW_STATE_DIR=/"
+
+detect openclaw HOME="$EMPTY_HOME" OPENCLAW_HOME=/
+expect_report "$stdout" "present (/)" \
+    "openclaw treated an explicit OPENCLAW_HOME=/ as missing"
+refuse_report "$stdout" "HOME is unset" \
+    "openclaw blamed an unset HOME for an explicit OPENCLAW_HOME=/"
+
+detect hermes HOME="$EMPTY_HOME" HERMES_HOME=/
+expect_report "$stdout" "present (/)" \
+    "hermes treated an explicit HERMES_HOME=/ as missing"
+refuse_report "$stdout" "HOME is unset" \
+    "hermes blamed an unset HOME for an explicit HERMES_HOME=/"
+
+echo "  explicit state dir: trailing slash trimmed, bare / still probed"
 
 echo "detect unset-HOME test passed"
