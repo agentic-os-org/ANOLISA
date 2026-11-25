@@ -6,11 +6,17 @@ function fallbackCopy(text: string, done: () => void) {
   el.style.position = 'fixed';
   el.style.opacity = '0';
   document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch {}
-  document.body.removeChild(el);
-  done();
+  let copied = false;
+  try {
+    el.focus();
+    el.select();
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  } finally {
+    document.body.removeChild(el);
+  }
+  if (copied) done();
 }
 
 /** Copy text, falling back to execCommand in insecure HTTP contexts. */
