@@ -161,6 +161,8 @@ def main():
             }]} for event in ("tool.before", "tool.after")},
         },
     }
+    if args.scenario in {"settings", "cooperative-attach"} and args.agent == "claude":
+        document["spec"]["agents"]["claude"]["claude_sdk"] = {"allow_plaintext_http_hosts": ["127.0.0.2"]}
     if args.evidence_mode is not None or args.scenario == "observation":
         document["spec"]["agents"][args.agent]["evidence"] = {
             "source_id": "fixture", "endpoint": "http://127.0.0.1:1",
@@ -218,7 +220,7 @@ def main():
             )
             assert compiled.returncode == 0, compiled.stderr
             descriptor.write_text(compiled.stdout)
-            descriptor.chmod(0o600)
+            descriptor.chmod(0o400)
             shutil.copyfile(descriptor, output / "descriptor.json")
             env.update(AW_TEST_CONFIG=str(deployed), AW_TEST_DESCRIPTOR=str(descriptor))
             wheel = prepare_claude_wheel(fixture, state_parent, env, output)
@@ -237,7 +239,8 @@ def main():
         for endpoint in output.glob("*/endpoint.json"):
             with socket.socket() as probe:
                 probe.settimeout(1)
-                assert probe.connect_ex(("127.0.0.1", json.loads(endpoint.read_text())["port"])) != 0
+                peer = json.loads(endpoint.read_text())
+                assert probe.connect_ex((peer.get("host", "127.0.0.1"), peer["port"])) != 0
         for evidence in output.glob("*/sdk-process.json"):
             detail = json.loads(evidence.read_text())
             assert_reaped(detail["pid"])

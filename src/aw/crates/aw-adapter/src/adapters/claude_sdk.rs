@@ -181,6 +181,11 @@ impl PreparedLaunch for Prepared {
             "aw_transport.py",
             include_bytes!("../../native/claude-sdk/aw_transport.py"),
         )?;
+        context.files.write(
+            "aw_http_hosts.py",
+            include_bytes!("../../../../sdk/python/src/aw_sdk/aw_http_hosts.py"),
+        )?;
+        let agent = &self.input.document["spec"]["agents"][&self.input.target];
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
         let final_profile = events
             .contains_key("security.violation")
@@ -195,6 +200,7 @@ impl PreparedLaunch for Prepared {
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "observation_enabled": observe,
                 "resident_policy_reload": self.input.options.resident_policy_reload,
+                "allow_plaintext_http_hosts": aw_config::plaintext_http_hosts(agent),
                 "hooks": hooks, "final_profile": final_profile,
                 "final_enforcing": super::claude_final::enforcing(&hooks),
             }))?,

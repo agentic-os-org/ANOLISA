@@ -122,7 +122,10 @@ Options are copied.
 The relay binds a random loopback port with a per-client secret path. It forwards
 original authentication and model request bytes, projects response tool IDs, and
 checks adoption before a tool result enters the next request. It does not log
-credentials or model content. Upstream non-loopback HTTP is rejected; HTTPS uses
+credentials or model content. Non-loopback upstreams require TLS by default. The selected target can grant
+HTTP to exact hosts or host/port pairs in both managed and application-owned resident workers.
+See the [configuration reference](../../../../../../docs/developer-guide/en/aw/configuration.md#claude-sdk-model-gateway).
+HTTPS uses
 system trust plus `SSL_CERT_FILE`/`SSL_CERT_DIR`. HTTP(S) proxies and `NO_PROXY` are
 honored, including port-specific `NO_PROXY=host:port` rules and IPv6 hosts.
 Redirects, SOCKS proxies, Bedrock/Vertex/Foundry transports, unsupported

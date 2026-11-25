@@ -422,6 +422,22 @@
         },
         "workspace_id": {
           "$ref": "#/$defs/name"
+        },
+        "claude_sdk": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow_plaintext_http_hosts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9.\\-:\\[\\]]+$"
+              },
+              "default": [],
+              "description": "Exact DNS names or IP literals, optionally restricted to one TCP port. Use brackets around IPv6 addresses with a port."
+            }
+          }
         }
       }
     },

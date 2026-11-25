@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import stat
 
+from aw_sdk.configuration import http_host_hint
 from aw_sdk.transport import AwError
 
 LIMIT = 4 * 1024 * 1024
@@ -89,6 +90,10 @@ def identity(info: os.stat_result) -> tuple:
 
 
 def read_file(path: str) -> bytes:
+    return _read_file(path)[0]
+
+
+def _read_file(path: str) -> tuple[bytes, int]:
     if not isinstance(path, str) or not Path(path).is_absolute() or ".." in path.split("/"):
         raise AwError("sdk_descriptor_file_invalid")
     parent = None
@@ -141,7 +146,7 @@ def read_file(path: str) -> bytes:
                 or current_parent.st_mode & 0o022
             ):
                 raise ValueError()
-            return data
+            return data, info.st_mode
     except (OSError, ValueError):
         raise AwError("sdk_descriptor_file_invalid") from None
     finally:
@@ -167,10 +172,11 @@ def load_descriptor(
     requires_service: bool = False,
 ) -> dict:
     """Use deployment-owned files only; runtime admission remains Service-owned."""
-    encoded = read_file(descriptor_file)
+    encoded, mode = _read_file(descriptor_file)
     try:
         value = json.loads(encoded.decode("utf-8"), object_pairs_hook=object_fields)
-        if not isinstance(value, dict) or set(value) - {"observe_session_start"} != FIELDS:
+        optional = {"observe_session_start", "allow_plaintext_http_hosts"}
+        if not isinstance(value, dict) or set(value) - optional != FIELDS:
             raise ValueError()
         actual_profile = value["profile"]
         if not isinstance(actual_profile, dict) or set(actual_profile) != {
@@ -200,17 +206,21 @@ def load_descriptor(
             or any(not text.strip(WHITE_SPACE) for text in actual_profile.values())
         ):
             raise ValueError()
+        hosts = http_host_hint(value, actual_profile)
     except (ValueError, TypeError, RecursionError):
         raise AwError("sdk_descriptor_invalid") from None
     if actual_profile != profile or (
         requires_service and value["availability"] != "required"
     ):
         raise AwError("sdk_descriptor_profile_mismatch")
+    if hosts.get("allow_plaintext_http_hosts") and mode & 0o222:
+        raise AwError("sdk_descriptor_read_only_required")
     if target is not None and target != value["target"]:
         raise AwError("sdk_descriptor_target_mismatch")
     if hashlib.sha256(read_file(config_file)).hexdigest() != value["configuration_sha256"]:
         raise AwError("sdk_descriptor_stale")
     return {
+        **hosts,
         "target": value["target"],
         "endpoint": value["endpoint"],
         "input_enabled": value["wait_for_input_submit"],

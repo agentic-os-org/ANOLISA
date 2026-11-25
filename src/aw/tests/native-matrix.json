@@ -1049,7 +1049,7 @@
           ],
           "timeout_seconds": 60,
           "report": "unittest",
-          "tests": 20
+          "tests": 23
         },
         {
           "name": "dispatch-contract",

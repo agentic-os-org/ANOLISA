@@ -83,9 +83,13 @@ registered as `deployment-descriptor-v1alpha1`; its `version` is
 stored bytes with `DeploymentDescriptor::parse`, which rejects duplicate keys,
 unknown fields, invalid shapes and unsupported versions.
 
-The descriptor carries only the exact-byte `configuration_sha256`, configured
+The descriptor carries the exact-byte `configuration_sha256`, configured
 `target`, profile `adapter`/`version`/`entrypoint`, absolute `endpoint`,
-`wait_for_input_submit` and `availability`, plus the contract version. It excludes
+`wait_for_input_submit` and `availability`, plus the contract version.
+The compiler emits `observe_session_start: true` for `qoder-public-hooks` when
+`session.start` applies to the target. For `claude-resident-hooks`, it emits
+`allow_plaintext_http_hosts` when the target grants plaintext HTTP access to
+one or more hosts. The descriptor excludes
 Provider configuration and execution plans. An `auto` endpoint resolves to
 `state_dir/aw.sock`; compilation rejects unresolved or relative service paths.
 The compiler reads no environment, starts no process and performs no installation.

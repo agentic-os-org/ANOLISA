@@ -9,6 +9,9 @@ pub mod native;
 pub mod requirements;
 pub mod service_paths;
 
+mod http_hosts;
+pub use http_hosts::plaintext_http_hosts;
+
 mod parsing;
 mod policy_update;
 mod validation;

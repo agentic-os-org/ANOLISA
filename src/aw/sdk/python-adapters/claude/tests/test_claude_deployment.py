@@ -18,6 +18,7 @@ FIXTURE = json.loads(
     (Path(__file__).resolve().parents[3] / "tests/fixtures/deployment.json").read_text()
 )
 BINARY = os.environ["AW_TEST_BINARY"]
+HTTP_HOSTS = ["llm-gateway.internal.:8080", "llm-gateway.internal"]
 
 
 class ClaudeDeployment(unittest.TestCase):
@@ -36,6 +37,10 @@ class ClaudeDeployment(unittest.TestCase):
     def write(self, input_enabled: bool) -> None:
         document = deepcopy(FIXTURE["configuration"])
         document["spec"]["agents"]["app"]["adapter"] = "claude-sdk"
+        if input_enabled:
+            document["spec"]["agents"]["app"]["claude_sdk"] = {
+                "allow_plaintext_http_hosts": HTTP_HOSTS
+            }
         document["spec"]["daemon"]["state_dir"] = str(self.root / "state")
         document["spec"]["events"]["input.submit"] = {
             "enabled": input_enabled, "required": input_enabled, "steps": []
@@ -49,8 +54,9 @@ class ClaudeDeployment(unittest.TestCase):
              "--agent", "app", "--profile", "claude-resident-hooks"],
             check=True, capture_output=True, timeout=10,
         )
+        self.descriptor.unlink(missing_ok=True)
         self.descriptor.write_bytes(result.stdout)
-        self.descriptor.chmod(0o600)
+        self.descriptor.chmod(0o400 if "allow_plaintext_http_hosts" in json.loads(result.stdout) else 0o600)
         return json.loads(result.stdout)
 
     def test_descriptor_and_parser_select_the_same_required_worker(self) -> None:
@@ -74,6 +80,7 @@ class ClaudeDeployment(unittest.TestCase):
                 )
             parsed = ResidentClaude.from_config(str(self.config), executable=BINARY)
             for candidate in (worker, parsed):
+                self.assertEqual(candidate._http_hosts, HTTP_HOSTS if enabled else [])
                 instance = candidate.instance
                 self.assertEqual(instance.target, "app")
                 self.assertEqual(instance.endpoint, str(self.root / "state/aw.sock"))
@@ -93,12 +100,22 @@ class ClaudeDeployment(unittest.TestCase):
 
         self.write(True)
         descriptor = self.compile()
+        self.descriptor.chmod(0o600)
+        with self.assertRaisesRegex(AwError, "sdk_descriptor_read_only_required"):
+            ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
         descriptor["profile"]["version"] = "0.2.88"
         self.descriptor.write_text(json.dumps(descriptor))
         with self.assertRaisesRegex(AwError, "sdk_descriptor_profile_mismatch"):
             ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
+        descriptor = self.compile()
+        self.descriptor.chmod(0o600)
+        for invalid in (None, "host", ["*.internal"], ["host:99999"], ["[host]:80"], ["192.0.2.1.:80"]):
+            descriptor["allow_plaintext_http_hosts"] = invalid
+            self.descriptor.write_text(json.dumps(descriptor))
+            with self.assertRaisesRegex(AwError, "sdk_descriptor_invalid"):
+                ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
         self.compile()
-        self.config.write_text(self.config.read_text() + "\n")
+        self.config.write_text(self.config.read_text().replace("llm-gateway.internal", "other.internal"))
         with self.assertRaisesRegex(AwError, "sdk_descriptor_stale"):
             ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
 

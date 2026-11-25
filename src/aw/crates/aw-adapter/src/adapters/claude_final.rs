@@ -188,10 +188,13 @@ esac
             ("enforce", "block", Some("block")),
             ("enforce", "report", Some("report")),
         ] {
-            let document = crate::test_support::final_gate_document(
+            let mut document = crate::test_support::final_gate_document(
                 "claude-sdk",
                 json!([crate::test_support::final_gate_step(mode, action)]),
             );
+            let hosts = json!(["model-proxy.cluster.local:8080"]);
+            document["spec"]["agents"]["sdk"]["claude_sdk"] =
+                json!({"allow_plaintext_http_hosts": hosts});
             let config = aw_config::Validator::new()
                 .unwrap()
                 .parse(&serde_json::to_vec(&document).unwrap())
@@ -268,6 +271,7 @@ esac
                     &fs::read(files.0.join("claude-sdk-hooks.json")).unwrap(),
                 )
                 .unwrap();
+                assert_eq!(private["allow_plaintext_http_hosts"], hosts);
                 assert_eq!(private["final_enforcing"], mode == "enforce");
                 assert_eq!(private["final_profile"].is_null(), mode == "off");
             }

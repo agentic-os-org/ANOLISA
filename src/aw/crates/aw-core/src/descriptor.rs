@@ -104,6 +104,10 @@ pub fn compile_with_options(
         "wait_for_input_submit": requirements.iter().any(|event| event.event == "input.submit"),
         "availability": availability,
     });
+    let hosts = aw_config::plaintext_http_hosts(&spec["agents"][target]);
+    if !hosts.is_empty() {
+        value["allow_plaintext_http_hosts"] = serde_json::json!(hosts);
+    }
     if options.session_start_hint
         && requirements
             .iter()

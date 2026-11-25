@@ -688,3 +688,6 @@ fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
 
 #[path = "configuration/submission.rs"]
 mod submission;
+
+#[path = "configuration/http_hosts.rs"]
+mod http_hosts;

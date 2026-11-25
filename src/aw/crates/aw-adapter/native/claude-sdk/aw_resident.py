@@ -148,6 +148,7 @@ class ManagedClient(ClaudeSDKClient):
         options: ClaudeAgentOptions,
         *,
         scope_factory: Callable[[Callable[[dict], bool]], Any] | None = None,
+        allow_plaintext_http_hosts: list[str] | None = None,
     ) -> None:
         if sys.version_info < (3, 11):
             raise RuntimeError("AW resident Claude SDK requires Python >=3.11")
@@ -161,6 +162,10 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_cooperative = scope_factory is not None
         self._aw_bridge = ResidentBridge(
             group, None if scope_factory is None else scope_factory(self._aw_install_routes)
+        )
+        self._aw_http_hosts = (
+            allow_plaintext_http_hosts if self._aw_cooperative
+            else self._aw_bridge.config.get("allow_plaintext_http_hosts", [])
         )
         self._aw_bridge.stop = self._aw_stop_native
         self._aw_cwd = str(Path(options.cwd or os.getcwd()).resolve())
@@ -300,7 +305,8 @@ class ManagedClient(ClaudeSDKClient):
                         transport = self._custom_transport
                         environment = await transport.model_environment(self._query)
                         self._aw_relay = ModelRelay(
-                            self._aw_bridge, {**self._aw_environment, **environment}
+                            self._aw_bridge, {**self._aw_environment, **environment},
+                            allow_plaintext_http_hosts=self._aw_http_hosts,
                         )
                         endpoint = await self._aw_relay.start()
                         await transport.route_model(self._query, endpoint)
