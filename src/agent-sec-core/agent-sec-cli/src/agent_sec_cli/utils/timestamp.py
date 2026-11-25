@@ -96,8 +96,22 @@ def epoch_to_utc_iso(epoch: float) -> str:
 
 
 def ns_to_utc_iso(value: int) -> str:
-    """Convert nanoseconds since epoch to a UTC-aware ISO timestamp."""
-    return epoch_to_utc_iso(value / 1_000_000_000)
+    """Convert nanoseconds since epoch to a UTC-aware ISO timestamp.
+
+    The split uses integer arithmetic: at current epoch magnitudes a
+    nanosecond count is not exactly representable as a float, so dividing
+    directly can round into the wrong second or microsecond. Nanoseconds
+    finer than one microsecond are truncated (floor) because ``datetime``
+    cannot represent them, which keeps the timestamp on the correct second
+    for both positive and negative epoch values.
+    """
+    seconds, nanos = divmod(value, 1_000_000_000)
+    microseconds = nanos // 1_000
+    return (
+        datetime.fromtimestamp(seconds, tz=timezone.utc)
+        .replace(microsecond=microseconds)
+        .isoformat()
+    )
 
 
 def utc_iso_to_epoch(value: str, *, field_name: str = "timestamp") -> float:
