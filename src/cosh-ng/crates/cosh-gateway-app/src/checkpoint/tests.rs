@@ -19,8 +19,12 @@ use cosh_types::checkpoint::{
 
 use super::*;
 
+#[path = "tests/task_snapshot.rs"]
+mod task_snapshot;
+
 enum DaemonReply {
     Response(Box<WsCkptResponse>),
+    CloseWithoutReply,
     Identity,
     CreatedFromRequest,
     SkippedFromRequest(String),
@@ -139,6 +143,11 @@ fn spawn_daemon(
             let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
             stream.read_exact(&mut payload).unwrap();
             let request: WsCkptRequest = bincode::deserialize(&payload).unwrap();
+            if matches!(reply, DaemonReply::CloseWithoutReply) {
+                // An outdated daemon drops the connection on unknown requests.
+                requests.push(request);
+                continue;
+            }
             let response = daemon_response(reply, &request);
             requests.push(request);
             let payload = bincode::serialize(&response).unwrap();
@@ -158,6 +167,10 @@ fn spawn_daemon(
 
 fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptResponse {
     match reply {
+        // The connection loop drains this variant before asking for a reply.
+        DaemonReply::CloseWithoutReply => {
+            unreachable!("close-without-reply requests never reach the reply builder")
+        }
         DaemonReply::ReplaceWorkspace(workspace, recreate) => {
             let old = workspace.with_extension("rollback-tmp");
             std::fs::rename(&workspace, &old).unwrap();
