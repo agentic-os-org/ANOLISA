@@ -215,6 +215,55 @@ pub(crate) fn write<T: Serialize>(
     value: &T,
     deadline: Instant,
 ) -> io::Result<()> {
+    let mut bytes = write_frame_header(stream, value, deadline)?;
+    transfer(stream, &mut bytes.0, deadline, true, None)
+}
+
+pub(crate) fn write_releasing<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    deadline: Instant,
+    mut send: impl FnMut(&UnixStream, &[u8]) -> io::Result<usize>,
+) -> io::Result<()> {
+    let frame = write_frame_header(stream, value, deadline)?;
+    let mut pending = frame.0.as_slice();
+    while !pending.is_empty() {
+        remaining(deadline)?;
+        // Linux Unix streams may still accept data with POLLOUT cleared.
+        match send(stream, pending) {
+            Ok(sent) => pending = &pending[sent..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_writable(stream, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    remaining(deadline).map(|_| ())
+}
+
+pub(crate) fn try_send(stream: &UnixStream, bytes: &[u8]) -> io::Result<usize> {
+    // SAFETY: the socket and the borrowed buffer are valid for this send.
+    let sent = unsafe {
+        libc::send(
+            stream.as_raw_fd(),
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+        )
+    };
+    match sent {
+        n if n > 0 => Ok(n as usize),
+        0 => Err(io::ErrorKind::WriteZero.into()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+fn write_frame_header<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    deadline: Instant,
+) -> io::Result<BoundedBuffer> {
     remaining(deadline)?;
     let mut bytes = BoundedBuffer(Vec::new());
     serde_json::to_writer(&mut bytes, value)
@@ -226,7 +275,43 @@ pub(crate) fn write<T: Serialize>(
         true,
         None,
     )?;
-    transfer(stream, &mut bytes.0, deadline, true, None)
+    Ok(bytes)
+}
+
+fn wait_writable(stream: &UnixStream, deadline: Instant) -> io::Result<()> {
+    let mut fd = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        let budget = remaining(deadline)?;
+        let timeout = i32::try_from(budget.as_millis() + 1).unwrap_or(i32::MAX);
+        // The descriptor stays open through the borrow of stream.
+        let ready = unsafe { libc::poll(&mut fd, 1, timeout) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "socket deadline exceeded",
+            ));
+        }
+        if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "socket closed before complete frame",
+            ));
+        }
+        if fd.revents & libc::POLLOUT != 0 {
+            return remaining(deadline).map(|_| ());
+        }
+    }
 }
 
 struct BoundedBuffer(Vec<u8>);
