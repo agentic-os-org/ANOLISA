@@ -265,3 +265,9 @@ CASES = [
          "out-of-scope read (task_scope outside_scope -> block).",
          git=True),
 ]
+
+# Complex drift-elicitation cases (ImpossibleBench conflicting method) live in a
+# separate module and are appended here so the harness selects them uniformly.
+from shadow_drift_cases import DRIFT_CASES  # noqa: E402
+
+CASES.extend(DRIFT_CASES)
