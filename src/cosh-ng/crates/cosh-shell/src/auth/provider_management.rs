@@ -37,6 +37,7 @@ pub(super) struct CoreAuthState {
     pub(super) existing_providers: Vec<ExistingProvider>,
     /// The core advertises the ownership-checked configuration writer.
     pub(super) guarded_writes: bool,
+    pub(super) oauth_source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +58,14 @@ struct RegistryAuthState {
     saved_providers: Vec<CoreSavedProvider>,
     #[serde(default)]
     config_write_guard: Option<String>,
+    #[serde(default)]
+    oauth: RegistryOAuthState,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RegistryOAuthState {
+    #[serde(default)]
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +205,11 @@ pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAu
         templates: state.templates,
         existing_providers,
         guarded_writes: state.config_write_guard.as_deref() == Some("v1"),
+        oauth_source: if state.oauth.source.is_empty() {
+            "not_selected".to_string()
+        } else {
+            state.oauth.source
+        },
     })
 }
 

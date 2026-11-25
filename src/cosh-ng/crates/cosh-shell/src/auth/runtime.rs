@@ -127,6 +127,7 @@ pub(crate) struct AuthState {
         std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
     pub(crate) ecs_trial: super::trial::TrialSession,
     pub(super) ecs: Option<super::ecs_poll::EcsFlow>,
+    pub(crate) oauth: Option<super::oauth_flow::OAuthFlow>,
     pub(crate) handled_card_events: HashSet<String>,
     pub(crate) completed_ids: HashSet<String>,
     /// Which surface owns the flow; the guide runs it as a finite task.
@@ -167,7 +168,7 @@ pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
 }
 
 pub(crate) fn has_auth_operation(state: &InlineState) -> bool {
-    has_pending_auth(state) || state.auth.ecs.is_some()
+    has_pending_auth(state) || state.auth.ecs.is_some() || state.auth.oauth.is_some()
 }
 
 /// Trigger auth panel from `/auth` slash command.
@@ -232,6 +233,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         core_state.trial_auto_use.unwrap_or(true) && state.auth.ecs_trial.auto_use_allowed;
     let mut sysom =
         SysomMenu::default().with_disable_retry(state.auth.ecs_trial.disable_save_failed);
+    sysom.refresh_oauth(&core_state.oauth_source);
     if let Some(trial) = core_state.ecs_trial.as_ref() {
         sysom.refresh_trial(trial, trial_auto_use);
     }
@@ -465,6 +467,12 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
                     } else if auth.default_provider_id {
                         apply_aliyun_prepare(auth);
                     }
+                }
+                AuthManagementEntry::AlibabaCloudLogin => {
+                    return super::oauth_flow::start(adapter, state, output).map(|_| true);
+                }
+                AuthManagementEntry::AlibabaCloudLogout => {
+                    return super::oauth_flow::logout(adapter, state, output).map(|_| true);
                 }
                 AuthManagementEntry::AddNew => begin_new_provider(auth),
             }
@@ -908,6 +916,14 @@ pub(super) fn handle_auth_back<W: std::io::Write>(
             }
             return Ok(());
         }
+    }
+    if state
+        .auth
+        .oauth
+        .as_ref()
+        .is_some_and(super::oauth_flow::OAuthFlow::waiting)
+    {
+        return super::oauth_flow::request_cancel(state, output);
     }
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(());

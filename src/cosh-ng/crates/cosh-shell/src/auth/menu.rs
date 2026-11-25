@@ -50,6 +50,8 @@ pub(super) struct SysomMenu {
     trial_active: bool,
     trial_model: Option<String>,
     retry_trial_disable: bool,
+    oauth_active: bool,
+    oauth_needs_login: bool,
 }
 
 impl SysomMenu {
@@ -62,6 +64,8 @@ impl SysomMenu {
             trial_active: false,
             trial_model: None,
             retry_trial_disable: false,
+            oauth_active: false,
+            oauth_needs_login: false,
         }
     }
 
@@ -74,7 +78,14 @@ impl SysomMenu {
             trial_active: false,
             trial_model: None,
             retry_trial_disable: false,
+            oauth_active: false,
+            oauth_needs_login: false,
         }
+    }
+
+    pub(super) fn refresh_oauth(&mut self, source: &str) {
+        self.oauth_active = source == "oauth_active";
+        self.oauth_needs_login = source == "oauth_needs_login";
     }
 
     /// The prefetched result, so Aliyun preparation runs once per `/auth`.
@@ -165,6 +176,10 @@ pub(super) enum AuthManagementEntry {
     EcsTrialShortcut,
     /// Configure SysOM through this instance's RAM role (ECS hosts without one saved).
     SysomShortcut,
+    /// Browser-based Alibaba Cloud account login (non-ECS OAuth source).
+    AlibabaCloudLogin,
+    /// Log out of the active Alibaba Cloud account login.
+    AlibabaCloudLogout,
     /// Act on `existing_providers[index]`.
     Existing(usize),
     /// Start the template picker for a brand-new provider.
@@ -187,6 +202,10 @@ pub(super) fn management_entries(
     }
     if sysom.shows_shortcut() {
         entries.push(AuthManagementEntry::SysomShortcut);
+    }
+    entries.push(AuthManagementEntry::AlibabaCloudLogin);
+    if sysom.oauth_active {
+        entries.push(AuthManagementEntry::AlibabaCloudLogout);
     }
     entries.extend((0..existing_count).map(AuthManagementEntry::Existing));
     entries.push(AuthManagementEntry::AddNew);
@@ -330,6 +349,17 @@ pub(super) fn management_options(sysom: &SysomMenu, providers: &[ExistingProvide
                     .unwrap_or_default()
             ),
             AuthManagementEntry::SysomShortcut => format!("  {SYSOM_ENTRY_LABEL}"),
+            AuthManagementEntry::AlibabaCloudLogin => format!(
+                "  阿里云账号登录（浏览器）{}",
+                if sysom.oauth_active {
+                    " * [active]"
+                } else if sysom.oauth_needs_login {
+                    "（需重新登录）"
+                } else {
+                    ""
+                }
+            ),
+            AuthManagementEntry::AlibabaCloudLogout => "  退出阿里云账号登录".into(),
             AuthManagementEntry::Existing(index) => {
                 existing_provider_option(sysom, providers, index)
             }
@@ -429,6 +459,27 @@ mod tests {
     }
 
     #[test]
+    fn oauth_login_row_always_present_and_logout_only_when_active() {
+        let mut sysom = SysomMenu::default();
+        let entries = management_entries(&sysom, 0);
+        assert!(entries.contains(&AuthManagementEntry::AlibabaCloudLogin));
+        assert!(!entries.contains(&AuthManagementEntry::AlibabaCloudLogout));
+        sysom.refresh_oauth("oauth_active");
+        let entries = management_entries(&sysom, 0);
+        let login = entries
+            .iter()
+            .position(|entry| *entry == AuthManagementEntry::AlibabaCloudLogin)
+            .unwrap();
+        assert_eq!(entries[login + 1], AuthManagementEntry::AlibabaCloudLogout);
+        let options = management_options(&sysom, &[]);
+        assert!(options[login].contains("[active]"));
+        sysom.refresh_oauth("oauth_needs_login");
+        let options = management_options(&sysom, &[]);
+        assert!(options[login].contains("需重新登录"));
+        assert!(!management_entries(&sysom, 0).contains(&AuthManagementEntry::AlibabaCloudLogout));
+    }
+
+    #[test]
     fn ecs_without_saved_providers_offers_sysom_first() {
         let sysom = on_ecs();
 
@@ -437,12 +488,14 @@ mod tests {
             management_entries(&sysom, 0),
             vec![
                 AuthManagementEntry::SysomShortcut,
+                AuthManagementEntry::AlibabaCloudLogin,
                 AuthManagementEntry::AddNew
             ]
         );
         let options = management_options(&sysom, &[]);
         assert!(options[0].contains(SYSOM_ENTRY_LABEL), "{options:?}");
-        assert!(options[1].contains("+ Add new provider"), "{options:?}");
+        assert!(options[1].contains("阿里云账号登录"), "{options:?}");
+        assert!(options[2].contains("+ Add new provider"), "{options:?}");
     }
 
     #[test]
@@ -454,6 +507,7 @@ mod tests {
             management_entries(&sysom, providers.len()),
             vec![
                 AuthManagementEntry::SysomShortcut,
+                AuthManagementEntry::AlibabaCloudLogin,
                 AuthManagementEntry::Existing(0),
                 AuthManagementEntry::AddNew,
             ]
@@ -464,19 +518,23 @@ mod tests {
         );
         assert_eq!(
             management_entry(&sysom, providers.len(), 1),
-            AuthManagementEntry::Existing(0)
+            AuthManagementEntry::AlibabaCloudLogin
         );
         assert_eq!(
             management_entry(&sysom, providers.len(), 2),
+            AuthManagementEntry::Existing(0)
+        );
+        assert_eq!(
+            management_entry(&sysom, providers.len(), 3),
             AuthManagementEntry::AddNew
         );
         // Returning from the action menu must land back on the same saved provider.
         assert_eq!(
             management_entry_index(&sysom, providers.len(), AuthManagementEntry::Existing(0)),
-            1
+            2
         );
         let options = management_options(&sysom, &providers);
-        assert!(options[1].contains("qwen-prod"), "{options:?}");
+        assert!(options[2].contains("qwen-prod"), "{options:?}");
     }
 
     #[test]
@@ -494,18 +552,19 @@ mod tests {
         assert_eq!(
             management_entries(&sysom, providers.len()),
             vec![
+                AuthManagementEntry::AlibabaCloudLogin,
                 AuthManagementEntry::Existing(0),
                 AuthManagementEntry::Existing(1),
                 AuthManagementEntry::AddNew,
             ]
         );
         let options = management_options(&sysom, &providers);
-        assert!(options[0].contains(SYSOM_ENTRY_LABEL), "{options:?}");
-        assert!(options[0].contains("sysom-trial"), "{options:?}");
+        assert!(options[1].contains(SYSOM_ENTRY_LABEL), "{options:?}");
+        assert!(options[1].contains("sysom-trial"), "{options:?}");
         assert!(
             !options
                 .iter()
-                .skip(1)
+                .skip(2)
                 .any(|o| o.contains(SYSOM_ENTRY_LABEL)),
             "{options:?}"
         );
@@ -526,15 +585,16 @@ mod tests {
         assert_eq!(
             management_entries(&sysom, providers.len()),
             vec![
+                AuthManagementEntry::AlibabaCloudLogin,
                 AuthManagementEntry::Existing(0),
                 AuthManagementEntry::AddNew
             ]
         );
-        assert_eq!(management_entry_count(&sysom, providers.len()), 2);
+        assert_eq!(management_entry_count(&sysom, providers.len()), 3);
         let options = management_options(&sysom, &providers);
         assert!(!options.iter().any(|o| o.contains("SysOM")), "{options:?}");
         assert_eq!(
-            options[0],
+            options[1],
             "* [active] DashScope (\u{767e}\u{70bc}) - \"qwen-prod\" - qwen3.7-plus"
         );
     }
@@ -556,8 +616,15 @@ mod tests {
     }
 
     #[test]
-    fn non_ecs_without_saved_providers_has_nothing_to_manage() {
-        assert!(!has_manageable_entries(&SysomMenu::default(), 0));
+    fn non_ecs_without_saved_providers_offers_login_and_add_new() {
+        assert!(has_manageable_entries(&SysomMenu::default(), 0));
+        assert_eq!(
+            management_entries(&SysomMenu::default(), 0),
+            vec![
+                AuthManagementEntry::AlibabaCloudLogin,
+                AuthManagementEntry::AddNew
+            ]
+        );
     }
 }
 

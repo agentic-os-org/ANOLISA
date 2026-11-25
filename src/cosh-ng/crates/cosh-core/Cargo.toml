@@ -50,6 +50,10 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 wait-timeout.workspace = true
 
+[features]
+# Bind the OAuth source to the approved pre-release route and application.
+oauth-pre = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["test-util"] }

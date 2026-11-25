@@ -208,3 +208,11 @@ impl WaitingText {
         }
     }
 }
+
+/// Reviewed activation guidance (guide + console link) shared by the ECS
+/// waiting-activation panel and the non-ECS OAuth not-activated guidance, so
+/// both reuse one audited copy and one activation entry.
+pub(crate) fn activation_guidance(language: Language) -> String {
+    let text = WaitingText::new(language);
+    format!("{}\n{}", text.guide, text.console_link)
+}

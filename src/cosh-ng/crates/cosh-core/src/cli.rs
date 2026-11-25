@@ -226,6 +226,11 @@ pub struct CliArgs {
     #[arg(long)]
     pub registry: bool,
 
+    /// Persistent OAuth login mode: run the browser login to completion,
+    /// stream one safe result on stdout, cancel on stdin EOF.
+    #[arg(long)]
+    pub oauth_login: bool,
+
     /// Enable cosh-shell backed terminal output evidence tool
     #[arg(long)]
     pub enable_shell_evidence_tool: bool,
@@ -251,6 +256,10 @@ impl CliArgs {
 
     pub fn is_registry(&self) -> bool {
         self.registry
+    }
+
+    pub fn is_oauth_login(&self) -> bool {
+        self.oauth_login
     }
 
     pub fn is_session_control(&self) -> bool {

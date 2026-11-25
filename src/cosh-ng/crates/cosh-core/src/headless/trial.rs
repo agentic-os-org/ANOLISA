@@ -565,7 +565,7 @@ mod tests {
             drop(engine);
             let args = CliArgs::try_parse_from(["cosh-core","--headless","--bare","--cosh-shell-transport",
                 "--workspace",root.path().to_str().unwrap(),"--resume",&session_id]).unwrap();
-            let mut runtime = super::super::SessionRuntime::initialize(&args,&resume_config).unwrap();
+            let mut runtime = super::super::SessionRuntime::initialize(&args,&resume_config,None).unwrap();
             runtime.finalize_model(&resume_config.resolve_provider().model,false);
             let mut engine = CoshCore::new_legacy(resume_config,Box::new(MockProvider::history_echo()),ToolRegistry::new());
             engine.model = runtime.record.model.clone();
@@ -623,7 +623,7 @@ mod tests {
             let mut config = CoreConfig::default();
             config.session.persist_dir = root.path().join("sessions").to_str().unwrap().into();
             config.ai.active_model = cli_model.or(configured_model).map(str::to_string);
-            let mut runtime = SessionRuntime::initialize(&args, &config).unwrap();
+            let mut runtime = SessionRuntime::initialize(&args, &config, None).unwrap();
             assert_eq!(runtime.record.model, saved_model);
             runtime.finalize_model(&config.resolve_provider().model, args.model.is_some());
             let mut engine = CoshCore::new_legacy(

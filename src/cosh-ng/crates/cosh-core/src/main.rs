@@ -18,6 +18,9 @@ mod logging;
 mod loop_detect;
 mod metrics;
 mod migrate;
+mod oauth_login;
+#[cfg(test)]
+mod oauth_wiring_tests;
 mod parent_watch;
 mod paths;
 mod process;
@@ -54,6 +57,33 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
             ));
         }
         return Box::new(provider::mock::MockProvider::history_echo());
+    }
+    match crate::auth::oauth::effective(config) {
+        crate::auth::oauth::SourceState::Active { generation, .. } => {
+            let manager = std::sync::Arc::new(
+                provider::sysom::oauth::manager::OAuthCredentialManager::new(
+                    std::sync::Arc::new(provider::sysom::oauth::client::OAuthClient::new(
+                        crate::auth::oauth::sysom_base(),
+                    )),
+                    crate::auth::oauth::store(),
+                    generation,
+                ),
+            );
+            match provider::sysom::SysomProvider::from_oauth(
+                manager,
+                &crate::auth::oauth::sysom_base(),
+            ) {
+                Ok(provider) => return Box::new(provider),
+                Err(error) => {
+                    tracing::warn!(error = %error, "oauth copilot endpoint rejected");
+                    return headless::auth::unconfigured_provider_for("OAuthEndpointInvalid");
+                }
+            }
+        }
+        crate::auth::oauth::SourceState::NeedsLogin => {
+            return headless::auth::unconfigured_provider_for("OAuthLoginRequired");
+        }
+        crate::auth::oauth::SourceState::NotSelected => {}
     }
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
@@ -101,6 +131,12 @@ fn create_provider_from_resolved(
 
 /// Check if auth is needed (no API key or AK/SK configured).
 fn needs_auth(config: &CoreConfig) -> bool {
+    if !matches!(
+        crate::auth::oauth::effective(config),
+        crate::auth::oauth::SourceState::NotSelected
+    ) {
+        return false;
+    }
     config.resolve_provider().auth_required()
 }
 
@@ -232,6 +268,8 @@ async fn run() {
         }
     } else if args.is_registry() {
         registry::run(&args, config).await;
+    } else if args.is_oauth_login() {
+        oauth_login::run(config).await;
     } else if args.is_compact() {
         std::process::exit(compaction::run_compact_cli(&args, config).await);
     } else if agent_headless {

@@ -93,6 +93,7 @@ impl RuntimeDispatcher {
         crate::runtime::login::invitation::observe_user_activity(state, batch.events);
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
         crate::auth::ecs_poll::poll(adapter, state, output)?;
+        crate::auth::oauth_flow::poll(adapter, state, output)?;
         crate::auth::trial::poll(adapter, state, output)?;
         crate::runtime::login::invitation::render_at_idle(state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])

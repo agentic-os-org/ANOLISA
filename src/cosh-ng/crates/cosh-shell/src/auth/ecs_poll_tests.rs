@@ -127,7 +127,7 @@ fn menu_prepare_results_return_to_user_choice_without_verifying_or_saving() {
         (
             serde_json::json!({"mode": "manual"}),
             false,
-            AuthPhase::SelectingProvider,
+            AuthPhase::ManagingProviders,
             true,
         ),
         (
@@ -136,11 +136,11 @@ fn menu_prepare_results_return_to_user_choice_without_verifying_or_saving() {
             AuthPhase::ManagingProviders,
             true,
         ),
-        (Value::Null, false, AuthPhase::SelectingProvider, false),
+        (Value::Null, false, AuthPhase::ManagingProviders, false),
         (
             serde_json::json!({"error_code": "metadata_access_denied"}),
             true,
-            AuthPhase::SelectingProvider,
+            AuthPhase::ManagingProviders,
             false,
         ),
     ] {
@@ -207,7 +207,7 @@ fn menu_prepare_timeout_reaps_before_returning_to_the_menu() {
     assert_probe_reaped(pid);
     assert_eq!(
         state.auth.state.as_ref().unwrap().phase,
-        AuthPhase::SelectingProvider
+        AuthPhase::ManagingProviders
     );
     assert_eq!(registry_calls(&dir).len(), 1);
     assert!(!state.auth.completed_ids.contains("menu-timeout"));

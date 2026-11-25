@@ -32,6 +32,9 @@ mod failure;
 mod identity_provider_tests;
 #[cfg(test)]
 mod identity_test_support;
+pub mod oauth;
+#[cfg(test)]
+mod oauth_provider_tests;
 mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -68,6 +71,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// while the model is queued, and the goal is to turn an unbounded hang into a
 /// bounded failure rather than to police latency.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+tokio::task_local! { pub static TEST_COPILOT_ENDPOINT: String; }
 
 /// Build the HTTP client for the streaming API.
 ///
@@ -111,7 +117,7 @@ pub struct EcsAuthChallenge {
 
 /// Credentials that can be refreshed at runtime (for STS).
 #[derive(Clone)]
-pub(super) struct SysomCredentials {
+pub struct SysomCredentials {
     access_key_id: String,
     access_key_secret: String,
     security_token: Option<String>,
@@ -138,12 +144,15 @@ pub struct SysomProvider {
     /// Resolved once per provider instance, including a negative result; only the
     /// on-disk cache honours [`INSTANCE_ID_CACHE_TTL_SECS`].
     instance_id: OnceCell<Option<String>>,
+    #[cfg(test)]
+    test_copilot_endpoint: Option<String>,
 }
 
 enum CredentialSource {
     Static,
     EcsRamRole,
     EcsIdentity(Arc<credential_manager::CredentialManager>),
+    OAuth(Arc<oauth::manager::OAuthCredentialManager>),
 }
 
 struct IdentityRequest {
@@ -191,6 +200,8 @@ impl SysomProvider {
             source: CredentialSource::Static,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
+            #[cfg(test)]
+            test_copilot_endpoint: None,
         }
     }
 
@@ -205,6 +216,8 @@ impl SysomProvider {
             source: CredentialSource::EcsRamRole,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
+            #[cfg(test)]
+            test_copilot_endpoint: None,
         }
     }
 
@@ -228,6 +241,43 @@ impl SysomProvider {
             ),
         ));
         provider
+    }
+
+    /// OAuth source bound to a release-environment Copilot HTTPS address.
+    /// Skips generic endpoint resolution and the ECS preflight entirely.
+    pub fn from_oauth(
+        manager: Arc<oauth::manager::OAuthCredentialManager>,
+        copilot_base: &str,
+    ) -> Result<Self, String> {
+        let url = reqwest::Url::parse(copilot_base)
+            .map_err(|_| "invalid SysOM Copilot endpoint".to_string())?;
+        let trusted = url.scheme() == "https" && {
+            #[cfg(feature = "oauth-pre")]
+            {
+                url.host_str() == Some(oauth::contract::PRE_HOST)
+            }
+            #[cfg(not(feature = "oauth-pre"))]
+            {
+                matches!(
+                    url.host_str(),
+                    Some(endpoint::PUBLIC_HOST) | Some(endpoint::VPC_PROXY_HOST)
+                )
+            }
+        };
+        if !trusted {
+            return Err("untrusted SysOM Copilot endpoint".to_string());
+        }
+        let host = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap()),
+            None => url.host_str().unwrap().to_string(),
+        };
+        let mut provider = Self::new("", "", None, &host);
+        provider.source = CredentialSource::OAuth(manager);
+        #[cfg(test)]
+        {
+            provider.test_copilot_endpoint = TEST_COPILOT_ENDPOINT.try_with(Clone::clone).ok();
+        }
+        Ok(provider)
     }
 
     /// Build the JSON request body for the SysOM API.
@@ -370,6 +420,11 @@ impl ContentGenerator for SysomProvider {
         config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
         self.cancelled.store(false, Ordering::SeqCst);
+        if let CredentialSource::OAuth(manager) = &self.source {
+            return self
+                .generate_oauth(messages, tools, config, manager.clone())
+                .await;
+        }
         if let CredentialSource::EcsIdentity(manager) = &self.source {
             return self
                 .generate_identity(messages, tools, config, manager.clone())
@@ -406,6 +461,13 @@ impl ContentGenerator for SysomProvider {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn auth_generation(&self) -> Option<u64> {
+        match &self.source {
+            CredentialSource::OAuth(manager) => Some(manager.login_generation()),
+            _ => None,
+        }
     }
 }
 
@@ -464,6 +526,193 @@ impl SysomProvider {
             ProviderFailureKind::Identity,
             DispatchState::NotDispatched,
         )))
+    }
+
+    async fn generate_oauth(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDeclaration],
+        config: &GenerateConfig,
+        manager: Arc<oauth::manager::OAuthCredentialManager>,
+    ) -> Result<GenerateStream, String> {
+        let lease = match manager.ensure().await {
+            Ok(lease) => lease,
+            Err(error) => return Ok(failure_stream(oauth_failure(error))),
+        };
+        if lease
+            .expires_at
+            .saturating_duration_since(tokio::time::Instant::now())
+            < ecs_identity::MINIMUM_SEND_TTL
+        {
+            manager.invalidate(lease.generation).await;
+            return Ok(failure_stream(oauth_failure(
+                oauth::contract::OAuthError::LeaseExpired,
+            )));
+        }
+        let body = self.build_request_body(messages, tools, config)?;
+        let body_bytes =
+            serde_json::to_vec(&body).map_err(|error| format!("JSON serialize: {error}"))?;
+        self.send_oauth_request(&body_bytes, lease, manager).await
+    }
+
+    async fn send_oauth_request(
+        &self,
+        body_bytes: &[u8],
+        lease: oauth::manager::OAuthLease,
+        manager: Arc<oauth::manager::OAuthCredentialManager>,
+    ) -> Result<GenerateStream, String> {
+        let (scheme, host) = {
+            #[cfg(test)]
+            {
+                if let Some(value) = &self.test_copilot_endpoint {
+                    let url = reqwest::Url::parse(value)
+                        .map_err(|_| "invalid test copilot endpoint".to_string())?;
+                    let loopback = url
+                        .host_str()
+                        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                        .is_some_and(|ip| ip.is_loopback());
+                    if url.scheme() != "http" || !loopback || url.port().is_none() {
+                        return Err("untrusted test copilot endpoint".to_string());
+                    }
+                    (
+                        "http".to_string(),
+                        format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()),
+                    )
+                } else {
+                    ("https".to_string(), self.configured_endpoint.clone())
+                }
+            }
+            #[cfg(not(test))]
+            {
+                ("https".to_string(), self.configured_endpoint.clone())
+            }
+        };
+        let resolved = endpoint::ResolvedEndpoint {
+            host: host.clone(),
+            scheme: scheme.clone(),
+            origin: endpoint::EndpointOrigin::Configured,
+        };
+        let client =
+            build_streaming_client_for_source(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT, true)
+                .map_err(|error| error.to_string())?;
+        let url = format!("{scheme}://{host}{API_PATH}");
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let nonce = Uuid::new_v4().to_string();
+        let hashed_payload = hex_sha256(body_bytes);
+        let mut sign_headers: Vec<(String, String)> = vec![
+            ("host".to_string(), host.clone()),
+            ("x-acs-version".to_string(), API_VERSION.to_string()),
+            ("x-acs-action".to_string(), API_ACTION.to_string()),
+            ("x-acs-date".to_string(), timestamp.clone()),
+            ("x-acs-signature-nonce".to_string(), nonce.clone()),
+            ("x-acs-content-sha256".to_string(), hashed_payload.clone()),
+            (
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            ),
+        ];
+        if let Some(token) = &lease.credentials.security_token {
+            sign_headers.push((
+                "x-acs-accesskey-id".to_string(),
+                lease.credentials.access_key_id.clone(),
+            ));
+            sign_headers.push(("x-acs-security-token".to_string(), token.clone()));
+        }
+        let authorization = self.sign_request(
+            "POST",
+            API_PATH,
+            &sign_headers,
+            &hashed_payload,
+            &lease.credentials,
+        );
+        let mut req = client
+            .post(&url)
+            .header("host", &host)
+            .header("x-acs-version", API_VERSION)
+            .header("x-acs-action", API_ACTION)
+            .header("x-acs-date", &timestamp)
+            .header("x-acs-signature-nonce", &nonce)
+            .header("x-acs-content-sha256", &hashed_payload)
+            .header("content-type", "application/json; charset=utf-8")
+            .header("accept", "text/event-stream")
+            .header("x-sysom-invoke-source", "cosh")
+            .header("Authorization", &authorization);
+        if let Some(token) = &lease.credentials.security_token {
+            req = req
+                .header("x-acs-accesskey-id", &lease.credentials.access_key_id)
+                .header("x-acs-security-token", token);
+        }
+        super::observe::tap_request("POST", &url, body_bytes);
+        let response = match req.body(body_bytes.to_vec()).send().await {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(failure_stream(failure::fixed(
+                    "Sysom.TransportError",
+                    ProviderFailureKind::Transport,
+                    DispatchState::Unknown,
+                )))
+            }
+        };
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("text/event-stream")
+            .to_owned();
+        super::observe::tap_response_head(status.as_u16(), &content_type);
+        let response_is_sse = content_type
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"));
+        if !status.is_success() || !response_is_sse {
+            let body = match bounded_error_body(response).await {
+                Ok(body) => body,
+                Err(kind) => {
+                    return Ok(failure_stream(failure::fixed(
+                        if kind == ProviderFailureKind::Transport {
+                            "Sysom.TransportError"
+                        } else {
+                            "Sysom.InvalidResponse"
+                        },
+                        kind,
+                        DispatchState::Unknown,
+                    )))
+                }
+            };
+            if let Some(failure) = failure::from_payload(&body, DispatchState::NotDispatched) {
+                if failure.kind == ProviderFailureKind::CredentialsExpired {
+                    manager.invalidate(lease.generation).await;
+                }
+                return Ok(failure_stream(failure));
+            }
+            return Ok(failure_stream(failure::fixed(
+                "Sysom.ProviderFailure",
+                ProviderFailureKind::Other,
+                DispatchState::Unknown,
+            )));
+        }
+        let cancelled = Arc::clone(&self.cancelled);
+        let byte_stream = response.bytes_stream().map(|chunk| {
+            chunk
+                .map(|bytes| {
+                    super::observe::tap_response_chunk(&bytes);
+                    bytes.to_vec()
+                })
+                .map_err(|error| error.to_string())
+        });
+        let generation = lease.generation;
+        let stream = sysom_event_stream_structured(Box::pin(byte_stream), cancelled);
+        let stream = futures::stream::once(async { GenerateEvent::RequestAccepted }).chain(stream);
+        Ok(Box::pin(stream.then(move |event| {
+            let manager = manager.clone();
+            async move {
+                if matches!(&event, GenerateEvent::ProviderFailure(failure) if failure.kind == ProviderFailureKind::CredentialsExpired) {
+                    manager.invalidate(generation).await;
+                }
+                event
+            }
+        })))
     }
 
     /// Send a streaming request using current credentials.
@@ -774,6 +1023,15 @@ fn failure_stream(failure: ProviderFailure) -> GenerateStream {
     Box::pin(futures::stream::once(async {
         GenerateEvent::ProviderFailure(failure)
     }))
+}
+
+fn oauth_failure(error: oauth::contract::OAuthError) -> ProviderFailure {
+    let kind = match error {
+        oauth::contract::OAuthError::PermissionDenied => ProviderFailureKind::PermissionDenied,
+        oauth::contract::OAuthError::SysomNotActivated => ProviderFailureKind::ActivationRequired,
+        _ => ProviderFailureKind::Identity,
+    };
+    failure::fixed(error.code(), kind, DispatchState::NotDispatched)
 }
 
 async fn bounded_error_body(

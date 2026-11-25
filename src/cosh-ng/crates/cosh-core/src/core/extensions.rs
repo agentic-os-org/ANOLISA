@@ -89,6 +89,7 @@ impl CoshCore {
             compaction: CompactionRuntime::default(),
             model,
             session_resumed: false,
+            session_auth_generation: None,
             shell_context: None,
             project_root,
             workspace,
