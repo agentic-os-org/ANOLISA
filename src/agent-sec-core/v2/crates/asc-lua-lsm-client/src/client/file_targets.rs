@@ -48,8 +48,12 @@ struct Mount {
 }
 
 impl Mount {
-    fn is_overlay(&self) -> bool {
-        matches!(self.filesystem.as_str(), "overlay" | "overlayfs")
+    fn check_mapping_identity(&self) -> Result<(), Failure> {
+        match self.filesystem.as_str() {
+            "overlay" | "overlayfs" => Err(rejected("LUA_LSM_OVERLAYFS_UNSUPPORTED")),
+            "btrfs" => Err(rejected("LUA_LSM_BTRFS_UNSUPPORTED")),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -84,13 +88,11 @@ impl MountView {
             .iter()
             .find(|m| m.id == stat.stx_mnt_id)
             .ok_or_else(|| retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"))?;
-        if containing.is_overlay() {
-            return Err(rejected("LUA_LSM_OVERLAYFS_UNSUPPORTED"));
-        }
+        containing.check_mapping_identity()?;
         Ok(FileType::from_raw_mode(u32::from(stat.stx_mode)))
     }
 
-    fn reject_overlay(&self, path: &Path, tree: bool) -> Result<(), Failure> {
+    fn check_mounts(&self, path: &Path, tree: bool) -> Result<(), Failure> {
         // Resolve absolute symlinks against this process's root. For a future
         // target its nearest existing ancestor determines the mount.
         for ancestor in path.ancestors() {
@@ -131,10 +133,10 @@ impl MountView {
                     .strip_prefix(root)
                     .map_err(|_| retryable("LUA_LSM_MOUNT_VIEW_UNAVAILABLE"))?;
                 let canonical = Path::new("/").join(relative);
-                if self.mounts.iter().any(|m| {
-                    m.is_overlay() && m.point != canonical && m.point.starts_with(&canonical)
-                }) {
-                    return Err(rejected("LUA_LSM_OVERLAYFS_UNSUPPORTED"));
+                for mount in &self.mounts {
+                    if mount.point != canonical && mount.point.starts_with(&canonical) {
+                        mount.check_mapping_identity()?;
+                    }
                 }
             }
             return Ok(());
@@ -309,7 +311,7 @@ pub(super) fn path_views(plan: &LuaLsmPlan) -> Result<Vec<BTreeSet<PathView>>, F
             let authored = Path::new(&target.path);
             let tree = target.kind == FileProtectionTargetKind::DirectoryTree;
             let canonical = canonical_target(authored, tree)?;
-            host.reject_overlay(authored, tree)?;
+            host.check_mounts(authored, tree)?;
             let subject_mounts = subject.as_ref().map_or(&host.mounts, |view| &view.mounts);
             let mut views =
                 views_for_target(authored, &canonical, tree, &host.mounts, subject_mounts)?;
@@ -324,9 +326,9 @@ pub(super) fn path_views(plan: &LuaLsmPlan) -> Result<Vec<BTreeSet<PathView>>, F
                 )?);
             }
             if let Some(subject) = &subject {
-                subject.reject_overlay(authored, tree)?;
+                subject.check_mounts(authored, tree)?;
                 for view in views.iter().filter(|view| view.filesystem.is_none()) {
-                    subject.reject_overlay(&view.base, tree)?;
+                    subject.check_mounts(&view.base, tree)?;
                 }
             }
             Ok(views)
@@ -339,7 +341,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overlay_rejection_uses_the_resolved_mount_and_directory_submounts() {
+    fn unsupported_filesystems_are_rejected_on_the_resolved_mount_and_submounts() {
         let fixture = tempfile::tempdir().unwrap();
         fs::create_dir(fixture.path().join("tree")).unwrap();
         fs::write(fixture.path().join("file"), b"data").unwrap();
@@ -348,37 +350,43 @@ mod tests {
         let id = rustix::fs::statx(&root, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
             .unwrap()
             .stx_mnt_id;
-        let table = format!("{id} 0 0:1 / / rw - overlay none rw\n");
         let mut view = MountView {
             root,
-            mounts: mounts(table.as_bytes()).unwrap(),
+            mounts: Vec::new(),
         };
-        for (path, tree) in [
-            ("/file", false),
-            ("/tree", true),
-            ("/future/secret", false),
-            ("/future/tree", true),
+        for (filesystem, supported, code) in [
+            ("overlay", "tmpfs", "LUA_LSM_OVERLAYFS_UNSUPPORTED"),
+            ("overlayfs", "ext4", "LUA_LSM_OVERLAYFS_UNSUPPORTED"),
+            ("btrfs", "ext4", "LUA_LSM_BTRFS_UNSUPPORTED"),
         ] {
-            assert_eq!(
-                view.reject_overlay(Path::new(path), tree).unwrap_err().code,
-                "LUA_LSM_OVERLAYFS_UNSUPPORTED",
-                "{path}"
-            );
-        }
+            let table = format!("{id} 0 0:1 / / rw - {filesystem} none rw\n");
+            view.mounts = mounts(table.as_bytes()).unwrap();
+            for (path, tree) in [
+                ("/file", false),
+                ("/tree", true),
+                ("/future/secret", false),
+                ("/future/tree", true),
+            ] {
+                assert_eq!(
+                    view.check_mounts(Path::new(path), tree).unwrap_err().code,
+                    code,
+                    "{path}"
+                );
+            }
 
-        // An overlaid parent with a supported mount on top is also reported in
-        // mountinfo. Only the ID returned for the opened target is authoritative.
-        let table = format!(
-            "1 0 0:9 / / rw - overlay none rw\n{id} 1 0:1 / / rw - tmpfs none rw\n3 {id} 0:3 / /tree/sub rw - overlayfs none rw\n"
-        );
-        view.mounts = mounts(table.as_bytes()).unwrap();
-        assert!(view.reject_overlay(Path::new("/file"), false).is_ok());
-        assert!(view.reject_overlay(Path::new("/future/tree"), true).is_ok());
-        for tree in ["/tree", "/alias"] {
-            assert_eq!(
-                view.reject_overlay(Path::new(tree), true).unwrap_err().code,
-                "LUA_LSM_OVERLAYFS_UNSUPPORTED"
+            // The target's mount ID distinguishes its supported mount from its parent.
+            let table = format!(
+                "1 0 0:9 / / rw - {filesystem} none rw\n{id} 1 0:1 / / rw - {supported} none rw\n3 {id} 0:3 / /tree/sub rw - {filesystem} none rw\n"
             );
+            view.mounts = mounts(table.as_bytes()).unwrap();
+            assert!(view.check_mounts(Path::new("/file"), false).is_ok());
+            assert!(view.check_mounts(Path::new("/future/tree"), true).is_ok());
+            for tree in ["/tree", "/alias"] {
+                assert_eq!(
+                    view.check_mounts(Path::new(tree), true).unwrap_err().code,
+                    code
+                );
+            }
         }
     }
 

@@ -28,6 +28,7 @@ struct Kernel {
     short_write: Mutex<bool>,
     fail_bootstrap: Mutex<bool>,
     fail_transfer: Mutex<bool>,
+    awaiting_transfer: Mutex<BTreeMap<String, BTreeSet<u32>>>,
     on_first_match: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     on_root_reseed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     readback_fault: Mutex<Option<ReadbackFault>>,
@@ -100,8 +101,10 @@ impl SecurityFs for Kernel {
             if names.remove(text).is_none() {
                 return Err(io::Error::from_raw_os_error(2));
             }
+            self.members.lock().unwrap().remove(text);
             if fault == Some(ReadbackFault::ReplacementMissingAfterUnregister) {
                 names.clear();
+                self.members.lock().unwrap().clear();
             }
         }
         Ok(payload.len())
@@ -153,7 +156,30 @@ impl SecurityFs for Kernel {
             {
                 return Err(io::Error::from_raw_os_error(3));
             }
-            "complete" if *self.fail_transfer.lock().unwrap() => {
+            "begin" => {
+                let members = self
+                    .members
+                    .lock()
+                    .unwrap()
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default();
+                self.awaiting_transfer.lock().unwrap().insert(name, members);
+            }
+            "sent" => {
+                self.awaiting_transfer
+                    .lock()
+                    .unwrap()
+                    .get_mut(&name)
+                    .unwrap()
+                    .remove(&pid.unwrap());
+            }
+            "complete"
+                if *self.fail_transfer.lock().unwrap()
+                    || self.awaiting_transfer.lock().unwrap()[&name]
+                        .iter()
+                        .any(|tid| Path::new(&format!("/proc/{tid}")).exists()) =>
+            {
                 return Err(io::Error::from_raw_os_error(11));
             }
             _ => {}
@@ -306,6 +332,16 @@ fn pure_preparation_and_native_create_update_delete_keep_the_contract() {
         [Presence::Present, Presence::Absent]
     );
     let calls = kernel.calls.lock().unwrap();
+    if Path::new("/proc/thread-self/children").exists() {
+        assert_eq!(
+            calls[start..]
+                .iter()
+                .filter(|call| *call == "bootstrap:member")
+                .count(),
+            1,
+            "a single-task subject needs only one member query"
+        );
+    }
     let changes: Vec<_> = calls[start..]
         .iter()
         .filter(|c| c.starts_with("write:"))
@@ -349,7 +385,7 @@ fn acknowledged_writes_require_registration_and_absence_readback() {
     assert!(kernel.names.lock().unwrap().contains_key(&old.target.id));
     assert!(kernel.names.lock().unwrap().contains_key(&new.target.id));
 
-    // A new Client can finish initialization after losing registration readback.
+    // A restart must confirm removal of the incomplete candidate before registering again.
     let client = LuaLsmClient::new(kernel.clone(), &state);
     *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::ListedAfterUnregister);
     let pending = client.update(previous, &new);
@@ -357,8 +393,10 @@ fn acknowledged_writes_require_registration_and_absence_readback() {
         pending.error.unwrap().code,
         "LUA_LSM_UNREGISTER_ABSENCE_UNCONFIRMED"
     );
-    assert_eq!(pending.observations[0].presence, Presence::Present);
-    assert_eq!(pending.observations[1].presence, Presence::Unknown);
+    assert_eq!(pending.observations.len(), 1);
+    assert_eq!(pending.observations[0].presence, Presence::Unknown);
+    assert!(state.join(format!("{}.json", new.target.id)).exists());
+    assert!(kernel.names.lock().unwrap().contains_key(&old.target.id));
     assert!(state.join(&old.target.id).is_dir());
     assert_eq!(
         kernel
@@ -371,6 +409,21 @@ fn acknowledged_writes_require_registration_and_absence_readback() {
         2
     );
 
+    *kernel.readback_fault.lock().unwrap() = None;
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    assert_eq!(client.update(previous, &new).error, None);
+    let old = new;
+    let previous = std::slice::from_ref(&old.target);
+    binding.binding_revision = binding.binding_revision.checked_next().unwrap();
+    let new = prepared(&client, &state, &binding);
+    *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::ListedAfterUnregister);
+    let pending = client.update(previous, &new);
+    assert_eq!(
+        pending.error.unwrap().code,
+        "LUA_LSM_UNREGISTER_ABSENCE_UNCONFIRMED"
+    );
+    assert_eq!(pending.observations[0].presence, Presence::Present);
+    assert_eq!(pending.observations[1].presence, Presence::Unknown);
     *kernel.readback_fault.lock().unwrap() = Some(ReadbackFault::ReplacementMissingAfterUnregister);
     let pending = client.update(previous, &new);
     assert_eq!(
@@ -488,9 +541,15 @@ fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
     {
         let calls = kernel.calls.lock().unwrap();
         let resumed = &calls[resume..];
-        assert!(resumed.starts_with(&["read:version".into(), "read:modules".into()]));
+        assert!(resumed.starts_with(&[
+            "read:version".into(),
+            "read:modules".into(),
+            "write:unregister".into(),
+            "read:modules".into(),
+            "write:register".into(),
+            "read:modules".into(),
+        ]));
         assert!(resumed.iter().any(|call| call == "bootstrap:seed_root"));
-        assert!(resumed.iter().all(|call| call != "write:register"));
     }
     assert_eq!(
         kernel
@@ -500,7 +559,7 @@ fn short_writes_conflicts_and_incomplete_initialization_stay_unknown() {
             .iter()
             .filter(|c| *c == "write:register")
             .count(),
-        3
+        4
     );
     // A completed receipt alone cannot restore a module lost from the kernel.
     kernel.names.lock().unwrap().remove(&prepared.target.id);
@@ -602,7 +661,7 @@ fn preparation_rejects_edited_source_and_translation_is_deterministic() {
 }
 
 #[test]
-fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
+fn incomplete_handover_keeps_the_old_module_and_replaces_the_partial_instance() {
     let subject = Probe::start();
     let directory = supported_test_tempdir();
     let protected = directory.path().join("file");
@@ -640,8 +699,16 @@ fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
     );
     assert!(kernel.names.lock().unwrap().contains_key(&first.target.id));
     assert_eq!(report.observations[0].presence, Presence::Unknown);
+    let receipt = state.join(format!("{}.json", next.target.id));
+    let read_instance = || {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        value["instance"].as_str().unwrap().to_owned()
+    };
+    let partial_instance = read_instance();
     *kernel.fail_transfer.lock().unwrap() = false;
     assert_eq!(client.update(&[first.target], &next).error, None);
+    assert_ne!(read_instance(), partial_instance);
     assert_eq!(
         kernel
             .calls
@@ -650,8 +717,46 @@ fn incomplete_handover_keeps_the_old_module_and_retries_the_same_instance() {
             .iter()
             .filter(|call| *call == "write:register")
             .count(),
-        2
+        3
     );
+}
+
+#[test]
+fn update_finds_a_member_outside_the_live_root_after_the_subtree_check() {
+    let directory = supported_test_tempdir();
+    let protected = directory.path().join("file");
+    fs::write(&protected, b"x").unwrap();
+    let state = directory.path().join("state");
+    let root = Probe::start();
+    let orphan = Probe::start();
+    let kernel = Arc::new(Kernel::default());
+    let client = LuaLsmClient::new(kernel.clone(), &state);
+    let mut binding = binding_for_pid(&protected, root.child.id());
+    let old = prepared(&client, &state, &binding);
+    assert_eq!(client.create(&old).error, None);
+    kernel
+        .members
+        .lock()
+        .unwrap()
+        .get_mut(&old.target.id)
+        .unwrap()
+        .insert(orphan.child.id());
+    binding.binding_revision = binding.binding_revision.checked_next().unwrap();
+    let next = prepared(&client, &state, &binding);
+    assert_eq!(client.update(&[old.target], &next).error, None);
+    assert!(kernel.members.lock().unwrap()[&next.target.id].contains(&orphan.child.id()));
+    if Path::new("/proc/thread-self/children").exists() {
+        assert_eq!(
+            kernel
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| *call == "bootstrap:complete")
+                .count(),
+            2
+        );
+    }
 }
 
 #[test]
@@ -1083,11 +1188,17 @@ fn tmpfs_test_tempdir() -> tempfile::TempDir {
     directory
 }
 
+fn unsupported_mount(path: &Path) -> Option<&'static str> {
+    match rustix::fs::statfs(path).ok()?.f_type {
+        0x794c_7630 => Some("LUA_LSM_OVERLAYFS_UNSUPPORTED"),
+        0x9123_683e => Some("LUA_LSM_BTRFS_UNSUPPORTED"),
+        _ => None,
+    }
+}
+
 fn supported_test_tempdir() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
-    if rustix::fs::statfs(directory.path()).unwrap().f_type == 0x794c_7630 {
-        // Positive apply tests need a supported filesystem even on kernels where
-        // an overlay file has consistent stat and maps identities.
+    if unsupported_mount(directory.path()).is_some() {
         tmpfs_test_tempdir()
     } else {
         directory
@@ -1095,7 +1206,7 @@ fn supported_test_tempdir() -> tempfile::TempDir {
 }
 
 #[test]
-fn overlay_scope_rejection_preserves_the_previous_deployment() {
+fn unsupported_mount_rejection_preserves_the_previous_deployment() {
     let probe = Probe::start();
     let dir = tempfile::tempdir().unwrap();
     let supported = tmpfs_test_tempdir();
@@ -1109,36 +1220,32 @@ fn overlay_scope_rejection_preserves_the_previous_deployment() {
     assert_eq!(client.create(&old).error, None);
 
     let mut targets = Vec::new();
-    if rustix::fs::statfs(dir.path()).unwrap().f_type == 0x794c_7630 {
+    if let Some(code) = unsupported_mount(dir.path()) {
         let tree = dir.path().join("empty");
         fs::create_dir(&tree).unwrap();
-        targets.push((tree, true));
+        targets.push((tree, true, code));
         let file = dir.path().join("existing");
         fs::write(&file, b"data").unwrap();
-        targets.push((file, false));
-        targets.push((dir.path().join("future/file"), false));
-    } else {
-        // A read-only overlay suffices to exercise pre-arming a missing file.
-        // The mount-table unit test covers rejection even on hosts without overlay.
-        let mounts = fs::read("/proc/self/mounts").unwrap();
-        for line in String::from_utf8_lossy(&mounts).lines() {
-            let mut fields = line.split_whitespace().skip(1);
-            let mount = Path::new(fields.next().unwrap());
-            if matches!(fields.next(), Some("overlay" | "overlayfs"))
-                && mount.is_dir()
-                && rustix::fs::statfs(mount).is_ok_and(|fs| fs.f_type == 0x794c_7630)
-            {
-                targets.push((mount.join(uuid::Uuid::new_v4().to_string()), false));
-                break;
-            }
+        targets.push((file, false, code));
+        targets.push((dir.path().join("future/file"), false, code));
+    }
+    // A visible read-only mount suffices to exercise pre-arming a missing file.
+    let mounts = fs::read("/proc/self/mounts").unwrap();
+    for line in String::from_utf8_lossy(&mounts).lines() {
+        let mut fields = line.split_whitespace().skip(1);
+        let mount = Path::new(fields.next().unwrap());
+        if matches!(fields.next(), Some("overlay" | "overlayfs" | "btrfs"))
+            && mount.is_dir()
+            && let Some(code) = unsupported_mount(mount)
+            && !targets.iter().any(|(_, _, covered)| *covered == code)
+        {
+            targets.push((mount.join(uuid::Uuid::new_v4().to_string()), false, code));
         }
     }
     if targets.is_empty() {
-        eprintln!(
-            "No visible overlay mount for the native mount check; the mount-table regression runs on every host."
-        );
+        eprintln!("No visible overlayfs or Btrfs mount; the mount-table regression covers both.");
     }
-    for (path, tree) in targets {
+    for (path, tree, code) in targets {
         let mut binding = permission_binding(&path, probe.child.id(), &["delete"], tree);
         binding.binding_id = old_binding.binding_id.clone();
         binding.binding_revision = old_binding.binding_revision.checked_next().unwrap();
@@ -1146,16 +1253,11 @@ fn overlay_scope_rejection_preserves_the_previous_deployment() {
         let report = client.update(std::slice::from_ref(&old.target), &new);
         let error = report.error.unwrap();
         assert_eq!(error.kind, FailureKind::Rejected);
-        assert_eq!(
-            error.code,
-            "LUA_LSM_OVERLAYFS_UNSUPPORTED",
-            "{}",
-            path.display()
-        );
+        assert_eq!(error.code, code, "{}", path.display());
         assert_eq!(report.observations[0].presence, Presence::Unknown);
         assert!(!state.join(format!("{}.json", new.target.id)).exists());
         eprintln!(
-            "Rejected overlay target {} before registration",
+            "Rejected unsupported target {} before registration",
             path.display()
         );
     }
@@ -1177,7 +1279,7 @@ fn mapping_test_tempdir() -> tempfile::TempDir {
     // backing device in maps. This reproduced the missing preflight error in
     // GitHub Actions job 137576531148 (expected LUA_LSM_PREEXISTING_READ_MAPPING).
     // Linux 6.8 gained the file_user_inode fix (upstream commit 3efdc78fdc21).
-    // Production now rejects overlay on every kernel. On the supported fixture
+    // Production rejects overlayfs and Btrfs on every kernel. On the supported fixture
     // mount still verify the identities used by these mapping assertions.
     type Identity = (u32, u32, u64);
     let mut probe = Probe::start();
@@ -1349,7 +1451,7 @@ fn second_scan_skips_a_child_reaped_before_seeding() {
 }
 
 #[test]
-fn pattern_preflight_checks_a_grandchild_reparented_after_seeding() {
+fn pattern_preflight_rejects_captured_orphan_and_retry_starts_with_current_tree() {
     let directory = mapping_test_tempdir();
     let tree = directory.path().join("tree");
     fs::create_dir(&tree).unwrap();
@@ -1383,6 +1485,13 @@ fn pattern_preflight_checks_a_grandchild_reparented_after_seeding() {
             &state,
             &pattern_binding(&tree.join("*.txt"), root, operation),
         );
+        // While the grandchild is still in the root's tree, rebuilding the module
+        // must continue to reject its mapping.
+        for _ in 0..2 {
+            let rejected = client.create(&plan);
+            assert_eq!(rejected.error.unwrap().code, expected);
+            assert_eq!(rejected.observations[0].presence, Presence::Unknown);
+        }
         *kernel.on_first_match.lock().unwrap() = Some(Box::new({
             let probe = probe.clone();
             move || {
@@ -1398,13 +1507,29 @@ fn pattern_preflight_checks_a_grandchild_reparented_after_seeding() {
         }));
         let report = client.create(&plan);
         assert!(kernel.on_first_match.lock().unwrap().is_none());
-        assert_eq!(probe.lock().unwrap().run("finish", Path::new("-")), "ok");
         assert!(kernel.members.lock().unwrap()[&plan.target.id].contains(&grandchild));
         assert_eq!(
             report.error.as_ref().map(|error| error.code.as_str()),
             Some(expected)
         );
         assert_eq!(report.observations[0].presence, Presence::Unknown);
+
+        // Keep the orphan and mapping alive. A retry discards the first attempt's
+        // membership and preflights the current tree, even across a daemon restart.
+        let restarted = LuaLsmClient::new(kernel.clone(), &state);
+        let retry = if operation == "read" {
+            &client
+        } else {
+            &restarted
+        };
+        let result = retry.create(&plan);
+        assert_eq!(result.error, None);
+        assert_eq!(result.observations[0].presence, Presence::Present);
+        assert_eq!(
+            kernel.members.lock().unwrap()[&plan.target.id],
+            BTreeSet::from([root])
+        );
+        assert_eq!(probe.lock().unwrap().run("finish", Path::new("-")), "ok");
     }
 }
 

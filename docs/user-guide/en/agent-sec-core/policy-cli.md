@@ -39,13 +39,16 @@ the [implementation and setup](../../../../src/agent-sec-core/v2/crates/asc-lua-
 
 Lua-LSM matches the path used for each operation. A rule can cover files created after deployment. Existing hard links do not block deployment. Access through a hard-link name outside the protected paths is currently outside the guarantee.
 
-Deployment returns `LUA_LSM_OVERLAYFS_UNSUPPORTED` if the target is on overlayfs or
-a protected directory tree contains an overlayfs mount. Empty directories are checked
-too. For a target that does not yet exist, the nearest existing ancestor determines the mount.
+Deployment rejects targets and protected directory submounts on overlayfs
+(`LUA_LSM_OVERLAYFS_UNSUPPORTED`) or Btrfs (`LUA_LSM_BTRFS_UNSUPPORTED`).
+The check includes empty directories. For a target that does not yet exist, the nearest existing ancestor determines the mount.
 
 Keep the process tree stable during first deployment when all descendants must be protected.
 If an unmarked descendant is reparented outside the tree before the client discovers it,
 the Binding can reach `Ready` while that descendant remains unprotected.
+Retrying an incomplete initial deployment removes the partial module and starts
+with the root's current process tree. Descendants that have left the tree lose
+that module's protection.
 
 Lua modules survive daemon stops. When discovery observes a root process exit or
 an administrator deletes its Scope, the daemon schedules Binding cleanup. Any
