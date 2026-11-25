@@ -6,7 +6,7 @@ mod preflight;
 mod process_tree;
 use confirmation::{Confirmation, valid_instance};
 use preflight::MappingPreflight;
-use process_tree::{boot_id, process_family, process_tasks, verify_process};
+use process_tree::{boot_id, process_family, process_tasks, subtree, verify_process};
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use asc_policy_target_contracts::TargetDeploymentClient;
+use asc_policy_types::process_discovery::ProcessIdentity;
 use asc_policy_types::target::{
     DeploymentReport, Failure, FailureKind, Observation, PreparedApply, Presence,
     TargetBindingPlan, TargetRef,
@@ -158,17 +159,16 @@ impl LuaLsmClient {
             let boot = boot_id().map_err(local_error)?;
             // Bind the receipt to the subject identity as well as the Lua source.
             let digest = format!("{:x}", Sha256::digest(&prepared.content));
-            let registered = names.contains_key(&prepared.target.id);
             let required_hooks = if plan.protects_creation() {
                 HOOKS_WITH_CREATION
             } else {
                 BASE_HOOKS
             };
-            if registered && names.get(&prepared.target.id) != Some(&required_hooks) {
-                return Err(rejected("LUA_LSM_UNSUPPORTED_HOOK_SET"));
-            }
             let controls = self.directory.join(&prepared.target.id);
-            let confirmation = if registered {
+            let initialized = if let Some(hooks) = names.get(&prepared.target.id) {
+                if *hooks != required_hooks {
+                    return Err(rejected("LUA_LSM_UNSUPPORTED_HOOK_SET"));
+                }
                 // A name alone does not expose LIVE state or identify the source.
                 let record = self
                     .read_confirmation(&prepared.target)
@@ -178,9 +178,16 @@ impl LuaLsmClient {
                             && valid_instance(&record.instance)
                     })
                     .ok_or_else(|| retryable("LUA_LSM_EXISTING_MODULE_UNCONFIRMED"))?;
-                Some(record)
+                if !record.initialized {
+                    // A fresh snapshot cannot account for previously labeled orphans.
+                    // Keep the receipt until unregister confirms their labels are gone.
+                    self.unregister(&prepared.target)?;
+                    self.clear_confirmation(&prepared.target)
+                        .map_err(local_error)?;
+                }
+                record.initialized
             } else {
-                None
+                false
             };
             if fs::read_link("/proc/self").map_err(local_error)?
                 != Path::new(&std::process::id().to_string())
@@ -188,16 +195,9 @@ impl LuaLsmClient {
                 return Err(rejected("LUA_LSM_PROCFS_VIEW_MISMATCH"));
             }
             let views = file_targets::path_views(&plan)?;
-            if confirmation
-                .as_ref()
-                .is_some_and(|record| record.initialized)
-            {
+            if initialized {
                 return Ok(());
             }
-            let instance = confirmation.map_or_else(
-                || uuid::Uuid::new_v4().simple().to_string(),
-                |record| record.instance,
-            );
             let family = if previous.is_empty() {
                 verify_process(&plan.process)?;
                 process_family(&plan.process)?
@@ -213,32 +213,30 @@ impl LuaLsmClient {
                 boot,
                 digest,
                 initialized: false,
-                instance,
+                instance: uuid::Uuid::new_v4().simple().to_string(),
             };
-            if !registered {
-                let source = render_module_with_views(&plan, &self.directory, &views);
-                if source.len() > MAX_BYTES {
-                    return Err(rejected("LUA_LSM_MODULE_SIZE_LIMIT"));
-                }
-                // Persist the instance before registration so retries can resume initialization.
-                self.save_confirmation(&prepared.target, &record)
-                    .map_err(local_error)?;
-                let count = match self.kernel.write("register", source.as_bytes()) {
-                    Ok(count) => count,
-                    Err(error) => {
-                        if error.kind() == io::ErrorKind::AlreadyExists {
-                            self.clear_confirmation(&prepared.target)
-                                .map_err(local_error)?;
-                        }
-                        return Err(kernel_error(&error, "REGISTER"));
+            let source = render_module_with_views(&plan, &self.directory, &views);
+            if source.len() > MAX_BYTES {
+                return Err(rejected("LUA_LSM_MODULE_SIZE_LIMIT"));
+            }
+            // Persist ownership before register so a retry can remove a partial instance.
+            self.save_confirmation(&prepared.target, &record)
+                .map_err(local_error)?;
+            let count = match self.kernel.write("register", source.as_bytes()) {
+                Ok(count) => count,
+                Err(error) => {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        self.clear_confirmation(&prepared.target)
+                            .map_err(local_error)?;
                     }
-                };
-                if count != source.len() {
-                    return Err(retryable("LUA_LSM_REGISTER_SHORT_WRITE"));
+                    return Err(kernel_error(&error, "REGISTER"));
                 }
-                if self.module_names()?.get(&prepared.target.id) != Some(&required_hooks) {
-                    return Err(retryable("LUA_LSM_REGISTRATION_UNCONFIRMED"));
-                }
+            };
+            if count != source.len() {
+                return Err(retryable("LUA_LSM_REGISTER_SHORT_WRITE"));
+            }
+            if self.module_names()?.get(&prepared.target.id) != Some(&required_hooks) {
+                return Err(retryable("LUA_LSM_REGISTRATION_UNCONFIRMED"));
             }
             self.label_existing_processes(&plan.process, &controls, &family)?;
             let matches = |index, pinned: &File| match self
@@ -329,8 +327,53 @@ impl LuaLsmClient {
                 Vec::new(),
             );
         }
-        for process in process_tasks()? {
-            for owner in &owners {
+        let complete = format!("complete/{instance}");
+        if let Ok(tasks) = subtree(&plan.process, true) {
+            self.transfer_tasks(&tasks, &owners, controls, &plan.process, mapping_preflight)?;
+        }
+        if self.transfer_complete(&owners, &complete)? {
+            return Ok(());
+        }
+        // A live member can be outside the current tree after reparenting.
+        self.transfer_tasks(
+            &process_tasks()?,
+            &owners,
+            controls,
+            &plan.process,
+            mapping_preflight,
+        )?;
+        if self.transfer_complete(&owners, &complete)? {
+            Ok(())
+        } else {
+            Err(retryable("LUA_LSM_MEMBERSHIP_TRANSFER_PENDING"))
+        }
+    }
+
+    fn transfer_complete(&self, owners: &[PathBuf], command: &str) -> Result<bool, Failure> {
+        for owner in owners {
+            match self.request(owner, command) {
+                Ok(()) => {}
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) =>
+                {
+                    return Ok(false);
+                }
+                Err(_) => return Err(retryable("LUA_LSM_MEMBERSHIP_TRANSFER_PENDING")),
+            }
+        }
+        Ok(true)
+    }
+
+    fn transfer_tasks(
+        &self,
+        tasks: &[ProcessIdentity],
+        owners: &[PathBuf],
+        controls: &Path,
+        root: &ProcessIdentity,
+        mapping_preflight: &MappingPreflight,
+    ) -> Result<(), Failure> {
+        for process in tasks {
+            for owner in owners {
                 match self.request(owner, &format!("member/{}", process.pid)) {
                     Err(error)
                         if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
@@ -340,17 +383,30 @@ impl LuaLsmClient {
                     Err(_) => return Err(retryable("LUA_LSM_MEMBERSHIP_UNCONFIRMED")),
                     Ok(()) => {}
                 }
-                verify_process(&process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
+                verify_process(process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
                 mapping_preflight.check(process.pid)?;
-                self.label_process(controls, &plan.process, &process)?;
-                verify_process(&process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
+                self.label_process(controls, root, process)?;
+                verify_process(process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
                 self.command(owner, &format!("sent/{}", process.pid))?;
-                verify_process(&process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
+                verify_process(process).map_err(|_| retryable("LUA_LSM_MEMBERSHIP_CHANGED"))?;
             }
         }
-        for owner in owners {
-            self.command(&owner, &format!("complete/{instance}"))
-                .map_err(|_| retryable("LUA_LSM_MEMBERSHIP_TRANSFER_PENDING"))?;
+        Ok(())
+    }
+
+    fn unregister(&self, target: &TargetRef) -> Result<(), Failure> {
+        match self.kernel.write("unregister", target.id.as_bytes()) {
+            Ok(count) if count != target.id.len() => {
+                return Err(retryable("LUA_LSM_UNREGISTER_SHORT_WRITE"));
+            }
+            Ok(_) => {}
+            // ENOENT can mean either the module or the control node is missing.
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::NOENT.raw_os_error()) => {
+            }
+            Err(error) => return Err(kernel_error(&error, "UNREGISTER")),
+        }
+        if self.module_names()?.contains_key(&target.id) {
+            return Err(retryable("LUA_LSM_UNREGISTER_ABSENCE_UNCONFIRMED"));
         }
         Ok(())
     }
@@ -461,20 +517,7 @@ impl TargetDeploymentClient for LuaLsmClient {
         for target in targets {
             let operation = (|| {
                 self.clear_confirmation(target).map_err(local_error)?;
-                match self.kernel.write("unregister", target.id.as_bytes()) {
-                    Ok(count) if count != target.id.len() => {
-                        return Err(retryable("LUA_LSM_UNREGISTER_SHORT_WRITE"));
-                    }
-                    Ok(_) => {}
-                    // ENOENT can mean either the module or the control node is missing.
-                    Err(error)
-                        if error.raw_os_error()
-                            == Some(rustix::io::Errno::NOENT.raw_os_error()) => {}
-                    Err(error) => return Err(kernel_error(&error, "UNREGISTER")),
-                }
-                if self.module_names()?.contains_key(&target.id) {
-                    return Err(retryable("LUA_LSM_UNREGISTER_ABSENCE_UNCONFIRMED"));
-                }
+                self.unregister(target)?;
                 Ok(Presence::Absent)
             })();
             let mut partial = report(target, operation);

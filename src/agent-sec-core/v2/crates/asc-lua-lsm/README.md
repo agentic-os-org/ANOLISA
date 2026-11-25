@@ -80,12 +80,12 @@ matches its current path, including newly created entries and files that replace
 an earlier object at the same name. Exact exclusions apply only to that entry.
 Subtree exclusions also cover its descendants.
 
-Deployment rejects an overlayfs target or an overlayfs submount inside a protected
-tree with `LUA_LSM_OVERLAYFS_UNSUPPORTED`. This applies to empty directories and
-all file operations. For a missing target, the nearest existing ancestor determines
+Deployment rejects targets on overlayfs (`LUA_LSM_OVERLAYFS_UNSUPPORTED`) or
+Btrfs (`LUA_LSM_BTRFS_UNSUPPORTED`), including submounts inside a protected tree.
+This applies to empty directories and all file operations. For a missing target, the nearest existing ancestor determines
 the mount. A separate tmpfs mount inside an overlay root can still be protected.
-The check applies on every kernel because existing mappings on some overlayfs
-mounts report a different device and inode from the target path.
+On both filesystem types, the device and inode pair from `stat` can differ from
+the pair in `/proc/<pid>/maps`. Deployment checks the mount type on every kernel.
 
 For example, blocking writes with `resource.path like "/work/secrets/*"` covers
 `/work/secrets/key` even after the kernel evicts and reloads its inode.
@@ -122,6 +122,8 @@ It reports Absent only when the listing succeeds and omits the requested name.
 Failed readback leaves the target Unknown, so reconciliation cannot report a
 successful deployment or deletion from an unverified result.
 
+The Client discovers descendants through each thread's procfs `children` file.
+If this walk is unavailable or detects churn, it reconstructs the tree from procfs parent PIDs.
 After registration the Client seeds the verified root and existing descendants.
 On access or fork, a caller can establish membership through its current ancestry
 when its PID namespace resolves the saved PID to the marked root. Fork and exec
@@ -148,7 +150,9 @@ accepted. Subsequent writes and shared write upgrades go through file hooks. A n
 which the relevant hook begins denying access. AgentSight preflight has the same
 snapshot limitation.
 
-Updates transfer members from the old modules rather than rediscovering ancestry.
+Updates first ask the old modules about tasks in the current subtree when available.
+Only if an old module reports outstanding members does the Client scan all visible
+tasks, including descendants reparented outside the tree.
 Atomic membership/exit counters fence concurrent forks and exits before an old
 module can be removed, including orphaned descendants and threads. A persisted
 registration-instance token prevents reuse of transfer markers after re-registration.
@@ -160,10 +164,13 @@ A same-boot daemon restart preserves Ready Bindings and both deployment receipts
 of a mixed Binding. Pending work resumes. Interrupted apply/delete follows the
 existing retry budget. When an apply is retried, the Client checks the native module
 listing against the record. A matching completed deployment skips initialization.
-A matching incomplete deployment repeats initialization on the registered module.
-A missing module is reapplied to the original verified process. Names without
-matching evidence are never overwritten or adopted. Delete invalidates evidence
-before unregister. Template changes require a new revision or explicit cleanup.
+For a matching incomplete deployment, the Client keeps its receipt until it
+unregisters the partial module and confirms its absence. A fresh initial apply
+checks the verified root's current process tree. Descendants already reparented
+outside that tree lose the partial module's protection. During an update, the
+previous revision continues protecting its members until handover succeeds.
+A missing module is registered afresh. Names without matching evidence are never
+overwritten or adopted. Explicit delete invalidates evidence before unregister. Template changes require a new revision or explicit cleanup.
 
 ## Boundaries requiring attention
 
@@ -247,8 +254,8 @@ outside hard-link mappings and excluded mappings without modifying kernel state.
 `tests/template.lua` runs in Ubuntu CI with Lua 5.1 and mocked kernel objects,
 including Cedar path matching. Repository and daemon tests cover
 root-exit cleanup and recovery. Native enforcement is tested manually on a
-disposable kernel host with the following command. Set `TMPDIR` to a writable
-non-overlay filesystem that allows execution for the native exec and mmap tests.
+disposable kernel host with the following command. For native exec and mmap tests, set `TMPDIR` to a writable, executable mount
+on a supported filesystem such as ext4.
 
 ```sh
 cargo test -p asc-lua-lsm live_kernel_ -- --ignored --test-threads=1

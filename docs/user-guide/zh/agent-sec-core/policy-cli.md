@@ -32,11 +32,12 @@ Lua-LSM 只接受 Cedar 策略。默认仍为 `agentsight`，已有部署保留�
 
 Lua-LSM 在每次操作时匹配路径，也能保护下发后才创建的文件。已有硬链接不影响下发；通过保护范围外的硬链接名称访问，暂时不在防护保证内。
 
-如果目标位于 overlayfs，或受保护的目录树包含 overlayfs 挂载，下发会返回
-`LUA_LSM_OVERLAYFS_UNSUPPORTED`。空目录也会检查。目标尚不存在时，按最近已存在的祖先判断挂载类型。
+如果目标或受保护目录树内的子挂载位于 overlayfs，下发返回 `LUA_LSM_OVERLAYFS_UNSUPPORTED`；
+位于 Btrfs 时返回 `LUA_LSM_BTRFS_UNSUPPORTED`。空目录也会检查。目标尚不存在时，按最近已存在的祖先判断挂载类型。
 
 需要保护全部后代时，应在首次下发期间保持进程树稳定。如果一个尚未打标的后代在被客户端发现前
 就被重新托管到树外，即使 Binding 进入 `Ready`，该后代仍可能不受保护。
+首次下发未完成时，重试会卸载该模块并按根进程当前的进程树重新部署，已离开这棵树的后代会失去该模块的保护。
 
 daemon 停止时 Lua 模块继续运行。发现根进程退出或管理员删除 Scope 时，daemon 会调度
 Binding 清理。模块卸载后，仍存活的后代失去这条 Binding 的保护。同一 boot 内重启 daemon
