@@ -1,12 +1,12 @@
 //! 静态 SSL 偏移验证：有界信号结转与轮换目标校验。
 
 use super::late_retry::ProcessIdentity;
-use super::{FileKey, StaticSslOffsets, stat_dev_to_key};
+use super::{FileKey, StaticSslOffsets, parse_maps_line, stat_dev_to_key};
 use crate::probes::codex_offsets::Fingerprint;
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io,
+    io::{self, BufRead},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     time::{Duration, Instant},
 };
@@ -149,17 +149,78 @@ pub(super) fn file_revision(path: &str) -> Option<FileRevision> {
         .map(|m| (m.len(), m.mtime(), m.mtime_nsec()))
 }
 
+/// 从固定描述符派生内核映射身份；overlayfs 的路径 stat 身份可能不同。
+fn mapped_file_key(file: &File) -> io::Result<FileKey> {
+    // PROT_NONE 不读取任何字节；一页临时 VMA 只让内核选择 mmap 的真实文件。
+    // SAFETY: 有效只读文件描述符，内核选择地址；长度非零，不解引用返回地址。
+    let address = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            1,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if address == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    struct Mapping(*mut libc::c_void);
+    impl Drop for Mapping {
+        fn drop(&mut self) {
+            // SAFETY: 仅释放本函数成功创建、尚未释放的一字节映射。
+            unsafe {
+                libc::munmap(self.0, 1);
+            }
+        }
+    }
+    let mapping = Mapping(address);
+    let address = mapping.0 as usize as u64;
+    // 此处读观察者自己的 VMA，不能用配置的宿主 procfs 或目标 PID。
+    let maps = io::BufReader::new(File::open("/proc/self/maps")?);
+    for line in maps.lines() {
+        let line = line?;
+        if let Some(((start, end), key, _)) = parse_maps_line(&line)
+            && start <= address
+            && address < end
+        {
+            return Ok(key);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "temporary SSL identity mapping is missing",
+    ))
+}
+
+/// 固定目标进程命名空间内的映射文件，拒绝同名文件替换或设备不匹配。
+pub(super) fn open_uprobe_target(path: &str, expected: FileKey) -> io::Result<File> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let observed = (stat_dev_to_key(metadata.dev()), metadata.ino());
+    if observed != expected && mapped_file_key(&file)? != expected {
+        // 仍比较完整设备/inode，不能仅凭 inode 相同放行：overlayfs 可在
+        // stat 时返回叠加层设备、mmap 时返回底层设备，两个身份都来自同一 fd。
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SSL uprobe target identity changed: expected {expected:?}, observed {observed:?}"
+            ),
+        ));
+    }
+    Ok(file)
+}
+
 /// 先固定描述符，再校验 inode 和内容修订，避免检查后路径被自更新替换。
 pub(super) fn open_rotation_target(
     path: &str,
     expected: FileKey,
     revision: Option<FileRevision>,
 ) -> io::Result<File> {
-    let file = File::open(path)?;
+    let file = open_uprobe_target(path, expected)?;
     let metadata = file.metadata()?;
-    if (stat_dev_to_key(metadata.dev()), metadata.ino()) != expected
-        || Some((metadata.len(), metadata.mtime(), metadata.mtime_nsec())) != revision
-    {
+    if Some((metadata.len(), metadata.mtime(), metadata.mtime_nsec())) != revision {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "SSL rotation target changed",
@@ -417,6 +478,68 @@ mod tests {
         assert_eq!(
             classify_pending_verdicts(&pending, now + VERIFY_WINDOW)[&(1, 1)],
             Verdict::Verified
+        );
+    }
+
+    #[test]
+    #[ignore = "需 overlayfs 容器，且 /usr/bin/python3 来自镜像底层"]
+    fn overlay_lower_file_is_pinned_without_dropping_device_checks() {
+        let path = "/usr/bin/python3";
+        let file = File::open(path).unwrap();
+        let metadata = file.metadata().unwrap();
+        let stat_key = (stat_dev_to_key(metadata.dev()), metadata.ino());
+        let mapped_key = mapped_file_key(&file).unwrap();
+        assert_ne!(stat_key, mapped_key, "夹具必须实际覆盖 overlay 的身份分叉");
+        let target = open_uprobe_target(path, mapped_key).unwrap();
+        assert_eq!(mapped_file_key(&target).unwrap(), mapped_key);
+        let wrong_device = mapped_key.0 ^ (1u64 << 32);
+        assert!(open_uprobe_target(path, (wrong_device, mapped_key.1)).is_err());
+        assert!(open_uprobe_target(path, (mapped_key.0, mapped_key.1 + 1)).is_err());
+        eprintln!("overlay 路径身份 {stat_key:?}，实际映射身份 {mapped_key:?} 校验通过");
+    }
+
+    #[test]
+    fn uprobe_target_pins_identity_and_rejects_replaced_or_wrong_device_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libssl.so");
+        fs::write(&path, b"mapped library").unwrap();
+        let path = path.to_str().unwrap();
+        let metadata = fs::metadata(path).unwrap();
+        let key = (stat_dev_to_key(metadata.dev()), metadata.ino());
+        assert!(open_uprobe_target(path, (key.0 + 1, key.1)).is_err());
+        assert!(open_uprobe_target(path, (key.0, key.1 + 1)).is_err());
+        let target = open_uprobe_target(path, key).unwrap();
+        let pinned = pinned_path(&target);
+        let replacement = dir.path().join("replacement");
+        fs::write(&replacement, b"different library").unwrap();
+        fs::rename(&replacement, path).unwrap();
+        assert!(open_uprobe_target(path, key).is_err());
+        assert_eq!(fs::read(&pinned).unwrap(), b"mapped library");
+        drop(target);
+        assert!(open_uprobe_target(dir.path().join("missing").to_str().unwrap(), key).is_err());
+    }
+
+    #[test]
+    fn pinned_mapping_identity_matches_the_kernel_and_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library");
+        fs::write(&path, b"mapped fixture").unwrap();
+        let file = File::open(&path).unwrap();
+        let expected = mapped_file_key(&file).unwrap();
+        let target = open_uprobe_target(path.to_str().unwrap(), expected).unwrap();
+        assert_eq!(mapped_file_key(&target).unwrap(), expected);
+        assert!(open_uprobe_target(path.to_str().unwrap(), (expected.0 + 1, expected.1)).is_err());
+        assert!(open_uprobe_target(path.to_str().unwrap(), (expected.0, expected.1 + 1)).is_err());
+        let replacement = dir.path().join("replacement");
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(open_uprobe_target(path.to_str().unwrap(), expected).is_err());
+        assert_eq!(mapped_file_key(&target).unwrap(), expected);
+        let maps = fs::read_to_string("/proc/self/maps").unwrap();
+        assert!(
+            !maps
+                .lines()
+                .any(|line| parse_maps_line(line).is_some_and(|(_, key, _)| key == expected))
         );
     }
 

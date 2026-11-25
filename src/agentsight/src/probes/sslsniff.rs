@@ -44,7 +44,7 @@ pub(crate) use self_verify::PlaintextSignals;
 use self_verify::VERIFY_WINDOW;
 use self_verify::{
     PendingVerify, SignalBacklog, Verdict, classify_pending_verdicts, file_revision,
-    open_rotation_target, pinned_path,
+    open_rotation_target, open_uprobe_target, pinned_path,
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
@@ -99,7 +99,19 @@ fn stale_reattach_ttl() -> Duration {
 struct InodeAttach {
     /// Held for Drop (detaches the uprobes); never read directly.
     _links: Vec<Link>,
+    /// 链接先释放，再关闭目标；全局挂载不依赖发现进程的 procfs 路径。
+    _target: Option<fs::File>,
     attached_at: Instant,
+}
+
+impl From<Vec<Link>> for InodeAttach {
+    fn from(links: Vec<Link>) -> Self {
+        Self {
+            _links: links,
+            _target: None,
+            attached_at: Instant::now(),
+        }
+    }
 }
 
 fn should_reattach(
@@ -114,7 +126,7 @@ fn should_reattach(
 /// Outcome of a single uprobe attach attempt for one library.
 enum AttachOutcome {
     /// Probes attached successfully.
-    Attached(Vec<Link>),
+    Attached(InodeAttach),
     /// No known SSL entry points in this binary; retrying is pointless, so
     /// the file stays marked in `traced_files` without an attachment.
     Untraceable,
@@ -1054,14 +1066,8 @@ impl SslSniff {
 
     /// Record a successful attach for `file`, replacing any prior entry
     /// (whose links are dropped, detaching the old probes).
-    fn record_attach(&mut self, file: FileKey, links: Vec<Link>) {
-        self.attachments.insert(
-            file,
-            InodeAttach {
-                _links: links,
-                attached_at: Instant::now(),
-            },
-        );
+    fn record_attach(&mut self, file: FileKey, attachment: impl Into<InodeAttach>) {
+        self.attachments.insert(file, attachment.into());
     }
 
     /// Persist the write offset for inodes proven to capture request-direction
@@ -1390,6 +1396,45 @@ impl SslSniff {
         }
     }
 
+    fn build_shared_attach(
+        &mut self,
+        pid: i32,
+        file: FileKey,
+        path: &str,
+        kind: SslLibKind,
+    ) -> AttachOutcome {
+        let target = match open_uprobe_target(path, file) {
+            Ok(target) => target,
+            Err(error) => {
+                log::warn!(
+                    "[attach_process] pid={pid}: cannot pin {kind:?} target {path} ({file:?}): {error}"
+                );
+                return AttachOutcome::Failed;
+            }
+        };
+        // 仍从目标进程的挂载命名空间打开，不能换成宿主机的同名库。
+        let attach_path = pinned_path(&target);
+        let mut outcome = match kind {
+            SslLibKind::OpenSsl => {
+                finish_ssl_attach(pid, path, attach_openssl(&mut self.skel, &attach_path, -1))
+            }
+            SslLibKind::Python => attach_python_ssl(pid, &attach_path, || {
+                attach_openssl(&mut self.skel, &attach_path, -1)
+            }),
+            SslLibKind::GnuTls => {
+                finish_ssl_attach(pid, path, attach_gnutls(&mut self.skel, &attach_path, -1))
+            }
+            SslLibKind::Nss => {
+                finish_ssl_attach(pid, path, attach_nss(&mut self.skel, &attach_path, -1))
+            }
+            _ => return AttachOutcome::Untraceable,
+        };
+        if let AttachOutcome::Attached(attachment) = &mut outcome {
+            attachment._target = Some(target);
+        }
+        outcome
+    }
+
     /// Attach uprobes for a single SSL library.
     ///
     /// `mapped_path` is the pathname the process actually mapped, which is what
@@ -1410,12 +1455,9 @@ impl SslSniff {
 
         // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
         let result = match kind {
-            SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
-            SslLibKind::Python => {
-                return attach_python_ssl(pid, path, || attach_openssl(&mut self.skel, path, -1));
+            SslLibKind::OpenSsl | SslLibKind::Python | SslLibKind::GnuTls | SslLibKind::Nss => {
+                return self.build_shared_attach(pid, file, path, kind);
             }
-            SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
-            SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
             SslLibKind::ExplicitTap => {
                 // A successful attach proves the symbol is exported; avoid
                 // scanning the whole binary again for each new process.
@@ -1481,7 +1523,7 @@ impl SslSniff {
                                     true,
                                     -1,
                                 ) {
-                                    Ok(links) => AttachOutcome::Attached(links),
+                                    Ok(links) => AttachOutcome::Attached(links.into()),
                                     Err(e) => {
                                         log::warn!(
                                             "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
@@ -1514,7 +1556,7 @@ impl SslSniff {
                                     false,
                                     -1,
                                 ) {
-                                    Ok(links) => AttachOutcome::Attached(links),
+                                    Ok(links) => AttachOutcome::Attached(links.into()),
                                     Err(e) => {
                                         log::warn!(
                                             "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
@@ -2582,7 +2624,7 @@ fn attach_python_ssl(
 
 fn finish_ssl_attach(pid: i32, path: &str, result: Result<Vec<Link>>) -> AttachOutcome {
     match result {
-        Ok(links) => AttachOutcome::Attached(links),
+        Ok(links) => AttachOutcome::Attached(links.into()),
         Err(error) => {
             log::warn!("[attach_process] pid={pid}: attach failed for {path}: {error:#}");
             AttachOutcome::Failed
@@ -2748,32 +2790,52 @@ fn make_sym_opts(sym: &str, retprobe: bool) -> UprobeOpts {
     o
 }
 
+fn probe_attach_error(error: libbpf_rs::Error, detail: impl FnOnce() -> String) -> anyhow::Error {
+    // libbpf-rs 0.23 的 NULL 分支丢失 errno，必须在日志格式化之前采样。
+    let os_error = std::io::Error::last_os_error();
+    let missing_errno = error.to_string().contains("returned NULL");
+    let message = if missing_errno && os_error.raw_os_error().is_some_and(|code| code != 0) {
+        format!(
+            "{}; libbpf errno={}: {os_error}",
+            detail(),
+            os_error.raw_os_error().unwrap_or(0)
+        )
+    } else {
+        detail()
+    };
+    anyhow::Error::new(error).context(message)
+}
+
 macro_rules! up {
     ($prog:expr, $pid:expr, $path:expr, $sym:expr) => {
         $prog
             .attach_uprobe_with_opts($pid, $path, 0, make_sym_opts($sym, false))
-            .with_context(|| format!("uprobe {}@{}", $sym, $path))
+            .map_err(|error| probe_attach_error(error, || format!("uprobe {}@{}", $sym, $path)))
     };
 }
 macro_rules! ur {
     ($prog:expr, $pid:expr, $path:expr, $sym:expr) => {
         $prog
             .attach_uprobe_with_opts($pid, $path, 0, make_sym_opts($sym, true))
-            .with_context(|| format!("uretprobe {}@{}", $sym, $path))
+            .map_err(|error| probe_attach_error(error, || format!("uretprobe {}@{}", $sym, $path)))
     };
 }
 macro_rules! up_off {
     ($prog:expr, $pid:expr, $path:expr, $off:expr) => {
         $prog
             .attach_uprobe(false, $pid, $path, $off)
-            .with_context(|| format!("uprobe offset {:#x}@{}", $off, $path))
+            .map_err(|error| {
+                probe_attach_error(error, || format!("uprobe offset {:#x}@{}", $off, $path))
+            })
     };
 }
 macro_rules! ur_off {
     ($prog:expr, $pid:expr, $path:expr, $off:expr) => {
         $prog
             .attach_uprobe(true, $pid, $path, $off)
-            .with_context(|| format!("uretprobe offset {:#x}@{}", $off, $path))
+            .map_err(|error| {
+                probe_attach_error(error, || format!("uretprobe offset {:#x}@{}", $off, $path))
+            })
     };
 }
 
@@ -3550,12 +3612,12 @@ mod tests {
     }
 
     /// Serializes tests that republish the process-wide learned-cache path.
-    static LEARNED_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static LEARNED_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Build an `SslSniff` whose learned-offset cache points at a per-test
     /// temp directory. The caller must hold [`LEARNED_PATH_LOCK`]: the path
     /// is process-global and read at construction time.
-    fn sniffer_with_isolated_learned_cache(
+    pub(super) fn sniffer_with_isolated_learned_cache(
         _guard: &std::sync::MutexGuard<'_, ()>,
         dir: &tempfile::TempDir,
     ) -> SslSniff {
@@ -4289,6 +4351,7 @@ mod tests {
                     key,
                     InodeAttach {
                         _links: Vec::new(),
+                        _target: None,
                         attached_at: Instant::now(),
                     },
                 )]);
@@ -4559,6 +4622,7 @@ mod tests {
         let attached_at = Instant::now();
         let attachment = InodeAttach {
             _links: Vec::new(),
+            _target: None,
             attached_at,
         };
         let recent = attached_at + Duration::from_secs(1);
