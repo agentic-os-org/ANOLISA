@@ -14,6 +14,7 @@ use super::super::{
     update_input_mode, PromptGhostCandidate, RawInputCapture, RawObserverAction, RawRelayAction,
     UserPtyInputGeneration,
 };
+use super::bash_submission_guard::bash_submission_needs_guard_with_overage;
 use super::*;
 use crate::input::AssistanceControl;
 
@@ -4351,7 +4352,7 @@ fn slash_guard_does_not_trust_blank_bytes_with_dirty_mirror() {
 
 #[test]
 fn bash_slash_guard_skips_clean_ordinary_and_empty_submissions() {
-    let classifier = InputClassifier::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
     let line_submits = LineSubmitCounter::default();
     let mut state = NativeLineState::default();
 
@@ -4376,8 +4377,242 @@ fn bash_slash_guard_skips_clean_ordinary_and_empty_submissions() {
 }
 
 #[test]
-fn bash_slash_guard_keeps_exact_and_readline_owned_submissions() {
+fn bash_memory_overage_requires_clean_submission_guard() {
     let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let mut state = NativeLineState::default();
+    state.observe_shell_bytes(b"echo ordinary");
+    assert!(!bash_submission_needs_guard_with_overage(
+        true,
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+        false,
+    ));
+    assert!(bash_submission_needs_guard_with_overage(
+        true,
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+        true,
+    ));
+    assert!(bash_submission_needs_guard_with_overage(
+        false,
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+        true,
+    ));
+    assert!(!bash_submission_needs_guard_with_overage(
+        false,
+        false,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+        true,
+    ));
+    assert!(!bash_submission_needs_guard_with_overage(
+        true,
+        true,
+        false,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+        true,
+    ));
+}
+
+#[test]
+fn bash_pressure_guard_is_independent_of_history_privacy() {
+    let relay = include_str!("relay.rs");
+    let calls: Vec<&str> = relay
+        .split("bash_submission_needs_guard(")
+        .skip(1)
+        .collect();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        let capability_args = call
+            .split("relay.main_prompt_gate.is_at_prompt()")
+            .next()
+            .expect("prompt gate argument");
+        assert!(
+            capability_args.contains("bash_pressure_guard_enabled()"),
+            "pressure guard must use its own capability: {capability_args}"
+        );
+        assert!(
+            !capability_args.contains("bash_readline_history_privacy_enabled()"),
+            "history privacy must not enable the pressure guard: {capability_args}"
+        );
+    }
+}
+
+#[test]
+fn bash_pressure_probe_runs_only_after_submission_admission() {
+    let script = include_str!("relay/bash_submission_guard.rs");
+    let function = script
+        .split("pub(super) fn bash_submission_needs_guard(")
+        .nth(1)
+        .expect("guard function")
+        .split("pub(super) fn bash_submission_needs_guard_with_overage(")
+        .next()
+        .expect("guard body");
+    let admission = function
+        .find("first_submission(bytes)")
+        .expect("submission admission");
+    let probe = function
+        .find("bash_memory_overage()")
+        .expect("pressure probe");
+    assert!(
+        admission < probe,
+        "pressure probe must not run for ordinary keystrokes"
+    );
+}
+
+#[test]
+fn bash_pressure_recovery_guard_requires_prompt_submission() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-pressure-recovery-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let recovery = root.join("ps0-pressure");
+    fs::write(&recovery, b"1").unwrap();
+    let classifier = InputClassifier::default()
+        .with_bash_pressure_guard(true)
+        .with_bash_pressure_recovery_file(recovery.clone());
+    let state = NativeLineState::default();
+    let submits = LineSubmitCounter::default();
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &submits,
+        b"printf ordinary\r",
+    ));
+    for bytes in [
+        b"".as_slice(),
+        b"printf ordinary",
+        b"\x1b[A",
+        b"\x1b[200~paste\n",
+    ] {
+        assert!(!bash_submission_needs_guard(
+            true,
+            true,
+            &classifier,
+            &state,
+            &submits,
+            bytes,
+        ));
+    }
+    assert!(!bash_submission_needs_guard(
+        true,
+        false,
+        &classifier,
+        &state,
+        &submits,
+        b"foreground\r",
+    ));
+    assert!(!bash_submission_needs_guard(
+        false,
+        true,
+        &classifier,
+        &state,
+        &submits,
+        b"ordinary\r",
+    ));
+    let paste = b"\x1b[200~paste\ntext\x1b[201~";
+    for split in 0..=paste.len() {
+        let mut partial = LineSubmitCounter::default();
+        partial.count(&paste[..split]);
+        assert!(
+            !bash_submission_needs_guard(
+                true,
+                true,
+                &classifier,
+                &state,
+                &partial,
+                &paste[split..],
+            ),
+            "split {split}"
+        );
+        partial.count(&paste[split..]);
+        assert!(
+            bash_submission_needs_guard(true, true, &classifier, &state, &partial, b"\r",),
+            "submit after split {split}"
+        );
+    }
+    for value in [b"".as_slice(), b"1"] {
+        fs::write(&recovery, value).unwrap();
+        assert_eq!(
+            classifier.bash_pressure_recovery_pending(),
+            !value.is_empty()
+        );
+    }
+    fs::remove_file(&recovery).unwrap();
+    assert!(!classifier.bash_pressure_recovery_pending());
+    fs::create_dir(&recovery).unwrap();
+    assert!(!classifier.bash_pressure_recovery_pending());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bash_pressure_only_guard_drops_prompt_after_untracked_binding() {
+    let (path, mut master) = output_file("pressure-only-ctrl-x");
+    let (tx, rx) = mpsc::channel();
+    let mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut buffer = CandidateLineBuffer::default();
+    let mut native = NativeLineState::default();
+    let mut exit = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default().with_bash_pressure_guard(true);
+    let generation = UserPtyInputGeneration::default();
+    let mut submits = LineSubmitCounter::default();
+    let gate = super::super::MainPromptGate::default();
+    gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &mode,
+        &mut buffer,
+        &mut native,
+        &mut exit,
+        &classifier,
+        &generation,
+        &mut submits,
+        &gate,
+    );
+    relay_passthrough_input(b"\x18", &mut relay).unwrap();
+    assert!(
+        !gate.is_at_prompt(),
+        "custom accept-line can transfer PTY ownership"
+    );
+    relay_passthrough_input(b"foreground\r", &mut relay).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"\x18foreground\r");
+    assert!(rx
+        .try_iter()
+        .all(|event| !matches!(event, RawInputEvent::UserIntercept(..))));
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn bash_slash_guard_keeps_exact_and_readline_owned_submissions() {
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
     let line_submits = LineSubmitCounter::default();
     let mut state = NativeLineState::default();
 

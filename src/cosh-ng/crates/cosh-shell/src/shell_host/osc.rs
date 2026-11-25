@@ -373,7 +373,9 @@ impl OscParser {
                 // boundary, so earlier output can never resurface as the
                 // prompt tail.
                 self.visible_tail.reset();
-                let command = marker.command.unwrap_or_default();
+                let Some(command) = marker.command.filter(|command| !command.is_empty()) else {
+                    return Ok(());
+                };
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
