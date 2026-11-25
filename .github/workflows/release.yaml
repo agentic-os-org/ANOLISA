@@ -140,9 +140,6 @@ jobs:
     uses: ./.github/workflows/aw-release.yml
     permissions:
       contents: read
-      actions: read
-    secrets:
-      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
 
   build_prebuilt:
     name: Build precompiled packages

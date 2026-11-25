@@ -71,7 +71,7 @@ def assert_core_wheel_boundary(wheel: Path) -> None:
         assert required in names, f"core wheel missing {required}"
 
 
-def main(binary: str) -> None:
+def main(binary: str, packages: tuple[Path, Path, Path] | None = None) -> None:
     sdk = Path(__file__).resolve().parents[1]
     core_package = sdk / "python"
     adapters = sdk / "python-adapters"
@@ -88,23 +88,26 @@ def main(binary: str) -> None:
     )
     with tempfile.TemporaryDirectory(prefix="aw-python-package-") as temporary:
         root = Path(temporary)
-        # Seed a stale _native file in the core build dir to prove incremental rebuilds purge it.
-        stale_native = sdk.parent / "target/python-sdk/build/lib/aw_sdk/_native/qwenpaw/stale.py"
-        stale_native.parent.mkdir(parents=True, exist_ok=True)
-        stale_native.write_text("# stale legacy bridge\n")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            core_future = pool.submit(
-                build_wheel, python, core_package, root / "wheels-core", environment
-            )
-            claude_future = pool.submit(
-                build_wheel, python, adapters / "claude", root / "wheels-claude", environment
-            )
-            qwenpaw_future = pool.submit(
-                build_wheel, python, adapters / "qwenpaw", root / "wheels-qwenpaw", environment
-            )
-            core_wheel = core_future.result()
-            claude_wheel = claude_future.result()
-            qwenpaw_wheel = qwenpaw_future.result()
+        if packages is None:
+            # Seed a stale _native file in the core build dir to prove incremental rebuilds purge it.
+            stale_native = sdk.parent / "target/python-sdk/build/lib/aw_sdk/_native/qwenpaw/stale.py"
+            stale_native.parent.mkdir(parents=True, exist_ok=True)
+            stale_native.write_text("# stale legacy bridge\n")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                core_future = pool.submit(
+                    build_wheel, python, core_package, root / "wheels-core", environment
+                )
+                claude_future = pool.submit(
+                    build_wheel, python, adapters / "claude", root / "wheels-claude", environment
+                )
+                qwenpaw_future = pool.submit(
+                    build_wheel, python, adapters / "qwenpaw", root / "wheels-qwenpaw", environment
+                )
+                core_wheel = core_future.result()
+                claude_wheel = claude_future.result()
+                qwenpaw_wheel = qwenpaw_future.result()
+        else:
+            core_wheel, claude_wheel, qwenpaw_wheel = packages
         assert_core_wheel_boundary(core_wheel)
         core_installed = root / "installed-core"
         run(

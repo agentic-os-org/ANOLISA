@@ -101,15 +101,15 @@ python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-di
 
 ## GitHub Release
 
-Run **Release / AW** manually on the official repository's `main` branch for
-the release commit. The workflow checks contracts, runs the full native and
-resident matrix, verifies three Linux x86_64 archives and compares six SDK
-packages with a clean rebuild. Wait for the run to succeed before pushing
-`aw/vX.Y.Z` at that commit. Candidate artifacts are retained for 28 days.
+Push `aw/vX.Y.Z` at the release commit on `main`. The tag workflow checks
+main ancestry and package versions, builds and tests installation of the three
+Linux x86_64 archives, then assembles the six matching SDK packages and verifies
+their receipts and checksums. It installs the release wheels and npm tarballs and
+runs the SDK protocol tests against the binary from the verified core archive.
+After approval in the `release` environment,
+GitHub publishes the verified assets with `SHA256SUMS` and `sdk-candidate.json`.
 
-The tag workflow checks main ancestry and package versions. It looks up the
-latest manual candidate run for the same commit. When that run succeeded and
-its artifact is available, the workflow verifies the artifact digest, package
-receipts and checksums before publication. Without an accepted candidate, the
-tag runs the full validation, starting integration after contracts pass.
-The release includes `SHA256SUMS` and `sdk-candidate.json`.
+To preview the same packages before tagging, dispatch **Release / AW** on
+`main` at the intended commit. Preview artifacts are retained for 28 days.
+See [integration testing](testing.md#integration-and-resident-containers) for
+the nightly and manual native and resident matrix.

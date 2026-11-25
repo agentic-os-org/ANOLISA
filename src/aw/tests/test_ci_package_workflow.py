@@ -42,6 +42,12 @@ class PackageSelectionTests(GateFixture):
         make.chmod(0o700)
         capture = self.root / "commands"
         output = self.root / "package output"
+        evidence = output / "test-evidence"
+        evidence.mkdir(parents=True)
+        provenance = self.root / "src/aw/target/rtk-provenance.json"
+        provenance.parent.mkdir(parents=True)
+        provenance.write_text("{}")
+        (binary / "cp").symlink_to(shutil.which("cp"))
         release = (AW.parents[1] / ".github/workflows/aw-release.yml").read_text()
         self.assertIn("release_version: ${{ needs.candidate.outputs.version }}", release)
         self.assertIn("RELEASE_VERSION: ${{ inputs.release_version }}", step)
@@ -73,6 +79,7 @@ class PackageSelectionTests(GateFixture):
                      "BACKENDS=sec-core tokenless"],
                 ])
                 self.assertFalse(any("packages_pty" in command for command in commands))
+                self.assertEqual((evidence / provenance.name).read_text(), "{}")
 
     def test_python_free_installer_precedes_python_enabled_make_builds(self) -> None:
         workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()

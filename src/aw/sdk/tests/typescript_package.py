@@ -60,7 +60,7 @@ def assert_core_tarball_boundary(artifact: Path) -> None:
         assert required in names, f"core npm package missing {required}"
 
 
-def main(binary: str) -> None:
+def main(binary: str, packages: tuple[Path, Path, Path] | None = None) -> None:
     sdk = Path(__file__).resolve().parents[1]
     core_package = sdk / "typescript"
     adapters = sdk / "typescript-adapters"
@@ -85,13 +85,16 @@ def main(binary: str) -> None:
         root = Path(temporary)
         # npm's cache stays private and needs no registry access for these tarballs.
         environment["npm_config_cache"] = str(root / "cache")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            core_f = pool.submit(pack, core_package, root / "pack-core", environment)
-            qoder_f = pool.submit(pack, adapters / "qoder", root / "pack-qoder", environment)
-            pi_f = pool.submit(pack, adapters / "pi", root / "pack-pi", environment)
-            core_artifact = core_f.result()
-            qoder_artifact = qoder_f.result()
-            pi_artifact = pi_f.result()
+        if packages is None:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                core_f = pool.submit(pack, core_package, root / "pack-core", environment)
+                qoder_f = pool.submit(pack, adapters / "qoder", root / "pack-qoder", environment)
+                pi_f = pool.submit(pack, adapters / "pi", root / "pack-pi", environment)
+                core_artifact = core_f.result()
+                qoder_artifact = qoder_f.result()
+                pi_artifact = pi_f.result()
+        else:
+            core_artifact, qoder_artifact, pi_artifact = packages
         assert_core_tarball_boundary(core_artifact)
         core_root = root / "core-app"
         core_root.mkdir(mode=0o700)

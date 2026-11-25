@@ -66,8 +66,6 @@ def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) ->
         [
             "",
             f"Job outcomes: `{json.dumps(outcomes, sort_keys=True)}`.",
-            "",
-            "Release acceptance combines these native results with contract checks on the same commit.",
         ]
     )
     return "\n".join(rows) + "\n", passed
