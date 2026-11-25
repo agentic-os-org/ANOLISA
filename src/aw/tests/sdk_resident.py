@@ -271,9 +271,12 @@ def main():
                 if not callbacks:
                     continue
                 assert all(record["association"]["status"] == "unverified" for record in callbacks)
-                assert records[-1]["phase"] == "closed"
-                assert records[-1]["coverage"] == "unknown"
-                assert "native_identity_unverified" in records[-1]["gaps"]
+                terminal = records[-1]
+                assert terminal["phase"] == "closed", terminal
+                assert terminal["coverage"] == "unknown", terminal
+                # The unreachable source short-circuits queries after recording callbacks.
+                assert terminal["source_state"] == "unavailable", terminal
+                assert "source_process_identity_unavailable" in terminal["gaps"], terminal
                 observed.append(len(callbacks))
             assert len(observed) >= 2, observed
             result = json.loads((output / "result.json").read_text())
