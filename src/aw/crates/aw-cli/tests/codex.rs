@@ -397,6 +397,25 @@ fn untrusted_disabled_and_unsupported_launches_never_start_tools() {
     }
 }
 
+fn assert_reaped(marker: &Path) {
+    let identity = fs::read_to_string(marker).unwrap();
+    let (pid, started) = identity.split_once(' ').unwrap();
+    let pid: u32 = pid.parse().unwrap();
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("cannot inspect Codex fixture {pid}: {error}"),
+    };
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    let mut fields = fields.split_whitespace();
+    let state = fields.next().unwrap();
+    let starttime = fields.nth(18).unwrap();
+    assert_ne!(
+        starttime, started,
+        "Codex fixture {pid} remains in state {state}"
+    );
+}
+
 #[test]
 fn interrupted_native_launch_releases_binding_and_owned_process() {
     for signal in [libc::SIGINT, libc::SIGTERM] {
@@ -413,12 +432,11 @@ fn interrupted_native_launch_releases_binding_and_owned_process() {
             assert!(Instant::now() < deadline, "Codex fixture never started");
             thread::sleep(Duration::from_millis(5));
         }
-        let pid = fs::read_to_string(marker).unwrap();
         assert_eq!(service.status()["bindings"], 1);
         process.signal(signal);
         assert_eq!(process.finish().status.signal(), Some(signal));
         service.released(&f);
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert_reaped(&marker);
         assert!(!f.root.join("policy-calls").exists());
         assert!(!f.root.join("codex-tool-executed").exists());
     }
@@ -443,12 +461,11 @@ fn interrupted_inventory_probe_reaps_child_without_binding() {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        let pid = fs::read_to_string(marker).unwrap();
         assert_eq!(service.status()["bindings"], 0);
         process.signal(signal);
         assert_eq!(process.finish().status.signal(), Some(signal));
         service.released(&f);
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert_reaped(&marker);
         assert!(!f.root.join("codex-started").exists());
         assert!(!f.root.join("policy-calls").exists());
     }

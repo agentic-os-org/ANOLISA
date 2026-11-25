@@ -9,36 +9,52 @@ import sys
 import time
 
 
+class ProbeCancelled(Exception):
+    pass
+
+
 def probe():
+    cancelled = False
+    ready = False
     expected = json.loads(sys.argv[2])
-    child = subprocess.Popen(
-        [sys.argv[1], "app-server"], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
-    )
-    selector = selectors.DefaultSelector()
-    selector.register(child.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(child.stderr, selectors.EVENT_READ, "stderr")
-    deadline = time.monotonic() + 8
-    buffered = b""
-    counts = {"stdout": 0, "stderr": 0}
-    replies = {}
 
     def send(frame):
         child.stdin.write(json.dumps(frame).encode() + b"\n")
         child.stdin.flush()
 
     def interrupted(_signal, _frame):
-        raise InterruptedError("Codex inventory probe cancelled")
+        nonlocal cancelled
+        cancelled = True
+        if ready:
+            raise ProbeCancelled("Codex inventory probe cancelled")
 
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
+    selector = selectors.DefaultSelector()
+    child = subprocess.Popen(
+        [sys.argv[1], "app-server"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+    )
     try:
+        ready = True
+        if cancelled:
+            raise ProbeCancelled("Codex inventory probe cancelled")
+        selector.register(child.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(child.stderr, selectors.EVENT_READ, "stderr")
+        deadline = time.monotonic() + 8
+        buffered = b""
+        counts = {"stdout": 0, "stderr": 0}
+        replies = {}
         send({"id": 0, "method": "initialize", "params": {
             "clientInfo": {"name": "aw_hook_inventory", "version": "0.1.0"},
             "capabilities": {"experimentalApi": True},
         }})
         while time.monotonic() < deadline:
+            if cancelled:
+                raise ProbeCancelled("Codex inventory probe cancelled")
             for key, _ in selector.select(0.05):
+                if cancelled:
+                    raise ProbeCancelled("Codex inventory probe cancelled")
                 chunk = os.read(key.fileobj.fileno(), 65536)
                 if not chunk:
                     selector.unregister(key.fileobj)
@@ -100,6 +116,7 @@ def probe():
                             "enabled": features.get("hooks", features.get("codex_hooks", True))}
         raise TimeoutError("Codex inventory deadline exceeded")
     finally:
+        ready = False
         selector.close()
         child.stdin.close()
         try:

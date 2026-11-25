@@ -10,6 +10,16 @@ import time
 
 root = Path(os.environ["FAKE_ROOT"])
 home = Path(os.environ["CODEX_HOME"])
+
+
+def write_pid(name):
+    pid = os.getpid()
+    started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    temporary = root / f"{name}.tmp"
+    temporary.write_text(f"{pid} {started}")
+    temporary.replace(root / name)
+
+
 if sys.argv[1:] == ["--version"]:
     print("codex-cli " + os.environ.get("FAKE_CODEX_VERSION", "0.163.0"))
     sys.exit(0)
@@ -18,7 +28,7 @@ if sys.argv[1:] == ["app-server"] and "AW_CODEX_CONFIG" not in os.environ:
     (root / "codex-probe-remote-control").write_text(
         os.environ.get("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", ""))
     if os.environ.get("FAKE_CODEX_PROBE_HOLD") == "1":
-        (root / "codex-probe.pid").write_text(str(os.getpid()))
+        write_pid("codex-probe.pid")
         time.sleep(30)
         sys.exit(1)
     for line in sys.stdin:
@@ -72,7 +82,7 @@ if mode == "capacity":
         time.sleep(0.01)
     mode = "allow"
 if mode == "hold":
-    (root / "codex.pid").write_text(str(os.getpid()))
+    write_pid("codex.pid")
     time.sleep(30)
     sys.exit(1)
 native = {"cwd": os.getcwd(), "session_id": "codex-session", "turn_id": "turn",
