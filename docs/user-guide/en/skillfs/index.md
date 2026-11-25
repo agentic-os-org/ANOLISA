@@ -386,8 +386,8 @@ them:
 
 | `status` | Meaning |
 | --- | --- |
-| `load_error` | The file could not be loaded, for example malformed YAML or content that is not valid UTF-8. The entry carries no `name` because the skill was never registered. |
-| `error` | The skill loaded but its `SKILL.md` failed to parse. The entry carries the skill `name`. |
+| `load_error` | The file could not be loaded, for example an unreadable file, content that is not valid UTF-8, or a file over the size limit. The entry carries no `name` because the skill was never registered. |
+| `error` | The skill loaded but its `SKILL.md` failed to parse, for example malformed YAML frontmatter. The entry carries the skill `name` (falling back to the directory name when the frontmatter has none). |
 
 Degraded skills appear under `warnings` with `status: "degraded"` and are not
 counted in `failed`.
