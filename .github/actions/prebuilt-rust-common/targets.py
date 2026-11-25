@@ -7,7 +7,7 @@ from pathlib import Path
 
 TARGETS = {
     "agent-sec-core": (
-        {"target-os": "linux", "target-arch": "x86_64", "profile": "gnu2.28-x86_64"},
+        {"target-os": "linux", "target-arch": "x86_64", "profile": "gnu2.28-x86_64-sec-core"},
     ),
     "os-skills": (
         {"target-os": "linux", "target-arch": "x86_64", "profile": "static-linux"},
