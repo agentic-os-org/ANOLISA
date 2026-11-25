@@ -37,6 +37,7 @@ use cosh_platform::checkpoint::{CkptClient, CkptRequestEffect};
 use cosh_types::checkpoint::{
     ChangeType, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, WorkspaceGenerationTokenV2,
 };
+use cosh_types::error::{CoshError, ErrorCode};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
@@ -312,6 +313,66 @@ fn checkpoint_error(code: &str, retryable: bool) -> ContractError {
         "The governed checkpoint operation could not be completed safely",
     )
     .unwrap_or_else(|_| unreachable!("static checkpoint errors are bounded"))
+}
+
+fn task_snapshot_failure(fallback_code: &str, failure: &CoshError) -> ContractError {
+    let (code, category, message) = match failure.code {
+        ErrorCode::CheckpointDaemonUnavailable => (
+            "checkpoint_daemon_unavailable".to_owned(),
+            ErrorCategory::RuntimeUnavailable,
+            "ws-ckpt is unavailable; check that the daemon is running",
+        ),
+        ErrorCode::Timeout => (
+            "checkpoint_daemon_timeout".to_owned(),
+            ErrorCategory::Transport,
+            "ws-ckpt did not respond in time; try again later",
+        ),
+        ErrorCode::CheckpointProtocolError => (
+            "checkpoint_daemon_protocol_mismatch".to_owned(),
+            ErrorCategory::Transport,
+            "Invalid response from ws-ckpt; check the service and upgrade if it predates ws-ckpt 0.5.0",
+        ),
+        ErrorCode::PermissionDenied => (
+            "checkpoint_caller_denied".to_owned(),
+            ErrorCategory::PolicyDenied,
+            "ws-ckpt rejected the authenticated snapshot caller",
+        ),
+        ErrorCode::InvalidInput => (
+            "checkpoint_invalid_input".to_owned(),
+            ErrorCategory::InvalidRequest,
+            "ws-ckpt rejected the snapshot request parameters",
+        ),
+        ErrorCode::CheckpointNotFound => (
+            "checkpoint_target_not_found".to_owned(),
+            ErrorCategory::NotFound,
+            "ws-ckpt could not find the requested workspace or snapshot",
+        ),
+        ErrorCode::CheckpointRestoreFailed => match rollback_rejection_code(failure) {
+            // The platform sets this detail and the message from typed rejection enums.
+            Some(code) => (code, ErrorCategory::Conflict, failure.message.as_str()),
+            None => (
+                "checkpoint_switch_rejected".to_owned(),
+                ErrorCategory::Conflict,
+                "ws-ckpt rejected guarded rollback",
+            ),
+        },
+        _ => return checkpoint_error(fallback_code, false),
+    };
+    let retryable = failure.recoverable && failure.code != ErrorCode::CheckpointProtocolError;
+    ContractError::new(code, category, retryable, message)
+        .unwrap_or_else(|_| checkpoint_error(fallback_code, false))
+}
+
+fn rollback_rejection_code(failure: &CoshError) -> Option<String> {
+    let name = failure
+        .details
+        .as_ref()
+        .and_then(|details| details.get("guarded_rollback_rejection"))
+        .and_then(serde_json::Value::as_str)?;
+    let code = format!("checkpoint_switch_rejected_{name}");
+    cosh_gateway_contracts::error::ErrorCode::parse(&code)
+        .ok()
+        .map(|_| code)
 }
 
 fn pre_runtime_checkpoint_error(
