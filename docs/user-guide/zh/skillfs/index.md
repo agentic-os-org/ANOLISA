@@ -330,6 +330,29 @@ skillfs validate /path/to/skills --format json
 进入状态汇总并返回非 0 exit code；仅 degraded 的 skill 会被报告，但 exit code 仍为
 0。
 
+source 目录存在但其中没有任何 skill 时不算错误：命令以 0 退出，并报告
+`total: 0`。路径不存在，或指向普通文件时，命令会以 1 退出，且不写任何 JSON 报告。
+因此，只检查 exit status 的 CI job 无法区分空 source 和健康 source。应改为断言报告
+内容：
+
+```bash
+skillfs validate /path/to/skills --format json \
+  | jq -e '.total > 0 and .failed == 0 and .degraded == 0'
+```
+
+该过滤条件会放行健康的非空 source，并拒绝空 source、含 degraded skill 的
+warning-only source，以及含 failed skill 的 source。
+
+load failure 和 parse failure 都计入 `failed`，也都列在 JSON 输出的 `errors`
+下，并通过 `status` 字段区分：
+
+| `status` | 含义 |
+| --- | --- |
+| `load_error` | 文件无法加载，例如 YAML 格式损坏或内容不是合法 UTF-8。该条目不带 `name`，因为 skill 从未注册。 |
+| `error` | skill 已加载，但其 `SKILL.md` 解析失败。该条目带有 skill `name`。 |
+
+degraded skill 出现在 `warnings` 下，`status` 为 `"degraded"`，不计入 `failed`。
+
 `SKILL.md` 中的 `## Parameters` 和 `## Returns` 标题允许带可选的闭合 `#`
 序列，例如 `## Parameters ##` 或 `## Returns #`。闭合序列与标题文字之间须有
 空格或 Tab，序列之后也只允许空格或 Tab。这些标题下的契约条目会正常解析，

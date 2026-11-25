@@ -365,6 +365,33 @@ skillfs validate /path/to/skills --format json
 failures are included in the status summary and produce a non-zero exit code;
 degraded-only skills are reported but keep exit code 0.
 
+An existing source directory that contains no skills is not an error: the
+command exits 0 and reports `total: 0`. A missing path, or a path to a regular
+file, exits 1 before any JSON report is written. A CI job that checks only the
+exit status therefore cannot tell an empty source from a healthy one. Assert on
+the report instead:
+
+```bash
+skillfs validate /path/to/skills --format json \
+  | jq -e '.total > 0 and .failed == 0 and .degraded == 0'
+```
+
+The filter accepts a healthy non-empty source. It rejects an empty source, a
+warning-only source whose skills are degraded, and a source with a failed
+skill.
+
+Load failures and parse failures are both counted in `failed` and both are
+listed under `errors` in JSON output, with a `status` field that distinguishes
+them:
+
+| `status` | Meaning |
+| --- | --- |
+| `load_error` | The file could not be loaded, for example malformed YAML or content that is not valid UTF-8. The entry carries no `name` because the skill was never registered. |
+| `error` | The skill loaded but its `SKILL.md` failed to parse. The entry carries the skill `name`. |
+
+Degraded skills appear under `warnings` with `status: "degraded"` and are not
+counted in `failed`.
+
 In `SKILL.md`, `## Parameters` and `## Returns` headings accept an optional
 closing sequence of `#` characters, such as `## Parameters ##` or
 `## Returns #`. Separate that sequence from the title with a space or Tab;
