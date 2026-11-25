@@ -387,6 +387,7 @@ pub(crate) fn page<T: Serialize>(
 }
 
 pub(crate) fn validate_records(tx: &Transaction<'_>) -> Result<(), RepositoryError> {
+    crate::pap::read_policy_generation(tx)?;
     let mut legacy = BTreeSet::new();
     for (table, key) in [
         ("policies", "policy_id"),

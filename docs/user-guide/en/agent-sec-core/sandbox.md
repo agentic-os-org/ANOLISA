@@ -410,8 +410,9 @@ Requests carry the optional Agent classification in `context.agent.agentType`.
 No Agent identity or UID registration is required. The type is caller-supplied,
 not authenticated; this stage does not isolate individual Agents by identity.
 
-For `seccore.system` revision 3, PAP supplies the full Cedar source to the PDP.
-The PDP evaluates each request with the optional `principal.agentType`. Sandbox
+For `seccore.system` revision 3, PAP stores the original Cedar source. The PDP
+loads the statements or fragments selected for Sandbox and evaluates them for
+each request using the optional `principal.agentType`. Sandbox
 requests omit `ownerUid`, so `principal has ownerUid` evaluates to false.
 For example, this rule permits Cosh to launch a process:
 
@@ -429,13 +430,14 @@ Mixing bare and constrained headers is rejected. Native JSON and all-bare legacy
 Cedar sources remain on the deployment path. Clients and Cedar policies using
 the old field spelling `agent_type` must switch to `agentType`.
 
-Each evaluate pulls one consistent current-policy snapshot. Its digest covers
-membership, revisions, schemas and source text. Unchanged sets reuse the compiled
-cache; changed sets replace it only after complete validation. Read, validation or
-runtime compatibility errors block authorization without stale fallback. Creation,
-deletion and eligibility changes take effect on the next request; an empty set
-replaces the cache and denies. Matching forbids override permits across the whole
-set. Scope/Binding deployment, pinned revisions and cleanup remain independent.
+Each request checks the PAP policy-set generation. Requests for the same generation
+reuse the compiled rules. On a cache miss, the daemon selects and loads rules from
+a consistent snapshot. The receipt's `policy_version` identifies the request-eligible
+source policies by membership, revision, schema and source text. If the current
+set cannot be read, validated or loaded, new authorizations fail even if an older
+set was cached. Creation, deletion and eligibility changes take effect on the next
+request. An empty set denies authorization. Matching forbids override permits
+across the whole set. Scope/Binding deployment, pinned revisions and cleanup remain independent.
 
 The old `baseline_policy` and `task_policy` configuration is no longer used. Its
 previous intersection semantics must be reviewed explicitly when adapting request

@@ -347,6 +347,7 @@ when { resource.host == "api.github.com" && context.input.scheme == "https" };"#
         let mut scope = scope();
         scope.owner_uid = Some(1000);
         scope.policy_snapshots[0].deployment = Some(DeploymentSelection {
+            fragments: std::collections::BTreeMap::new(),
             backend: DeploymentBackend::ActPlane,
             statement_ids: BTreeSet::from(["policy0".into()]),
         });

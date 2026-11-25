@@ -1,18 +1,102 @@
-//! Automatic placement of file statements on discovered process trees.
+//! Select the operations `ActPlane` can lower, then place them on discovered processes.
 
-use asc_policy_cedar::deployment::{DeploymentSelector, Placement, StatementTarget};
+use asc_agentsight_protocol::FileProtectionTargetKind;
+use asc_policy_cedar::{
+    deployment::{DeploymentSelector, Placement, StatementTarget},
+    selection::{
+        Direction, EnforcementDeviation, SelectedStatement, Selection, ValidatedStatement,
+    },
+};
 use asc_policy_types::policy::DeploymentBackend;
 
 /// File statements establish their own process target, optionally restricted by UID.
 pub const SELECTOR: DeploymentSelector = DeploymentSelector {
     backend: DeploymentBackend::ActPlane,
     select,
+    place,
 };
 
-fn select(rule: &StatementTarget) -> Placement<'_> {
+fn select(input: &ValidatedStatement<'_>) -> Selection {
+    let rule = input.rule;
     if !rule.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File") {
-        return Placement::Ignore;
+        return input.selection(SelectedStatement::Unrelated);
     }
+    // Report the same targeting failure in static coverage and automatic Scope diagnostics.
+    if asc_policy_cedar::schema::uses_principal_targeting(input.schema)
+        && let Placement::Unassigned(reason) = place(rule)
+    {
+        return input.selection(SelectedStatement::Unsupported(reason));
+    }
+    let selected = if rule.may_match(&["file.write"], "SecCore::File") {
+        input.select_operations(&["write", "delete"])
+    } else {
+        SelectedStatement::Whole
+    };
+    let fragment = match &selected {
+        SelectedStatement::Fragment { cedar, .. } => Some(cedar.as_str()),
+        SelectedStatement::Unrelated => {
+            return input.selection(SelectedStatement::Unsupported(
+                "ActPlane supports only ordinary write and delete for file.write".into(),
+            ));
+        }
+        _ => None,
+    };
+    let residual = match rule.deployment_rule(fragment) {
+        Ok(rule) => rule,
+        Err(error) => return input.selection(SelectedStatement::Unsupported(error.diagnostic())),
+    };
+    let syntax = cedar_policy::pst::PolicySet {
+        policies: [(residual.id().clone(), residual)].into_iter().collect(),
+        template_links: Vec::new(),
+        templates: cedar_policy::pst::LinkedHashMap::new(),
+    };
+    let branches = match &selected {
+        SelectedStatement::Fragment { branches, .. } => branches.clone(),
+        _ => input.operation_branches(),
+    };
+    let mut affected = vec![false; branches.len()];
+    let translated = crate::cedar::translate_with_origins(&syntax, branches.len(), |i, target| {
+        affected[i] |= target.protections.delete
+            || (target.kind == FileProtectionTargetKind::DirectoryTree
+                && target.protections.ordinary_write);
+    });
+    // Admission considers the complete candidate. Dropping an unlowerable
+    // statement here could make the rest of a previously rejected plan publish.
+    if translated.is_err() {
+        return input.selection(SelectedStatement::Undetermined);
+    }
+    let mut selection = input.selection(selected);
+    for (branch, has_deviation) in branches.into_iter().zip(affected) {
+        if !has_deviation {
+            continue;
+        }
+        let (direction, code, condition, explanation) = match branch.operation.as_str() {
+            "delete" => (
+                Direction::Stricter,
+                "ancestor_rename_guard",
+                "Renaming an ancestor would move a protected path.",
+                "ActPlane can block that rename to preserve deletion protection.",
+            ),
+            "write" => (
+                Direction::Weaker,
+                "shared_writable_mapping",
+                "The selected directory tree is modified through a shared writable mapping.",
+                "ActPlane cannot mediate every modification through that mapping.",
+            ),
+            _ => continue,
+        };
+        selection.deviations.push(EnforcementDeviation {
+            branch,
+            direction,
+            code,
+            condition,
+            explanation,
+        });
+    }
+    selection
+}
+
+fn place(rule: &StatementTarget) -> Placement<'_> {
     match &rule.subject {
         Ok(Some(subject)) => Placement::Bind(subject),
         Ok(None) => Placement::Unassigned(

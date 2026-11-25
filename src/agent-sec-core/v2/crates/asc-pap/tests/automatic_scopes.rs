@@ -829,3 +829,124 @@ fn automatic_retry_pins_the_authorized_candidate_or_serving_snapshot() {
     assert_eq!(applied.policy_snapshots[0].revision, third.revision);
     assert_eq!(pap.get_scope(id).unwrap(), applied);
 }
+
+#[test]
+fn selection_is_shared_per_consumer_and_bindings_pin_the_selected_fragment() {
+    use asc_policy_cedar::{
+        deployment::DeploymentSelector,
+        selection::{SelectedStatement, Selection, ValidatedStatement},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static PASSES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+    fn sandbox(input: &ValidatedStatement<'_>) -> Selection {
+        PASSES[0].fetch_add(1, Ordering::SeqCst);
+        input.selection(input.select_operations(&["write"]))
+    }
+    fn actplane(input: &ValidatedStatement<'_>) -> Selection {
+        PASSES[1].fetch_add(1, Ordering::SeqCst);
+        (SELECTORS[0].select)(input)
+    }
+    fn gateway(input: &ValidatedStatement<'_>) -> Selection {
+        PASSES[2].fetch_add(1, Ordering::SeqCst);
+        (SELECTORS[1].select)(input)
+    }
+    const COUNTED: &[DeploymentSelector] = &[
+        DeploymentSelector {
+            select: actplane,
+            ..asc_policy_translator_agentsight::selection::SELECTOR
+        },
+        DeploymentSelector {
+            select: gateway,
+            ..asc_gateway_plan::selection::SELECTOR
+        },
+    ];
+    let (pap, repo) = automatic_file_service();
+    let pap = pap.with_automatic_scopes(
+        Ok(BTreeMap::from([(
+            "qoder".into(),
+            ProcessMatcher::Name {
+                process_name: "qoder".into(),
+            },
+        )])),
+        COUNTED,
+        || {},
+    );
+    let mut source = file("/work/reports");
+    let PolicySource::Cedar(cedar) = &mut source else {
+        unreachable!()
+    };
+    cedar.text =
+        r#"forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        when {principal has agentType && principal.agentType == "qoder"}
+        when {resource.path == "/work/reports" || resource.path like "/work/reports/*"}
+        when {context.input.operation == SecCore::WriteOperation::"write" ||
+              context.input.operation == SecCore::WriteOperation::"delete" ||
+              context.input.operation == SecCore::WriteOperation::"rename"};"#
+            .into();
+    let policy = pap.create_policy("reports", &source).unwrap();
+    let requests = pap.clone();
+    let first = requests.sandbox_selections(sandbox).unwrap();
+    let (_, row) = first.iter().next().unwrap();
+    let SelectedStatement::Fragment { cedar, .. } = &row.selected else {
+        panic!("expected Sandbox fragment")
+    };
+    assert!(cedar.contains("write") && !cedar.contains("delete") && !cedar.contains("rename"));
+    for _ in 0..1000 {
+        assert!(Arc::ptr_eq(
+            &first,
+            &requests.sandbox_selections(sandbox).unwrap()
+        ));
+    }
+    for _ in 0..3 {
+        pap.sweep_deleting_scopes().unwrap();
+    }
+    let scopes = pap.list_scopes(10, 0).unwrap().items;
+    assert_eq!(scopes.len(), 1);
+    let scope = &scopes[0];
+    let selected = scope.policy_snapshots[0].deployment.as_ref().unwrap();
+    let fragment = selected.fragments.values().next().unwrap();
+    assert!(
+        fragment.contains("write") && fragment.contains("delete") && !fragment.contains("rename")
+    );
+    let instances: Vec<_> = (31..34)
+        .map(|pid| ProcessIdentity {
+            boot_id: "boot1".into(),
+            pid_namespace: "pid:[1]".into(),
+            pid,
+            start_time: 42,
+        })
+        .collect();
+    let bindings = repo
+        .sync_observed_scope_instances(
+            &scope.scope_id,
+            &instances,
+            &BTreeMap::new(),
+            repo.automatic_scope_generation(&scope.scope_id).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(bindings.len(), 3);
+    for binding in bindings {
+        assert_eq!(
+            binding.binding.spec.policy.deployment.as_ref(),
+            Some(selected)
+        );
+    }
+    assert_eq!(
+        PASSES.each_ref().map(|n| n.load(Ordering::SeqCst)),
+        [1, 1, 1]
+    );
+    let PolicySource::Cedar(cedar) = &mut source else {
+        unreachable!()
+    };
+    cedar.text = cedar.text.replace("/work/reports", "/work/new");
+    pap.update_policy(&policy.policy_id, "reports", &source)
+        .unwrap();
+    let next = requests.sandbox_selections(sandbox).unwrap();
+    assert!(next.generation > first.generation);
+    pap.retry_scope(&scope.scope_id).unwrap();
+    assert_eq!(
+        PASSES.each_ref().map(|n| n.load(Ordering::SeqCst)),
+        [2, 2, 2]
+    );
+}

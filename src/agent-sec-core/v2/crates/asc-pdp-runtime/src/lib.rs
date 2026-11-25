@@ -7,8 +7,10 @@ mod decision;
 mod os_permissions;
 mod path_conditions;
 mod request;
+pub mod selection;
 
 use asc_daemon_protocol::authorization::{Decision, OsAuthorizationRequest};
+use asc_policy_cedar::selection::{Selection, ValidatedStatement};
 use asc_policy_types::Validate;
 use asc_policy_types::cedar::AuthorizationPolicySet;
 use cedar_policy::Schema;
@@ -32,7 +34,28 @@ impl PdpRuntime {
     /// Rejects invalid metadata, ineligible members, incompatible schemas or OS
     /// projections. The empty set is valid and denies every request.
     pub fn from_policy_set(snapshot: AuthorizationPolicySet) -> Result<Self, PdpError> {
-        if snapshot.version.is_empty() {
+        Self::load(snapshot.version, || {
+            CompiledPolicySet::from_members(&snapshot.policies)
+        })
+    }
+
+    /// Loads the pinned Sandbox selection. Whole statements retain their validated
+    /// Cedar representation; fragments retain the ID and schema of their source.
+    ///
+    /// # Errors
+    /// Rejects invalid version metadata, malformed fragments, and unsupported OS projections.
+    pub fn from_selected<'a>(
+        version: String,
+        statements: impl IntoIterator<Item = (ValidatedStatement<'a>, &'a Selection)>,
+    ) -> Result<Self, PdpError> {
+        Self::load(version, || CompiledPolicySet::from_selected(statements))
+    }
+
+    fn load(
+        version: String,
+        compile: impl FnOnce() -> Result<CompiledPolicySet, PdpError>,
+    ) -> Result<Self, PdpError> {
+        if version.is_empty() {
             return Err(PdpError::Configuration(
                 "policy set version is required".into(),
             ));
@@ -40,11 +63,10 @@ impl PdpRuntime {
         let schema = asc_policy_cedar::schema::load_schema(
             &asc_policy_cedar::schema::principal_reference(),
         )?;
-        let policy = CompiledPolicySet::from_members(&snapshot.policies)?;
         Ok(Self {
-            version: snapshot.version,
+            version,
             schema,
-            policy,
+            policy: compile()?,
         })
     }
 

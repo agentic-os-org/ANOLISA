@@ -41,12 +41,12 @@ fn wildcard_gateway_diagnostics_reuse_membership_and_return_each_scopes_outcome(
             process_name: "qoder".into(),
         },
     )]);
-    let plan = derive(
-        &policies,
-        Ok(&mappings),
+    let (policies, views) = crate::selection::SelectionCache::isolated_deployment(
+        policies.to_vec(),
         &[asc_gateway_plan::selection::SELECTOR],
     )
     .unwrap();
+    let plan = derive(policies.clone(), Ok(&mappings), views).unwrap();
     let mut outcomes = Vec::new();
     let mut expected = BTreeMap::new();
     for (id, candidate) in &plan.scopes {

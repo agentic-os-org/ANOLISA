@@ -27,13 +27,13 @@ fn many_uid_targets_share_source_and_an_oversized_assignment_fails_independently
             process_name: "qoder".into(),
         },
     )]);
-    let desired = derive(
-        &policies,
-        Ok(&mappings),
+    let (policies, views) = crate::selection::SelectionCache::isolated_deployment(
+        policies,
         &[asc_policy_translator_agentsight::selection::SELECTOR],
     )
     .unwrap();
-    assert!(std::ptr::eq(desired.policies, policies.as_slice()));
+    let desired = derive(policies.clone(), Ok(&mappings), views).unwrap();
+    assert!(Arc::ptr_eq(&desired.policies, &policies));
     let publications = publications(&BTreeMap::new(), &desired).unwrap();
     assert_eq!(publications.len(), 64);
     assert!(publications.iter().all(|group| group.len() == 1));

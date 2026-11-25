@@ -5,23 +5,25 @@ use asc_policy_repository::StoreError;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 /// Each entry upgrades version N to N+1, including any persisted JSON conversion.
-/// Append steps; never reorder or change a released step. The runner owns commit
-/// and `user_version`, so a step must not commit or perform external I/O.
+/// Append steps; never reorder or change a released step. A step must not
+/// commit, set `user_version` or perform external I/O.
 type Migration = fn(&Transaction<'_>) -> Result<(), RepositoryError>;
 
-const MIGRATIONS: &[Migration] = &[initialize_v1];
+const MIGRATIONS: &[Migration] = &[initialize_v1, add_policy_generation];
 
-/// Applies all missing steps atomically; rejects databases newer than this binary.
+/// Stages all missing steps. The caller commits after validating the resulting database.
 /// # Errors
 /// Rejects unsupported versions, nonempty unversioned databases and failed upgrades.
-pub(crate) fn migrate(connection: &mut Connection) -> Result<(), RepositoryError> {
-    apply_migrations(connection, MIGRATIONS)
+pub(crate) fn stage_migrations(
+    connection: &mut Connection,
+) -> Result<Transaction<'_>, RepositoryError> {
+    stage_steps(connection, MIGRATIONS)
 }
 
-fn apply_migrations(
-    connection: &mut Connection,
+fn stage_steps<'a>(
+    connection: &'a mut Connection,
     migrations: &[Migration],
-) -> Result<(), RepositoryError> {
+) -> Result<Transaction<'a>, RepositoryError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let current = usize::try_from(version).map_err(|_| StoreError::Incompatible)?;
@@ -33,8 +35,7 @@ fn apply_migrations(
         let next = i64::try_from(index + 1).map_err(|_| StoreError::Incompatible)?;
         transaction.pragma_update(None, "user_version", next)?;
     }
-    transaction.commit()?;
-    Ok(())
+    Ok(transaction)
 }
 
 fn initialize_v1(transaction: &Transaction<'_>) -> Result<(), RepositoryError> {
@@ -52,9 +53,26 @@ fn initialize_v1(transaction: &Transaction<'_>) -> Result<(), RepositoryError> {
     Ok(())
 }
 
+fn add_policy_generation(transaction: &Transaction<'_>) -> Result<(), RepositoryError> {
+    transaction.execute_batch(
+        "CREATE TABLE policy_generation(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            generation INTEGER NOT NULL CHECK(generation>=0)) STRICT;
+         INSERT INTO policy_generation VALUES (1,0);",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply_migrations(
+        connection: &mut Connection,
+        migrations: &[Migration],
+    ) -> Result<(), RepositoryError> {
+        Ok(stage_steps(connection, migrations)?.commit()?)
+    }
 
     fn version(connection: &Connection) -> i64 {
         connection
@@ -65,13 +83,24 @@ mod tests {
     #[test]
     fn current_database_is_not_initialized_again() {
         let mut connection = Connection::open_in_memory().unwrap();
-        migrate(&mut connection).unwrap();
+        apply_migrations(&mut connection, &[initialize_v1]).unwrap();
         assert_eq!(version(&connection), 1);
         connection
             .execute("INSERT INTO policies VALUES ('kept',1,NULL)", [])
             .unwrap();
-        migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 1);
+        apply_migrations(&mut connection, MIGRATIONS).unwrap();
+        assert_eq!(version(&connection), 2);
+        connection
+            .execute("UPDATE policy_generation SET generation=7", [])
+            .unwrap();
+        apply_migrations(&mut connection, MIGRATIONS).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT generation FROM policy_generation", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            7
+        );
         assert_eq!(
             connection
                 .query_row("SELECT policy_id FROM policies", [], |r| r
@@ -87,7 +116,7 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        migrate(&mut connection).unwrap();
+        apply_migrations(&mut connection, MIGRATIONS).unwrap();
         connection.execute_batch(
             "INSERT INTO scopes VALUES ('s', '{}', 'ACTIVE', NULL, 0);
              INSERT INTO bindings (binding_id, scope_id, policy_id, boot_id, pid_namespace,
@@ -109,7 +138,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_and_nonempty_unversioned_databases_remain_untouched() {
-        for original_version in [-1, 0, 2] {
+        for original_version in [-1, 0, 3] {
             let mut connection = Connection::open_in_memory().unwrap();
             connection
                 .execute_batch(
@@ -120,7 +149,7 @@ mod tests {
                 .pragma_update(None, "user_version", original_version)
                 .unwrap();
             assert!(matches!(
-                migrate(&mut connection),
+                apply_migrations(&mut connection, MIGRATIONS),
                 Err(RepositoryError::Storage(StoreError::Incompatible))
             ));
             assert_eq!(version(&connection), original_version);

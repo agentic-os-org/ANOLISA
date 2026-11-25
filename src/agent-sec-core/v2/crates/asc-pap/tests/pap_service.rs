@@ -115,16 +115,19 @@ impl PapRepository for FakeRepository {
         self.inner.get_policy(id, revision)
     }
 
-    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
-        self.inner.automatic_policies()
+    fn policy_generation(&self) -> Result<u64, PapError> {
+        self.inner.policy_generation()
+    }
+
+    fn policy_snapshot(
+        &self,
+        kind: asc_pap::PolicySnapshotKind,
+    ) -> Result<asc_pap::PolicySnapshot, PapError> {
+        self.inner.policy_snapshot(kind)
     }
 
     fn automatic_source_revisions(&self) -> Result<Vec<(ResourceId, Revision)>, PapError> {
         self.inner.automatic_source_revisions()
-    }
-
-    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
-        self.inner.all_current_policies()
     }
 
     fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {

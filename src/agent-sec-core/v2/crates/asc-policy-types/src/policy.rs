@@ -1,6 +1,6 @@
 //! Revisioned authored Policy snapshots retained by Scope and Binding.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +70,10 @@ pub struct DeploymentSelection {
     pub backend: DeploymentBackend,
     /// Cedar parser IDs within the original source, independently of credential annotations.
     pub statement_ids: BTreeSet<String>,
+    /// Complete selected Cedar text for partial statements, keyed by their original ID.
+    /// An absent entry consumes the whole statement from this pinned revision.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fragments: BTreeMap<String, String>,
 }
 
 /// Backends that install rules on discovered processes.

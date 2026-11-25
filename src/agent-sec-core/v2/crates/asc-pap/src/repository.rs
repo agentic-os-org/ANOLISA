@@ -6,6 +6,24 @@ use asc_policy_types::scope::PreparedScope;
 use crate::error::PapError;
 use crate::model::{Page, PolicyRevisionState};
 
+/// Determines which current source policies a PEP can read in one bounded snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicySnapshotKind {
+    /// Include every current policy for request-time authorization.
+    AllCurrent,
+    /// Include only v3 source policies eligible for automatic deployment.
+    Automatic,
+}
+
+/// Current source policies in identity order and their transaction's policy-set generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicySnapshot {
+    /// Advances on every committed change to an authored policy.
+    pub generation: u64,
+    /// All current records in the requested snapshot, including an empty set.
+    pub policies: Vec<PreparedPolicy>,
+}
+
 /// Persistence port owned by PAP.
 ///
 /// Repositories bound serialized records and list pages to the transport budget.
@@ -56,17 +74,37 @@ pub trait PapRepository: Send + Sync {
     /// Rejects invalid selection sizes, missing policies, or persistence failures.
     fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError>;
 
+    /// Reads the committed policy-set generation without loading or parsing policies.
+    ///
+    /// # Errors
+    /// Returns a storage failure if the current generation cannot be read.
+    fn policy_generation(&self) -> Result<u64, PapError>;
+
+    /// Reads the generation and complete selected source set in the same storage snapshot.
+    ///
+    /// # Errors
+    /// Returns a storage or capacity failure without a partial result.
+    fn policy_snapshot(&self, kind: PolicySnapshotKind) -> Result<PolicySnapshot, PapError>;
+
     /// Reads every current policy in identity order in one consistent storage snapshot.
     /// Never paginate or return a truncated authorization candidate.
     ///
     /// # Errors
     /// Returns storage or capacity failures without a partial result.
-    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError>;
+    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        Ok(self
+            .policy_snapshot(PolicySnapshotKind::AllCurrent)?
+            .policies)
+    }
 
     /// Snapshot current v3 source policies for process deployment.
     /// # Errors
     /// Returns storage or snapshot capacity errors.
-    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError>;
+    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        Ok(self
+            .policy_snapshot(PolicySnapshotKind::Automatic)?
+            .policies)
+    }
 
     /// Returns only the ordered v3 identities and revisions used to fence publication.
     ///

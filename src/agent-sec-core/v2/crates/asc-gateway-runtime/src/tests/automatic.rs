@@ -47,6 +47,7 @@ fn candidate(
 ) -> PreparedScope {
     let mut selected = policy.clone();
     selected.deployment = Some(DeploymentSelection {
+        fragments: std::collections::BTreeMap::new(),
         backend: DeploymentBackend::Gateway,
         statement_ids: statements.iter().map(|id| (*id).to_owned()).collect(),
     });

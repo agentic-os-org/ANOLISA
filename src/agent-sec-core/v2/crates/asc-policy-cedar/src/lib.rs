@@ -11,6 +11,7 @@ pub mod deployment;
 pub mod http;
 mod rewrite;
 pub mod schema;
+pub mod selection;
 mod validation;
 
 pub use rewrite::rewrite_token_files;

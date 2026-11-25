@@ -22,14 +22,16 @@ mod automatic;
 mod error;
 mod model;
 mod repository;
+mod selection;
 mod service;
 pub use asc_policy_types::policy::AutomaticDiagnostic;
 pub use automatic::{ScopePublication, ScopeUpdate, is_automatic_source};
+pub use selection::ConsumerPolicySet;
 
 pub use asc_policy_cedar::schema::{PRINCIPAL_SCHEMA_REVISION, SCHEMA_ID};
 pub use error::{EnqueueError, PapError};
 pub use model::{Page, PolicyRevisionState, ScopeDiscoverySeed};
-pub use repository::PapRepository;
+pub use repository::{PapRepository, PolicySnapshot, PolicySnapshotKind};
 pub use service::PapService;
 
 /// Maximum number of active Scopes retained by the repository.

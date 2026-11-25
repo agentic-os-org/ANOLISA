@@ -1,15 +1,29 @@
 //! Automatic placement of credential grants and HTTP rules which may constrain them.
 
 use asc_policy_cedar::deployment::{DeploymentSelector, Placement, StatementTarget};
+use asc_policy_cedar::selection::{SelectedStatement, Selection, ValidatedStatement};
 use asc_policy_types::policy::DeploymentBackend;
 
 /// HTTP credential scopes are created only by grants with their own verified target.
 pub const SELECTOR: DeploymentSelector = DeploymentSelector {
     backend: DeploymentBackend::Gateway,
     select,
+    place,
 };
 
-fn select(rule: &StatementTarget) -> Placement<'_> {
+fn select(input: &ValidatedStatement<'_>) -> Selection {
+    let selected = match place(input.rule) {
+        Placement::Ignore => SelectedStatement::Unrelated,
+        Placement::Unassigned(reason) => SelectedStatement::Unsupported(reason),
+        Placement::Bind(_) => SelectedStatement::Whole,
+        // The full restriction is required for Scope admission. Selection alone
+        // cannot promise that the resulting combination can be installed.
+        Placement::Include(_) => SelectedStatement::Undetermined,
+    };
+    input.selection(selected)
+}
+
+fn place(rule: &StatementTarget) -> Placement<'_> {
     if !rule.may_match(&["network.send"], "SecCore::HttpEndpoint") {
         return Placement::Ignore;
     }

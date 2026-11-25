@@ -455,8 +455,8 @@ Policy 一起保存，用于选择 schema 修订。`agent-sec-cli policy default
 以 Cedar 文件形式输出内置基线，可直接用上述命令导入；`policy default --json` 改为输出
 JSON 源码封装。
 
-指定 `--schema-revision 3` 时，Sandbox PDP 读取整份策略。
-使用 `principal has agentType && principal.agentType == "qoder"` 指定 Agent 类别，
+使用 `--schema-revision 3` 可在 Cedar 中指定 Agent 类别，例如
+`principal has agentType && principal.agentType == "qoder"`。
 Sandbox 或 Hook 请求使用 `context.agent.agentType`。
 可用 `ownerUid` 限定进程分配。Sandbox 请求提供可用的 Agent 类别，省略进程 UID。
 手工 `scope create` 可引用 revision 1 或 2 的策略。将 Policy 升级到 revision 3 后，
@@ -527,10 +527,13 @@ Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保�
 
 Sandbox 运行时授权复用同一组 Cedar Policy。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
 授权默认启用，无独立权限上限配置。决定须在 60 秒内接收；接收后的审批等待和执行可稍后完成。
-操作方式见 [Sandbox 指南](sandbox.md#接入策略授权)。
-每次求值从 PAP 一起读取当前策略。PDP 完整装载 v3 原文，v1/v2 沿用已有的 principal 分流规则。使用 `principal is SecCore::Subject` 并按可选的 `agentType` 匹配请求。
-更新或删除影响后续请求；集合为空时拒绝，读取或校验失败时停止新授权。
-已有手工 Scope/Binding 快照和已经接收的决定继续保留各自绑定的版本。
+对于 v3 策略，PDP 装载 Sandbox 选中的 Cedar 语句或片段。PAP 策略集版本不变时，
+PDP 复用已装载的规则，由 Cedar 根据每次请求的属性求值。使用
+`principal is SecCore::Subject` 和可选的 `agentType` 属性匹配请求。
+v1/v2 仍按已有的 principal 头部规则决定哪些策略可用于请求授权。
+
+更新和删除对后续请求生效。策略集为空时拒绝授权，读取或校验失败时停止新授权。
+已有 Scope/Binding 快照和已经接收的决定保留各自绑定的版本。操作方式见 [Sandbox 指南](sandbox.md#接入策略授权)。
 
 ## 管理 Scope
 

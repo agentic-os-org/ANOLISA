@@ -176,8 +176,8 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let authorization =
-        asc_daemon::authorization::PapAuthorizationPolicy::new(PapService::new(repository.clone()));
+    let pap = PapService::new(repository.clone());
+    let authorization = asc_daemon::authorization::PapAuthorizationPolicy::new(pap.clone());
     report_startup("skillsec", startup_started);
     let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
         Ok(service) => service,
@@ -311,8 +311,7 @@ async fn run(
         }
     };
     report_startup("scope_recovery", startup_started);
-    let mut pap =
-        PapService::new(repository.clone()).with_reconcile_enqueuer(policy_runtime.enqueuer());
+    let mut pap = pap.with_reconcile_enqueuer(policy_runtime.enqueuer());
     if let Some(execution) = scope_execution.clone() {
         pap = pap.with_scope_execution(execution);
     }
