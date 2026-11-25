@@ -3,9 +3,15 @@
 
 import importlib.metadata
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
+
+
+def canonical_name(name: str) -> str:
+    """Return the canonical PyPI project name used by package registries."""
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 runtime = Path(sys.argv[1])
@@ -26,7 +32,7 @@ site_packages = runtime / "lib/python3.11/site-packages"
 packages = []
 for distribution in importlib.metadata.distributions(path=[str(site_packages)]):
     name = distribution.metadata["Name"]
-    reference = f"pkg:pypi/{name.lower().replace('_', '-')}@{distribution.version}"
+    reference = f"pkg:pypi/{canonical_name(name)}@{distribution.version}"
     component = {
         "type": "library",
         "name": name,
