@@ -9,6 +9,7 @@ on:
       - 'src/tokenless/**'
       - 'distribution/packaging/aw/**'
       - 'distribution/Makefile'
+      - 'src/semantic-arbiter/**'
       - '.github/workflows/aw-ci.yml'
       - '.github/workflows/aw-integration.yml'
       - '.github/workflows/aw-release.yml'
@@ -22,6 +23,7 @@ on:
       - 'distribution/Makefile'
       - '.github/workflows/aw-integration.yml'
       - '.github/workflows/aw-release.yml'
+      - 'src/semantic-arbiter/**'
   merge_group:
   workflow_call:
   workflow_dispatch:
@@ -120,6 +122,8 @@ jobs:
             src/aw -> target/cargo-contracts
             providers/agent-sec-core
             providers/tokenless
+            providers/semantic-arbiter
+            src/semantic-arbiter
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
