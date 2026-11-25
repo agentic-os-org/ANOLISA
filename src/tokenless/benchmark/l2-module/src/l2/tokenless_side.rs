@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tokenless side: direct in-process calls to `JsonCompressor` — the same
-//! code path the L1 suite measures, so L2
-//! numbers stay comparable with L1 rather than adding CLI subprocess noise.
+//! Direct component calls for reference tests only; `l2_compare` does not use them and they
+//! are not the production final state. JSON keeps numeric literals; new domains get raw text.
 //!
 //! Latency basis: **in-process** (`Instant` around the compress call only).
 
 use crate::l2::{Category, L2Error};
 use serde_json::{Value, json};
 use std::time::Instant;
-use tokenless_compressors::{JsonCompressionContext, JsonCompressor, RecoveryMethod};
+use tokenless_compressors::{
+    BuildLogCompressor, HtmlExtractor, JsonCompressionContext, JsonCompressor, Recoverability,
+    RecoveryMethod, SearchResultsCompressor, TabularCompressor,
+};
 
 /// Latency-basis label stamped on every tokenless-side result row.
 pub const LATENCY_BASIS: &str = "in-process";
@@ -29,8 +31,7 @@ pub const LATENCY_BASIS: &str = "in-process";
 /// Output of one in-process compression call.
 #[derive(Debug, Clone)]
 pub struct TokenlessOutput {
-    /// Compact-JSON wire form of the compressed value; what token counts and
-    /// the compression rate are measured on.
+    /// Actual candidate wire text: serialized JSON, or unwrapped output for content domains.
     pub compressed: String,
     /// Text that retention checks run against. For JSON samples this is the
     /// wire form; for wrapped text (source code) it is the inner `content`
@@ -41,6 +42,8 @@ pub struct TokenlessOutput {
     pub retention_text: String,
     /// Pure compression time in seconds (serialization excluded).
     pub latency_s: f64,
+    /// The no-recovery mode rejects unrecoverable candidates outside the component.
+    pub rejected_unrecoverable: bool,
 }
 
 /// Parses a `json`-category sample, rejecting a top-level JSON string.
@@ -68,13 +71,11 @@ fn parse_json_sample(content: &str) -> Result<Value, L2Error> {
     Ok(value)
 }
 
-/// Compresses `content` with the tokenless `JsonCompressor`.
+/// Produces a domain component candidate without Runtime arbitration.
 ///
-/// JSON samples are parsed and compressed as-is. Non-JSON text (source code,
-/// command output) is wrapped as `{"content": text}` — the engine's generic
-/// fallback envelope — because the compressor operates on JSON values; the
-/// wrapper is part of the measured payload on BOTH the before and after
-/// side, so it cannot inflate the compression rate.
+/// JSON is validated, not re-rendered; build-log, tabular, search and HTML call components directly.
+/// Other compatibility calls use a `{"content": text}` envelope counted on both sides.
+/// HTML measures the rendered candidate only, not Runtime capability, recovery or savings gates.
 ///
 /// # Errors
 ///
@@ -83,13 +84,18 @@ fn parse_json_sample(content: &str) -> Result<Value, L2Error> {
 /// input, and [`L2Error::Json`] if the sample cannot be serialized into the
 /// payload handed to the engine.
 pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2Error> {
-    let value: Value = if category == Category::Json {
-        parse_json_sample(content)?
+    if matches!(
+        category,
+        Category::BuildLog | Category::Tabular | Category::Search | Category::Html
+    ) {
+        return compress_content_domain(category, content);
+    }
+    let input = if category == Category::Json {
+        parse_json_sample(content)?;
+        content.to_owned()
     } else {
-        json!({ "content": content })
+        serde_json::to_string(&json!({ "content": content }))?
     };
-
-    let input = serde_json::to_string(&value)?;
     let compressor = JsonCompressor::default();
     // Matches L1's default CLI entry point; with no Stash, this does not
     // affect output or compression metrics.
@@ -99,7 +105,7 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         stash: None,
         allow_toon: false,
         min_toon_chars: usize::MAX,
-        allow_unrecoverable: true,
+        allow_unrecoverable: false,
         embedded_html: false,
     };
     // Time only the compress call: the envelope handling below is measurement
@@ -110,7 +116,12 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         .map_err(|error| L2Error::InvalidSample(error.to_string()))?;
     let latency_s = start.elapsed().as_secs_f64();
 
-    let compressed = outcome.output;
+    let rejected_unrecoverable = outcome.recoverability == Recoverability::Unrecoverable;
+    let compressed = if rejected_unrecoverable {
+        input
+    } else {
+        outcome.output
+    };
     // Retention matches literal source substrings, so for the wrapped-text
     // envelope it must see the inner string, not its JSON-escaped form. JSON
     // samples keep the wire form: their ground truth is written to match it.
@@ -136,14 +147,14 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         compressed,
         retention_text,
         latency_s,
+        rejected_unrecoverable,
     })
 }
 
 /// The wire form the tokenless side counts "before" tokens on.
 ///
-/// For JSON samples this is the compacted original; for text samples it is
-/// the same `{"content": ...}` envelope handed to the compressor, keeping
-/// before/after counts symmetrical.
+/// Returns raw text for JSON and direct domains, or the exact envelope given to the component.
+/// Both counts use actual wire text, so re-rendering or envelope overhead is never savings.
 ///
 /// # Errors
 ///
@@ -151,8 +162,41 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
 /// count, so the top-level-string rejection applies here too.
 pub fn wire_before(category: Category, content: &str) -> Result<String, L2Error> {
     if category == Category::Json {
-        Ok(serde_json::to_string(&parse_json_sample(content)?)?)
-    } else {
-        Ok(serde_json::to_string(&json!({ "content": content }))?)
+        parse_json_sample(content)?;
+        return Ok(content.to_owned());
     }
+    if matches!(
+        category,
+        Category::BuildLog | Category::Tabular | Category::Search | Category::Html
+    ) {
+        return Ok(content.to_owned());
+    }
+    Ok(serde_json::to_string(&json!({ "content": content }))?)
+}
+
+fn compress_content_domain(category: Category, content: &str) -> Result<TokenlessOutput, L2Error> {
+    let start = Instant::now();
+    let compressed = match category {
+        Category::BuildLog => BuildLogCompressor.compress(content, None).output,
+        Category::Tabular => TabularCompressor.compress(content).output,
+        Category::Search => SearchResultsCompressor
+            .compress_paths(content)
+            .or_else(|| SearchResultsCompressor.compress(content))
+            .unwrap_or_else(|| content.to_owned()),
+        Category::Html => HtmlExtractor
+            .render(content)
+            .map(|view| view.output)
+            .unwrap_or_else(|| content.to_owned()),
+        _ => {
+            return Err(L2Error::InvalidSample(format!(
+                "unsupported content-domain category {category}"
+            )));
+        }
+    };
+    Ok(TokenlessOutput {
+        latency_s: start.elapsed().as_secs_f64(),
+        retention_text: compressed.clone(),
+        compressed,
+        rejected_unrecoverable: false,
+    })
 }

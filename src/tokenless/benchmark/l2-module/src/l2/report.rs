@@ -21,6 +21,7 @@
 //! because the three sides are timed on deliberately different bases and a
 //! bare number table would invite invalid cross-side latency comparisons.
 
+use crate::l2::runtime_side::Mode;
 use crate::l2::stats::LatencyPercentiles;
 use crate::l2::task_sim::TaskSideReplay;
 use crate::l2::{Category, L2Error};
@@ -158,13 +159,11 @@ pub struct GapStats {
 #[derive(Debug, Clone, Serialize)]
 pub struct CategoryComparison {
     pub category: Category,
-    /// Paired compression-rate gap; `None` when either side degraded, fewer
-    /// than two aligned pairs exist, or the two sides did not receive
-    /// byte-identical input (see [`Self::input_asymmetry`]).
+    /// Same-input default-entry paired gap. `None` when either side degraded, fewer than
+    /// two aligned default pairs remain, or every pair was excluded as an explicit condition.
     pub compression_gap: Option<GapStats>,
-    /// `Some(reason)` when the sides were fed different bytes, so the gap is
-    /// deliberately withheld rather than presented as a comparison.
-    pub input_asymmetry: Option<String>,
+    /// Explicit sample conditions excluded from both sides' default headline pools.
+    pub excluded_conditions: Option<String>,
     pub tokenless: Option<SideAggregate>,
     pub headroom: Option<SideAggregate>,
 }
@@ -174,10 +173,8 @@ pub struct CategoryComparison {
 pub struct TaskComparison {
     pub name: String,
     pub notes: String,
-    /// Categories in this task whose sides were not fed byte-identical input.
-    /// Non-empty means the cross-side totals below mix a non-comparable
-    /// measurement and must not be read as a head-to-head result.
-    pub asymmetric_categories: Vec<String>,
+    /// Categories with excluded explicit conditions; task totals use default entries only.
+    pub excluded_condition_categories: Vec<String>,
     pub tokenless: Option<TaskSideReplay>,
     pub headroom: Option<TaskSideReplay>,
 }
@@ -219,6 +216,10 @@ pub struct RunSummary {
     pub rtk_dirty: Option<bool>,
     /// `os/arch` of the machine that ran the comparison.
     pub platform: String,
+    /// Production Runtime mode the tokenless side ran under.
+    pub mode: Mode,
+    /// Effective EntryOptions, including pinned switches and launcher/receipt paths.
+    pub resolved_entry_options: Value,
     pub headroom_available: bool,
     pub rtk_available: bool,
     /// Probe model id, or `None` when probing was disabled/keyless.
@@ -257,9 +258,88 @@ impl Report {
         Ok(())
     }
 
+    /// Renders a standalone Tokenless report without claiming an unrun comparison.
+    pub fn write_tokenless(&self, dir: &Path) -> Result<(), L2Error> {
+        if self.summary.headroom_available
+            || self
+                .categories
+                .iter()
+                .any(|category| category.headroom.is_some())
+        {
+            return Err(L2Error::InvalidSample(
+                "Tokenless-only report contains a measured comparator".to_owned(),
+            ));
+        }
+        std::fs::create_dir_all(dir)?;
+        let mut value = self.to_json();
+        value["report_kind"] = json!("tokenless-only");
+        value["comparison_status"] = json!("not_executed");
+        let recovery_storage = self.summary.mode.recovery_storage();
+        value["coverage"] = json!({"comparator": "not_executed",
+            "semantic": if self.summary.probe_model.is_some() { "requested; see per-category coverage" } else { "not_executed" },
+            "runtime_arbitration": "measured",
+            "host_retrieval_tool": "not_measured"});
+        value["recovery_storage"] = json!(recovery_storage);
+        value["component_modes"] = json!({
+            "entry": "production PreTool/execution/PostTool for commands; production PostTool for static payloads",
+            "runtime_mode": self.summary.mode,
+            "final_acceptance": "production dispatch, arbitration and recovery gate included",
+            "recovery_storage": recovery_storage,
+            "model_visible_output": "accepted output plus additional context"});
+        std::fs::write(
+            dir.join("report.json"),
+            serde_json::to_string_pretty(&value)?,
+        )?;
+        let mut md = format!(
+            "# Tokenless L2 独立报告\n\n- 时间：{}\n- SHA：`{}`{}{}\n- 参考侧：未执行，不构成对比结论\n\n",
+            self.summary.date,
+            self.summary.git_sha,
+            dirty_suffix(self.summary.git_dirty),
+            untracked_suffix(self.summary.untracked_build_inputs)
+        );
+        md.push_str("| 类别 | 独立 N | 重复数 | 压缩率 | 保留项 | 语义得分 | p99 ms |\n|---|---:|---:|---:|---|---|---:|\n");
+        let mut details = String::new();
+        for category in &self.categories {
+            if let Some(side) = &category.tokenless {
+                let semantic = side
+                    .semantic_score
+                    .map(|score| format!("{score:.4}"))
+                    .unwrap_or_else(|| "未测".to_owned());
+                md.push_str(&format!(
+                    "| {} | {} | {} | {:.2}% | {}/{} | {} | {:.4} |\n",
+                    category.category,
+                    side.n,
+                    side.reps,
+                    side.compression_mean * 100.0,
+                    side.retention_passed,
+                    side.retention_total,
+                    semantic,
+                    side.latency_ms.p99
+                ));
+                details.push_str(&format!(
+                    "\n{} 时延口径：{}；丢失项：{:?}\n",
+                    category.category, side.latency_basis, side.retention_missing
+                ));
+            } else {
+                md.push_str(&format!(
+                    "| {} | 未完成 | — | — | — | — | — |\n",
+                    category.category
+                ));
+            }
+        }
+        md.push_str(&details);
+        md.push_str(&format!("\n## 门禁与边界\n\n- 质量信号：{}\n- 降级：{:?}\n- 静态重复不增加独立 N；未探测的语义得分不按零或成功处理。\n- Token 使用 o200k_base 主计数，离线计数不等于百炼账单。\n- 静态输入经生产 PostTool；命令经调用前处理、实际执行和调用后处理，显式 RTK 路径另标。生产分派、最终仲裁与恢复门禁参与测量。\n- 运行模式：{}；原文恢复存储：{}。内存中可取回原文不代表真实宿主的恢复工具已经可用。\n",
+            serde_json::to_string(&self.quality_gate())?, self.summary.degradations,
+            self.summary.mode, recovery_storage));
+        std::fs::write(dir.join("TOKENLESS_L2_REPORT_zh.md"), md)?;
+        Ok(())
+    }
+
     /// The machine-readable report, quality gate included.
     pub fn to_json(&self) -> Value {
         json!({
+            "schema_version": 2,
+            "report_kind": "comparison",
             "summary": self.summary,
             "categories": self.categories,
             "tasks": self.tasks,
@@ -279,8 +359,8 @@ impl Report {
         for cat in &self.categories {
             // Gate on the paired gap, never on a fresh subtraction of the two
             // per-side means. `compression_gap` is already `None` when the gap
-            // is not a legitimate comparison — an input-asymmetric category, a
-            // degraded side, or fewer than two aligned pairs — so recomputing
+            // is not a legitimate comparison — every pair excluded as an explicit
+            // condition, a degraded side, or fewer than two aligned pairs — so recomputing
             // one here would let the report call a category non-comparable and
             // still emit an l1_candidate for it.
             if let Some(gap) = &cat.compression_gap {
@@ -334,7 +414,7 @@ impl Report {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# L2 Module Comparison Report\n\n");
-        md.push_str("tokenless vs headroom on identical one-round tool outputs.\n\n");
+        md.push_str("tokenless vs headroom on paired one-round tool outputs; explicit RTK entries are separate conditions and excluded from the headline pools.\n\n");
 
         md.push_str("## Summary\n\n");
         md.push_str(&format!("- Date: {}\n", self.summary.date));
@@ -363,6 +443,20 @@ impl Report {
         ));
         md.push_str(&format!("- Platform: {}\n", self.summary.platform));
         md.push_str(&format!(
+            "- Runtime mode: {}\n- Resolved EntryOptions: `{}`\n",
+            self.summary.mode,
+            serde_json::Value::Object(
+                self.summary
+                    .resolved_entry_options
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, value)| value.is_boolean())
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            )
+        ));
+        md.push_str(&format!(
             "- Headroom side: {}\n",
             if self.summary.headroom_available {
                 "available"
@@ -389,8 +483,8 @@ impl Report {
         md.push_str("## Latency bases\n\n");
         md.push_str(
             "| Side | Basis |\n|---|---|\n\
-             | tokenless (json/code) | in-process (`Instant` around the compress call) |\n\
-             | tokenless (command/grep/diff) | rtk wrapped-minus-raw wall clock (includes process startup) |\n\
+             | tokenless (static payloads) | production PostTool dispatch and final arbitration, in-process |\n\
+             | tokenless (commands) | production PreTool + PostTool time plus rewritten-minus-raw wall clock when rewritten (includes process startup) |\n\
              | headroom | worker-internal (`perf_counter` around `router.compress`) |\n\n\
              Latency numbers are **not comparable across bases**; compare within a row's basis only.\n\n",
         );
@@ -545,7 +639,7 @@ impl Report {
         let asymmetric: Vec<&CategoryComparison> = self
             .categories
             .iter()
-            .filter(|c| c.input_asymmetry.is_some())
+            .filter(|c| c.excluded_conditions.is_some() && c.compression_gap.is_none())
             .collect();
         if !asymmetric.is_empty() {
             md.push_str("## Not directly comparable\n\n");
@@ -553,12 +647,26 @@ impl Report {
                 md.push_str(&format!(
                     "- **{}**: {}\n",
                     cat.category.name(),
-                    cat.input_asymmetry.as_deref().unwrap_or(""),
+                    cat.excluded_conditions.as_deref().unwrap_or(""),
                 ));
             }
             md.push('\n');
         }
 
+        let excluded: Vec<_> = self
+            .categories
+            .iter()
+            .filter(|cat| cat.compression_gap.is_some() && cat.excluded_conditions.is_some())
+            .collect();
+        if !excluded.is_empty() {
+            md.push_str("## Excluded conditions\n\nExplicit conditions stay in row evidence but not in either side's default headline pool.\n\n");
+            for cat in excluded {
+                if let Some(note) = &cat.excluded_conditions {
+                    md.push_str(&format!("- **{}**: {note}\n", cat.category.name()));
+                }
+            }
+            md.push('\n');
+        }
         md.push_str("## Paired compression gap (tokenless − headroom, o200k)\n\n");
         md.push_str(
             "Per-instance paired differences remove sample-to-sample variance;\n\
@@ -613,13 +721,11 @@ impl Report {
             if !task.notes.is_empty() {
                 md.push_str(&format!("\n> {}: {}\n\n", task.name, task.notes));
             }
-            if !task.asymmetric_categories.is_empty() {
+            if !task.excluded_condition_categories.is_empty() {
                 md.push_str(&format!(
-                    "\n> {}: totals include {} sample(s), whose two sides are not fed \
-                     byte-identical input — the cross-side totals above are not a \
-                     head-to-head result. See \"Not directly comparable\".\n\n",
+                    "\n> {}: totals exclude explicit conditions from {} and use only default-entry samples; eligible same-input paired gaps remain comparable.\n\n",
                     task.name,
-                    task.asymmetric_categories.join(", "),
+                    task.excluded_condition_categories.join(", "),
                 ));
             }
         }

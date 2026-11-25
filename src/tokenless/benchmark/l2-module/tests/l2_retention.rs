@@ -15,7 +15,7 @@
 //! Unit checks for ground-truth retention: substring/regex item matching and
 //! the dynamic extraction patterns for live command output.
 
-use tokenless_l2_bench::l2::retention::check;
+use tokenless_l2_bench::l2::retention::{self, check};
 use tokenless_l2_bench::l2::samples::extract_dynamic_ground_truth;
 use tokenless_l2_bench::l2::{Category, GroundTruth, L2Error};
 
@@ -31,7 +31,7 @@ fn substring_items_are_checked_individually() {
     assert_eq!(result.total, 3);
     assert_eq!(result.failures.len(), 1);
     assert!(result.failures[0].contains("not-in-there"));
-    assert!((result.rate() - 2.0 / 3.0).abs() < 1e-9);
+    assert!((result.rate().unwrap() - 2.0 / 3.0).abs() < 1e-9);
 }
 
 #[test]
@@ -59,10 +59,10 @@ fn regex_items_match_and_miss() {
 }
 
 #[test]
-fn empty_ground_truth_scores_full_retention() {
+fn empty_ground_truth_is_unmeasured_not_full_retention() {
     let result = check(&[], "anything").expect("check");
     assert_eq!(result.total, 0);
-    assert_eq!(result.rate(), 1.0);
+    assert_eq!(result.rate(), None);
 }
 
 #[test]
@@ -98,15 +98,45 @@ fn dynamic_extraction_command_accepts_git_show_headers() {
 }
 
 #[test]
-fn dynamic_extraction_grep_pulls_file_line_prefixes() {
+fn dynamic_extraction_grep_binds_locations_to_matched_content() {
     let raw = "src/bin/l2_compare.rs:41:fn main() -> Result<()> {\n\
                src/lib.rs:20:pub fn main_entry() {\n";
     let items = extract_dynamic_ground_truth(Category::Grep, raw).expect("extract");
     assert_eq!(items.len(), 2);
     assert!(matches!(
         &items[0],
-        GroundTruth::Substring(s) if s == "src/bin/l2_compare.rs:41"
+        GroundTruth::Substring(s) if s == "src/bin/l2_compare.rs:41:fn main() -> Result<()> {"
     ));
+}
+
+#[test]
+fn grep_grouped_paths_keep_facts_but_empty_or_wrong_records_do_not() {
+    use tokenless_l2_bench::l2::retention::check_search;
+    let original = "src/file.rs:12:required_alpha\nsrc/file.rs:99:required_omega\n";
+    let truth = extract_dynamic_ground_truth(Category::Grep, original).unwrap();
+    for representation in [
+        original,
+        "src/file.rs\n12:required_alpha\n99:required_omega\n",
+        "src/\nfile.rs:12:required_alpha\nfile.rs:99:required_omega\n",
+        "[Search results grouped by file; all received lines retained]\nFile=\"src/file.rs\"\n12:required_alpha\n99:required_omega\n",
+    ] {
+        let score = check_search(&truth, representation).unwrap();
+        assert_eq!(score.passed, score.total);
+    }
+    for lost in [
+        "src/file.rs\n12:\n99:\n",
+        "src/file.rs:12:\nsrc/file.rs:99:\n",
+        "other/file.rs\n12:required_alpha\n99:required_omega\n",
+        "other/src/file.rs\n12:required_alpha\n99:required_omega\n",
+        "other/src/\nfile.rs:12:required_alpha\nfile.rs:99:required_omega\n",
+        "src/file.rs\n99:required_alpha\n12:required_omega\n",
+    ] {
+        let score = check_search(&truth, lost).unwrap();
+        assert_eq!(
+            score.passed, 0,
+            "invented a retained location/content binding: {lost}"
+        );
+    }
 }
 
 #[test]
@@ -352,4 +382,115 @@ fn extracted_items_round_trip_through_retention_check() {
     let partial = check(&items, "abc1234 fix parser").expect("check");
     assert_eq!(partial.passed, 1);
     assert_eq!(partial.total, 2);
+}
+
+fn literals(items: &[GroundTruth]) -> Vec<&str> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            GroundTruth::Substring(s) => Some(s.as_str()),
+            GroundTruth::Pattern { .. } => None,
+        })
+        .collect()
+}
+
+/// List-like command output is checked at its head, middle and tail, so a
+/// filter that keeps only the head cannot pass (reverse control).
+#[test]
+fn command_facts_spread_over_long_lists_and_catch_a_dropped_tail() {
+    let raw: String = (0..40)
+        .map(|i| format!("src/crate_{i:02}/lib.rs\n"))
+        .collect();
+    let items = extract_dynamic_ground_truth(Category::Command, &raw).expect("extract");
+    let facts = literals(&items);
+    assert_eq!(facts.len(), 5);
+    assert!(facts.contains(&"src/crate_00/lib.rs"));
+    assert!(facts.contains(&"src/crate_39/lib.rs"));
+    assert_eq!(
+        check(&items, &raw).expect("check").passed,
+        5,
+        "original keeps its own facts"
+    );
+    let head_only: String = raw
+        .lines()
+        .take(10)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let result = check(&items, &head_only).expect("check");
+    assert!(result.passed < result.total, "a head-only filter must fail");
+}
+
+/// A test run's outcomes are its facts, not the compiler warnings it printed first.
+#[test]
+fn command_facts_prefer_test_outcomes_over_compiler_warnings() {
+    let raw = "warning: unused variable: `x`\n --> src/lib.rs:3:9\n\nrunning 3 tests\n\
+               test tests::a ... ok
+test tests::b ... FAILED
+test tests::c ... ok
+
+\
+               test result: FAILED. 2 passed; 1 failed; 0 ignored\n";
+    let items = extract_dynamic_ground_truth(Category::Command, raw).expect("extract");
+    let facts = literals(&items);
+    assert!(facts.contains(&"tests::b"));
+    assert!(facts.contains(&"test result: FAILED"));
+    assert!(facts.iter().all(|fact| !fact.starts_with("warning")));
+}
+
+#[test]
+fn command_facts_capture_rustc_errors_and_their_locations() {
+    let raw = "   Compiling fixture v0.1.0 (/work/fixture)\nerror[E0308]: mismatched types\n \
+               --> src/main.rs:4:23\n  |\n4 |     let ready: bool = 1 + 2;\n\
+               error: could not compile `fixture` (bin \"fixture\") due to 1 previous error\n";
+    let items = extract_dynamic_ground_truth(Category::Command, raw).expect("extract");
+    let facts = literals(&items);
+    assert!(facts.contains(&"error[E0308]: mismatched types"));
+    assert!(facts.contains(&"src/main.rs:4:23"));
+}
+
+#[test]
+fn command_facts_fall_back_to_git_status_paths_and_ls_entries() {
+    let status = "On branch main\nChanges not staged for commit:\n\tmodified:   src/a.rs\n\tmodified:   src/b.rs\n\nUntracked files:\n\tnotes.txt\n";
+    let facts = extract_dynamic_ground_truth(Category::Command, status).expect("extract");
+    assert_eq!(literals(&facts), ["src/a.rs", "src/b.rs", "notes.txt"]);
+    let ls = "total 8\n-rw-r--r--  1 root root 1200 Nov  5 12:20 entry.rs\ndrwxr-xr-x  3 root root 4096 Nov  5 12:20 post_tool\n";
+    let facts = extract_dynamic_ground_truth(Category::Command, ls).expect("extract");
+    assert_eq!(literals(&facts), ["entry.rs", "post_tool"]);
+}
+
+/// Markdown escaping and re-wrapping change format only: the fact still counts.
+#[test]
+fn markdown_escaping_and_rewrapping_are_not_losses() {
+    let truth = vec![
+        GroundTruth::Substring("required_heading".to_string()),
+        GroundTruth::Substring("Complete explanatory evidence must survive".to_string()),
+    ];
+    let rendered = "# required\\_heading\n\nComplete explanatory\nevidence must survive rendering.";
+    let result = check(&truth, rendered).expect("check");
+    assert_eq!(result.passed, 2, "{:?}", result.failures);
+}
+
+/// Reverse control: normalization never invents content that was removed.
+#[test]
+fn search_normalization_preserves_format_but_not_missing_records() {
+    let truth = vec![GroundTruth::Substring(
+        "src/a.rs:7:required_alpha has evidence".into(),
+    )];
+    let formatted =
+        retention::check_search(&truth, "src/a.rs:7:required\\_alpha   has evidence").unwrap();
+    assert_eq!(formatted.passed, 1);
+    assert_eq!(
+        retention::check_search(&truth, "src/a.rs:7:unrelated text")
+            .unwrap()
+            .passed,
+        0
+    );
+}
+
+#[test]
+fn normalization_still_reports_removed_content() {
+    let truth = vec![GroundTruth::Substring("required_value_middle".to_string())];
+    let result = check(&truth, "# required\\_heading\n\n`required_code = 42`").expect("check");
+    assert_eq!(result.passed, 0);
+    assert_eq!(result.failures.len(), 1);
 }

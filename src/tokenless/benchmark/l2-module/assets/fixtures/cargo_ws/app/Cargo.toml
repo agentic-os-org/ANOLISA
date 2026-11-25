@@ -1,0 +1,19 @@
+[package]
+name = "fixture_app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dep01 = { path = "../deps/dep01" }
+dep02 = { path = "../deps/dep02" }
+dep03 = { path = "../deps/dep03" }
+dep04 = { path = "../deps/dep04" }
+dep05 = { path = "../deps/dep05" }
+dep06 = { path = "../deps/dep06" }
+dep07 = { path = "../deps/dep07" }
+dep08 = { path = "../deps/dep08" }
+dep09 = { path = "../deps/dep09" }
+dep10 = { path = "../deps/dep10" }
+dep11 = { path = "../deps/dep11" }
+dep12 = { path = "../deps/dep12" }

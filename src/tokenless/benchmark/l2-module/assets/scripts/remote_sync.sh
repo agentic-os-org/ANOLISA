@@ -23,7 +23,7 @@ set -euo pipefail
 L2_SSH_USER="${L2_SSH_USER:-root}"
 # Remote workspace root. Defaults to /root/work for the usual throwaway root
 # box; override it together with L2_SSH_USER when running as an ordinary
-# account, e.g. L2_SSH_USER=ubuntu L2_REMOTE_WORK=/home/ubuntu/work.
+# account; inject its identity and workspace through the environment.
 L2_REMOTE_WORK="${L2_REMOTE_WORK:-/root/work}"
 HEADROOM_SRC="${HEADROOM_SRC:-$HOME/git_repo/headroom}"
 

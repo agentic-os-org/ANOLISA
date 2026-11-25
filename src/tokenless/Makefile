@@ -223,6 +223,13 @@ test-hooks: test-hook-scripts
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
 
+.PHONY: test-benchmark-l2-worker
+L2_TEST_PYTHON ?= python3
+test-benchmark-l2-worker:
+	$(L2_TEST_PYTHON) benchmark/l2-module/tests/test_headroom_worker_evidence.py
+
+test-integration: test-benchmark-l2-worker
+
 test-claude-code-detect:
 	@echo "==> Testing claude-code detect.sh first-run retry..."
 	bash tests/test-claude-code-detect-retry.sh

@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["app", "deps/dep01", "deps/dep02", "deps/dep03", "deps/dep04", "deps/dep05", "deps/dep06", "deps/dep07", "deps/dep08", "deps/dep09", "deps/dep10", "deps/dep11", "deps/dep12"]
